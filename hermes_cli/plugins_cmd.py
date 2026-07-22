@@ -2407,46 +2407,10 @@ def _run_composite_fallback(plugin_keys, plugin_labels, plugin_selected,
     print()
 
 
-_CATALOG_SIDECAR_FILENAME = ".hermes-catalog.json"
-
-
-def write_catalog_sidecar(target: Path, entry: Any) -> None:
-    """Record catalog provenance next to an installed plugin.
-
-    The ``.hermes-catalog.json`` sidecar lets ``hermes plugins list`` and the
-    dashboard tell a catalog-pinned install apart from a raw git install and
-    detect when the catalog has moved to a newer pinned SHA.
-    """
-    from datetime import datetime, timezone
-
-    payload = {
-        "catalog_name": entry.name,
-        "repo": entry.repo,
-        "sha": entry.sha,
-        "installed_at": datetime.now(timezone.utc)
-        .isoformat()
-        .replace("+00:00", "Z"),
-        "tier": entry.tier,
-    }
-    (target / _CATALOG_SIDECAR_FILENAME).write_text(
-        json.dumps(payload, indent=2) + "\n", encoding="utf-8"
-    )
-
-
-def read_catalog_sidecar(plugin_dir: Path) -> Optional[dict]:
-    """Read a plugin dir's ``.hermes-catalog.json`` sidecar, or ``None``.
-
-    Returns ``None`` for missing, unreadable, or non-mapping sidecars —
-    callers degrade to "installed, provenance unknown".
-    """
-    path = plugin_dir / _CATALOG_SIDECAR_FILENAME
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return data if isinstance(data, dict) else None
+# Public aliases for the sidecar helpers defined above — the dashboard
+# (web_server.py) imports these names; the CLI paths use the private ones.
+write_catalog_sidecar = _write_catalog_sidecar
+read_catalog_sidecar = _read_catalog_sidecar
 
 
 def dashboard_install_plugin(
