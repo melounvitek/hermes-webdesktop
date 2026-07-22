@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
@@ -176,7 +177,11 @@ def load_catalog() -> List[PluginCatalogEntry]:
     Invalid entries are skipped with a logged warning; this function never
     raises for a malformed entry.
     """
-    root = get_catalog_dir()
+    return _load_entries_from_dir(get_catalog_dir())
+
+
+def _load_entries_from_dir(root: Path) -> List[PluginCatalogEntry]:
+    """Parse all catalog entry files in *root* (skipping ``removed.yaml``)."""
     if not root.is_dir():
         return []
     entries: List[PluginCatalogEntry] = []
@@ -200,7 +205,17 @@ def get_catalog_entry(name: str) -> Optional[PluginCatalogEntry]:
 def search_catalog(query: str) -> List[PluginCatalogEntry]:
     """Case-insensitive substring search over name, description, and
     declared tools. An empty query returns the whole catalog."""
-    entries = load_catalog()
+    return filter_entries(load_catalog(), query)
+
+
+def filter_entries(
+    entries: List[PluginCatalogEntry], query: str
+) -> List[PluginCatalogEntry]:
+    """Filter *entries* with :func:`search_catalog` semantics.
+
+    Lets callers that already hold a (possibly live-fetched) entry list
+    apply the same matching rules without re-loading the catalog.
+    """
     q = (query or "").strip().lower()
     if not q:
         return entries
@@ -272,6 +287,100 @@ def find_removed(name_or_repo: str) -> Optional[RemovedEntry]:
         if entry.repo and candidate_repo == _normalize_repo(entry.repo):
             return entry
     return None
+
+
+# ─── Live index ──────────────────────────────────────────────────────────────
+
+# GitHub contents API for the in-repo catalog dir. Unauthenticated (60 req/hr
+# rate limit) — fine for interactive use, and any failure falls back to the
+# in-tree catalog silently.
+_LIVE_INDEX_URL = (
+    "https://api.github.com/repos/NousResearch/hermes-agent/contents/"
+    "plugin-catalog?ref=main"
+)
+_LIVE_TTL_SECONDS = 6 * 60 * 60  # 6h
+_REQUEST_TIMEOUT = 5.0
+
+
+def _live_cache_dir() -> Path:
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "cache" / "plugin-catalog"
+
+
+def fetch_live_catalog(*, force: bool = False) -> Optional[Path]:
+    """Refresh the catalog cache from the GitHub repo; return the cache dir.
+
+    Lists ``plugin-catalog/*.yaml`` via the GitHub contents API, raw-fetches
+    each file, and stores them under ``<hermes_home>/cache/plugin-catalog/``
+    with a 6-hour TTL (repeat searches don't re-hit the API). Returns the
+    cache directory on success (or fresh cache), or ``None`` on ANY network
+    or parse failure — callers then fall back to the in-tree catalog.
+    """
+    cache = _live_cache_dir()
+    marker = cache / ".fetched"
+    if not force and marker.is_file():
+        try:
+            age = time.time() - marker.stat().st_mtime
+        except OSError:
+            age = _LIVE_TTL_SECONDS + 1
+        if age < _LIVE_TTL_SECONDS:
+            return cache
+
+    try:
+        import httpx
+
+        resp = httpx.get(
+            _LIVE_INDEX_URL,
+            timeout=_REQUEST_TIMEOUT,
+            follow_redirects=True,
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        resp.raise_for_status()
+        listing = resp.json()
+        if not isinstance(listing, list):
+            raise ValueError("unexpected contents-API payload")
+
+        fetched: dict[str, str] = {}
+        for item in listing:
+            if not isinstance(item, dict):
+                continue
+            fname = str(item.get("name") or "")
+            url = str(item.get("download_url") or "")
+            if not fname.endswith(".yaml") or not url:
+                continue
+            file_resp = httpx.get(
+                url, timeout=_REQUEST_TIMEOUT, follow_redirects=True
+            )
+            file_resp.raise_for_status()
+            fetched[fname] = file_resp.text
+
+        cache.mkdir(parents=True, exist_ok=True)
+        # Replace stale cached entries wholesale so removed files disappear.
+        for old in cache.glob("*.yaml"):
+            if old.name not in fetched:
+                old.unlink(missing_ok=True)
+        for fname, text in fetched.items():
+            (cache / fname).write_text(text, encoding="utf-8")
+        marker.touch()
+        return cache
+    except Exception as exc:
+        logger.debug("Plugin catalog: live index fetch failed: %s", exc)
+        return None
+
+
+def load_catalog_live() -> List[PluginCatalogEntry]:
+    """Return catalog entries, preferring a live-fetched (or cached) index.
+
+    Falls back silently to the in-tree catalog when the network is
+    unavailable or the fetch fails.
+    """
+    cache = fetch_live_catalog()
+    if cache is not None and any(
+        p.name != "removed.yaml" for p in cache.glob("*.yaml")
+    ):
+        return _load_entries_from_dir(cache)
+    return load_catalog()
 
 
 # ─── Human summaries ─────────────────────────────────────────────────────────
