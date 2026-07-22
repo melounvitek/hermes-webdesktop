@@ -1,0 +1,14 @@
+name: example-plugin
+repo: https://github.com/NousResearch/hermes-example-plugins
+sha: 38fe0fb53eff98d477f807432e965429e665ca33
+subdir: ""
+description: Reference example plugins for the Hermes plugin system.
+maintainer: NousResearch
+tier: official
+docs_url: ""
+platforms: []
+capabilities:
+  provides_tools: []
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: []
