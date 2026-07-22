@@ -1,8 +1,8 @@
-name: example-plugin
+name: plugin-llm-example
 repo: https://github.com/NousResearch/hermes-example-plugins
 sha: 38fe0fb53eff98d477f807432e965429e665ca33
-subdir: ""
-description: Reference example plugins for the Hermes plugin system.
+subdir: "plugin-llm-example"
+description: Reference plugin showing host-owned structured LLM access via ctx.llm.
 maintainer: NousResearch
 tier: official
 docs_url: ""
