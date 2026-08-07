@@ -17,7 +17,8 @@ vi.mock('@/i18n', () => ({
         projects: {
           enter: (label: string) => `Enter ${label}`,
           reorder: (label: string) => `Reorder ${label}`,
-          toggle: (label: string, open: boolean) => `${open ? 'Show' : 'Hide'} ${label} sessions`
+          toggle: (label: string, open: boolean) => `${open ? 'Show' : 'Hide'} ${label} sessions`,
+          autoDiscovered: 'Auto-discovered'
         }
       }
     }
@@ -91,5 +92,35 @@ describe('ProjectOverviewRow', () => {
     const { container } = render(<ProjectOverviewRow project={project} />)
 
     expect(container.querySelector('[data-sessions-project="p1"]')).toBeTruthy()
+  })
+
+  it('renders the folder-library lead glyph for explicit projects', () => {
+    const explicit = { id: 'p1', label: 'Explicit', isAuto: false } as unknown as SidebarProjectTree
+
+    const { container } = render(<ProjectOverviewRow project={explicit} />)
+
+    expect(container.querySelector('.codicon-folder-library')).toBeTruthy()
+    expect(container.querySelector('.codicon-repo')).toBeNull()
+  })
+
+  it('defaults to the folder-library lead glyph when isAuto is absent (explicit nodes omit it)', () => {
+    const explicit = { id: 'p1', label: 'Explicit' } as unknown as SidebarProjectTree
+
+    const { container } = render(<ProjectOverviewRow project={explicit} />)
+
+    expect(container.querySelector('.codicon-folder-library')).toBeTruthy()
+    expect(container.querySelector('.codicon-repo')).toBeNull()
+  })
+
+  it('renders the repo lead glyph and an "Auto-discovered" tooltip for auto projects', () => {
+    const auto = { id: '/Users/dev/my-repo', label: 'my-repo', isAuto: true } as unknown as SidebarProjectTree
+
+    const { container } = render(<ProjectOverviewRow project={auto} />)
+
+    expect(container.querySelector('.codicon-repo')).toBeTruthy()
+    expect(container.querySelector('.codicon-folder-library')).toBeNull()
+
+    const link = screen.getByRole('button', { name: 'Enter my-repo' })
+    expect(tipTrigger(link)).toBeTruthy()
   })
 })

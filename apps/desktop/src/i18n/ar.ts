@@ -1781,6 +1781,7 @@ export const ar = defineLocale({
     projects: {
       sectionLabel: 'المشاريع',
       home: 'الرئيسية',
+      autoDiscovered: 'مكتشف تلقائيًا',
       newButton: 'مشروع جديد',
       createTitle: 'مشروع جديد',
       createDesc: 'سمِّ مساحة العمل وأضف مجلدا أو أكثر.',
