@@ -268,8 +268,13 @@ function Invoke-StreamedHermes([string]$Exe, [string[]]$HermesArgs, [string]$Tag
     $proc = [System.Diagnostics.Process]::Start($psi)
     $outWriter = [System.IO.File]::CreateText($outFile)
     $errWriter = [System.IO.File]::CreateText($errFile)
-    # Pump synchronously in small reads so the UI stays alive; stderr is
-    # drained at the end (hermes update is stdout-dominant).
+    # Drain stderr from the START, asynchronously. uv writes its progress
+    # to stderr; a redirected pipe nobody reads fills at ~64KB and blocks
+    # the child mid-update (E2E run 31453853006 deadlocked 43 minutes in
+    # `uv sync` exactly this way). ReadToEndAsync keeps the pipe empty
+    # while the loop below pumps stdout.
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    # Pump stdout synchronously in small reads so the UI stays alive.
     while (-not $proc.HasExited) {
         while (-not $proc.StandardOutput.EndOfStream) {
             $ln = $proc.StandardOutput.ReadLine()
@@ -289,7 +294,7 @@ function Invoke-StreamedHermes([string]$Exe, [string[]]$HermesArgs, [string]$Tag
             if ($ln.Trim()) { Write-HandoffLog ("{0}| {1}" -f $Tag, $ln) }
         }
     }
-    $errText = $proc.StandardError.ReadToEnd()
+    $errText = $errTask.GetAwaiter().GetResult()
     if ($errText) {
         $errWriter.Write($errText)
         foreach ($ln in ($errText -split "`r?`n")) {
