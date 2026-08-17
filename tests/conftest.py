@@ -614,6 +614,108 @@ def _neutralize_git_safe_directory_read(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _close_leaked_session_dbs():
+    """Close every SessionDB a test constructed but forgot to close.
+
+    Root cause of OOM incident 20260816: ~40 files under tests/hermes_cli/
+    build ``SessionDB(...)`` directly and never call ``close()``. Each open
+    instance holds the writer connection (state.db + -wal fds), up to
+    ``_READ_POOL_MAX`` pooled read connections, per-connection SQLite page
+    caches, and — once token accounting has run — an ``atexit`` registration
+    that pins the instance alive until interpreter exit. Under the sanctioned
+    per-file-process runner this is invisible, but a raw single-process
+    ``pytest tests/hermes_cli/`` accumulated 16-25 GB RSS and had to be
+    OOM-killed three times in one day.
+
+    Rather than editing every test file, ``SessionDB.__init__`` registers each
+    instance in ``hermes_state_guard._test_instance_registry`` (a WeakSet,
+    populated only when the ``HERMES_TEST_ISOLATION`` marker is set — i.e.
+    only under this suite). This teardown closes whatever the test left open.
+    ``close()`` is idempotent (``self._conn`` is None afterwards) and also
+    unregisters the pinning atexit hook, so instances become collectable.
+
+    Snapshotting the registry BEFORE the test and closing only NEW instances
+    is deliberately avoided: closing pre-existing instances is harmless (they
+    were leaked by an earlier test in the same process) and the simpler
+    close-everything sweep is what actually bounds the process.
+
+    Instances opened through ``hermes_state_registry.acquire()`` are skipped:
+    on those ``close()`` releases a refcount rather than closing, so a sweep
+    would silently retire a shared generation that a wider-scoped fixture
+    still holds. The registry owns that lifecycle (``close_all()``).
+    """
+    yield
+    try:
+        from hermes_state_guard import _test_instance_registry as registry
+    except Exception:
+        return
+    if not registry:
+        return
+    for db in list(registry):
+        if getattr(db, "_shared_registry_owned", False):
+            continue
+        try:
+            db.close()
+        except Exception:
+            # Teardown must never fail a passing test; a close that raises
+            # (cross-thread ProgrammingError, already-closed) leaves at most
+            # the one connection for the next sweep / process exit.
+            pass
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _pytest_memory_cap():
+    """Fail fast with MemoryError instead of eating the box (Linux only).
+
+    Applies ``RLIMIT_AS`` for the pytest process so any future in-process
+    accumulation (like the SessionDB leak this suite once had) dies with a
+    loud ``MemoryError`` at the cap instead of ballooning to 25 GB and
+    getting OOM-killed by the machine's sentinel.
+
+    Default cap: 12 GiB — generous headroom over the observed healthy peak
+    (< 1 GiB for the largest per-file runs, a few GiB for a full healthy
+    single-process run). Override with the ``HERMES_PYTEST_MEM_CAP`` env var:
+
+    * ``HERMES_PYTEST_MEM_CAP=0`` (or ``off``/``none``) disables the cap;
+    * any other integer is the cap in GiB (e.g. ``HERMES_PYTEST_MEM_CAP=4``).
+
+    This is a test-harness knob, not user-facing product config, hence an
+    env var rather than config.yaml. Skipped on non-Linux (RLIMIT_AS
+    semantics differ on macOS and don't exist on Windows) and when the
+    existing limit is already tighter.
+    """
+    if sys.platform != "linux":
+        yield
+        return
+    raw = os.environ.get("HERMES_PYTEST_MEM_CAP", "").strip().lower()
+    if raw in {"0", "off", "none", "disable", "disabled"}:
+        yield
+        return
+    cap_gib = 12
+    if raw:
+        try:
+            cap_gib = int(raw)
+        except ValueError:
+            cap_gib = 12
+        if cap_gib <= 0:
+            yield
+            return
+    try:
+        import resource
+
+        cap_bytes = cap_gib * 1024**3
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        new_soft = cap_bytes if soft in (resource.RLIM_INFINITY,) or soft > cap_bytes else soft
+        new_hard = hard if hard != resource.RLIM_INFINITY and hard < cap_bytes else cap_bytes
+        resource.setrlimit(resource.RLIMIT_AS, (new_soft, new_hard))
+    except Exception:
+        # Sandboxes/containers may refuse setrlimit; the cap is defensive,
+        # never a reason to fail the run.
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_webbrowser(monkeypatch):
     """Record browser-open attempts instead of opening real browser windows."""
     import webbrowser as _webbrowser
