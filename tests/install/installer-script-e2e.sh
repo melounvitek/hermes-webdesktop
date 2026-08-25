@@ -407,6 +407,61 @@ case "$UPDATE_METHOD" in
       | ts_prefix > "$LOG_DIR/app-update.log") || rc=$?
     log_group "app update (Playwright) transcript" "$LOG_DIR/app-update.log"
     [ "$rc" -eq 0 ] || fail "app-driven update exited $rc; transcript above"
+    # The in-app update spawns a DETACHED npm/updater whose parent chain does
+    # not pass through the Electron root, so the driver's descendant sweep
+    # cannot see it and a pre-clean can race a still-writing npm.
+    # Deterministic quiesce instead: find processes whose cwd is inside
+    # $INSTALL_DIR, wait for them to finish (they are the updater's tail),
+    # then escalate TERM -> KILL. cwd matching is precise to this sandbox;
+    # no name patterns.
+    step "quiescing $INSTALL_DIR before the head desktop smoke"
+    procs_in_install_dir() {
+      # Linux: /proc cwd links (fast, no tools needed). Darwin has no /proc:
+      # one lsof pass over ALL cwd descriptors, filtered by prefix in the
+      # reader. Deliberately NOT `+D "$INSTALL_DIR"`: lsof exits 1 when a +D
+      # match comes up empty, and under `set -euo pipefail` that non-zero
+      # kills the leg at the assignment. The unanchored form always matches
+      # other processes, so empty-for-OUR-dir is exit 0.
+      if [ -d /proc ]; then
+        local pid cwd
+        for pid in /proc/[0-9]*; do
+          cwd="$(readlink "$pid/cwd" 2>/dev/null)" || continue
+          case "$cwd" in "$INSTALL_DIR"*) echo "${pid#/proc/}";; esac
+        done
+      else
+        lsof -d cwd -F pn 2>/dev/null | awk -v dir="$INSTALL_DIR" '
+          /^p/ { pid = substr($0, 2) }
+          /^n/ { if (index(substr($0, 2), dir) == 1) print pid }'
+      fi
+    }
+    # If the probe mechanism itself is broken (no lsof on the runner, output
+    # shape surprise), say so and skip the wait... a blind quiesce must be
+    # VISIBLE, not a vacuous "install dir quiet".
+    if [ ! -d /proc ] && ! command -v lsof >/dev/null 2>&1; then
+      echo "WARNING: no /proc and no lsof; quiesce is blind, proceeding on the pre-clean alone"
+    else
+    quiesce_deadline=$((SECONDS + 60))
+    while :; do
+      lingering="$(procs_in_install_dir || true)"
+      [ -z "$lingering" ] && { ok "install dir quiet"; break; }
+      if [ "$SECONDS" -ge "$quiesce_deadline" ]; then
+        echo "install-dir processes still alive after 60s; terminating: $lingering"
+        kill $lingering 2>/dev/null || true
+        sleep 5
+        lingering="$(procs_in_install_dir || true)"
+        [ -n "$lingering" ] && kill -9 $lingering 2>/dev/null || true
+        ok "install dir force-quieted"
+        break
+      fi
+      sleep 2
+    done
+    fi
+    # The smoke check rebuilds from scratch anyway; give it a pristine tree
+    # rather than whatever the interrupted in-app update left behind.
+    step "clearing node_modules after driver-killed in-app update"
+    find "$INSTALL_DIR" -maxdepth 3 -name node_modules -type d -prune -print0 2>/dev/null \
+      | xargs -0 rm -rf 2>/dev/null || true
+    ok "node_modules cleared for the head desktop smoke"
     ;;
 esac
 assert_checkout "$HEAD_SHA" HEAD

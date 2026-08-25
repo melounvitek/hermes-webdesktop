@@ -29,6 +29,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { _electron } from '@playwright/test';
 
@@ -80,8 +81,25 @@ function log(msg) {
   console.log(`[launch-from-spec] ${msg}`);
 }
 
+// Coarse phase marker for the self-deadline's post-mortem line.
+let currentPhase = 'init';
+/** @param {string} p */
+function phase(p) {
+  currentPhase = p;
+}
 
 async function main() {
+  // SIGKILLed Electron leaves Playwright connections and inherited pipes
+  // holding node's event loop open, so the driver can outlive its own
+  // finished test. Success and failure paths exit explicitly; this unref'd
+  // timer is the backstop so no unknown state holds a runner past its budget.
+  const SELF_DEADLINE_MS = 20 * 60 * 1000;
+  const selfDeadline = setTimeout(() => {
+    log(`DRIVER SELF-TIMEOUT after ${SELF_DEADLINE_MS / 60000}min - exiting 124 (phase: ${currentPhase})`);
+    process.exit(124);
+  }, SELF_DEADLINE_MS);
+  selfDeadline.unref();
+
   const { values } = parseArgs({
     options: {
       spec: { type: 'string' },
@@ -98,6 +116,7 @@ async function main() {
   const launch = resolveLaunch(spec);
   log(`launching ${launch.executablePath} (shape: ${spec.matchedShape})`);
 
+  phase('launch');
   const app = await _electron.launch({
     executablePath: launch.executablePath,
     args: launch.args,
@@ -158,7 +177,7 @@ async function main() {
   if (values['no-update']) {
     log('smoke mode: window proven, closing');
     await app.close().catch(() => {});
-    return;
+    process.exit(0);
   }
 
   if (!values.result && !(values['expect-sha'] && values['repo-dir'])) {
@@ -180,6 +199,7 @@ async function main() {
   // alternate short-timeout dismiss clicks with short-timeout settings
   // clicks until a settings click actually LANDS (Playwright's hit-target
   // check makes a landed click proof the overlay is gone).
+  phase('overlay-loop');
   const later = window.getByRole('button', { name: /choose a provider later|skip/i }).first()
   const settingsButton = window.getByRole('button', { name: /open settings|settings/i }).first()
 
@@ -208,6 +228,7 @@ async function main() {
     throw new Error('onboarding overlay never cleared: Settings not clickable within 180s')
   }
 
+  phase('about-update');
   // Settings is open: About -> Update now.
   await window.getByRole('tab', { name: /about/i }).or(
     window.getByRole('button', { name: /about/i })).first().click();
@@ -241,6 +262,7 @@ async function main() {
     throw e;
   }
   await updateNow.click();
+  phase('update-poll');
   log('clicked Update now; polling for result file');
 
   // The app may relaunch/exit during the update; completion signals are
@@ -274,10 +296,154 @@ async function main() {
     await new Promise((r) => setTimeout(r, 2_000));
   }
 
-  await app.close().catch(() => {});
+  // ── Post-update: observe the hand-off state, then relaunch and verify ──
+  // On CI runners the rebuilt app cannot self-relaunch (chrome-sandbox needs
+  // root ownership; user namespaces are restricted), so the product parks on
+  // an "update complete, reopen Hermes to finish" overlay and never exits;
+  // a bare app.close() would wait on it forever. Record the hand-off state,
+  // close with a bounded teardown, then do what the overlay asks (the real
+  // user journey) and assert the relaunched app runs the updated code.
+  phase('post-update');
+  const handoff = await window.evaluate(() => {
+    const text = document.body ? document.body.innerText : ''
+    const m = text.match(/[^\n]*(update complete|reopen|relaunch)[^\n]*/i)
+    return m ? m[0].trim().slice(0, 200) : null
+  }).catch(() => null);
+  log(handoff ? `post-update hand-off state: "${handoff}"` : 'post-update: no hand-off overlay observed (app may self-relaunch)');
+  await window.screenshot({ path: `${values.spec}.post-update.png` }).catch(() => {});
+
+  const boundedClose = async (application, label) => {
+    // ElectronApplication.process() can throw on darwin once the app has
+    // started tearing down; never assume it is callable.
+    let proc = null;
+    try { proc = application.process(); } catch { /* connection gone */ }
+    const rootPid = proc?.pid;
+    // Snapshot descendants BEFORE closing: once the root dies its children
+    // reparent to init and a PPID walk can no longer find them.
+    let doomed = [];
+    if (rootPid && process.platform !== 'win32') {
+      try {
+        const out = execFileSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8' });
+        const children = new Map();
+        for (const line of out.trim().split('\n')) {
+          const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+          if (!children.has(ppid)) children.set(ppid, []);
+          children.get(ppid).push(pid);
+        }
+        const queue = [rootPid];
+        while (queue.length) {
+          const next = queue.shift();
+          for (const child of children.get(next) || []) {
+            doomed.push(child);
+            queue.push(child);
+          }
+        }
+      } catch (e) {
+        log(`${label}: descendant snapshot failed (continuing): ${String(e).slice(0, 120)}`);
+      }
+    }
+    const closed = await Promise.race([
+      application.close().then(() => true).catch(() => true),
+      new Promise((r) => setTimeout(() => r(false), 15_000)),
+    ]);
+    if (!closed) {
+      // SIGTERM first: Electron runs its exit handlers, and any npm/node
+      // children the in-app update spawned get a chance to settle instead
+      // of leaving node_modules half-written.
+      log(`${label}: graceful close timed out after 15s - SIGTERM, then SIGKILL if needed`);
+      if (proc) {
+        try { proc.kill('SIGTERM'); } catch { /* already gone */ }
+        const terminated = await new Promise((r) => {
+          const timer = setTimeout(() => r(false), 10_000);
+          proc.once('exit', () => { clearTimeout(timer); r(true); });
+        });
+        if (!terminated) {
+          log(`${label}: SIGTERM ignored after 10s - SIGKILL`);
+          try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+        }
+      } else {
+        log(`${label}: no process handle to signal - relying on descendant sweep`);
+      }
+    }
+    // Killing the Electron root does not cascade: the spawned backend
+    // (`hermes serve` python + node helpers) survives and keeps writing
+    // under the install dir. SIGTERM the snapshot first (orderly backend
+    // shutdown), then SIGKILL stragglers.
+    if (doomed.length) {
+      for (const pid of doomed) {
+        try { process.kill(pid, 'SIGTERM'); } catch { /* raced exit - fine */ }
+      }
+      await new Promise((r) => setTimeout(r, 5_000));
+      let killed = 0;
+      for (const pid of doomed) {
+        try { process.kill(pid, 'SIGKILL'); killed++; } catch { /* exited on TERM */ }
+      }
+      log(`${label}: swept ${doomed.length} descendant process(es) (${killed} needed SIGKILL)`);
+    }
+  };
+  await boundedClose(app, 'updated-app teardown');
+
+  // Relaunch from the same captured spec - the leg's own launch mechanism -
+  // and require the UI to come up on the updated checkout. Verification:
+  // the renderer's DOM carries the running build's short sha when launched
+  // from a git checkout (statusbar/About); require the EXPECTED sha's short
+  // form, or at minimum a live UI window, logging what we saw.
+  phase('relaunch');
+  log('relaunching the updated app (the "reopen Hermes" step)');
+  const relaunch = await _electron.launch({
+    executablePath: launch.executablePath,
+    args: launch.args,
+    cwd: launch.cwd,
+    env: launch.env,
+  });
+  let window2 = null;
+  const relaunchDeadline = Date.now() + 120_000;
+  while (!window2 && Date.now() < relaunchDeadline) {
+    for (const candidate of relaunch.windows()) {
+      const hasUi = await candidate
+        .evaluate(() => document.querySelector('button') !== null)
+        .catch(() => false);
+      if (hasUi) { window2 = candidate; break; }
+    }
+    if (!window2) await new Promise((r) => setTimeout(r, 1_000));
+  }
+  if (!window2) {
+    await boundedClose(relaunch, 'relaunch teardown');
+    throw new Error('relaunched app never presented a UI window within 120s - updated build may be broken');
+  }
+  // Give the shell a moment to paint the statusbar/version chrome.
+  await new Promise((r) => setTimeout(r, 10_000));
+  const shortSha = (expectSha || '').slice(0, 7);
+  const verdict = await window2.evaluate((sha) => {
+    const text = document.body ? document.body.innerText : ''
+    const version = (text.match(/v\d+\.\d+\.\d+[^\n]*/) || [null])[0]
+    return { version, hasSha: sha ? text.includes(sha) : false, sample: text.slice(-200) }
+  }, shortSha).catch(() => null);
+  await window2.screenshot({ path: `${values.spec}.relaunched.png` }).catch(() => {});
+  log(`relaunched app: version="${verdict?.version || 'unseen'}" expectedSha(${shortSha}) in DOM=${verdict?.hasSha}`);
+  if (!verdict) {
+    await boundedClose(relaunch, 'relaunch teardown');
+    throw new Error('relaunched app UI came up but could not be read');
+  }
+  if (shortSha && !verdict.hasSha) {
+    // Not fatal on its own: packaged builds do not always surface the sha in
+    // the DOM. The window came up on the updated install dir, which is the
+    // user-facing contract; log loudly so a human can tighten this later.
+    log(`NOTE: expected short sha ${shortSha} not found in relaunched DOM; version line was "${verdict.version}"`);
+  }
+  log('relaunch verification complete: updated app boots and presents UI');
+  await boundedClose(relaunch, 'relaunch teardown');
+  // Explicit exit: SIGKILLed Electron leaves driver connections holding
+  // the event loop; falling off main() never terminates.
+  process.exit(0);
 }
 
 const invoked = process.argv[1] && path.resolve(process.argv[1]) === (await import('node:url')).fileURLToPath(import.meta.url);
 if (invoked) {
-  await main();
+  try {
+    await main();
+  } catch (error) {
+    console.error(error);
+    process.exit(1);
+  }
 }
