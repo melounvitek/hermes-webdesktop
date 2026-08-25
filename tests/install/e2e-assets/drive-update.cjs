@@ -93,7 +93,28 @@ async function main() {
     timeout: 120_000
   })
 
-  const page = await app.firstWindow({ timeout: 120_000 })
+  // firstWindow() can grab a helper webContents (wake indicator etc.), not
+  // the main app window. Pick the window that actually renders UI (has a
+  // <button>), retrying as windows appear.
+  await app.firstWindow({ timeout: 120_000 })
+  let page = null
+  const windowDeadline = Date.now() + 120_000
+  while (!page) {
+    for (const candidate of app.windows()) {
+      const hasUi = await candidate
+        .evaluate(() => document.querySelector('button') !== null)
+        .catch(() => false)
+      if (hasUi) { page = candidate; break }
+    }
+    if (!page) {
+      if (Date.now() > windowDeadline) {
+        for (const c of app.windows()) log(`  window seen: url=${c.url()}`)
+        throw new Error('no window with app UI (a <button>) appeared within 120s')
+      }
+      await new Promise(r => setTimeout(r, 1_000))
+    }
+  }
+  log(`window picked (${app.windows().length} windows, url=${page.url()})`)
   log('first window acquired')
 
   // Boot: wait for the composer to exist — the shell is mounted by then.
@@ -106,40 +127,60 @@ async function main() {
   await page.waitForTimeout(3000)
   await shot(page, '01-app-booted')
 
-  // ── Dismiss onboarding if present ─────────────────────────────────────
+  // ── Reach Settings through the onboarding overlay ─────────────────────
   // A fresh install with no configured provider shows the onboarding card
-  // ("Let's get you setup..."). The update path needs no provider, so skip
-  // it via "I'll choose a provider later" to reach the app shell (which
-  // has the settings gear). Harmless no-op if onboarding isn't shown.
-  const dismissedOnboarding = await clickFirstVisible(
-    page,
-    [
-      p => p.getByRole('button', { name: /choose a provider later/i }),
-      p => p.getByText(/choose a provider later/i),
-      p => p.getByRole('button', { name: /skip/i })
-    ],
-    'skip onboarding',
-    8_000
-  )
+  // ("Let's get you setup..."). It mounts LATE and in phases: first a
+  // buttonless boot-progress card ("Starting Hermes... 86%"), then the
+  // provider picker with "I'll choose a provider later".
+  // Two traps: a one-shot dismiss probe fires before the picker's button
+  // exists, and isVisible() on the settings gear reports true while the
+  // gear sits UNDER the fullscreen overlay that intercepts every click.
+  // So: alternate short-timeout dismiss clicks with short-timeout settings
+  // clicks until a settings click actually LANDS - Playwright's click
+  // checks the hit target, so a landed click is proof the overlay is gone.
+  // Harmless when onboarding never shows: the first settings click lands.
+  const laterLocators = [
+    p => p.getByRole('button', { name: /choose a provider later/i }),
+    p => p.getByText(/choose a provider later/i),
+    p => p.getByRole('button', { name: /skip/i })
+  ]
+  const settingsLocators = [
+    p => p.getByLabel('Open settings'),
+    p => p.locator('[aria-label="Open settings"]'),
+    p => p.locator('[title="Open settings"]'),
+    p => p.getByRole('button', { name: 'Open settings' })
+  ]
 
-  if (dismissedOnboarding) {
-    log('dismissed onboarding overlay')
-    await page.waitForTimeout(2500)
-    await shot(page, '01b-onboarding-dismissed')
+  const overlayDeadline = Date.now() + 180_000
+  let openedSettings = false
+  const brief = e => String((e && e.message) || e).split('\n').slice(0, 25).join(' | ')
+  let iter = 0
+
+  while (!openedSettings) {
+    iter++
+    for (const make of laterLocators) {
+      try {
+        await make(page).first().click({ timeout: 1_500 })
+        log('dismissed onboarding overlay')
+        await page.waitForTimeout(2500)
+        await shot(page, '01b-onboarding-dismissed')
+        break
+      } catch (e) {
+        log(`[overlay] iter ${iter} dismiss click failed: ${brief(e)}`)
+      }
+    }
+    for (const make of settingsLocators) {
+      try {
+        await make(page).first().click({ timeout: 2_500 })
+        openedSettings = true
+        log('clicked: Open settings')
+        break
+      } catch (e) {
+        log(`[overlay] iter ${iter} settings click failed: ${brief(e)}`)
+      }
+    }
+    if (!openedSettings && Date.now() > overlayDeadline) break
   }
-
-  // ── Open Settings (titlebar gear) ─────────────────────────────────────
-  const openedSettings = await clickFirstVisible(
-    page,
-    [
-      p => p.getByLabel('Open settings'),
-      p => p.locator('[aria-label="Open settings"]'),
-      p => p.locator('[title="Open settings"]'),
-      p => p.getByRole('button', { name: 'Open settings' })
-    ],
-    'Open settings',
-    60_000
-  )
 
   if (!openedSettings) {
     await shot(page, 'ERROR-no-settings-button')
