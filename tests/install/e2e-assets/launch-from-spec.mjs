@@ -212,7 +212,34 @@ async function main() {
   await window.getByRole('tab', { name: /about/i }).or(
     window.getByRole('button', { name: /about/i })).first().click();
   const updateNow = window.getByRole('button', { name: /update now/i }).first();
-  await updateNow.waitFor({ state: 'visible', timeout: 60_000 });
+  // "Update now" only renders once a check reports behind > 0, and the
+  // About panel starts at "Last checked: never". The boot-time auto-check
+  // can also fail transiently and latch the error UI, while a fresh check
+  // succeeds. Nudge like an impatient user: click Check now whenever it is
+  // clickable (not a spinner), re-test Update now, 3 minute ceiling.
+  const checkNow = window.getByRole('button', { name: /check now/i }).first();
+  const nudgeDeadline = Date.now() + 180_000;
+  let updateVisible = await updateNow.isVisible().catch(() => false);
+  while (!updateVisible && Date.now() < nudgeDeadline) {
+    await checkNow.click({ timeout: 5_000 })
+      .then(() => log('nudged Check now'))
+      .catch(() => {}); // spinner or mid-transition - fine, just wait
+    await window.waitForTimeout(15_000);
+    updateVisible = await updateNow.isVisible().catch(() => false);
+  }
+  try {
+    await updateNow.waitFor({ state: 'visible', timeout: 15_000 });
+  } catch (e) {
+    // The About UI flattens every check failure to a generic "couldn't
+    // reach the update server", hiding the git stderr the main process
+    // captured. Pull the full status over the same IPC the panel uses so
+    // the log names the real error.
+    const status = await window.evaluate(() =>
+      window.hermesDesktop?.updates?.check?.() ?? Promise.resolve('no updates.check bridge')
+    ).catch((err) => `updates.check failed: ${err?.message || err}`);
+    log(`[update-status] ${JSON.stringify(status)}`);
+    throw e;
+  }
   await updateNow.click();
   log('clicked Update now; polling for result file');
 

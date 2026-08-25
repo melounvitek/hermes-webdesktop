@@ -239,18 +239,28 @@ async function main() {
   let visible = await updateNow.isVisible().catch(() => false)
 
   if (!visible) {
-    log('Update now not visible yet — clicking Check now')
-    await clickFirstVisible(page, [p => p.getByRole('button', { name: 'Check now' })], 'Check now', 20_000)
-
-    try {
-      await updateNow.waitFor({ state: 'visible', timeout: 120_000 })
-      visible = true
-    } catch {
-      visible = false
+    // The boot-time auto-check can fail transiently and latch the error
+    // UI, while a fresh check succeeds. Nudge loop: click Check now when
+    // clickable, re-test Update now, 3 minute ceiling.
+    log('Update now not visible yet — nudging Check now')
+    const deadline = Date.now() + 180_000
+    while (!visible && Date.now() < deadline) {
+      await page.getByRole('button', { name: 'Check now' }).first()
+        .click({ timeout: 5_000 })
+        .then(() => log('nudged Check now'))
+        .catch(() => {})
+      await page.waitForTimeout(15_000)
+      visible = await updateNow.isVisible().catch(() => false)
     }
   }
 
   if (!visible) {
+    // Surface the real git error behind the UI's generic "couldn't reach
+    // the update server" line.
+    const status = await page.evaluate(() =>
+      window.hermesDesktop?.updates?.check?.() ?? Promise.resolve('no updates.check bridge')
+    ).catch((err) => `updates.check failed: ${err?.message || err}`)
+    log(`[update-status] ${JSON.stringify(status)}`)
     await shot(page, 'ERROR-no-update-now')
     throw new Error('"Update now" never appeared — update check did not report behind > 0')
   }
