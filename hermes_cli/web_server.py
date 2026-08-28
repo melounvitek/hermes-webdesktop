@@ -18691,13 +18691,6 @@ async def rescan_dashboard_plugins():
     return {"ok": True, "count": len(plugins)}
 
 
-class _AgentPluginInstallBody(BaseModel):
-    identifier: str
-    force: bool = False
-    enable: bool = True
-    catalog_name: Optional[str] = None
-
-
 def _strip_dashboard_manifest(p: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in p.items() if not k.startswith("_")}
 

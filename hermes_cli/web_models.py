@@ -739,6 +739,8 @@ class _AgentPluginInstallBody(BaseModel):
     identifier: str
     force: bool = False
     enable: bool = True
+    # Install by curated-catalog name (resolves repo + pinned SHA server-side).
+    catalog_name: Optional[str] = None
 
 
 # --- from web_server.py (originally lines 19896-19898) ---
