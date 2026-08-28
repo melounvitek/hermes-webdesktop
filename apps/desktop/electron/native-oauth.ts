@@ -28,6 +28,8 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 
+import { type AdvertisedAuthProvider, oauthGuardMayHardFail } from './native-auth-decisions'
+
 // The gateway status field that lists supported auth flows. See
 // hermes_cli/web_server.py status handler.
 const NATIVE_FLOW_ID = 'native_pkce'
@@ -78,9 +80,16 @@ export function statusSupportsNativeFlow(statusBody: any): boolean {
 }
 
 /**
- * Decide the login strategy for a gated gateway from its status body.
- * Returns 'native' when the gateway can do RFC 8252 AND we're not forced to
- * the legacy path; 'embedded' otherwise (older gateway ⇒ webview fallback).
+ * Decide the login strategy for a gated gateway from its status body and
+ * advertised provider capabilities.
+ *
+ * Returns 'native' when the gateway advertises native_pkce AND at least one
+ * non-password provider is available; 'embedded' when all providers are
+ * password-only, the gateway lacks native_pkce, or forceEmbedded is set.
+ *
+ * Provider metadata is discovered from /api/auth/providers (separate from
+ * /api/status). When absent (older gateway), the decision falls through to
+ * the auth_flows check — existing compatibility is preserved.
  *
  * `forceEmbedded` lets a user/setting or an env override pin the legacy flow
  * (e.g. a corporate proxy that blocks loopback). Precedence written down here,
@@ -88,9 +97,13 @@ export function statusSupportsNativeFlow(statusBody: any): boolean {
  */
 export function resolveLoginStrategy(
   statusBody: any,
-  opts: { forceEmbedded?: boolean } = {}
+  opts: { forceEmbedded?: boolean; providers?: AdvertisedAuthProvider[] } = {}
 ): 'native' | 'embedded' {
   if (opts.forceEmbedded) {
+    return 'embedded'
+  }
+
+  if (!oauthGuardMayHardFail(opts.providers)) {
     return 'embedded'
   }
 
@@ -109,6 +122,7 @@ export function buildNativeAuthorizeUrl(
 ): string {
   const parsed = new URL(baseUrl)
   const prefix = parsed.pathname.replace(/\/+$/, '')
+
   const q = new URLSearchParams({
     code_challenge: params.challenge,
     code_challenge_method: 'S256',
@@ -145,10 +159,7 @@ export function nativeRefreshUrl(baseUrl: string): string {
  * `expectedState` MUST match (CSRF defense — RFC 6749 §10.12); a mismatch
  * throws rather than proceeding.
  */
-export function parseLoopbackCallback(
-  requestUrl: string,
-  expectedState: string
-): { code: string } {
+export function parseLoopbackCallback(requestUrl: string, expectedState: string): { code: string } {
   // requestUrl is the path+query the loopback server received, e.g.
   // "/callback?code=...&state=...". Resolve against a dummy origin to parse.
   const parsed = new URL(requestUrl, 'http://127.0.0.1')
@@ -199,11 +210,40 @@ export function parseTokenResponse(body: any): NativeTokenSet {
 }
 
 /**
+ * Validate a token set loaded from the encrypted local store.
+ *
+ * The stored representation is already normalized as NativeTokenSet and
+ * therefore uses camelCase. Gateway token responses use snake_case and
+ * remain handled separately by parseTokenResponse().
+ */
+export function parseStoredTokenSet(body: any): NativeTokenSet {
+  const accessToken = String(body?.accessToken || '')
+
+  if (!accessToken) {
+    throw new Error('Stored token set missing accessToken')
+  }
+
+  const expiresAt = Number(body?.expiresAt)
+
+  return {
+    accessToken,
+    refreshToken: String(body?.refreshToken || ''),
+    expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0,
+    provider: String(body?.provider || ''),
+    userId: String(body?.userId || '')
+  }
+}
+
+/**
  * True when a stored token set is at/near expiry and should be refreshed
  * before use. `skewSeconds` refreshes slightly early to avoid a race where
  * the token expires in flight (mirrors the server's 60s cookie floor).
  */
-export function tokenNeedsRefresh(tokens: Pick<NativeTokenSet, 'expiresAt'>, nowSeconds: number, skewSeconds = 60): boolean {
+export function tokenNeedsRefresh(
+  tokens: Pick<NativeTokenSet, 'expiresAt'>,
+  nowSeconds: number,
+  skewSeconds = 60
+): boolean {
   if (!tokens || !Number.isFinite(tokens.expiresAt) || tokens.expiresAt <= 0) {
     // Unknown expiry ⇒ treat as needing refresh so we validate before use.
     return true

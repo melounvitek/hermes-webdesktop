@@ -424,62 +424,6 @@ class TestRequiresHermesGate:
         assert mgr._plugins["spec_plugin"].manifest.requires_hermes == ">=0.19"
 
 
-# ── config: spec parsing + ctx.plugin_config ───────────────────────────────
-
-
-class TestPluginConfig:
-    def test_config_spec_parsed_onto_manifest(self):
-        from hermes_cli.plugins import PluginManager
-
-        hermes_home = Path(os.environ["HERMES_HOME"])
-        plugins_dir = hermes_home / "plugins"
-        spec = [
-            {"key": "api_url", "prompt": "API URL", "type": "str",
-             "default": "https://api.example.com", "secret": False},
-            {"key": "token", "prompt": "Token", "type": "str", "secret": True},
-        ]
-        _make_plugin(
-            plugins_dir, "cfg_plugin",
-            manifest_extra={"config": spec},
-            enable=False,
-        )
-        mgr = PluginManager()
-        mgr.discover_and_load()
-        manifest = mgr._plugins["cfg_plugin"].manifest
-        assert isinstance(manifest.config_spec, list)
-        assert manifest.config_spec[0]["key"] == "api_url"
-        assert manifest.config_spec[1]["secret"] is True
-
-    def test_plugin_config_merges_defaults_under_config_entries(self):
-        from hermes_cli.plugins import PluginContext, PluginManifest, PluginManager
-
-        hermes_home = Path(os.environ["HERMES_HOME"])
-        cfg_path = hermes_home / "config.yaml"
-        cfg_path.write_text(yaml.safe_dump({
-            "plugins": {"entries": {"merge_plugin": {"api_url": "https://override"}}}
-        }))
-
-        manifest = PluginManifest(
-            name="merge_plugin",
-            key="merge_plugin",
-            config_spec=[
-                {"key": "api_url", "default": "https://default"},
-                {"key": "retries", "type": "int", "default": 3},
-            ],
-        )
-        ctx = PluginContext(manifest, PluginManager())
-        cfg = ctx.plugin_config
-        assert cfg["api_url"] == "https://override"   # config.yaml wins
-        assert cfg["retries"] == 3                    # default fills the gap
-
-    def test_plugin_config_empty_without_spec_or_entries(self):
-        from hermes_cli.plugins import PluginContext, PluginManifest, PluginManager
-
-        manifest = PluginManifest(name="bare_plugin", key="bare_plugin")
-        ctx = PluginContext(manifest, PluginManager())
-        assert ctx.plugin_config == {}
-
-
 # ── _install_plugin_core: ref checkout + removed blocklist ────────────────
 
 

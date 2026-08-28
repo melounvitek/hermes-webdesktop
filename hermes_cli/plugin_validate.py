@@ -24,7 +24,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 _UPPER_SNAKE_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_CONFIG_TYPES = {"str", "bool", "int"}
+_CONFIG_TYPES = {
+    "str", "string", "int", "integer", "float", "number",
+    "bool", "boolean", "list", "array", "dict", "mapping", "map",
+}
 _PROBE_TIMEOUT = 30
 _PROBE_SENTINEL = "HERMES_VALIDATE_JSON:"
 
@@ -119,33 +122,36 @@ def _check_requires_hermes(report: ValidationReport, manifest: dict) -> None:
 
 
 def _check_config_spec(report: ValidationReport, manifest: dict) -> None:
-    raw = manifest.get("config")
+    """Validate the manifest ``config_schema`` mapping (#64165 format)."""
+    raw = manifest.get("config_schema")
     if raw in (None, [], {}):
-        report.add("config spec", True, "not declared")
+        report.add("config schema", True, "not declared")
         return
     problems: List[str] = []
-    if not isinstance(raw, list):
-        problems.append("config: must be a list of mappings")
+    if not isinstance(raw, dict):
+        problems.append("config_schema: must be a mapping of key -> spec")
     else:
-        for i, item in enumerate(raw):
-            if not isinstance(item, dict) or not item.get("key"):
-                problems.append(f"config[{i}]: must be a mapping with a 'key'")
-                continue
-            typ = item.get("type")
-            if typ is not None and str(typ) not in _CONFIG_TYPES:
+        for skey, spec in raw.items():
+            if not isinstance(spec, dict):
                 problems.append(
-                    f"config[{i}] ({item['key']}): type must be one of "
+                    f"config_schema.{skey}: must be a mapping (e.g. {{type: str}})"
+                )
+                continue
+            typ = spec.get("type")
+            if typ is not None and str(typ).lower() not in _CONFIG_TYPES:
+                problems.append(
+                    f"config_schema.{skey}: type must be one of "
                     f"{'/'.join(sorted(_CONFIG_TYPES))}"
                 )
-            secret = item.get("secret")
-            if secret is not None and not isinstance(secret, bool):
+            required = spec.get("required")
+            if required is not None and not isinstance(required, bool):
                 problems.append(
-                    f"config[{i}] ({item['key']}): secret must be a boolean"
+                    f"config_schema.{skey}: required must be a boolean"
                 )
     if problems:
-        report.add("config spec", False, "; ".join(problems))
+        report.add("config schema", False, "; ".join(problems))
     else:
-        report.add("config spec", True, "shape valid")
+        report.add("config schema", True, "shape valid")
 
 
 def _check_requires_env(report: ValidationReport, manifest: dict) -> None:
