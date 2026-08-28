@@ -414,7 +414,17 @@ def validate_plugin_dir(plugin_dir: Path) -> ValidationReport:
     if not manifest_file.is_file():
         manifest_file = plugin_dir / "plugin.yml"
     if not manifest_file.is_file():
-        report.add("manifest", False, "no plugin.yaml in the plugin directory")
+        # Portable Agent Plugins v1 (#81196): a plugin.json-only package is
+        # admissible — validated through the portable manifest reader. When a
+        # package carries both manifests the native plugin.yaml always wins
+        # (this branch is only reached when no native manifest exists).
+        portable_file = plugin_dir / "plugin.json"
+        if portable_file.is_file():
+            return _validate_portable_plugin(report, plugin_dir)
+        report.add(
+            "manifest", False,
+            "no plugin.yaml (or portable plugin.json) in the plugin directory",
+        )
         return report
 
     import yaml
@@ -437,4 +447,36 @@ def validate_plugin_dir(plugin_dir: Path) -> ValidationReport:
     _check_requires_env(report, manifest)
     recorded = _check_capabilities(report, manifest, plugin_dir)
     _check_builtin_collisions(report, manifest, recorded)
+    return report
+
+
+def _validate_portable_plugin(report: ValidationReport, plugin_dir: Path) -> ValidationReport:
+    """Admission checks for a portable Agent Plugins v1 (plugin.json) package.
+
+    Portable packages have no register() entry point, so the capability
+    probe does not apply; validation is the manifest reader's own
+    diagnostics (schema shape, name, supported subset).
+    """
+    try:
+        from hermes_cli.agent_plugins import read_agent_plugin_manifest
+
+        manifest, diagnostics = read_agent_plugin_manifest(plugin_dir)
+    except Exception as exc:
+        report.add("portable manifest", False, f"plugin.json failed validation: {exc}")
+        return report
+
+    # The portable reader raises on hard failures; surviving diagnostics are
+    # advisory (unsupported-subset notes etc.) — surface them as warnings.
+    for diag in diagnostics:
+        scope = getattr(diag, "scope", "")
+        message = getattr(diag, "message", str(diag))
+        report.warnings.append(f"{scope}: {message}" if scope else message)
+
+    report.add("portable manifest", True, "plugin.json parses (Agent Plugins v1)")
+    name = str(manifest.get("name") or "").strip()
+    report.add(
+        "manifest fields",
+        bool(name),
+        "name present" if name else "plugin.json missing required 'name'",
+    )
     return report

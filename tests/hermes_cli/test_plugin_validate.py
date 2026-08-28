@@ -72,20 +72,22 @@ class TestStaticChecks:
         report = validate_plugin_dir(d)
         assert report.ok
 
-    def test_invalid_config_section_fails(self, tmp_path):
-        manifest = dict(BASE_MANIFEST, config=[{"prompt": "no key here"}])
+    def test_invalid_config_schema_fails(self, tmp_path):
+        manifest = dict(
+            BASE_MANIFEST, config_schema={"endpoint": {"type": "no-such-type"}}
+        )
         d = _make_plugin(tmp_path, manifest=manifest)
         report = validate_plugin_dir(d)
         assert not report.ok
         assert any("config" in f for f in report.failures)
 
-    def test_valid_config_section_passes(self, tmp_path):
+    def test_valid_config_schema_passes(self, tmp_path):
         manifest = dict(
             BASE_MANIFEST,
-            config=[
-                {"key": "endpoint", "prompt": "Endpoint?", "type": "str"},
-                {"key": "token", "secret": True, "type": "str"},
-            ],
+            config_schema={
+                "endpoint": {"type": "str", "description": "Endpoint?"},
+                "retries": {"type": "int", "default": 3},
+            },
         )
         d = _make_plugin(tmp_path, manifest=manifest)
         report = validate_plugin_dir(d)

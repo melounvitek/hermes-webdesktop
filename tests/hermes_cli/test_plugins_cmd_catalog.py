@@ -86,7 +86,8 @@ def fake_core(monkeypatch, tmp_path):
     calls: list[dict] = []
     target = tmp_path / "fake-installed"
 
-    def fake(identifier, *, force, ref=None, skip_removed_check=False):
+    def fake(identifier, *, force, ref=None, skip_removed_check=False,
+             scan_decision_cb=None):
         target.mkdir(parents=True, exist_ok=True)
         calls.append(
             {
@@ -443,7 +444,7 @@ class TestSearchBrowseInfo:
     def test_search_no_results_message(self, catalog_dir, offline, capsys):
         plugins_cmd.cmd_search("zzz-nothing")
         out = capsys.readouterr().out
-        assert "No catalog entries" in out
+        assert "No plugins matched" in out
 
     def test_info_shows_full_detail(self, catalog_dir, offline, capsys):
         _write_entry(
@@ -486,69 +487,6 @@ class TestSearchBrowseInfo:
 # ── doctor ─────────────────────────────────────────────────────────────────
 
 
-class TestDoctor:
-    @pytest.fixture(autouse=True)
-    def _no_runtime_scan(self, monkeypatch):
-        monkeypatch.setattr(
-            plugins_cmd, "_runtime_load_errors", lambda: {}
-        )
-
-    def test_doctor_table_lists_installed_plugin(
-        self, catalog_dir, offline, capsys
-    ):
-        _install_user_plugin(
-            "doc-plugin",
-            sidecar={
-                "catalog_name": "doc-plugin",
-                "repo": "https://github.com/example/doc-plugin",
-                "sha": SHA_A,
-                "tier": "official",
-                "installed_at": "2026-01-01T00:00:00Z",
-            },
-        )
-        _write_entry(catalog_dir, "doc-plugin", sha=SHA_A, tier="official")
-        plugins_cmd.cmd_doctor()
-        out = capsys.readouterr().out
-        assert "doc-plugin" in out
-        assert "official" in out
-
-    def test_doctor_detail_flags_pin_mismatch(
-        self, catalog_dir, offline, capsys
-    ):
-        _install_user_plugin(
-            "doc-plugin",
-            sidecar={
-                "catalog_name": "doc-plugin",
-                "repo": "https://github.com/example/doc-plugin",
-                "sha": SHA_A,
-                "tier": "official",
-                "installed_at": "2026-01-01T00:00:00Z",
-            },
-        )
-        _write_entry(catalog_dir, "doc-plugin", sha=SHA_B)
-        plugins_cmd.cmd_doctor("doc-plugin")
-        out = capsys.readouterr().out
-        assert "doc-plugin" in out
-        assert "behind catalog pin" in out or "pin mismatch" in out
-
-    def test_doctor_flags_removed_plugin(self, catalog_dir, offline, capsys):
-        _install_user_plugin("evil-plugin")
-        _write_removed(
-            catalog_dir,
-            [{"name": "evil-plugin", "reason": "exfiltrated env vars"}],
-        )
-        plugins_cmd.cmd_doctor("evil-plugin")
-        out = capsys.readouterr().out
-        assert "REMOVED" in out
-
-    def test_doctor_unknown_plugin_exits(self, catalog_dir, offline, capsys):
-        with pytest.raises(SystemExit):
-            plugins_cmd.cmd_doctor("no-such-plugin")
-
-
-# ── argparse dispatch ──────────────────────────────────────────────────────
-
-
 class TestDispatch:
     def _dispatch(self, monkeypatch, action, **attrs):
         recorded = {}
@@ -566,7 +504,6 @@ class TestDispatch:
             "cmd_browse",
             "cmd_info",
             "cmd_validate",
-            "cmd_doctor",
             "cmd_install",
         ):
             monkeypatch.setattr(plugins_cmd, fn, record(fn))
@@ -575,9 +512,9 @@ class TestDispatch:
         return recorded
 
     def test_search_dispatch(self, monkeypatch):
-        rec = self._dispatch(monkeypatch, "search", query="foo")
+        rec = self._dispatch(monkeypatch, "search", term="foo")
         assert rec["fn"] == "cmd_search"
-        assert "foo" in rec["args"] or rec["kwargs"].get("query") == "foo"
+        assert "foo" in rec["args"] or rec["kwargs"].get("term") == "foo"
 
     def test_browse_dispatch(self, monkeypatch):
         rec = self._dispatch(monkeypatch, "browse")
@@ -592,8 +529,15 @@ class TestDispatch:
         assert rec["fn"] == "cmd_validate"
 
     def test_doctor_dispatch(self, monkeypatch):
-        rec = self._dispatch(monkeypatch, "doctor", name=None)
-        assert rec["fn"] == "cmd_doctor"
+        # `doctor` is owned by the runtime-contract dev doctor on main.
+        recorded = {}
+        monkeypatch.setattr(
+            plugins_cmd, "cmd_plugin_doctor",
+            lambda target, *, ci=False: recorded.setdefault("target", target),
+        )
+        ns = argparse.Namespace(plugins_action="doctor", target=".", ci=False)
+        plugins_cmd.plugins_command(ns)
+        assert recorded["target"] == "."
 
     def test_install_allow_removed_dispatch(self, monkeypatch):
         rec = self._dispatch(

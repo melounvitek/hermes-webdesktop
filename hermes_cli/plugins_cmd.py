@@ -1007,6 +1007,21 @@ write_catalog_sidecar = _write_catalog_sidecar
 read_catalog_sidecar = _read_catalog_sidecar
 
 
+def _catalog_annotation(dir_path) -> Optional[str]:
+    """Return ``catalog:<tier>@<shaShort>`` for a catalog install, else None."""
+    if not dir_path:
+        return None
+    try:
+        sidecar = _read_catalog_sidecar(Path(dir_path))
+    except Exception:
+        return None
+    if not sidecar or not sidecar.get("catalog_name"):
+        return None
+    tier = str(sidecar.get("tier") or "community")
+    sha = str(sidecar.get("sha") or "")
+    return f"catalog:{tier}@{sha[:8]}"
+
+
 def _removed_annotation(name: str, dir_path) -> Optional[str]:
     """Return the removed-blocklist reason when *name* matches, else None."""
     try:
@@ -2213,16 +2228,22 @@ def cmd_list(args: Any | None = None) -> None:
     entries = _filter_plugin_entries(entries, args, enabled, disabled)
 
     if getattr(args, "json", False):
-        payload = [
-            {
+        payload = []
+        for name, version, description, source, _dir, key in entries:
+            row = {
                 "name": name,
                 "status": _plugin_status(name, enabled, disabled, key=key),
                 "version": str(version),
                 "description": description,
                 "source": source,
             }
-            for name, version, description, source, _dir, key in entries
-        ]
+            catalog_note = _catalog_annotation(_dir)
+            if catalog_note:
+                row["catalog"] = catalog_note
+            removed_reason = _removed_annotation(name, _dir)
+            if removed_reason is not None:
+                row["removed"] = removed_reason
+            payload.append(row)
         print(json.dumps(payload, indent=2))
         return
 
@@ -2252,13 +2273,7 @@ def cmd_list(args: Any | None = None) -> None:
             status = "[green]enabled[/green]"
         else:
             status = "[yellow]not enabled[/yellow]"
-        source_label = source
-        if _dir:
-            sidecar = _read_catalog_sidecar(Path(_dir))
-            if sidecar and sidecar.get("catalog_name"):
-                tier = str(sidecar.get("tier") or "community")
-                sha = str(sidecar.get("sha") or "")
-                source_label = f"catalog:{tier}@{sha[:8]}"
+        source_label = _catalog_annotation(_dir) or source
         removed_reason = _removed_annotation(name, _dir)
         if removed_reason is not None:
             removed_lines.append(

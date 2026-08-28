@@ -118,8 +118,10 @@ jobs:
             fi
 
             PLUGIN_DIR="$CLONE_DIR${SUBDIR:+/$SUBDIR}"
-            if [ ! -f "$PLUGIN_DIR/plugin.yaml" ]; then
-              echo "::error file=$entry::no plugin.yaml at subdir '$SUBDIR' of $REPO@$SHA"
+            # Native plugin.yaml OR portable Agent Plugins v1 plugin.json
+            # (#81196; native manifest wins when both exist).
+            if [ ! -f "$PLUGIN_DIR/plugin.yaml" ] && [ ! -f "$PLUGIN_DIR/plugin.yml" ] && [ ! -f "$PLUGIN_DIR/plugin.json" ]; then
+              echo "::error file=$entry::no plugin.yaml or plugin.json at subdir '$SUBDIR' of $REPO@$SHA"
               FAILED=1; echo "::endgroup::"; continue
             fi
 

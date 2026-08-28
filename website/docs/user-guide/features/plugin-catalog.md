@@ -81,6 +81,20 @@ hermes plugins enable <name>
 The install prompt shows the entry's capability summary — declared tools,
 hooks, and required env vars — before anything is cloned.
 
+### Updating a catalog install
+
+`hermes plugins update <name>` never runs `git pull` for catalog installs —
+it compares your installed pin against the current catalog pin and, when the
+catalog moved (via a reviewed PR), force-reinstalls at the new SHA. Your
+enabled/disabled state is preserved. `hermes plugins list` shows catalog
+installs as `catalog:<tier>@<sha>` so you can see provenance at a glance.
+
+### Names not in the catalog
+
+A bare name that isn't a catalog entry falls back to the
+[community plugin index](plugins.md) with a warning — those entries are
+indexed, not reviewed. Catalog names always win when both exist.
+
 ### Custom git URLs are different
 
 `hermes plugins install <git-url>` still works for any repository, but it
