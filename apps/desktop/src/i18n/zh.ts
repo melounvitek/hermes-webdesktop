@@ -410,18 +410,10 @@ export const zh: Translations = {
       agentHalfMissingTip:
         '这是捆绑插件的桌面部分，但其 agent 部分未安装在当前连接的后端/配置上。请在 能力 → 插件 中安装。',
       agent: {
-        title: '智能体插件',
-        blurb:
-          '你安装到 Hermes 后端的插件——工具、技能、MCP 服务器、钩子和斜杠命令。「便携」插件是 Agent Plugins 标准包（技能 + MCP 组合，也可在其他智能体中使用）。开关在新会话中生效。',
-        appliesTo: '应用于：',
-        empty: '尚未安装智能体插件。',
-        loadFailed: '无法加载智能体插件',
-        portable: '便携',
-        search: '搜索插件…',
-        noMatches: '没有匹配的插件。',
-        toggleFailed: (name: string) => `无法切换 ${name}`,
-        updateBackendToManage: '请更新 Hermes 后端以便在桌面端管理此插件。',
-        sources: { bundled: '内置', user: '用户', git: 'git', project: '项目', entrypoint: 'pip' }
+        title: 'Agent 插件',
+        movedToCapabilities:
+          'Agent 插件按配置在「能力」页管理 — 已安装列表、开关和插件目录都在那里。',
+        openCapabilities: '打开 能力 → 插件'
       },
       installModal: {
         title: '安装插件',

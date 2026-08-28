@@ -365,16 +365,8 @@ export interface Translations {
       agentHalfMissingTip: string
       agent: {
         title: string
-        blurb: string
-        appliesTo: string
-        empty: string
-        loadFailed: string
-        portable: string
-        search: string
-        noMatches: string
-        toggleFailed: (name: string) => string
-        updateBackendToManage: string
-        sources: Record<string, string>
+        movedToCapabilities: string
+        openCapabilities: string
       }
       installModal: {
         title: string

@@ -112,6 +112,61 @@ describe('PluginsTab', () => {
     expect($pluginInstallRequest.get()).toBeNull()
   })
 
+  it('toggles by canonical key through plugins.manage', async () => {
+    $agentPlugins.set([
+      {
+        description: '',
+        key: 'image_gen/legacy',
+        name: 'Legacy plugin',
+        source: 'user',
+        status: 'disabled',
+        version: '0.20.0'
+      }
+    ])
+    requestGateway.mockResolvedValueOnce({
+      ok: true,
+      plugin: { key: 'image_gen/legacy', name: 'Legacy plugin', status: 'enabled' }
+    } as never)
+
+    render(<PluginsTab profile={null} />)
+
+    screen.getByRole('switch', { name: 'Legacy plugin' }).click()
+
+    await waitFor(() =>
+      expect(requestGateway).toHaveBeenCalledWith(
+        'plugins.manage',
+        expect.objectContaining({ action: 'toggle', key: 'image_gen/legacy', enable: true })
+      )
+    )
+  })
+
+  it('renders keyless rows read-only (no name-addressed toggle RPC)', () => {
+    // Name-addressed toggles flip every same-named plugin across category
+    // dirs — pre-contract-v6 rows must never reach the RPC.
+    $agentPlugins.set([
+      {
+        description: 'Returned by a pre-key backend',
+        name: 'Legacy plugin',
+        source: 'user',
+        status: 'disabled',
+        version: '0.20.0'
+      }
+    ])
+
+    render(<PluginsTab profile={null} />)
+
+    const toggle = screen.getByRole('switch', { name: 'Legacy plugin' })
+
+    expect(toggle.hasAttribute('disabled') || toggle.getAttribute('aria-disabled') === 'true').toBe(true)
+
+    toggle.click()
+
+    expect(requestGateway).not.toHaveBeenCalledWith(
+      'plugins.manage',
+      expect.objectContaining({ action: 'toggle' })
+    )
+  })
+
   it('appends the subdir fragment for multi-plugin repos', async () => {
     render(<PluginsTab profile={null} />)
 
