@@ -2543,14 +2543,20 @@ def _(rid, params: dict) -> dict:
             ident = (
                 params.get("identifier") or params.get("repo") or ""
             ).strip()
-            if not ident:
+            # Curated-catalog install: resolve repo + pinned SHA server-side
+            # (same contract as the dashboard endpoint). ``catalog_name``
+            # alone is enough — identifier may be empty.
+            catalog_name = str(params.get("catalog_name") or "").strip()
+            if not ident and not catalog_name:
                 return _err(
-                    rid, 4019, "plugins.install requires 'identifier' or 'repo'"
+                    rid, 4019,
+                    "plugins.install requires 'identifier', 'repo', or 'catalog_name'",
                 )
             result = dashboard_install_plugin(
                 ident,
                 force=bool(params.get("force")),
                 enable=params.get("enable", True),
+                catalog_name=catalog_name or None,
             )
             if not result.get("ok"):
                 return _err(rid, 5026, result.get("error") or "install failed")

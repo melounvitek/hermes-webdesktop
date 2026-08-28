@@ -179,7 +179,16 @@ export interface AgentPluginInstallResult {
 
 export async function installAgentPlugin(
   request: GatewayRequest,
-  opts: { identifier: string; force?: boolean; enable?: boolean }
+  opts: {
+    identifier: string
+    force?: boolean
+    enable?: boolean
+    /** Curated-catalog install: the backend resolves repo + pinned SHA from
+     *  its own plugin-catalog and records provenance in the sidecar. */
+    catalogName?: string
+    /** Target profile's HERMES_HOME (null/undefined = backend launch profile). */
+    profile?: string | null
+  }
 ): Promise<AgentPluginInstallResult> {
   try {
     const result = await request<{
@@ -188,12 +197,13 @@ export async function installAgentPlugin(
       warnings?: string[]
       missing_env?: string[]
       error?: string
-    }>('plugins.manage', {
+    }>('plugins.manage', withProfile({
       action: 'install',
       identifier: opts.identifier,
       force: Boolean(opts.force),
-      enable: opts.enable ?? true
-    })
+      enable: opts.enable ?? true,
+      ...(opts.catalogName ? { catalog_name: opts.catalogName } : {})
+    }, opts.profile))
 
     if (!result?.ok) {
       return { ok: false, error: result?.error || 'Install failed' }

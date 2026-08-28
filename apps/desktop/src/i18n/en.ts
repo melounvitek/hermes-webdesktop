@@ -418,6 +418,9 @@ export const en: Translations = {
       failed: 'failed',
       empty: 'No desktop plugins installed yet.',
       kinds: { bundled: 'bundled', disk: 'on disk', runtime: 'runtime' },
+      agentHalfMissing: 'agent half missing here',
+      agentHalfMissingTip:
+        'This is the desktop half of a bundled plugin, but its agent half is not installed on the currently connected backend/profile. Install it from Capabilities → Plugins.',
       agent: {
         title: 'Agent plugins',
         blurb:
@@ -441,6 +444,8 @@ export const en: Translations = {
         desktopLabel: 'Desktop UI',
         agentTargetLocal: profile => `Installs into the ${profile} backend (~/.hermes/plugins/)`,
         agentTargetRemote: profile => `Installs into the connected ${profile} backend`,
+        catalogPinned: (name, sha) =>
+          `Hermes catalog entry "${name}" — the agent component installs at the reviewed pin${sha ? ` ${sha}` : ''}, not the branch tip.`,
         desktopTarget: "Installs into this app's local desktop-plugins folder",
         desktopOnlyNote: 'Desktop-only packages do not install a backend agent plugin.',
         insecureWarning: 'This URL uses an insecure or local scheme. Prefer https:// or git@ for production installs.',
@@ -1308,6 +1313,20 @@ export const en: Translations = {
     archive: 'Archive',
     skillArchivedTitle: 'Skill archived',
     skillArchivedMessage: 'Restorable via hermes curator restore.',
+    tabPlugins: 'Plugins',
+    plugins: {
+      empty: 'No agent plugins installed for this profile',
+      emptyHint: 'Browse the catalog below and install a reviewed plugin with one click.',
+      loadFailed: 'Could not load agent plugins',
+      toggleFailed: (name: string) => `Could not toggle ${name}`,
+      legacyBackend: 'This backend predates key-addressed plugin toggles — update Hermes to manage it here.',
+      portableBadge: 'portable',
+      catalogTitle: 'Plugin catalog',
+      catalogBrowse: 'Browse',
+      catalogHide: 'Hide the catalog browser',
+      catalogHint:
+        'Hit "+ Add to this Agent" on any plugin — reviewed entries install at their pinned commit into the selected profile. Bundled agent+desktop plugins offer both halves.'
+    },
     hub: {
       searchPlaceholder: 'Search the skill hub',
       search: 'Search',

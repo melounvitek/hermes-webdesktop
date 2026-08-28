@@ -689,3 +689,39 @@
     grid-template-columns: 1fr;
   }
 }
+
+
+/* ── Picker embed mode (?embed=picker, iframed by the desktop app) ────── */
+
+.pickerMode .hero {
+  display: none;
+}
+
+.pickerMode {
+  padding-top: 0.5rem;
+}
+
+:global(html):has(.pickerMode) :global(.navbar),
+:global(html):has(.pickerMode) :global(footer) {
+  display: none;
+}
+
+.pickBtn {
+  display: block;
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--ifm-color-primary);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ifm-color-primary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.pickBtn:hover {
+  background: var(--ifm-color-primary);
+  color: #fff;
+}

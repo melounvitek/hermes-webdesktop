@@ -310,7 +310,21 @@ function AgentPluginsSection() {
   )
 }
 
-function PluginRow({ record }: { record: PluginRecord }) {
+/** Folder name when a desktop plugin entry lives in the UNIFIED agent-plugins
+ *  root (`~/.hermes/plugins/<name>/desktop/plugin.js`) — i.e. it is the
+ *  desktop half of a bundled agent+desktop package. Null for standalone
+ *  desktop plugins. */
+function unifiedPackageName(file?: string): null | string {
+  if (!file) {
+    return null
+  }
+
+  const match = /[\\/]plugins[\\/]([^\\/]+)[\\/]desktop[\\/]plugin\.js$/.exec(file)
+
+  return match ? match[1] : null
+}
+
+function PluginRow({ record, agentHalfMissing }: { record: PluginRecord; agentHalfMissing?: boolean }) {
   const { t } = useI18n()
   const p = t.settings.plugins
 
@@ -348,6 +362,13 @@ function PluginRow({ record }: { record: PluginRecord }) {
           <span>{record.name}</span>
           <Pill>{p.kinds[record.kind]}</Pill>
           {record.status === 'error' && <Pill tone="primary">{p.failed}</Pill>}
+          {agentHalfMissing && (
+            <Tip label={p.agentHalfMissingTip}>
+              <span>
+                <Pill tone="primary">{p.agentHalfMissing}</Pill>
+              </span>
+            </Tip>
+          )}
         </>
       }
     />
@@ -358,6 +379,13 @@ export function PluginsSettings() {
   const { t } = useI18n()
   const p = t.settings.plugins
   const records = useStore($pluginRecords)
+  // The agent-plugin list for the CURRENTLY scoped backend/profile — used to
+  // flag bundled packages whose desktop half is local but whose agent half is
+  // not installed where the app is now pointing (one desktop app, N agents:
+  // switching gateway/profile makes this drift visible instead of silent).
+  const agentRows = useStore($agentPlugins)
+  const agentStatus = useStore($agentPluginsStatus)
+  const agentNames = new Set(agentRows.flatMap(row => [row.name, row.key ?? row.name]))
 
   // Deep-link from settings search (?plugin=<id or key>): rows render as soon
   // as their store hydrates, so "ready" is simply target-present; the polling
@@ -400,9 +428,19 @@ export function PluginsSettings() {
           <EmptyState title={p.empty} />
         ) : (
           <div>
-            {rows.map(record => (
-              <PluginRow key={record.id} record={record} />
-            ))}
+            {rows.map(record => {
+              const packageName = unifiedPackageName(record.file)
+
+              return (
+                <PluginRow
+                  agentHalfMissing={
+                    packageName !== null && agentStatus === 'ready' && !agentNames.has(packageName)
+                  }
+                  key={record.id}
+                  record={record}
+                />
+              )
+            })}
           </div>
         )}
       </SettingsSection>

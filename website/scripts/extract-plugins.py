@@ -111,6 +111,7 @@ def load_catalog_entries(catalog_dir: Path) -> list[dict]:
             "shaShort": sha[:7],
             "tier": tier,
             "maintainer": str(raw.get("maintainer") or "").strip(),
+            "subdir": str(raw.get("subdir") or "").strip(),
             "requiresHermes": str(raw.get("requires_hermes") or "").strip(),
             "platforms": _str_list(raw.get("platforms")),
             "capabilities": _normalize_capabilities(raw.get("capabilities")),

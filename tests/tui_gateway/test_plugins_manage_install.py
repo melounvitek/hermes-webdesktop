@@ -37,6 +37,7 @@ def test_plugins_manage_install_success():
         "owner/hello-world",
         force=True,
         enable=False,
+        catalog_name=None,
     )
 
 
@@ -71,3 +72,31 @@ def test_plugins_manage_install_failure():
 
     assert "error" in resp
     assert "Git clone failed" in resp["error"]["message"]
+
+
+def test_plugins_manage_install_catalog_name_only():
+    """A catalog pick needs no identifier — the backend resolves repo + pin."""
+    payload = {"ok": True, "plugin_name": "weather-plugin", "enabled": False}
+    with patch(
+        "hermes_cli.plugins_cmd.dashboard_install_plugin",
+        return_value=payload,
+    ) as mock_install:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "plugins.manage",
+                "params": {
+                    "action": "install",
+                    "catalog_name": "weather-plugin",
+                    "enable": False,
+                },
+            }
+        )
+
+    assert "result" in resp
+    mock_install.assert_called_once_with(
+        "",
+        force=False,
+        enable=False,
+        catalog_name="weather-plugin",
+    )

@@ -361,6 +361,8 @@ export interface Translations {
       failed: string
       empty: string
       kinds: { bundled: string; disk: string; runtime: string }
+      agentHalfMissing: string
+      agentHalfMissingTip: string
       agent: {
         title: string
         blurb: string
@@ -383,6 +385,7 @@ export interface Translations {
         desktopLabel: string
         agentTargetLocal: (profile: string) => string
         agentTargetRemote: (profile: string) => string
+        catalogPinned: (name: string, sha: string) => string
         desktopTarget: string
         desktopOnlyNote: string
         insecureWarning: string
@@ -1146,6 +1149,19 @@ export interface Translations {
     archive: string
     skillArchivedTitle: string
     skillArchivedMessage: string
+    tabPlugins: string
+    plugins: {
+      empty: string
+      emptyHint: string
+      loadFailed: string
+      toggleFailed: (name: string) => string
+      legacyBackend: string
+      portableBadge: string
+      catalogTitle: string
+      catalogBrowse: string
+      catalogHide: string
+      catalogHint: string
+    }
     hub: {
       searchPlaceholder: string
       search: string

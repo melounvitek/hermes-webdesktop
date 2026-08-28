@@ -406,6 +406,9 @@ export const zh: Translations = {
       failed: '失败',
       empty: '尚未安装桌面插件。',
       kinds: { bundled: '内置', disk: '磁盘', runtime: '运行时' },
+      agentHalfMissing: '此处缺少 agent 部分',
+      agentHalfMissingTip:
+        '这是捆绑插件的桌面部分，但其 agent 部分未安装在当前连接的后端/配置上。请在 能力 → 插件 中安装。',
       agent: {
         title: '智能体插件',
         blurb:
@@ -429,6 +432,8 @@ export const zh: Translations = {
         desktopLabel: '桌面 UI',
         agentTargetLocal: profile => `安装到 ${profile} 后端（~/.hermes/plugins/）`,
         agentTargetRemote: profile => `安装到已连接的 ${profile} 后端`,
+        catalogPinned: (name, sha) =>
+          `Hermes 目录条目「${name}」— agent 部分将安装在经过审核的固定提交${sha ? ` ${sha}` : ''}，而不是分支最新代码。`,
         desktopTarget: '安装到此应用的本地 desktop-plugins 文件夹',
         desktopOnlyNote: '仅桌面包不会安装后端智能体插件。',
         insecureWarning: '此 URL 使用了不安全的本地 scheme。生产环境请优先使用 https:// 或 git@。',
@@ -1497,6 +1502,20 @@ export const zh: Translations = {
     archive: '归档',
     skillArchivedTitle: '技能已归档',
     skillArchivedMessage: '可通过 hermes curator restore 恢复。',
+    tabPlugins: '插件',
+    plugins: {
+      empty: '此配置尚未安装任何 agent 插件',
+      emptyHint: '在下方目录中浏览，一键安装经过审核的插件。',
+      loadFailed: '无法加载 agent 插件',
+      toggleFailed: (name: string) => `无法切换 ${name}`,
+      legacyBackend: '此后端版本较旧，不支持按键名切换插件 — 请更新 Hermes 后再在此管理。',
+      portableBadge: '便携',
+      catalogTitle: '插件目录',
+      catalogBrowse: '浏览',
+      catalogHide: '隐藏目录浏览器',
+      catalogHint:
+        '点击任意插件上的「+ Add to this Agent」— 经过审核的条目会以其固定提交安装到所选配置。捆绑的 agent+桌面插件会同时提供两部分。'
+    },
     hub: {
       searchPlaceholder: '搜索技能中心',
       search: '搜索',

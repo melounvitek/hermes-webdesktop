@@ -145,7 +145,7 @@ export function PluginInstallModal() {
     void runProbe(request)
   }, [request, resetState, runProbe])
 
-  const profileLabel = activeProfile || profileScope || 'default'
+  const profileLabel = request?.profile || activeProfile || profileScope || 'default'
 
   const agentTargetHint =
     connection?.mode === 'remote' ? m.agentTargetRemote(profileLabel) : m.agentTargetLocal(profileLabel)
@@ -183,7 +183,9 @@ export function PluginInstallModal() {
         const result = await installAgentPlugin(requestGateway, {
           identifier: request.repo,
           force: forceReinstall,
-          enable: enableAgent
+          enable: enableAgent,
+          catalogName: request.catalogName,
+          profile: request.profile
         })
 
         if (result.ok) {
@@ -273,6 +275,11 @@ export function PluginInstallModal() {
               <div className="rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) px-3 py-2 font-mono text-[length:var(--conversation-caption-font-size)] break-all text-foreground">
                 {request.repo}
               </div>
+              {request.catalogName && (
+                <p className="mt-1 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+                  {m.catalogPinned(request.catalogName, request.sha?.slice(0, 8) ?? '')}
+                </p>
+              )}
             </div>
 
             <div className="space-y-3 rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) px-3 py-2.5">

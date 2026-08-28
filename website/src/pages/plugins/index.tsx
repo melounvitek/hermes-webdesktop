@@ -18,6 +18,7 @@ interface CatalogPlugin {
   shaShort: string;
   tier: string;
   maintainer: string;
+  subdir?: string;
   requiresHermes?: string;
   platforms?: string[];
   capabilities?: PluginCapabilities;
@@ -140,12 +141,15 @@ function PluginCard({
   query,
   expanded,
   onToggle,
+  onPick,
   style,
 }: {
   plugin: CatalogPlugin;
   query: string;
   expanded: boolean;
   onToggle: () => void;
+  /** Picker embed mode: render "+ Add to this Agent" and call this. */
+  onPick?: (plugin: CatalogPlugin) => void;
   style?: React.CSSProperties;
 }) {
   const tier = TIER_CONFIG[plugin.tier] || TIER_CONFIG.community;
@@ -212,6 +216,18 @@ function PluginCard({
             </span>
           ))}
         </div>
+
+        {onPick && (
+          <button
+            className={styles.pickBtn}
+            onClick={(e) => {
+              e.stopPropagation();
+              onPick(plugin);
+            }}
+          >
+            + Add to this Agent
+          </button>
+        )}
 
         {expanded && (
           <div className={styles.cardDetail}>
@@ -316,6 +332,35 @@ function buildSearchHaystack(p: CatalogPlugin): string {
 }
 
 export default function PluginCatalogPage() {
+  // Picker embed mode (?embed=picker): the page is iframed by a host app
+  // (Hermes desktop's Capabilities > Plugins tab) as a one-click catalog
+  // picker. Site chrome is hidden via CSS and every card gains an
+  // "+ Add to this Agent" button that posts
+  //   { type: 'hermes-plugin-pick', name, repo, sha, subdir, tier,
+  //     installCmd }
+  // to the parent window. The HOST performs the actual install through its
+  // own gateway (plugins.manage, catalog_name=<name>) — this page never
+  // installs anything; parents must validate event.origin before acting.
+  const pickerMode =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("embed") === "picker";
+
+  const pickPlugin = useCallback((plugin: CatalogPlugin) => {
+    if (typeof window === "undefined" || window.parent === window) return;
+    window.parent.postMessage(
+      {
+        type: "hermes-plugin-pick",
+        name: plugin.name,
+        repo: plugin.repo,
+        sha: plugin.sha,
+        subdir: plugin.subdir || "",
+        tier: plugin.tier,
+        installCmd: plugin.installCommand || `hermes plugins install ${plugin.name}`,
+      },
+      "*"
+    );
+  }, []);
+
   const [data, setData] = useState<{ plugins: CatalogPlugin[]; meta: CatalogMeta } | null>(
     null,
   );
@@ -394,7 +439,7 @@ export default function PluginCatalogPage() {
       title="Plugin Catalog"
       description="Browse reviewed, SHA-pinned plugins for Hermes Agent"
     >
-      <div className={styles.page}>
+      <div className={`${styles.page} ${pickerMode ? styles.pickerMode : ""}`}>
         <header className={styles.hero}>
           <div className={styles.heroGlow} />
           <div className={styles.heroContent}>
@@ -552,6 +597,7 @@ export default function PluginCatalogPage() {
                     query={search}
                     expanded={expandedCard === key}
                     onToggle={() => setExpandedCard(expandedCard === key ? null : key)}
+                    onPick={pickerMode ? pickPlugin : undefined}
                     style={{ animationDelay: `${Math.min(i, 20) * 25}ms` }}
                   />
                 );
