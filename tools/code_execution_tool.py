@@ -1102,16 +1102,71 @@ def _format_interrupted_output(stdout_text: str) -> str:
     return f"{stdout_text}\n{marker}" if stdout_text else marker
 
 
+def _finish_remote_kernel_result(kernel_result: Dict[str, Any], *,
+                                 timeout: int, exec_start: float) -> str:
+    """Post-process a remote-kernel cell result into the tool's JSON reply.
+
+    Same output pipeline as the per-call paths: truncation, ANSI strip,
+    secret redaction; timeout messaging mirrors the local kernel contract
+    (kernel killed, state lost, next call fresh).
+    """
+    from tools.ansi_strip import strip_ansi
+    from agent.redact import redact_sensitive_text
+
+    stdout_text = kernel_result.get("stdout", "") or ""
+    stderr_text = kernel_result.get("stderr", "") or ""
+    traceback_text = kernel_result.get("traceback", "") or ""
+    if stderr_text or traceback_text:
+        # Same joining shape as the local kernel path (code_kernel result
+        # assembly): stderr and traceback ride in the output under one
+        # marker so the model always sees the failure inline.
+        stdout_text = (
+            stdout_text + "\n--- stderr ---\n" + stderr_text + traceback_text
+        )
+
+    stdout_text, stdout_metadata = _truncate_stdout_text(stdout_text)
+    stdout_text = strip_ansi(stdout_text)
+    stdout_text = redact_sensitive_text(stdout_text, code_file=True)
+
+    duration = round(time.monotonic() - exec_start, 2)
+    result: Dict[str, Any] = {
+        "status": kernel_result.get("status", "error"),
+        "output": stdout_text,
+        "tool_calls_made": kernel_result.get("tool_calls_made", 0),
+        "duration_seconds": duration,
+        "kernel": kernel_result.get("kernel", {"remote": True}),
+    }
+    result.update(stdout_metadata)
+
+    if result["status"] == "timeout":
+        timeout_msg = (
+            f"Cell timed out after {timeout}s; the remote session kernel was "
+            "killed and its state was lost. The next call starts fresh."
+        )
+        result["error"] = timeout_msg
+        result["output"] = (
+            (stdout_text + f"\n\n⏰ {timeout_msg}") if stdout_text
+            else f"⏰ {timeout_msg}"
+        )
+    elif result["status"] == "error" and kernel_result.get("error"):
+        result["error"] = kernel_result["error"]
+
+    return json.dumps(result, ensure_ascii=False)
+
+
 def _execute_remote(
     code: str,
     task_id: Optional[str],
     enabled_tools: Optional[List[str]],
+    reset: bool = False,
 ) -> str:
-    """Run a script on the remote terminal backend via file-based RPC.
+    """Run code on the remote terminal backend.
 
-    The script and the generated hermes_tools.py module are shipped to
-    the remote environment, and tool calls are proxied through a polling
-    thread that communicates via request/response files.
+    Preferred path: the owner's persistent remote session kernel
+    (tools/code_kernel_remote.py — detached runner + file cell protocol).
+    Fallback path: the original per-call script ship (kept both as the
+    fail-open route when a kernel cannot be spawned and as the only route
+    for hosts that cannot sustain a background process).
     """
 
     _cfg = _load_config()
@@ -1155,6 +1210,41 @@ def _execute_remote(
                 "tool_calls_made": 0,
                 "duration_seconds": 0,
             })
+
+        # --- Session-kernel path (hermes-agent#96873) -------------------
+        # Same always-on model as local: one persistent kernel per owner,
+        # rebuilt on the run-to-completion transport (detached runner +
+        # file cell protocol). Spawn failure falls OPEN to the per-call
+        # path below so a degraded remote host never blocks execution.
+        try:
+            from tools.code_kernel_remote import execute_in_remote_kernel
+
+            kernel_result = execute_in_remote_kernel(
+                code,
+                env=env,
+                env_type=env_type,
+                task_env_id=effective_task_id,
+                sandbox_tools=frozenset(sandbox_tools),
+                timeout=timeout,
+                max_tool_calls=max_tool_calls,
+                reset=bool(reset),
+                idle_exit=int(_cfg.get("kernel_idle_timeout", 1800)),
+            )
+        except Exception:
+            logger.warning(
+                "remote session-kernel path failed; falling back to per-call",
+                exc_info=True,
+            )
+            kernel_result = None
+
+        if kernel_result is not None:
+            return _finish_remote_kernel_result(
+                kernel_result, timeout=timeout, exec_start=exec_start,
+            )
+        logger.info(
+            "remote session kernel unavailable on %s; using per-call path",
+            env_type,
+        )
 
         # Create sandbox directory on remote
         env.execute(
@@ -1379,8 +1469,14 @@ def execute_code(
     reset: bool = False,
 ) -> str:
     """
-    Run a Python script in a sandboxed child process with RPC access
-    to a subset of Hermes tools.
+    Run Python in the session's persistent kernel (local) or a per-call
+    child process (remote backends), with RPC access to a subset of
+    Hermes tools.
+
+    "Sandbox" in names below refers to the security envelope (env
+    scrubbing, tool whitelist + call budget, output redaction) — not an
+    isolation jail: in the default `project` mode, code runs in the
+    session's cwd with the project venv's interpreter.
 
     Dispatches to the local (UDS) or remote (file-based RPC) path
     depending on the configured terminal backend.
@@ -1462,7 +1558,7 @@ def execute_code(
         clear_current_thread_interrupt()
 
     if env_type != "local":
-        return _execute_remote(code, task_id, enabled_tools)
+        return _execute_remote(code, task_id, enabled_tools, reset=bool(reset))
 
     # --- Local execution path (UDS) --- below this line is unchanged ---
 
@@ -1908,19 +2004,21 @@ def _load_config() -> dict:
 EXECUTION_MODES = ("project", "strict")
 DEFAULT_EXECUTION_MODE = "project"
 
-# Valid values for code_execution.kernel_mode.
-#   per-call : today's behavior — a fresh child process per execute_code call.
-#   session  : one persistent kernel per (task, mode, interpreter, cwd,
-#              tool-set); variables and imports survive across calls. See
-#              tools/code_kernel.py for the design and its boundaries.
-KERNEL_MODES = ("per-call", "session")
-DEFAULT_KERNEL_MODE = "per-call"
+# Session kernels are the only local execution model: one persistent kernel
+# per conversation (see tools/code_kernel.py). The former
+# code_execution.kernel_mode knob ("per-call" | "session") is retired — the
+# config key is silently ignored if present, and _get_kernel_mode() remains
+# only as a compat symbol for external callers. Remote terminal backends
+# still run per-call: their file-based RPC path has no kernel host YET (a
+# long-lived remote runner + cell protocol is tracked follow-up work, not a
+# design limit).
+KERNEL_MODES = ("per-call", "session")  # legacy compat constant
+DEFAULT_KERNEL_MODE = "session"
 
 
 def _get_kernel_mode() -> str:
-    """Return the active execute_code kernel mode — 'per-call' or 'session'."""
-    value = _load_config().get("kernel_mode", DEFAULT_KERNEL_MODE)
-    return value if value in KERNEL_MODES else DEFAULT_KERNEL_MODE
+    """Legacy compat shim — session kernels are always on for local runs."""
+    return "session"
 
 
 def _get_execution_mode() -> str:
