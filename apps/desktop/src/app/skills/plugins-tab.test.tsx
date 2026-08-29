@@ -189,3 +189,130 @@ describe('PluginsTab', () => {
     })
   })
 })
+
+describe('PluginsTab catalog UX', () => {
+  beforeEach(() => {
+    $agentPlugins.set([])
+    $agentPluginsStatus.set('ready')
+    closePluginInstallRequest()
+    requestGateway.mockClear()
+  })
+
+  afterEach(cleanup)
+
+  it('shows an Update chip when the catalog pin moved past the installed SHA', () => {
+    $agentPlugins.set([
+      {
+        catalog_name: 'demo-weather',
+        catalog_sha: 'b'.repeat(40),
+        catalog_tier: 'community',
+        description: '',
+        installed_sha: 'a'.repeat(40),
+        key: 'demo-weather',
+        name: 'demo-weather',
+        source: 'git',
+        status: 'enabled',
+        update_available: true,
+        version: '1.0.0'
+      }
+    ])
+
+    render(<PluginsTab profile={null} />)
+
+    expect(screen.getByRole('button', { name: `Update to ${'b'.repeat(8)}` })).toBeTruthy()
+  })
+
+  it('re-pins through plugins.manage update when the chip is clicked', async () => {
+    $agentPlugins.set([
+      {
+        catalog_name: 'demo-weather',
+        catalog_sha: 'b'.repeat(40),
+        catalog_tier: 'community',
+        description: '',
+        installed_sha: 'a'.repeat(40),
+        key: 'demo-weather',
+        name: 'demo-weather',
+        source: 'git',
+        status: 'enabled',
+        update_available: true,
+        version: '1.0.0'
+      }
+    ])
+    requestGateway.mockResolvedValue({ ok: true, unchanged: false, plugins: [] } as never)
+
+    render(<PluginsTab profile="workbot" />)
+
+    screen.getByRole('button', { name: `Update to ${'b'.repeat(8)}` }).click()
+
+    await waitFor(() =>
+      expect(requestGateway).toHaveBeenCalledWith(
+        'plugins.manage',
+        expect.objectContaining({ action: 'update', name: 'demo-weather', profile: 'workbot' })
+      )
+    )
+  })
+
+  it('refuses a catalog pick that is already installed and current', async () => {
+    $agentPlugins.set([
+      {
+        catalog_name: 'demo-weather',
+        description: '',
+        installed_sha: 'a'.repeat(40),
+        key: 'demo-weather',
+        name: 'demo-weather',
+        source: 'git',
+        status: 'enabled',
+        update_available: false,
+        version: '1.0.0'
+      }
+    ])
+
+    render(<PluginsTab profile={null} />)
+
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: {
+          name: 'demo-weather',
+          repo: 'https://github.com/example/demo-weather',
+          type: 'hermes-plugin-pick'
+        },
+        origin: 'https://hermes-agent.nousresearch.com'
+      })
+    )
+
+    // The modal must NOT open — the pick is refused with a toast.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect($pluginInstallRequest.get()).toBeNull()
+  })
+
+  it('still opens the modal for an installed pick when an update is available', async () => {
+    $agentPlugins.set([
+      {
+        catalog_name: 'demo-weather',
+        description: '',
+        installed_sha: 'a'.repeat(40),
+        key: 'demo-weather',
+        name: 'demo-weather',
+        source: 'git',
+        status: 'enabled',
+        update_available: true,
+        version: '1.0.0'
+      }
+    ])
+
+    render(<PluginsTab profile={null} />)
+
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: {
+          name: 'demo-weather',
+          repo: 'https://github.com/example/demo-weather',
+          type: 'hermes-plugin-pick'
+        },
+        origin: 'https://hermes-agent.nousresearch.com'
+      })
+    )
+
+    await waitFor(() => expect($pluginInstallRequest.get()).not.toBeNull())
+  })
+})

@@ -100,3 +100,23 @@ def test_plugins_manage_install_catalog_name_only():
         enable=False,
         catalog_name="weather-plugin",
     )
+
+
+def test_plugins_manage_update_requires_catalog_sidecar(tmp_path, monkeypatch):
+    """Non-catalog installs are refused — their update flows stay CLI-owned."""
+    import hermes_cli.plugins_cmd as plugins_cmd
+
+    plugins_root = tmp_path / "plugins"
+    (plugins_root / "plain-git-plugin").mkdir(parents=True)
+    monkeypatch.setattr(plugins_cmd, "_plugins_dir", lambda: plugins_root)
+
+    resp = server.handle_request(
+        {
+            "id": "1",
+            "method": "plugins.manage",
+            "params": {"action": "update", "name": "plain-git-plugin"},
+        }
+    )
+
+    assert "error" in resp
+    assert "not a catalog install" in resp["error"]["message"]

@@ -26,6 +26,14 @@ export interface AgentPluginRow {
   status: 'enabled' | 'disabled' | 'not enabled'
   /** Agent Plugins v1 package (portable skills/MCP format) vs native Hermes. */
   portable?: boolean
+  /** Curated-catalog provenance (from the install sidecar), when present. */
+  catalog_name?: string
+  catalog_tier?: string
+  installed_sha?: string
+  /** Current catalog pin for this entry (backend-computed). */
+  catalog_sha?: string
+  /** Installed SHA differs from the catalog pin — an update is available. */
+  update_available?: boolean
 }
 
 export type AgentPluginsStatus = 'idle' | 'loading' | 'ready' | 'error'
@@ -217,5 +225,38 @@ export async function installAgentPlugin(
     }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** Re-pin a catalog-installed plugin to the current catalog SHA (backend
+ *  `plugins.manage update`; catalog installs only). Refreshes the list on
+ *  success. Returns whether the update applied. */
+export async function updateAgentPlugin(
+  request: GatewayRequest,
+  name: string,
+  failMessage: string,
+  profile?: string | null
+): Promise<boolean> {
+  $agentPluginBusy.set(name)
+
+  try {
+    const result = await request<{ ok?: boolean; unchanged?: boolean }>(
+      'plugins.manage',
+      withProfile({ action: 'update', name }, profile)
+    )
+
+    if (!result?.ok) {
+      throw new Error(failMessage)
+    }
+
+    await loadAgentPlugins(request, profile)
+
+    return !result.unchanged
+  } catch (e) {
+    notifyError(e, failMessage)
+
+    return false
+  } finally {
+    $agentPluginBusy.set(null)
   }
 }

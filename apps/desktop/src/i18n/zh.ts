@@ -426,6 +426,12 @@ export const zh: Translations = {
         agentTargetRemote: profile => `安装到已连接的 ${profile} 后端`,
         catalogPinned: (name, sha) =>
           `Hermes 目录条目「${name}」— agent 部分将安装在经过审核的固定提交${sha ? ` ${sha}` : ''}，而不是分支最新代码。`,
+        reviewedHeading: '经过审核的目录条目',
+        reviewedIntro: '此条目已在其固定提交处经过人工审核。你仍可在下方检查确切代码。',
+        restartToApply: '重启网关后插件才会生效。',
+        restartNow: '重启网关',
+        missingEnvAction: '去设置',
+        alreadyInstalled: (name: string) => `${name} 已安装。`,
         desktopTarget: '安装到此应用的本地 desktop-plugins 文件夹',
         desktopOnlyNote: '仅桌面包不会安装后端智能体插件。',
         insecureWarning: '此 URL 使用了不安全的本地 scheme。生产环境请优先使用 https:// 或 git@。',
@@ -1506,7 +1512,14 @@ export const zh: Translations = {
       catalogBrowse: '浏览',
       catalogHide: '隐藏目录浏览器',
       catalogHint:
-        '点击任意插件上的「+ Add to this Agent」— 经过审核的条目会以其固定提交安装到所选配置。捆绑的 agent+桌面插件会同时提供两部分。'
+        '点击任意插件上的「+ Add to this Agent」— 经过审核的条目会以其固定提交安装到所选配置。捆绑的 agent+桌面插件会同时提供两部分。',
+      alreadyInstalled: (name: string) => `${name} 已安装在此配置中。`,
+      catalogProvenance: (sha: string) => `从 Hermes 目录安装${sha ? `，固定提交 ${sha}` : ''}。`,
+      tierOfficial: '官方',
+      tierCommunity: '社区',
+      updateToPin: (sha: string) => `更新到 ${sha}`,
+      updateFailed: (name: string) => `无法更新 ${name}`,
+      updated: (name: string) => `${name} 已更新到当前目录固定提交。重启网关后生效。`
     },
     hub: {
       searchPlaceholder: '搜索技能中心',

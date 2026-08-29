@@ -378,6 +378,12 @@ export interface Translations {
         agentTargetLocal: (profile: string) => string
         agentTargetRemote: (profile: string) => string
         catalogPinned: (name: string, sha: string) => string
+        reviewedHeading: string
+        reviewedIntro: string
+        restartToApply: string
+        restartNow: string
+        missingEnvAction: string
+        alreadyInstalled: (name: string) => string
         desktopTarget: string
         desktopOnlyNote: string
         insecureWarning: string
@@ -1153,6 +1159,13 @@ export interface Translations {
       catalogBrowse: string
       catalogHide: string
       catalogHint: string
+      alreadyInstalled: (name: string) => string
+      catalogProvenance: (sha: string) => string
+      tierOfficial: string
+      tierCommunity: string
+      updateToPin: (sha: string) => string
+      updateFailed: (name: string) => string
+      updated: (name: string) => string
     }
     hub: {
       searchPlaceholder: string

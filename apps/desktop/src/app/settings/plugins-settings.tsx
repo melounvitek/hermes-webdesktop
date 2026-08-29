@@ -14,6 +14,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { FolderOpen, Monitor, Package, RefreshCw } from '@/lib/icons'
 import { $agentPlugins, $agentPluginsStatus, loadAgentPlugins } from '@/store/agent-plugins'
 import { notifyError } from '@/store/notifications'
+import { openPluginInstallRequest } from '@/store/plugin-install-request'
 import { $gatewayState } from '@/store/session'
 
 import { EmptyState, Pill, SettingsContent, SettingsSection } from './primitives'
@@ -96,6 +97,46 @@ function unifiedPackageName(file?: string): null | string {
   return match ? match[1] : null
 }
 
+/** Open the dual-target install modal pre-filled to install ONLY the agent
+ *  half of a bundled package (drift repair). Provenance comes from the
+ *  package's catalog sidecar when present; otherwise the git remote of the
+ *  plugin folder is unknown and we fall back to asking the user via the
+ *  standard flow with the folder name as identifier hint. */
+async function repairAgentHalf(record: PluginRecord, packageName: string) {
+  let repo = ''
+  let catalogName: string | undefined
+  let sha: string | undefined
+
+  try {
+    const pluginDir = record.file?.replace(/[\\/]desktop[\\/]plugin\.js$/, '')
+
+    const raw = pluginDir
+      ? await window.hermesDesktop?.readFileText?.(`${pluginDir}/.hermes-catalog.json`)
+      : null
+
+    if (raw) {
+      const sidecar = JSON.parse(typeof raw === 'string' ? raw : (raw as { content?: string }).content ?? '') as {
+        catalog_name?: string
+        repo?: string
+        sha?: string
+      }
+
+      repo = sidecar.repo ?? ''
+      catalogName = sidecar.catalog_name
+      sha = sidecar.sha
+    }
+  } catch {
+    // No sidecar (raw-git bundled install) — fall through to the name hint.
+  }
+
+  openPluginInstallRequest({
+    catalogName,
+    legacyHint: 'agent',
+    repo: repo || packageName,
+    sha
+  })
+}
+
 function PluginRow({ record, agentHalfMissing }: { record: PluginRecord; agentHalfMissing?: boolean }) {
   const { t } = useI18n()
   const p = t.settings.plugins
@@ -136,9 +177,14 @@ function PluginRow({ record, agentHalfMissing }: { record: PluginRecord; agentHa
           {record.status === 'error' && <Pill tone="primary">{p.failed}</Pill>}
           {agentHalfMissing && (
             <Tip label={p.agentHalfMissingTip}>
-              <span>
-                <Pill tone="primary">{p.agentHalfMissing}</Pill>
-              </span>
+              <Button
+                className="h-5 px-1.5 text-[0.65rem]"
+                onClick={() => void repairAgentHalf(record, unifiedPackageName(record.file) ?? record.name)}
+                size="xs"
+                variant="outline"
+              >
+                {p.agentHalfMissing}
+              </Button>
             </Tip>
           )}
         </>

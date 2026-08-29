@@ -438,6 +438,13 @@ export const en: Translations = {
         agentTargetRemote: profile => `Installs into the connected ${profile} backend`,
         catalogPinned: (name, sha) =>
           `Hermes catalog entry "${name}" — the agent component installs at the reviewed pin${sha ? ` ${sha}` : ''}, not the branch tip.`,
+        reviewedHeading: 'Reviewed catalog entry',
+        reviewedIntro:
+          'This entry was human-reviewed at its pinned commit. You can still inspect the exact code below.',
+        restartToApply: 'Restart the gateway for the plugin to take effect.',
+        restartNow: 'Restart gateway',
+        missingEnvAction: 'Set it up',
+        alreadyInstalled: (name: string) => `${name} is already installed.`,
         desktopTarget: "Installs into this app's local desktop-plugins folder",
         desktopOnlyNote: 'Desktop-only packages do not install a backend agent plugin.',
         insecureWarning: 'This URL uses an insecure or local scheme. Prefer https:// or git@ for production installs.',
@@ -1317,7 +1324,14 @@ export const en: Translations = {
       catalogBrowse: 'Browse',
       catalogHide: 'Hide the catalog browser',
       catalogHint:
-        'Hit "+ Add to this Agent" on any plugin — reviewed entries install at their pinned commit into the selected profile. Bundled agent+desktop plugins offer both halves.'
+        'Hit "+ Add to this Agent" on any plugin — reviewed entries install at their pinned commit into the selected profile. Bundled agent+desktop plugins offer both halves.',
+      alreadyInstalled: (name: string) => `${name} is already installed in this profile.`,
+      catalogProvenance: (sha: string) => `Installed from the Hermes catalog${sha ? ` at pin ${sha}` : ''}.`,
+      tierOfficial: 'official',
+      tierCommunity: 'community',
+      updateToPin: (sha: string) => `Update to ${sha}`,
+      updateFailed: (name: string) => `Could not update ${name}`,
+      updated: (name: string) => `${name} updated to the current catalog pin. Restart the gateway to apply.`
     },
     hub: {
       searchPlaceholder: 'Search the skill hub',

@@ -17,8 +17,10 @@ import {
   type AgentPluginRow,
   isDesktopRelevantPlugin,
   loadAgentPlugins,
-  toggleAgentPlugin
+  toggleAgentPlugin,
+  updateAgentPlugin
 } from '@/store/agent-plugins'
+import { notify } from '@/store/notifications'
 import { $paneHeightOverride, setPaneHeightOverride } from '@/store/panes'
 import { openPluginInstallRequest } from '@/store/plugin-install-request'
 
@@ -61,11 +63,13 @@ function profileParam(scope: ProfileScope): null | string {
 function PluginRow({
   row,
   busy,
-  onToggle
+  onToggle,
+  onUpdate
 }: {
   row: AgentPluginRow
   busy: boolean
   onToggle: (enable: boolean) => void
+  onUpdate?: () => void
 }) {
   const { t } = useI18n()
   const address = row.key ?? ''
@@ -83,6 +87,20 @@ function PluginRow({
             <span className="rounded border border-(--ui-stroke-tertiary) px-1 text-[0.65rem] text-(--ui-text-tertiary)">
               {t.skills.plugins.portableBadge}
             </span>
+          )}
+          {row.catalog_name && (
+            <Tip label={t.skills.plugins.catalogProvenance(row.installed_sha?.slice(0, 8) ?? '')}>
+              <span className="rounded border border-(--ui-stroke-tertiary) px-1 text-[0.65rem] text-(--ui-text-tertiary)">
+                {row.catalog_tier === 'official'
+                  ? t.skills.plugins.tierOfficial
+                  : t.skills.plugins.tierCommunity}
+              </span>
+            </Tip>
+          )}
+          {row.update_available && onUpdate && (
+            <Button className="h-5 px-1.5 text-[0.65rem]" disabled={busy} onClick={onUpdate} size="xs" variant="outline">
+              {t.skills.plugins.updateToPin(row.catalog_sha?.slice(0, 8) ?? '')}
+            </Button>
           )}
         </div>
         {row.description && (
@@ -155,6 +173,19 @@ export const PluginsTab = memo(function PluginsTab({ profile }: { profile: Profi
         return
       }
 
+      // Already installed at (or past) this pin in the scoped profile →
+      // tell the user instead of re-running the install ceremony. Rows with
+      // update_available keep their explicit Update chip in the list above.
+      const existing = $agentPlugins
+        .get()
+        .find(row => row.catalog_name === data.name || row.name === data.name)
+
+      if (existing && !existing.update_available) {
+        notify({ kind: 'success', message: t.skills.plugins.alreadyInstalled(String(data.name)) })
+
+        return
+      }
+
       // Open the shared dual-target install modal: it probes the repo for
       // agent/desktop halves, installs the agent half at the catalog pin
       // into the scoped profile, and offers the desktop half locally.
@@ -169,7 +200,7 @@ export const PluginsTab = memo(function PluginsTab({ profile }: { profile: Profi
     window.addEventListener('message', onMessage)
 
     return () => window.removeEventListener('message', onMessage)
-  }, [open, scope])
+  }, [open, scope, t])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -191,7 +222,7 @@ export const PluginsTab = memo(function PluginsTab({ profile }: { profile: Profi
           <div className="flex flex-col">
             {visible.map(row => (
               <PluginRow
-                busy={busyKey === (row.key ?? row.name)}
+                busy={busyKey === (row.key ?? row.name) || busyKey === row.name}
                 key={row.key ?? row.name}
                 onToggle={enable => {
                   if (!row.key) {
@@ -200,6 +231,19 @@ export const PluginsTab = memo(function PluginsTab({ profile }: { profile: Profi
 
                   void toggleAgentPlugin(requestGateway, row.key, enable, p.toggleFailed(row.name), scope)
                 }}
+                onUpdate={
+                  row.update_available
+                    ? () => {
+                        void updateAgentPlugin(requestGateway, row.name, p.updateFailed(row.name), scope).then(
+                          applied => {
+                            if (applied) {
+                              notify({ kind: 'success', message: p.updated(row.name) })
+                            }
+                          }
+                        )
+                      }
+                    : undefined
+                }
                 row={row}
               />
             ))}
