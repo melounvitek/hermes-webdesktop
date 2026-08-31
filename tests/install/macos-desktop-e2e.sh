@@ -226,12 +226,17 @@ phase_install() {
   app_bin="$(find "$app/Contents/MacOS" -type f -perm +111 | head -1)"
   [ -n "$app_bin" ] || fail "no executable inside $app/Contents/MacOS"
 
-  # Run the installer binary DIRECTLY: `open` launches via launchd, which
-  # inherits NONE of the redirect env (GIT_CONFIG_GLOBAL, HOME) - the whole
-  # isolation would silently evaporate. Direct exec is the same binary and
-  # the same first-launch flow.
+  # The Setup app is Tauri (Rust + system webview): Playwright/Electron
+  # attach never works, and run bare it waits forever on its setup-choice
+  # screen. Launch it in the background with our env (direct exec, not
+  # `open`: launchd inherits NONE of the redirect env) and drive the
+  # "Install Hermes" button with native input.
   local rc=0
-  "$app_bin" 2>&1 | ts_prefix > "$LOG_DIR/bootstrap-install.log" || rc=$?
+  bash "$ASSETS/drive-dmg-install.sh" \
+    --app-bin "$app_bin" \
+    --install-dir "$INSTALL_DIR" \
+    --proof-dir "$LOG_DIR" 2>&1 \
+    | ts_prefix > "$LOG_DIR/bootstrap-install.log" || rc=$?
   log_group "Hermes-Setup (dmg bootstrap) transcript" "$LOG_DIR/bootstrap-install.log"
   hdiutil detach "$mount" >/dev/null 2>&1 || true
   [ "$rc" -eq 0 ] || fail "dmg bootstrap exited $rc; transcript above"
@@ -249,15 +254,23 @@ phase_install() {
   ok "installed app: $(find_installed_app)"
 }
 
-run_playwright_update() {
-  # $1: spec file to launch from. Installs the driver's OWN pinned
-  # @playwright/test into a scratch dir (never the installed tree's copy).
-  local spec="$1"
+ensure_playwright() {
+  # Install the driver's OWN pinned @playwright/test into a scratch dir
+  # (never the installed tree's copy). Idempotent across phases.
   local pw_dir="$WORK_ROOT/playwright"
+  [ -d "$pw_dir/node_modules/@playwright/test" ] && { printf '%s' "$pw_dir"; return 0; }
   mkdir -p "$pw_dir"
   (cd "$pw_dir" && npm install --no-save --no-audit --no-fund \
     "@playwright/test@$PLAYWRIGHT_VERSION" 2>&1 | ts_prefix > "$LOG_DIR/playwright-install.log") \
     || { log_group "playwright install transcript" "$LOG_DIR/playwright-install.log"; fail "playwright install failed"; }
+  printf '%s' "$pw_dir"
+}
+
+run_playwright_update() {
+  # $1: spec file to launch from.
+  local spec="$1"
+  local pw_dir
+  pw_dir="$(ensure_playwright)"
   cp "$ASSETS/launch-from-spec.mjs" "$pw_dir/"
   local rc=0
   (cd "$pw_dir" && node launch-from-spec.mjs \

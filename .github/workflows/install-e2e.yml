@@ -47,11 +47,11 @@ on:
   workflow_dispatch:
     inputs:
       route:
-        description: 'Which combinations to run. all = every OS; both/update/installer = the linux legs; windows-desktop = the windows legs.'
+        description: 'Which combinations to run. all = every OS; both/update/installer = the linux legs; windows-desktop = the windows legs; macos-desktop = the macos legs.'
         required: false
         type: choice
         default: all
-        options: [all, both, update, installer, windows-desktop]
+        options: [all, both, update, installer, windows-desktop, macos-desktop]
       tag-count:
         description: 'How many release tags to sample (newest, oldest, and a spread between).'
         required: false
@@ -179,7 +179,7 @@ jobs:
 
   macos:
     name: ${{ matrix.name }}
-    if: github.event_name != 'workflow_dispatch' || inputs.route == 'all'
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "macos-desktop"]'), inputs.route)
     needs: generate-matrix
     strategy:
       fail-fast: false
