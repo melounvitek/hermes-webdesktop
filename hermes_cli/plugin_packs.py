@@ -86,7 +86,7 @@ class PackPluginEntry:
     @property
     def install_identifier(self) -> Optional[str]:
         """Identifier for the existing install path (None for bare names,
-        which must first resolve through the community index)."""
+        which must first resolve through the plugin catalog)."""
         if self.repo:
             return f"{self.repo}/{self.subdir}" if self.subdir else self.repo
         return None
@@ -305,50 +305,57 @@ class ResolvedPackPlugin:
 
 
 def resolve_pack_plugins(pack: PluginPack) -> List[ResolvedPackPlugin]:
-    """Resolve every entry; bare names go through the community index.
+    """Resolve every entry; bare names go through the plugin catalog.
 
     Resolution failures do not raise — they are carried per-entry so the
     review screen can show them and install can report partial failure.
     """
     resolved: List[ResolvedPackPlugin] = []
-    index_entries = None
+    catalog_entries = None
     for entry in pack.plugins:
         ident = entry.install_identifier
         if ident is not None:
             resolved.append(ResolvedPackPlugin(entry=entry, identifier=ident))
             continue
-        # Bare community-index name.
+        # Bare catalog name.
         try:
-            if index_entries is None:
-                from hermes_cli.plugin_index import load_index
+            if catalog_entries is None:
+                from hermes_cli.plugin_catalog import load_catalog_live
 
-                index_entries, _src = load_index()
-            from hermes_cli.plugin_index import resolve_name
-
-            match, candidates = resolve_name(index_entries, entry.name or "")
-        except Exception as exc:  # index load must not crash pack handling
+                catalog_entries = load_catalog_live()
+        except Exception as exc:  # catalog load must not crash pack handling
             resolved.append(
                 ResolvedPackPlugin(
                     entry=entry, identifier=None,
-                    resolve_error=f"community index unavailable: {exc}",
+                    resolve_error=f"plugin catalog unavailable: {exc}",
                 )
             )
             continue
+        match = next(
+            (e for e in catalog_entries if e.name == (entry.name or "")), None
+        )
         if match is None:
-            detail = (
-                "ambiguous in the community index"
-                if len(candidates) > 1
-                else "not found in the community index"
-            )
             resolved.append(
-                ResolvedPackPlugin(entry=entry, identifier=None, resolve_error=detail)
+                ResolvedPackPlugin(
+                    entry=entry, identifier=None,
+                    resolve_error="not found in the plugin catalog",
+                )
             )
             continue
+        caps = match.capabilities
+        declared = (
+            list(caps.provides_tools)
+            + list(caps.provides_hooks)
+            + list(caps.provides_middleware)
+        )
+        install_identifier = (
+            f"{match.repo}#{match.subdir}" if match.subdir else match.repo
+        )
         resolved.append(
             ResolvedPackPlugin(
                 entry=entry,
-                identifier=match.install_identifier,
-                index_capabilities=list(match.capabilities),
+                identifier=install_identifier,
+                index_capabilities=declared,
             )
         )
     return resolved

@@ -444,7 +444,7 @@ class TestSearchBrowseInfo:
     def test_search_no_results_message(self, catalog_dir, offline, capsys):
         plugins_cmd.cmd_search("zzz-nothing")
         out = capsys.readouterr().out
-        assert "No plugins matched" in out
+        assert "No catalog entries matched" in out
 
     def test_info_shows_full_detail(self, catalog_dir, offline, capsys):
         _write_entry(

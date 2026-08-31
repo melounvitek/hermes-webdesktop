@@ -35,7 +35,6 @@ data/
 # Bundled community plugin index seed (shipped as package data) — the bare
 # `data/` pattern above would otherwise swallow it.
 !hermes_cli/data/
-!hermes_cli/data/plugin_index.json
 .pytest_cache/
 test_durations.json
 .pytest-cache/

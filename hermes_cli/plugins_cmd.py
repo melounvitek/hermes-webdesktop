@@ -1045,63 +1045,6 @@ def _removed_annotation(name: str, dir_path) -> Optional[str]:
     return None
 
 
-def _looks_like_bare_index_name(identifier: str) -> bool:
-    """True when *identifier* is a bare plugin name (no slash, not a URL).
-
-    Bare names are resolved through the community plugin index; anything with
-    a slash or URL scheme keeps the existing owner/repo / Git URL semantics.
-    """
-    if "/" in identifier or "\\" in identifier:
-        return False
-    return not identifier.startswith(("https://", "http://", "git@", "ssh://", "file://"))
-
-
-def _resolve_index_name(identifier: str, console) -> tuple[str, Optional[str]]:
-    """Resolve a bare plugin name to ``(install_identifier, pinned_ref)``.
-
-    Exits with an error when the name is unknown, or lists candidates and
-    exits when the name is ambiguous. The returned ref is only used when it
-    is an exact 40-character commit SHA (the pin format the installer
-    accepts); tag refs are surfaced as advisory output instead.
-    """
-    from hermes_cli.plugin_index import SECURITY_FOOTER, load_index, resolve_name
-
-    entries, source = load_index()
-    entry, candidates = resolve_name(entries, identifier)
-    if entry is None:
-        if len(candidates) > 1:
-            console.print(
-                f"[red]Error:[/red] Plugin name '{identifier}' is ambiguous in the "
-                f"community index ({source}). Candidates:"
-            )
-            for c in candidates:
-                console.print(f"  {c.name}  →  {c.install_identifier}")
-            console.print("Re-run with the exact name or the owner/repo identifier.")
-        else:
-            console.print(
-                f"[red]Error:[/red] Plugin '{identifier}' was not found in the "
-                f"community index ({source}). Use `hermes plugins search <term>` to "
-                "browse, or install directly with an owner/repo identifier."
-            )
-        sys.exit(1)
-
-    pinned_ref: Optional[str] = None
-    if entry.ref and _EXACT_COMMIT_RE.fullmatch(entry.ref):
-        pinned_ref = entry.ref.lower()
-    elif entry.ref:
-        console.print(
-            f"[dim]Index pins ref '{entry.ref}' (not an exact commit SHA); "
-            "installing the default branch head instead.[/dim]"
-        )
-    console.print(
-        f"[dim]Resolved '{entry.name}' via community index ({source}) → "
-        f"{entry.install_identifier}"
-        + (f" @ {pinned_ref[:12]}[/dim]" if pinned_ref else "[/dim]")
-    )
-    console.print(f"[dim]{SECURITY_FOOTER}[/dim]")
-    return entry.install_identifier, pinned_ref
-
-
 def cmd_install(
     identifier: str,
     force: bool = False,
@@ -1130,6 +1073,14 @@ def cmd_install(
     entry = None
     if _looks_like_catalog_name(identifier):
         entry = _get_live_catalog_entry(identifier)
+        if entry is None:
+            console.print(
+                f"[red]Error:[/red] '{identifier}' is not in the Hermes "
+                "plugin catalog and is not a Git URL or owner/repo "
+                "shorthand.\n"
+                "Browse available entries with `hermes plugins search`."
+            )
+            sys.exit(1)
     if entry is not None:
         from hermes_cli.plugin_catalog import (
             entry_capability_summary,
@@ -1153,14 +1104,6 @@ def cmd_install(
         identifier = _catalog_install_identifier(entry)
         if ref is None:
             ref = entry.sha
-    elif _looks_like_bare_index_name(identifier):
-        console.print(
-            "[yellow]Warning:[/yellow] not in the curated Hermes catalog — "
-            "resolving through the community index (unreviewed)."
-        )
-        identifier, index_ref = _resolve_index_name(identifier, console)
-        if ref is None:
-            ref = index_ref
     else:
         console.print(
             "[yellow]Warning:[/yellow] custom (unreviewed) source — "
@@ -3529,39 +3472,22 @@ def cmd_search(
     term: str = "",
     *,
     json_output: bool = False,
-    capability: Optional[str] = None,
-    refresh: bool = False,
 ) -> None:
-    """Search the community plugin index (fuzzy on name/description/tags)."""
+    """Search the curated plugin catalog (name/description/declared tools)."""
     from rich.console import Console
 
-    from hermes_cli.plugin_index import (
-        SECURITY_FOOTER,
-        load_index,
-        search_index,
-    )
+    from hermes_cli.plugin_catalog import filter_entries, load_catalog_live
 
     console = Console()
-
-    # Curated catalog first — reviewed, SHA-pinned entries.
-    catalog_matches = []
-    try:
-        from hermes_cli.plugin_catalog import filter_entries, load_catalog_live
-
-        catalog_matches = filter_entries(load_catalog_live(), term)
-    except Exception as exc:
-        logger.debug("catalog search unavailable: %s", exc)
-
-    entries, source = load_index(refresh=refresh)
-    results = search_index(entries, term, capability=capability)
+    entries = load_catalog_live()
+    matches = filter_entries(entries, term)
 
     if json_output:
         print(
             json.dumps(
                 {
-                    "source": source,
                     "query": term,
-                    "catalog_results": [
+                    "results": [
                         {
                             "name": e.name,
                             "description": e.description,
@@ -3569,42 +3495,25 @@ def cmd_search(
                             "sha": e.sha,
                             "tier": e.tier,
                         }
-                        for e in catalog_matches
+                        for e in matches
                     ],
-                    "results": [e.to_dict() for e in results],
-                    "note": SECURITY_FOOTER,
                 },
                 indent=2,
             )
         )
         return
 
-    if catalog_matches:
-        _render_catalog_entries(catalog_matches, console)
-
-    if not results:
-        if not catalog_matches:
+    if not matches:
+        if term:
             console.print(
-                f"[yellow]No plugins matched '{term}'[/yellow] "
-                f"[dim](index source: {source})[/dim]"
+                f"[yellow]No catalog entries matched '{term}'[/yellow] "
+                "[dim](browse everything with `hermes plugins browse`)[/dim]"
             )
+        else:
+            console.print("[dim]No catalog entries available.[/dim]")
         return
+    _render_catalog_entries(matches, console)
 
-    from rich.table import Table
-
-    table = Table(title=f"Community plugins ({len(results)} match{'es' if len(results) != 1 else ''})")
-    table.add_column("Name", style="bold")
-    table.add_column("Description")
-    table.add_column("Author")
-    table.add_column("Tags", style="dim")
-    for e in results:
-        desc = e.description
-        if len(desc) > 70:
-            desc = desc[:67] + "..."
-        table.add_row(e.name, desc, e.author, ", ".join(e.tags))
-    console.print(table)
-    console.print(f"[dim]Index source: {source}. Install: hermes plugins install <name>[/dim]")
-    console.print(f"[dim]{SECURITY_FOOTER}[/dim]")
 
 
 def plugins_command(args) -> None:
@@ -3633,8 +3542,6 @@ def plugins_command(args) -> None:
         cmd_search(
             getattr(args, "term", "") or "",
             json_output=getattr(args, "json", False),
-            capability=getattr(args, "capability", None),
-            refresh=getattr(args, "refresh", False),
         )
     elif action == "update":
         cmd_update(args.name)
