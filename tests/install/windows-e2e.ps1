@@ -758,12 +758,22 @@ function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {
         Write-Host "  waiting for the detached updater to finish (up to 35 min) ..."
         $updateLog = Join-Path $HermesHome "logs\update.log"
         $updateLogPos = 0
+        $startSha = ""
+        try { $startSha = Get-InstalledHead } catch {}
         $deadline = (Get-Date).AddMinutes(35)
+        # A working updater moves the checkout off the starting sha within its
+        # first minutes (git fetch/reset precedes the long venv + rebuild
+        # tail). No movement by this mark means the updater is wedged before
+        # its git step; waiting out the full bound adds nothing.
+        $progressDeadline = (Get-Date).AddMinutes(12)
         while ((Get-Date) -lt $deadline) {
             if (Test-Path -LiteralPath $resultPath) { break }
             $head = ""
             try { $head = Get-InstalledHead } catch {}
             if ($head -eq $TargetSha -and -not (Test-Path -LiteralPath $markerPath)) { break }
+            if ((Get-Date) -gt $progressDeadline -and $head -eq $startSha) {
+                Assert-True $false "updater made progress off $startSha within 12 minutes (wedged before its git step; on pre-#97052 releases this is the fork-upstream prompt hang)"
+            }
             # Tail any new update.log lines so the desktop-rebuild phase is
             # visible in the CI step output.
             if (Test-Path -LiteralPath $updateLog) {
