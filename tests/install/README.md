@@ -60,7 +60,7 @@ The desktop app has two launch paths, so the matrix has two app-update methods. 
 
 A grey leg is normal. There are two causes:
 
-- The method pair has no driver yet. The pair is a declared TODO. The gate in the run workflow lists the pairs that run.
+- The method pair is declared but cannot run: either no OS entry point exists for it (open-app-update after a plain script install registers nothing to open), or no driver arm exists yet. The gate in the run workflow lists the pairs that run.
 - The starting release predates the surface under test. Example: a release without `apps/desktop` has no window to launch. The tag annotation `tag_has_desktop` from the primary workflow marks these releases.
 
 The result chart on the run summary shows each leg as passed, failed, or skipped.

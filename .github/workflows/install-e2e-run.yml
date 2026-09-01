@@ -42,7 +42,7 @@ on:
         required: true
         type: string
       update-method:
-        description: 'How the install updates to HEAD. Supported: hermes-update (the updater), installer-script (re-run the one-liner), installer-script+desktop (re-run with --include-desktop), hermes-desktop-app-update (launch via hermes desktop under Playwright, click Update now). Declared-but-TODO methods (open-app-update) skip.'
+        description: 'How the install updates to HEAD. Supported: hermes-update (the updater), installer-script (re-run the one-liner), installer-script+desktop (re-run with --include-desktop), hermes-desktop-app-update (launch via hermes desktop under Playwright, click Update now). open-app-update runs only where an OS entry point exists (see the per-OS run workflows); pairs without one skip.'
         required: true
         type: string
       install-ref:
@@ -76,8 +76,8 @@ permissions:
 jobs:
   e2e:
     name: install & update
-    # The pairs the driver can run today; anything else is a declared TODO
-    # and natively skips. Desktop-surface methods (+desktop installs,
+    # The pairs the driver can run today; anything else natively skips.
+    # Desktop-surface methods (+desktop installs,
     # hermes-desktop-app-update) also need the starting tag to ship
     # apps/desktop (their flags shipped with it).
     if: >-
