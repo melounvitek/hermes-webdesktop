@@ -68,7 +68,7 @@ on:
         description: 'Job timeout. A cold run installs real toolchains twice, and app-update legs add a full Electron build + launch.'
         required: false
         type: number
-        default: 75
+        default: 60
 
 permissions:
   contents: read

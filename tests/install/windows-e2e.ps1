@@ -748,16 +748,17 @@ function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {
         # asserts below are the hard gate either way; the JSON is asserted
         # only when the script path produced it.
         #
-        # This can take a LONG time: the website release we installed is weeks
-        # of main behind HEAD, so the update pulls a large diff AND does a
-        # full Electron desktop rebuild (vite + electron-builder) plus a uv
-        # sync. The desktop-build output goes to logs/update.log (not the
-        # streamed handoff log), so we tail update.log here to show progress
-        # instead of going silent for tens of minutes.
-        Write-Host "  waiting for the detached updater to finish (up to 90 min; large old->new rebuild) ..."
+        # The update pulls a large diff AND does a full Electron desktop
+        # rebuild (vite + electron-builder) plus a uv sync; a WORKING updater
+        # finishes well under 35 minutes on these runners (slowest observed
+        # leg anywhere in the matrix: 29m end to end). A wedged updater never
+        # finishes at any bound, so a longer wait only delays the report.
+        # The desktop-build output goes to logs/update.log (not the streamed
+        # handoff log), so we tail update.log here to show progress.
+        Write-Host "  waiting for the detached updater to finish (up to 35 min) ..."
         $updateLog = Join-Path $HermesHome "logs\update.log"
         $updateLogPos = 0
-        $deadline = (Get-Date).AddMinutes(90)
+        $deadline = (Get-Date).AddMinutes(35)
         while ((Get-Date) -lt $deadline) {
             if (Test-Path -LiteralPath $resultPath) { break }
             $head = ""

@@ -51,7 +51,7 @@ on:
         description: 'Job timeout. App-update legs do a full Electron build.'
         required: false
         type: number
-        default: 120
+        default: 60
 
 permissions:
   contents: read
