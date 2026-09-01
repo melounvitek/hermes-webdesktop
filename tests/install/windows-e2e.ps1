@@ -764,15 +764,24 @@ function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {
         # A working updater moves the checkout off the starting sha within its
         # first minutes (git fetch/reset precedes the long venv + rebuild
         # tail). No movement by this mark means the updater is wedged before
-        # its git step; waiting out the full bound adds nothing.
+        # its git step; waiting out the full bound adds nothing. Unreadable
+        # counts as unmoved (the wedge holds the venv shim lock, so reads can
+        # throw), but only two consecutive no-progress polls trip it: one bad
+        # read must not fail a healthy leg.
         $progressDeadline = (Get-Date).AddMinutes(12)
+        $noProgressPolls = 0
         while ((Get-Date) -lt $deadline) {
             if (Test-Path -LiteralPath $resultPath) { break }
             $head = ""
             try { $head = Get-InstalledHead } catch {}
             if ($head -eq $TargetSha -and -not (Test-Path -LiteralPath $markerPath)) { break }
-            if ((Get-Date) -gt $progressDeadline -and $head -eq $startSha) {
-                Assert-True $false "updater made progress off $startSha within 12 minutes (wedged before its git step; on pre-#97052 releases this is the fork-upstream prompt hang)"
+            if ((Get-Date) -gt $progressDeadline -and ($head -eq $startSha -or $head -eq "")) {
+                $noProgressPolls++
+                if ($noProgressPolls -ge 2) {
+                    Assert-True $false "updater made progress off $startSha within 12 minutes (checkout unmoved or unreadable; wedged before its git step... on pre-#97052 releases this is the fork-upstream prompt hang)"
+                }
+            } else {
+                $noProgressPolls = 0
             }
             # Tail any new update.log lines so the desktop-rebuild phase is
             # visible in the CI step output.
