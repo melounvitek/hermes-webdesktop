@@ -92,12 +92,11 @@ jobs:
     #     Update button to click, no -IncludeDesktop to pass);
     #   * open-app-update needs an OS entry point, which only the
     #     desktop-bearing installs create.
-    # desktop-installer@latest as an UPDATE method is the one declared TODO.
     if: >-
       (inputs.install-method == 'installer-script'
         || (contains(fromJSON('["installer-script+desktop", "desktop-installer@latest"]'), inputs.install-method) && inputs.tag-has-desktop))
       && (contains(fromJSON('["hermes-update", "installer-script"]'), inputs.update-method)
-        || (contains(fromJSON('["installer-script+desktop", "hermes-desktop-app-update"]'), inputs.update-method) && inputs.tag-has-desktop)
+        || (contains(fromJSON('["installer-script+desktop", "hermes-desktop-app-update", "desktop-installer@latest"]'), inputs.update-method) && inputs.tag-has-desktop)
         || (inputs.update-method == 'open-app-update' && inputs.tag-has-desktop
             && contains(fromJSON('["desktop-installer@latest", "installer-script+desktop"]'), inputs.install-method)))
     runs-on: windows-latest

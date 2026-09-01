@@ -23,10 +23,11 @@
 #                            target sha, marker cleanup, result JSON (when
 #                            the script path wrote one), working hermes,
 #                            and the relaunched app window.
-#                 update     TODO: run `hermes update` from the installed
-#                            venv (the CLI route a GUI user might take).
-#                 installer  TODO: re-run the bootstrap installer over the
-#                            existing install (its --update flow).
+#                 update     run `hermes update` from the installed venv
+#                            (the CLI route a GUI user might take).
+#                 installer  re-run the bootstrap installer over the
+#                            existing install (download Hermes-Setup.exe
+#                            again, AHK clicks Install; lands on HEAD).
 #
 # HOW THE STAGING WORKS (no MITM proxy, no network fakery):
 #   We bare-clone the checkout into <workroot>\serve.git and point every git
@@ -552,9 +553,20 @@ function Invoke-PhaseStage {
 # Phase: install-gui -- website Hermes-Setup.exe, headed, AHK-driven
 # ----------------------------------------------------------------------------
 function Invoke-PhaseInstallGui {
+    param(
+        # "install" (first run, must land on OLD) or "update" (re-run over an
+        # existing install after serve.git advanced, must land on the target).
+        [string]$Mode = "install",
+        [string]$ExpectedSha = "",
+        [string]$ExpectedLabel = ""
+    )
     $state = Read-State
-    Write-Step "INSTALL (GUI): Hermes-Setup.exe from the website, headed, AHK clicks"
-    $proof = Join-Path $ProofRoot "install-gui"
+    if ($Mode -eq "install") {
+        $ExpectedSha = $state.old
+        $ExpectedLabel = "OLD ($($state.old_ref))"
+    }
+    Write-Step "$($Mode.ToUpper()) (GUI): Hermes-Setup.exe from the website, headed, AHK clicks"
+    $proof = Join-Path $ProofRoot $(if ($Mode -eq "install") { "install-gui" } else { "update-gui-installer" })
     New-Item -ItemType Directory -Path $proof -Force | Out-Null
 
     # The production installer, from the website. This is the binary users
@@ -640,14 +652,15 @@ function Invoke-PhaseInstallGui {
     # Close the freshly launched app (user quits after first look).
     Stop-HermesAppProcesses "post-install"
 
-    # The installer cloned serve.git's `main`, which stage parked at OLD.
-    # (A pinned installer build would land on its baked pin instead; either
-    # way the requirement is the same: not already on HEAD.)
+    # The installer cloned/updated from serve.git's `main`; the phase's
+    # expected sha says where that must land (install: OLD; update: HEAD).
     $installedSha = Get-InstalledHead
-    Write-Host "  installer landed on: $installedSha (OLD = $($state.old) [$($state.old_ref)])"
-    Assert-True ($installedSha -eq $state.old) "installed checkout is at OLD ($($state.old_ref))"
-    Assert-True ($installedSha -ne $state.current) "installed checkout differs from HEAD (an update is genuinely available)"
-    Test-HermesRuns "post-install-gui"
+    Write-Host "  installer landed on: $installedSha (expected $ExpectedLabel = $ExpectedSha)"
+    Assert-True ($installedSha -eq $ExpectedSha) "installed checkout is at $ExpectedLabel"
+    if ($Mode -eq "install") {
+        Assert-True ($installedSha -ne $state.current) "installed checkout differs from HEAD (an update is genuinely available)"
+    }
+    Test-HermesRuns "post-$Mode-gui"
     Assert-True ($null -ne (Get-DesktopExe)) "packaged Desktop Hermes.exe exists"
 
     # Seed a provider so the update leg meets the ready app shell, not the
@@ -889,10 +902,20 @@ function Invoke-PhaseUpdate {
             Assert-DesktopArtifact "HEAD"
         }
         "desktop-installer@latest" {
-            # TODO: re-run the bootstrap Hermes-Setup.exe over the existing
-            # install (its --update flow jumps straight to progress and
-            # runs unattended).
-            throw "update method 'desktop-installer@latest' is not implemented yet"
+            # A user re-downloading Hermes-Setup.exe and clicking Install over
+            # the existing install (the GUI twin of re-running the one-liner).
+            # Windows has no already-installed fast path, so the full installer
+            # UI shows and the same AHK drive applies; install.ps1's repository
+            # stage fetches into the existing checkout, now aimed at HEAD.
+            # Rotate the bootstrap log first: it appends across runs, and the
+            # AHK's "bootstrap complete" fallback must not match the install
+            # phase's completion line.
+            $bootLog = Join-Path $HermesHome "logs\bootstrap-installer.log"
+            if (Test-Path -LiteralPath $bootLog) {
+                Move-Item -LiteralPath $bootLog -Destination "$bootLog.install-phase" -Force
+            }
+            Invoke-PhaseInstallGui -Mode "update" -ExpectedSha $state.current -ExpectedLabel "HEAD"
+            Assert-DesktopArtifact "HEAD"
         }
     }
 
