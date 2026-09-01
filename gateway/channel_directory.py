@@ -206,7 +206,7 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
     }
 
     try:
-        atomic_json_write(DIRECTORY_PATH, directory)
+        await asyncio.to_thread(atomic_json_write, DIRECTORY_PATH, directory)
     except Exception as e:
         logger.warning("Channel directory: failed to write: %s", e)
 
@@ -439,15 +439,15 @@ def _build_from_sessions_db(platform_name: str) -> List[Dict[str, str]]:
     """Pull channels/contacts from state.db gateway session rows."""
     entries: List[Dict[str, str]] = []
     try:
-        from hermes_state import SessionDB
-        db = SessionDB()
+        from hermes_state import get_shared_session_db, release_or_close
+        db = get_shared_session_db()
         try:
             lister = getattr(db, "list_gateway_sessions", None)
             if not callable(lister):
                 return []
             rows = lister(platform=platform_name, active_only=False)
         finally:
-            db.close()
+            release_or_close(db)
 
         seen_ids = set()
         for row in rows:
