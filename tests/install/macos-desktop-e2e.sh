@@ -21,6 +21,8 @@
 #              hermes-desktop-app-update  capture `hermes desktop`'s spawn,
 #                                         launch the spec under Playwright,
 #                                         click Update now
+#              hermes-update              CLI update from the installed venv
+#              installer-script[+desktop] re-run the current install one-liner
 #
 # Usage:
 #   tests/install/macos-desktop-e2e.sh --phase stage|install|update|all
@@ -61,8 +63,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$UPDATE_METHOD" in
-  open-app-update|hermes-desktop-app-update) ;;
-  *) echo "error: --update-method must be open-app-update or hermes-desktop-app-update, got '$UPDATE_METHOD'" >&2; exit 1 ;;
+  open-app-update|hermes-desktop-app-update|hermes-update|installer-script|installer-script+desktop) ;;
+  *) echo "error: unsupported --update-method '$UPDATE_METHOD'" >&2; exit 1 ;;
 esac
 [ "$(uname -s)" = "Darwin" ] || { echo "error: this driver runs on macOS only" >&2; exit 1; }
 
@@ -266,6 +268,39 @@ ensure_playwright() {
   printf '%s' "$pw_dir"
 }
 
+installer_supports() {
+  # $1: ref; $2: flag. Installer flags must match the installer being run,
+  # not this checkout's: older releases reject options added later.
+  # Capture before grepping: a `git show | grep -q` pipe takes SIGPIPE
+  # under pipefail when grep exits at first match, so a supported flag
+  # would read as unsupported.
+  local text
+  text="$(git -C "$REPO_ROOT" show "$1:scripts/install.sh")"
+  grep -qF -- "$2" <<< "$text"
+}
+
+run_installer() {
+  # $1: ref whose scripts/install.sh to run; $2: log name; $3: "desktop" to
+  # opt the desktop stage in (--include-desktop). Mirrors the POSIX driver.
+  local script="$WORK_ROOT/install-$2.sh"
+  git -C "$REPO_ROOT" show "$1:scripts/install.sh" > "$script"
+  chmod +x "$script"
+  local flags=(--skip-setup)
+  if installer_supports "$1" "--skip-browser"; then
+    flags+=(--skip-browser)
+  fi
+  if [ "${3:-}" = "desktop" ]; then
+    installer_supports "$1" "--include-desktop" \
+      || fail "ref $1 does not support --include-desktop; this leg cannot mean what it claims"
+    flags+=(--include-desktop)
+  fi
+  # </dev/null: EOF makes every prompt take its default.
+  local rc=0
+  bash "$script" "${flags[@]}" < /dev/null 2>&1 | ts_prefix > "$LOG_DIR/install-$2.log" || rc=$?
+  log_group "installer ($2) transcript" "$LOG_DIR/install-$2.log"
+  [ "$rc" -eq 0 ] || fail "installer ($2) exited $rc; transcript above"
+}
+
 run_playwright_update() {
   # $1: spec file to launch from.
   local spec="$1"
@@ -300,6 +335,35 @@ phase_update() {
   mock_start "$WORK_ROOT"
   trap mock_stop EXIT
   case "$UPDATE_METHOD" in
+    hermes-update)
+      # The CLI route a dmg user takes from a terminal. `--yes` reaches the
+      # update subcommand only in later releases; ask the installed hermes.
+      local hermes="$INSTALL_DIR/venv/bin/hermes"
+      local update_cmd=("$hermes" update)
+      if "$hermes" update --help 2>&1 | grep -qF -- --yes; then
+        update_cmd=("$hermes" update --yes)
+      fi
+      local rc=0
+      (cd "$INSTALL_DIR" && "${update_cmd[@]}" < /dev/null 2>&1 | ts_prefix > "$LOG_DIR/update.log") || rc=$?
+      log_group "hermes update transcript" "$LOG_DIR/update.log"
+      [ "$rc" -eq 0 ] || fail "hermes update exited $rc; transcript above"
+      ;;
+    installer-script)
+      # A dmg user re-running today's install one-liner.
+      run_installer "$HEAD_SHA" head
+      ;;
+    installer-script+desktop)
+      run_installer "$HEAD_SHA" head desktop
+      # The desktop stage is this leg's claim: the rebuilt app must exist.
+      head_app=""
+      for cand in \
+        "$INSTALL_DIR/apps/desktop/release/mac-arm64/Hermes.app" \
+        "$INSTALL_DIR/apps/desktop/release/mac/Hermes.app"; do
+        [ -d "$cand" ] && { head_app="$cand"; break; }
+      done
+      [ -n "$head_app" ] || fail "no built Hermes.app under the checkout after the +desktop update"
+      ok "rebuilt app present: $head_app"
+      ;;
     open-app-update)
       # The installed app IS the user surface here (double-click the .app);
       # hand-build the spec Playwright launches from. Env: the redirect set,

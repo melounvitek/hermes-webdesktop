@@ -76,8 +76,16 @@ click_install() {
   # shellcheck disable=SC2086
   set -- $geo
   local x=$1 y=$2 wd=$3 ht=$4
-  # Button center sits at ~65% of window height (measured from the
-  # installer's first-run screen at its fixed 880x620 window size).
+  if [ -n "$LAST_ERR" ]; then
+    # Error screen: Retry install sits left of center at ~59% height
+    # (measured: button x 359-492, y 402-441 in the 880x620 window).
+    local cx=$((x + wd * 48 / 100))
+    local cy=$((y + ht * 59 / 100))
+    cliclick "c:${cx},${cy}" 2>&1 || true
+    echo "clicked retry ${cx},${cy} (window ${x},${y} ${wd}x${ht})"
+    return 0
+  fi
+  # First-run screen: button center sits at ~65% of window height.
   local cx=$((x + wd / 2))
   local cy=$((y + ht * 65 / 100))
   cliclick "c:${cx},${cy}" 2>&1 || true
@@ -101,6 +109,26 @@ installed_app() {
 install_complete() {
   [ -d "$INSTALL_DIR/.git" ] && [ -x "$HERMES_BIN" ] && installed_app
 }
+# The bootstrap parks on an error screen instead of exiting when a stage
+# fails (e.g. a transient 429 downloading install.sh), with a Retry button
+# in the same button zone the install click hits. Its log names the cause;
+# watch for new failure lines, let the regular click drive the retry, and
+# give up after a few so a persistent failure reports the real error
+# instead of burning the whole install timeout.
+BOOTSTRAP_LOG="$HOME/.hermes/logs/bootstrap-installer.log"
+bootstrap_error() {
+  [ -f "$BOOTSTRAP_LOG" ] || return 0
+  # Match REAL failure shapes only: the structured stage log's state=Failed,
+  # or the error screen's own message. Healthy INFO lines carry the literal
+  # field error=None, so a bare error/failed substring match false-positives
+  # on every stage transition.
+  tail -5 "$BOOTSTRAP_LOG" 2>/dev/null \
+    | grep -E 'state=Failed|install script failed|didn.t finish|ERROR ' | tail -1 || true
+}
+RETRIES=0
+MAX_RETRIES=3
+LAST_ERR=""
+PENDING_ERR_COUNT=0
 DEADLINE=$((SECONDS + INSTALL_TIMEOUT_SECS))
 FIRST_SHOT=0
 CLICKS=0
@@ -118,6 +146,28 @@ while :; do
     shot "ERROR-setup-exited"
     log "Hermes-Setup exited (pid $SETUP_PID) before the install landed"
     exit 1
+  fi
+  err="$(bootstrap_error)"
+  if [ -n "$err" ]; then
+    PENDING_ERR_COUNT=$((PENDING_ERR_COUNT + 1))
+  else
+    PENDING_ERR_COUNT=0
+  fi
+  # Two consecutive error probes before switching click targets: a single
+  # log-parse glitch must never redirect the clicker.
+  if [ "$PENDING_ERR_COUNT" -ge 2 ] && [ "$err" != "$LAST_ERR" ]; then
+    LAST_ERR="$err"
+    RETRIES=$((RETRIES + 1))
+    log "bootstrap error (retry $RETRIES/$MAX_RETRIES): $err"
+    shot "ERROR-bootstrap-attempt-$RETRIES"
+    if [ "$RETRIES" -gt "$MAX_RETRIES" ]; then
+      log "bootstrap failing persistently; giving up"
+      exit 1
+    fi
+  fi
+  if [ -z "$err" ] && [ -n "$LAST_ERR" ]; then
+    log "bootstrap error cleared; resuming install-button targeting"
+    LAST_ERR=""
   fi
   if [ "$FIRST_SHOT" -eq 0 ] && [ "$SECONDS" -gt 10 ]; then
     shot "00-setup-window"
