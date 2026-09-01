@@ -18,14 +18,14 @@ as a no-op compatibility alias for existing installation commands.
 > longer activate exporters. Without the new variable, Hermes does not run
 > Relay plugin discovery, configuration layering, middleware, or exporters.
 
-Hermes requires NeMo Relay 0.8.1 or later within the 0.8 release line. That
+Hermes requires NeMo Relay 0.8.2 or later within the 0.8 release line. That
 line provides the provider-codec and canonical tool-result contracts Hermes
 uses for managed provider and tool calls.
 
 ## Runtime Dependency and Data Boundary
 
 Hermes installs the platform-specific `nemo-relay` native wheel from the
-bounded `>=0.8.1,<0.9` dependency range. The published package is built from
+bounded `>=0.8.2,<0.9` dependency range. The published package is built from
 the [NVIDIA NeMo Relay repository](https://github.com/NVIDIA/NeMo-Relay).
 Unsupported platforms use the explicit no-op runtime described above rather
 than downloading a different implementation.
