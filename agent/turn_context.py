@@ -1,9 +1,10 @@
 """Per-turn setup for ``run_conversation`` (the turn prologue).
 
 ``build_turn_context`` runs the once-per-turn setup (stdio guard, sanitization, prompt
-restore-or-build, session row, preflight compression, pre_llm_call hook, prefetch,
-persistence) mutating ``agent`` exactly as the inline code did, and returns a
-``TurnContext`` carrying only the locals the loop reads back."""
+restore-or-build, session row, idle/preflight compaction — see
+``turn_context_compaction`` — pre_llm_call hook, prefetch, persistence), mutating
+``agent`` as the loop expects, and returns a ``TurnContext`` carrying only the locals
+the loop reads back. ``build_api_messages`` builds the wire copy for one API call."""
 
 from __future__ import annotations
 
@@ -64,17 +65,11 @@ def _preflight_request_tokens(
             "using generic transcript estimate",
             exc_info=True,
         )
-    if _agent_stale_thinking_on_wire(agent):
-        return estimate_request_tokens_rough(
-            messages,
-            system_prompt=system_prompt or "",
-            tools=tools,
-        )
     return estimate_request_tokens_rough(
         messages,
         system_prompt=system_prompt or "",
         tools=tools,
-        charge_stale_thinking=False,
+        charge_stale_thinking=_agent_stale_thinking_on_wire(agent),
     )
 
 
@@ -148,10 +143,8 @@ def extract_api_content_sidecar(msg: Mapping[str, Any]) -> Optional[str]:
 
 
 def consume_gateway_turn_context_notes(agent: Any) -> str:
-    """Pop the gateway's per-turn must-deliver notes off the agent (one-shot).
-
-    Staged on ``agent._gateway_turn_context_notes``; consuming them keeps the system
-    prompt byte-stable and prevents a cached agent replaying a stale note."""
+    """Pop the gateway's per-turn must-deliver notes off the agent (one-shot, so the
+    system prompt stays byte-stable and a cached agent never replays a stale note)."""
     notes = getattr(agent, "_gateway_turn_context_notes", "") or ""
     if hasattr(agent, "_gateway_turn_context_notes"):
         try:
@@ -1066,8 +1059,6 @@ def build_api_messages(
     from agent.agent_runtime_helpers import fill_empty_non_final_wire_payload
     from agent.conversation_loop import _clone_message_for_send
 
-    _ext_prefetch_cache = ext_prefetch_cache
-    _plugin_user_context = plugin_user_context
     api_messages = []
     for idx, msg in enumerate(messages):
 
@@ -1098,9 +1089,7 @@ def build_api_messages(
             else:
                 # Callers that bypass the prologue stamping: compose live.
                 _composed = compose_user_api_content(
-                    api_msg.get("content", ""),
-                    _ext_prefetch_cache,
-                    _plugin_user_context,
+                    api_msg.get("content", ""), ext_prefetch_cache, plugin_user_context
                 )
                 if _composed is not None:
                     api_msg["content"] = _composed
@@ -1118,13 +1107,10 @@ def build_api_messages(
         # This ensures multi-turn reasoning context is preserved
         agent._copy_reasoning_content_for_api(msg, api_msg)
 
-        # Remove 'reasoning' field - it's for trajectory storage only
-        # We've copied it to 'reasoning_content' for the API above
-        if "reasoning" in api_msg:
-            api_msg.pop("reasoning")
-        # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
-        if "finish_reason" in api_msg:
-            api_msg.pop("finish_reason")
+        # 'reasoning' is trajectory-only (copied to 'reasoning_content' above);
+        # finish_reason is rejected by strict APIs (e.g. Mistral).
+        api_msg.pop("reasoning", None)
+        api_msg.pop("finish_reason", None)
         # Fill empty non-final user/assistant wire copies so the pre-call sanitizer
         # stops re-healing and flooding errors.log; durable history is untouched.
         # After the reasoning copy so thinking-only turns keep payload (#96870).
