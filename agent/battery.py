@@ -1,13 +1,9 @@
 """System-battery read-out for the CLI/TUI status bar.
 
-Reads the host battery through ``psutil`` (already a Hermes dependency) and
-exposes a compact, colour-coded label.  Everything degrades to "unavailable"
-when there is no battery (desktops, servers, VMs) or when the read fails, so
-callers can render the result unconditionally and simply show nothing.
-
-The status bar repaints often (every keystroke and on a ~1s idle refresh), so
-:func:`read_battery` memoises the last reading for a few seconds instead of
-hitting ``psutil`` on every frame.
+Reads the host battery through ``psutil`` and exposes a compact, colour-coded
+label. Everything degrades to "unavailable" (no battery / read failure) so
+callers can render unconditionally. The status bar repaints on every keystroke,
+so :func:`read_battery` memoises the reading for a few seconds.
 """
 
 from __future__ import annotations
@@ -19,12 +15,8 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class BatteryStatus:
-    """A single battery reading.
-
-    ``available`` is False on machines without a battery (or when the read
-    failed).  ``percent`` is clamped to 0-100.  ``plugged`` is True when on AC
-    power, False on battery, and None when the platform can't tell.
-    """
+    """One reading: ``percent`` clamped 0-100; ``plugged`` None when the
+    platform can't tell."""
 
     available: bool
     percent: Optional[int] = None
@@ -45,6 +37,9 @@ CATEGORY_BAD = "bad"
 CATEGORY_CRITICAL = "critical"
 CATEGORY_DIM = "dim"
 
+# (upper bound inclusive, category) for a discharging battery; first match wins.
+_LEVEL_CATEGORIES = ((10, CATEGORY_CRITICAL), (20, CATEGORY_BAD), (50, CATEGORY_WARN))
+
 _CACHE_TTL_SECONDS = 8.0
 _cache: Optional[tuple[float, BatteryStatus]] = None
 
@@ -52,19 +47,11 @@ _cache: Optional[tuple[float, BatteryStatus]] = None
 def _read_battery_uncached() -> BatteryStatus:
     try:
         import psutil
+
+        # ``sensors_battery`` is missing on some platforms/builds of psutil.
+        batt = getattr(psutil, "sensors_battery")()
     except Exception:
         return UNAVAILABLE
-
-    # ``sensors_battery`` is missing on some platforms/builds of psutil.
-    reader = getattr(psutil, "sensors_battery", None)
-    if reader is None:
-        return UNAVAILABLE
-
-    try:
-        batt = reader()
-    except Exception:
-        return UNAVAILABLE
-
     if batt is None:
         return UNAVAILABLE
 
@@ -75,12 +62,8 @@ def _read_battery_uncached() -> BatteryStatus:
             percent = max(0, min(100, int(round(float(raw_percent)))))
         except (TypeError, ValueError):
             percent = None
-
     plugged = getattr(batt, "power_plugged", None)
-    if plugged is not None:
-        plugged = bool(plugged)
-
-    return BatteryStatus(available=True, percent=percent, plugged=plugged)
+    return BatteryStatus(available=True, percent=percent, plugged=None if plugged is None else bool(plugged))
 
 
 def read_battery(use_cache: bool = True) -> BatteryStatus:
@@ -109,13 +92,9 @@ def battery_category(status: BatteryStatus) -> str:
     # On AC power the level isn't a concern — always read as healthy.
     if status.charging:
         return CATEGORY_GOOD
-    pct = status.percent
-    if pct <= 10:
-        return CATEGORY_CRITICAL
-    if pct <= 20:
-        return CATEGORY_BAD
-    if pct <= 50:
-        return CATEGORY_WARN
+    for bound, category in _LEVEL_CATEGORIES:
+        if status.percent <= bound:
+            return category
     return CATEGORY_GOOD
 
 

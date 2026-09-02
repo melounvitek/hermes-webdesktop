@@ -25,7 +25,7 @@ from agent import estop
 def hermes_home(tmp_path, monkeypatch):
     """Point HERMES_HOME at a temp dir and reset estop module log state."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    estop._reset_log_state_for_tests()
+    estop._logged_components.clear()
     return tmp_path
 
 
@@ -389,7 +389,7 @@ def test_profile_gateway_honors_canonical_root_estop(tmp_path, monkeypatch):
     profile = root / "profiles" / "fleet-analyst"
     profile.mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(profile))
-    estop._reset_log_state_for_tests()
+    estop._logged_components.clear()
 
     assert estop.is_engaged() is False
     (root / "ESTOP").write_text("{\"reason\": \"thundering herd\"}\n", encoding="utf-8")

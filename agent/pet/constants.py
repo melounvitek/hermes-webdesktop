@@ -140,8 +140,7 @@ STATE_ALIASES: dict[str, tuple[str, ...]] = {
 def state_aliases_for(state: "PetState | str") -> tuple[str, ...]:
     """Return accepted row-name aliases for *state* (always non-empty)."""
     value = state.value if isinstance(state, PetState) else str(state)
-    aliases = STATE_ALIASES.get(value)
-    return aliases if aliases else (value,)
+    return STATE_ALIASES.get(value) or (value,)
 
 
 def state_rows_for_grid(row_count: int | None) -> list[str]:
@@ -150,10 +149,7 @@ def state_rows_for_grid(row_count: int | None) -> list[str]:
         rows = int(row_count or 0)
     except (TypeError, ValueError):
         rows = 0
-
-    if rows >= len(CODEX_STATE_ROWS):
-        return CODEX_STATE_ROWS
-    return LEGACY_STATE_ROWS
+    return CODEX_STATE_ROWS if rows >= len(CODEX_STATE_ROWS) else LEGACY_STATE_ROWS
 
 
 def state_row_index(state: "PetState | str", row_count: int | None = None) -> int:

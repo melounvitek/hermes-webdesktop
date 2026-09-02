@@ -37,17 +37,6 @@ _PROVIDER_LABELS: dict[str, str] = {
 }
 
 
-def _forced_provider_from_env() -> str | None:
-    """Optional QA override to force a pet-gen backend.
-
-    `HERMES_PET_IMAGE_PROVIDER=<name>` (e.g. `openrouter`) bypasses the normal
-    active/default provider resolution for pet generation only. Unknown values are
-    ignored so existing users are unaffected.
-    """
-    forced = os.environ.get("HERMES_PET_IMAGE_PROVIDER", "").strip().lower()
-    return forced if forced in _REF_CAPABLE else None
-
-
 class GenerationError(RuntimeError):
     """Raised on any image-generation failure (no provider, API error, IO)."""
 
@@ -70,6 +59,14 @@ def _discover() -> None:
         logger.debug("image-gen plugin discovery failed: %s", exc)
 
 
+def _available(name: str):
+    """The registered provider *name* if it exists and has credentials, else ``None``."""
+    from agent.image_gen_registry import get_provider
+
+    provider = get_provider(name)
+    return provider if provider is not None and provider.is_available() else None
+
+
 def resolve_provider(*, require_references: bool = True, prefer: str | None = None) -> SpriteProvider:
     """Pick the image provider to use for sprite work.
 
@@ -80,25 +77,17 @@ def resolve_provider(*, require_references: bool = True, prefer: str | None = No
     prompt-only base drafts).
     """
     _discover()
-    from agent.image_gen_registry import get_active_provider, get_provider
+    from agent.image_gen_registry import get_active_provider
 
-    # QA override: force one provider for pet-gen iteration regardless of the
-    # globally active image_gen backend.
-    forced = _forced_provider_from_env()
-    if forced:
-        chosen = get_provider(forced)
-        if chosen is not None and chosen.is_available():
-            return SpriteProvider(name=forced, provider=chosen, supports_references=True)
-
-    # An explicit user pick wins when it's reference-capable and has credentials;
-    # otherwise we ignore it and fall through to the normal resolution.
-    if prefer:
-        chosen = get_provider(prefer)
-        if prefer in _REF_CAPABLE and chosen is not None and chosen.is_available():
-            return SpriteProvider(name=prefer, provider=chosen, supports_references=True)
+    # QA override: ``HERMES_PET_IMAGE_PROVIDER=<name>`` forces one ref-capable backend
+    # for pet-gen only (unknown values ignored). Then an explicit user pick (desktop
+    # picker) wins when ref-capable and configured; otherwise fall through.
+    forced = os.environ.get("HERMES_PET_IMAGE_PROVIDER", "").strip().lower()
+    for name in (forced, prefer):
+        if name in _REF_CAPABLE and (chosen := _available(name)) is not None:
+            return SpriteProvider(name=name, provider=chosen, supports_references=True)
 
     # Configured / active provider first.
-    active = None
     try:
         active = get_active_provider()
     except Exception:  # noqa: BLE001
@@ -110,8 +99,8 @@ def resolve_provider(*, require_references: bool = True, prefer: str | None = No
 
     # Any available reference-capable provider.
     for name in _REF_CAPABLE:
-        provider = get_provider(name)
-        if provider is not None and provider.is_available():
+        provider = _available(name)
+        if provider is not None:
             return SpriteProvider(name=name, provider=provider, supports_references=True)
 
     if not require_references and active is not None and active.is_available():
@@ -136,26 +125,15 @@ def list_sprite_providers() -> list[dict]:
     yield an empty list.
     """
     _discover()
-    from agent.image_gen_registry import get_provider
-
     try:
         default_name = resolve_provider(require_references=True).name
     except GenerationError:
         default_name = ""
-
-    out: list[dict] = []
-    for name in _REF_CAPABLE:
-        provider = get_provider(name)
-        if provider is None or not provider.is_available():
-            continue
-        out.append(
-            {
-                "name": name,
-                "label": _PROVIDER_LABELS.get(name, name),
-                "default": name == default_name,
-            }
-        )
-    return out
+    return [
+        {"name": name, "label": _PROVIDER_LABELS.get(name, name), "default": name == default_name}
+        for name in _REF_CAPABLE
+        if _available(name) is not None
+    ]
 
 
 def _save_local(image_ref: str, *, prefix: str) -> Path:
