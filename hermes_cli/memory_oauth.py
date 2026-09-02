@@ -1,11 +1,4 @@
-"""HTTP routes for memory-provider OAuth connect, mounted by ``web_server``.
-
-Kept out of ``web_server.py`` so the memory feature's surface stays in the
-memory layer. Dispatch is by convention: a provider's flow lives at
-``plugins.memory.<provider>.oauth_flow`` exposing ``start_loopback_flow_background``
-and ``get_flow_status``; a provider without that module simply 404s. No provider
-is named here.
-"""
+"""HTTP routes for memory-provider OAuth connect, mounted by ``web_server``."""
 
 from __future__ import annotations
 

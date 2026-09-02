@@ -56,8 +56,8 @@ def _collect_masked_input(
 def masked_secret_prompt(prompt: str, *, mask: str = "*") -> str:
     """Prompt for a secret while showing masked typing feedback.
 
-    Falls back to ``getpass.getpass`` when stdin/stdout are not interactive or
-    when raw terminal handling is unavailable.
+    Falls back to ``getpass.getpass`` when stdin/stdout are not interactive or when raw terminal
+    handling is unavailable.
     """
     stdin = sys.stdin
     stdout = sys.stdout
