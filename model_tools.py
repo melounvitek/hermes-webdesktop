@@ -558,6 +558,18 @@ def _compute_tool_definitions(
     return filtered_tools
 
 
+def _active_model_config() -> Tuple[str, Dict[str, Any]]:
+    """(model_id, model section) from config.yaml; model_id is "" when unset."""
+    from hermes_cli.config import load_config
+    cfg = load_config() or {}
+    model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+    raw_model_id = model_cfg.get("model") or model_cfg.get("default") or ""
+    if isinstance(raw_model_id, dict):
+        from hermes_cli.config import split_model_config_default
+        raw_model_id, _ = split_model_config_default(raw_model_id)
+    return str(raw_model_id).strip(), model_cfg
+
+
 def _resolve_active_context_length() -> int:
     """Active model's context length for the tool-search gate (0 if unresolvable).
 
@@ -568,17 +580,10 @@ def _resolve_active_context_length() -> int:
     startup); then the full live resolver.
     """
     try:
-        from hermes_cli.config import load_config as _load
-        cfg = _load() or {}
-        model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
-        _raw_model_id = model_cfg.get("model") or model_cfg.get("default") or ""
-        if isinstance(_raw_model_id, dict):
-            from hermes_cli.config import split_model_config_default
-            _raw_model_id, _ = split_model_config_default(_raw_model_id)
-        model_id = str(_raw_model_id).strip()
+        model_id, model_cfg = _active_model_config()
         if not model_id:
             return 0
-        from agent.model_metadata import get_model_context_length
+        from agent.model_metadata import get_cached_context_length, get_model_context_length
         raw_ctx = model_cfg.get("context_length")
         config_ctx = raw_ctx if isinstance(raw_ctx, int) and raw_ctx > 0 else None
         provider = str(model_cfg.get("provider") or "").strip()
@@ -589,9 +594,7 @@ def _resolve_active_context_length() -> int:
             # provider+base_url-only lookup so static fallbacks still apply.
             try:
                 from hermes_cli.runtime_provider import resolve_runtime_provider
-                rt = resolve_runtime_provider(
-                    requested=provider, target_model=model_id
-                ) or {}
+                rt = resolve_runtime_provider(requested=provider, target_model=model_id) or {}
                 base_url = str(rt.get("base_url") or base_url or "").strip()
                 api_key = str(rt.get("api_key") or "").strip()
             except Exception as rt_exc:
@@ -602,7 +605,6 @@ def _resolve_active_context_length() -> int:
                 )
         if config_ctx is None and base_url:
             try:
-                from agent.model_metadata import get_cached_context_length
                 cached_ctx = get_cached_context_length(model_id, base_url)
                 if isinstance(cached_ctx, int) and cached_ctx > 0:
                     return cached_ctx
