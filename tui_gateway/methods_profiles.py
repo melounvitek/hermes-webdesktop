@@ -106,6 +106,7 @@ def _latest_message_preview(db, session_id):
 
     Messaging-app semantics for rosters (latest exchange), unlike the first-message
     preview session lists use for recognition.  Agent-delivery prefixes are kept.
+    Same query shape as ``SessionDB.latest_message_row_id`` — keep them in step.
     """
     try:
         with db._lock:
@@ -127,8 +128,9 @@ def _latest_message_preview(db, session_id):
 def _open_profile_session_db_readonly(profile_path):
     """Read-only attach for roster previews, or None.
 
-    A writable ``SessionDB()`` waits up to 20s for the write lock; the roster polls
-    every 5s while the live backend holds it, which stalled the RPC past the desktop timeout.
+    A writable ``SessionDB()`` waits up to 20s for the write lock and runs schema init;
+    the roster polls every 5s while the live backend holds the writer, which stalled the
+    RPC past the desktop timeout.  ``read_only=True`` takes neither the lock nor the DDL.
     """
     db_path = Path(profile_path) / "state.db"
     if not _try(db_path.exists, False):

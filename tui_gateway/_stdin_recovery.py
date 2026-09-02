@@ -103,6 +103,7 @@ def handle_spurious_eof(recovery_times: list[float], log_fn: object) -> bool:
     # a non-zero timeout would make the next readline() return '' again, looping
     # until the rate limiter fires.
     os.set_blocking(0, True)
+    # "ll" = struct timeval {tv_sec, tv_usec}; zero timeval disables the timeout.
     _stdin_sockopt(lambda s: s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, struct.pack("ll", 0, 0)))
 
     # TextIOWrapper.readline returns '' on EAGAIN but does NOT stick EOF; the

@@ -151,6 +151,8 @@ def _install_signal(signame, handler):
     try:
         signal.signal(sig, handler)
     except (ValueError, OSError, RuntimeError):
+        # Off the main thread despite the check, or handler rejected by the
+        # platform — skip rather than crash the import.
         pass
 
 

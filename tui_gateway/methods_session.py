@@ -414,6 +414,8 @@ def _(rid, params: dict) -> dict:
 def _session_list_by_title(rid, db, title_lookup: str) -> dict:
     """EXACT-title registry lookup (not a listing) for callers that treat a title as identity.
 
+    Window-free on purpose: a busy profile's recency-windowed listing can push the
+    row out, so scanning ``session.list`` output is not a reliable identity lookup.
     Hidden rows resolve (canonical chats are born hidden); archived rows and
     deny-listed sources do not; compression lineages resolve to the live tip
     (``resolved_id``), mirroring profiles.list's canonical_session resolver.
@@ -858,7 +860,9 @@ def _resume_response(
 
 def _resume_read_history(ctx: _Resume):
     """One lineage SELECT feeds both projections: model-fed copy alternation-repaired
-    for live replay, display copy verbatim (inspection/export shows what is stored)."""
+    for live replay, display copy verbatim (inspection/export shows what is stored).
+    The repaired copy becomes the resumed session's working conversation, so healing
+    a durable violation once here avoids re-firing the pre-request repair every turn."""
     ctx.db.reopen_session(ctx.target)
     if ctx.omit_messages:
         raw = ctx.db.get_messages_as_conversation(ctx.target, repair_alternation=True, include_row_ids=True)

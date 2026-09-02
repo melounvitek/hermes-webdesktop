@@ -479,7 +479,11 @@ class HostedRoomRuntime:
     def _resume_exact(
         self, transport: InternalSessionRPC, room_id: str, profile: str
     ) -> str | None:
-        """Resolve the canonical room session and return its resumed runtime id."""
+        """Resolve the canonical room session and return its resumed runtime id.
+
+        Callers must use the returned id (not the stored one) for every
+        subsequent history/info probe; resume may hand back a different id.
+        """
         session = transport.resolve_exact(
             profile=profile,
             title=room_session_title(room_id),
