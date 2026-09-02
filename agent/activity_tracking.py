@@ -40,12 +40,10 @@ class ActivityTrackingMixin:
         """Update the last-activity timestamp and description (thread-safe).
 
         Bumps a monotonic generation under ``_liveness_activity_lock`` so the watchdog can bind a stall
-        observation
-        to the exact ``(generation, timestamp)`` it sampled. Also bridges (rate-limited, best-effort) to the
-        kanban
-        heartbeat when this is a dispatcher-spawned worker, and to the durable SessionDB activity projection.
-        ``provenance`` names special writers (compression); ``force_persist`` bypasses the SessionDB rate
-        limit.
+        observation to the exact ``(generation, timestamp)`` it sampled. Also bridges (rate-limited,
+        best-effort) to the kanban heartbeat when this is a dispatcher-spawned worker, and to the durable
+        SessionDB activity projection. ``provenance`` names special writers (compression); ``force_persist``
+        bypasses the SessionDB rate limit.
         """
         from agent.session_activity import (
             bound_activity_description,

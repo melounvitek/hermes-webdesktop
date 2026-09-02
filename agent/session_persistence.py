@@ -85,8 +85,7 @@ class SessionPersistenceMixin:
         """Rewrite the current-turn user message before persistence/return.
 
         Some paths use an API-only user-message variant that must not leak into transcripts or resumed
-        history;
-        mutate the in-memory list in place so both persistence and returned history stay clean.
+        history; mutate the in-memory list in place so both persistence and returned history stay clean.
         """
         idx = getattr(self, "_persist_user_message_idx", None)
         override = getattr(self, "_persist_user_message_override", None)
@@ -214,9 +213,8 @@ class SessionPersistenceMixin:
         """Persist any un-flushed messages to the SQLite session store.
 
         Dedup is an intrinsic ``_DB_PERSISTED_MARKER`` on each written dict — not positional slices (drift
-        after
-        sequence repair) nor a retained ``id(msg)`` set (address reuse). ``_flushed_db_message_ids`` is only a
-        one-shot seed translated to markers and cleared each flush.
+        after sequence repair) nor a retained ``id(msg)`` set (address reuse). ``_flushed_db_message_ids`` is
+        only a one-shot seed translated to markers and cleared each flush.
         """
         # Persistence-isolated agents (background review fork) share the parent's session_id for cache
         # warmth; a write here would land the curator's harness turn in the user's real history. Hard-stop.
@@ -583,8 +581,7 @@ class SessionPersistenceMixin:
         """Optional per-session JSON snapshot writer (``sessions.write_json_snapshots``, default False).
 
         state.db is canonical; this exists for external tooling reading ``session_{sid}.json``. Rewrites the
-        full
-        list after every persistence point, never overwriting a larger log with fewer messages.
+        full list after every persistence point, never overwriting a larger log with fewer messages.
         """
         if not getattr(self, "_session_json_enabled", False):
             return

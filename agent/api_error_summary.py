@@ -22,10 +22,9 @@ class ApiErrorSummaryMixin:
         """Detect subscription/entitlement 401/403s that masquerade as auth failures.
 
         Refreshing a token cannot fix an unsubscribed account, so callers surface the error instead of looping
-        the
-        pool. xAI returns the same permission-denied text for BOTH cases; a ``[WKE=unauthenticated:...]``
-        suffix (or
-        "access token could not be validated") means stale token → return False so the refresh path runs.
+        the pool. xAI returns the same permission-denied text for BOTH cases; a ``[WKE=unauthenticated:...]``
+        suffix (or "access token could not be validated") means stale token → return False so the refresh path
+        runs.
         """
         if status_code not in {401, 403, None}:
             return False

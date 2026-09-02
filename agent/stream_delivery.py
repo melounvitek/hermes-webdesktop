@@ -263,10 +263,8 @@ class StreamDeliveryMixin:
         token.
 
         Every attempt (each provider path, each retry) claims right before consuming. Claiming bumps the
-        shared
-        token, so an earlier attempt still alive on another thread is superseded and its late chunks fenced
-        out.
-        Stored per-thread: a thread that never claimed is never a writer and can never be fenced.
+        shared token, so an earlier attempt still alive on another thread is superseded and its late chunks
+        fenced out. Stored per-thread: a thread that never claimed is never a writer and can never be fenced.
         """
         self._ensure_stream_writer_state()
         with self._stream_writer_lock:

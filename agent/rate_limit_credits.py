@@ -51,8 +51,7 @@ class RateLimitCreditsMixin:
         """Parse x-nous-credits-* headers, cache CreditsState, fire threshold notices.
 
         The PARSE is swallowed (miss → keep last-known); the notice EVALUATION is a separate block that WARNS
-        on
-        failure so a depletion-notice bug cannot vanish silently.
+        on failure so a depletion-notice bug cannot vanish silently.
         """
         # Dev test fixture (HERMES_DEV_CREDITS_FIXTURE): inject a chosen notice state
         # each turn for repeatable testing, bypassing real headers. Throwaway scaffolding.
@@ -132,9 +131,8 @@ class RateLimitCreditsMixin:
         """Run the threshold policy on the current credits state and emit notices.
 
         Shared by the warm path and the cold-start seed so an already-depleted session warns immediately. Runs
-        only
-        when a notice consumer is bound. WARNS on failure. Emits clears FIRST so depleted lands last (latest-
-        wins slot).
+        only when a notice consumer is bound. WARNS on failure. Emits clears FIRST so depleted lands last
+        (latest- wins slot).
         """
         if getattr(self, "notice_callback", None) is None and getattr(self, "notice_clear_callback", None) is None:
             return

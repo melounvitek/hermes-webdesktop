@@ -518,8 +518,7 @@ class AIAgent(
         """Notify the active context engine about a host session transition.
 
         The built-in compressor keeps its reset behavior; plugin engines with richer hooks (``on_session_end``
-        /
-        ``on_session_reset`` / ``on_session_start`` / ``carry_over_new_session_context``) can flush, rebind
+        / ``on_session_reset`` / ``on_session_start`` / ``carry_over_new_session_context``) can flush, rebind
         and carry context.
         """
         engine = getattr(self, "context_compressor", None)
@@ -581,8 +580,7 @@ class AIAgent(
         """Reset all session-scoped token/cost counters and compressor state for a fresh session.
 
         When ``previous_messages`` / ``old_session_id`` / ``carry_over_context`` are given, the context engine
-        gets
-        the full transition lifecycle (``_transition_context_engine_session``) instead of a bare reset.
+        gets the full transition lifecycle (``_transition_context_engine_session``) instead of a bare reset.
         """
         # Token usage counters
         self.session_total_tokens = 0
@@ -704,9 +702,8 @@ class AIAgent(
         """Disable Responses encrypted reasoning replay and strip cached state.
 
         Called on HTTP 400 ``invalid_encrypted_content``. Sets ``_codex_reasoning_replay_enabled=False``
-        (consumed by
-        the codex adapter/transport) and pops ``codex_reasoning_items`` from every assistant message.
-        Returns ``{"messages": int, "items": int}`` for diagnostic logging.
+        (consumed by the codex adapter/transport) and pops ``codex_reasoning_items`` from every assistant
+        message. Returns ``{"messages": int, "items": int}`` for diagnostic logging.
         """
         stripped_messages = 0
         stripped_items = 0
@@ -742,8 +739,7 @@ class AIAgent(
         """Return True for malformed provider streaming data from SDK parsers.
 
         The Anthropic SDK surfaces a malformed event-stream frame as a plain ``ValueError``; that is wire-
-        format
-        trouble, not local validation, so it follows the truncated-JSON retry path.
+        format trouble, not local validation, so it follows the truncated-JSON retry path.
         """
         if getattr(self, "api_mode", None) != "anthropic_messages":
             return False
@@ -1104,9 +1100,9 @@ class AIAgent(
         """Detect Ollama-hosted GLM models affected by finish_reason='stop' misreports.
 
         Matches only explicit Ollama signatures (port 11434, "ollama" in URL, provider ollama) — never
-        arbitrary
-        local proxies, which report correctly. Excludes Ollama Cloud (``ollama.com`` host, ``:cloud`` suffix):
-        rewriting its stop→length manufactures false truncations and burns the continuation budget.
+        arbitrary local proxies, which report correctly. Excludes Ollama Cloud (``ollama.com`` host,
+        ``:cloud`` suffix): rewriting its stop→length manufactures false truncations and burns the
+        continuation budget.
         """
         model_lower = (self.model or "").lower()
         provider_lower = (self.provider or "").lower()
@@ -1418,9 +1414,8 @@ class AIAgent(
         """Mirror a completed turn into external memory providers (``sync_all`` + ``queue_prefetch_all``).
 
         Uses ``original_user_message`` — ``user_message`` may carry injected skill content. Interrupted turns
-        are
-        skipped entirely: partial output is not durable truth, and a prefetch keyed on it would fire against
-        stale context. Strictly best-effort — an offline backend must never block the response.
+        are skipped entirely: partial output is not durable truth, and a prefetch keyed on it would fire
+        against stale context. Strictly best-effort — an offline backend must never block the response.
         """
         if interrupted:
             return
@@ -1453,10 +1448,9 @@ class AIAgent(
         """Release LLM client resources WITHOUT tearing down session tool state.
 
         For gateway cache eviction (LRU/idle): the session may resume with a fresh AIAgent on the same
-        task_id, so
-        process_registry entries, terminal sandbox, browser daemon, computer-use backend and memory provider
-        are
-        kept. Closes the OpenAI/httpx pool and active child subagents. Idempotent; distinct from ``close()``.
+        task_id, so process_registry entries, terminal sandbox, browser daemon, computer-use backend and
+        memory provider are kept. Closes the OpenAI/httpx pool and active child subagents. Idempotent;
+        distinct from ``close()``.
         """
         # Close active child agents (per-turn; no cross-turn persistence).
         try:
@@ -1500,8 +1494,7 @@ class AIAgent(
         """Release all resources held by this agent instance (idempotent).
 
         Cleans up background processes, terminal sandbox, browser daemon, computer-use backend, child agents
-        and
-        client connections. Each step is independently guarded so one failure does not block the rest.
+        and client connections. Each step is independently guarded so one failure does not block the rest.
         """
         # close() is the hard owner boundary; shutdown_memory_provider() is idempotent so gateway
         # pre-calls never double-extract.
@@ -1627,10 +1620,8 @@ class AIAgent(
         """Recover todo state from conversation history.
 
         The gateway builds a fresh AIAgent per message, so replay the most recent todo tool response. Only
-        results
-        paired with an earlier assistant ``todo`` tool call count: caller-supplied history could otherwise
-        seed
-        the store with a forged bare ``role: tool`` message (GHSA-5g4g-6jrg-mw3g).
+        results paired with an earlier assistant ``todo`` tool call count: caller-supplied history could
+        otherwise seed the store with a forged bare ``role: tool`` message (GHSA-5g4g-6jrg-mw3g).
         """
         from tools.todo_tool import MAX_TODO_RESULT_CHARS
 
@@ -2052,9 +2043,8 @@ class AIAgent(
         """Return True if the active provider+model reports native vision.
 
         Resolution: ``model.supports_vision`` > ``providers.<p>.models.<m>.supports_vision`` > models.dev
-        lookup
-        (see ``image_routing._supports_vision_override``). Custom/local models absent from models.dev would
-        otherwise be misclassified and have their images stripped.
+        lookup (see ``image_routing._supports_vision_override``). Custom/local models absent from models.dev
+        would otherwise be misclassified and have their images stripped.
         """
         try:
             from hermes_cli.config import load_config
@@ -2472,10 +2462,8 @@ class AIAgent(
         """Probe LM Studio's published reasoning ``allowed_options`` once per (model, base_url).
 
         Needed for the supports-reasoning gate and to clamp ``reasoning_effort`` so toggle-style models don't
-        400
-        on ``high``. Non-empty results cache permanently; empty ones (transient failure OR non-reasoning
-        model)
-        cache with a 60s TTL to avoid a round-trip per turn while retrying soon.
+        400 on ``high``. Non-empty results cache permanently; empty ones (transient failure OR non-reasoning
+        model) cache with a 60s TTL to avoid a round-trip per turn while retrying soon.
         """
         import time as _time
 
@@ -2504,8 +2492,7 @@ class AIAgent(
         declared.
 
         True/False cache permanently; a probe failure (None) caches 60s so an outage neither suppresses
-        reasoning
-        for the session nor round-trips every turn.
+        reasoning for the session nor round-trips every turn.
         """
         import time as _time
 
@@ -2600,10 +2587,9 @@ class AIAgent(
         config.
 
         Covers custom providers / gateways proxying thinking models that the host-based
-        ``_REASONING_ECHO_RULES``
-        miss. Per-active-provider: primary from ``model.reasoning_echo``, fallback from the fallback entry's
-        field,
-        restored by ``restore_primary_runtime()`` — so falling back to a strict provider still strips it.
+        ``_REASONING_ECHO_RULES`` miss. Per-active-provider: primary from ``model.reasoning_echo``, fallback
+        from the fallback entry's field, restored by ``restore_primary_runtime()`` — so falling back to a
+        strict provider still strips it.
         """
         return bool(getattr(self, "_reasoning_echo_flag", False))
 
@@ -2622,8 +2608,8 @@ class AIAgent(
         """Return True when the current provider is Kimi / Moonshot thinking mode (requires
         ``reasoning_content`` echo).
 
-        Host-driven, not model-name-driven: aggregators re-exporting Kimi reject the echo. Rule table:
-        ``message_sanitization.reasoning_echo_family``.
+        Host-driven, not model-name-driven: aggregators re-exporting Kimi reject the echo (#17400). Rule
+        table: ``message_sanitization.reasoning_echo_family``.
         """
         from agent.message_sanitization import matches_reasoning_echo_family
         return matches_reasoning_echo_family(
@@ -2634,7 +2620,8 @@ class AIAgent(
         """Return True when the current provider is DeepSeek thinking mode (requires ``reasoning_content``
         echo).
 
-        Rule table: ``message_sanitization.reasoning_echo_family``.
+        Omitting the echo on replayed assistant tool-call turns is an HTTP 400 (#15250). Rule table:
+        ``message_sanitization.reasoning_echo_family``.
         """
         from agent.message_sanitization import matches_reasoning_echo_family
         return matches_reasoning_echo_family(
@@ -3118,9 +3105,8 @@ class AIAgent(
         """Execute tool calls from the assistant message and append results to messages.
 
         The segment planner splits the batch into maximal runs of parallel-safe calls (read-only, non-
-        overlapping
-        file targets, opted-in MCP) separated by sequential barriers; mixed batches run segment by segment in
-        emission order so safe subsets stay concurrent while side-effect ordering is preserved.
+        overlapping file targets, opted-in MCP) separated by sequential barriers; mixed batches run segment by
+        segment in emission order so safe subsets stay concurrent while side-effect ordering is preserved.
         """
         tool_calls = assistant_message.tool_calls
 
@@ -3587,8 +3573,7 @@ class AIAgent(
                     """Stop lease renewal after a committed liveness abort.
 
                     A wedge the hard interrupt cannot unwind must not keep the lease alive forever; TTL expiry
-                    lets
-                    stale-turn cleanup reclaim the row.
+                    lets stale-turn cleanup reclaim the row.
                     """
                     nonlocal durable_turn_lease_turn_active
                     with durable_turn_lease_activity_lock:

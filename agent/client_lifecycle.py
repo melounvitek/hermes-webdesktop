@@ -89,8 +89,7 @@ class ClientLifecycleMixin:
         """Check if an OpenAI client is closed.
 
         ``is_closed`` is a bool property on httpx.Client but a method on openai.OpenAI; a bare getattr
-        returned
-        the always-truthy bound method and recreated the client on every call.
+        returned the always-truthy bound method and recreated the client on every call.
         """
         from unittest.mock import Mock
 
@@ -151,10 +150,8 @@ class ClientLifecycleMixin:
 
         ``close()`` releases raw FDs from the calling thread; the shared client has no owning thread and other
         threads may still hold its fd in an SSL BIO. A recycled fd then gets a TLS record written into an
-        unrelated
-        file (the SQLite-header corruption family). So: ``shutdown()`` the sockets (FD-safe from any thread)
-        and
-        let GC release the FDs once every borrower has unwound.
+        unrelated file (the SQLite-header corruption family: #29507 / #67142 / #70773). So: ``shutdown()``
+        the sockets (FD-safe from any thread) and let GC release the FDs once every borrower has unwound.
         """
         if client is None:
             return
@@ -179,9 +176,8 @@ class ClientLifecycleMixin:
         """FD-safe transport drain for an abandoned (timed-out) worker; returns sockets shut down.
 
         The worker may be blocked in an OpenSSL read; hard-closing from the timeout thread releases FDs under
-        a live
-        BIO (native corruption / SIGSEGV). Only ``shutdown()`` so the read settles with EOF and the worker
-        closes itself.
+        a live BIO (native corruption / SIGSEGV, #94248). Only ``shutdown()`` so the read settles with EOF and
+        the worker closes itself.
         """
         drained = 0
         # Shared primary client (codex-direct / MoA stream on it directly).
@@ -449,9 +445,8 @@ class ClientLifecycleMixin:
         """Cross-thread abort: shut sockets down without releasing FDs.
 
         For stranger-thread callers (interrupt loop, stale detector). ``close()`` from a non-owning thread
-        raced the
-        live SSL BIO and corrupted unrelated FDs; ``shutdown(SHUT_RDWR)`` unblocks the owner's recv/send so it
-        closes from its own context.
+        raced the live SSL BIO and corrupted unrelated FDs; ``shutdown(SHUT_RDWR)`` unblocks the owner's
+        recv/send so it closes from its own context.
         """
         if client is None:
             return
@@ -513,12 +508,10 @@ class ClientLifecycleMixin:
         """Build (or reuse) a request-local Anthropic client for one in-flight call.
 
         The stale/interrupt watchdog must never ``close()`` the client a worker is still reading (fd recycled
-        under
-        a live SSL BIO → TLS record in a SQLite header). A per-request client lets the stranger ``shutdown()``
-        while
-        the owner closes. Single-slot cache keyed as ``_request_anthropic_client_key``; ``in_use`` gives a
-        second
-        concurrent call a fresh untracked client. Mirrors ``_rebuild_anthropic_client`` construction.
+        under a live SSL BIO → TLS record in a SQLite header). A per-request client lets the stranger
+        ``shutdown()`` while the owner closes. Single-slot cache keyed as ``_request_anthropic_client_key``;
+        ``in_use`` gives a second concurrent call a fresh untracked client. Mirrors
+        ``_rebuild_anthropic_client`` construction.
         """
         if self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
@@ -808,12 +801,10 @@ class ClientLifecycleMixin:
         """Adopt ~/.hermes/.env credential/base-url edits at the turn boundary.
 
         A Settings save updates ``.env`` but a live worker keeps init-time values, so an open chat kept
-        calling the
-        old endpoint. Reacts only to env *edits* (resolved value changed since last look), never to divergence
-        from
-        the agent's current values — pool rotation/failover and a config ``model.base_url`` legitimately move
-        the
-        session and must not flap. Covers registry providers and named custom providers with ``key_env``.
+        calling the old endpoint. Reacts only to env *edits* (resolved value changed since last look), never
+        to divergence from the agent's current values — pool rotation/failover and a config ``model.base_url``
+        legitimately move the session and must not flap. Covers registry providers and named custom providers
+        with ``key_env``.
         """
         if self.api_mode != "chat_completions":
             return False
@@ -995,10 +986,8 @@ class ClientLifecycleMixin:
         """Refresh Copilot credentials and rebuild the shared OpenAI client.
 
         The raw GitHub token is stable, but the short-TTL *exchanged* IDE token is what authenticates and
-        expires
-        mid-turn (``401 IDE token expired``). Re-resolving the raw token leaves the same expired JWT on the
-        wire, so
-        force a fresh exchange. Caller enforces the single-shot guard.
+        expires mid-turn (``401 IDE token expired``). Re-resolving the raw token leaves the same expired JWT
+        on the wire, so force a fresh exchange. Caller enforces the single-shot guard.
         """
         if not self._is_copilot_provider():
             return False
@@ -1199,8 +1188,7 @@ class ClientLifecycleMixin:
 
         Lets custom endpoints behind a WAF that rejects the SDK's identifying headers (``User-Agent``,
         ``X-Stainless-*``) work. Delegates to ``agent.auxiliary_client._apply_user_default_headers`` so main
-        and
-        auxiliary clients cannot drift. No-op for Anthropic/Bedrock modes.
+        and auxiliary clients cannot drift. No-op for Anthropic/Bedrock modes.
         """
         if self.api_mode in ("anthropic_messages", "bedrock_converse"):
             return

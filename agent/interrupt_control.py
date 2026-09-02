@@ -28,13 +28,11 @@ class InterruptControlMixin:
         """Request the agent to interrupt its current tool-calling loop (call from another thread).
 
         ``message``: new message to include in the response context. ``hard_cancel``: explicit stop;
-        compression
-        may honor it even while ordinary interrupts are masked. ``tool_reason``: trusted fixed category safe
-        for
-        tool output. ``require_generation``: activity-generation claim — the interrupt is published only if
-        the
-        turn's generation still matches at the final mutation edge (claim reserved under the activity lock,
-        consumed together with the first observable publication); returns False if the turn resumed meanwhile.
+        compression may honor it even while ordinary interrupts are masked. ``tool_reason``: trusted fixed
+        category safe for tool output. ``require_generation``: activity-generation claim — the interrupt is
+        published only if the turn's generation still matches at the final mutation edge (claim reserved under
+        the activity lock, consumed together with the first observable publication); returns False if the turn
+        resumed meanwhile.
         """
         if require_generation is not None:
             # RESERVE the abort's generation claim under the SAME lock `_touch_activity` stamps with. Real
@@ -320,9 +318,8 @@ class InterruptControlMixin:
 
         During a model request this cancels only that request: completed messages/tool results are kept, the
         displayed partial reasoning becomes assistant context, the correction is appended as a real user
-        message,
-        and the loop retries. During tool execution it degrades to ``steer()``; Codex app-server uses native
-        ``turn/steer``. Returns False when there is no live turn or the text is empty.
+        message, and the loop retries. During tool execution it degrades to ``steer()``; Codex app-server uses
+        native ``turn/steer``. Returns False when there is no live turn or the text is empty.
         """
         if not text or not text.strip():
             return False

@@ -48,8 +48,7 @@ class StatusOutputMixin:
         """Return True when quiet-mode spinner output has a safe sink.
 
         A raw spinner falling back to ``sys.stdout`` can corrupt protocol streams (ACP JSON-RPC); allow it
-        only
-        when output is rerouted via ``_print_fn`` or stdout is a real TTY.
+        only when output is rerouted via ``_print_fn`` or stdout is a real TTY.
         """
         if self._print_fn is not None:
             return True
