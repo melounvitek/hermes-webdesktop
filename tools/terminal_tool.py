@@ -1237,6 +1237,15 @@ def _resolve_command_cwd(
     return recorded or default_cwd
 
 
+def _error_json(error: str, *, exit_code: int = -1, status: Optional[str] = None, **extra) -> str:
+    """The terminal error envelope: ``output``/``exit_code``/``error`` (+ ``status``, extras)."""
+    body: Dict[str, Any] = {"output": "", "exit_code": exit_code, "error": error}
+    if status is not None:
+        body["status"] = status
+    body.update(extra)
+    return json.dumps(body, ensure_ascii=False)
+
+
 @dataclass
 class _ApprovalVerdict:
     """Outcome of the pre-exec guard pass.
@@ -1262,37 +1271,30 @@ def _run_approval_guards(command: str, env_type: str, config: Dict[str, Any], *,
     )
     if not approval["approved"]:
         if approval.get("status") == "pending_approval":  # gateway ask mode
-            return _ApprovalVerdict(blocked_json=json.dumps({
-                "output": "",
-                "exit_code": -1,
-                "error": "",
-                "status": "pending_approval",
-                "approval_pending": True,
-                "command": approval.get("command", command),
-                "description": approval.get("description", "command flagged"),
-                "pattern_key": approval.get("pattern_key", ""),
-                "smart_denied": approval.get("smart_denied", False),
-                "allow_permanent": approval.get("allow_permanent", True),
-            }, ensure_ascii=False))
+            return _ApprovalVerdict(blocked_json=_error_json(
+                "", status="pending_approval",
+                approval_pending=True,
+                command=approval.get("command", command),
+                description=approval.get("description", "command flagged"),
+                pattern_key=approval.get("pattern_key", ""),
+                smart_denied=approval.get("smart_denied", False),
+                allow_permanent=approval.get("allow_permanent", True),
+            ))
         desc = approval.get("description", "command flagged")
         fallback_msg = (
             f"Command denied: {desc}. "
             "Use the approval prompt to allow it, or rephrase the command."
         )
-        return _ApprovalVerdict(blocked_json=json.dumps({
-            "output": "",
-            "exit_code": -1,
-            "error": approval.get("message", fallback_msg),
-            "status": "blocked"
-        }, ensure_ascii=False))
+        return _ApprovalVerdict(blocked_json=_error_json(
+            approval.get("message", fallback_msg), status="blocked",
+        ))
+    desc = approval.get("description", "flagged as dangerous")
     if approval.get("user_approved"):
-        desc = approval.get("description", "flagged as dangerous")
         return _ApprovalVerdict(
             note=f"Command required approval ({desc}) and was approved by the user.",
             approved_run=True,
         )
     if approval.get("smart_approved"):
-        desc = approval.get("description", "flagged as dangerous")
         return _ApprovalVerdict(
             note=f"Command was flagged ({desc}) and auto-approved by smart approval.",
         )
@@ -1315,6 +1317,240 @@ def _fatal_error_json(e: BaseException) -> str:
         "traceback": _redact_terminal_error_text(tb_str),
         "status": "error"
     }, ensure_ascii=False)
+
+
+@dataclass
+class _ExecPlan:
+    """Per-call execution parameters resolved before any environment is touched."""
+    config: Dict[str, Any]
+    env_type: str
+    effective_task_id: str
+    image: str
+    cwd: str
+    host_cwd: Optional[str]
+    effective_timeout: int
+
+
+def _plan_execution(
+    command: Any, *, task_id: Optional[str], timeout: Optional[int],
+    background: bool, _host_local: bool,
+) -> "_ExecPlan | str":
+    """Resolve backend, env-cache key, image, cwd and timeout for one call.
+
+    Returns the finished error JSON instead of a plan when the call is rejected
+    up front (non-string command, non-positive or over-cap timeout, a
+    foreground command that must run in the background).
+    """
+    if not isinstance(command, str):
+        logger.warning(
+            "Rejected invalid terminal command value: %s",
+            type(command).__name__,
+        )
+        return _error_json(
+            f"Invalid command: expected string, got {type(command).__name__}",
+            status="error",
+        )
+
+    config = _get_env_config()
+    env_type = "local" if _host_local else config["env_type"]
+
+    # Fail closed under a refusal scope: the routed profile's terminal
+    # policy could not be resolved, so running with the launch process's
+    # ambient policy is forbidden.
+    if not _host_local:
+        from tools.terminal_scope import enforce_no_refusal
+
+        enforce_no_refusal()
+
+    effective_task_id = _resolve_container_task_id(task_id)
+    if _host_local:
+        # Control-plane children run beside this interpreter, never inside
+        # the configured Docker/SSH backend; keep their env cache separate.
+        effective_task_id = f"host-local-{effective_task_id}"
+
+    # Per-task overrides (RL/benchmark envs, ACP workspace cwd) win over
+    # the global env-var config; ``resolve_task_overrides`` reads the raw
+    # task id first, then the collapsed container id.
+    overrides = resolve_task_overrides(task_id)
+    image = _select_image(env_type, overrides, config)
+
+    cwd = overrides.get("cwd") or get_session_cwd(task_id) or config["cwd"]
+    host_cwd = _resolve_task_host_cwd(config, task_id)
+    # config["cwd"] was sanitized for container backends in _get_env_config
+    # but an override / session record is raw: a host path would reach
+    # `docker run -w` and fail with exit 125. Re-apply the guard to the
+    # resolved cwd; when the host path IS this session's mounted workspace,
+    # remap to /workspace instead of discarding it.
+    if _is_container_backend(env_type) and _is_unusable_container_cwd(cwd):
+        remapped = "/workspace" if host_cwd else config["cwd"]
+        if cwd != remapped:
+            logger.info(
+                "Remapping host/relative cwd override %r for %s backend "
+                "(won't exist in sandbox). Using %r instead.",
+                cwd, env_type, remapped,
+            )
+        cwd = remapped
+    # Reject non-positive timeouts before deadline math: ``timeout or
+    # default`` would silently turn 0 into the default, and a negative
+    # value is truthy and would fire an immediate "-Ns" timeout.
+    if timeout is not None and timeout <= 0:
+        return tool_error(
+            f"timeout must be a positive number of seconds (got {timeout})."
+        )
+    effective_timeout = timeout or config["timeout"]
+
+    if not background and timeout and timeout > FOREGROUND_MAX_TIMEOUT:
+        return tool_error(
+            f"Foreground timeout {timeout}s exceeds the maximum of "
+            f"{FOREGROUND_MAX_TIMEOUT}s. Use background=true with "
+            f"notify_on_complete=true for long-running commands."
+        )
+
+    if not background:
+        guidance = _foreground_background_guidance(command)
+        if guidance:
+            return _error_json(guidance, status="error")
+
+    return _ExecPlan(
+        config=config, env_type=env_type, effective_task_id=effective_task_id,
+        image=image, cwd=cwd, host_cwd=host_cwd, effective_timeout=effective_timeout,
+    )
+
+
+def _acquire_env(plan: _ExecPlan, task_id: Optional[str]) -> Any:
+    """Cached env for the task, else create it under the per-task creation lock.
+
+    Concurrent calls for the same task_id wait for the first sandbox instead
+    of each creating their own; the cache is re-checked under that lock.
+    Returns the ``"disabled"`` error JSON (a str) when creation raises
+    ImportError.
+    """
+    _start_cleanup_thread()
+    env_type, eff = plan.env_type, plan.effective_task_id
+
+    with _env_lock:
+        env: Any = _lookup_active_env(eff, task_id)
+    if env is not None:
+        return env
+
+    with _creation_locks_lock:
+        task_lock = _creation_locks.setdefault(eff, threading.Lock())
+
+    with task_lock:
+        with _env_lock:
+            env = _lookup_active_env(eff, task_id)
+        if env is not None:
+            return env
+
+        if env_type == "singularity":
+            _check_disk_usage_warning()
+        logger.info("Creating new %s environment for task %s...", env_type, eff[:8])
+        try:
+            new_env = _create_environment(
+                env_type=env_type,
+                image=plan.image,
+                cwd=plan.cwd,
+                timeout=plan.effective_timeout,
+                ssh_config=_ssh_config_from_config(plan.config) if env_type == "ssh" else None,
+                container_config=(
+                    _container_config_from_config(plan.config)
+                    if _is_container_backend(env_type) else None
+                ),
+                local_config=(
+                    {"persistent": plan.config.get("local_persistent", False)}
+                    if env_type == "local" else None
+                ),
+                task_id=eff,
+                host_cwd=plan.host_cwd,
+            )
+        except ImportError as e:
+            return _error_json(
+                _redact_terminal_error_text(
+                    f"Terminal tool disabled: environment creation failed ({e})"
+                ),
+                status="disabled",
+            )
+
+        with _env_lock:
+            _active_environments[eff] = new_env
+            _last_activity[eff] = time.time()
+        logger.info("%s environment ready for task %s", env_type, eff[:8])
+        return new_env
+
+
+def _run_foreground(
+    command: str, env: Any, plan: _ExecPlan, *,
+    task_id: Optional[str], session_id: Optional[str], session_key: str,
+    workdir: Optional[str], approval_note: Optional[str], clear_interrupt: bool,
+) -> str:
+    """Execute in the foreground with retry on transient errors, then finalize."""
+    max_retries = 3
+    retry_count = 0
+    result = None
+    command_cwd = None
+    env_type, eff, effective_timeout = plan.env_type, plan.effective_task_id, plan.effective_timeout
+
+    # Clean interrupt slate for an approved command, ONCE before the retry
+    # loop: drop a stale bit that landed during the approval-wait so it
+    # can't SIGINT the just-approved run. Do NOT re-clear inside the loop —
+    # a genuine interrupt during the backoff sleep must survive and abort
+    # the next attempt (rc 130).
+    if clear_interrupt:
+        from tools.interrupt import clear_current_thread_interrupt
+        clear_current_thread_interrupt()
+
+    while retry_count <= max_retries:
+        try:
+            command_cwd = _resolve_command_cwd(
+                workdir=workdir,
+                default_cwd=plan.cwd,
+                session_key=session_key,
+                env_type=env_type,
+            )
+            # bounded_capture: model-facing output keeps a head/tail window
+            # while streaming so a verbose command can't OOM the gateway;
+            # internal env.execute() consumers stay unbounded.
+            result = env.execute(
+                command, timeout=effective_timeout, cwd=command_cwd,
+                bounded_capture=True,
+            )
+        except Exception as e:
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                return _error_json(
+                    f"Command timed out after {effective_timeout} seconds", exit_code=124,
+                )
+
+            # Retry on transient errors
+            if retry_count < max_retries:
+                retry_count += 1
+                wait_time = 2 ** retry_count
+                logger.warning("Execution error, retrying in %ds (attempt %d/%d) - Command: %s - Error: %s: %s - Task: %s, Backend: %s",
+                               wait_time, retry_count, max_retries, _safe_command_preview(command), type(e).__name__, e, eff, env_type)
+                time.sleep(wait_time)
+                continue
+
+            logger.error("Execution failed after %d retries - Command: %s - Error: %s: %s - Task: %s, Backend: %s",
+                         max_retries, _safe_command_preview(command), type(e).__name__, e, eff, env_type)
+            return _error_json(_redact_terminal_error_text(
+                f"Command execution failed: {type(e).__name__}: {e}"
+            ))
+
+        break
+
+    return finalize_foreground_result(
+        command=command,
+        result=result,
+        env=env,
+        env_type=env_type,
+        effective_task_id=eff,
+        task_id=task_id,
+        session_id=session_id,
+        session_key=session_key,
+        workdir=workdir,
+        command_cwd=command_cwd,
+        approval_note=approval_note,
+    )
 
 
 def terminal_tool(
@@ -1344,138 +1580,16 @@ def terminal_tool(
     children (kept in a separate env cache from the configured backend).
     """
     try:
-        if not isinstance(command, str):
-            logger.warning(
-                "Rejected invalid terminal command value: %s",
-                type(command).__name__,
-            )
-            return json.dumps({
-                "output": "",
-                "exit_code": -1,
-                "error": f"Invalid command: expected string, got {type(command).__name__}",
-                "status": "error",
-            }, ensure_ascii=False)
-
-        config = _get_env_config()
-        env_type = "local" if _host_local else config["env_type"]
-
-        # Fail closed under a refusal scope: the routed profile's terminal
-        # policy could not be resolved, so running with the launch process's
-        # ambient policy is forbidden.
-        if not _host_local:
-            from tools.terminal_scope import enforce_no_refusal
-
-            enforce_no_refusal()
-
-        effective_task_id = _resolve_container_task_id(task_id)
-        if _host_local:
-            # Control-plane children run beside this interpreter, never inside
-            # the configured Docker/SSH backend; keep their env cache separate.
-            effective_task_id = f"host-local-{effective_task_id}"
-
-        # Per-task overrides (RL/benchmark envs, ACP workspace cwd) win over
-        # the global env-var config; ``resolve_task_overrides`` reads the raw
-        # task id first, then the collapsed container id.
-        overrides = resolve_task_overrides(task_id)
-        image = _select_image(env_type, overrides, config)
-
-        cwd = overrides.get("cwd") or get_session_cwd(task_id) or config["cwd"]
-        host_cwd = _resolve_task_host_cwd(config, task_id)
-        # config["cwd"] was sanitized for container backends in _get_env_config
-        # but an override / session record is raw: a host path would reach
-        # `docker run -w` and fail with exit 125. Re-apply the guard to the
-        # resolved cwd; when the host path IS this session's mounted workspace,
-        # remap to /workspace instead of discarding it.
-        if _is_container_backend(env_type) and _is_unusable_container_cwd(cwd):
-            remapped = "/workspace" if host_cwd else config["cwd"]
-            if cwd != remapped:
-                logger.info(
-                    "Remapping host/relative cwd override %r for %s backend "
-                    "(won't exist in sandbox). Using %r instead.",
-                    cwd, env_type, remapped,
-                )
-            cwd = remapped
-        # Reject non-positive timeouts before deadline math: ``timeout or
-        # default`` would silently turn 0 into the default, and a negative
-        # value is truthy and would fire an immediate "-Ns" timeout.
-        if timeout is not None and timeout <= 0:
-            return tool_error(
-                f"timeout must be a positive number of seconds (got {timeout})."
-            )
-        effective_timeout = timeout or config["timeout"]
-
-        if not background and timeout and timeout > FOREGROUND_MAX_TIMEOUT:
-            return tool_error(
-                f"Foreground timeout {timeout}s exceeds the maximum of "
-                f"{FOREGROUND_MAX_TIMEOUT}s. Use background=true with "
-                f"notify_on_complete=true for long-running commands."
-            )
-
-        if not background:
-            guidance = _foreground_background_guidance(command)
-            if guidance:
-                return json.dumps({
-                    "output": "",
-                    "exit_code": -1,
-                    "error": guidance,
-                    "status": "error",
-                }, ensure_ascii=False)
-
-        _start_cleanup_thread()
-
-        # Get or create environment. A per-task creation lock makes concurrent
-        # calls for the same task_id wait for the first sandbox instead of each
-        # creating their own; the cache is re-checked under that lock.
-        with _env_lock:
-            env: Any = _lookup_active_env(effective_task_id, task_id)
-
-        if env is None:
-            with _creation_locks_lock:
-                task_lock = _creation_locks.setdefault(effective_task_id, threading.Lock())
-
-            with task_lock:
-                with _env_lock:
-                    env = _lookup_active_env(effective_task_id, task_id)
-
-                if env is None:
-                    if env_type == "singularity":
-                        _check_disk_usage_warning()
-                    logger.info("Creating new %s environment for task %s...", env_type, effective_task_id[:8])
-                    try:
-                        new_env = _create_environment(
-                            env_type=env_type,
-                            image=image,
-                            cwd=cwd,
-                            timeout=effective_timeout,
-                            ssh_config=_ssh_config_from_config(config) if env_type == "ssh" else None,
-                            container_config=(
-                                _container_config_from_config(config)
-                                if _is_container_backend(env_type) else None
-                            ),
-                            local_config=(
-                                {"persistent": config.get("local_persistent", False)}
-                                if env_type == "local" else None
-                            ),
-                            task_id=effective_task_id,
-                            host_cwd=host_cwd,
-                        )
-                    except ImportError as e:
-                        return json.dumps({
-                            "output": "",
-                            "exit_code": -1,
-                            "error": _redact_terminal_error_text(
-                                f"Terminal tool disabled: environment creation failed ({e})"
-                            ),
-                            "status": "disabled"
-                        }, ensure_ascii=False)
-
-                    with _env_lock:
-                        _active_environments[effective_task_id] = new_env
-                        _last_activity[effective_task_id] = time.time()
-                        env = new_env
-                    logger.info("%s environment ready for task %s", env_type, effective_task_id[:8])
-
-        assert env is not None  # all creation failure paths return above
+        plan = _plan_execution(
+            command, task_id=task_id, timeout=timeout,
+            background=background, _host_local=_host_local,
+        )
+        if isinstance(plan, str):
+            return plan
+        env = _acquire_env(plan, task_id)
+        if isinstance(env, str):
+            return env
+        env_type, cwd, effective_task_id = plan.env_type, plan.cwd, plan.effective_task_id
 
         # Session key for cwd records: the contextvar doesn't cross tool-worker
         # threads, so fall back to the raw task_id (the top-level agent's
@@ -1496,12 +1610,7 @@ def terminal_tool(
             if workdir_error:
                 logger.warning("Blocked dangerous workdir: %s (command: %s)",
                                workdir[:200], _safe_command_preview(command))
-                return json.dumps({
-                    "output": "",
-                    "exit_code": -1,
-                    "error": workdir_error,
-                    "status": "blocked"
-                }, ensure_ascii=False)
+                return _error_json(workdir_error, status="blocked")
 
         if env_type == "local":
             blocked = self_repo_block(
@@ -1512,10 +1621,9 @@ def terminal_tool(
 
         # Pre-exec security checks (tirith + dangerous command detection);
         # force=True means the user already confirmed.
-        verdict = _run_approval_guards(command, env_type, config, force=force)
+        verdict = _run_approval_guards(command, env_type, plan.config, force=force)
         if verdict.blocked_json:
             return verdict.blocked_json
-        approval_note = verdict.note
 
         pty_disabled_reason = None
         effective_pty = pty
@@ -1541,81 +1649,14 @@ def terminal_tool(
                 effective_pty=effective_pty,
                 notify_on_complete=notify_on_complete,
                 watch_patterns=watch_patterns,
-                approval_note=approval_note,
+                approval_note=verdict.note,
                 pty_disabled_reason=pty_disabled_reason,
             )
-        # Foreground: run with retry on transient errors.
-        max_retries = 3
-        retry_count = 0
-        result = None
-        command_cwd = None
-
-        # Clean interrupt slate for an approved command, ONCE before the retry
-        # loop: drop a stale bit that landed during the approval-wait so it
-        # can't SIGINT the just-approved run. Do NOT re-clear inside the loop —
-        # a genuine interrupt during the backoff sleep must survive and abort
-        # the next attempt (rc 130).
-        if verdict.approved_run:
-            from tools.interrupt import clear_current_thread_interrupt
-            clear_current_thread_interrupt()
-
-        while retry_count <= max_retries:
-            try:
-                command_cwd = _resolve_command_cwd(
-                    workdir=workdir,
-                    default_cwd=cwd,
-                    session_key=session_key,
-                    env_type=env_type,
-                )
-                # bounded_capture: model-facing output keeps a head/tail window
-                # while streaming so a verbose command can't OOM the gateway;
-                # internal env.execute() consumers stay unbounded.
-                result = env.execute(
-                    command, timeout=effective_timeout, cwd=command_cwd,
-                    bounded_capture=True,
-                )
-            except Exception as e:
-                error_str = str(e).lower()
-                if "timeout" in error_str:
-                    return json.dumps({
-                        "output": "",
-                        "exit_code": 124,
-                        "error": f"Command timed out after {effective_timeout} seconds"
-                    }, ensure_ascii=False)
-
-                # Retry on transient errors
-                if retry_count < max_retries:
-                    retry_count += 1
-                    wait_time = 2 ** retry_count
-                    logger.warning("Execution error, retrying in %ds (attempt %d/%d) - Command: %s - Error: %s: %s - Task: %s, Backend: %s",
-                                   wait_time, retry_count, max_retries, _safe_command_preview(command), type(e).__name__, e, effective_task_id, env_type)
-                    time.sleep(wait_time)
-                    continue
-
-                logger.error("Execution failed after %d retries - Command: %s - Error: %s: %s - Task: %s, Backend: %s",
-                             max_retries, _safe_command_preview(command), type(e).__name__, e, effective_task_id, env_type)
-                return json.dumps({
-                    "output": "",
-                    "exit_code": -1,
-                    "error": _redact_terminal_error_text(
-                        f"Command execution failed: {type(e).__name__}: {e}"
-                    )
-                }, ensure_ascii=False)
-
-            break
-
-        return finalize_foreground_result(
-            command=command,
-            result=result,
-            env=env,
-            env_type=env_type,
-            effective_task_id=effective_task_id,
-            task_id=task_id,
-            session_id=session_id,
-            session_key=session_key,
-            workdir=workdir,
-            command_cwd=command_cwd,
-            approval_note=approval_note,
+        return _run_foreground(
+            command, env, plan,
+            task_id=task_id, session_id=session_id, session_key=session_key,
+            workdir=workdir, approval_note=verdict.note,
+            clear_interrupt=verdict.approved_run,
         )
 
     except EnvironmentConnectionError as e:
