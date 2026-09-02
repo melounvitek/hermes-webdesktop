@@ -97,6 +97,15 @@ def _self_and_non_gateway_ancestor_pids(psutil) -> set[int]:
     return skip
 
 
+def _lower_dir_prefix(path: Path) -> str:
+    """``str(path)`` lower-cased with one trailing separator, resolved when possible (prefix matching)."""
+    try:
+        raw = str(path.resolve())
+    except OSError:
+        raw = str(path)
+    return raw.lower().rstrip(os.sep) + os.sep
+
+
 def _detect_venv_python_processes(
     *, exclude_pids: set[int] | None = None
 ) -> list[tuple[int, str, str]]:
@@ -114,15 +123,8 @@ def _detect_venv_python_processes(
     except Exception:
         return []
 
-    venv_dir = _m().PROJECT_ROOT / "venv"
-    try:
-        venv_prefix = str(venv_dir.resolve()).lower().rstrip(os.sep) + os.sep
-    except OSError:
-        venv_prefix = str(venv_dir).lower().rstrip(os.sep) + os.sep
-    try:
-        root_prefix = str(_m().PROJECT_ROOT.resolve()).lower().rstrip(os.sep) + os.sep
-    except OSError:
-        root_prefix = str(_m().PROJECT_ROOT).lower().rstrip(os.sep) + os.sep
+    venv_prefix = _lower_dir_prefix(_m().PROJECT_ROOT / "venv")
+    root_prefix = _lower_dir_prefix(_m().PROJECT_ROOT)
 
     skip: set[int] = set(exclude_pids or set())
     skip |= _self_and_non_gateway_ancestor_pids(psutil)
@@ -312,11 +314,7 @@ def _venv_launcher_ancestors(pids: list[int]) -> list[int]:
     except Exception:
         return []
 
-    venv_dir = _m().PROJECT_ROOT / "venv"
-    try:
-        venv_prefix = str(venv_dir.resolve()).lower().rstrip(os.sep) + os.sep
-    except OSError:
-        venv_prefix = str(venv_dir).lower().rstrip(os.sep) + os.sep
+    venv_prefix = _lower_dir_prefix(_m().PROJECT_ROOT / "venv")
 
     skip = _self_and_non_gateway_ancestor_pids(psutil)
 
@@ -502,6 +500,25 @@ def _relaunch_stopped_serves(token: dict) -> None:
     )
 
 
+def _is_backend_argv(argv_low: str) -> bool:
+    """Whether a lower-cased argv is a Desktop backend (``hermes_cli.main`` running ``serve``/``dashboard``)."""
+    return "hermes_cli.main" in argv_low and (
+        " serve" in argv_low or " dashboard" in argv_low
+    )
+
+
+def _live_argv_low(psutil, pid, cmdline: str) -> str | None:
+    """Current lower-cased argv of *pid* (falls back to the scanned *cmdline*); ``None`` if it exited."""
+    argv = cmdline
+    try:
+        argv = " ".join(psutil.Process(int(pid)).cmdline()) or cmdline
+    except psutil.NoSuchProcess:
+        return None
+    except Exception:
+        pass
+    return argv.lower()
+
+
 def _orphaned_desktop_backend_pids(
     matches: list[tuple[int, str, str]],
 ) -> list[tuple[int, int]] | None:
@@ -520,24 +537,14 @@ def _orphaned_desktop_backend_pids(
     except Exception:
         return None
 
-    def _is_backend(argv_low: str) -> bool:
-        return "hermes_cli.main" in argv_low and (
-            " serve" in argv_low or " dashboard" in argv_low
-        )
-
     # Pass 1: find orphaned backend ROOTS among the holders.
     roots: list[tuple[int, int]] = []
     remaining: list[tuple[int, str]] = []  # (pid, argv_low) still to justify
     for pid, _name, cmdline in matches:
-        argv = cmdline
-        try:
-            argv = " ".join(psutil.Process(int(pid)).cmdline()) or cmdline
-        except psutil.NoSuchProcess:
+        low = _live_argv_low(psutil, pid, cmdline)
+        if low is None:
             continue  # exited between scan and classification — nothing to reap
-        except Exception:
-            pass
-        low = argv.lower()
-        if not _is_backend(low):
+        if not _is_backend_argv(low):
             remaining.append((int(pid), low))
             continue
         try:
@@ -631,21 +638,12 @@ def _handoff_reapable_backend_pids(
     except Exception:
         return None
 
-    def _is_backend(argv_low: str) -> bool:
-        return "hermes_cli.main" in argv_low and (
-            " serve" in argv_low or " dashboard" in argv_low
-        )
-
     roots: list[int] = []
     for pid, _name, cmdline in matches:
-        argv = cmdline
-        try:
-            argv = " ".join(psutil.Process(int(pid)).cmdline()) or cmdline
-        except psutil.NoSuchProcess:
+        low = _live_argv_low(psutil, pid, cmdline)
+        if low is None:
             continue  # exited — nothing to reap
-        except Exception:
-            pass
-        if not _is_backend(argv.lower()):
+        if not _is_backend_argv(low):
             return None  # unexpected non-backend holder: refuse the whole set
         roots.append(int(pid))
 
