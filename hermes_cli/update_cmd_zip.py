@@ -237,62 +237,17 @@ def _abort_zip_update_if_dirty_tree() -> None:
     _m().sys.exit(1)
 
 
-def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> bool:
-    """Update Hermes Agent by downloading a ZIP archive.
+def _download_and_swap_zip(branch: str, zip_url: str) -> None:
+    """Download the source ZIP for *branch* and two-phase swap it into the checkout.
 
-    Used on Windows when git file I/O is broken (antivirus, NTFS filter
-    drivers causing 'Invalid argument' errors on file creation).
-
-    Returns ``False`` when a Desktop rebuild ran and failed; ``True`` otherwise.
+    Exits the process (``sys.exit(1)``) on any failure; the two-phase replace
+    guarantees the install is either fully updated or fully rolled back.
     """
-    from hermes_cli.update_cmd import (
-        _ensure_uv_for_termux,
-        _ensure_venv_pip,
-        _finish_dashboard_update_cleanup,
-        _m,
-        _print_bundled_skills_sync_report,
-        _print_curator_first_run_notice,
-        _print_curator_recent_run_notice,
-        _print_update_summary,
-        _read_project_version,
-        _rebuild_desktop_after_update,
-        _refuse_update_for_contended_shims,
-        _shim_quarantine_error_type,
-        _sweep_bytecode_after_update,
-        _update_node_dependencies,
-        _validate_critical_modules_import,
-        _verify_and_restore_state_dbs_post_update,
-    )
-    active_tool_dependencies = _m()._capture_active_tool_dependencies()
+    from hermes_cli.update_cmd import _m
 
     import tempfile
     import zipfile
     from urllib.request import urlretrieve
-
-    # Snapshot the pre-update version before files are replaced so the
-    # completion line can report the transition (prime-agent#630 port).
-    pre_update_version = _read_project_version()
-
-    # The static GitHub archive is fine for "main" but would silently ignore
-    # --branch — the exact silent-divergence bug --branch was added to
-    # prevent. Refuse rather than lie.
-    branch = _m()._resolve_update_branch(args)
-    if branch != "main":
-        print(
-            f"✗ --branch={branch} is not supported on the Windows ZIP-fallback "
-            "update path."
-        )
-        print(
-            "  This path runs when git file I/O is broken on the system. "
-            "Either resolve the git-side breakage (typically an antivirus "
-            "or NTFS filter holding files open) and rerun `hermes update "
-            f"--branch {branch}`, or update against main with `hermes update`."
-        )
-        _m().sys.exit(1)
-    _abort_zip_update_if_dirty_tree()
-    zip_url = (
-        f"https://github.com/NousResearch/hermes-agent/archive/refs/heads/{branch}.zip"
-    )
 
     print("→ Downloading latest version...")
     tmp_dir = tempfile.mkdtemp(prefix="hermes-update-")
@@ -434,15 +389,16 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    _sweep_bytecode_after_update(branch)
 
-    # Reinstall Python deps: prefer .[all]; if one extra breaks, keep base
-    # deps and retry the remaining extras individually so working
-    # capabilities aren't silently stripped. Self-lock deferral (#86735): the
-    # code swap is committed; defer only the dependency sync when this
-    # process holds a native extension the sync must rewrite.
-    _m()._abort_dependency_sync_if_self_locked()
-    print("→ Updating Python dependencies...")
+def _reinstall_python_deps_after_zip(active_tool_dependencies) -> None:
+    """Reinstall Python deps (uv preferred, pip fallback) and re-arm active tool deps."""
+    from hermes_cli.update_cmd import (
+        _ensure_uv_for_termux,
+        _ensure_venv_pip,
+        _m,
+        _refuse_update_for_contended_shims,
+        _shim_quarantine_error_type,
+    )
 
     from hermes_cli.managed_uv import ensure_uv, update_managed_uv
 
@@ -489,6 +445,70 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     # after the dependency reinstall, same as the git-pull path (#53272,
     # #70636).
     _m()._refresh_active_memory_provider_dependencies()
+
+
+def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> bool:
+    """Update Hermes Agent by downloading a ZIP archive.
+
+    Used on Windows when git file I/O is broken (antivirus, NTFS filter
+    drivers causing 'Invalid argument' errors on file creation).
+
+    Returns ``False`` when a Desktop rebuild ran and failed; ``True`` otherwise.
+    """
+    from hermes_cli.update_cmd import (
+        _finish_dashboard_update_cleanup,
+        _m,
+        _print_bundled_skills_sync_report,
+        _print_curator_first_run_notice,
+        _print_curator_recent_run_notice,
+        _print_update_summary,
+        _read_project_version,
+        _rebuild_desktop_after_update,
+        _sweep_bytecode_after_update,
+        _update_node_dependencies,
+        _validate_critical_modules_import,
+        _verify_and_restore_state_dbs_post_update,
+    )
+    active_tool_dependencies = _m()._capture_active_tool_dependencies()
+
+    # Snapshot the pre-update version before files are replaced so the
+    # completion line can report the transition (prime-agent#630 port).
+    pre_update_version = _read_project_version()
+
+    # The static GitHub archive is fine for "main" but would silently ignore
+    # --branch — the exact silent-divergence bug --branch was added to
+    # prevent. Refuse rather than lie.
+    branch = _m()._resolve_update_branch(args)
+    if branch != "main":
+        print(
+            f"✗ --branch={branch} is not supported on the Windows ZIP-fallback "
+            "update path."
+        )
+        print(
+            "  This path runs when git file I/O is broken on the system. "
+            "Either resolve the git-side breakage (typically an antivirus "
+            "or NTFS filter holding files open) and rerun `hermes update "
+            f"--branch {branch}`, or update against main with `hermes update`."
+        )
+        _m().sys.exit(1)
+    _abort_zip_update_if_dirty_tree()
+    zip_url = (
+        f"https://github.com/NousResearch/hermes-agent/archive/refs/heads/{branch}.zip"
+    )
+
+    _download_and_swap_zip(branch, zip_url)
+
+    _sweep_bytecode_after_update(branch)
+
+    # Reinstall Python deps: prefer .[all]; if one extra breaks, keep base
+    # deps and retry the remaining extras individually so working
+    # capabilities aren't silently stripped. Self-lock deferral (#86735): the
+    # code swap is committed; defer only the dependency sync when this
+    # process holds a native extension the sync must rewrite.
+    _m()._abort_dependency_sync_if_self_locked()
+    print("→ Updating Python dependencies...")
+
+    _reinstall_python_deps_after_zip(active_tool_dependencies)
 
     # Verify the tree actually imports (catches the parse-OK-but-skewed tree
     # an interrupted copy leaves). Placed *after* the dependency reinstall so

@@ -439,7 +439,10 @@ def test_update_via_zip_wires_discard_into_the_commit_failure_path():
     import inspect
     import textwrap
 
-    src = textwrap.dedent(inspect.getsource(update_cmd._update_via_zip))
+    # The swap lives in the download/swap collaborator the ZIP path calls.
+    from hermes_cli import update_cmd_zip
+
+    src = textwrap.dedent(inspect.getsource(update_cmd_zip._download_and_swap_zip))
     tree = ast.parse(src)
 
     def _calls(node, name):
