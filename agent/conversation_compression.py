@@ -1573,6 +1573,43 @@ def _emit_compression_attempt_telemetry(
         logger.debug("failed to emit compression attempt telemetry: %s", exc)
 
 
+def _existing_system_prompt(agent: Any, system_message: str) -> str:
+    """Cached system prompt, or a fresh build when nothing is cached (abort paths)."""
+    existing = getattr(agent, "_cached_system_prompt", None)
+    if not existing:
+        existing = agent._build_system_prompt(system_message)
+    return existing
+
+
+def _emit_aborted_attempt_telemetry(
+    agent: Any, started_at: float, failure_class: str | None
+) -> None:
+    _emit_compression_attempt_telemetry(
+        agent,
+        started_at=started_at,
+        commit_status="aborted",
+        split_status="aborted",
+        failure_class=failure_class,
+    )
+
+
+def _restore_messages_snapshot(messages: list, snapshot: Optional[list]) -> None:
+    """Put the pre-compression deep snapshot back into the live list if it drifted."""
+    if snapshot is not None and messages != snapshot:
+        messages[:] = copy.deepcopy(snapshot)
+
+
+def _restore_prune_rearm_tokens(compressor: Any, snapshot: dict) -> None:
+    """Restore ONLY the prune runway from the attempt snapshot.
+
+    compress() zeroes it in memory while the durable copy only clears on a
+    successful commit; a kept transcript keeps its cached prefix, and 0 would let
+    the next prune break that cache.
+    """
+    if "_proactive_prune_rearm_tokens" in snapshot:
+        compressor._proactive_prune_rearm_tokens = snapshot["_proactive_prune_rearm_tokens"]
+
+
 def compression_skipped_due_to_lock(agent: Any) -> bool:
     """Type-pinned read of the per-session lock-skip signal.
 
@@ -2867,9 +2904,7 @@ def compress_context(
                     agent.context_compressor, _compressor_attempt_snapshot,
                     attempt_generation=_attempt_generation,
                 )
-                existing_prompt = getattr(agent, "_cached_system_prompt", None)
-                if not existing_prompt:
-                    existing_prompt = agent._build_system_prompt(system_message)
+                existing_prompt = _existing_system_prompt(agent, system_message)
                 return messages, existing_prompt
         try:
             return _compress_context_via_codex_app_server(
@@ -2897,9 +2932,7 @@ def compress_context(
             blocked, agent.context_compressor, bypass_cooldown
         ):
             _mark_compression_blocked_transient(agent, agent.context_compressor)
-            existing_prompt = getattr(agent, "_cached_system_prompt", None)
-            if not existing_prompt:
-                existing_prompt = agent._build_system_prompt(system_message)
+            existing_prompt = _existing_system_prompt(agent, system_message)
             return messages, existing_prompt
 
     # Lazy feasibility probe (~400ms cold) on first attempt, not __init__; it sets
@@ -3041,16 +3074,8 @@ def compress_context(
                         agent.session_id or "none",
                     )
                     agent._last_compaction_in_place = False
-                    _existing_sp = getattr(agent, "_cached_system_prompt", None)
-                    if not _existing_sp:
-                        _existing_sp = agent._build_system_prompt(system_message)
-                    _emit_compression_attempt_telemetry(
-                        agent,
-                        started_at=_attempt_started_at,
-                        commit_status="aborted",
-                        split_status="aborted",
-                        failure_class="commit_fence_cancelled",
-                    )
+                    _existing_sp = _existing_system_prompt(agent, system_message)
+                    _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "commit_fence_cancelled")
                     _complete_compaction_lifecycle(force_terminal=True)
                     return messages, _existing_sp
             try:
@@ -3124,21 +3149,13 @@ def compress_context(
                     )
                 except Exception:
                     pass
-            _existing_sp = getattr(agent, "_cached_system_prompt", None)
-            if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
+            _existing_sp = _existing_system_prompt(agent, system_message)
             try:
                 if hasattr(agent.context_compressor, "_begin_compression_telemetry"):
                     agent.context_compressor._begin_compression_telemetry(current_tokens=approx_tokens)
             except Exception:
                 pass
-            _emit_compression_attempt_telemetry(
-                agent,
-                started_at=_attempt_started_at,
-                commit_status="aborted",
-                split_status="aborted",
-                failure_class="lock_contended",
-            )
+            _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "lock_contended")
             _complete_compaction_lifecycle(force_terminal=True)
             return messages, _existing_sp
     _lock_released = False
@@ -3200,16 +3217,8 @@ def compress_context(
                 agent.session_id or "none",
             )
             agent._last_compaction_in_place = False
-            _existing_sp = getattr(agent, "_cached_system_prompt", None)
-            if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
-            _emit_compression_attempt_telemetry(
-                agent,
-                started_at=_attempt_started_at,
-                commit_status="aborted",
-                split_status="aborted",
-                failure_class="commit_fence_cancelled",
-            )
+            _existing_sp = _existing_system_prompt(agent, system_message)
+            _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "commit_fence_cancelled")
             _release_lock()
             return messages, _existing_sp
 
@@ -3233,18 +3242,14 @@ def compress_context(
                 _session_err,
             )
             _release_lock()
-            _existing_sp = getattr(agent, "_cached_system_prompt", None)
-            if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
+            _existing_sp = _existing_system_prompt(agent, system_message)
             return messages, _existing_sp
         if _parent_already_rotated:
             recovered_messages = _adopt_live_compression_child(
                 agent, _lock_db, _lock_sid
             )
             _release_lock()
-            _existing_sp = getattr(agent, "_cached_system_prompt", None)
-            if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
+            _existing_sp = _existing_system_prompt(agent, system_message)
             if recovered_messages is not None:
                 logger.warning(
                     "compression recovery: stale session=%s adopted live child=%s",
@@ -3271,9 +3276,7 @@ def compress_context(
         # Durable cooldown read failed under a built-in compressor: force=True could
         # clear an unknown newer row before cancellation could restore it. Abort.
         _release_lock()
-        existing_prompt = getattr(agent, "_cached_system_prompt", None)
-        if not existing_prompt:
-            existing_prompt = agent._build_system_prompt(system_message)
+        existing_prompt = _existing_system_prompt(agent, system_message)
         return messages, existing_prompt
 
     # Another path may have compacted this session in place since construction;
@@ -3294,9 +3297,7 @@ def compress_context(
         ):
             _mark_compression_blocked_transient(agent, compressor)
             _release_lock()
-            existing_prompt = getattr(agent, "_cached_system_prompt", None)
-            if not existing_prompt:
-                existing_prompt = agent._build_system_prompt(system_message)
+            existing_prompt = _existing_system_prompt(agent, system_message)
             return messages, existing_prompt
 
     _activity_heartbeat: Optional[_CompressionActivityHeartbeat] = None
@@ -3545,28 +3546,14 @@ def compress_context(
         except BaseException as _rollback_exc:
             # Compensation failure must surface, but it must not strand the
             # session lease or retain an in-memory transcript mutation.
-            if (
-                messages_before_compression is not None
-                and messages != messages_before_compression
-            ):
-                messages[:] = copy.deepcopy(messages_before_compression)
+            _restore_messages_snapshot(messages, messages_before_compression)
             if _activity_heartbeat is not None:
                 _activity_heartbeat.stop("context compression rollback failed")
                 _activity_heartbeat = None
             _release_lock()
-            _emit_compression_attempt_telemetry(
-                agent,
-                started_at=_attempt_started_at,
-                commit_status="aborted",
-                split_status="aborted",
-                failure_class=f"rollback:{type(_rollback_exc).__name__}",
-            )
+            _emit_aborted_attempt_telemetry(agent, _attempt_started_at, f"rollback:{type(_rollback_exc).__name__}")
             raise
-        if (
-            messages_before_compression is not None
-            and messages != messages_before_compression
-        ):
-            messages[:] = copy.deepcopy(messages_before_compression)
+        _restore_messages_snapshot(messages, messages_before_compression)
         # Record after restore so rollback cannot wipe a stall backoff, and
         # while the lease is still held so the next turn cannot race it.
         _stall_backoff = _record_stall_interrupted_backoff(
@@ -3580,20 +3567,16 @@ def compress_context(
             _activity_heartbeat.stop("context compression cancelled")
             _activity_heartbeat = None
         _release_lock()
-        _emit_compression_attempt_telemetry(
+        _emit_aborted_attempt_telemetry(
             agent,
-            started_at=_attempt_started_at,
-            commit_status="aborted",
-            split_status="aborted",
-            failure_class=(
+            _attempt_started_at,
+            (
                 STALL_INTERRUPTED_FAILURE_CLASS
                 if _stall_backoff
                 else "explicit_interrupt"
             ),
         )
-        _existing_sp = getattr(agent, "_cached_system_prompt", None)
-        if not _existing_sp:
-            _existing_sp = agent._build_system_prompt(system_message)
+        _existing_sp = _existing_system_prompt(agent, system_message)
         return messages, _existing_sp
     except BaseException as _compress_exc:
         # Any failure after lock acquisition must release it or the session is
@@ -3602,13 +3585,7 @@ def compress_context(
             _activity_heartbeat.stop("context compression failed")
             _activity_heartbeat = None
         _release_lock()
-        _emit_compression_attempt_telemetry(
-            agent,
-            started_at=_attempt_started_at,
-            commit_status="aborted",
-            split_status="aborted",
-            failure_class=f"exception:{type(_compress_exc).__name__}",
-        )
+        _emit_aborted_attempt_telemetry(agent, _attempt_started_at, f"exception:{type(_compress_exc).__name__}")
         raise
     finally:
         if _activity_heartbeat is not None:
@@ -3640,15 +3617,11 @@ def compress_context(
                         "No messages were dropped — conversation continues unchanged. "
                         "Run /compress to retry, or /new to start a fresh session."
                     )
-                _existing_sp = getattr(agent, "_cached_system_prompt", None)
-                if not _existing_sp:
-                    _existing_sp = agent._build_system_prompt(system_message)
-                _emit_compression_attempt_telemetry(
+                _existing_sp = _existing_system_prompt(agent, system_message)
+                _emit_aborted_attempt_telemetry(
                     agent,
-                    started_at=_attempt_started_at,
-                    commit_status="aborted",
-                    split_status="aborted",
-                    failure_class=(
+                    _attempt_started_at,
+                    (
                         getattr(agent.context_compressor, "_last_summary_error", None)
                         and "summary_generation_aborted"
                     ),
@@ -3684,16 +3657,8 @@ def compress_context(
                 logger.debug(
                     "no-progress backoff arm failed", exc_info=True
                 )
-            _existing_sp = getattr(agent, "_cached_system_prompt", None)
-            if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
-            _emit_compression_attempt_telemetry(
-                agent,
-                started_at=_attempt_started_at,
-                commit_status="aborted",
-                split_status="aborted",
-                failure_class="no_progress",
-            )
+            _existing_sp = _existing_system_prompt(agent, system_message)
+            _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "no_progress")
             _release_lock()
             return messages, _existing_sp
 
@@ -3710,9 +3675,7 @@ def compress_context(
                 )
             except Exception:
                 pass
-            _existing_sp = getattr(agent, "_cached_system_prompt", None)
-            if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
+            _existing_sp = _existing_system_prompt(agent, system_message)
             _release_lock()
             return messages, _existing_sp
 
@@ -3734,22 +3697,10 @@ def compress_context(
                 ),
                 agent.session_id or "none",
             )
-            if (
-                messages_before_compression is not None
-                and messages != messages_before_compression
-            ):
-                messages[:] = copy.deepcopy(messages_before_compression)
+            _restore_messages_snapshot(messages, messages_before_compression)
             agent._last_compaction_in_place = False
-            _existing_sp = getattr(agent, "_cached_system_prompt", None)
-            if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
-            _emit_compression_attempt_telemetry(
-                agent,
-                started_at=_attempt_started_at,
-                commit_status="aborted",
-                split_status="aborted",
-                failure_class="attempt_superseded",
-            )
+            _existing_sp = _existing_system_prompt(agent, system_message)
+            _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "attempt_superseded")
             _release_lock()
             return messages, _existing_sp
 
@@ -3763,11 +3714,7 @@ def compress_context(
                     durable_cooldown_state=_durable_cooldown_state,
                     attempt_generation=_attempt_generation,
                 )
-                if (
-                    messages_before_compression is not None
-                    and messages != messages_before_compression
-                ):
-                    messages[:] = copy.deepcopy(messages_before_compression)
+                _restore_messages_snapshot(messages, messages_before_compression)
                 logger.info(
                     "Compression commit cancelled before session mutation "
                     "(session=%s).",
@@ -3781,15 +3728,11 @@ def compress_context(
                     messages=messages,
                     approx_tokens=approx_tokens,
                 )
-                _existing_sp = getattr(agent, "_cached_system_prompt", None)
-                if not _existing_sp:
-                    _existing_sp = agent._build_system_prompt(system_message)
-                _emit_compression_attempt_telemetry(
+                _existing_sp = _existing_system_prompt(agent, system_message)
+                _emit_aborted_attempt_telemetry(
                     agent,
-                    started_at=_attempt_started_at,
-                    commit_status="aborted",
-                    split_status="aborted",
-                    failure_class=(
+                    _attempt_started_at,
+                    (
                         STALL_INTERRUPTED_FAILURE_CLASS
                         if _stall_backoff
                         else "commit_fence_cancelled"
@@ -4018,16 +3961,8 @@ def compress_context(
                         )
                     except Exception:
                         pass
-                    _existing_sp = getattr(agent, "_cached_system_prompt", None)
-                    if not _existing_sp:
-                        _existing_sp = agent._build_system_prompt(system_message)
-                    _emit_compression_attempt_telemetry(
-                        agent,
-                        started_at=_attempt_started_at,
-                        commit_status="aborted",
-                        split_status="aborted",
-                        failure_class="would_grow",
-                    )
+                    _existing_sp = _existing_system_prompt(agent, system_message)
+                    _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "would_grow")
                     # Count the refusal as an ineffective-compaction strike so the anti-thrash
                     # breaker latches; otherwise auto-compress retries the same summary every turn.
                     try:
@@ -4037,15 +3972,7 @@ def compress_context(
                             "could not record rejected-compaction strike",
                             exc_info=True,
                         )
-                    # Restore ONLY the prune runway: compress() zeroed it in memory, but the kept
-                    # transcript keeps its cached prefix; 0 lets the next prune break the cache. The
-                    # durable copy was never cleared (that rides the commit), so this realigns them.
-                    if "_proactive_prune_rearm_tokens" in _compressor_attempt_snapshot:
-                        agent.context_compressor._proactive_prune_rearm_tokens = (
-                            _compressor_attempt_snapshot[
-                                "_proactive_prune_rearm_tokens"
-                            ]
-                        )
+                    _restore_prune_rearm_tokens(agent.context_compressor, _compressor_attempt_snapshot)
                     _release_lock()
                     return messages, _existing_sp
 
@@ -4339,14 +4266,9 @@ def compress_context(
                     messages[:] = copy.deepcopy(messages_before_compression)
                     compressed = messages
                     _compression_made_progress = False
-                    # Restore ONLY the prune runway: the full snapshot restore is for pre-commit
-                    # cancels (telemetry keeps failed values); runway rolls back with transcript.
-                    if "_proactive_prune_rearm_tokens" in _compressor_attempt_snapshot:
-                        agent.context_compressor._proactive_prune_rearm_tokens = (
-                            _compressor_attempt_snapshot[
-                                "_proactive_prune_rearm_tokens"
-                            ]
-                        )
+                    # Only the runway rolls back: the full snapshot restore is for pre-commit
+                    # cancels (telemetry keeps failed values).
+                    _restore_prune_rearm_tokens(agent.context_compressor, _compressor_attempt_snapshot)
                 elif (
                     in_place
                     and split_status != "in_place_committed"
@@ -4358,14 +4280,7 @@ def compress_context(
                     messages[:] = copy.deepcopy(messages_before_compression)
                     compressed = messages
                     _compression_made_progress = False
-                    # Runway rolls back with the transcript: compress() zeroed it in memory and the
-                    # durable clear only rides the archive_and_compact that just failed.
-                    if "_proactive_prune_rearm_tokens" in _compressor_attempt_snapshot:
-                        agent.context_compressor._proactive_prune_rearm_tokens = (
-                            _compressor_attempt_snapshot[
-                                "_proactive_prune_rearm_tokens"
-                            ]
-                        )
+                    _restore_prune_rearm_tokens(agent.context_compressor, _compressor_attempt_snapshot)
                 split_status = (
                     "aborted"
                     if locals().get("old_session_id") is None and not in_place
@@ -4621,9 +4536,7 @@ def _compress_context_via_codex_app_server(
             len(messages),
             f"{approx_tokens:,}" if approx_tokens else "unknown",
         )
-        existing_prompt = getattr(agent, "_cached_system_prompt", None)
-        if not existing_prompt:
-            existing_prompt = agent._build_system_prompt(system_message)
+        existing_prompt = _existing_system_prompt(agent, system_message)
         return messages, existing_prompt
 
     # Automatic entrypoints honor the compressor-owned cooldown: a recent compaction
@@ -4639,9 +4552,7 @@ def _compress_context_via_codex_app_server(
                 len(messages),
                 f"{approx_tokens:,}" if approx_tokens else "unknown",
             )
-            existing_prompt = getattr(agent, "_cached_system_prompt", None)
-            if not existing_prompt:
-                existing_prompt = agent._build_system_prompt(system_message)
+            existing_prompt = _existing_system_prompt(agent, system_message)
             return messages, existing_prompt
 
     codex_session = getattr(agent, "_codex_session", None)
@@ -4653,9 +4564,7 @@ def _compress_context_via_codex_app_server(
             len(messages),
             f"{approx_tokens:,}" if approx_tokens else "unknown",
         )
-        existing_prompt = getattr(agent, "_cached_system_prompt", None)
-        if not existing_prompt:
-            existing_prompt = agent._build_system_prompt(system_message)
+        existing_prompt = _existing_system_prompt(agent, system_message)
         return messages, existing_prompt
 
     logger.info(
@@ -4703,9 +4612,7 @@ def _compress_context_via_codex_app_server(
             agent,
             str(getattr(result, "error", None) or "compaction interrupted"),
         )
-        existing_prompt = getattr(agent, "_cached_system_prompt", None)
-        if not existing_prompt:
-            existing_prompt = agent._build_system_prompt(system_message)
+        existing_prompt = _existing_system_prompt(agent, system_message)
         return messages, existing_prompt
 
     try:
@@ -4740,9 +4647,7 @@ def _compress_context_via_codex_app_server(
         getattr(result, "thread_id", None) or "",
         getattr(result, "turn_id", None) or "",
     )
-    existing_prompt = getattr(agent, "_cached_system_prompt", None)
-    if not existing_prompt:
-        existing_prompt = agent._build_system_prompt(system_message)
+    existing_prompt = _existing_system_prompt(agent, system_message)
     # Terminal edge only on success — failure/interrupt paths above return
     # without it, matching the main compress_context() gating.
     _emit_compaction_done(agent)
