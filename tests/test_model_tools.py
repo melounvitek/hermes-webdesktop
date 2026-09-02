@@ -1,7 +1,7 @@
 """Tests for model_tools.py — function call dispatch, agent-loop interception, legacy toolsets."""
 
 import json
-from unittest.mock import ANY, call, patch
+from unittest.mock import patch
 
 
 from model_tools import (
@@ -10,7 +10,6 @@ from model_tools import (
     get_toolset_for_tool,
     _AGENT_LOOP_TOOLS,
     _LEGACY_TOOLSET_MAP,
-    TOOL_TO_TOOLSET_MAP,
 )
 
 
