@@ -1,13 +1,11 @@
-"""Backend git operations for the desktop coding rail + Codex-style review pane.
+"""Backend git operations for the desktop coding rail + review pane.
 
-The desktop's git affordances (coding-rail status, worktree lanes, review pane,
-branch switch) run as Electron-local git on the user's machine. On a *remote*
-gateway those would operate on the wrong filesystem, so this module mirrors them
-over the dashboard's authenticated REST surface — the same pattern as ``/api/fs``.
-
-Everything shells out to the system ``git`` (and ``gh`` for ship info / PRs).
-Reads degrade to ``None`` / empty on a non-repo; mutations raise so the renderer
-can surface a toast. Callers pass an already path-hardened ``cwd``.
+The desktop's git affordances run as Electron-local git; on a *remote* gateway
+those would hit the wrong filesystem, so this module mirrors them over the
+dashboard's authenticated REST surface (same pattern as ``/api/fs``). Everything
+shells out to system ``git`` (and ``gh`` for PRs). Reads degrade to ``None`` /
+empty on a non-repo; mutations raise so the renderer can toast. Callers pass an
+already path-hardened ``cwd``.
 """
 
 from __future__ import annotations
@@ -144,14 +142,9 @@ def _default_branch_name(cwd: str) -> str | None:
     head = _git_out(cwd, ["rev-parse", "--abbrev-ref", "origin/HEAD"]).strip()
     if head and head != "origin/HEAD":
         return head.split("/", 1)[-1]
-    for ref in (
-        "refs/heads/main",
-        "refs/heads/master",
-        "refs/remotes/origin/main",
-        "refs/remotes/origin/master",
-    ):
-        code, _, _ = _git(cwd, ["rev-parse", "--verify", "--quiet", ref])
-        if code == 0:
+    for ref in ("refs/heads/main", "refs/heads/master",
+                "refs/remotes/origin/main", "refs/remotes/origin/master"):
+        if _git(cwd, ["rev-parse", "--verify", "--quiet", ref])[0] == 0:
             return ref.split("/")[-1]
     return None
 
@@ -161,8 +154,7 @@ def _default_branch_name(cwd: str) -> str | None:
 
 def _walk_entries(raw: str):
     """Yield (tag, xy, path) per changed file from ``git status --porcelain=v2 -z``,
-    skipping branch headers and the rename/copy origin-path records. One walker
-    feeds the rail, the review list, and the commit flow."""
+    skipping branch headers and rename/copy origin-path records."""
     records = raw.split("\0")
     i = 0
     while i < len(records):
@@ -188,13 +180,9 @@ def _entry_staged(tag: str, xy: str) -> bool:
 
 def _classify(tag: str, xy: str, path: str) -> dict:
     y = xy[1] if len(xy) > 1 else "."
-    return {
-        "path": path,
-        "staged": _entry_staged(tag, xy),
-        "unstaged": tag == "?" or (tag in ("1", "2") and y not in (".", "?")),
-        "untracked": tag == "?",
-        "conflicted": tag == "u",
-    }
+    return {"path": path, "staged": _entry_staged(tag, xy),
+            "unstaged": tag == "?" or (tag in ("1", "2") and y not in (".", "?")),
+            "untracked": tag == "?", "conflicted": tag == "u"}
 
 
 def _status_letter(tag: str, xy: str) -> str:
@@ -241,19 +229,11 @@ def repo_status(cwd: str) -> dict | None:
     added += sum(_untracked_insertions(cwd, f["path"]) for f in files[:_UNTRACKED_SCAN_CAP] if f["untracked"])
 
     return {
-        "branch": branch,
-        "defaultBranch": _default_branch_name(cwd),
-        "detached": detached,
-        "ahead": ahead,
-        "behind": behind,
-        "staged": sum(f["staged"] for f in files),
-        "unstaged": sum(f["unstaged"] for f in files),
-        "untracked": sum(f["untracked"] for f in files),
-        "conflicted": sum(f["conflicted"] for f in files),
-        "changed": len(files),
-        "added": added,
-        "removed": removed,
-        "files": files[:200],
+        "branch": branch, "defaultBranch": _default_branch_name(cwd), "detached": detached,
+        "ahead": ahead, "behind": behind,
+        "staged": sum(f["staged"] for f in files), "unstaged": sum(f["unstaged"] for f in files),
+        "untracked": sum(f["untracked"] for f in files), "conflicted": sum(f["conflicted"] for f in files),
+        "changed": len(files), "added": added, "removed": removed, "files": files[:200],
     }
 
 
@@ -465,22 +445,14 @@ def _pr_query(owner: str, name: str, branches: list[str], numbers: list[int]) ->
     # directly also tells us its branch — so it lands in the same by-branch map
     # as everything else.
     fields += [f"n{i}: pullRequest(number: {n}) {{ {_PR_NODE_FIELDS} }}" for i, n in enumerate(numbers)]
-    return (
-        f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{\n"
-        + "\n".join(fields)
-        + "\n} }"
-    )
+    return (f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{\n"
+            + "\n".join(fields) + "\n} }")
 
 
 def _pr_payload(pr: dict) -> dict:
-    return {
-        "branch": str(pr.get("headRefName")),
-        "draft": bool(pr.get("isDraft")),
-        "number": int(pr.get("number") or 0),
-        "state": str(pr.get("state") or "").lower(),
-        "title": str(pr.get("title") or ""),
-        "url": str(pr.get("url") or ""),
-    }
+    return {"branch": str(pr.get("headRefName")), "draft": bool(pr.get("isDraft")),
+            "number": int(pr.get("number") or 0), "state": str(pr.get("state") or "").lower(),
+            "title": str(pr.get("title") or ""), "url": str(pr.get("url") or "")}
 
 
 def review_pr_list(cwd: str, branches: list[str], numbers: list[int] = None) -> dict:
@@ -594,9 +566,8 @@ def _slugify(name: str) -> str:
 
 
 def _default_branch(cwd: str) -> str:
-    remote = _git_out(
-        cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]
-    ).strip().replace("origin/", "", 1)
+    remote = _git_out(cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]
+                      ).strip().replace("origin/", "", 1)
     if remote:
         return remote
     configured = _git_out(cwd, ["config", "--get", "init.defaultBranch"]).strip()
@@ -733,27 +704,11 @@ def branch_list(cwd: str) -> list[dict]:
         and name.split("/", 1)[-1] not in local_set
     ]
     return [
-        *(
-            {
-                "name": name,
-                "checkedOut": name in path_by_branch,
-                "isDefault": bool(trunk and name == trunk),
-                "isRemote": False,
-                "worktreePath": path_by_branch.get(name),
-            }
-            for name in locals_
-        ),
-        *(
-            {
-                # No local checkout, and never the local trunk.
-                "name": name,
-                "checkedOut": False,
-                "isDefault": False,
-                "isRemote": True,
-                "worktreePath": None,
-            }
-            for name in remotes
-        ),
+        *({"name": name, "checkedOut": name in path_by_branch, "isDefault": bool(trunk and name == trunk),
+           "isRemote": False, "worktreePath": path_by_branch.get(name)} for name in locals_),
+        # Remote rows: no local checkout, and never the local trunk.
+        *({"name": name, "checkedOut": False, "isDefault": False, "isRemote": True,
+           "worktreePath": None} for name in remotes),
     ]
 
 
@@ -776,9 +731,8 @@ def base_branch_list(cwd: str) -> list[dict]:
         return []
     # origin/HEAD when a remote exists; otherwise the local default
     # (main/master/init.defaultBranch) so a no-remote repo still flags its trunk.
-    default = _git_out(
-        cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]
-    ).strip() or _default_branch(cwd)
+    default = (_git_out(cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]).strip()
+               or _default_branch(cwd))
     return [
         {"name": name, "isRemote": name.startswith("origin/"),
          "isDefault": bool(default and name == default)}

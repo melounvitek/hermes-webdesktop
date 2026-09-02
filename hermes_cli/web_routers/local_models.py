@@ -1,14 +1,10 @@
 """Local-models dashboard routes — the desktop's window into the managed
 llama.cpp runtime.
 
-Every payload carries plain-language, pre-formatted facts the UI can show
+Every payload carries plain-language, pre-formatted facts the UI shows
 verbatim (what will this model do ON THIS MACHINE, how big is the download,
-what is the runtime doing right now), never raw internals.
-
-Long jobs (runtime install, model download) follow the repo's job pattern:
-start-POST -> {job_id} -> GET poll with byte progress. Downloads are
-byte-size checked against what the server declared (no hash verification by
-design); a short download deletes the file and reports it plainly.
+what is the runtime doing), never raw internals. Long jobs follow the repo's
+job pattern: start-POST -> {job_id} -> GET poll with byte progress.
 """
 
 from __future__ import annotations
@@ -65,17 +61,12 @@ def _human_gb(n: int | float) -> str:
 
 def _job(kind: str, target: str, model_id: str | None = None) -> Dict[str, Any]:
     job = {
-        "job_id": uuid.uuid4().hex[:12],
-        "kind": kind,               # "runtime-install" | "model-download" | ...
-        "target": target,
+        "job_id": uuid.uuid4().hex[:12], "kind": kind, "target": target,
         "model_id": model_id,       # catalog id for downloads; None otherwise
         "status": "running",        # running | done | error
         "phase": "starting",        # human-readable step name
-        "detail": "",
-        "total_bytes": None,
-        "done_bytes": 0,
-        "started_at": time.time(),
-        "error": None,
+        "detail": "", "total_bytes": None, "done_bytes": 0,
+        "started_at": time.time(), "error": None,
     }
     with _JOBS_LOCK:
         _JOBS[job["job_id"]] = job
@@ -98,9 +89,8 @@ def _finish(job: Dict[str, Any], detail: str) -> None:
 def _spawn_job(job: Dict[str, Any], name: str, body: Callable[[], None], *,
                fail_msg: str | None = None,
                on_exit: Callable[[], None] | None = None) -> None:
-    """Run ``body`` on a daemon thread; any exception marks the job errored
-    (optionally warning ``fail_msg`` with the exception). ``on_exit`` always
-    runs last (lock release)."""
+    """Run ``body`` on a daemon thread; an exception marks the job errored
+    (warning ``fail_msg`` when given). ``on_exit`` always runs last."""
     def _run():
         try:
             body()
@@ -117,9 +107,8 @@ def _spawn_job(job: Dict[str, Any], name: str, body: Callable[[], None], *,
 
 
 def _refresh_runtime(skip_msg: str) -> None:
-    """Bounce a running router so it rescans the models dir; the router only
-    scans at spawn, so a new/deleted file is invisible until then. Never
-    raises — the file operation already succeeded."""
+    """Bounce a running router so it rescans the models dir (it only scans at
+    spawn). Never raises — the file operation already succeeded."""
     try:
 
         bootstrap.refresh_local_runtime()
@@ -152,10 +141,9 @@ _CHUNK = 4 << 20
 
 
 def _probe_range_support(url: str) -> int:
-    """Total size when the server honors Range requests, else 0.
-
-    A 401/403 from the CDN means the repo is gated or the catalog names a
-    wrong repo — raise with a plain-language message, not a bare status."""
+    """Total size when the server honors Range requests, else 0. A 401/403
+    means the repo is gated or the catalog names a wrong repo — raise with a
+    plain-language message, not a bare status."""
     req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
@@ -195,19 +183,15 @@ def _variant_files_on_disk(model_id: str) -> "list[Path]":
 def download_file(url: str, dest: Path, job: Dict[str, Any],
                   *,
                   base_done: int = 0, keep_totals: bool = False) -> None:
-    """Download url -> dest with byte progress on ``job``.
+    """Download url -> dest with byte progress on ``job``; ranged-parallel when
+    the server supports it, single-stream otherwise. Never leaves a .part.
 
-    Ranged-parallel when the server supports it, single-stream fallback
-    otherwise. No integrity check against the CATALOG by design: catalog
-    sizes may lag an upstream re-upload, and a newer file must download
-    fine. Completeness is checked only against what the SERVER declared for
-    this transfer (range-probe total / Content-Length), so a dropped
-    connection still errors instead of staging a truncated file. Never
-    leaves a .part behind.
-
-    Multi-file variants: ``base_done`` offsets the progress so this file's
-    bytes accumulate onto the files before it, and ``keep_totals=True``
-    stops the per-file size from overwriting the variant's total.
+    No integrity check against the CATALOG by design (catalog sizes may lag a
+    re-upload); completeness is checked only against what the SERVER declared
+    (range-probe total / Content-Length), so a dropped connection still errors
+    instead of staging a truncated file. Multi-file variants: ``base_done``
+    offsets progress onto earlier files and ``keep_totals=True`` stops the
+    per-file size from overwriting the variant's total.
     """
     tmp = dest.with_suffix(".part")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -241,9 +225,7 @@ def download_file(url: str, dest: Path, job: Dict[str, Any],
                 f.truncate(total)
             job["detail"] = ""
             errors: list[Exception] = []
-            bounds = [(i * total // _DOWNLOAD_CONNECTIONS,
-                       (i + 1) * total // _DOWNLOAD_CONNECTIONS - 1)
-                      for i in range(_DOWNLOAD_CONNECTIONS)]
+            n = _DOWNLOAD_CONNECTIONS
 
             def fetch_range(start: int, end: int) -> None:
                 try:
@@ -256,9 +238,9 @@ def download_file(url: str, dest: Path, job: Dict[str, Any],
                 except Exception as exc:  # noqa: BLE001
                     errors.append(exc)
 
-            threads = [threading.Thread(target=fetch_range, args=b, daemon=True,
-                                        name=f"lm-dl-{i}")
-                       for i, b in enumerate(bounds)]
+            threads = [threading.Thread(target=fetch_range, daemon=True, name=f"lm-dl-{i}",
+                                        args=(i * total // n, (i + 1) * total // n - 1))
+                       for i in range(n)]
             for t in threads:
                 t.start()
             for t in threads:
@@ -405,11 +387,9 @@ def _assign_default(job: Dict[str, Any], model_id: str) -> None:
 
 
 def _loaded_models(running: Dict[str, Any]) -> "tuple[Dict[str, str], Dict[str, Any]]":
-    """Which staged models are resident right now, plus how each is placed.
-
-    Placement is the granted window from the child itself and the plan's
-    spill facts from the preset decision — the difference between 'fast'
-    and 'why is my CPU busy', so it must be inspectable, not inferred."""
+    """Resident models right now, plus how each is placed (granted window
+    from the child, spill facts from the preset decision) — the difference
+    between 'fast' and 'why is my CPU busy', so it must be inspectable."""
 
     data = _router_request(running, "/models", timeout=3)
     # Everything resident or becoming resident: 'loading' renders as its own
@@ -446,11 +426,8 @@ def _loaded_models(running: Dict[str, Any]) -> "tuple[Dict[str, str], Dict[str, 
 @router.get("/api/local-models/status")
 def local_models_status():
     """Cheap, immediate, never blocks on probes: config state + installed
-    runtime + staged models + supervisor state. GPU facts come from
-    /api/local-models/hardware (slower, polled).
-
-    Sync def on purpose: blocking urlopen/scans run in FastAPI's threadpool
-    instead of stalling the event loop."""
+    runtime + staged models + supervisor state (GPU facts live in /hardware).
+    Sync def on purpose: blocking urlopen/scans run in the threadpool."""
 
     section = _runtime_section()
     configured_tag = section.get("tag") or binaries.default_tag()
@@ -460,21 +437,18 @@ def local_models_status():
     # newest installed).
     tag = configured_tag if configured_tag in have else (have[0] if have else configured_tag)
 
-    # A pending engine update exists when the user runs the local engine
-    # (enabled + something installed) and the configured tag — pinned or the
-    # Hermes-release default — is newer than anything on disk. The download
+    # Update pending = engine in use (enabled + something installed) and the
+    # configured tag (pinned or release default) isn't on disk. The download
     # is a button click, never automatic.
     update_available = bool(
         section.get("enabled") and have and configured_tag not in have)
 
-    runtime_installed = False
     runtime_backend = None
     root = binaries.runtimes_root() / tag
     if root.exists():
         for backend_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             try:
                 binaries.server_binary(backend_dir)
-                runtime_installed = True
                 runtime_backend = backend_dir.name
                 break
             except Exception:  # noqa: BLE001
@@ -493,8 +467,7 @@ def local_models_status():
 
     running = _state_endpoint()
 
-    # Resident models from the live router; {} when down. Feeds the pane's
-    # Loaded pills and eject buttons.
+    # Resident models from the live router ({} when down): Loaded pills + eject.
     loaded: Dict[str, str] = {}
     placement: Dict[str, Any] = {}
     if running is not None:
@@ -523,7 +496,7 @@ def local_models_status():
         "tag": tag,
         "configured_tag": configured_tag,
         "update_available": update_available,
-        "runtime_installed": runtime_installed,
+        "runtime_installed": runtime_backend is not None,
         "runtime_backend": runtime_backend,
         "server_running": running is not None,
         "server_base_url": (running or {}).get("base_url"),
@@ -551,22 +524,16 @@ def _loading_progress() -> Dict[str, Any]:
 
 @router.get("/api/local-models/hardware")
 def local_models_hardware():
-    """The budget as plain facts. Polled by the pane and the statusbar
-    resource item (throttled client-side). Sync def on purpose: shells out
-    to nvidia-smi and probes budgets — threadpool, not loop."""
+    """The budget as plain facts, polled by the pane and statusbar. Sync def
+    on purpose: shells out to nvidia-smi — threadpool, not loop."""
 
     budget = hardware.probe_budget()
     ram_total, ram_avail = hardware._ram_bytes()
     out = {
-        "uma": budget.uma,
-        "vram_total_bytes": budget.total_device_bytes,
-        "vram_usable_bytes": budget.usable_vram_bytes,
-        "ram_total_bytes": ram_total,
-        "ram_available_bytes": ram_avail,
-        "vram_label": _human_gb(budget.total_device_bytes),
-        "gpu_name": None,
-        "gpu_util_percent": None,
-        "vram_used_bytes": None,
+        "uma": budget.uma, "vram_total_bytes": budget.total_device_bytes,
+        "vram_usable_bytes": budget.usable_vram_bytes, "ram_total_bytes": ram_total,
+        "ram_available_bytes": ram_avail, "vram_label": _human_gb(budget.total_device_bytes),
+        "gpu_name": None, "gpu_util_percent": None, "vram_used_bytes": None,
     }
     # GPU identity + live utilization (NVIDIA; other vendors degrade to None
     # and the UI hides those readouts).
@@ -602,22 +569,18 @@ _QUANT_REASON_COMPACT = ("Compact build sized for this machine ({quant}) — "
 
 @router.get("/api/local-models/catalog")
 def local_models_catalog():
-    """Every entry answers the user's three questions up front: how big is
-    the download, will it fit, and what context/speed shape will I get —
-    from the catalog's measured numbers + this machine's budget. The row
-    advertises the BEST build for this machine (highest quality that runs
-    fully on the GPU at the 64K floor; else the smallest that works, spilled
-    and priced). No entry is hidden; unaffordable models show WHY. Sync def
-    on purpose: probe_budget + catalog I/O block — threadpool, not loop."""
+    """Every entry answers up front: how big is the download, will it fit,
+    and what context/speed shape will I get. The row advertises the BEST
+    build for this machine (highest quality fully on GPU at the 64K floor;
+    else the smallest that works, spilled and priced). No entry is hidden;
+    unaffordable models show WHY. Sync def: blocking I/O -> threadpool."""
 
-    # Serve the catalog already in memory; a TTL-gated background fetch lands
-    # new entries for the next call (day-0 models without an app release).
+    # Serve the in-memory catalog; a TTL-gated background fetch lands new
+    # entries for the next call (day-0 models without an app release).
     catalog.refresh_catalog_soon()
-
-    # Planning budget: price against machine capacity, not live-free VRAM —
-    # a loaded model must not make every row unaffordable.
+    # Planning budget: machine capacity, not live-free VRAM — a loaded model
+    # must not make every row unaffordable.
     budget = hardware.probe_budget(planning=True)
-    # The default pick for THIS machine: quality-ranked, fit- and speed-gated.
     # The reason key ships with the row so the Recommended badge's tooltip is
     # the branch that actually fired, not a re-derivation that can drift.
     picked = catalog.recommended_entry(budget, _eligible_entries())
@@ -630,24 +593,20 @@ def local_models_catalog():
     for entry in catalog.CATALOG:
         choice = catalog.select_variant(entry, budget)
         # Any variant of this family on disk counts as downloaded.
-        downloaded_variant = next(
-            (v for v in entry.variants if v.model_id in staged_ids), None)
+        dl = next((v for v in entry.variants if v.model_id in staged_ids), None)
         row: Dict[str, Any] = {
-            "id": entry.id,
-            "display_name": entry.display_name,
-            "description": entry.description,
+            "id": entry.id, "display_name": entry.display_name, "description": entry.description,
             "native_context": entry.n_ctx_train,
             "native_context_label": f"{entry.n_ctx_train // 1024}K",
             "recommended": entry.id == recommended,
             "recommended_reason": recommended_reason if entry.id == recommended else None,
-            "downloaded": downloaded_variant is not None,
-            "downloaded_model_id": downloaded_variant.model_id if downloaded_variant else None,
-            "downloaded_quant": downloaded_variant.quant if downloaded_variant else None,
-            "mtp": entry.mtp,
-            "vision": entry.mmproj is not None,
+            "downloaded": dl is not None,
+            "downloaded_model_id": dl.model_id if dl else None,
+            "downloaded_quant": dl.quant if dl else None,
+            "mtp": entry.mtp, "vision": entry.mmproj is not None,
             # Day-0 architectures need the llama.cpp release where their support
-            # landed. True gates download/activate in the pane until the engine
-            # updates; the row still renders (visible + explained beats hidden).
+            # landed: True gates download/activate until the engine updates, but
+            # the row still renders (visible + explained beats hidden).
             "needs_engine": _engine_too_old(entry.min_engine),
             "min_engine": entry.min_engine or None,
         }
@@ -655,9 +614,7 @@ def local_models_catalog():
             smallest = min(entry.variants, key=lambda v: v.size_bytes)
             smallest_total = entry.download_bytes(smallest)
             row.update({
-                "fits": False,
-                "size_bytes": smallest_total,
-                "size_label": _human_gb(smallest_total),
+                "fits": False, "size_bytes": smallest_total, "size_label": _human_gb(smallest_total),
                 "fit_summary": "Needs more memory than this machine has",
                 "fit_detail": (f"even the most compact build ({smallest.quant}, "
                                f"{_human_gb(smallest_total)}) exceeds GPU + system memory"),
@@ -675,13 +632,9 @@ def local_models_catalog():
         decision = context_policy.initial_window(entry.profile(variant), budget, overhead_bytes=overhead)
         download_total = entry.download_bytes(variant)
         row.update({
-            "fits": True,
-            "model_id": variant.model_id,
-            "quant": variant.quant,
-            "quant_validated": variant.validated,
-            "size_bytes": download_total,
-            "size_label": _human_gb(download_total),
-            "variant_count": len(entry.variants),
+            "fits": True, "model_id": variant.model_id, "quant": variant.quant,
+            "quant_validated": variant.validated, "size_bytes": download_total,
+            "size_label": _human_gb(download_total), "variant_count": len(entry.variants),
             "quant_reason": _QUANT_REASONS.get(
                 choice.reason_key, _QUANT_REASON_COMPACT).format(quant=variant.quant),
         })
@@ -711,13 +664,11 @@ class RuntimeInstallBody(BaseModel):
 
 
 def _runtime_progress_hook(job: Dict[str, Any]):
-    """Adapter: ensure_runtime_installed's progress stream -> job fields.
-
-    Throttled to ~4 updates/s. Byte counters are CUMULATIVE across the plan:
-    a multi-asset engine (CUDA zip + cudart zip) reads as one growing
-    download, not a bar that restarts per asset; the total grows as each
-    asset's size becomes known. Unpack/verify keep the download's counters —
-    a bar bouncing back to zero after the bytes finished reads as failure."""
+    """Adapter: ensure_runtime_installed's progress stream -> job fields,
+    throttled to ~4 updates/s. Byte counters are CUMULATIVE across the plan
+    (a multi-asset engine reads as one growing download, total growing as
+    each asset's size becomes known); unpack/verify keep the counters — a bar
+    bouncing back to zero after the bytes finished reads as failure."""
     state = {"last": 0.0, "banked": 0, "asset": None, "asset_total": 0}
 
     def hook(stage: str, done: int, total: int, label: str) -> None:
@@ -856,9 +807,9 @@ async def local_models_download(body: ModelDownloadBody):
 
 @router.delete("/api/local-models/models/{model_id}")
 async def local_models_delete(model_id: str):
-    """Remove a staged model: every split part plus its private assets, then
-    bounce the router off the request thread (deleting the active file
-    mid-serve is exactly the stale state the refresh exists for)."""
+    """Remove every split part plus private assets, then bounce the router off
+    the request thread (deleting the active file mid-serve is exactly the
+    stale state the refresh exists for)."""
     files = _variant_files_on_disk(model_id)
     if not files:
         raise HTTPException(status_code=404, detail="model not found")
@@ -899,16 +850,12 @@ _QUICKSTART_LOCK = threading.Lock()
 
 @router.post("/api/local-models/quickstart")
 async def local_models_quickstart(body: QuickstartBody):
-    """The dummy-proof path: one job that installs the runtime (if missing),
-    downloads this machine's build of the recommended model (if missing),
-    and makes it the default for new chats. Each leg is the same code the
-    individual routes run — this route only sequences them, so 'Configure'
-    and quickstart can never disagree about what gets installed.
-
-    Preflight rejects (no servable entry, engine too old) fail the POST
-    synchronously so the button can explain itself; everything slow runs in
-    the job with the usual phase/byte progress.
-    """
+    """One job: install the runtime (if missing), download this machine's
+    build of the recommended model (if missing), make it the default. Each
+    leg is the same code the individual routes run, so 'Configure' and
+    quickstart can never disagree. Preflight rejects (no servable entry,
+    engine too old) fail the POST synchronously so the button can explain
+    itself; everything slow runs in the job with phase/byte progress."""
 
     # Resolve the target entry: explicit id, else this machine's
     # recommendation, else the first catalog entry this machine can serve.
@@ -983,14 +930,9 @@ async def local_models_quickstart(body: QuickstartBody):
 
     _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s",
                on_exit=_QUICKSTART_LOCK.release)
-    return {
-        "job_id": job["job_id"],
-        "model_id": entry.id,
-        "display_name": entry.display_name,
-        "needs_runtime": need_runtime,
-        "needs_download": need_download,
-        "download_bytes": download_bytes,
-    }
+    return {"job_id": job["job_id"], "model_id": entry.id, "display_name": entry.display_name,
+            "needs_runtime": need_runtime, "needs_download": need_download,
+            "download_bytes": download_bytes}
 
 
 def _stop_server() -> None:
@@ -1027,10 +969,9 @@ _SERVER_ACTIONS = {"stop": _stop_server, "start": _start_server}
 
 @router.post("/api/local-models/server")
 async def local_models_server(body: ServerActionBody):
-    """Turn the local engine off (stop the server, free ALL GPU memory, and
-    disable auto-start) or back on. The off switch is the whole-engine
-    counterpart of per-model eject — and unlike eject it IS durable: the
-    user said off, so boots stay off until they say on."""
+    """Turn the local engine off (stop the server, free ALL GPU memory,
+    disable auto-start) or back on. Unlike per-model eject the off switch IS
+    durable: the user said off, so boots stay off until they say on."""
     action = (body.action or "").strip().lower()
     if action not in _SERVER_ACTIONS:
         raise HTTPException(status_code=400, detail="action must be 'stop' or 'start'")
@@ -1050,10 +991,9 @@ class ModelEjectBody(BaseModel):
 
 @router.post("/api/local-models/eject")
 def local_models_eject(body: ModelEjectBody):
-    """Free a loaded model's GPU memory now. Nothing reloads it except
-    demand — the next message to it (residency v2: no automatic loading
-    exists anywhere). Sync def on purpose: the fallback path blocks on a
-    urlopen with a 120s timeout — threadpool, never the event loop."""
+    """Free a loaded model's GPU memory now; only demand (the next message)
+    reloads it — residency v2 has no automatic loading anywhere. Sync def:
+    the fallback path blocks on a 120s urlopen — threadpool, never the loop."""
 
     sup = bootstrap.get_supervisor()
     if sup is not None:
@@ -1082,13 +1022,11 @@ class ModelActivateBody(BaseModel):
 
 @router.post("/api/local-models/activate")
 async def local_models_activate(body: ModelActivateBody):
-    """Make a downloaded model the default for new chats. Pure selection
-    (residency v2): a config write through the same machinery as
-    /api/model/set, plus making sure the server is up. NO model loading —
-    models load on first inference, always; an empty router costs nothing.
-    Kept as a job for UI continuity."""
-    # Split variants stage under their first part — resolve like the rest
-    # of the routes instead of assuming a single flat file.
+    """Make a downloaded model the default for new chats: a config write via
+    the same machinery as /api/model/set plus making sure the server is up.
+    NO model loading (residency v2: models load on first inference; an empty
+    router costs nothing). Kept as a job for UI continuity."""
+    # Split variants stage under their first part — resolve like the other routes.
 
     if body.model_id not in bootstrap.staged_model_ids():
         raise HTTPException(status_code=404, detail=f"{body.model_id} is not downloaded")
@@ -1138,9 +1076,8 @@ async def local_models_job(job_id: str):
 
 @router.get("/api/local-models/search")
 async def local_models_search(q: str, limit: int = 20):
-    """Full-text HF search over GGUF models — the firehose behind the
-    curated catalog. Per-quant fit pills come from the repo-files call once
-    the user opens a hit."""
+    """Full-text HF search over GGUF models — the firehose behind the curated
+    catalog; per-quant fit pills come from the repo-files call."""
 
 
     if not q.strip():
@@ -1155,9 +1092,8 @@ async def local_models_search(q: str, limit: int = 20):
 
 @router.get("/api/local-models/search/files")
 async def local_models_search_files(repo: str):
-    """The servable GGUFs in one HF repo with a rough pre-download fit
-    verdict per quant (file size + conservative fill-ins — the GGUF header
-    refines it after download)."""
+    """Servable GGUFs in one HF repo with a rough pre-download fit verdict per
+    quant (file size + conservative fill-ins; the GGUF header refines it)."""
 
 
     try:
@@ -1176,10 +1112,9 @@ class BrowsedDownloadBody(BaseModel):
 
 @router.post("/api/local-models/download-browsed")
 async def local_models_download_browsed(body: BrowsedDownloadBody):
-    """Download an arbitrary HF GGUF (browsed or pasted) into the managed
-    models dir. From the moment it lands it is a normal staged model: the
-    post-download bounce regenerates presets from its real header and the
-    fit policy owns its launch. No catalog entry — it serves 'unverified',
+    """Download an arbitrary HF GGUF into the managed models dir. Once landed
+    it is a normal staged model (the post-download bounce regenerates presets
+    from its real header); with no catalog entry it serves 'unverified',
     capabilities answered from the live server only."""
 
     paths = [p for p in (body.paths or []) if p.lower().endswith(".gguf")]
@@ -1217,10 +1152,9 @@ class SideloadBody(BaseModel):
 
 @router.post("/api/local-models/sideload")
 async def local_models_sideload(body: SideloadBody):
-    """Register a GGUF that already exists on this machine: link it into
-    the managed models dir (copy only when linking is impossible) and
-    bounce the router so it serves immediately. The original stays where
-    it is; delete-from-Hermes removes only our link."""
+    """Register a GGUF already on this machine: link it into the managed
+    models dir (copy only when linking is impossible) and bounce the router.
+    The original stays put; delete-from-Hermes removes only our link."""
 
     src = Path(body.path)
     if not src.is_file() or src.suffix.lower() != ".gguf":

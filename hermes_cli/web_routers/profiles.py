@@ -58,10 +58,8 @@ def _warn_profile_read_error(profile: str, exc: Exception) -> None:
     if key in _profile_read_warned:
         return
     _profile_read_warned.add(key)
-    _log.warning(
-        "profile session read failed for %r (reported only in the response "
-        "errors array): %s", profile, exc,
-    )
+    _log.warning("profile session read failed for %r (reported only in the response "
+                 "errors array): %s", profile, exc)
 
 sessions_router = APIRouter()
 router = APIRouter()
@@ -201,6 +199,16 @@ def _profile_errors(log_msg: str, *args, not_found=(FileNotFoundError,),
     except Exception as e:
         _log.exception(log_msg, *args)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _best_effort(log_msg: str, *args, fn, default=None):
+    """Run ``fn()``; on failure log ``log_msg`` with traceback and return
+    ``default`` (the parent operation already succeeded, so never 500)."""
+    try:
+        return fn()
+    except Exception:
+        _log.exception(log_msg, *args)
+        return default
 
 
 def _profile_targets(log_label: str, *, lightweight: bool) -> List[Tuple[str, Path]]:
@@ -441,15 +449,17 @@ def get_profiles_sessions(
     else:
         targets = _profile_targets("GET /api/profiles/sessions", lightweight=True)
 
-    min_message_count = max(0, min_messages)
-    archived_only = archived == "only"
-    include_archived = archived == "include"
     # Source scoping (see /api/sessions): recents pass exclude_sources=cron,
     # the cron-jobs section passes source=cron — two independent lists so
     # newest cron sessions can't starve the recents page.
-    source_filter = source or None
-    source_list = [s.strip() for s in (sources or "").split(",") if s.strip()]
-    exclude_list = [s.strip() for s in (exclude_sources or "").split(",") if s.strip()]
+    filters = dict(
+        source=source or None,
+        sources=[s.strip() for s in (sources or "").split(",") if s.strip()] or None,
+        exclude_sources=[s.strip() for s in (exclude_sources or "").split(",") if s.strip()] or None,
+        min_message_count=max(0, min_messages),
+        include_archived=archived == "include",
+        archived_only=archived == "only",
+    )
     # Over-fetch per profile so the merged+sorted window is correct for the
     # requested page. Capped so a huge profile can't blow up the response.
     per_profile = min(max(limit + offset, limit), 500)
@@ -465,28 +475,11 @@ def get_profiles_sessions(
             continue
         try:
             rows = db.list_sessions_rich(
-                source=source_filter,
-                sources=source_list or None,
-                exclude_sources=exclude_list or None,
-                limit=per_profile,
-                offset=0,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                order_by_last_active=order == "recent",
+                limit=per_profile, offset=0, order_by_last_active=order == "recent",
                 # Same SQL-level blob skip as /api/sessions.
-                compact_rows=not full,
-                include_pinned=True,
+                compact_rows=not full, include_pinned=True, **filters,
             )
-            profile_total = db.session_count(
-                source=source_filter,
-                sources=source_list or None,
-                exclude_sources=exclude_list or None,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                exclude_children=True,
-            )
+            profile_total = db.session_count(exclude_children=True, **filters)
             total += profile_total
             profile_totals[name] = profile_total
             merged.extend(_tag_rows(rows, name, now))
@@ -501,14 +494,8 @@ def get_profiles_sessions(
     window = _pinned_window(merged, offset, limit)
     if not full:
         _strip_session_list_rows(window)
-    return {
-        "sessions": window,
-        "total": total,
-        "profile_totals": profile_totals,
-        "limit": limit,
-        "offset": offset,
-        "errors": errors,
-    }
+    return {"sessions": window, "total": total, "profile_totals": profile_totals,
+            "limit": limit, "offset": offset, "errors": errors}
 
 
 @sessions_router.get("/api/profiles/sessions/sidebar")
@@ -556,19 +543,12 @@ def get_profiles_sessions_sidebar(
     now = time.time()
 
     def _slice(db, *, source=None, exclude=None, cap):
+        # include_pinned: a pinned conversation must reach the sidebar even
+        # when it has aged past the window, or its Pinned row renders empty.
         return db.list_sessions_rich(
-            source=source,
-            exclude_sources=exclude or None,
-            limit=cap,
-            offset=0,
-            min_message_count=1,
-            include_archived=False,
-            archived_only=False,
-            order_by_last_active=True,
-            compact_rows=True,
-            # A pinned conversation must reach the sidebar even when it has
-            # aged past the window — otherwise its Pinned row renders empty.
-            include_pinned=True,
+            source=source, exclude_sources=exclude or None, limit=cap, offset=0,
+            min_message_count=1, include_archived=False, archived_only=False,
+            order_by_last_active=True, compact_rows=True, include_pinned=True,
         )
 
     for name, home in targets:
@@ -577,15 +557,9 @@ def get_profiles_sessions_sidebar(
         db_path = Path(home) / "state.db"
         if not db_path.exists():
             continue
-        profile_cache_key = (
-            str(db_path),
-            _sidebar_db_fingerprint(db_path),
-            recents_cap,
-            tuple(recents_exclude_list),
-            cron_cap,
-            messaging_cap,
-            tuple(messaging_exclude_list),
-        )
+        profile_cache_key = (str(db_path), _sidebar_db_fingerprint(db_path), recents_cap,
+                             tuple(recents_exclude_list), cron_cap, messaging_cap,
+                             tuple(messaging_exclude_list))
         slices = _sidebar_profile_cache_get(profile_cache_key)
         if slices is None:
             db = _open_profile_db(name, home, errors)
@@ -627,16 +601,10 @@ def get_profiles_sessions_sidebar(
         return win
 
     return {
-        "recents": {
-            "sessions": _window(recents_rows, recents_cap),
-            "profiles_truncated": recents_truncated,
-            "profiles_usage": profile_totals,
-        },
+        "recents": {"sessions": _window(recents_rows, recents_cap),
+                    "profiles_truncated": recents_truncated, "profiles_usage": profile_totals},
         "cron": {"sessions": _window(cron_rows, cron_cap)},
-        "messaging": {
-            "sessions": _window(messaging_rows, messaging_cap),
-            "total": len(messaging_rows),
-        },
+        "messaging": {"sessions": _window(messaging_rows, messaging_cap), "total": len(messaging_rows)},
         "errors": errors,
     }
 
@@ -739,12 +707,8 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
         token = set_hermes_home_override(str(home))
         try:
             tree, _active_id = gateway_server._build_project_tree(
-                db,
-                preview_limit=preview_limit,
-                hydrate=False,
-                session_limit=session_limit,
-                include_discovered=False,
-            )
+                db, preview_limit=preview_limit, hydrate=False,
+                session_limit=session_limit, include_discovered=False)
             _merge_profile_tree(merged, tree["projects"], name, preview_limit)
             scoped_session_ids.extend(tree["scoped_session_ids"])
         except Exception as exc:
@@ -756,11 +720,9 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
 
     return {
         "projects": sorted(merged.values(), key=lambda p: p.get("lastActive") or 0, reverse=True),
-        # Ownership is per profile, so no single project is "the active one"
-        # here; the desktop only reads active_id to bias its overview sort.
-        "active_id": None,
-        "scoped_session_ids": scoped_session_ids,
-        "errors": errors,
+        # Ownership is per profile, so no project is "the active one" here; the
+        # desktop only reads active_id to bias its overview sort.
+        "active_id": None, "scoped_session_ids": scoped_session_ids, "errors": errors,
     }
 
 
@@ -851,13 +813,8 @@ async def create_profile_endpoint(body: ProfileCreate):
     with _profile_errors("POST /api/profiles failed", not_found=(),
                          bad_request=(ValueError, FileExistsError, FileNotFoundError)):
         path = profiles_mod.create_profile(
-            name=body.name,
-            clone_from=clone_from,
-            clone_all=body.clone_all,
-            clone_config=clone_config,
-            no_skills=body.no_skills,
-            description=body.description,
-        )
+            name=body.name, clone_from=clone_from, clone_all=body.clone_all,
+            clone_config=clone_config, no_skills=body.no_skills, description=body.description)
         # Match the CLI's profile-create flow: fresh named profiles get the
         # bundled skills. Cloning already copied the source's skills (incl.
         # user-installed); no_skills wrote the opt-out marker so seeding no-ops.
@@ -874,61 +831,37 @@ async def create_profile_endpoint(body: ProfileCreate):
     # dashboard page or `<profile> setup` afterward.
     provider = (body.provider or "").strip()
     model = (body.model or "").strip()
-    model_set = False
-    if provider and model:
-        try:
-            _write_profile_model(path, provider, model)
-            model_set = True
-        except Exception:
-            _log.exception("Setting model for new profile %s failed", body.name)
-
-    mcp_written = 0
-    if body.mcp_servers:
-        try:
-            mcp_written = _write_profile_mcp_servers(path, body.mcp_servers)
-        except Exception:
-            _log.exception("Writing MCP servers for new profile %s failed", body.name)
-
+    model_set = bool(provider and model) and _best_effort(
+        "Setting model for new profile %s failed", body.name,
+        fn=lambda: (_write_profile_model(path, provider, model), True)[1], default=False)
+    mcp_written = _best_effort(
+        "Writing MCP servers for new profile %s failed", body.name,
+        fn=lambda: _write_profile_mcp_servers(path, body.mcp_servers), default=0
+    ) if body.mcp_servers else 0
     # "keep" skill selection has replace semantics: disable every seeded skill
     # not in the list. Skipped when empty (legacy: keep the bundle).
-    skills_disabled = 0
-    if body.keep_skills:
-        try:
-            skills_disabled = _disable_unselected_skills(path, body.keep_skills)
-        except Exception:
-            _log.exception("Applying skill selection for new profile %s failed", body.name)
+    skills_disabled = _best_effort(
+        "Applying skill selection for new profile %s failed", body.name,
+        fn=lambda: _disable_unselected_skills(path, body.keep_skills), default=0
+    ) if body.keep_skills else 0
 
     # Skills-hub installs are spawned async, scoped to the new profile via
     # `-p <name>` (a fresh subprocess re-binds skills_hub.SKILLS_DIR to the
     # profile's HERMES_HOME at import). PIDs go back for the UI to poll.
-    hub_installs: List[Dict[str, Any]] = []
-    for identifier in body.hub_skills:
-        ident = (identifier or "").strip()
-        if not ident:
-            continue
-        try:
-            proc = _spawn_hermes_action(
-                ["-p", body.name, "skills", "install", ident, "--yes"],
-                _hub_action_name("install", ident),
-            )
-            hub_installs.append({"identifier": ident, "pid": proc.pid})
-        except Exception:
-            _log.exception(
-                "Spawning hub-skill install %s for new profile %s failed",
-                ident,
-                body.name,
-            )
-            hub_installs.append({"identifier": ident, "pid": None})
+    def _spawn_install(ident: str):
+        return _spawn_hermes_action(["-p", body.name, "skills", "install", ident, "--yes"],
+                                    _hub_action_name("install", ident)).pid
 
-    return {
-        "ok": True,
-        "name": body.name,
-        "path": str(path),
-        "model_set": model_set,
-        "mcp_written": mcp_written,
-        "skills_disabled": skills_disabled,
-        "hub_installs": hub_installs,
-    }
+    hub_installs: List[Dict[str, Any]] = [
+        {"identifier": ident, "pid": _best_effort(
+            "Spawning hub-skill install %s for new profile %s failed", ident, body.name,
+            fn=lambda: _spawn_install(ident))}
+        for ident in ((i or "").strip() for i in body.hub_skills) if ident
+    ]
+
+    return {"ok": True, "name": body.name, "path": str(path), "model_set": model_set,
+            "mcp_written": mcp_written, "skills_disabled": skills_disabled,
+            "hub_installs": hub_installs}
 
 
 @router.get("/api/profiles/active")
@@ -1000,27 +933,16 @@ async def open_profile_terminal_endpoint(name: str):
             subprocess.Popen(["cmd.exe", "/c", "start", "", command])
         elif sys.platform == "darwin":
             escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-            applescript = (
-                'tell application "Terminal"\n'
-                "activate\n"
-                f'do script "{escaped}"\n'
-                "end tell"
-            )
-            subprocess.Popen(["osascript", "-e", applescript])
+            subprocess.Popen(["osascript", "-e",
+                              f'tell application "Terminal"\nactivate\ndo script "{escaped}"\nend tell'])
         else:
             for executable, popen_args in _linux_terminal_commands(command):
-                if subprocess.call(
-                    ["which", executable],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                ) == 0:
+                if subprocess.call(["which", executable], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL) == 0:
                     subprocess.Popen(popen_args)
                     break
             else:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No supported terminal emulator found",
-                )
+                raise HTTPException(status_code=400, detail="No supported terminal emulator found")
     return {"ok": True, "command": command}
 
 
@@ -1042,17 +964,8 @@ async def rename_profile_endpoint(name: str, body: ProfileRename):
     except ValueError:
         is_default = False
     if is_default:
-        return {
-            "ok": True,
-            "name": "default",
-            "display_name": body.new_name.strip(),
-            "path": str(path),
-        }
-    return {
-        "ok": True,
-        "name": profiles_mod.normalize_profile_name(body.new_name),
-        "path": str(path),
-    }
+        return {"ok": True, "name": "default", "display_name": body.new_name.strip(), "path": str(path)}
+    return {"ok": True, "name": profiles_mod.normalize_profile_name(body.new_name), "path": str(path)}
 
 
 @router.delete("/api/profiles/{name}")
@@ -1107,14 +1020,11 @@ async def update_profile_soul(name: str, body: ProfileSoulUpdate):
         # at the umask default (profiles chmods only .env to 0600) and SOUL.md
         # is not a secret. (The default profile's seeder runs on every
         # load_config, so its file already exists and preserve_mode applies.)
-        atomic_write_text(
-            soul_path, body.content, preserve_mode=True, create_mode=0o644
-        )
+        atomic_write_text(soul_path, body.content, preserve_mode=True, create_mode=0o644)
 
     try:
         # atomic_write_text() writes a temp file, fsyncs it and replaces the
-        # original — three syscalls that block for as long as the filesystem
-        # takes to durably commit the persona document.
+        # original — blocking for as long as the filesystem takes to commit.
         await run_in_threadpool(_run)
     except OSError as e:
         _log.exception("PUT /api/profiles/%s/soul failed", name)
@@ -1134,11 +1044,7 @@ async def update_profile_description_endpoint(name: str, body: ProfileDescriptio
                          not_found=(), bad_request=()):
         # write_profile_meta() reads profile.yaml, merges and rewrites it.
         await run_in_threadpool(
-            profiles_mod.write_profile_meta,
-            profile_dir,
-            description=text,
-            description_auto=False,
-        )
+            profiles_mod.write_profile_meta, profile_dir, description=text, description_auto=False)
     return {"ok": True, "description": text, "description_auto": False}
 
 
@@ -1237,29 +1143,22 @@ async def import_profile_endpoint(body: ProfileImport):
             profiles_mod.import_profile, archive, name=(body.name or "").strip() or None)
 
     imported = profile_dir.name
+
     # Match the CLI import flow: create the wrapper alias when it's safe.
-    try:
+    def _wrapper():
         if not profiles_mod.check_alias_collision(imported):
             profiles_mod.create_wrapper_script(imported)
-    except Exception:
-        _log.exception("Creating wrapper for imported profile %s failed", imported)
+    _best_effort("Creating wrapper for imported profile %s failed", imported, fn=_wrapper)
 
     # Surface the bundled desktop appearance overlay (if the archive carried
     # one) so the desktop can apply theme/interface prefs without another
     # round-trip.
     desktop_overlay = None
     if (profile_dir / "desktop.json").is_file():
-        try:
-            desktop_overlay = _read_desktop_overlay(profile_dir)
-        except Exception:
-            _log.exception("Reading desktop.json from imported profile %s failed", imported)
-
-    return {
-        "ok": True,
-        "name": imported,
-        "path": str(profile_dir),
-        "desktop": desktop_overlay,
-    }
+        desktop_overlay = _best_effort(
+            "Reading desktop.json from imported profile %s failed", imported,
+            fn=lambda: _read_desktop_overlay(profile_dir))
+    return {"ok": True, "name": imported, "path": str(profile_dir), "desktop": desktop_overlay}
 
 
 @router.get("/api/profiles/{name}/desktop-overlay")
