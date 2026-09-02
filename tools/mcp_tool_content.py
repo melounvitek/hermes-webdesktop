@@ -2,7 +2,10 @@
 capping, _meta filtering, image/audio caching to MEDIA tags, resource links and
 embedded resources."""
 
+import base64
 import logging
+import mimetypes
+from typing import Any, Dict, Optional, Tuple
 from tools.ansi_strip import strip_unicode_tags
 from tools.mcp_tool_common import mcp_field, _core
 from tools.mcp_tool_schema import mcp_prefixed_tool_name
@@ -16,6 +19,14 @@ logger = logging.getLogger("tools.mcp_tool")
 # so ordinary large results reach spillover intact; only pathological floods
 # are lossy-truncated here.
 _MCP_HARD_RESULT_CAP_CHARS = 2_000_000
+
+# Hard cap on decoded resource bytes from one block, so a misbehaving server
+# can't fill the cache disk.
+_MCP_RESOURCE_MAX_BYTES = 50 * 1024 * 1024
+
+# Base64 expands ~4/3; reject oversized payloads BEFORE decoding so a multi-GB
+# blob string is never transiently doubled in memory.
+_MCP_RESOURCE_MAX_B64_CHARS = _MCP_RESOURCE_MAX_BYTES * 4 // 3 + 4
 
 
 def _truncate_mcp_text_result(text: str, max_chars: int = _MCP_HARD_RESULT_CAP_CHARS) -> str:
@@ -48,7 +59,7 @@ def _is_reserved_mcp_meta_key(key: str) -> bool:
     )
 
 
-def _strip_reserved_meta_keys(meta) -> "Optional[Dict[str, Any]]":
+def _strip_reserved_meta_keys(meta) -> Optional[Dict[str, Any]]:
     """Drop protocol-reserved keys from ``_meta``; None if nothing model-facing
     remains or the input wasn't a mapping."""
     if not isinstance(meta, dict):
@@ -58,70 +69,102 @@ def _strip_reserved_meta_keys(meta) -> "Optional[Dict[str, Any]]":
     return out or None
 
 
+def _base_mime(mime_type) -> str:
+    """``type/subtype`` of a MIME string, lower-cased, parameters dropped."""
+    return str(mime_type or "").split(";", 1)[0].strip().lower()
+
+
 def _mcp_image_extension_for_mime_type(mime_type: str) -> str:
     """File extension for an MCP image MIME type (``.png`` fallback)."""
-    import mimetypes
-    normalized = (mime_type or "").split(";", 1)[0].strip().lower()
+    normalized = _base_mime(mime_type)
     if normalized in {"image/jpeg", "image/jpg"}:
         return ".jpg"
     return mimetypes.guess_extension(normalized) or ".png"
 
 
-def _cache_mcp_image_block(block) -> str:
-    """Cache an ``ImageContent`` block and return a ``MEDIA:<path>`` tag.
+def _decode_block_b64(data, what: str, label: str, *, cap_what: Optional[str] = None,
+                      cap_suffix: str = "", decode_fail: str = "") -> Tuple[Optional[bytes], str]:
+    """Base64-decode one block payload: ``(bytes, "")`` or ``(None, inline_marker)``.
 
-    Returns "" (logging, not raising) when the block isn't an image, the base64
-    is malformed, or the cache rejects the bytes: one bad block must not kill
-    the tool result, and the caller falls through to any text blocks.
+    With ``cap_what`` the payload is rejected on b64 length BEFORE decoding (a
+    multi-GB string must never be transiently doubled) and on decoded size after.
+    Decode failures warn and return ``decode_fail`` ("" = drop the block).
     """
-    import base64
-
-    data = getattr(block, "data", None)
-    mime_type = mcp_field(block, "mime_type", "mimeType")
-    normalized_mime = str(mime_type or "").split(";", 1)[0].strip().lower()
-    if data is None or not normalized_mime.startswith("image/"):
-        return ""
-
+    if cap_what and len(data) > _core._MCP_RESOURCE_MAX_B64_CHARS:
+        return None, f"[MCP {cap_what} too large to cache: ~{len(data) * 3 // 4} bytes{cap_suffix}]"
     try:
         raw_bytes = base64.b64decode(data)
     except (TypeError, ValueError) as exc:
-        logger.warning("MCP image block decode failed (%s): %s", normalized_mime, exc)
-        return ""
+        logger.warning("MCP %s decode failed (%s): %s", what, label, exc)
+        return None, decode_fail
+    if cap_what and len(raw_bytes) > _core._MCP_RESOURCE_MAX_BYTES:
+        return None, f"[MCP {cap_what} too large to cache: {len(raw_bytes)} bytes{cap_suffix}]"
+    return raw_bytes, ""
 
+
+def _write_block_cache(writer: str, what: str, skip_label: str, *args,
+                       unavailable: str = "", failed: str = "", **kwargs) -> Tuple[Optional[str], str]:
+    """Call ``gateway.platforms.base.<writer>(*args, **kwargs)``: ``(path, "")`` or ``(None, marker)``.
+
+    Fail-open: gateway deps missing (e.g. cron without gateway) → debug log +
+    ``unavailable``; any other cache error → warning + ``failed``. One bad
+    block must never kill the tool result.
+    """
     try:
-        from gateway.platforms.base import cache_image_from_bytes
+        import gateway.platforms.base as _base
 
-        image_path = cache_image_from_bytes(
-            raw_bytes,
-            ext=_mcp_image_extension_for_mime_type(normalized_mime),
-        )
+        return getattr(_base, writer)(*args, **kwargs), ""
     except ImportError:
-        # gateway.platforms.base unavailable (e.g. cron without gateway deps):
-        # drop silently, callers get any text blocks that parsed.
-        logger.debug("MCP image caching skipped — gateway.platforms.base unavailable")
-        return ""
+        logger.debug("MCP %s caching skipped — gateway.platforms.base unavailable", skip_label)
+        return None, unavailable
     except Exception as exc:
-        logger.warning("MCP image block cache failed: %s", exc)
+        logger.warning("MCP %s cache failed: %s", what, exc)
+        return None, failed
+
+
+def _cache_mcp_image_block(block) -> str:
+    """Cache an ``ImageContent`` block and return a ``MEDIA:<path>`` tag.
+
+    "" (logging, not raising) when the block isn't an image, the base64 is
+    malformed, or the cache rejects the bytes: the caller falls through to any
+    text blocks.
+    """
+    data = getattr(block, "data", None)
+    mime = _base_mime(mcp_field(block, "mime_type", "mimeType"))
+    if data is None or not mime.startswith("image/"):
         return ""
+    raw_bytes, err = _decode_block_b64(data, "image block", mime)
+    if raw_bytes is None:
+        return err
+    path, err = _write_block_cache(
+        "cache_image_from_bytes", "image block", "image",
+        raw_bytes, ext=_mcp_image_extension_for_mime_type(mime),
+    )
+    return err if path is None else f"MEDIA:{path}"
 
-    return f"MEDIA:{image_path}"
+
+_WAV_MIME_EXT = {"audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav"}
 
 
-# Hard cap on decoded resource bytes from one block, so a misbehaving server
-# can't fill the cache disk.
-_MCP_RESOURCE_MAX_BYTES = 50 * 1024 * 1024
-
-
-# Base64 expands ~4/3; reject oversized payloads BEFORE decoding so a multi-GB
-# blob string is never transiently doubled in memory.
-_MCP_RESOURCE_MAX_B64_CHARS = _MCP_RESOURCE_MAX_BYTES * 4 // 3 + 4
+def _cache_mcp_audio_block(block) -> str:
+    """Cache an ``AudioContent`` block and return a ``MEDIA:`` tag; "" when not
+    audio or on any failure (same fail-open contract as the image path)."""
+    data = getattr(block, "data", None)
+    mime = _base_mime(mcp_field(block, "mime_type", "mimeType"))
+    if data is None or not mime.startswith("audio/"):
+        return ""
+    raw_bytes, err = _decode_block_b64(data, "audio block", mime, cap_what="audio resource")
+    if raw_bytes is None:
+        return err
+    ext = _WAV_MIME_EXT.get(mime) or mimetypes.guess_extension(mime) or ".ogg"
+    path, err = _write_block_cache("cache_audio_from_bytes", "audio block", "audio", raw_bytes, ext=ext)
+    return err if path is None else f"MEDIA:{path}"
 
 
 def _mcp_resource_filename(uri: str, mime_type: str) -> str:
     """Safe display filename from the URI's last path segment, used only as a
     name hint: ``cache_document_from_bytes`` re-sanitizes and prefixes it, so
     remote path components can't steer the cache location."""
-    import mimetypes
     import re as _re
     from pathlib import Path
     from urllib.parse import urlparse, unquote
@@ -142,47 +185,9 @@ def _mcp_resource_filename(uri: str, mime_type: str) -> str:
         else:
             name = name[:150]
     if not name or name in {".", ".."}:
-        normalized = (mime_type or "").split(";", 1)[0].strip().lower()
-        ext = mimetypes.guess_extension(normalized) or ".bin"
+        ext = mimetypes.guess_extension(_base_mime(mime_type)) or ".bin"
         name = f"resource{ext}"
     return name
-
-
-def _cache_mcp_audio_block(block) -> str:
-    """Cache an ``AudioContent`` block and return a ``MEDIA:`` tag; "" when not
-    audio or on any failure (same fail-open contract as the image path)."""
-    import base64
-
-    data = getattr(block, "data", None)
-    mime_type = str(mcp_field(block, "mime_type", "mimeType") or "").split(";", 1)[0].strip().lower()
-    if data is None or not mime_type.startswith("audio/"):
-        return ""
-    if len(data) > _core._MCP_RESOURCE_MAX_B64_CHARS:
-        return f"[MCP audio resource too large to cache: ~{len(data) * 3 // 4} bytes]"
-    try:
-        raw_bytes = base64.b64decode(data)
-    except (TypeError, ValueError) as exc:
-        logger.warning("MCP audio block decode failed (%s): %s", mime_type, exc)
-        return ""
-    if len(raw_bytes) > _core._MCP_RESOURCE_MAX_BYTES:
-        return f"[MCP audio resource too large to cache: {len(raw_bytes)} bytes]"
-    try:
-        from gateway.platforms.base import cache_audio_from_bytes
-        import mimetypes
-
-        ext = (
-            {"audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav"}.get(mime_type)
-            or mimetypes.guess_extension(mime_type)
-            or ".ogg"
-        )
-        audio_path = cache_audio_from_bytes(raw_bytes, ext=ext)
-    except ImportError:
-        logger.debug("MCP audio caching skipped — gateway.platforms.base unavailable")
-        return ""
-    except Exception as exc:
-        logger.warning("MCP audio block cache failed: %s", exc)
-        return ""
-    return f"MEDIA:{audio_path}"
 
 
 def _render_mcp_resource_block(block, server_name: str = "") -> str:
@@ -219,36 +224,29 @@ def _render_mcp_resource_block(block, server_name: str = "") -> str:
     resource = getattr(block, "resource", None)
     if resource is None:
         return ""
-
     text = getattr(resource, "text", None)
     if text is not None:
         return strip_unicode_tags(str(text))
-
     blob = getattr(resource, "blob", None)
     if blob is None:
         return ""
 
-    import base64
-
     uri = str(getattr(resource, "uri", "") or "")
     mime = str(mcp_field(resource, "mime_type", "mimeType", "") or "")
-    if len(blob) > _core._MCP_RESOURCE_MAX_B64_CHARS:
-        return f"[MCP embedded resource too large to cache: ~{len(blob) * 3 // 4} bytes, uri={uri}]"
-    try:
-        raw_bytes = base64.b64decode(blob)
-    except (TypeError, ValueError) as exc:
-        logger.warning("MCP embedded resource decode failed (%s): %s", mime or uri, exc)
-        return f"[MCP embedded resource could not be decoded: {mime or uri}]"
-    if len(raw_bytes) > _core._MCP_RESOURCE_MAX_BYTES:
-        return f"[MCP embedded resource too large to cache: {len(raw_bytes)} bytes, uri={uri}]"
-    try:
-        from gateway.platforms.base import cache_document_from_bytes
-
-        path = cache_document_from_bytes(raw_bytes, _mcp_resource_filename(uri, mime))
-    except ImportError:
-        logger.debug("MCP resource caching skipped — gateway.platforms.base unavailable")
-        return f"[MCP embedded resource received ({len(raw_bytes)} bytes, {mime or 'unknown type'}) but document cache unavailable in this process]"
-    except Exception as exc:
-        logger.warning("MCP embedded resource cache failed: %s", exc)
-        return f"[MCP embedded resource could not be cached: {mime or uri}]"
-    return f"[MCP resource saved to {path} ({mime or 'unknown type'}, {len(raw_bytes)} bytes) — read it with read_file or terminal tools]"
+    raw_bytes, err = _decode_block_b64(
+        blob, "embedded resource", mime or uri, cap_what="embedded resource",
+        cap_suffix=f", uri={uri}",
+        decode_fail=f"[MCP embedded resource could not be decoded: {mime or uri}]",
+    )
+    if raw_bytes is None:
+        return err
+    kind = mime or "unknown type"
+    path, err = _write_block_cache(
+        "cache_document_from_bytes", "embedded resource", "resource",
+        raw_bytes, _mcp_resource_filename(uri, mime),
+        unavailable=f"[MCP embedded resource received ({len(raw_bytes)} bytes, {kind}) but document cache unavailable in this process]",
+        failed=f"[MCP embedded resource could not be cached: {mime or uri}]",
+    )
+    if path is None:
+        return err
+    return f"[MCP resource saved to {path} ({kind}, {len(raw_bytes)} bytes) — read it with read_file or terminal tools]"
