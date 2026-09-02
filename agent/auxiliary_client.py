@@ -8575,6 +8575,122 @@ def _resolve_call_client(
     return _ResolvedAuxRoute(client, final_model, resolved_provider, effective_provider)
 
 
+class _PreparedAuxRequest(NamedTuple):
+    client: Any
+    final_model: Optional[str]
+    kwargs: Dict[str, Any]
+    resolved_provider: str
+    request_provider: str
+    resolved_model: Optional[str]
+    resolved_base_url: Optional[str]
+    resolved_api_key: Optional[str]
+    resolved_api_mode: Optional[str]
+    effective_timeout: float
+    effective_extra_body: Dict[str, Any]
+    base_info: str
+
+
+def _prepare_aux_request(
+    task: Optional[str],
+    *,
+    provider: Optional[str],
+    model: Optional[str],
+    base_url: Optional[str],
+    api_key: Optional[str],
+    main_runtime: Dict[str, Any],
+    messages: list,
+    temperature: Optional[float],
+    max_tokens: Optional[int],
+    tools: Optional[list],
+    timeout: Optional[float],
+    extra_body: Optional[dict],
+    reasoning_config: Optional[dict],
+    extra_headers: Optional[Dict[str, str]],
+    api_mode: Optional[str],
+    route_info: Optional[Dict[str, str]],
+    async_mode: bool,
+) -> _PreparedAuxRequest:
+    """Shared head of call_llm/async_call_llm: resolve route + client, publish it, build request kwargs.
+
+    The sync wire additionally applies the certified compression fast lane and
+    per-request ``extra_headers``; ``base_info`` is the client's base_url (sync
+    falls back to the resolved base_url when the client exposes none).
+    """
+    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+        task, provider, model, base_url, api_key)
+    if api_mode:
+        resolved_api_mode = api_mode
+    effective_extra_body = _get_task_extra_body(task)
+    effective_extra_body.update(extra_body or {})
+    client, final_model, resolved_provider, effective_provider = _resolve_call_client(
+        task,
+        provider=provider, model=model, base_url=base_url, api_key=api_key,
+        resolved_provider=resolved_provider, resolved_model=resolved_model,
+        resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
+        resolved_api_mode=resolved_api_mode, main_runtime=main_runtime,
+        async_mode=async_mode,
+    )
+
+    effective_timeout = _effective_aux_timeout(task, timeout)
+    request_provider = effective_provider or resolved_provider
+    fast_compression_cap = None
+    if not async_mode:
+        compression_config = (
+            _get_auxiliary_task_config("compression") if task == "compression" else {}
+        )
+        fast_compression_cap, effective_extra_body = _compression_fast_lane_controls(
+            task,
+            actual_provider=request_provider,
+            actual_model=final_model,
+            requested_provider=provider,
+            requested_model=model,
+            route_config=compression_config,
+            leak_guard_config=compression_config,
+            max_tokens=max_tokens,
+            extra_body=effective_extra_body,
+        )
+    _set_relay_auxiliary_route(request_provider, final_model, resolved_api_mode)
+    _record_route_info(
+        route_info, _fallback_provider_from_label(request_provider), final_model
+    )
+
+    if async_mode:
+        base_info = str(getattr(client, "base_url", "") or "")
+    else:
+        base_info = str(getattr(client, "base_url", resolved_base_url) or "")
+        if task:
+            logger.info("Auxiliary %s: using %s (%s)%s",
+                         task, request_provider or "auto", final_model or "default",
+                         f" at {base_info}" if base_info and "openrouter" not in base_info else "")
+
+    # Pass the client's actual base_url so endpoint-specific temperature overrides
+    # work on auto-detected routes (api.moonshot.ai vs api.kimi.com/coding).
+    kwargs = _build_call_kwargs(
+        request_provider, final_model, messages,
+        temperature=temperature, max_tokens=max_tokens,
+        tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
+        reasoning_config=reasoning_config,
+        base_url=base_info or resolved_base_url, task=task)
+    if fast_compression_cap is not None and max_tokens is None:
+        # Narrow exception to "no cap" on aux calls: the compression route is
+        # certified non-reasoning, so a bounded summary is intentional. Only fires
+        # when the caller passed no max_tokens (explicit caps pass through untouched).
+        kwargs.update(auxiliary_max_tokens_param(fast_compression_cap, model=final_model))
+    if extra_headers:
+        kwargs["extra_headers"] = dict(extra_headers)
+
+    # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
+    client_base = str(getattr(client, "base_url", "") or "")
+    if _is_anthropic_compat_endpoint(request_provider, client_base):
+        kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
+
+    return _PreparedAuxRequest(
+        client, final_model, kwargs, resolved_provider, request_provider,
+        resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode,
+        effective_timeout, effective_extra_body, base_info,
+    )
+
+
 class _LadderStep(NamedTuple):
     """A provider request the ladder asks its driver to perform.
 
@@ -9100,72 +9216,19 @@ def _call_llm_impl(
     # One immutable runtime snapshot for keying/resolution/retries/fallbacks, so a
     # concurrent /model switch can't mix key and client from different runtimes.
     main_runtime = _normalize_main_runtime(main_runtime)
-    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
-        task, provider, model, base_url, api_key)
-    if api_mode:
-        resolved_api_mode = api_mode
-    effective_extra_body = _get_task_extra_body(task)
-    effective_extra_body.update(extra_body or {})
-    client, final_model, resolved_provider, effective_provider = _resolve_call_client(
-        task,
-        provider=provider, model=model, base_url=base_url, api_key=api_key,
-        resolved_provider=resolved_provider, resolved_model=resolved_model,
-        resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
-        resolved_api_mode=resolved_api_mode, main_runtime=main_runtime,
-        async_mode=False,
+    req = _prepare_aux_request(
+        task, provider=provider, model=model, base_url=base_url, api_key=api_key,
+        main_runtime=main_runtime, messages=messages, temperature=temperature,
+        max_tokens=max_tokens, tools=tools, timeout=timeout, extra_body=extra_body,
+        reasoning_config=reasoning_config, extra_headers=extra_headers,
+        api_mode=api_mode, route_info=route_info, async_mode=False,
     )
-
-    effective_timeout = _effective_aux_timeout(task, timeout)
-    request_provider = effective_provider or resolved_provider
-    compression_config = (
-        _get_auxiliary_task_config("compression") if task == "compression" else {}
-    )
-    fast_compression_cap, effective_extra_body = _compression_fast_lane_controls(
-        task,
-        actual_provider=request_provider,
-        actual_model=final_model,
-        requested_provider=provider,
-        requested_model=model,
-        route_config=compression_config,
-        leak_guard_config=compression_config,
-        max_tokens=max_tokens,
-        extra_body=effective_extra_body,
-    )
-    _set_relay_auxiliary_route(
-        request_provider,
-        final_model,
-        resolved_api_mode,
-    )
-    _record_route_info(
-        route_info, _fallback_provider_from_label(request_provider), final_model
-    )
-
-    _base_info = str(getattr(client, "base_url", resolved_base_url) or "")
-    if task:
-        logger.info("Auxiliary %s: using %s (%s)%s",
-                     task, request_provider or "auto", final_model or "default",
-                     f" at {_base_info}" if _base_info and "openrouter" not in _base_info else "")
-
-    # Pass the client's actual base_url so endpoint-specific temperature overrides
-    # work on auto-detected routes (api.moonshot.ai vs api.kimi.com/coding).
-    kwargs = _build_call_kwargs(
-        request_provider, final_model, messages,
-        temperature=temperature, max_tokens=max_tokens,
-        tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
-        reasoning_config=reasoning_config,
-        base_url=_base_info or resolved_base_url, task=task)
-    if fast_compression_cap is not None and max_tokens is None:
-        # Narrow exception to "no cap" on aux calls: the compression route is
-        # certified non-reasoning, so a bounded summary is intentional. Only fires
-        # when the caller passed no max_tokens (explicit caps pass through untouched).
-        kwargs.update(auxiliary_max_tokens_param(fast_compression_cap, model=final_model))
-    if extra_headers:
-        kwargs["extra_headers"] = dict(extra_headers)
-
-    # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
-    _client_base = str(getattr(client, "base_url", "") or "")
-    if _is_anthropic_compat_endpoint(request_provider, _client_base):
-        kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
+    client, final_model, kwargs = req.client, req.final_model, req.kwargs
+    resolved_provider, request_provider = req.resolved_provider, req.request_provider
+    resolved_model, resolved_base_url = req.resolved_model, req.resolved_base_url
+    resolved_api_key, resolved_api_mode = req.resolved_api_key, req.resolved_api_mode
+    effective_timeout, effective_extra_body = req.effective_timeout, req.effective_extra_body
+    _base_info = req.base_info
 
     # Streaming path (MoA aggregator): return the raw SDK stream, deliberately
     # skipping validation and the fallback chain below — those assume a complete
@@ -9458,43 +9521,19 @@ async def _async_call_llm_impl(
     # Keep every async phase on one runtime identity across awaits (concurrent /model switch).
     main_runtime = _normalize_main_runtime(main_runtime)
     extra_headers = None  # async entry point has no per-request header override
-    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
-        task, provider, model, base_url, api_key)
-    effective_extra_body = _get_task_extra_body(task)
-    effective_extra_body.update(extra_body or {})
-    client, final_model, resolved_provider, effective_provider = _resolve_call_client(
-        task,
-        provider=provider, model=model, base_url=base_url, api_key=api_key,
-        resolved_provider=resolved_provider, resolved_model=resolved_model,
-        resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
-        resolved_api_mode=resolved_api_mode, main_runtime=main_runtime,
-        async_mode=True,
+    req = _prepare_aux_request(
+        task, provider=provider, model=model, base_url=base_url, api_key=api_key,
+        main_runtime=main_runtime, messages=messages, temperature=temperature,
+        max_tokens=max_tokens, tools=tools, timeout=timeout, extra_body=extra_body,
+        reasoning_config=reasoning_config, extra_headers=None,
+        api_mode=None, route_info=route_info, async_mode=True,
     )
-
-    effective_timeout = _effective_aux_timeout(task, timeout)
-    request_provider = effective_provider or resolved_provider
-    _set_relay_auxiliary_route(
-        request_provider,
-        final_model,
-        resolved_api_mode,
-    )
-    _record_route_info(
-        route_info, _fallback_provider_from_label(request_provider), final_model
-    )
-
-    # Client's actual base_url so endpoint-specific temperature overrides work on
-    # auto-detected routes.
-    _client_base = str(getattr(client, "base_url", "") or "")
-    kwargs = _build_call_kwargs(
-        request_provider, final_model, messages,
-        temperature=temperature, max_tokens=max_tokens,
-        tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
-        reasoning_config=reasoning_config,
-        base_url=_client_base or resolved_base_url, task=task)
-
-    # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
-    if _is_anthropic_compat_endpoint(request_provider, _client_base):
-        kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
+    client, final_model, kwargs = req.client, req.final_model, req.kwargs
+    resolved_provider, request_provider = req.resolved_provider, req.request_provider
+    resolved_model, resolved_base_url = req.resolved_model, req.resolved_base_url
+    resolved_api_key, resolved_api_mode = req.resolved_api_key, req.resolved_api_mode
+    effective_timeout, effective_extra_body = req.effective_timeout, req.effective_extra_body
+    _client_base = req.base_info
 
     try:
         # Retry ONCE on the same provider for a transient blip before escalating
