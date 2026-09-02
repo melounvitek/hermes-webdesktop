@@ -342,7 +342,9 @@ class ElicitationHandler:
     def _result(self, action: str, metric: str):
         """Count *metric* and return ``ElicitResult(action)`` (accept carries empty content)."""
         self.metrics[metric] += 1
-        return _core.ElicitResult(action=action, content={}) if action == "accept" else _core.ElicitResult(action=action)
+        if action == "accept":
+            return _core.ElicitResult(action="accept", content={})
+        return _core.ElicitResult(action=action)
 
     def _consent_thunk(self, message: str, description: str) -> Callable[[], str]:
         """Sync consent call, replaying the agent's contextvars snapshot when the

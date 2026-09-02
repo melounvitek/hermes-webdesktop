@@ -132,7 +132,8 @@ _MCP_NAME_DELIM = "__"
 
 def mcp_prefixed_tool_name(server_name: str, tool_name: str) -> str:
     """Registry/wire name: ``mcp__<sanitizedServer>__<sanitizedTool>``."""
-    return f"{MCP_TOOL_NAME_PREFIX}{sanitize_mcp_name_component(server_name)}{_MCP_NAME_DELIM}{sanitize_mcp_name_component(tool_name)}"
+    safe_server, safe_tool = sanitize_mcp_name_component(server_name), sanitize_mcp_name_component(tool_name)
+    return f"{MCP_TOOL_NAME_PREFIX}{safe_server}{_MCP_NAME_DELIM}{safe_tool}"
 
 
 def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:

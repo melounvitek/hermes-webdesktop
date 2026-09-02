@@ -48,8 +48,10 @@ def _tool_defs_content_changed(agent, new_defs: list) -> bool:
         return False
 
 
-def _publish_tool_snapshot(agent, new_defs: list, new_names: set, *, snapshot_generation: int,
-                           staged_engine_names: set, content_aware: bool, prefix_registered: Optional[set]) -> Optional[set]:
+def _publish_tool_snapshot(
+    agent, new_defs: list, new_names: set, *, snapshot_generation: int,
+    staged_engine_names: set, content_aware: bool, prefix_registered: Optional[set],
+) -> Optional[set]:
     """Single atomic read-diff-publish under ``_agent_tools_lock`` so ``added``
     matches what was published and a stale (older-generation) rebuild can't
     overwrite a newer one. Returns the added names, or None when nothing was
@@ -120,7 +122,9 @@ def refresh_agent_mcp_tools(
     snapshot_generation = registry._generation
     # Computed OUTSIDE the lock (can be slow); diff + publish happen together in
     # one critical section so concurrent callers can't torn-publish.
-    new_defs = list(get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode) or [])
+    new_defs = list(
+        get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode) or []
+    )
     new_names = {_def_name(t) for t in new_defs}
     # Re-append the post-build families on LOCALS only; live agent attributes
     # are untouched until the single atomic publish.
