@@ -836,7 +836,6 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             except Exception:
                 pass
             agent._cached_system_prompt = agent._build_system_prompt(system_message)
-            agent._bot_capability_refreshed = True
             # Persist so the NEXT turn restores the new bytes verbatim (cache break is
             # once per capability change). on_session_start not re-fired: continuation.
             if agent._session_db:
