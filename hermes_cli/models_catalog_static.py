@@ -182,7 +182,7 @@ def _xai_curated_models() -> list[str]:
         xai = data.get("xai") if isinstance(data, dict) else None
         models = xai.get("models") if isinstance(xai, dict) else None
         if isinstance(models, dict) and models:
-            ids = [mid for mid in models.keys() if isinstance(mid, str)]
+            ids = [mid for mid in models if isinstance(mid, str)]
             if ids:
                 return _xai_finalize_catalog(sorted(ids))
     except Exception:

@@ -126,9 +126,8 @@ def _get_ollama_request_headers() -> dict[str, str]:
             entry.get("key_env") or entry.get("api_key_env") or ""
         ).strip()
         api_key = os.getenv(key_env, "").strip() if key_env else ""
-    if api_key:
-        if not any(key.lower() == "authorization" for key in result):
-            result["Authorization"] = f"Bearer {api_key}"
+    if api_key and not any(key.lower() == "authorization" for key in result):
+        result["Authorization"] = f"Bearer {api_key}"
     return result
 
 

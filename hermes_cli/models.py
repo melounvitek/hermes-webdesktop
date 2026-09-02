@@ -201,18 +201,15 @@ def _custom_provider_ssl_context(base_url: str):
     return None
 
 
+# Process-lifetime picker lists refreshed from the live catalogs (see fetch_*_models).
 _openrouter_catalog_cache: list[tuple[str, str]] | None = None
-
-
 _ai_gateway_catalog_cache: list[tuple[str, str]] | None = None
 
 
 # ---------------------------------------------------------------------------
-# Nous Portal free-model helper
+# Nous Portal free-model helpers — the Portal models endpoint is the source of truth for what is
+# offered (free or paid); we surface it as-is, no local allowlist filtering.
 # ---------------------------------------------------------------------------
-# The Nous Portal models endpoint is the source of truth for which models
-# are currently offered (free or paid). We trust whatever it returns and
-# surface it to users as-is — no local allowlist filtering.
 
 
 def _is_model_free(model_id: str, pricing: dict[str, dict[str, str]]) -> bool:
@@ -236,11 +233,8 @@ def partition_nous_models_by_tier(
     For free-tier users: only free models are selectable; paid models are returned as unavailable
     (shown grayed out in the menu).
     """
-    if not free_tier:
+    if not free_tier or not pricing:  # no pricing → can't determine, show everything
         return (model_ids, [])
-
-    if not pricing:
-        return (model_ids, [])  # can't determine, show everything
 
     selectable: list[str] = []
     unavailable: list[str] = []
@@ -319,11 +313,8 @@ def union_with_portal_paid_recommendations(
     )
 
 
-# ---------------------------------------------------------------------------
-# TTL cache for free-tier detection — avoids repeated API calls within a
-# session while still picking up upgrades quickly.
-# ---------------------------------------------------------------------------
-_FREE_TIER_CACHE_TTL: int = 180  # seconds (3 minutes)
+# Free-tier detection cache — short so an account upgrade shows within minutes.
+_FREE_TIER_CACHE_TTL: int = 180  # seconds
 _free_tier_cache: tuple[bool, float] | None = None  # (result, timestamp)
 
 
@@ -356,23 +347,10 @@ def check_nous_free_tier(*, force_fresh: bool = False) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Nous Portal recommended models
-#
-# The Portal publishes a curated list of suggested models (separated into
-# paid and free tiers) plus dedicated recommendations for compaction (text
-# summarisation / auxiliary) and vision tasks. We fetch it once per process
-# with a TTL cache so callers can ask "what's the best aux model right now?"
-# without hitting the network on every lookup.
-#
-# Shape of the response (fields we care about):
-#   {
-#     "paidRecommendedModels":     [ {modelName, ...}, ... ],
-#     "freeRecommendedModels":     [ {modelName, ...}, ... ],
-#     "paidRecommendedCompactionModel":  {modelName, ...} | null,
-#     "paidRecommendedVisionModel":      {modelName, ...} | null,
-#     "freeRecommendedCompactionModel":  {modelName, ...} | null,
-#     "freeRecommendedVisionModel":      {modelName, ...} | null,
-#   }
+# Nous Portal recommended models — the Portal's curated paid/free suggestions plus dedicated
+# compaction (aux) and vision picks, TTL-cached per process. Response fields we read:
+#   {paid,free}RecommendedModels: [{modelName, ...}],
+#   {paid,free}Recommended{Compaction,Vision}Model: {modelName, ...} | null
 # ---------------------------------------------------------------------------
 
 NOUS_RECOMMENDED_MODELS_PATH = "/api/nous/recommended-models"
@@ -442,12 +420,8 @@ def fetch_nous_recommended_models(
         if now - cached_at < _NOUS_RECOMMENDED_CACHE_TTL:
             return payload
 
-    url = f"{base}{NOUS_RECOMMENDED_MODELS_PATH}"
     try:
-        req = urllib.request.Request(
-            url,
-            headers={"Accept": "application/json"},
-        )
+        req = urllib.request.Request(f"{base}{NOUS_RECOMMENDED_MODELS_PATH}", headers={"Accept": "application/json"})
         with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
         if not isinstance(data, dict):
@@ -456,18 +430,11 @@ def fetch_nous_recommended_models(
         data = {}
 
     if data:
-        # Live fetch succeeded — refresh both cache layers.
-        _nous_recommended_cache[base] = (data, now)
-        _write_nous_recommended_disk(base, data)
-        return data
-
-    # Live fetch failed. Fall back to the last-known-good disk copy so a
-    # transient Portal hiccup doesn't drop the recommendations entirely.
-    disk = _read_nous_recommended_disk(base)
-    if disk:
-        _nous_recommended_cache[base] = (disk, now)
-        return disk
-
+        _write_nous_recommended_disk(base, data)  # live succeeded — refresh both cache layers
+    else:
+        # Live failed: last-known-good disk copy, so a transient Portal hiccup doesn't drop the
+        # recommendations entirely.
+        data = _read_nous_recommended_disk(base) or data
     _nous_recommended_cache[base] = (data, now)
     return data
 
@@ -475,15 +442,11 @@ def fetch_nous_recommended_models(
 def _resolve_nous_portal_url() -> str:
     """Best-effort lookup of the Portal base URL the user is authed against."""
     try:
-        from hermes_cli.auth import (
-            DEFAULT_NOUS_PORTAL_URL,
-            get_provider_auth_state,
-        )
+        from hermes_cli.auth import DEFAULT_NOUS_PORTAL_URL, get_provider_auth_state
+
         state = get_provider_auth_state("nous") or {}
         portal = str(state.get("portal_base_url") or "").strip()
-        if portal:
-            return portal.rstrip("/")
-        return str(DEFAULT_NOUS_PORTAL_URL).rstrip("/")
+        return (portal or str(DEFAULT_NOUS_PORTAL_URL)).rstrip("/")
     except Exception:
         return "https://portal.nousresearch.com"
 
@@ -520,20 +483,14 @@ def get_nous_recommended_aux_model(
         try:
             free_tier = check_nous_free_tier()
         except Exception:
-            # On any detection error, assume paid — paid users see both fields
-            # anyway so this is a safe default that maximises model quality.
+            # On detection error assume paid — paid users see both fields anyway, so this is the
+            # safe default that maximises model quality.
             free_tier = False
 
-    if vision:
-        paid_key, free_key = "paidRecommendedVisionModel", "freeRecommendedVisionModel"
-    else:
-        paid_key, free_key = "paidRecommendedCompactionModel", "freeRecommendedCompactionModel"
-
-    # Preference order:
-    #   free tier  → free only
-    #   paid tier  → paid, then free (if paid field is null)
-    candidates = [free_key] if free_tier else [paid_key, free_key]
-    for key in candidates:
+    kind = "Vision" if vision else "Compaction"
+    paid_key, free_key = f"paidRecommended{kind}Model", f"freeRecommended{kind}Model"
+    # free tier → free only; paid tier → paid, then free (if the paid field is null)
+    for key in ([free_key] if free_tier else [paid_key, free_key]):
         name = _extract_model_name(payload.get(key))
         if name:
             return name
@@ -1106,64 +1063,36 @@ def detect_static_provider_for_model(
     if alias_match:
         return alias_match
 
-    # --- Step 0: bare provider name typed as model ---
-    # If someone types `/model nous` or `/model anthropic`, treat it as a
-    # provider switch and pick the first model from that provider's catalog.
-    # Skip "custom" and "openrouter" — custom has no model catalog, and
-    # openrouter requires an explicit model name to be useful.
+    # Step 0: a bare provider name typed as the model (`/model nous`) is a provider switch to that
+    # provider's default. Skip "custom" (no catalog) and "openrouter" (needs an explicit model).
     resolved_provider = _PROVIDER_ALIASES.get(name_lower, name_lower)
     if resolved_provider not in {"custom", "openrouter"}:
         default_models = _PROVIDER_MODELS.get(resolved_provider, [])
-        if (
-            resolved_provider in _PROVIDER_LABELS
-            and default_models
-            and resolved_provider not in current_keys
-        ):
-            # Route through the cost-safe default rather than picking
-            # ``default_models[0]`` directly. For metered aggregators whose
-            # curated list is ordered most-capable-first (e.g. Nous Portal),
-            # entry [0] is the priciest flagship, and typing ``/model nous``
-            # would silently escalate to it — the exact billing footgun the
-            # catalog-labeled silent default (``_SILENT_DEFAULT_PROVIDERS``)
-            # exists to prevent. For providers outside that set this is
-            # unchanged (it returns ``models[0]``).
-            return (
-                resolved_provider,
-                get_default_model_for_provider(resolved_provider) or default_models[0],
-            )
+        if resolved_provider in _PROVIDER_LABELS and default_models and resolved_provider not in current_keys:
+            # Cost-safe default, not ``default_models[0]``: metered aggregators order their list
+            # most-capable-first, so [0] is the priciest flagship and `/model nous` would silently
+            # escalate to it — the footgun ``_SILENT_DEFAULT_PROVIDERS`` exists to prevent. Other
+            # providers still get ``models[0]``.
+            return (resolved_provider, get_default_model_for_provider(resolved_provider) or default_models[0])
 
-    # Aggregators list other providers' models — never auto-switch TO them
-    # If the model belongs to the current provider's catalog, don't suggest switching
+    # A model in the current provider's own catalog never suggests switching.
     if _model_in_provider_catalog(name_lower, current_keys):
         return None
 
-    # --- Step 1: check static provider catalogs for a direct match ---
-    # If the current provider is a custom endpoint (custom or custom:*), never
-    # auto-switch away from it based on a static catalog match — the user
-    # explicitly configured their own endpoint and the same model name may be
-    # served there (#48305).
-    _is_custom_current = (
-        current_provider == "custom"
-        or current_provider.startswith("custom:")
-    )
-    for pid in _PROVIDER_MODELS:
-        if (
-            pid in current_keys
-            or pid in _AGGREGATOR_PROVIDERS
-            or pid in _BORROWED_MODEL_PROVIDERS
-        ):
-            continue
-        if _is_custom_current:
-            continue
-        if any(name_lower == m.lower() for m in _provider_catalog_names(pid)):
-            return (pid, name)
+    # Step 1: direct static-catalog match. Aggregators list other vendors' models — never
+    # auto-switch TO them. A custom endpoint (custom / custom:*) is never auto-switched away
+    # from: the user configured it deliberately and may serve the same model name there.
+    if current_provider != "custom" and not current_provider.startswith("custom:"):
+        for pid in _PROVIDER_MODELS:
+            if pid in current_keys or pid in _AGGREGATOR_PROVIDERS or pid in _BORROWED_MODEL_PROVIDERS:
+                continue
+            if _model_in_provider_catalog(name_lower, {pid}):
+                return (pid, name)
 
-    # Borrow-list providers (re-expose other vendors' models) only after every
-    # native-vendor catalog, and only when one is the current provider.
+    # Borrow-list providers (re-expose other vendors' models) only after every native-vendor
+    # catalog, and only when one is the current provider.
     for pid in _BORROWED_MODEL_PROVIDERS:
-        if pid in current_keys:
-            continue
-        if any(name_lower == m.lower() for m in _provider_catalog_names(pid)):
+        if pid not in current_keys and _model_in_provider_catalog(name_lower, {pid}):
             return (pid, name)
 
     return None
@@ -1179,16 +1108,10 @@ def _configured_provider_ids() -> set[str]:
     try:
         from hermes_cli.config import load_config
 
-        cfg = load_config() or {}
-        providers = cfg.get("providers")
+        providers = (load_config() or {}).get("providers")
         if not isinstance(providers, dict):
             return set()
-        ids: set[str] = set()
-        for pid in providers:
-            key = str(pid).strip().lower()
-            if key:
-                ids.add(key)
-        return ids
+        return {key for pid in providers if (key := str(pid).strip().lower())}
     except Exception:
         return set()
 
@@ -1243,28 +1166,17 @@ def detect_provider_for_model(
     if _model_in_provider_catalog(name.lower(), _provider_keys(current_provider)):
         return None
 
-    # --- Step 2: check OpenRouter catalog ---
-    # First try exact match (handles provider/model format)
+    # Step 2: OpenRouter catalog (exact slug, then bare model part).
     or_slug = _find_openrouter_slug(name)
     if or_slug:
-        if current_provider != "openrouter":
-            return ("openrouter", or_slug)
-        # Already on openrouter, just return the resolved slug
-        if or_slug != name:
+        if current_provider != "openrouter" or or_slug != name:
             return ("openrouter", or_slug)
         return None  # already on openrouter with matching name
 
-    # --- Step 3: explicit ``vendor/model`` prefix naming a configured provider ---
-    # Checked after the OpenRouter slug lookup so aggregator-native slugs
-    # (e.g. ``deepseek/deepseek-chat``) keep their existing routing; only
-    # vendors the user defined in their ``providers:`` block route here,
-    # so catalog/default behavior for built-in vendor prefixes is unchanged
-    # (#87189).
-    prefix_match = _resolve_provider_prefix(name)
-    if prefix_match is not None:
-        return prefix_match
-
-    return None
+    # Step 3: explicit ``vendor/model`` prefix naming a configured provider. After the OpenRouter
+    # lookup so aggregator-native slugs (``deepseek/deepseek-chat``) keep their routing; only
+    # vendors from the user's ``providers:`` block route here.
+    return _resolve_provider_prefix(name)
 
 
 def _find_openrouter_slug(model_name: str) -> Optional[str]:
@@ -1273,18 +1185,13 @@ def _find_openrouter_slug(model_name: str) -> Optional[str]:
     if not name_lower:
         return None
 
-    # Exact match (already has provider/ prefix)
-    for mid in model_ids():
+    ids = model_ids()
+    for mid in ids:  # exact match (already has the provider/ prefix)
         if name_lower == mid.lower():
             return mid
-
-    # Try matching just the model part (after the /)
-    for mid in model_ids():
-        if "/" in mid:
-            _, model_part = mid.split("/", 1)
-            if name_lower == model_part.lower():
-                return mid
-
+    for mid in ids:  # bare model part after the "/"
+        if "/" in mid and name_lower == mid.split("/", 1)[1].lower():
+            return mid
     return None
 
 
@@ -1321,15 +1228,6 @@ def _is_openai_fast_model(model_id: Optional[str]) -> bool:
     return any(base.startswith(prefix) for prefix in _OPENAI_FAST_MODE_PREFIXES)
 
 
-# Models that support Anthropic Fast Mode (speed="fast").
-# See https://platform.claude.com/docs/en/build-with-claude/fast-mode
-#
-# Pattern-based matching — any claude-* model is eligible. The anthropic
-# adapter gates speed=fast on native Anthropic endpoints only (see
-# _is_third_party_anthropic_endpoint in agent/anthropic_adapter.py), so
-# third-party proxies that would reject the beta header are protected.
-
-
 def _strip_vendor_prefix(model_id: str) -> str:
     """Strip vendor/ prefix from a model ID (e.g. 'anthropic/claude-opus-4-6' -> 'claude-opus-4-6')."""
     raw = str(model_id or "").strip().lower()
@@ -1352,13 +1250,10 @@ def model_supports_fast_mode(model_id: Optional[str]) -> bool:
 def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
     """Return True if the model accepts the Anthropic Fast Mode ``speed`` param.
 
-    This gates the *speed=fast request parameter*, which Anthropic supports on Opus 4.8 and Opus 5
-    (research preview, Claude API only). It is deliberately NOT a general "is this a fast model"
-    check:
-
-    - Opus 4.7 hard-400s on the parameter. - Dedicated ``…-fast`` model ids (e.g. OpenRouter's
-    ``claude-opus-4.8-fast``) select fast inference via the model field and must not also receive
-    the speed parameter.
+    Gates the *speed=fast request parameter* (Opus 4.8 / Opus 5, Claude API only) — deliberately
+    NOT a general "is this a fast model" check: Opus 4.7 hard-400s on the parameter, and dedicated
+    ``…-fast`` ids select fast inference via the model field and must not also get it. The
+    anthropic adapter additionally gates on native endpoints so proxies never see the beta header.
     """
     raw = _strip_vendor_prefix(str(model_id or ""))
     base = raw.split(":")[0]
@@ -1821,41 +1716,23 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
 
 
 # ---------------------------------------------------------------------------
-# Generic disk cache for provider_model_ids() — keeps /model picker fast.
+# Disk cache for provider_model_ids() — keeps /model picker fast.
+#
+# Without it every picker open re-fetches every authed provider's /v1/models (2+ s of serial
+# round-trips). One JSON file at $HERMES_HOME/provider_models_cache.json; per-provider entries
+# keyed by credential fingerprint (rotate OPENAI_API_KEY → entry invalidates); 1h TTL;
+# `force_refresh=True` bypasses and overwrites on success; only NON-EMPTY results are cached so
+# a transient failure is never pinned; any read/write error degrades silently to a live fetch.
 # ---------------------------------------------------------------------------
-#
-# Without this layer, every /model picker open re-fetches every authed
-# provider's /v1/models endpoint. On a well-configured user (anthropic +
-# openai + copilot + gemini + huggingface + ...) that's 2+ seconds of cold
-# HTTP roundtrips just to render the provider list.
-#
-# Cache strategy:
-#   - One JSON file at $HERMES_HOME/provider_models_cache.json
-#   - Per-provider entries keyed by (provider, credential fingerprint)
-#   - Credential fingerprint = sha256 of env-var values that the provider
-#     normally reads. Swap your OPENAI_API_KEY and the entry invalidates.
-#   - 1h TTL by default. `force_refresh=True` skips the cache entirely
-#     and overwrites it on success.
-#   - Only NON-EMPTY results are cached. An empty/None response from a
-#     transient network error never gets pinned.
-#   - Cache file is best-effort. Any read/write error degrades silently
-#     to a live fetch — the picker keeps working.
 
 _PROVIDER_MODELS_CACHE_TTL = 3600  # 1h
-# Stale-while-revalidate window: an expired-but-same-credentials entry is
-# served IMMEDIATELY (picker opens stay instant) while a background daemon
-# thread re-fetches the live catalog and rewrites the disk cache for the
-# next open. Beyond this bound the entry is considered too old to trust and
-# the caller blocks on a live fetch as before. Rationale: the /model picker's
-# provider listing runs 8-9 serial /v1/models round-trips (~2-3s) whenever
-# the 1h TTL lapses mid-session — model catalogs change on release timescales,
-# not hourly, so serving hour-old data while refreshing off-thread is strictly
-# better than stalling every picker surface (CLI, TUI, dashboard, gateway).
+# Stale-while-revalidate window: an expired-but-same-credentials entry is served IMMEDIATELY
+# while a daemon thread refreshes the disk cache for the next open; beyond this bound the entry
+# is too old to trust and the caller blocks on a live fetch. Catalogs change on release
+# timescales, not hourly, so hour-old data beats stalling every picker surface.
 _PROVIDER_MODELS_STALE_SERVE_MAX = 7 * 24 * 3600  # 7d
 
-# Providers with a background SWR refresh currently in flight — dedupes
-# concurrent refreshes so repeated picker opens during one refresh don't
-# stack threads or duplicate network calls.
+# Cache keys with a background SWR refresh in flight — dedupes concurrent refreshes.
 _swr_refresh_inflight: set = set()
 _swr_refresh_lock = threading.Lock()
 
@@ -2018,13 +1895,8 @@ def _credential_fingerprint(provider: str) -> str:
             pass
 
     blob = "|".join(parts).encode("utf-8", errors="replace")
-    # blake2b for cache-key fingerprinting only — not for credential storage.
-    # We never reverse this hash; collisions are harmless (worst case: cache
-    # miss → live re-fetch). Use blake2b instead of sha256 here because
-    # CodeQL's `py/weak-sensitive-data-hashing` rule flags sha256 over env
-    # vars whose names contain "API_KEY" / "TOKEN" even when the hash is
-    # used as an identity fingerprint, not for password storage. blake2b
-    # is a keyed-hash primitive and isn't flagged.
+    # blake2b, not sha256: fingerprint only (collisions = a harmless cache miss), and CodeQL's
+    # weak-sensitive-data-hashing rule flags sha256 over env vars named *API_KEY*/*TOKEN*.
     return hashlib.blake2b(blob, digest_size=8).hexdigest()
 
 
@@ -2273,8 +2145,7 @@ def _fetch_anthropic_models(
             m,                    # alphabetical within tier
         ))
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).debug("Failed to fetch Anthropic models: %s", e)
+        logger.debug("Failed to fetch Anthropic models: %s", e)
         return None
 
 
@@ -2333,15 +2204,25 @@ def _copilot_catalog_item_is_text_model(
     return True
 
 
-# Module-level cache for the GitHub Copilot /models catalog.
-# The picker path can ask for it multiple times in one process via:
-#   list_authenticated_providers -> cached_provider_model_ids -> provider_model_ids -> _fetch_github_models
-# and later get_copilot_model_context()/normalize helpers. Cache the raw filtered
-# catalog for a short TTL so we don't pay repeated TLS handshakes on every picker open.
-# Keyed by the api_key used for the successful fetch so a credential swap
-# mid-process never serves the previous account's catalog. Uses a monotonic
-# clock so wall-clock adjustments can't extend the TTL. Lock-free like the
-# other module caches here — a racing thread at worst duplicates one fetch.
+def _copilot_text_models(items: list[dict[str, Any]], *, ignore_picker_flag: bool = False) -> list[dict[str, Any]]:
+    """Chat-capable catalog rows, deduped by id, in catalog order."""
+    models: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in items:
+        if not _copilot_catalog_item_is_text_model(item, ignore_picker_flag=ignore_picker_flag):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if not model_id or model_id in seen_ids:
+            continue
+        seen_ids.add(model_id)
+        models.append(item)
+    return models
+
+
+# Short-TTL cache of the filtered GitHub Copilot /models catalog: the picker path and the
+# context/normalize helpers all ask for it in one process. Keyed by the api_key of the successful
+# fetch so a credential swap never serves the previous account's catalog; monotonic clock so
+# wall-clock adjustments can't extend the TTL; lock-free (a race at worst duplicates one fetch).
 _github_model_catalog_cache: Optional[list[dict[str, Any]]] = None
 _github_model_catalog_cache_key: Optional[str] = None
 _github_model_catalog_cache_time: float = 0.0
@@ -2378,35 +2259,14 @@ def fetch_github_model_catalog(
             with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
                 items = _payload_items(data)
-                models: list[dict[str, Any]] = []
-                seen_ids: set[str] = set()
-                for item in items:
-                    if not _copilot_catalog_item_is_text_model(item):
-                        continue
-                    model_id = str(item.get("id") or "").strip()
-                    if not model_id or model_id in seen_ids:
-                        continue
-                    seen_ids.add(model_id)
-                    models.append(item)
+                models = _copilot_text_models(items)
                 if not models and items:
-                    # GitHub has been observed returning
-                    # ``model_picker_enabled: false`` for EVERY model on some
-                    # accounts/token types, which would silently reject the
-                    # whole live catalog and strand the picker on the stale
-                    # curated fallback. The flag is a display hint, not an
-                    # availability contract — when honoring it empties the
-                    # catalog, retry without it (chat/endpoint checks still
-                    # apply, so embeddings and non-chat rows stay excluded).
-                    for item in items:
-                        if not _copilot_catalog_item_is_text_model(
-                            item, ignore_picker_flag=True
-                        ):
-                            continue
-                        model_id = str(item.get("id") or "").strip()
-                        if not model_id or model_id in seen_ids:
-                            continue
-                        seen_ids.add(model_id)
-                        models.append(item)
+                    # GitHub has been observed returning ``model_picker_enabled: false`` for EVERY
+                    # model on some accounts/token types, which would strand the picker on the
+                    # stale curated fallback. The flag is a display hint, not an availability
+                    # contract — when honoring it empties the catalog, retry without it
+                    # (chat/endpoint checks still apply, so non-chat rows stay excluded).
+                    models = _copilot_text_models(items, ignore_picker_flag=True)
                 if models:
                     _github_model_catalog_cache = copy.deepcopy(models)
                     _github_model_catalog_cache_key = api_key
@@ -2649,28 +2509,20 @@ def normalize_opencode_model_id(provider_id: Optional[str], model_id: Optional[s
     return current
 
 
-# OpenCode Zen free-tier models (``*-free`` slugs, e.g. x-preview-f-free /
-# "Ox Alpha", plus unsuffixed free models like big-pickle) are served
-# ANONYMOUSLY on the Zen relay: a request with no Authorization header
-# succeeds, while ANY non-empty bearer the relay doesn't recognize is
-# rejected with 401 "Invalid API key" — including our "no-key-required"
-# placeholder and OpenCode GO subscription keys (the Go relay doesn't serve
-# the free tier at all: "Model x is not supported").
-# Verified live 2026-08-21 against POST /zen/v1/chat/completions.
+# OpenCode Zen free-tier models (``*-free`` slugs plus unsuffixed ones like big-pickle) are
+# served ANONYMOUSLY on the Zen relay: no Authorization header succeeds, while ANY unrecognized
+# non-empty bearer — including our placeholder and OpenCode GO subscription keys — is 401'd (the
+# Go relay doesn't serve the free tier at all).
 OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER = "opencode-zen-free-keyless"
 _OPENCODE_ZEN_FREE_BASE_URL = "https://opencode.ai/zen/v1"
 
-# Models whose slug carries ``-free`` but are NOT anonymous-servable: they are
-# KEYED (Go-subscription) models and must be excluded from the keyless free
-# catalog even though the suffix looks free. ox-alpha-free is the Go relay's
-# subscription twin of the Zen keyless Ox Alpha (verified 2026-08-21).
+# ``-free``-suffixed slugs that are KEYED (Go-subscription) models, NOT anonymous-servable —
+# excluded from the keyless catalog despite the suffix (ox-alpha-free is Ox Alpha's Go twin).
 _OPENCODE_FREE_KEYED_SUFFIX_MODELS = frozenset({"ox-alpha-free"})
 
-# In-process memo for _fetch_opencode_free_models(): (fetched_at, ids-or-None).
-# Direct provider_model_ids("opencode-free") callers (model validation, healing)
-# can run several times per resolution — without this each would block on a
-# network round-trip. Failures are memoized too (negative caching) so an
-# unreachable relay doesn't stall every validation for `timeout` seconds.
+# In-process memo for _fetch_opencode_free_models(): (fetched_at, ids-or-None). Validation and
+# healing call provider_model_ids("opencode-free") several times per resolution; failures are
+# memoized too so an unreachable relay doesn't stall every call for `timeout` seconds.
 _opencode_free_live_memo: Optional[tuple[float, Optional[list[str]]]] = None
 _OPENCODE_FREE_LIVE_MEMO_TTL = 300.0  # 5 min; SWR disk cache handles the rest
 
@@ -3045,18 +2897,13 @@ _DEEPINFRA_SURFACE_TAGS: frozenset[str] = frozenset({
 _DEEPINFRA_DEFAULT_BASE_URL = "https://api.deepinfra.com/v1/openai"
 _DEEPINFRA_MODELS_QUERY = "filter=true&sort_by=hermes"
 
-# Module-level cache for the full tagged catalog response, keyed by base URL.
-# Each value is the parsed ``data`` list. Surface-specific filters read from
-# this cache so a single network round-trip serves chat / image-gen / tts /
-# stt callers across the whole process lifetime.
+# Full tagged catalog (parsed ``data`` list) keyed by base URL; every surface filter (chat /
+# image-gen / tts / stt) reads it so one round-trip serves the whole process.
 _deepinfra_catalog_cache: dict[str, list[dict]] = {}
 
-# Negative cache: monotonic timestamp of the last failed fetch, keyed by base
-# URL. Without this, an unreachable catalog (offline / DNS / firewall) makes
-# every surface helper (chat picker, pricing, image/video/tts/stt defaults,
-# vision) re-attempt a fresh blocking fetch that eats the full timeout each
-# time — several sequential stalls in one user-visible operation. A short TTL
-# lets connectivity recover without a process restart.
+# Negative cache: monotonic time of the last failed fetch per base URL. Without it an
+# unreachable catalog makes every surface helper re-attempt a blocking fetch that eats the full
+# timeout — several sequential stalls in one operation. Short TTL so connectivity can recover.
 _deepinfra_catalog_neg_cache: dict[str, float] = {}
 _DEEPINFRA_CATALOG_NEG_TTL = 60.0  # seconds
 
