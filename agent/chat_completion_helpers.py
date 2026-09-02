@@ -3934,6 +3934,78 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
         raise
 
 
+class _ToolCallAccumulator:
+    """Assemble streamed tool-call deltas into complete ``tool_calls`` entries.
+
+    ``acc`` maps slot index -> ``{"id","type","function":{"name","arguments"},
+    "extra_content"}``. Ollama-compatible endpoints reuse index 0 for every
+    tool call in a parallel batch, distinguishing them only by id, so a new id
+    arriving at an already-seen raw index is redirected to a fresh slot.
+    """
+
+    def __init__(self):
+        self.acc: dict = {}
+        self._notified: set = set()
+        self._last_id_at_idx: dict = {}      # raw_index -> last seen non-empty id
+        self._active_slot_by_idx: dict = {}  # raw_index -> current slot in acc
+
+    def feed(self, tc_delta) -> Optional[str]:
+        """Merge one delta; return the tool name the first time it is complete."""
+        raw_index = getattr(tc_delta, "index", None)
+        raw_idx = raw_index if raw_index is not None else 0
+        tc_id = getattr(tc_delta, "id", None)
+        delta_id = tc_id or ""
+        if isinstance(tc_id, int):  # Poolside sends integer ids
+            tc_id = str(tc_id)
+
+        if raw_idx not in self._active_slot_by_idx:
+            self._active_slot_by_idx[raw_idx] = raw_idx
+        if (
+            delta_id
+            and raw_idx in self._last_id_at_idx
+            and delta_id != self._last_id_at_idx[raw_idx]
+        ):
+            self._active_slot_by_idx[raw_idx] = max(self.acc, default=-1) + 1
+        if delta_id:
+            self._last_id_at_idx[raw_idx] = delta_id
+        idx = self._active_slot_by_idx[raw_idx]
+
+        entry = self.acc.setdefault(idx, {
+            "id": tc_id or "",
+            "type": "function",
+            "function": {"name": "", "arguments": ""},
+            "extra_content": None,
+        })
+        if tc_id:
+            entry["id"] = tc_id
+        tc_function = getattr(tc_delta, "function", None)
+        if tc_function:
+            function_name = getattr(tc_function, "name", None)
+            if function_name:
+                # Assignment, not +=: names arrive complete (OpenAI spec) and
+                # some providers (MiniMax M2.7 via NVIDIA NIM) resend the full
+                # name in every chunk — concatenation gives "read_fileread_file".
+                entry["function"]["name"] = function_name
+            function_arguments = getattr(tc_function, "arguments", None)
+            if function_arguments:
+                entry["function"]["arguments"] += function_arguments
+        extra = getattr(tc_delta, "extra_content", None)
+        if extra is None and hasattr(tc_delta, "model_extra"):
+            extra = (tc_delta.model_extra if isinstance(tc_delta.model_extra, dict) else {}).get("extra_content")
+        if extra is not None:
+            if hasattr(extra, "model_dump"):
+                try:
+                    extra = extra.model_dump(warnings=False)
+                except TypeError:
+                    extra = extra.model_dump()
+            entry["extra_content"] = extra
+        name = entry["function"]["name"]
+        if name and idx not in self._notified:
+            self._notified.add(idx)
+            return name
+        return None
+
+
 class _StreamingCall:
     """One streaming request on the chat_completions / anthropic_messages wire.
 
@@ -4115,14 +4187,8 @@ class _StreamingCall:
         # connect/pool cover TCP handshake, not model inference.
         _conn_cap = min(_base_timeout, 60.0) if _provider_timeout_cfg is not None else 30.0
         content_parts: list = []
-        tool_calls_acc: dict = {}
-        tool_gen_notified: set = set()
-        # Ollama-compatible endpoints reuse index 0 for every tool call
-        # in a parallel batch, distinguishing them only by id.  Track
-        # the last seen id per raw index so we can detect a new tool
-        # call starting at the same index and redirect it to a fresh slot.
-        _last_id_at_idx: dict = {}      # raw_index -> last seen non-empty id
-        _active_slot_by_idx: dict = {}  # raw_index -> current slot in tool_calls_acc
+        tool_calls = _ToolCallAccumulator()
+        tool_calls_acc = tool_calls.acc
         finish_reason = None
         model_name = None
         role = "assistant"
@@ -4461,83 +4527,16 @@ class _StreamingCall:
             if delta_tool_calls:
                 _flush_pending_stream_text()
                 for tc_delta in delta_tool_calls:
-                    raw_index = getattr(tc_delta, "index", None)
-                    raw_idx = raw_index if raw_index is not None else 0
-                    delta_id = getattr(tc_delta, "id", None) or ""
-
-                    # Ollama fix: detect a new tool call reusing the same
-                    # raw index (different id) and redirect to a fresh slot.
-                    if raw_idx not in _active_slot_by_idx:
-                        _active_slot_by_idx[raw_idx] = raw_idx
-                    if (
-                        delta_id
-                        and raw_idx in _last_id_at_idx
-                        and delta_id != _last_id_at_idx[raw_idx]
-                    ):
-                        new_slot = max(tool_calls_acc, default=-1) + 1
-                        _active_slot_by_idx[raw_idx] = new_slot
-                    if delta_id:
-                        _last_id_at_idx[raw_idx] = delta_id
-                    idx = _active_slot_by_idx[raw_idx]
-
-                    if idx not in tool_calls_acc:
-                        # Poolside may send integer id instead of string
-                        _tc_id = getattr(tc_delta, "id", None)
-                        if isinstance(_tc_id, int):
-                            _tc_id = str(_tc_id)
-                        tool_calls_acc[idx] = {
-                            "id": _tc_id or "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                            "extra_content": None,
-                        }
-                    entry = tool_calls_acc[idx]
-                    tc_id = getattr(tc_delta, "id", None)
-                    if tc_id is not None:
-                        _new_id = tc_id
-                        if isinstance(_new_id, int):
-                            _new_id = str(_new_id)
-                        if _new_id:
-                            entry["id"] = _new_id
-                    tc_function = getattr(tc_delta, "function", None)
-                    if tc_function:
-                        function_name = getattr(tc_function, "name", None)
-                        if function_name:
-                            # Use assignment, not +=.  Function names are
-                            # atomic identifiers delivered complete in the
-                            # first chunk (OpenAI spec).  Some providers
-                            # (MiniMax M2.7 via NVIDIA NIM) resend the full
-                            # name in every chunk; concatenation would
-                            # produce "read_fileread_file".  Assignment
-                            # (matching the OpenAI Node SDK / LiteLLM /
-                            # Vercel AI patterns) is immune to this.
-                            entry["function"]["name"] = function_name
-                        function_arguments = getattr(tc_function, "arguments", None)
-                        if function_arguments:
-                            entry["function"]["arguments"] += function_arguments
-                    extra = getattr(tc_delta, "extra_content", None)
-                    if extra is None and hasattr(tc_delta, "model_extra"):
-                        extra = (tc_delta.model_extra if isinstance(tc_delta.model_extra, dict) else {}).get("extra_content")
-                    if extra is not None:
-                        if hasattr(extra, "model_dump"):
-                            try:
-                                extra = extra.model_dump(warnings=False)
-                            except TypeError:
-                                extra = extra.model_dump()
-                        entry["extra_content"] = extra
-                    # Fire once per tool when the full name is available
-                    name = entry["function"]["name"]
-                    if name and idx not in tool_gen_notified:
-                        tool_gen_notified.add(idx)
+                    name = tool_calls.feed(tc_delta)
+                    if name is not None:
                         self._fire_first_delta()
                         self.agent._fire_tool_gen_started(name)
                         # Record the partial tool-call name so the outer
                         # stub-builder can surface a user-visible warning
                         # if streaming dies before this tool's arguments
-                        # are fully delivered.  Without this, a stall
-                        # during tool-call JSON generation lets the stub
-                        # at line ~6107 return `tool_calls=None`, silently
-                        # discarding the attempted action.
+                        # are fully delivered; otherwise a stall during
+                        # tool-call JSON generation lets the stub return
+                        # ``tool_calls=None`` and silently discard the action.
                         self.result["partial_tool_names"].append(name)
 
             # (finish_reason/usage are now extracted at the top of the loop
