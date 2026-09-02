@@ -1,0 +1,623 @@
+"""prompt_toolkit completer + inline auto-suggest for slash commands.
+
+Extracted from :mod:`hermes_cli.commands` (which re-exports
+``SlashCommandCompleter`` / ``SlashCommandAutoSuggest``). The registry module
+stays prompt_toolkit-free so the gateway can import it without the dependency.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import time
+from collections.abc import Callable, Iterable, Mapping
+from itertools import chain
+from typing import Any, Dict, Optional, Tuple
+
+from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
+from prompt_toolkit.completion import Completer, Completion
+
+from hermes_cli.commands import COMMANDS, SUBCOMMANDS
+
+# (config-file signature, personalities) memo for /personality completion.
+_personalities_memo: Optional[
+    Tuple[Tuple[Optional[str], Optional[int], Optional[int]], Dict[str, Any]]
+] = None
+
+
+def _personalities_from_cli_config() -> Dict[str, Any]:
+    """``available_personalities(load_cli_config())`` memoised on config path+mtime+size.
+
+    load_cli_config() does a full YAML parse + deep merge and the completer
+    runs per keystroke; the result only changes when config.yaml changes on
+    disk (same pattern as load_env). Falls back to a fresh load when the file
+    cannot be stat'ed.
+    """
+    global _personalities_memo
+    from cli import load_cli_config
+    from hermes_cli.personality import available_personalities
+
+    try:
+        from hermes_cli.config import get_config_path
+
+        cfg_path = get_config_path()
+        st = cfg_path.stat()
+        sig = (str(cfg_path), st.st_mtime_ns, st.st_size)
+    except Exception:
+        sig = (None, None, None)
+
+    if _personalities_memo is not None and _personalities_memo[0] == sig:
+        return _personalities_memo[1]
+
+    personalities = available_personalities(load_cli_config())
+    _personalities_memo = (sig, personalities)
+    return personalities
+
+
+def _short_desc(info: Mapping[str, Any], default: str) -> str:
+    """50-char description preview used in completion menus."""
+    description = str(info.get("description", default))
+    return description[:50] + ("..." if len(description) > 50 else "")
+
+
+def _file_size_label(path: str) -> str:
+    """Return a compact human-readable file size, or '' on error."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return ""
+    if size < 1024:
+        return f"{size}B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.0f}K"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f}M"
+    return f"{size / (1024 * 1024 * 1024):.1f}G"
+
+
+def _prefix_completions(rows: Iterable[tuple[str, Any]], partial: str, *, skip_exact: bool = True):
+    """Yield a Completion per ``(name, meta)`` whose name starts with *partial* (case-folded partial)."""
+    lowered = partial.lower()
+    for name, meta in rows:
+        if name.startswith(lowered) and not (skip_exact and name == lowered):
+            yield Completion(name, start_position=-len(partial), display=name, display_meta=meta)
+
+
+def _split_args(sub_text: str) -> tuple[list[str], str]:
+    """``(completed_words, partial)`` for multi-word argument text; a trailing space means a fresh word."""
+    parts = sub_text.split()
+    if sub_text.endswith(" "):
+        return parts, ""
+    return parts[:-1], (parts[-1] if parts else "")
+
+
+# ---------------------------------------------------------------------------
+# Dynamic argument completers: (sub_text, sub_lower) -> Completion iterator
+# ---------------------------------------------------------------------------
+
+def _skin_completions(sub_text: str, sub_lower: str):
+    """/skin — available skins."""
+    try:
+        from hermes_cli.skin_engine import list_skins
+        rows = ((s["name"], s.get("description", "") or s.get("source", "")) for s in list_skins())
+        yield from _prefix_completions(rows, sub_text)
+    except Exception:
+        pass
+
+
+def _personality_completions(sub_text: str, sub_lower: str):
+    """/personality — ``none`` plus configured personalities."""
+    try:
+        from hermes_cli.personality import describe_personality
+
+        personalities = _personalities_from_cli_config()
+        rows = chain([("none", "clear personality overlay")],
+                     ((name, describe_personality(prompt)) for name, prompt in personalities.items()))
+        yield from _prefix_completions(rows, sub_text)
+    except Exception:
+        pass
+
+
+def _tools_completions(sub_text: str, sub_lower: str):
+    """/tools — subcommand, then toolset / MCP-server names for enable|disable.
+
+    Toolsets are offered only when the subcommand would change their state
+    (enable → currently off, disable → currently on); MCP server prefixes are
+    always offered.
+    """
+    completed, partial = _split_args(sub_text)
+    if not completed:
+        yield from _prefix_completions(((s, None) for s in ("list", "disable", "enable")), partial)
+        return
+    subcommand = completed[0].lower()
+    if subcommand not in ("enable", "disable"):
+        return
+    already = set(completed[1:])
+    try:
+        from hermes_cli.config import load_config_readonly
+        from hermes_cli.tools_config import CONFIGURABLE_TOOLSETS, _get_platform_tools, _get_plugin_toolset_keys
+
+        # Readonly loader: this runs per keystroke and never mutates config,
+        # so skip the defensive deepcopy of load_config().
+        config = load_config_readonly()
+        enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+        mcp_servers = config.get("mcp_servers") or {}
+        want_enabled = subcommand != "enable"
+        rows = [(k, label) for k, label, _d in CONFIGURABLE_TOOLSETS if (k in enabled) == want_enabled]
+        rows += [(k, "plugin toolset") for k in sorted(_get_plugin_toolset_keys()) if (k in enabled) == want_enabled]
+        if isinstance(mcp_servers, dict):
+            rows += [(f"{srv}:", f"MCP server '{srv}'") for srv in sorted(mcp_servers)]
+        yield from _prefix_completions(((k, m) for k, m in rows if k not in already), partial, skip_exact=False)
+    except Exception:
+        return
+
+
+def _handoff_completions(sub_text: str, sub_lower: str):
+    """/handoff — connected (enabled + configured) gateway platforms, first arg only.
+
+    A recorded home channel is NOT required to list a platform — it's often
+    learned at runtime — so the meta hints whether one is set yet.
+    """
+    completed, partial = _split_args(sub_text)
+    if completed:
+        return
+    try:
+        from gateway.config import load_gateway_config
+
+        gw = load_gateway_config()
+        platforms = gw.get_connected_platforms()
+    except Exception:
+        return
+
+    for platform in platforms:
+        name = platform.value
+        if not name.startswith(partial.lower()):
+            continue
+        try:
+            home = gw.get_home_channel(platform)
+        except Exception:
+            home = None
+        meta = f"→ {home.name}" if home and getattr(home, "name", None) else "send this session here"
+        yield Completion(name, start_position=-len(partial), display=name, display_meta=meta)
+
+
+# base command -> (handler(sub_text, sub_lower), single_word_only).
+# Single-word handlers only run while the first argument is being typed;
+# /tools and /handoff parse multi-word input themselves, bypassing the
+# static SUBCOMMANDS branch.
+_DYNAMIC_COMPLETIONS: dict[str, tuple[Callable[..., Any], bool]] = {
+    "/skin": (_skin_completions, True),
+    "/personality": (_personality_completions, True),
+    "/tools": (_tools_completions, False),
+    "/handoff": (_handoff_completions, False),
+}
+
+
+# ---------------------------------------------------------------------------
+# Path / @-context completion
+# ---------------------------------------------------------------------------
+
+def _extract_path_word(text: str) -> str | None:
+    """Path-like word under the cursor (``./``, ``../``, ``~/``, ``/`` or contains ``/``), else None.
+
+    Tokens with a ``://`` scheme are excluded — treating a pasted URL as a
+    path fires os.listdir per keystroke for no useful result.
+    """
+    word = text.rpartition(" ")[2]
+    if not word or "://" in word:
+        return None
+    return word if "/" in word else None
+
+
+def _dir_completions(expanded: str, word: str, limit: int, text_for: Callable[[str], str], want_dir: bool | None = None):
+    """Yield directory-listing completions for the path *expanded*.
+
+    Entries of the parent dir are matched case-insensitively on the typed
+    basename (all entries after a trailing ``/``), sorted by name, and
+    limited to *limit*. ``text_for(full_path)`` builds the completion text
+    (without the trailing ``/``); *want_dir* restricts to dirs / files.
+    """
+    if expanded.endswith("/"):
+        search_dir, prefix = expanded, ""
+    else:
+        search_dir = os.path.dirname(expanded) or "."
+        prefix = os.path.basename(expanded)
+    try:
+        entries = os.listdir(search_dir)
+    except OSError:
+        return
+    prefix_lower = prefix.lower()
+    count = 0
+    for entry in sorted(entries):
+        if prefix and not entry.lower().startswith(prefix_lower):
+            continue
+        full_path = os.path.join(search_dir, entry)
+        is_dir = os.path.isdir(full_path)
+        if want_dir is not None and want_dir != is_dir:
+            continue
+        if count >= limit:
+            break
+        suffix = "/" if is_dir else ""
+        yield Completion(
+            text_for(full_path) + suffix,
+            start_position=-len(word),
+            display=entry + suffix,
+            display_meta="dir" if is_dir else _file_size_label(full_path),
+        )
+        count += 1
+
+
+def _path_completions(word: str, limit: int = 30):
+    """Yield Completion objects for file paths matching *word*, keeping the user's path style (~, absolute, relative)."""
+    if word.startswith("~"):
+        text_for = lambda fp: "~/" + os.path.relpath(fp, os.path.expanduser("~"))  # noqa: E731
+    elif os.path.isabs(word):
+        text_for = lambda fp: fp  # noqa: E731
+    else:
+        text_for = os.path.relpath
+    yield from _dir_completions(os.path.expanduser(word), word, limit, text_for)
+
+
+_STATIC_CONTEXT_REFS = (
+    ("@diff", "Git working tree diff"),
+    ("@staged", "Git staged diff"),
+    ("@file:", "Attach a file"),
+    ("@folder:", "Attach a folder"),
+    ("@git:", "Git log with diffs (e.g. @git:5)"),
+    ("@url:", "Fetch web content"),
+)
+
+
+def _score_path(filepath: str, query: str) -> int:
+    """Score a file path against a fuzzy query. Higher = better match; 0 = no match."""
+    if not query:
+        return 1  # show everything when query is empty
+    lower_file = os.path.basename(filepath).lower()
+    lower_q = query.lower()
+    if lower_file == lower_q:
+        return 100
+    if lower_file.startswith(lower_q):
+        return 80
+    if lower_q in lower_file:
+        return 60
+    if lower_q in filepath.lower():
+        return 40
+    # Abbreviation match: query chars appear in order in the filename ("fo" ~
+    # "file_operations"); bonus when >= half land on word boundaries (_-./).
+    qi = boundary_hits = 0
+    prev = "_"  # treat start as boundary
+    for c in lower_file:
+        if qi < len(lower_q) and c == lower_q[qi]:
+            boundary_hits += prev in "_-./"
+            qi += 1
+        prev = c
+    if qi < len(lower_q):
+        return 0
+    return 35 if boundary_hits >= len(lower_q) * 0.5 else 25
+
+
+class SlashCommandCompleter(Completer):
+    """Autocomplete for built-in slash commands, subcommands, and skill commands."""
+
+    # Commands that open pickers when run bare. No trailing space for these:
+    # the TUI applies the completion on Enter, and "/model " blocks the picker.
+    _PICKER_COMMANDS = frozenset({"model", "skin", "personality"})
+
+    # Module-level helpers exposed as staticmethods for existing callers/tests.
+    _extract_path_word = staticmethod(_extract_path_word)
+    _dir_completions = staticmethod(_dir_completions)
+    _path_completions = staticmethod(_path_completions)
+    _score_path = staticmethod(_score_path)
+    _skin_completions = staticmethod(_skin_completions)
+    _personality_completions = staticmethod(_personality_completions)
+    _tools_completions = staticmethod(_tools_completions)
+    _handoff_completions = staticmethod(_handoff_completions)
+    _DYNAMIC_COMPLETIONS = _DYNAMIC_COMPLETIONS
+
+    def __init__(
+        self,
+        skill_commands_provider: Callable[[], Mapping[str, dict[str, Any]]] | None = None,
+        command_filter: Callable[[str], bool] | None = None,
+        skill_bundles_provider: Callable[[], Mapping[str, dict[str, Any]]] | None = None,
+    ) -> None:
+        self._skill_commands_provider = skill_commands_provider
+        self._command_filter = command_filter
+        self._skill_bundles_provider = skill_bundles_provider
+        # Cached project file list for fuzzy @ completions
+        self._file_cache: list[str] = []
+        self._file_cache_time: float = 0.0
+        self._file_cache_cwd: str = ""
+
+    def _command_allowed(self, slash_command: str) -> bool:
+        if self._command_filter is None:
+            return True
+        try:
+            return bool(self._command_filter(slash_command))
+        except Exception:
+            return True
+
+    @staticmethod
+    def _call_provider(provider) -> Mapping[str, dict[str, Any]]:
+        if provider is None:
+            return {}
+        try:
+            return provider() or {}
+        except Exception:
+            return {}
+
+    def _iter_skill_commands(self) -> Mapping[str, dict[str, Any]]:
+        return self._call_provider(self._skill_commands_provider)
+
+    def _iter_skill_bundles(self) -> Mapping[str, dict[str, Any]]:
+        return self._call_provider(self._skill_bundles_provider)
+
+    # -- stacked slash-skill completion helpers ---------------------------
+
+    @staticmethod
+    def _normalize_skill_token(token: str) -> str:
+        """Canonical hyphenated /slug form; mirrors resolve_skill_command_key() (underscores == hyphens)."""
+        return "/" + token.lstrip("/").replace("_", "-").lower()
+
+    def _is_skill_command(self, token: str) -> bool:
+        return self._normalize_skill_token(token) in self._iter_skill_commands()
+
+    def _stacked_skill_completions(self, text: str):
+        """Offer skill-command completions for stacked invocations (``/skill-a /skill-b do XYZ``).
+
+        Keep suggesting while every completed token is a distinct skill
+        command, the cap is not reached, and the current word starts with
+        ``/``; once the chain breaks, offer nothing — instruction text must
+        never be polluted with skill suggestions.
+        """
+        try:
+            from agent.skill_commands import _MAX_STACKED_SKILLS as _cap
+        except Exception:
+            _cap = 5
+
+        completed, current_word = _split_args(text)
+        skill_cmds = self._iter_skill_commands()
+        seen: set[str] = set()
+        for token in completed:
+            key = self._normalize_skill_token(token)
+            if key not in skill_cmds or key in seen:
+                return
+            seen.add(key)
+        # A bare space after the chain means they may be starting the instruction.
+        if len(seen) >= _cap or not current_word.startswith("/"):
+            return
+
+        word_key = self._normalize_skill_token(current_word)
+        for cmd, info in skill_cmds.items():
+            if cmd in seen or not cmd.startswith(word_key):
+                continue
+            # Exact match: trailing space keeps the dropdown visible so the
+            # next stacked token can be typed immediately (see _completion_text).
+            yield Completion(
+                f"{cmd} " if cmd == word_key else cmd,
+                start_position=-len(current_word),
+                display=cmd,
+                display_meta=f"⚡ {_short_desc(info, 'Skill command')}",
+            )
+
+    @staticmethod
+    def _completion_text(cmd_name: str, word: str) -> str:
+        """Replacement text: on an exact match a no-op replacement makes prompt_toolkit
+        suppress the menu, so a trailing space is appended — except for _PICKER_COMMANDS."""
+        if cmd_name != word or cmd_name in SlashCommandCompleter._PICKER_COMMANDS:
+            return cmd_name
+        return f"{cmd_name} "
+
+    @staticmethod
+    def _extract_context_word(text: str) -> str | None:
+        """Extract a bare ``@`` token for context reference completions."""
+        word = text.rpartition(" ")[2]
+        return word if word.startswith("@") else None
+
+    def _context_completions(self, word: str, limit: int = 30):
+        """Claude Code-style @ completions: static refs, ``@file:``/``@folder:`` paths, else fuzzy project files."""
+        lowered = word.lower()
+        for candidate, meta in _STATIC_CONTEXT_REFS:
+            if candidate.startswith(lowered) and candidate != lowered:
+                yield Completion(candidate, start_position=-len(word), display=candidate, display_meta=meta)
+
+        # Accepting the bare `@file` / `@folder` (no colon yet) lets the picker
+        # surface entries without first accepting the static hint.
+        for prefix in ("@file:", "@folder:"):
+            bare = prefix[:-1]
+            if word == bare or word.startswith(prefix):
+                expanded = os.path.expanduser("" if word == bare else word[len(prefix):])
+                if not expanded or expanded == ".":
+                    expanded = "./"
+                # `@folder:` surfaces only directories, `@file:` only regular
+                # files — otherwise `@folder:` lists every dotfile in cwd.
+                yield from _dir_completions(
+                    expanded, word, limit,
+                    lambda fp: f"{prefix}{os.path.relpath(fp)}",
+                    want_dir=(prefix == "@folder:"),
+                )
+                return
+
+        yield from self._fuzzy_file_completions(word, word[1:], limit)
+
+    def _get_project_files(self) -> list[str]:
+        """Return cached list of project files (refreshed every 5s); rg (gitignore-aware) then fd."""
+        cwd = os.getcwd()
+        now = time.monotonic()
+        if self._file_cache and self._file_cache_cwd == cwd and now - self._file_cache_time < 5.0:
+            return self._file_cache
+
+        files: list[str] = []
+        for cmd in (
+            ["rg", "--files", "--sortr=modified", cwd],
+            ["rg", "--files", cwd],
+            ["fd", "--type", "f", "--base-directory", cwd],
+        ):
+            if not shutil.which(cmd[0]):
+                continue
+            try:
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=2,
+                    cwd=cwd, encoding="utf-8", errors="replace",
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                continue
+            if proc.returncode != 0 or not proc.stdout.strip():
+                continue
+            for p in proc.stdout.strip().split("\n")[:5000]:
+                try:
+                    files.append(os.path.relpath(p, cwd) if os.path.isabs(p) else p)
+                except ValueError:
+                    # Windows: relpath raises for paths on a different mount than
+                    # cwd (\\.\nul, other drive letter). One bad entry must not
+                    # crash the @ autocomplete event loop.
+                    continue
+            break
+
+        self._file_cache, self._file_cache_time, self._file_cache_cwd = files, now, cwd
+        return files
+
+    def _fuzzy_file_completions(self, word: str, query: str, limit: int = 20):
+        """Yield fuzzy file completions for bare @query (no query = recently modified files)."""
+        files = self._get_project_files()
+        if not query:
+            ranked = files[:limit]
+        else:
+            scored = [(s, fp) for fp in files if (s := _score_path(fp, query)) > 0]
+            scored.sort(key=lambda x: (-x[0], x[1]))
+            ranked = [fp for _, fp in scored[:limit]]
+
+        for fp in ranked:
+            is_dir = fp.endswith("/")
+            meta = "dir" if is_dir else _file_size_label(os.path.join(os.getcwd(), fp))
+            if query:
+                meta = f"{fp}  {meta}" if meta else fp
+            yield Completion(
+                f"@{'folder' if is_dir else 'file'}:{fp}",
+                start_position=-len(word),
+                display=os.path.basename(fp),
+                display_meta=meta,
+            )
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if not text.startswith("/"):
+            ctx_word = self._extract_context_word(text)
+            if ctx_word is not None:
+                yield from self._context_completions(ctx_word)
+                return
+            path_word = _extract_path_word(text)
+            if path_word is not None:
+                yield from _path_completions(path_word)
+            return
+
+        parts = text.split(maxsplit=1)
+        base_cmd = parts[0].lower()
+        if len(parts) > 1 or text.endswith(" "):
+            # Completing arguments: base command already typed.
+            sub_text = parts[1] if len(parts) > 1 else ""
+            sub_lower = sub_text.lower()
+
+            # Stacked slash-skill chain (`/skill-a /skill-b …`), see
+            # split_stacked_skill_commands in agent/skill_commands.py.
+            if self._is_skill_command(base_cmd):
+                yield from self._stacked_skill_completions(text)
+                return
+
+            dynamic = _DYNAMIC_COMPLETIONS.get(base_cmd)
+            if dynamic is not None:
+                handler, single_word = dynamic
+                if not single_word or " " not in sub_text:
+                    yield from handler(sub_text, sub_lower)
+                    return
+
+            if " " not in sub_text and base_cmd in SUBCOMMANDS and self._command_allowed(base_cmd):
+                yield from _prefix_completions(((s, None) for s in SUBCOMMANDS[base_cmd]), sub_text)
+            return
+
+        word = text[1:]
+
+        def _cmd_completion(cmd_name: str, meta: str):
+            return Completion(
+                self._completion_text(cmd_name, word),
+                start_position=-len(word),
+                display=f"/{cmd_name}",
+                display_meta=meta,
+            )
+
+        for cmd, desc in COMMANDS.items():
+            if self._command_allowed(cmd) and cmd[1:].startswith(word):
+                yield _cmd_completion(cmd[1:], desc)
+
+        for cmd, info in self._iter_skill_bundles().items():
+            if cmd[1:].startswith(word):
+                skill_count = len(info.get("skills", []))
+                yield _cmd_completion(cmd[1:], f"▣ {_short_desc(info, 'Skill bundle')} ({skill_count} skills)")
+
+        for cmd, info in self._iter_skill_commands().items():
+            if cmd[1:].startswith(word):
+                yield _cmd_completion(cmd[1:], f"⚡ {_short_desc(info, 'Skill command')}")
+
+        try:
+            from hermes_cli.plugins import get_plugin_commands
+            for cmd_name, cmd_info in get_plugin_commands().items():
+                if cmd_name.startswith(word):
+                    yield _cmd_completion(cmd_name, f"🔌 {_short_desc(cmd_info, 'Plugin command')}")
+        except Exception:
+            pass
+
+
+class SlashCommandAutoSuggest(AutoSuggest):
+    """Inline ghost-text for slash commands and their subcommands; history fallback for other input."""
+
+    def __init__(
+        self,
+        history_suggest: AutoSuggest | None = None,
+        completer: SlashCommandCompleter | None = None,
+    ) -> None:
+        self._history = history_suggest
+        self._completer = completer  # Reuse its model cache
+
+    def _allowed(self, cmd: str) -> bool:
+        return self._completer is None or self._completer._command_allowed(cmd)
+
+    def get_suggestion(self, buffer, document):
+        text = document.text_before_cursor
+        if not text.startswith("/"):
+            return self._history_suggestion(buffer, document)
+
+        parts = text.split(maxsplit=1)
+        base_cmd = parts[0].lower()
+
+        if len(parts) == 1 and not text.endswith(" "):
+            # Still typing the command name: /upd → "ate". Prefer the SHORTEST
+            # match so /he ghosts "lp" (/help), not "artbeat" (/heartbeat).
+            word = text[1:].lower()
+            for cmd in sorted(COMMANDS, key=len):
+                cmd_name = cmd[1:]
+                if self._allowed(cmd) and cmd_name.startswith(word) and cmd_name != word:
+                    return Suggestion(cmd_name[len(word):])
+            return None
+
+        sub_text = parts[1] if len(parts) > 1 else ""
+        sub_lower = sub_text.lower()
+
+        # Stacked skill chain: ghost-suggest the rest of the next skill name;
+        # otherwise fall through to the history fallback for instruction text.
+        if self._completer is not None and self._completer._is_skill_command(base_cmd):
+            for completion in self._completer._stacked_skill_completions(text):
+                remainder = completion.text[-completion.start_position:] \
+                    if completion.start_position else completion.text
+                if remainder.strip():
+                    return Suggestion(remainder)
+
+        if not self._allowed(base_cmd):
+            return None
+        if " " not in sub_text:
+            for sub in SUBCOMMANDS.get(base_cmd, ()):
+                if sub.startswith(sub_lower) and sub != sub_lower:
+                    return Suggestion(sub[len(sub_text):])
+        return self._history_suggestion(buffer, document)
+
+    def _history_suggestion(self, buffer, document):
+        return self._history.get_suggestion(buffer, document) if self._history else None
