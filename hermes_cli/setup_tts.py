@@ -21,7 +21,6 @@ def _pip_install_tts_package(name: str, pip_args: list, manual_cmd: str) -> bool
     ladder so pip-less venvs (Ubuntu 25.10 ``python -m venv``, ``uv venv``) work."""
     from hermes_cli.setup import print_error, print_info, print_success
     from hermes_cli.tools_config import _pip_install
-
     try:
         result = _pip_install(pip_args, timeout=300)
     except Exception as e:
@@ -48,7 +47,6 @@ _ESPEAK_INSTALL = {
 def _install_neutts_deps() -> bool:
     """Install NeuTTS dependencies with user approval. Returns True on success."""
     from hermes_cli.setup import print_info, print_success, print_warning, prompt_yes_no
-
     if not _check_espeak_ng():
         hint, install_cmd = _ESPEAK_INSTALL.get(sys.platform, _ESPEAK_INSTALL["linux"])
         print()
@@ -76,7 +74,6 @@ def _install_neutts_deps() -> bool:
 def _install_kittentts_deps() -> bool:
     """Install KittenTTS dependencies with user approval. Returns True on success."""
     from hermes_cli.setup import print_info
-
     wheel_url = (
         "https://github.com/KittenML/KittenTTS/releases/download/"
         "0.8.1/kittentts-0.8.1-py3-none-any.whl"
@@ -114,7 +111,6 @@ def _run_xai_oauth_login_from_setup() -> bool:
     to whatever the user picked next, e.g. Edge TTS).
     """
     from hermes_cli.setup import print_info, print_warning
-
     try:
         from hermes_cli.auth import (
             _is_remote_session, _save_xai_oauth_tokens, _xai_oauth_device_code_login,
@@ -192,7 +188,6 @@ _TTS_LOCAL_PROVIDERS = {
 def _tts_api_key_step(selected: str) -> str:
     """Ensure the key for an API-key TTS provider exists; fall back to edge otherwise."""
     from hermes_cli.setup import get_env_value, print_info, print_success, print_warning, prompt, save_env_value
-
     env_vars, save_var, prompt_label, saved_msg, hint = _TTS_API_KEY_PROVIDERS[selected]
     if any(get_env_value(v) for v in env_vars):
         return selected
@@ -211,7 +206,6 @@ def _tts_api_key_step(selected: str) -> str:
 def _tts_local_install_step(selected: str) -> str:
     """Offer to install a local TTS engine; fall back to edge if declined/failed."""
     from hermes_cli.setup import _module_installed, print_info, print_success, print_warning, prompt_yes_no
-
     module, name, lines, question, installer = _TTS_LOCAL_PROVIDERS[selected]
     if _module_installed(module):
         print_success(f"{name} is already installed")
@@ -236,7 +230,6 @@ def _tts_xai_step(config: dict) -> str:
         _run_xai_oauth_login_from_setup, _xai_oauth_logged_in_for_setup, get_env_value, print_success,
         print_warning, prompt, prompt_choice, save_env_value,
     )
-
     selected = "xai"
     if _xai_oauth_logged_in_for_setup():
         print_success("xAI TTS will use your xAI Grok OAuth (SuperGrok / Premium+) credentials")
@@ -290,7 +283,6 @@ def _setup_tts_provider(config: dict):
         get_env_value, get_nous_subscription_features, managed_nous_tools_enabled, print_header, print_info,
         print_success, print_warning, prompt_choice, save_config,
     )
-
     current_provider = config.get("tts", {}).get("provider", "edge")
     current_label = _TTS_PROVIDER_LABELS.get(current_provider, current_provider)
 

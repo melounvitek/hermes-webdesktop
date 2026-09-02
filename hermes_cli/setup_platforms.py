@@ -18,7 +18,6 @@ def _is_valid_telegram_bot_token(token: str) -> bool:
 def _info(*lines: str | None) -> None:
     """print_info each line in order; ``None`` emits a bare blank ``print()``."""
     from hermes_cli.setup import print_info
-
     for line in lines:
         print() if line is None else print_info(line)
 
@@ -33,7 +32,6 @@ def _profile_name_from_hermes_home(hermes_home) -> str | None:
 def _setup_telegram_auto_result():
     """Attempt automatic Telegram bot creation via managed QR onboarding."""
     from hermes_cli.setup import get_hermes_home
-
     try:
         from hermes_cli.telegram_managed_bot import auto_setup_telegram_bot_result
     except ImportError:
@@ -50,7 +48,6 @@ def _setup_telegram_auto_result():
 def _declines_reconfigure(env_var: str, label: str, question: str) -> bool:
     """True when ``env_var`` is already set and the user does NOT want to reconfigure."""
     from hermes_cli.setup import get_env_value, print_info, prompt_yes_no
-
     if not get_env_value(env_var):
         return False
     print_info(f"{label}: already configured")
@@ -59,7 +56,6 @@ def _declines_reconfigure(env_var: str, label: str, question: str) -> bool:
 
 def _save_if_set(env_var: str, value: str) -> None:
     from hermes_cli.setup import save_env_value
-
     if value:
         save_env_value(env_var, value)
 
@@ -67,7 +63,6 @@ def _save_if_set(env_var: str, value: str) -> None:
 def _save_allowlist(env_var: str, users: str, success_msg: str) -> None:
     """Strip spaces, persist the allowlist, and confirm."""
     from hermes_cli.setup import print_success, save_env_value
-
     save_env_value(env_var, users.replace(" ", ""))
     print_success(success_msg)
 
@@ -75,7 +70,6 @@ def _save_allowlist(env_var: str, users: str, success_msg: str) -> None:
 def _save_port(env_var: str, value: str, default: str) -> None:
     """Persist ``value`` as an int port; warn (keeping ``default``) when it isn't one."""
     from hermes_cli.setup import print_success, print_warning, save_env_value
-
     if not value:
         return
     try:
@@ -87,7 +81,6 @@ def _save_port(env_var: str, value: str, default: str) -> None:
 
 def _prompt_telegram_bot_token() -> str | None:
     from hermes_cli.setup import print_error, print_info, prompt
-
     print_info("Create a bot via @BotFather on Telegram")
     while True:
         token = prompt("Telegram bot token", password=True)
@@ -103,7 +96,6 @@ def _prompt_telegram_bot_token() -> str | None:
 def _telegram_allowlist_nudge() -> None:
     """Existing config kept as-is: warn when it has no user allowlist."""
     from hermes_cli.setup import get_env_value, print_info, prompt, prompt_yes_no
-
     if get_env_value("TELEGRAM_ALLOWED_USERS"):
         return
     print_info("⚠️  Telegram has no user allowlist - anyone can use your bot!")
@@ -117,7 +109,6 @@ def _telegram_allowlist_nudge() -> None:
 def _obtain_telegram_token():
     """Return (token, setup_result); auto flow first when chosen, else manual paste."""
     from hermes_cli.setup import print_error, prompt
-
     _info("How would you like to create your Telegram bot?", None,
           "  [1] Automatic (recommended)",
           "      Scan a QR code → confirm in Telegram → done.",
@@ -149,7 +140,6 @@ def _setup_telegram():
     """Configure Telegram bot credentials and allowlist."""
     from hermes_cli.setup import print_header, print_info, print_success, prompt, prompt_yes_no
     from hermes_cli.setup import save_env_value
-
     print_header("Telegram")
     if _declines_reconfigure("TELEGRAM_BOT_TOKEN", "Telegram", "Reconfigure Telegram?"):
         _telegram_allowlist_nudge()
@@ -216,7 +206,6 @@ def _setup_bluebubbles():
     """Configure BlueBubbles iMessage gateway."""
     from hermes_cli.setup import print_header, print_info, print_success, print_warning, prompt
     from hermes_cli.setup import prompt_yes_no, save_env_value
-
     print_header("BlueBubbles (iMessage)")
     if _declines_reconfigure("BLUEBUBBLES_SERVER_URL", "BlueBubbles", "Reconfigure BlueBubbles?"):
         return
@@ -261,16 +250,9 @@ def _setup_bluebubbles():
           "   Install: https://docs.bluebubbles.app/helper-bundle/installation")
 
 
-def _setup_qqbot():
-    """Configure QQ Bot (Official API v2) via gateway setup."""
-    from hermes_cli.gateway import _setup_qqbot as _gateway_setup_qqbot
-    _gateway_setup_qqbot()
-
-
 def _setup_webhooks():
     """Configure webhook integration."""
     from hermes_cli.setup import print_header, print_success, print_warning, prompt, save_env_value
-
     print_header("Webhooks")
     if _declines_reconfigure("WEBHOOK_ENABLED", "Webhooks", "Reconfigure webhooks?"):
         return
@@ -327,7 +309,6 @@ def _is_progress(status: str) -> bool:
 def _warn_missing_home_channels() -> None:
     """Platforms with a token but no home channel."""
     from hermes_cli.setup import get_env_value, print_warning
-
     missing_home = [
         plat for plat, token_var, home_vars in _HOME_CHANNEL_CHECKS
         if get_env_value(token_var) and not any(get_env_value(v) for v in home_vars)
@@ -352,7 +333,6 @@ def _restart_running_gateway(any_messaging: bool, supports_systemd: bool) -> Non
         _system_scope_wizard_would_need_root, _print_system_scope_remediation,
     )
     import platform as _platform
-
     if supports_systemd and _system_scope_wizard_would_need_root():
         _print_system_scope_remediation("restart")
         return
@@ -384,7 +364,6 @@ def setup_gateway(config: dict):
     """Configure messaging platform integrations."""
     from hermes_cli.setup import print_header, print_info, print_success, prompt_checklist
     from hermes_cli.gateway import _all_platforms, _platform_status, _configure_platform
-
     print_header("Messaging Platforms")
     _info("Connect to messaging platforms to chat with Hermes from anywhere.",
           "Toggle with Space, confirm with Enter.", None)

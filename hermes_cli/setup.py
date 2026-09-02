@@ -1,19 +1,10 @@
-"""
-Interactive setup wizard for Hermes Agent.
+"""Interactive setup wizard for Hermes Agent (config lives in ~/.hermes/).
 
-Modular wizard with independently-runnable sections:
-  1. Model & Provider — choose your AI provider and model
-  2. Terminal Backend — where your agent runs commands
-  3. Agent Settings — iterations, compression, session reset
-  4. Messaging Platforms — connect Telegram, Discord, etc.
-  5. Tools — configure TTS, web search, image generation, etc.
-
-Config files are stored in ~/.hermes/ for easy access.
-
-Section bodies live in sibling modules (setup_tts, setup_terminal, setup_platforms,
-setup_summary, setup_migration, setup_quick) and are re-exported here; they resolve shared
-prompt/config helpers lazily through this module so test patches on ``hermes_cli.setup.<name>``
-keep working.
+Independently-runnable sections: Model & Provider, Terminal Backend, Agent Settings,
+Messaging Platforms, Tools (TTS, web search, image generation, ...). Section bodies live in
+sibling modules (setup_tts, setup_terminal, setup_platforms, setup_summary, setup_migration,
+setup_quick) and are re-exported here; they resolve shared prompt/config helpers lazily through
+this module so test patches on ``hermes_cli.setup.<name>`` keep working.
 """
 
 import importlib.util
@@ -38,60 +29,12 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 _DOCS_BASE = "https://hermes-agent.nousresearch.com/docs"
 
 
-# Default model lists per provider — used as fallback when the live
-# /models endpoint can't be reached.
-_DEFAULT_PROVIDER_MODELS = {
-    "copilot-acp": ["copilot-acp"],
-    "copilot": [
-        "gpt-5.4", "gpt-5.4-mini", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.2-codex", "gpt-4.1", "gpt-4o",
-        "gpt-4o-mini", "claude-opus-4.6", "claude-sonnet-5", "claude-sonnet-4.6", "claude-sonnet-4.5",
-        "claude-haiku-4.5", "gemini-2.5-pro",
-    ],
-    "gemini": [
-        "gemini-3.1-pro-preview", "gemini-3-pro-preview",
-        "gemini-3.6-flash", "gemini-3.1-flash-lite-preview",
-    ],
-    "vertex": [
-        "google/gemini-3.1-pro-preview", "google/gemini-3-pro-preview",
-        "google/gemini-3-flash-preview", "google/gemini-3.1-flash-lite-preview",
-        "google/gemini-2.5-pro", "google/gemini-2.5-flash",
-    ],
-    "zai": ["glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.5", "glm-4.5-flash"],
-    "kimi-coding": ["kimi-k3", "kimi-k2.6", "kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"],
-    "kimi-coding-cn": ["kimi-k3", "kimi-k2.6", "kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview"],
-    "stepfun": ["step-3.5-flash", "step-3.5-flash-2603"],
-    "arcee": ["trinity-large-thinking", "trinity-large-preview", "trinity-mini"],
-    "minimax": ["MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2"],
-    "minimax-cn": ["MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2"],
-    "ai-gateway": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5", "google/gemini-3-flash"],
-    "kilocode": ["anthropic/claude-sonnet-5", "anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5.4", "google/gemini-3-pro-preview", "google/gemini-3-flash-preview"],
-    "opencode-zen": ["x-preview-f-free", "gpt-5.6-sol", "gpt-5.4", "gpt-5.3-codex", "claude-opus-5", "claude-sonnet-5", "gemini-3.7-flash", "glm-5.2", "kimi-k3", "minimax-m3"],
-    "opencode-free": ["deepseek-v4-flash-free", "hy3-free", "mimo-v2.5-free", "laguna-s-2.1-free", "nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "muse-spark-1.2-contributor-free"],
-    "opencode-go": ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "gpt-5.6-luna", "grok-4.5", "glm-5.3", "glm-5.3-flash", "glm-5.2", "mimo-v2.5-pro", "mimo-v2.5", "minimax-m3", "minimax-m2.7", "qwen3.8-max", "qwen3.7-max", "deepseek-v4-pro", "hy3"],
-    "huggingface": [
-        "Qwen/Qwen3.5-397B-A17B", "Qwen/Qwen3-235B-A22B-Thinking-2507",
-        "Qwen/Qwen3-Coder-480B-A35B-Instruct", "deepseek-ai/DeepSeek-R1-0528",
-        "deepseek-ai/DeepSeek-V3.2", "moonshotai/Kimi-K2.5",
-    ],
-}
-
-
-# Config helpers (re-exported; tests patch them on this module).
+# Config helpers (re-exported; tests patch them on this module). display_hermes_home is
+# imported lazily at call sites (stale-module safety during hermes update).
 from hermes_cli.config import (  # noqa: E402
-    cfg_get,
-    DEFAULT_CONFIG,
-    get_hermes_home,
-    get_config_path,
-    get_env_path,
-    load_config,
-    save_config,
-    save_env_value,
-    remove_env_value,
-    get_env_value,
-    ensure_hermes_home,
+    cfg_get, DEFAULT_CONFIG, get_hermes_home, get_config_path, get_env_path, load_config, save_config,
+    save_env_value, remove_env_value, get_env_value, ensure_hermes_home,
 )
-# display_hermes_home imported lazily at call sites (stale-module safety during hermes update)
-
 from hermes_cli.colors import Colors, color  # noqa: E402
 
 
@@ -101,12 +44,7 @@ def print_header(title: str):
     print(color(f"◆ {title}", Colors.CYAN, Colors.BOLD))
 
 
-from hermes_cli.cli_output import (  # noqa: E402
-    print_error,
-    print_info,
-    print_success,
-    print_warning,
-)
+from hermes_cli.cli_output import print_error, print_info, print_success, print_warning  # noqa: E402
 from hermes_cli.secret_prompt import masked_secret_prompt  # noqa: E402
 
 
@@ -193,9 +131,9 @@ def prompt(question: str, default: str = None, password: bool = False) -> str:
 class _SetupControlFlow(BaseException):
     """Bypass provider error handlers that intentionally catch ``Exception``.
 
-    Provider setup contains broad compatibility boundaries around network,
-    plugin, and credential integrations. Navigation must cross those layers
-    unchanged so the outer setup state machine can replay the prior prompt.
+    Provider setup has broad compatibility boundaries around network, plugin and credential
+    integrations; navigation must cross them unchanged so the outer state machine can replay
+    the prior prompt.
     """
 
 
@@ -236,8 +174,7 @@ _SETUP_NAVIGATION: ContextVar[_SetupNavigationState | None] = ContextVar(
 
 
 def _handle_setup_menu_navigation(
-    event: MenuNavigationEvent,
-    value: object = None,
+    event: MenuNavigationEvent, value: object = None
 ) -> MenuNavigationStart | None:
     """Translate shared curses menu events into setup control flow."""
     state = _SETUP_NAVIGATION.get()
@@ -278,7 +215,6 @@ def _handle_setup_menu_navigation(
 def _setup_navigation_scope():
     """Install and reliably restore the setup menu navigation context."""
     from hermes_cli.curses_ui import reset_menu_navigation_handler, set_menu_navigation_handler
-
     token = _SETUP_NAVIGATION.set(_SetupNavigationState())
     menu_token = set_menu_navigation_handler(_handle_setup_menu_navigation)
     try:
@@ -291,9 +227,8 @@ def _setup_navigation_scope():
 def _run_setup_steps(steps: list[tuple[str, Callable[[], None]]]) -> None:
     """Run setup sections with left-arrow navigation between choices.
 
-    Left arrow at a section's first choice returns to the previous section.
-    From a later, nested choice it replays earlier selections invisibly and
-    reopens only the immediately preceding prompt.
+    Left arrow at a section's first choice returns to the previous section; from a later, nested
+    choice it replays earlier selections invisibly and reopens only the preceding prompt.
     """
     state = _SETUP_NAVIGATION.get()
     section_index = 0
@@ -334,17 +269,12 @@ def _run_setup_steps(steps: list[tuple[str, Callable[[], None]]]) -> None:
 
 
 def run_setup_action_with_navigation(
-    label: str,
-    action: Callable[[], None],
-    *,
-    cancelled_message: str = "Setup cancelled.",
+    label: str, action: Callable[[], None], *, cancelled_message: str = "Setup cancelled."
 ) -> None:
     """Run a setup-style menu flow with Escape and nested Left navigation.
 
-    Shared commands such as ``hermes model`` use the same provider/model
-    pickers as the setup wizard, but run outside ``run_setup_wizard``.  This
-    installs the setup navigation context for that standalone command and
-    reuses the same prompt replay state machine.
+    Shared commands such as ``hermes model`` use the wizard's pickers outside ``run_setup_wizard``;
+    this installs the navigation context for them and reuses the prompt replay state machine.
     """
     with _setup_navigation_scope():
         try:
@@ -354,9 +284,7 @@ def run_setup_action_with_navigation(
             print_info(cancelled_message)
 
 
-# =============================================================================
-# Prompt primitives
-# =============================================================================
+# ── Prompt primitives ──
 
 
 def _curses_prompt_choice(question: str, choices: list, default: int = 0, description: str | None = None) -> int:
@@ -368,10 +296,9 @@ def _curses_prompt_choice(question: str, choices: list, default: int = 0, descri
 def prompt_choice(question: str, choices: list, default: int = 0, description: str | None = None) -> int:
     """Prompt for a choice from a list with arrow key navigation.
 
-    Escape cancels an active setup wizard. Outside setup it keeps the current
-    default. The curses component owns its own numbered fallback, so a cancel
-    result must never be mistaken for a request to open another prompt.
-    Ctrl+C exits the wizard.
+    Escape cancels an active setup wizard; outside setup it keeps the default. The curses
+    component owns its own numbered fallback, so a cancel result must never be mistaken for a
+    request to open another prompt. Ctrl+C exits the wizard.
     """
     idx = _curses_prompt_choice(question, choices, default, description=description)
     if idx >= 0:
@@ -388,13 +315,11 @@ def prompt_choice(question: str, choices: list, default: int = 0, description: s
 def is_noninteractive() -> bool:
     """True when no human is available to answer a prompt.
 
-    The dashboard/desktop spawn CLI actions with ``stdin=DEVNULL`` and
-    ``HERMES_NONINTERACTIVE=1`` (see ``hermes_cli/web_server.py``). In that
-    context an ``input()`` raises ``EOFError`` immediately, so a prompt that
-    aborts on EOF kills the spawned action — this is what made the desktop
-    "restart gateway" fail when the Windows gateway service was not yet
-    installed (the start path asks "Install it now?" with no one to answer).
-    Honour the explicit env flag here so callers fall back to their default.
+    The dashboard/desktop spawn CLI actions with ``stdin=DEVNULL`` and ``HERMES_NONINTERACTIVE=1``
+    (see ``hermes_cli/web_server.py``); there ``input()`` raises ``EOFError`` immediately, and a
+    prompt that aborts on EOF kills the spawned action (desktop "restart gateway" failed this way
+    when the Windows service was not installed yet). Honour the flag so callers fall back to their
+    default.
     """
     return os.environ.get("HERMES_NONINTERACTIVE", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -402,16 +327,14 @@ def is_noninteractive() -> bool:
 def prompt_yes_no(question: str, default: bool = True) -> bool:
     """Prompt for yes/no. Ctrl+C exits, empty input returns default.
 
-    Non-interactive callers (``HERMES_NONINTERACTIVE=1`` or a closed/redirected
-    stdin) have no one to answer, so fall back to ``default`` instead of
-    aborting the whole process.
+    Non-interactive callers (``HERMES_NONINTERACTIVE=1`` or a closed/redirected stdin) have no
+    one to answer, so fall back to ``default`` instead of aborting the whole process.
     """
     if is_noninteractive():
         return default
 
-    # Setup owns a scoped curses navigation handler. Route binary selections
-    # through the same menu surface so ESC and left-arrow work consistently,
-    # while preserving the traditional line prompt for every other caller.
+    # Inside setup, route binary selections through the curses menu so ESC and left-arrow work
+    # consistently; every other caller keeps the traditional line prompt.
     if _SETUP_NAVIGATION.get() is not None:
         return _curses_prompt_choice(question, ["Yes", "No"], 0 if default else 1) == 0
 
@@ -424,9 +347,8 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
             print()
             sys.exit(1)
         except EOFError:
-            # No stdin to read (closed/redirected, e.g. a spawned action with
-            # stdin=DEVNULL). Accept the default rather than exit so the caller
-            # can proceed unattended instead of failing the whole command.
+            # No stdin (closed/redirected, e.g. stdin=DEVNULL): accept the default so the caller
+            # proceeds unattended instead of failing the whole command.
             print()
             return default
 
@@ -442,9 +364,8 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
 def prompt_checklist(title: str, items: list, pre_selected: list = None) -> list:
     """Multi-select checklist; returns the sorted indices of selected items.
 
-    Each item is a display string; ``pre_selected`` indices start checked. The user toggles
-    with Space and confirms with Enter on the appended "Continue →" option. Cancel keeps the
-    pre-selection. Falls back to a numbered toggle interface when curses is unavailable.
+    ``pre_selected`` indices start checked; Space toggles, Enter on the appended "Continue →"
+    confirms, cancel keeps the pre-selection. Numbered fallback when curses is unavailable.
     """
     if pre_selected is None:
         pre_selected = []
@@ -500,31 +421,22 @@ def _print_banner(*lines: str) -> None:
 # between `hermes tools` and `hermes setup tools`).
 
 
-# =============================================================================
-# Section 1: Model & Provider Configuration
-# =============================================================================
+# ── Section 1: Model & Provider Configuration ──
 
 
 def setup_model_provider(config: dict, *, quick: bool = False):
     """Configure the inference provider and default model.
 
-    Delegates to ``cmd_model()`` (the same flow used by ``hermes model``)
-    for provider selection, credential prompting, and model picking.
-    This ensures a single code path for all provider setup — any new
-    provider added to ``hermes model`` is automatically available here.
-
-    When *quick* is True, skips credential rotation, vision, and TTS
-    configuration — used by the streamlined first-time quick setup.
+    Delegates to the ``hermes model`` flow (provider picker, credential prompting, model pick,
+    persistence) so there is one code path — any provider added there is available here.
+    *quick* skips credential rotation, vision and TTS (first-time quick setup).
     """
     from hermes_cli.config import load_config, save_config
-
     print_header("Inference Provider")
     print_info("Choose how to connect to your main chat model.")
     print_info(f"   Guide: {_DOCS_BASE}/integrations/providers")
     print()
 
-    # Delegate to the shared hermes model flow — handles provider picker,
-    # credential prompting, model selection, and config persistence.
     from hermes_cli.main import select_provider_and_model
     try:
         select_provider_and_model()
@@ -536,43 +448,27 @@ def setup_model_provider(config: dict, *, quick: bool = False):
         print_warning(f"Provider setup encountered an error: {exc}")
         print_info("You can try again later with: hermes model")
 
-    # Re-sync the wizard's config dict from what cmd_model saved to disk.
-    # cmd_model writes via its own load/save cycle, and the wizard's final
-    # save_config(config) must not overwrite those changes with stale values
-    # (#4172). Refresh in place so callers holding the same object see every
-    # section the picker may have changed (model, custom_providers, auxiliary, ...).
+    # Re-sync from disk in place: cmd_model saved via its own load/save cycle and the wizard's
+    # final save_config(config) must not clobber it with stale values (#4172). Rotation, vision
+    # and TTS keep safe defaults (configure via `hermes auth add` / `hermes setup tts`).
     config.clear()
     config.update(load_config())
-
-    # Credential rotation, vision-backend selection, and TTS provider have safe
-    # defaults (rotation off, vision auto-detected, TTS = Edge) and are configured
-    # on demand via `hermes auth add`, `hermes setup` vision, and `hermes setup tts`.
-    # Tool Gateway prompt is already shown by _model_flow_nous() above.
     save_config(config)
 
 
-# =============================================================================
-# Section 3: Agent Settings
-# =============================================================================
+# ── Section 3: Agent Settings ──
 
 
 def _apply_default_agent_settings(config: dict):
     """Apply recommended defaults for all agent settings without prompting."""
     config.setdefault("agent", {})["max_turns"] = 150
-    # config.yaml is the authoritative source for max_turns; the gateway
-    # bridges it into HERMES_MAX_ITERATIONS at startup. We no longer write
-    # to .env to avoid the dual-source inconsistency that caused the
-    # 60-vs-500 bug (stale .env entry silently shadowing config.yaml).
+    # config.yaml is authoritative for max_turns (the gateway bridges it into HERMES_MAX_ITERATIONS);
+    # a stale .env entry silently shadowing it caused the 60-vs-500 bug, so drop it.
     remove_env_value("HERMES_MAX_ITERATIONS")
-
     config.setdefault("display", {})["tool_progress"] = "all"
-
     config.setdefault("compression", {})["enabled"] = True
     config["compression"]["threshold"] = 0.50
-
-    # Default: never auto-reset sessions. This matches the gateway's own
-    # default (SessionResetPolicy.mode = "none"); we still write it
-    # explicitly so the choice is visible/editable in config.yaml.
+    # Never auto-reset (the gateway default); written explicitly so it is visible in config.yaml.
     config.setdefault("session_reset", {})["mode"] = "none"
 
     save_config(config)
@@ -631,9 +527,7 @@ def setup_agent_settings(config: dict):
     print_info(f"   Guide: {_DOCS_BASE}/user-guide/configuration")
     print()
 
-    # ── Max Iterations ──
-    # config.yaml is authoritative; a legacy .env entry (pre-PR#18413) must not
-    # surface a stale number, so read from config only.
+    # ── Max Iterations ── (config.yaml is authoritative; never surface a stale legacy .env value)
     current_max = str(cfg_get(config, "agent", "max_turns", default=90))
     print_info("Maximum tool-calling iterations per conversation.")
     print_info("Higher = more complex tasks, but costs more tokens.")
@@ -642,8 +536,7 @@ def setup_agent_settings(config: dict):
     try:
         max_iter = int(prompt("Max iterations", current_max))
         if max_iter > 0:
-            # config.yaml only; drop any stale .env entry — gateway/run.py derives
-            # HERMES_MAX_ITERATIONS from agent.max_turns at startup.
+            # config.yaml only; gateway/run.py derives HERMES_MAX_ITERATIONS from agent.max_turns.
             config.setdefault("agent", {})["max_turns"] = max_iter
             config.pop("max_turns", None)
             remove_env_value("HERMES_MAX_ITERATIONS")
@@ -717,27 +610,17 @@ def setup_agent_settings(config: dict):
     save_config(config)
 
 
-# =============================================================================
-# Section 5: Tool Configuration (delegates to unified tools_config.py)
-# =============================================================================
+# ── Section 5: Tool Configuration (delegates to unified tools_config.py) ──
 
 
 def setup_tools(config: dict, first_install: bool = False):
-    """Configure tools — delegates to the unified tools_command() in tools_config.py.
-
-    Both `hermes setup tools` and `hermes tools` use the same flow:
-    platform selection → toolset toggles → provider/API key configuration.
-    ``first_install`` selects the simplified first-install flow (no platform
-    menu, prompts for all unconfigured API keys).
-    """
+    """`hermes setup tools` == `hermes tools`: platform selection → toolset toggles → provider keys.
+    ``first_install`` selects the simplified flow (no platform menu, prompts for all missing keys)."""
     from hermes_cli.tools_config import tools_command
-
     tools_command(first_install=first_install, config=config)
 
 
-# =============================================================================
-# Shared Metrics
-# =============================================================================
+# ── Shared Metrics ──
 
 
 _SEND_CONSENT_EXPLAINER = (
@@ -773,15 +656,12 @@ def setup_telemetry(config: dict):
     shared_metrics["enabled"] = prompt_yes_no("Enable local shared metrics?", default=current)
     if not shared_metrics["enabled"]:
         print_info("Local shared metrics disabled.")
-        # Sending cannot outlive collection: leaving send=true here would be a
-        # configuration that logs an error on every run and never transmits.
+        # Sending cannot outlive collection (send=true would log an error every run, never send).
         if shared_metrics.get("send") is True:
             shared_metrics["send"] = False
             print_info("Sending shared metrics disabled as well.")
-        # Turning collection off is also a withdrawal of send consent, and it
-        # has to close the window like any other. Recorded unconditionally:
-        # the send key may already be false in config while the consent window
-        # is still open, and that window must not survive to be reopened.
+        # Turning collection off withdraws send consent too. Recorded unconditionally: the send
+        # key may already be false while the consent window is still open, and it must close.
         _record_send_consent_change(enabled=False)
         return
 
@@ -799,11 +679,8 @@ def setup_telemetry(config: dict):
 def _record_send_consent_change(*, enabled: bool) -> None:
     """Reconcile consent windows at the moment the user decides.
 
-    Same single writer as the relay and the sender — reconciliation derives
-    the window state from the observation, so wizard, relay, and mid-pass
-    callers cannot disagree. The relay's once-per-process reconcile would
-    catch this on the next hook fire anyway; running it here just makes the
-    wizard's effect immediate.
+    Same single writer as the relay and the sender, so wizard, relay and mid-pass callers cannot
+    disagree; the relay would reconcile on its next hook anyway — this makes the effect immediate.
     """
     try:
         from hermes_cli.observability.shared_metrics import SharedMetricsStore
@@ -815,63 +692,37 @@ def _record_send_consent_change(*, enabled: bool) -> None:
             with write_txn(connection):
                 reconcile_send_consent(connection, enabled)
     except Exception:
-        # Never block the wizard on telemetry bookkeeping. The relay runs the
-        # same reconciliation on the next lifecycle hook.
+        # Never block the wizard on telemetry bookkeeping; the relay reconciles on the next hook.
         logger.debug("Unable to record shared-metrics consent change", exc_info=True)
 
 
-# =============================================================================
-# Extracted sections (re-exported so callers and test patches keep resolving
-# through hermes_cli.setup). These modules import this module lazily inside
-# function bodies, so the top-level import here is cycle-free.
-# =============================================================================
+# Extracted sections, re-exported so callers and test patches keep resolving through
+# hermes_cli.setup. They import this module lazily inside bodies, so this is cycle-free.
 
 from hermes_cli.setup_tts import (  # noqa: E402,F401
-    _run_xai_oauth_login_from_setup,
-    _setup_tts_provider,
-    _xai_oauth_logged_in_for_setup,
-    setup_tts,
+    _run_xai_oauth_login_from_setup, _setup_tts_provider, _xai_oauth_logged_in_for_setup, setup_tts,
 )
 from hermes_cli.setup_terminal import (  # noqa: E402,F401
-    _prompt_vercel_sandbox_settings,
-    _read_nearest_vercel_project,
-    setup_terminal_backend,
+    _prompt_vercel_sandbox_settings, _read_nearest_vercel_project, setup_terminal_backend,
 )
 from hermes_cli.setup_platforms import (  # noqa: E402,F401
-    _TELEGRAM_BOT_TOKEN_RE,
-    _profile_name_from_hermes_home,
-    _setup_bluebubbles,
-    _setup_qqbot,
-    _setup_telegram,
-    _setup_telegram_auto_result,
-    _setup_webhooks,
-    setup_gateway,
+    _TELEGRAM_BOT_TOKEN_RE, _profile_name_from_hermes_home, _setup_bluebubbles, _setup_telegram,
+    _setup_telegram_auto_result, _setup_webhooks, setup_gateway,
 )
 from hermes_cli.setup_summary import _print_setup_summary  # noqa: E402,F401
 from hermes_cli.setup_migration import (  # noqa: E402,F401
-    _OPENCLAW_SCRIPT,
-    _get_section_config_summary,
-    _load_openclaw_migration_module,
-    _model_section_has_credentials,
-    _offer_openclaw_migration,
-    _print_migration_preview,
+    _OPENCLAW_SCRIPT, _get_section_config_summary, _load_openclaw_migration_module,
+    _model_section_has_credentials, _offer_openclaw_migration, _print_migration_preview,
     _skip_configured_section,
 )
 from hermes_cli.setup_quick import (  # noqa: E402,F401
-    _blank_slate_minimal_toolsets,
-    _blank_slate_minimize_config,
-    _blank_slate_walkthrough,
-    _print_macos_fda_tip,
-    _run_blank_slate_setup,
-    _run_first_time_quick_setup,
-    _run_portal_one_shot,
+    _blank_slate_minimal_toolsets, _blank_slate_minimize_config, _blank_slate_walkthrough,
+    _print_macos_fda_tip, _run_blank_slate_setup, _run_first_time_quick_setup, _run_portal_one_shot,
     _run_quick_setup,
 )
 
 
-# =============================================================================
-# Main Wizard Orchestrator
-# =============================================================================
+# ── Main Wizard Orchestrator ──
 
 SETUP_SECTIONS = [
     ("model", "Model & Provider", setup_model_provider),
@@ -940,8 +791,7 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
         print_info("Each section below will show what was imported — press Enter to keep,")
         print_info("or choose to reconfigure if needed.")
 
-    # Agent Settings are no longer prompted. First installs get the recommended
-    # defaults silently; existing installs keep theirs. Tune via `hermes setup agent`.
+    # Agent Settings are not prompted: first installs get defaults, existing keep theirs.
     if not is_existing:
         _apply_default_agent_settings(config)
 
@@ -961,8 +811,8 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
             setup_gateway(config)
             return
 
-        # A migrated gateway section can be skipped, but its service still
-        # needs to exist so imported platforms and cron jobs become active.
+        # A skipped (migrated) gateway section still needs its service so imported platforms
+        # and cron jobs become active.
         from hermes_cli.gateway import ensure_gateway_service
 
         ensure_gateway_service(context="setup")
@@ -982,18 +832,8 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
 
 
 def _run_setup_wizard_impl(args):
-    """Run the interactive setup wizard.
-
-    Supports full, quick, and section-specific setup:
-      hermes setup           — full or quick (auto-detected)
-      hermes setup model     — just model/provider
-      hermes setup tts       — just text-to-speech
-      hermes setup terminal  — just terminal backend
-      hermes setup gateway   — just messaging platforms
-      hermes setup tools     — just tool configuration
-      hermes setup telemetry — just local shared metrics
-      hermes setup agent     — just agent settings
-    """
+    """Run the interactive setup wizard: full/quick (auto-detected), ``--portal``, or one
+    ``hermes setup <section>`` from SETUP_SECTIONS."""
     from hermes_cli.config import is_managed, managed_error
     if is_managed():
         managed_error("run setup wizard")
@@ -1047,11 +887,8 @@ def _run_setup_wizard_impl(args):
     migration_ran = False
 
     if is_existing:
-        # Existing install — default is the full-wizard reconfigure flow.
-        # Every prompt shows the current value as its default, so pressing
-        # Enter keeps it.  Opt into `--quick` for the narrow "just fill in
-        # missing items" flow (useful after a partial OpenClaw migration
-        # or when a required API key got cleared).
+        # Existing install — the full reconfigure wizard is the default (Enter keeps each current
+        # value); `--quick` narrows it to missing items (partial OpenClaw import, cleared key).
         if quick_requested:
             _run_setup_steps([("Quick Setup", lambda: _run_quick_setup(config, hermes_home))])
             return
@@ -1064,14 +901,10 @@ def _run_setup_wizard_impl(args):
         print_info("")
         print_info("Tip: jump straight to a section with 'hermes setup model|terminal|")
         print_info("     gateway|tools|agent', or fill only missing items with --quick.")
-        # --reconfigure is the default on existing installs; the flag is kept
-        # for backwards compatibility and is a no-op here.
+        # --reconfigure is kept for backwards compatibility and is a no-op here.
     else:
-        # ── First-Time Setup ──
+        # ── First-Time Setup ── (--reconfigure / --quick are meaningless here; fall through)
         print()
-
-        # --reconfigure / --quick on a fresh install are meaningless — fall
-        # through to the normal first-time flow.
         if reconfigure_requested or quick_requested:
             print_info("No existing configuration found — running first-time setup.")
             print()

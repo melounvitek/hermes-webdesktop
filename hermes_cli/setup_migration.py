@@ -17,9 +17,7 @@ logger = logging.getLogger("hermes_cli.setup")
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 
-# =============================================================================
-# Post-Migration Section Skip Logic
-# =============================================================================
+# ── Post-Migration Section Skip Logic ──
 
 _OPENROUTER_ENV_VARS = ("OPENROUTER_API_KEY", "OPENAI_API_KEY")
 
@@ -33,7 +31,6 @@ def _model_section_has_credentials(config: dict) -> bool:
     which route generic ``OPENAI_API_KEY`` / ``OPENROUTER_API_KEY`` values through OpenRouter.
     """
     from hermes_cli.setup import get_env_value
-
     try:
         from hermes_cli.auth import get_active_provider
         if get_active_provider():
@@ -154,9 +151,7 @@ def _skip_configured_section(config: dict, section_key: str, label: str) -> bool
     return not prompt_yes_no(f"  Reconfigure {label.lower()}?", default=False)
 
 
-# =============================================================================
-# OpenClaw Migration
-# =============================================================================
+# ── OpenClaw Migration ──
 
 _OPENCLAW_SCRIPT = (
     get_optional_skills_dir(PROJECT_ROOT / "optional-skills")

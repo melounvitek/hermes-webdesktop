@@ -20,7 +20,6 @@ def _prompt_vercel_sandbox_settings(config: dict):
     from hermes_cli.setup import (
         get_env_value, print_info, print_warning, prompt, remove_env_value, save_env_value,
     )
-
     terminal = config.setdefault("terminal", {})
     print()
     print_info("Vercel Sandbox settings:")
@@ -102,7 +101,6 @@ def _read_nearest_vercel_project(start: Path | None = None) -> dict[str, str]:
 def _prompt_secret_env(label: str, env_var: str, *, confirm_msg: str = "") -> None:
     """Prompt for a secret and persist it to .env when non-empty."""
     from hermes_cli.setup import print_success, prompt, save_env_value
-
     value = prompt(label, password=True)
     if value:
         save_env_value(env_var, value)
@@ -113,7 +111,6 @@ def _prompt_secret_env(label: str, env_var: str, *, confirm_msg: str = "") -> No
 def _ensure_sdk(package: str, manual_hint: str, *, show_stderr: bool = False) -> None:
     """Import *package*; if missing, install it via the venv pip helper."""
     from hermes_cli.setup import print_info, print_success, print_warning
-
     try:
         __import__(package)
     except ImportError:
@@ -131,7 +128,6 @@ def _ensure_sdk(package: str, manual_hint: str, *, show_stderr: bool = False) ->
 
 def _setup_backend_local(config: dict) -> None:
     from hermes_cli.setup import print_info, print_success
-
     print_success("Terminal backend: Local")
     print_info("Commands run directly on this machine.")
     # Gateway working directory defaults to home; sudo stays off. Both are
@@ -141,7 +137,6 @@ def _setup_backend_local(config: dict) -> None:
 
 def _setup_backend_docker(config: dict) -> None:
     from hermes_cli.setup import print_info, print_success, print_warning, prompt_yes_no
-
     print_success("Terminal backend: Docker")
     docker_bin = shutil.which("docker")
     if not docker_bin:
@@ -171,7 +166,6 @@ def _setup_backend_docker(config: dict) -> None:
 
 def _setup_backend_singularity(config: dict) -> None:
     from hermes_cli.setup import print_info, print_success, print_warning
-
     print_success("Terminal backend: Singularity/Apptainer")
     sing_bin = shutil.which("apptainer") or shutil.which("singularity")
     if not sing_bin:
@@ -188,7 +182,6 @@ def _setup_backend_modal(config: dict) -> None:
         cfg_get, get_env_value, get_nous_subscription_features, managed_nous_tools_enabled,
         print_info, print_success, prompt_choice, prompt_yes_no,
     )
-
     print_success("Terminal backend: Modal")
     print_info("Serverless cloud sandboxes. Each session gets its own container.")
     from tools.managed_tool_gateway import is_managed_tool_gateway_ready
@@ -237,7 +230,6 @@ def _setup_backend_modal(config: dict) -> None:
 
 def _setup_backend_daytona(config: dict) -> None:
     from hermes_cli.setup import get_env_value, print_info, print_success, prompt_yes_no
-
     print_success("Terminal backend: Daytona")
     print_info("Persistent cloud development environments.")
     print_info("Each session gets a dedicated sandbox with filesystem persistence.")
@@ -256,7 +248,6 @@ def _setup_backend_daytona(config: dict) -> None:
 
 def _setup_backend_vercel(config: dict) -> None:
     from hermes_cli.setup import print_info, print_success, print_warning
-
     print_success("Terminal backend: Vercel Sandbox")
     print_info("Cloud microVM sandboxes with snapshot-backed filesystem persistence.")
     print_info("Requires the optional SDK: pip install 'hermes-agent[vercel]'")
@@ -288,7 +279,6 @@ def _setup_backend_ssh(config: dict) -> None:
     from hermes_cli.setup import (
         get_env_value, print_info, print_success, print_warning, prompt, prompt_yes_no, save_env_value,
     )
-
     print_success("Terminal backend: SSH")
     print_info("Run commands on a remote machine via SSH.")
 
@@ -327,7 +317,6 @@ def _setup_backend_ssh(config: dict) -> None:
 
 def _setup_backend_plugin(config: dict, backend: str) -> None:
     from hermes_cli.setup import print_info, print_success, print_warning
-
     try:
         from agent.terminal_env_registry import get_provider
 
@@ -361,7 +350,6 @@ def setup_terminal_backend(config: dict):
         _DOCS_BASE, cfg_get, print_header, print_info, print_success, prompt_choice, save_config, save_env_value,
     )
     import platform as _platform
-
     print_header("Terminal Backend")
     print_info("Choose where Hermes runs shell commands and code.")
     print_info("This affects tool execution, file access, and isolation.")

@@ -11,16 +11,13 @@ from pathlib import Path
 logger = logging.getLogger("hermes_cli.setup")
 
 # (env-var name substring, platform label, emoji) — order matters: first match wins.
-_MESSAGING_PLATFORMS = (
-    ("TELEGRAM", "Telegram", "📱"), ("DISCORD", "Discord", "💬"), ("SLACK", "Slack", "💼"),
-)
+_MESSAGING_PLATFORMS = (("TELEGRAM", "Telegram", "📱"), ("DISCORD", "Discord", "💬"), ("SLACK", "Slack", "💼"))
 
 
 def _reload_config_into(config: dict) -> None:
     """Re-sync the in-memory config dict from disk after a sub-flow that saved
     via its own load/save cycle, so a later save_config(config) can't clobber it."""
     from hermes_cli.setup import load_config
-
     _refreshed = load_config()
     config.clear()
     config.update(_refreshed)
@@ -29,7 +26,6 @@ def _reload_config_into(config: dict) -> None:
 def _prompt_env_var(var: dict):
     """Prompt for one env-var value (masked when the var is a secret)."""
     from hermes_cli.setup import prompt
-
     return prompt(f"  {var.get('prompt', var['name'])}", password=bool(var.get("password")))
 
 
@@ -43,7 +39,6 @@ def _run_portal_one_shot(config: dict) -> None:
     so there is a single source of truth and ``hermes portal`` always offers a picker.
     """
     from hermes_cli.setup import Colors, color, load_config, print_error, print_info, print_success
-
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.MAGENTA))
     print(color("│     ⚕ Hermes Setup — Nous Portal (one-shot)             │", Colors.MAGENTA))
@@ -104,7 +99,6 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
         print_info, print_success, print_warning, prompt_choice, save_config, setup_gateway,
         setup_terminal_backend,
     )
-
     # Step 1: Nous Portal — OAuth login + model selection (provider set to "nous" by the save).
     print()
     print_header("Nous Portal")
@@ -168,7 +162,6 @@ def _print_macos_fda_tip() -> None:
     Silent on non-macOS and when FDA is already granted or indeterminate.
     """
     from hermes_cli.setup import print_info
-
     if sys.platform != "darwin":
         return
     tcc_dir = Path.home() / "Library" / "Application Support" / "com.apple.TCC"
@@ -183,8 +176,7 @@ def _print_macos_fda_tip() -> None:
     print_info("  macOS tip: silence ALL folder permission prompts with one switch —")
     print_info("  System Settings → Privacy & Security → Full Disk Access → enable")
     print_info("  your terminal (and Hermes.app if you use Desktop), or run:")
-    print_info("    open \"x-apple.systempreferences:com.apple.preference"
-               ".security?Privacy_AllFiles\"")
+    print_info("    open \"x-apple.systempreferences:com.apple.preference" ".security?Privacy_AllFiles\"")
     print_info("  The grant is permanent — it survives every Hermes update.")
 
 
@@ -252,7 +244,6 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
         _print_setup_summary, print_header, print_info, print_success, prompt_choice, save_config,
         setup_model_provider, setup_terminal_backend,
     )
-
     print()
     print_header("Blank Slate Setup")
     print_info("Everything starts OFF. First we force-enable only what's required")
@@ -324,7 +315,6 @@ def _blank_slate_walkthrough(config: dict, hermes_home):
         _print_setup_summary, print_header, print_info, print_success, print_warning,
         prompt_yes_no, save_config, setup_gateway,
     )
-
     # Bundled skills — default to NONE, offer to seed all
     print()
     print_header("Bundled Skills")
@@ -409,18 +399,13 @@ def _run_quick_setup(config: dict, hermes_home):
         Colors, _print_setup_summary, _prompt_api_key, color, print_header, print_info,
         print_success, print_warning, prompt_checklist, save_config, save_env_value,
     )
-    from hermes_cli.config import (
-        get_missing_env_vars, get_missing_config_fields, check_config_version,
-    )
-
+    from hermes_cli.config import (get_missing_env_vars, get_missing_config_fields, check_config_version)
     print()
     print_header("Quick Setup — Missing Items Only")
 
     # Check what's missing
     missing_required = [v for v in get_missing_env_vars(required_only=False) if v.get("is_required")]
-    missing_optional = [
-        v for v in get_missing_env_vars(required_only=False) if not v.get("is_required")
-    ]
+    missing_optional = [v for v in get_missing_env_vars(required_only=False) if not v.get("is_required")]
     missing_config = get_missing_config_fields()
     current_ver, latest_ver = check_config_version()
 
@@ -496,9 +481,7 @@ def _run_quick_setup(config: dict, hermes_home):
             platforms.setdefault(plat, []).append(var)
 
         platform_labels = [f"{emojis[p]} {p}" for p in platform_order]
-        selected_indices = prompt_checklist(
-            "Which platforms would you like to set up?", platform_labels
-        )
+        selected_indices = prompt_checklist("Which platforms would you like to set up?", platform_labels)
 
         for idx in selected_indices:
             plat = platform_order[idx]

@@ -67,7 +67,6 @@ def _voice_provider_status(kind: str, provider: str, rows: dict, default: tuple)
     """Summary row for a TTS/STT provider. A keyed provider whose key is missing
     falls through to the default row, matching the runtime fallback."""
     from hermes_cli.setup import get_env_value, _module_installed
-
     row = rows.get(provider, default)
     if isinstance(row[1], tuple) and row[1] and not any(get_env_value(v) for v in row[1]):
         row = default
@@ -171,7 +170,6 @@ def _video_gen_row(config, feats):
 def _tts_row(config, feats):
     # Configured provider, gated on its key (or local install)
     from hermes_cli.setup import cfg_get
-
     tts_provider = cfg_get(config, "tts", "provider", default="edge")
     if feats.tts.managed_by_nous:
         return ("Text-to-Speech (OpenAI via Nous subscription)", True, None)
@@ -180,7 +178,6 @@ def _tts_row(config, feats):
 
 def _stt_row(config, feats):
     from hermes_cli.setup import cfg_get
-
     stt_provider = cfg_get(config, "stt", "provider", default="local") or "local"
     _stt_feature = feats.features.get("stt")
     if _stt_feature is not None and _stt_feature.managed_by_nous:
@@ -190,7 +187,6 @@ def _stt_row(config, feats):
 
 def _modal_row(config, feats):
     from hermes_cli.setup import cfg_get, managed_nous_tools_enabled
-
     if feats.modal.managed_by_nous:
         return ("Modal Execution (Nous subscription)", True, None)
     if cfg_get(config, "terminal", "backend") == "modal":
@@ -204,7 +200,6 @@ def _modal_row(config, feats):
 
 def _home_assistant_row(config, feats):
     from hermes_cli.setup import get_env_value
-
     return ("Smart Home (Home Assistant)", True, None) if get_env_value("HASS_TOKEN") else None
 
 
@@ -222,7 +217,6 @@ def _spotify_row(config, feats):
 
 def _skills_hub_row(config, feats):
     from hermes_cli.setup import get_env_value
-
     if get_env_value("GITHUB_TOKEN"):
         return ("Skills Hub (GitHub)", True, None)
     return ("Skills Hub (GitHub)", False, "GITHUB_TOKEN")
@@ -246,14 +240,12 @@ _TOOL_ROW_BUILDERS = (
 def _print_cmd_rows(rows):
     """Print (command, description) rows as '   <green cmd><desc>'."""
     from hermes_cli.setup import Colors, color
-
     for cmd, desc in rows:
         print(f"   {color(cmd, Colors.GREEN)}{desc}")
 
 
 def _print_section_header(title):
     from hermes_cli.setup import Colors, color
-
     print(color("─" * 60, Colors.DIM))
     print()
     print(color(title, Colors.CYAN, Colors.BOLD))
@@ -266,7 +258,6 @@ def _print_setup_summary(config: dict, hermes_home):
         print_header, print_info, print_warning, get_config_path, get_env_path,
         get_nous_subscription_features, Colors, color,
     )
-
     # Provider readiness — the one thing setup absolutely must produce. Previously a user
     # could cancel the API-key prompt mid-wizard (Enter → "Cancelled."), watch the wizard
     # continue through Terminal/Gateway/Tools, and exit "successfully" with NO working model —
