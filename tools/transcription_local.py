@@ -61,8 +61,7 @@ def _normalize_local_model(model_name: Optional[str]) -> str:
             "STT model '%s' is a cloud-only name and cannot be used with the local "
             "provider. Falling back to '%s'. Set stt.local.model to a valid "
             "faster-whisper size (tiny, base, small, medium, large-v3).",
-            model_name,
-            DEFAULT_LOCAL_MODEL,
+            model_name, DEFAULT_LOCAL_MODEL,
         )
         return DEFAULT_LOCAL_MODEL
     return model_name
@@ -78,10 +77,7 @@ def _try_lazy_install_stt() -> bool:
         ensure("stt.faster_whisper", prompt=False)
         if _ilu.find_spec("faster_whisper"):
             return True
-        logger.warning(
-            "faster-whisper was installed but importlib still cannot find it "
-            "(may require Python restart)"
-        )
+        logger.warning("faster-whisper was installed but importlib still cannot find it (may require Python restart)")
     except Exception as exc:
         logger.warning(
             "Lazy install of faster-whisper failed: %s. "
@@ -199,32 +195,24 @@ def build_local_transcribe_kwargs(stt_config: Optional[Dict[str, Any]] = None) -
     stt_config = stt_config if isinstance(stt_config, dict) else _load_stt_config()
     local_cfg = stt_config.get("local") or {}
 
+    # ``vad: null`` in YAML means "default on".
+    vad_enabled = local_cfg.get("vad", True)
     kwargs: Dict[str, Any] = {
         "beam_size": 5,
         "condition_on_previous_text": False,
+        "vad_filter": vad_enabled is None or bool(vad_enabled),
     }
-
-    vad_enabled = local_cfg.get("vad", True)
-    if vad_enabled is None:
-        vad_enabled = True
-    if bool(vad_enabled):
-        kwargs["vad_filter"] = True
+    if kwargs["vad_filter"]:
         kwargs["vad_parameters"] = {
-            "min_silence_duration_ms": _config_number(
-                local_cfg, "vad_min_silence_ms", _VAD_MIN_SILENCE_MS_DEFAULT, int
-            )
+            "min_silence_duration_ms": _config_number(local_cfg, "vad_min_silence_ms", _VAD_MIN_SILENCE_MS_DEFAULT, int)
         }
-    else:
-        kwargs["vad_filter"] = False
 
     # Push the confidence gate into faster-whisper itself: its internal
     # defaults drop low-confidence segments BEFORE our post-filter sees them,
     # so without this the ``stt.local`` threshold knobs were dead for that
     # first gate (non-English speech decodes at lower avg_logprob and was
     # silently discarded). Same values feed both gates; defaults unchanged.
-    no_speech_threshold, log_prob_threshold = _confidence_thresholds(local_cfg)
-    kwargs["no_speech_threshold"] = no_speech_threshold
-    kwargs["log_prob_threshold"] = log_prob_threshold
+    kwargs["no_speech_threshold"], kwargs["log_prob_threshold"] = _confidence_thresholds(local_cfg)
 
     forced_lang = _resolve_stt_language("local", stt_config)
     if forced_lang:
@@ -252,14 +240,10 @@ def _is_hallucinated_segment(segment: Any, no_speech_threshold: float, logprob_t
     think the window is non-speech AND have decoded it with low confidence, so
     quiet-but-real speech survives. Unknown segment shapes are never dropped.
     """
-    no_speech_prob = getattr(segment, "no_speech_prob", None)
-    avg_logprob = getattr(segment, "avg_logprob", None)
-    if no_speech_prob is None or avg_logprob is None:
-        return False
     try:
-        no_speech_prob = float(no_speech_prob)
-        avg_logprob = float(avg_logprob)
-    except (TypeError, ValueError):
+        no_speech_prob = float(getattr(segment, "no_speech_prob"))
+        avg_logprob = float(getattr(segment, "avg_logprob"))
+    except (AttributeError, TypeError, ValueError):
         return False
     return no_speech_prob > no_speech_threshold and avg_logprob < logprob_threshold
 
@@ -295,9 +279,7 @@ def _transcribe_local_command(
 
     command_template = _get_local_command_template()
     if not command_template:
-        return _error_result(
-            f"{LOCAL_STT_COMMAND_ENV} not configured and no local whisper binary was found"
-        )
+        return _error_result(f"{LOCAL_STT_COMMAND_ENV} not configured and no local whisper binary was found")
 
     # Language: hook override > stt.local.language > stt.language > env > "en".
     language = language or _resolve_stt_language("local") or DEFAULT_LOCAL_STT_LANGUAGE
@@ -318,10 +300,7 @@ def _transcribe_local_command(
             # Scrub Hermes secrets from the child env (same policy as _run_command_stt).
             from tools.environments.local import hermes_subprocess_env
 
-            _run_quiet(
-                shlex.split(command), timeout=300,
-                env=hermes_subprocess_env(inherit_credentials=False),
-            )
+            _run_quiet(shlex.split(command), timeout=300, env=hermes_subprocess_env(inherit_credentials=False))
 
             txt_files = sorted(Path(output_dir).glob("*.txt"))
             if not txt_files:
@@ -330,9 +309,7 @@ def _transcribe_local_command(
             transcript_text = txt_files[0].read_text(encoding="utf-8").strip()
             logger.info(
                 "Transcribed %s via local STT command (%s, %d chars)",
-                Path(file_path).name,
-                normalized_model,
-                len(transcript_text),
+                Path(file_path).name, normalized_model, len(transcript_text),
             )
             return _ok_result(transcript_text, "local_command")
 

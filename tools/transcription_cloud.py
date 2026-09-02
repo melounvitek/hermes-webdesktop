@@ -26,6 +26,7 @@ from tools.transcription_common import (
     XAI_STT_BASE_URL,
     _error_result,
     _get_stt_section,
+    _lazy_ensure_quietly,
     _log_prompt_unsupported,
     _ok_result,
 )
@@ -247,11 +248,7 @@ def _transcribe_mistral(
         return _error_result("MISTRAL_API_KEY not set")
 
     try:
-        try:
-            from tools.lazy_deps import ensure as _lazy_ensure
-            _lazy_ensure("stt.mistral", prompt=False)
-        except Exception:
-            pass
+        _lazy_ensure_quietly("stt.mistral")
         from mistralai.client import Mistral
 
         with Mistral(api_key=api_key) as client:

@@ -23,6 +23,7 @@ from tools.transcription_common import (
     SUPPORTED_FORMATS,
     _config_number,
     _error_result,
+    _lazy_ensure_quietly,
     _process_error_detail,
 )
 
@@ -68,9 +69,7 @@ _STT_M4A_ENCODE_ARGS = (
 )
 
 
-def _run_ffmpeg_stt_encode(
-    ffmpeg: str, input_path: str, output_path: str, *, audio_filter: Optional[str] = None
-) -> None:
+def _run_ffmpeg_stt_encode(ffmpeg: str, input_path: str, output_path: str, *, audio_filter: Optional[str] = None) -> None:
     """Run the shared STT m4a encode, optionally with an ``-af`` filter.
 
     Raises on failure — callers own the error semantics (transcode reports, trim swallows).
@@ -119,11 +118,7 @@ def _validate_audio_file_size(audio_path: Path, *, enforce_size_limit: bool = Tr
     return None
 
 
-def _validate_audio_source_file(
-    file_path: str,
-    *,
-    enforce_size_limit: bool = True,
-) -> Optional[Dict[str, Any]]:
+def _validate_audio_source_file(file_path: str, *, enforce_size_limit: bool = True) -> Optional[Dict[str, Any]]:
     """Validate source path safety (and optionally size) before any decoder runs."""
     audio_path = Path(file_path)
 
@@ -136,15 +131,9 @@ def _validate_audio_source_file(
     return _validate_audio_file_size(audio_path, enforce_size_limit=enforce_size_limit)
 
 
-def _validate_audio_file(
-    file_path: str,
-    *,
-    enforce_size_limit: bool = True,
-) -> Optional[Dict[str, Any]]:
+def _validate_audio_file(file_path: str, *, enforce_size_limit: bool = True) -> Optional[Dict[str, Any]]:
     """Validate a supported, decoder-safe audio file."""
-    source_error = _validate_audio_source_file(
-        file_path, enforce_size_limit=enforce_size_limit
-    )
+    source_error = _validate_audio_source_file(file_path, enforce_size_limit=enforce_size_limit)
     if source_error:
         return source_error
 
@@ -156,9 +145,7 @@ def _validate_audio_file(
     return None
 
 
-def _prepare_audio_for_transcription(
-    file_path: str,
-) -> tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
+def _prepare_audio_for_transcription(file_path: str) -> tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
     """Convert a decoder-safe .silk source to a temporary supported WAV file."""
     from tools.transcription_tools import _HAS_PILK, _safe_find_spec
     audio_path = Path(file_path)
@@ -167,11 +154,7 @@ def _prepare_audio_for_transcription(
     if not _HAS_PILK:
         # pilk is a tiny silk-v3 codec binding — lazy-install on first .silk
         # voice note instead of bloating the base install.
-        try:
-            from tools.lazy_deps import ensure as _lazy_ensure
-            _lazy_ensure("stt.silk", prompt=False)
-        except Exception:
-            pass
+        _lazy_ensure_quietly("stt.silk")
         if not _safe_find_spec("pilk"):
             return None, None, _error_result(
                 "Unsupported format: .silk. Install the optional 'pilk' dependency to enable WeChat voice transcription."
@@ -294,9 +277,7 @@ def _cloud_trim_settings(stt_config: Dict[str, Any]) -> tuple[bool, int, int]:
     return enabled, threshold_db, max(keep_ms, 0)
 
 
-def _trim_silence_for_cloud_stt(
-    file_path: str, stt_config: Dict[str, Any]
-) -> Optional[str]:
+def _trim_silence_for_cloud_stt(file_path: str, stt_config: Dict[str, Any]) -> Optional[str]:
     """Return a silence-trimmed copy of *file_path* for cloud upload, or None.
 
     ``None`` always means "upload the original" (disabled, tools missing, clip
@@ -315,10 +296,11 @@ def _trim_silence_for_cloud_stt(
     if not original_duration or original_duration <= 0:
         logger.debug("Cloud STT silence trim skipped: could not probe %s", file_path)
         return None
+    name = Path(file_path).name
     if original_duration < _CLOUD_TRIM_MIN_INPUT_SECONDS:
         logger.debug(
             "Cloud STT silence trim skipped for %s: %.1fs is below the %.0fs gate",
-            Path(file_path).name, original_duration, _CLOUD_TRIM_MIN_INPUT_SECONDS,
+            name, original_duration, _CLOUD_TRIM_MIN_INPUT_SECONDS,
         )
         return None
 
@@ -341,21 +323,18 @@ def _trim_silence_for_cloud_stt(
         trimmed_duration = _probe_audio_duration(trimmed_path)
         if not trimmed_duration or trimmed_duration < min_result_seconds:
             logger.debug(
-                "Cloud STT silence trim discarded for %s: trimmed result ~empty (%.2fs)",
-                Path(file_path).name, trimmed_duration or 0.0,
+                "Cloud STT silence trim discarded for %s: trimmed result ~empty (%.2fs)", name, trimmed_duration or 0.0,
             )
             return None
         if trimmed_duration > original_duration * (1 - _CLOUD_TRIM_MIN_SAVING):
             logger.debug(
                 "Cloud STT silence trim discarded for %s: saves <%.0f%% (%.1fs -> %.1fs)",
-                Path(file_path).name, _CLOUD_TRIM_MIN_SAVING * 100,
-                original_duration, trimmed_duration,
+                name, _CLOUD_TRIM_MIN_SAVING * 100, original_duration, trimmed_duration,
             )
             return None
         logger.info(
             "Trimmed silence from %s before cloud STT upload (%.1fs -> %.1fs, -%d%%)",
-            Path(file_path).name, original_duration, trimmed_duration,
-            round((1 - trimmed_duration / original_duration) * 100),
+            name, original_duration, trimmed_duration, round((1 - trimmed_duration / original_duration) * 100),
         )
         keep_result = True
         return trimmed_path

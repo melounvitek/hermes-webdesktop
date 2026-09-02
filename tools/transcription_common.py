@@ -67,6 +67,19 @@ def _get_stt_section(stt_config: Dict[str, Any], name: str) -> Dict[str, Any]:
     return section if isinstance(section, dict) else {}
 
 
+def _lazy_ensure_quietly(dep: str) -> None:
+    """Best-effort ``tools.lazy_deps.ensure(dep, prompt=False)``; failures are swallowed.
+
+    prompt=False: a bare input() deadlocks under the interactive CLI where
+    prompt_toolkit owns stdin; installs are gated by ``security.allow_lazy_installs``.
+    """
+    try:
+        from tools.lazy_deps import ensure
+        ensure(dep, prompt=False)
+    except Exception:
+        pass
+
+
 def _process_error_detail(exc: "subprocess.CalledProcessError") -> str:
     """stderr > stdout > str(exc) for a failed helper binary."""
     return exc.stderr.strip() or exc.stdout.strip() or str(exc)
