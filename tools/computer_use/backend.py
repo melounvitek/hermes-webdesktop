@@ -16,11 +16,9 @@ _JPEG_SOF_MARKERS = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0
 
 
 def image_dimensions_from_bytes(raw: bytes) -> Optional[Tuple[int, int]]:
-    """Return (width, height) for PNG / JPEG bytes, or None when unreadable.
-
-    PNG: IHDR. JPEG: walk segments (skipping 0xFF fill bytes) to the first SOF
-    marker; stop at SOS. Used by the tool layer's provider min-size guard.
-    """
+    """(width, height) for PNG / JPEG bytes, or None when unreadable. PNG: IHDR. JPEG: walk
+    segments (skipping 0xFF fill bytes) to the first SOF marker; stop at SOS. Used by the
+    tool layer's provider min-size guard."""
     if raw.startswith(b"\x89PNG\r\n\x1a\n") and len(raw) >= 24:
         try:
             width, height = struct.unpack(">II", raw[16:24])
@@ -77,13 +75,9 @@ class UIElement:
 
 @dataclass
 class CaptureResult:
-    """Result of a screen capture call.
-
-    At least one of png_b64 / elements is populated depending on capture mode:
-    mode="vision" → png_b64 only; mode="ax" → elements only; mode="som" (default)
-    → both: the PNG already carries numbered overlays drawn by the backend and
-    `elements` holds the matching index → element mapping.
-    """
+    """Result of a screen capture call. mode="vision" → png_b64 only; mode="ax" → elements
+    only; mode="som" (default) → both: the PNG already carries numbered overlays drawn by
+    the backend and `elements` holds the matching index → element mapping."""
 
     mode: str
     width: int                      # screenshot width (logical px, pre-Anthropic-scale)
@@ -105,11 +99,10 @@ class CaptureResult:
 class ActionResult:
     """Result of any action (click / type / scroll / drag / key / wait).
 
-    ``ok`` is tool/transport success only — NOT the semantic verdict. Read
-    ``effect`` / ``escalation`` (cua-driver's structured verdict) to decide the
-    next rung of the verify → escalate ladder. All structured fields are optional
-    and additive: an older driver that omits ``structuredContent`` leaves them
-    ``None`` and behavior is unchanged.
+    ``ok`` is tool/transport success only — NOT the semantic verdict; read ``effect`` /
+    ``escalation`` (cua-driver's structured verdict) to pick the next rung of the
+    verify → escalate ladder. Structured fields are optional and additive: an older
+    driver that omits ``structuredContent`` leaves them ``None``, behavior unchanged.
     """
 
     ok: bool
