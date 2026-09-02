@@ -9,7 +9,6 @@ import sys
 import subprocess
 import shutil
 import importlib.util
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from hermes_cli.config import (
@@ -33,6 +32,15 @@ _env_path = get_env_path()
 load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
 
 from hermes_cli.colors import Colors, color
+from hermes_cli.doctor_report import (  # noqa: F401  (re-exported for doctor_live and tests)
+    Finding,
+    _fail_and_issue,
+    _section,
+    check_fail,
+    check_info,
+    check_ok,
+    check_warn,
+)
 from hermes_cli.doctor_connectivity import (  # noqa: F401  (re-exported; tests import from hermes_cli.doctor)
     _build_apikey_providers_list,
     _has_healthy_oauth_fallback_for_apikey_provider,
@@ -372,19 +380,6 @@ def _apply_doctor_tool_availability_overrides(available: list[str], unavailable:
     return updated_available, updated_unavailable
 
 
-def check_ok(text: str, detail: str = ""):
-    print(f"  {color('✓', Colors.GREEN)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
-
-def check_warn(text: str, detail: str = ""):
-    print(f"  {color('⚠', Colors.YELLOW)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
-
-def check_fail(text: str, detail: str = ""):
-    print(f"  {color('✗', Colors.RED)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
-
-def check_info(text: str):
-    print(f"    {color('→', Colors.CYAN)} {text}")
-
-
 def _doctor_memory_config(hermes_home: Path | None = None) -> dict:
     """Return the effective memory section used by doctor diagnostics."""
     home = hermes_home if hermes_home is not None else HERMES_HOME
@@ -507,18 +502,6 @@ def _render_state_db_stats(stats: dict, holders=None) -> list:
     # would only duplicate it.
 
     return lines
-
-
-def _section(title: str) -> None:
-    """Print a doctor section banner: blank line + bold cyan ◆ title."""
-    print()
-    print(color(f"◆ {title}", Colors.CYAN, Colors.BOLD))
-
-
-def _fail_and_issue(text: str, detail: str, fix: str, issues: list[str]) -> None:
-    """Emit a check_fail and append the corresponding fix instruction."""
-    check_fail(text, detail)
-    issues.append(fix)
 
 
 # Deprecated / legacy config keys still read for back-compat. Doctor surfaces
@@ -1137,20 +1120,6 @@ def check_macos_full_disk_access() -> None:
         "and restart them once. With Hermes' stable signing identities the "
         "grant survives every update."
     )
-
-
-@dataclass
-class Finding:
-    """What one doctor check contributed: auto-fixable issues, manual-only issues, fixes applied."""
-
-    issues: list = field(default_factory=list)
-    manual_issues: list = field(default_factory=list)
-    fixed: int = 0
-
-    def merge(self, other: "Finding") -> None:
-        self.issues.extend(other.issues)
-        self.manual_issues.extend(other.manual_issues)
-        self.fixed += other.fixed
 
 
 def _memory_store_flags(hermes_home: Path) -> tuple:
