@@ -272,21 +272,8 @@ def _aux_interrupt_protected() -> bool:
 
 def _aux_interrupt_cancel_requested() -> bool:
     """Return whether an explicit host cancel overrides aux protection."""
-    event = getattr(_aux_interrupt_protection, "cancel_event", None)
-    if event is not None:
-        try:
-            return bool(event.is_set())
-        except Exception:
-            logger.debug("aux interrupt cancel event check failed", exc_info=True)
-            return False
-    check = getattr(_aux_interrupt_protection, "cancel_check", None)
-    if not callable(check):
-        return False
-    try:
-        return bool(check())
-    except Exception:
-        logger.debug("aux interrupt cancel check failed", exc_info=True)
-        return False
+    check = _capture_aux_cancel_check()
+    return _captured_aux_cancel_requested(check) if check is not None else False
 
 
 @contextlib.contextmanager
@@ -775,34 +762,30 @@ def _is_codex_gpt54_or_gpt55(model: Optional[str], provider: Optional[str] = Non
     wasting a small window and a 900K window has no such problem. Name kept for
     the ``compression.codex_gpt55_autoraise`` config key.
     """
-    prov = (provider or "").strip().lower()
-    if prov != "openai-codex":
+    bare = _codex_route_bare_model(model, provider)
+    if bare is None:
         return False
-    bare = (model or "").strip().lower().rsplit("/", 1)[-1]
     from agent.model_metadata import is_codex_context_variant
     if is_codex_context_variant(bare):
         return False
-    return (
-        bare == "gpt-5.4"
-        or bare.startswith("gpt-5.4-")
-        or bare.startswith("gpt-5.4.")
-        or bare == "gpt-5.5"
-        or bare.startswith("gpt-5.5-")
-        or bare.startswith("gpt-5.5.")
-        or bare == "gpt-5.6"
-        or bare.startswith("gpt-5.6-")
-        or bare.startswith("gpt-5.6.")
-        or bare == "gpt-daybreak-blue-latest"
+    if bare == "gpt-daybreak-blue-latest":
+        return True
+    return any(
+        bare == fam or bare.startswith(fam + "-") or bare.startswith(fam + ".")
+        for fam in ("gpt-5.4", "gpt-5.5", "gpt-5.6")
     )
+
+
+def _codex_route_bare_model(model: Optional[str], provider: Optional[str]) -> Optional[str]:
+    """Lowercased bare model slug when ``provider`` is the Codex OAuth route, else None."""
+    if (provider or "").strip().lower() != "openai-codex":
+        return None
+    return (model or "").strip().lower().rsplit("/", 1)[-1]
 
 
 def _is_codex_spark(model: Optional[str], provider: Optional[str] = None) -> bool:
     """True for ``gpt-5.3-codex-spark`` on the Codex OAuth route (the slug exists nowhere else)."""
-    prov = (provider or "").strip().lower()
-    if prov != "openai-codex":
-        return False
-    bare = (model or "").strip().lower().rsplit("/", 1)[-1]
-    return bare == "gpt-5.3-codex-spark"
+    return _codex_route_bare_model(model, provider) == "gpt-5.3-codex-spark"
 
 
 def _fixed_temperature_for_model(
