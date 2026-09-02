@@ -5896,6 +5896,7 @@ from hermes_cli.web_routers.cron import (  # noqa: E402,F401 — legacy re-expor
     cron_fire_webhook,
     list_cron_blueprints,
     instantiate_blueprint,
+    _normalize_dashboard_cron_updates,
 )
 
 
