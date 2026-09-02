@@ -45,12 +45,8 @@ import logging
 import os
 import re
 import tempfile  # noqa: F401 — tests/gateway patch ``tts_tool.tempfile.NamedTemporaryFile``
-import threading
-import time
-import uuid
 from pathlib import Path
 from typing import Callable, Dict, Any, List, Optional
-from urllib.parse import urljoin
 
 from hermes_constants import display_hermes_home
 
@@ -86,7 +82,7 @@ def _resolve_provider_key(env_var: str, provider_id: str) -> str:
     return resolve_provider_secret(env_var, provider_id, env_getter=get_env_value)
 
 
-from tools.managed_tool_gateway import resolve_managed_tool_gateway
+from tools.managed_tool_gateway import resolve_managed_tool_gateway  # noqa: F401 — seam patched by tests
 from tools.tts_command_provider import (  # noqa: F401 — historical names re-exported
     BUILTIN_TTS_PROVIDERS,
     COMMAND_TTS_OUTPUT_FORMATS,
@@ -108,13 +104,11 @@ from tools.tts_command_provider import (  # noqa: F401 — historical names re-e
     run_command_provider as _run_command_tts,
     shell_quote_context as _shell_quote_context,
 )
-from tools.tool_backend_helpers import (
+from tools.tool_backend_helpers import (  # noqa: F401 — seams patched by tests, resolved via tts_tool_openai._origin()
     NOUS_MANAGED_PROVIDER,
     managed_nous_tools_enabled,
-    nous_tool_gateway_unavailable_message,
     read_selection,
     resolve_openai_audio_api_key,
-    selection_error,
 )
 from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-exported
     FALLBACK_MAX_TEXT_LENGTH,
@@ -174,6 +168,31 @@ from tools.tts_tool_local import (  # noqa: F401 — historical names re-exporte
 )
 from tools.tts_tool_speaker import (  # noqa: F401 — historical names re-exported
     stream_tts_to_speaker,
+)
+from tools.tts_tool_openai import (  # noqa: F401 — historical names re-exported
+    DEFAULT_DEEPINFRA_TTS_VOICE,
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_OPENAI_MODEL,
+    DEFAULT_OPENAI_VOICE,
+    MANAGED_OPENAI_TTS_MODELS,
+    _generate_deepinfra_tts,
+    _generate_openai_tts,
+    _has_openai_audio_backend,
+    _managed_openai_audio_route,
+    _resolve_openai_audio_client_config,
+)
+from tools.tts_tool_lifecycle import (  # noqa: F401 — historical names re-exported
+    _lazy_sdk_feature_for_provider,
+    _local_tts_warmers,
+    _reset_tts_leases_for_tests,
+    _signal_user_tts_provider,
+    _tts_lease_lock,
+    _tts_leases,
+    acquire_tts_lease,
+    release_tts_lease,
+    release_tts_provider,
+    tts_lease_holders,
+    warm_tts_provider,
 )
 
 # ---------------------------------------------------------------------------
@@ -261,14 +280,6 @@ def _check_piper_available() -> bool:
 # Defaults
 # ===========================================================================
 DEFAULT_PROVIDER = "edge"
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini-tts"
-# The managed OpenAI audio gateway (Nous portal proxy) only proxies these
-# speech models; anything else is 400 "Unsupported managed OpenAI speech model".
-MANAGED_OPENAI_TTS_MODELS = frozenset({"gpt-4o-mini-tts"})
-DEFAULT_OPENAI_VOICE = "alloy"
-DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-# DeepInfra base URL is resolved via hermes_cli.models.deepinfra_base_url (shared).
-DEFAULT_DEEPINFRA_TTS_VOICE = "default"
 
 
 def _get_default_output_dir() -> str:
@@ -513,347 +524,6 @@ def _has_any_command_tts_provider(tts_config: Optional[Dict[str, Any]] = None) -
     for _name, _cfg in _iter_command_providers(tts_config):
         return True
     return False
-
-
-# ===========================================================================
-# Provider: OpenAI TTS (also every OpenAI-compatible endpoint — DeepInfra
-# delegates here). Kept in the origin module: it shares the managed-gateway
-# selection logic below.
-# ===========================================================================
-def _generate_openai_tts(
-    text: str,
-    output_path: str,
-    tts_config: Dict[str, Any],
-    *,
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
-    model: Optional[str] = None,
-    voice: Optional[str] = None,
-    speed: Optional[float] = None,
-    instructions: Optional[str] = None,
-) -> str:
-    """Generate audio via the OpenAI ``audio.speech.create`` SDK shape.
-
-    Explicit kwargs let OpenAI-compatible backends (DeepInfra) pass their own
-    credentials/model/voice and skip ``_resolve_openai_audio_client_config``
-    (the managed-gateway path). When None: ``api_key`` comes from the OpenAI
-    auth chain, ``base_url`` from ``tts.openai.base_url`` then the auth-chain
-    fallback then the OpenAI default, model/voice/speed from ``tts.openai``
-    (speed falling back to global ``tts.speed``). ``instructions`` is
-    forwarded only when truthy so ``tts-1`` and strict OpenAI-compatible
-    servers that reject unknown kwargs are unaffected.
-    """
-    fallback_base: Optional[str] = None
-    is_managed = False
-    explicit_base_url = base_url is not None
-    if api_key is None:
-        api_key, fallback_base, is_managed = _resolve_openai_audio_client_config()
-
-    # ``tts.openai: null`` in YAML yields None — coalesce so .get() is safe.
-    oai_config = (tts_config.get("openai") if isinstance(tts_config, dict) else None) or {}
-    if model is None:
-        model = oai_config.get("model", DEFAULT_OPENAI_MODEL)
-    if voice is None:
-        voice = oai_config.get("voice", DEFAULT_OPENAI_VOICE)
-    config_base_url = oai_config.get("base_url")
-    if base_url is None:
-        # Config override beats the auth-chain fallback; an explicit arg
-        # (DeepInfra) skipped this block and always wins.
-        base_url = config_base_url or fallback_base or DEFAULT_OPENAI_BASE_URL
-    if speed is None:
-        speed_default = tts_config.get("speed", 1.0) if isinstance(tts_config, dict) else 1.0
-        speed = float(oai_config.get("speed", speed_default))
-    language = oai_config.get("language")
-
-    # The managed gateway only proxies MANAGED_OPENAI_TTS_MODELS; coerce a
-    # direct-OpenAI model (e.g. "tts-1-hd") unless the user redirected
-    # base_url to their own endpoint.
-    if (
-        is_managed
-        and not explicit_base_url
-        and not config_base_url
-        and model not in MANAGED_OPENAI_TTS_MODELS
-    ):
-        logger.warning(
-            "TTS: managed OpenAI audio gateway does not support model %r; "
-            "falling back to %s. Set VOICE_TOOLS_OPENAI_KEY or OPENAI_API_KEY "
-            "to use %r directly.",
-            model, DEFAULT_OPENAI_MODEL, model,
-        )
-        model = DEFAULT_OPENAI_MODEL
-
-    response_format = _tts_response_format_from_path(output_path)
-
-    OpenAIClient = _import_openai_client()
-    client = OpenAIClient(api_key=api_key, base_url=base_url)
-    try:
-        create_kwargs: Dict[str, Any] = {
-            "model": model,
-            "voice": voice,
-            "input": text,
-            "response_format": response_format,
-            "extra_headers": {"x-idempotency-key": str(uuid.uuid4())},
-        }
-        if speed != 1.0:
-            create_kwargs["speed"] = max(0.25, min(4.0, speed))
-        if instructions:
-            create_kwargs["instructions"] = instructions
-        if language:
-            create_kwargs["extra_body"] = {"lang_code": language}
-        response = client.audio.speech.create(**create_kwargs)
-
-        response.stream_to_file(output_path)
-        return output_path
-    finally:
-        close = getattr(client, "close", None)
-        if callable(close):
-            close()
-
-
-def _generate_deepinfra_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    """Resolve DeepInfra credentials/model, then delegate to the OpenAI handler.
-
-    DeepInfra's audio endpoint is OpenAI-compatible. Model ids come live from
-    the shared ``hermes_cli.models`` catalog helpers (no hardcoded ids, so
-    retired models disappear without a patch).
-    """
-    api_key = _resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
-    if not api_key:
-        raise ValueError(
-            "DEEPINFRA_API_KEY not set. Run `hermes setup` to configure, "
-            "or set the env var directly."
-        )
-
-    # ``tts.deepinfra: null`` yields None (no DEFAULT_CONFIG block to merge over).
-    di_config = tts_config.get("deepinfra") if isinstance(tts_config, dict) else None
-    if not isinstance(di_config, dict):
-        di_config = {}
-
-    from hermes_cli.models import deepinfra_base_url, deepinfra_model_ids
-
-    model = di_config.get("model")
-    if not isinstance(model, str) or not model.strip():
-        candidates = deepinfra_model_ids("tts")
-        if not candidates:
-            raise ValueError(
-                "No DeepInfra TTS model available. Pin one in config.yaml "
-                "under tts.deepinfra.model, or check connectivity to "
-                "api.deepinfra.com so the live catalog can be fetched."
-            )
-        model = candidates[0]
-    return _generate_openai_tts(
-        text,
-        output_path,
-        tts_config,
-        api_key=api_key,
-        base_url=deepinfra_base_url(di_config),
-        model=model,
-        voice=di_config.get("voice", DEFAULT_DEEPINFRA_TTS_VOICE),
-        speed=float(di_config.get("speed", tts_config.get("speed", 1.0))),
-    )
-
-
-# ===========================================================================
-# Local-engine lifecycle: warm-up / release driven by TTS-output toggles
-# ===========================================================================
-#
-# Local engines load their model lazily on first synthesis, so the first spoken
-# reply after a user turns speech output on pays the whole load as dead air,
-# and the model then stays resident forever. The toggles ARE the intent
-# signal: every surface that flips speech output on holds a *lease* here
-# (warming the configured engine); when the last lease is released the local
-# model caches are dropped. Lease-counting keeps one surface's "off" from
-# unloading a model another surface in this process still needs. Cloud
-# providers have nothing resident; warming them only ensures the lazily
-# installed SDK is importable.
-
-def _local_tts_warmers() -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-    """Provider name → loader populating that engine's cache slot (same key synthesis uses)."""
-    return {
-        "piper": lambda cfg: _load_piper_voice_for_config(cfg)[0],
-        "kittentts": lambda cfg: _load_kittentts_model_for_config(cfg)[0],
-    }
-
-
-def _lazy_sdk_feature_for_provider(provider: str) -> Optional[str]:
-    """tools.lazy_deps feature key for providers whose SDK installs on first use."""
-    return {
-        "edge": "tts.edge",
-        "elevenlabs": "tts.elevenlabs",
-        "mistral": "tts.mistral",
-    }.get(provider)
-
-
-_tts_lease_lock = threading.Lock()
-_tts_leases: set = set()
-
-
-def _signal_user_tts_provider(name: str, tts_config: Dict[str, Any], hook: str) -> Optional[str]:
-    """Forward a lease ``hook`` (``"warm"`` / ``"release"``) to a user-declared provider.
-
-    Command providers run their optional ``warm_command`` / ``release_command``
-    (same template/env/timeout rules as ``command``; output discarded) on a
-    background thread so a toggle never waits on a model server. Plugin
-    providers get :meth:`TTSProvider.warm` / :meth:`TTSProvider.release`.
-    Best-effort: failures are logged at debug. Returns the action taken.
-    """
-    if not name or name in BUILTIN_TTS_PROVIDERS:
-        return None
-    cfg = _get_named_provider_config(tts_config, name)
-    try:
-        if _is_command_provider_config(cfg):
-            template = str(cfg.get(f"{hook}_command") or "").strip()
-            if not template:
-                return None
-            command = _render_command_tts_template(template, {
-                "voice": str(cfg.get("voice", "")),
-                "model": str(cfg.get("model", "")),
-                "speed": str(cfg.get("speed", tts_config.get("speed", ""))),
-            })
-
-            def _run() -> None:
-                try:
-                    _run_command_tts(command, _get_command_tts_timeout(cfg),
-                                     env_passthrough=_command_provider_env_passthrough(cfg))
-                except Exception as exc:  # noqa: BLE001 — best-effort hook
-                    logger.debug("[TTS] %s_command for %s failed: %s", hook, name, exc)
-
-            threading.Thread(target=_run, name=f"tts-{hook}-{name}", daemon=True).start()
-            return hook
-        from agent.tts_registry import get_provider
-        from hermes_cli.plugins import _ensure_plugins_discovered
-
-        _ensure_plugins_discovered()
-        plugin_provider = get_provider(name)
-        if plugin_provider is None:
-            return None
-        getattr(plugin_provider, hook)()
-        return hook
-    except Exception as exc:  # noqa: BLE001 — best-effort hook
-        logger.debug("[TTS] %s hook for %s failed: %s", hook, name, exc)
-        return "error"
-
-
-def warm_tts_provider(
-    tts_config: Optional[Dict[str, Any]] = None,
-    provider: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Pre-load the configured TTS provider so the next synthesis starts hot.
-
-    Local engines load their voice/model into the same LRU slot synthesis
-    reads (including first-use download); lazily-installed cloud SDKs are
-    made importable; user-declared providers get ``warm_command`` /
-    :meth:`TTSProvider.warm`; everything else is ``action: "noop"``.
-    Never raises — the result dict carries ``warmed`` / ``action`` /
-    ``error``. Blocking; UI threads should run it in the background.
-    """
-    if tts_config is None:
-        tts_config = _load_tts_config()
-    name = (provider or _get_provider(tts_config) or "").lower().strip()
-    result: Dict[str, Any] = {"provider": name, "warmed": False, "action": "noop"}
-
-    warmer = _local_tts_warmers().get(name)
-    if warmer is not None:
-        cache = _LOCAL_TTS_MODEL_CACHES.get(name)
-        before = len(cache) if cache is not None else 0
-        started = time.monotonic()
-        try:
-            warmer(tts_config)
-        except Exception as exc:  # engine missing, download failed, bad voice…
-            logger.warning("[TTS] warm-up for %s failed: %s", name, exc)
-            result.update(action="error", error=str(exc))
-            return result
-        after = len(cache) if cache is not None else 0
-        result.update(
-            warmed=True,
-            action="loaded" if after > before else "cached",
-            elapsed_ms=int((time.monotonic() - started) * 1000),
-        )
-        logger.info("[TTS] warm-up %s: %s in %dms", name, result["action"], result["elapsed_ms"])
-        return result
-
-    signalled = _signal_user_tts_provider(name, tts_config, "warm")
-    if signalled is not None:
-        result.update(warmed=signalled != "error", action="warmed" if signalled != "error" else "error")
-        return result
-
-    feature = _lazy_sdk_feature_for_provider(name)
-    if feature is not None:
-        try:
-            from tools.lazy_deps import ensure, is_available
-
-            if is_available(feature):
-                result.update(warmed=True, action="cached")
-            else:
-                ensure(feature, prompt=False)
-                result.update(warmed=True, action="installed")
-        except Exception as exc:
-            logger.debug("[TTS] SDK warm-up for %s skipped: %s", name, exc)
-            result.update(action="error", error=str(exc))
-    return result
-
-
-def release_tts_provider(provider: Optional[str] = None) -> Dict[str, Any]:
-    """Drop resident local TTS models so their memory is returned.
-
-    With ``provider`` given only that engine's cache is cleared; otherwise
-    every local cache is, and the configured user-declared provider is
-    signalled (plugin ``release()`` / command ``release_command``). Returns
-    ``{"released": <model instances dropped>}``.
-    """
-    name = (provider or "").lower().strip()
-    if not name:
-        tts_config = _load_tts_config()
-        _signal_user_tts_provider(_get_provider(tts_config), tts_config, "release")
-    released = 0
-    for cache_name, cache in _LOCAL_TTS_MODEL_CACHES.items():
-        if name and cache_name != name:
-            continue
-        released += len(cache)
-        cache.clear()
-    if released:
-        logger.info("[TTS] released %d resident local model(s)", released)
-    return {"released": released}
-
-
-def acquire_tts_lease(lease: str, tts_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Register ``lease`` (e.g. ``"desktop:read-aloud"``) as a live consumer and warm the provider.
-
-    Re-acquiring is idempotent but still re-warms (cheap on a cache hit, and
-    heals a cache cleared elsewhere).
-    """
-    with _tts_lease_lock:
-        _tts_leases.add(lease)
-        holders = len(_tts_leases)
-    result = warm_tts_provider(tts_config)
-    result["leases"] = holders
-    return result
-
-
-def release_tts_lease(lease: str) -> Dict[str, Any]:
-    """Drop ``lease``; when it was the last one, unload resident local models.
-
-    Releasing a never-acquired lease is a no-op (still reports the holder
-    count) so surfaces can call it unconditionally on their "off" path.
-    """
-    with _tts_lease_lock:
-        _tts_leases.discard(lease)
-        holders = len(_tts_leases)
-        result: Dict[str, Any] = {"leases": holders, "released": 0}
-        if holders == 0:
-            result["released"] = release_tts_provider()["released"]
-    return result
-
-
-def tts_lease_holders() -> List[str]:
-    """Snapshot of live lease names (diagnostics / tests)."""
-    with _tts_lease_lock:
-        return sorted(_tts_leases)
-
-
-def _reset_tts_leases_for_tests() -> None:
-    with _tts_lease_lock:
-        _tts_leases.clear()
 
 
 # ===========================================================================
@@ -1426,83 +1096,6 @@ def check_tts_requirements() -> bool:
         plugin = get_provider(provider)
         return bool(plugin and plugin.is_available())
     except Exception:
-        return False
-
-
-def _managed_openai_audio_route() -> Optional[tuple]:
-    gateway = resolve_managed_tool_gateway("openai-audio")
-    if gateway is None:
-        return None
-    return gateway.nous_user_token, urljoin(f"{gateway.gateway_origin.rstrip('/')}/", "v1"), True
-
-
-def _resolve_openai_audio_client_config() -> tuple[str, str, bool]:
-    """Return ``(api_key, base_url, is_managed)`` for the OpenAI audio client.
-
-    ``is_managed`` marks the Nous managed audio gateway (a restricted proxy)
-    so callers can coerce the request to what it supports. Strict selection
-    semantics on the stored ``tts`` provider:
-    - ``"nous"`` → managed gateway ONLY; unentitled/unreachable is an error.
-    - any other stored provider → direct credentials ONLY (``tts.openai.api_key``
-      then ``VOICE_TOOLS_OPENAI_KEY``/``OPENAI_API_KEY``); no silent managed fallback.
-    - never-configured tts section → legacy ladder: config key → env key → managed.
-    """
-    tts_config = _load_tts_config()
-    openai_cfg = (tts_config.get("openai") if isinstance(tts_config, dict) else None) or {}
-    cfg_api_key = openai_cfg.get("api_key") or ""
-    cfg_base_url = openai_cfg.get("base_url") or ""
-    direct_base = cfg_base_url or DEFAULT_OPENAI_BASE_URL
-
-    selected = read_selection("tts")
-
-    if selected == NOUS_MANAGED_PROVIDER:
-        route = _managed_openai_audio_route()
-        if route is None:
-            raise ValueError(selection_error(
-                "tts",
-                NOUS_MANAGED_PROVIDER,
-                "the Nous Tool Gateway is not available (not entitled or "
-                "unreachable)",
-            ))
-        return route
-
-    if cfg_api_key:
-        return cfg_api_key, direct_base, False
-    direct_api_key = resolve_openai_audio_api_key()
-    if direct_api_key:
-        return direct_api_key, direct_base, False
-
-    if selected is not None:
-        raise ValueError(selection_error(
-            "tts",
-            selected,
-            "neither tts.openai.api_key in config nor "
-            "VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set",
-        ))
-
-    route = _managed_openai_audio_route()
-    if route is None:
-        message = (
-            "Neither tts.openai.api_key in config nor "
-            "VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set"
-        )
-        if managed_nous_tools_enabled():
-            message += (
-                ". "
-                + nous_tool_gateway_unavailable_message(
-                    "managed OpenAI audio for TTS",
-                )
-            )
-        raise ValueError(message)
-    return route
-
-
-def _has_openai_audio_backend() -> bool:
-    """Return True when the selected OpenAI audio route is usable."""
-    try:
-        _resolve_openai_audio_client_config()
-        return True
-    except ValueError:
         return False
 
 
