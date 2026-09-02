@@ -390,25 +390,25 @@ _aux_provider_response = threading.local()
 _aux_stream_deadline = threading.local()
 
 
-def _notify_aux_progress() -> None:
-    """Tick the installed forward-progress hook, if any. Never raises."""
-    hook = getattr(_aux_progress, "hook", None)
+def _tick_hook(local: threading.local, label: str) -> None:
+    """Call the thread-local hook installed on ``local``, if any. Never raises."""
+    hook = getattr(local, "hook", None)
     if hook is None:
         return
     try:
         hook()
     except Exception:
-        logger.debug("aux progress hook failed", exc_info=True)
+        logger.debug("aux %s hook failed", label, exc_info=True)
+
+
+def _notify_aux_progress() -> None:
+    """Tick the installed forward-progress hook, if any."""
+    _tick_hook(_aux_progress, "progress")
 
 
 def _notify_aux_dispatch() -> None:
     """Record an actual provider dispatch without claiming response progress."""
-    hook = getattr(_aux_dispatch, "hook", None)
-    if hook is not None:
-        try:
-            hook()
-        except Exception:
-            logger.debug("aux dispatch hook failed", exc_info=True)
+    _tick_hook(_aux_dispatch, "dispatch")
 
 
 def _notify_aux_timing_response() -> None:
@@ -417,12 +417,7 @@ def _notify_aux_timing_response() -> None:
     For content-free frames (keepalives, empty deltas): counts toward
     ``time_to_first_progress_ms`` but must not reset a compression inactivity fence.
     """
-    hook = getattr(_aux_provider_response, "hook", None)
-    if hook is not None:
-        try:
-            hook()
-        except Exception:
-            logger.debug("aux provider response hook failed", exc_info=True)
+    _tick_hook(_aux_provider_response, "provider response")
 
 
 def _notify_aux_provider_response() -> None:
@@ -2347,6 +2342,20 @@ def _endpoint_speaks_anthropic_messages(base_url: str) -> bool:
     return False
 
 
+def _is_specialized_aux_client(client_obj: Any) -> bool:
+    """True for clients that must never be re-dispatched through a wire adapter.
+
+    Anthropic/Bedrock/Codex wrappers, plus any client declaring
+    ``HERMES_SKIP_TRANSPORT_WRAP`` (native/ACP shims, in-tree or from a provider
+    plugin) — a class-attribute declaration rather than isinstance, so this hot
+    path never imports those client modules just to type-test.
+    """
+    return (
+        _safe_isinstance(client_obj, (AnthropicAuxiliaryClient, BedrockAuxiliaryClient, CodexAuxiliaryClient))
+        or _client_declares(client_obj, "HERMES_SKIP_TRANSPORT_WRAP")
+    )
+
+
 def _maybe_wrap_anthropic(
     client_obj: Any,
     model: str,
@@ -2366,33 +2375,14 @@ def _maybe_wrap_anthropic(
     endpoint is OpenAI-wire, ``api_mode`` is explicitly non-Anthropic, or the
     ``anthropic`` SDK is missing (falls back to OpenAI wire).
     """
-    if isinstance(client_obj, _AuxProbeClientStub):
-        # Availability probe: stub only signals resolvability; skipping also
-        # avoids importing adapter modules (openai.types) on the probe path.
+    # Probe stubs only signal resolvability (skipping also avoids importing
+    # adapter modules on the probe path); specialized adapters are never re-dispatched.
+    if isinstance(client_obj, _AuxProbeClientStub) or _is_specialized_aux_client(client_obj):
         return client_obj
-    if _safe_isinstance(client_obj, AnthropicAuxiliaryClient):
-        return client_obj
-    if _safe_isinstance(client_obj, BedrockAuxiliaryClient):
-        return client_obj
-    # Other specialized adapters we must never re-dispatch.
-    if _safe_isinstance(client_obj, CodexAuxiliaryClient):
-        return client_obj
-    # A client that declares itself complete is never re-dispatched through a
-    # wire adapter. Declared as a class attribute rather than isinstance-checked
-    # so an out-of-tree provider's client is covered too — and so this hot path
-    # no longer imports the native/ACP client modules just to type-test.
-    if _client_declares(client_obj, "HERMES_SKIP_TRANSPORT_WRAP"):
-        return client_obj
-
     # Explicit non-anthropic api_mode wins over URL heuristics.
     if api_mode and api_mode != "anthropic_messages":
         return client_obj
-
-    should_wrap = (
-        api_mode == "anthropic_messages"
-        or _endpoint_speaks_anthropic_messages(base_url)
-    )
-    if not should_wrap:
+    if api_mode != "anthropic_messages" and not _endpoint_speaks_anthropic_messages(base_url):
         return client_obj
 
     try:
