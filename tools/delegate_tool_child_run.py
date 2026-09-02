@@ -7,6 +7,7 @@ Split out of ``tools/delegate_tool.py``; every moved name is re-imported there, 
 from __future__ import annotations
 
 import logging
+import contextvars
 import json
 import threading
 import time
@@ -32,15 +33,15 @@ def _num(value: Any, default: int = 0) -> int:
     return int(value) if isinstance(value, (int, float)) else default
 
 
-def _fabricated_entry(idx: int, status: str, error: str, child: Any) -> Dict[str, Any]:
-    """Result entry for a child whose Future raised or never finished."""
+def _fabricated_entry(idx: int, status: str, error: str, child: Any, duration: float = 0) -> Dict[str, Any]:
+    """Result entry for a child that raised, never finished, or was abandoned."""
     return {
         "task_index": idx,
         "status": status,
         "summary": None,
         "error": error,
         "api_calls": 0,
-        "duration_seconds": 0,
+        "duration_seconds": duration,
         "_child_role": getattr(child, "_delegate_role", None),
     }
 
@@ -556,6 +557,111 @@ def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     _resweep_timer = threading.Timer(5.0, _drain_resweep)
     _resweep_timer.daemon = True
     _resweep_timer.start()
+
+
+def _lease_child_credential(child: Any) -> tuple[Any, Optional[str]]:
+    """Lease a credential from the child's pool (if any) and bind it; ``(pool, lease_id)``."""
+    child_pool = getattr(child, "_credential_pool", None)
+    if child_pool is None:
+        return None, None
+    leased_cred_id = child_pool.acquire_lease()
+    if leased_cred_id is not None:
+        try:
+            leased_entry = child_pool.current()
+            if leased_entry is not None and hasattr(child, "_swap_credential"):
+                child._swap_credential(leased_entry)
+        except Exception as exc:
+            logger.debug("Failed to bind child to leased credential: %s", exc)
+    return child_pool, leased_cred_id
+
+
+def _make_text_relay(child_progress_cb: Any):
+    """Stream callback forwarding the child's reply text up the progress relay so
+    gateway watch windows mirror it live (subagent.text → message.delta). Inert
+    under CLI/TUI: their progress handlers ignore non-tool events."""
+
+    def _relay_child_text(delta: str) -> None:
+        if delta:
+            _safe_progress(child_progress_cb, "subagent.text", preview=delta)
+
+    return _relay_child_text
+
+
+def _await_child(
+    child: Any,
+    goal: str,
+    ws: "_ChildWorkspace",
+    relay_child_text: Any,
+    *,
+    task_index: int,
+    subagent_id: Optional[str],
+    child_start: float,
+    child_progress_cb: Any,
+    worktree: _WorktreeReporter,
+) -> tuple[Optional[Dict[str, Any]], Optional[_ChildFailure]]:
+    """Run the child's conversation on a daemon worker and wait for it.
+
+    Returns ``(result, None)`` or ``(None, failure)`` on timeout/exception.
+    The hard timeout is off by default (``result(timeout=None)`` blocks until
+    the child finishes; stuck-child protection is the heartbeat). The worker is
+    a daemon: a timed-out child is abandoned and a stdlib non-daemon worker
+    would block interpreter exit at atexit-join time. The worker installs a
+    non-interactive approval callback so dangerous-command prompts never fall
+    back to ``input()`` and deadlock the parent TUI (deny vs approve follows
+    delegation.subagent_auto_approve).
+    """
+    from tools.delegate_tool import (
+        _get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb,
+    )
+    from tools.daemon_pool import DaemonThreadPoolExecutor
+
+    child_timeout = _get_child_timeout()
+    executor = DaemonThreadPoolExecutor(
+        max_workers=1, initializer=_set_subagent_approval_cb, initargs=(_get_subagent_approval_callback(),),
+    )
+    # Worker thread handle so the timeout diagnostic can dump its stack.
+    worker_thread_holder: Dict[str, Optional[threading.Thread]] = {"t": None}
+
+    def _run_with_thread_capture():
+        worker_thread_holder["t"] = threading.current_thread()
+        from agent.delegation_context import delegated_child_context
+
+        with delegated_child_context(str(getattr(child, "session_id", "") or "")):
+            return child.run_conversation(
+                user_message=goal, task_id=ws.child_task_id, stream_callback=relay_child_text,
+            )
+
+    future = executor.submit(contextvars.copy_context().run, _run_with_thread_capture)
+    try:
+        return future.result(timeout=child_timeout), None
+    except Exception as exc:
+        return None, _handle_child_wait_failure(
+            exc,
+            child=child,
+            task_index=task_index,
+            goal=goal,
+            subagent_id=subagent_id,
+            child_future=future,
+            child_timeout=child_timeout,
+            child_start=child_start,
+            child_progress_cb=child_progress_cb,
+            worker_thread_holder=worker_thread_holder,
+            worktree=worktree,
+        )
+    finally:
+        # Shut down without waiting — a child stuck on blocking I/O would hang wait=True forever.
+        executor.shutdown(wait=False)
+
+
+def _merge_late_steer(result: Dict[str, Any], subagent_id: Optional[str], child: Any) -> None:
+    """Linearization boundary for registry steering: from here the child cannot
+    consume another steer. Closing under the registry lock either rejects a
+    concurrent caller or drains every accepted exact text into the result
+    before callbacks/result assembly run."""
+    late = _close_subagent_steering(subagent_id, child) if subagent_id else None
+    if late:
+        existing = result.get("pending_steer")
+        result["pending_steer"] = f"{existing}\n{late}" if isinstance(existing, str) and existing else late
 
 
 def _handle_child_wait_failure(
