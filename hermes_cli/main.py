@@ -3832,6 +3832,39 @@ def _is_profile_api_key_provider(provider_id: str) -> bool:
         return False
 
 
+# Provider id -> flow(config, current_model, args). Lambdas resolve the
+# _model_flow_* names at call time so test monkeypatches on hermes_cli.main
+# keep intercepting. Custom-slug providers (always ``custom:*``),
+# remove-custom and the generic API-key set are the fallthrough branches in
+# select_provider_and_model.
+_PROVIDER_MODEL_FLOWS = {
+    "openrouter": lambda c, m, a: _model_flow_openrouter(c, m),
+    "moa": lambda c, m, a: _model_flow_moa(c, m),
+    "ai-gateway": lambda c, m, a: _model_flow_ai_gateway(c, m),
+    "nous": lambda c, m, a: _model_flow_nous(c, m, args=a),
+    "openai-codex": lambda c, m, a: _model_flow_openai_codex(c, m),
+    "xai-oauth": lambda c, m, a: _model_flow_xai_oauth(c, m, args=a),
+    "qwen-oauth": lambda c, m, a: _model_flow_qwen_oauth(c, m),
+    "minimax-oauth": lambda c, m, a: _model_flow_minimax_oauth(c, m, args=a),
+    "copilot-acp": lambda c, m, a: _model_flow_copilot_acp(c, m),
+    "copilot": lambda c, m, a: _model_flow_copilot(c, m),
+    "custom": lambda c, m, a: _model_flow_custom(c),
+    "anthropic": lambda c, m, a: _model_flow_anthropic(c, m),
+    "kimi-coding": lambda c, m, a: _model_flow_kimi(c, m),
+    "stepfun": lambda c, m, a: _model_flow_stepfun(c, m),
+    "bedrock": lambda c, m, a: _model_flow_bedrock(c, m),
+    "vertex": lambda c, m, a: _model_flow_vertex(c, m),
+    "azure-foundry": lambda c, m, a: _model_flow_azure_foundry(c, m),
+}
+
+_GENERIC_API_KEY_PROVIDERS = frozenset({
+    "openai-api", "gemini", "deepseek", "xai", "zai", "kimi-coding-cn",
+    "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go",
+    "opencode-free", "alibaba", "huggingface", "xiaomi", "arcee", "gmi",
+    "nvidia", "ollama-cloud", "tencent-tokenhub", "tencent-tokenplan", "lmstudio",
+})
+
+
 def select_provider_and_model(args=None):
     """Core provider selection + model picking logic.
 
@@ -4200,29 +4233,12 @@ def select_provider_and_model(args=None):
         _aux_config_menu()
         return
 
-    # Step 2: Provider-specific setup + model selection
-    if selected_provider == "openrouter":
-        _model_flow_openrouter(config, current_model)
-    elif selected_provider == "moa":
-        _model_flow_moa(config, current_model)
-    elif selected_provider == "ai-gateway":
-        _model_flow_ai_gateway(config, current_model)
-    elif selected_provider == "nous":
-        _model_flow_nous(config, current_model, args=args)
-    elif selected_provider == "openai-codex":
-        _model_flow_openai_codex(config, current_model)
-    elif selected_provider == "xai-oauth":
-        _model_flow_xai_oauth(config, current_model, args=args)
-    elif selected_provider == "qwen-oauth":
-        _model_flow_qwen_oauth(config, current_model)
-    elif selected_provider == "minimax-oauth":
-        _model_flow_minimax_oauth(config, current_model, args=args)
-    elif selected_provider == "copilot-acp":
-        _model_flow_copilot_acp(config, current_model)
-    elif selected_provider == "copilot":
-        _model_flow_copilot(config, current_model)
-    elif selected_provider == "custom":
-        _model_flow_custom(config)
+    # Step 2: Provider-specific setup + model selection.
+    # Flows are looked up by name at call time (globals()) so test
+    # monkeypatches on hermes_cli.main._model_flow_* keep intercepting.
+    flow = _PROVIDER_MODEL_FLOWS.get(selected_provider)
+    if flow is not None:
+        flow(config, current_model, args)
     elif (
         selected_provider.startswith("custom:")
         or selected_provider in _custom_provider_map
@@ -4237,42 +4253,10 @@ def select_provider_and_model(args=None):
         _model_flow_named_custom(config, provider_info)
     elif selected_provider == "remove-custom":
         _remove_custom_provider(config)
-    elif selected_provider == "anthropic":
-        _model_flow_anthropic(config, current_model)
-    elif selected_provider == "kimi-coding":
-        _model_flow_kimi(config, current_model)
-    elif selected_provider == "stepfun":
-        _model_flow_stepfun(config, current_model)
-    elif selected_provider == "bedrock":
-        _model_flow_bedrock(config, current_model)
-    elif selected_provider == "vertex":
-        _model_flow_vertex(config, current_model)
-    elif selected_provider == "azure-foundry":
-        _model_flow_azure_foundry(config, current_model)
-    elif selected_provider in {
-        "openai-api",
-        "gemini",
-        "deepseek",
-        "xai",
-        "zai",
-        "kimi-coding-cn",
-        "minimax",
-        "minimax-cn",
-        "kilocode",
-        "opencode-zen",
-        "opencode-go",
-        "opencode-free",
-        "alibaba",
-        "huggingface",
-        "xiaomi",
-        "arcee",
-        "gmi",
-        "nvidia",
-        "ollama-cloud",
-        "tencent-tokenhub",
-        "tencent-tokenplan",
-        "lmstudio",
-    } or _is_profile_api_key_provider(selected_provider):
+    elif (
+        selected_provider in _GENERIC_API_KEY_PROVIDERS
+        or _is_profile_api_key_provider(selected_provider)
+    ):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
     # ── Post-switch cleanup: clear stale OPENAI_BASE_URL ──────────────
