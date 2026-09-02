@@ -1,13 +1,22 @@
-"""Dangerous command approval -- gate flow, prompting, and per-session state.
+"""Dangerous command approval -- the gate flow and per-session state.
 
-Single source of truth for the dangerous command system:
-- Pattern detection lives in :mod:`tools.approval_detection` (re-exported here)
-- Per-session approval state (thread-safe, keyed by session_key)
-- Approval prompting (CLI interactive + gateway async, see
-  :mod:`tools.approval_gateway_wait`) and plugin transports
-- Smart approval via auxiliary LLM (:mod:`tools.approval_smart`)
-- Human-wait accounting (:mod:`tools.approval_human_wait`)
-- Permanent allowlist persistence (config.yaml)
+Single source of truth for the dangerous command system. This module owns the
+session state (approvals, yolo, gateway queues, denial breaker), the three
+guard entry points (``check_all_command_guards``, ``check_execute_code_guard``,
+``request_tool_approval`` / ``_run_approval_gate``) and the shared
+human-decision engine behind them. The leaves it re-exports:
+
+- :mod:`tools.approval_detection` -- hardline / dangerous pattern detection
+- :mod:`tools.approval_context`   -- session/interactive contextvars, config readers
+- :mod:`tools.approval_floors`    -- pre-gate blocks and the permanent allowlist match
+- :mod:`tools.approval_prompt`    -- CLI prompt, plugin transports, MCP elicitation
+- :mod:`tools.approval_gateway_wait` -- blocking gateway round-trip
+- :mod:`tools.approval_smart`     -- guardian-LLM verdicts
+- :mod:`tools.approval_human_wait` -- human-wait accounting
+
+Every private name is re-exported here so ``from tools.approval import X`` and
+``patch("tools.approval.X")`` keep working; leaf modules call back through
+``tools.approval`` at call time for the same reason.
 """
 
 from dataclasses import dataclass
@@ -151,6 +160,7 @@ def _denial_breaker_addendum(session_key: str) -> str:
 # =========================================================================
 # Gateway approval queue (the blocking wait loop lives in approval_gateway_wait)
 # =========================================================================
+
 
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
@@ -413,14 +423,8 @@ def save_permanent_allowlist(patterns: set):
 
 
 # =========================================================================
-# Approval prompting (CLI)
+# Bypass check (yolo / mode=off)
 # =========================================================================
-
-
-# =========================================================================
-# Config readers
-# =========================================================================
-
 
 def is_approval_bypass_active_for_session(session_key: str) -> bool:
     """Canonical three-source bypass check: process ``--yolo`` (frozen at
@@ -449,8 +453,10 @@ def is_approval_bypass_active() -> bool:
 
 _APPROVED = {"approved": True, "message": None}
 
+
 def _approved() -> dict:
     return dict(_APPROVED)
+
 
 def _denied(message: str, *, pattern_key: str, description: str,
             outcome: str, **extra) -> dict:
@@ -466,6 +472,7 @@ def _denied(message: str, *, pattern_key: str, description: str,
     result.update(extra)
     return result
 
+
 def _blocked(message: str, *, pattern_key: str, description: str) -> dict:
     """Non-interactive block (cron / -q / unattended / no-human): no consent keys."""
     return {
@@ -475,12 +482,14 @@ def _blocked(message: str, *, pattern_key: str, description: str) -> dict:
         "description": description,
     }
 
+
 def _user_approved(session_key: str, description: str) -> dict:
     """A human approval (incl. ESCALATE-then-approve or a smart-DENY owner
     override) resets the consecutive-denial tally."""
     _reset_denials(session_key)
     return {"approved": True, "message": None,
             "user_approved": True, "description": description}
+
 
 def _gateway_refusal(decision: dict):
     """``(reason, reason_addendum, timeout_addendum, outcome, deny_reason)`` when
@@ -500,9 +509,11 @@ def _gateway_refusal(decision: dict):
     reason_addendum = f' Reason given by the user: "{deny_reason}".' if deny_reason else ""
     return ("denied by user", reason_addendum, "", "denied", deny_reason)
 
+
 def _gateway_notify_cb(session_key: str):
     with _lock:
         return _gateway_notify_cbs.get(session_key)
+
 
 def _gateway_approval_data(display_command: str, display_description: str,
                            pattern_key: str, pattern_keys: list[str], *,
@@ -527,6 +538,7 @@ def _gateway_approval_data(display_command: str, display_description: str,
     if smart_denied:
         data["smart_denied"] = True
     return data
+
 
 def _pending_result(session_key: str, *, display_command: str,
                     display_description: str, pattern_key: str,
@@ -561,6 +573,7 @@ def _pending_result(session_key: str, *, display_command: str,
     if smart_denied:
         result.update(smart_denied=True, allow_permanent=False)
     return result
+
 
 def _action_pending_result(session_key: str, *, display_command: str,
                            display_description: str, pattern_key: str,
@@ -730,11 +743,12 @@ def _unattended_deny(command: str, ctx: _Unattended) -> dict | None:
 class _GateSpec:
     noun: str                 # "command" | "code" — for the pending STOP text
     transport: bool           # offer the selected plugin transport first
-    breaker: bool             # ``{breaker}`` = denial circuit-breaker addendum
     user_approved: bool       # human approval resets the denial tally
     redact_cli: bool          # CLI prompt + hooks see the redacted copy
     redact_pending: bool      # pending payload/result carry the redacted copy
     pending: object           # builder for the "no notifier, no panel" fallback
+    # Message templates. ``{breaker}`` = the denial circuit-breaker addendum,
+    # read only where a template shows it (reading it logs when tripped).
     notify_failed: str
     gateway_refused: str      # {reason}{reason_addendum}{timeout_addendum}{breaker}
     transport_denied: str     # {breaker}
@@ -755,7 +769,7 @@ _STOP_ACTION = (
 )
 
 _COMMAND_GATE = _GateSpec(
-    noun="command", transport=True, breaker=True, user_approved=True,
+    noun="command", transport=True, user_approved=True,
     redact_cli=False, redact_pending=True, pending=_pending_result,
     notify_failed="BLOCKED: Failed to send approval request to user. Do NOT retry.",
     gateway_refused="BLOCKED: Command {reason}.{reason_addendum}" + _STOP_COMMAND
@@ -771,7 +785,7 @@ _COMMAND_GATE = _GateSpec(
     smart_log="Smart approval: auto-approved '{command}' ({description})",
 )
 _EXECUTE_CODE_GATE = _GateSpec(
-    noun="code", transport=True, breaker=True, user_approved=True,
+    noun="code", transport=True, user_approved=True,
     redact_cli=True, redact_pending=True, pending=_pending_result,
     notify_failed="BLOCKED: Failed to send execute_code approval request to user. Do NOT retry.",
     gateway_refused=(
@@ -795,7 +809,7 @@ _EXECUTE_CODE_GATE = _GateSpec(
 # Plugin-escalated tool calls / protected writes: no transport, no breaker,
 # no user_approved marker (parity with the historical gate).
 _ACTION_GATE = _GateSpec(
-    noun="action", transport=False, breaker=False, user_approved=False,
+    noun="action", transport=False, user_approved=False,
     redact_cli=False, redact_pending=False, pending=_action_pending_result,
     notify_failed="BLOCKED: Failed to send approval request to user. Do NOT retry.",
     gateway_refused="BLOCKED: Action {reason}.{reason_addendum}" + _STOP_ACTION
@@ -862,8 +876,6 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     allow_permanent = permanent_capable and not smart_denied
 
     def deny(template: str, outcome: str, **fmt) -> dict:
-        # The breaker addendum logs when tripped, so only read it where the
-        # template shows it.
         breaker = ""
         if "{breaker}" in template:
             breaker = _denial_breaker_addendum(session_key)
@@ -1067,6 +1079,7 @@ def _should_skip_container_guards(env_type: str, has_host_access: bool = False) 
         return not has_host_access
     return env_type in ("singularity", "modal", "daytona", "vercel_sandbox")
 
+
 def _floor_block(command: str, *, sudo_guard: bool = False) -> dict | None:
     """Unconditional floors, BEFORE yolo / mode=off / cron approve-mode so no
     session-level setting can bypass them: hardline catastrophic commands,
@@ -1223,6 +1236,7 @@ def _tirith_scan(command: str) -> dict:
             ],
             "summary": "Tirith unavailable (fail-closed)",
         }
+
 
 def check_all_command_guards(command: str, env_type: str,
                              approval_callback=None,

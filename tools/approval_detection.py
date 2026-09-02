@@ -101,6 +101,7 @@ _CMDPOS = (
     r'\s*'
 )
 
+
 # Destructive-path matcher for the rm hardline rules: accept the path fully
 # wrapped in a matching quote pair (`rm -rf "/"`, `rm -rf "$HOME"`) OR bare with
 # a terminator (whitespace, end, or `) ` ; | &` so `$(rm -rf /)` is caught).
