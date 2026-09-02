@@ -110,6 +110,74 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
     return migrated
 
 
+def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
+    """Post-migration safety nets: restore cron jobs / protected model settings lost during the update,
+    for the active profile (from *pre_update_snapshot_id*) and every sibling profile (own snapshot)."""
+    # Safety net: migrations/desktop scheduler have emptied or truncated cron/jobs.json;
+    # restore from the pre-update snapshot if jobs went missing.
+    try:
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        cron_restore = restore_cron_jobs_if_emptied(pre_update_snapshot_id)
+        if cron_restore:
+            print()
+            print(
+                "  ⚠️  cron/jobs.json lost jobs during this update — "
+                f"restored {cron_restore['job_count']} job(s) from "
+                f"pre-update snapshot {cron_restore['snapshot_id']}."
+            )
+    except Exception as exc:
+        # Never let the cron safety net break an otherwise-good update.
+        logger.debug("Cron jobs auto-restore check failed: %s", exc)
+
+    # Desktop update/repair cycles have rewritten model.provider/model.default and dropped
+    # moa:; restore only those protected keys from the same pre-update snapshot.
+    try:
+        from hermes_cli.backup import restore_config_model_settings_if_rewritten
+
+        cfg_restore = restore_config_model_settings_if_rewritten(pre_update_snapshot_id)
+        if cfg_restore:
+            print()
+            print(
+                "  ⚠️  config.yaml user model settings were rewritten during "
+                f"this update — restored {', '.join(cfg_restore['keys'])} "
+                f"from pre-update snapshot {cfg_restore['snapshot_id']}."
+            )
+    except Exception as exc:
+        # Never let the config safety net break an otherwise-good update.
+        logger.debug("Config model-settings auto-restore check failed: %s", exc)
+
+    # Same cron-jobs safety net per sibling profile against ITS OWN pre-update snapshot.
+    with _best_effort('Sibling cron auto-restore check failed: %s'):
+        from hermes_cli.backup import restore_cron_jobs_all_profiles
+
+        for _restored in restore_cron_jobs_all_profiles(
+            _LAST_SIBLING_SNAPSHOTS
+        ):
+            print()
+            print(
+                f"  ⚠️  Profile '{_restored['profile']}': cron/jobs.json "
+                f"lost jobs during this update — restored "
+                f"{_restored['job_count']} job(s) from pre-update "
+                f"snapshot {_restored['snapshot_id']}."
+            )
+
+    # Same config model-settings safety net for sibling profiles.
+    with _best_effort('Sibling config auto-restore check failed: %s'):
+        from hermes_cli.backup import restore_config_model_settings_all_profiles
+
+        for _cfg_restored in restore_config_model_settings_all_profiles(
+            _LAST_SIBLING_SNAPSHOTS
+        ):
+            print()
+            print(
+                f"  ⚠️  Profile '{_cfg_restored['profile']}': config.yaml "
+                f"user model settings were rewritten during this update — "
+                f"restored {', '.join(_cfg_restored['keys'])} from "
+                f"pre-update snapshot {_cfg_restored['snapshot_id']}."
+            )
+
+
 def _check_and_apply_config_migration(
     *,
     assume_yes: bool = False,
@@ -239,69 +307,7 @@ def _check_and_apply_config_migration(
         for _name, _from_ver, _to_ver in _migrated_siblings:
             print(f"  ✓ Profile '{_name}': config format updated " f"(v{_from_ver} → v{_to_ver})")
 
-    # Safety net: migrations/desktop scheduler have emptied or truncated cron/jobs.json;
-    # restore from the pre-update snapshot if jobs went missing.
-    try:
-        from hermes_cli.backup import restore_cron_jobs_if_emptied
-
-        cron_restore = restore_cron_jobs_if_emptied(pre_update_snapshot_id)
-        if cron_restore:
-            print()
-            print(
-                "  ⚠️  cron/jobs.json lost jobs during this update — "
-                f"restored {cron_restore['job_count']} job(s) from "
-                f"pre-update snapshot {cron_restore['snapshot_id']}."
-            )
-    except Exception as exc:
-        # Never let the cron safety net break an otherwise-good update.
-        logger.debug("Cron jobs auto-restore check failed: %s", exc)
-
-    # Desktop update/repair cycles have rewritten model.provider/model.default and dropped
-    # moa:; restore only those protected keys from the same pre-update snapshot.
-    try:
-        from hermes_cli.backup import restore_config_model_settings_if_rewritten
-
-        cfg_restore = restore_config_model_settings_if_rewritten(pre_update_snapshot_id)
-        if cfg_restore:
-            print()
-            print(
-                "  ⚠️  config.yaml user model settings were rewritten during "
-                f"this update — restored {', '.join(cfg_restore['keys'])} "
-                f"from pre-update snapshot {cfg_restore['snapshot_id']}."
-            )
-    except Exception as exc:
-        # Never let the config safety net break an otherwise-good update.
-        logger.debug("Config model-settings auto-restore check failed: %s", exc)
-
-    # Same cron-jobs safety net per sibling profile against ITS OWN pre-update snapshot.
-    with _best_effort('Sibling cron auto-restore check failed: %s'):
-        from hermes_cli.backup import restore_cron_jobs_all_profiles
-
-        for _restored in restore_cron_jobs_all_profiles(
-            _LAST_SIBLING_SNAPSHOTS
-        ):
-            print()
-            print(
-                f"  ⚠️  Profile '{_restored['profile']}': cron/jobs.json "
-                f"lost jobs during this update — restored "
-                f"{_restored['job_count']} job(s) from pre-update "
-                f"snapshot {_restored['snapshot_id']}."
-            )
-
-    # Same config model-settings safety net for sibling profiles.
-    with _best_effort('Sibling config auto-restore check failed: %s'):
-        from hermes_cli.backup import restore_config_model_settings_all_profiles
-
-        for _cfg_restored in restore_config_model_settings_all_profiles(
-            _LAST_SIBLING_SNAPSHOTS
-        ):
-            print()
-            print(
-                f"  ⚠️  Profile '{_cfg_restored['profile']}': config.yaml "
-                f"user model settings were rewritten during this update — "
-                f"restored {', '.join(_cfg_restored['keys'])} from "
-                f"pre-update snapshot {_cfg_restored['snapshot_id']}."
-            )
+    _restore_snapshot_safety_nets(pre_update_snapshot_id)
 
 
 # {profile: snapshot_id} from this run's pre-update backup, consumed by the per-profile
