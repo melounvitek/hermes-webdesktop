@@ -306,17 +306,175 @@ def get_tool_definitions(
     return result
 
 
-def _find_tool(tool_defs: List[Dict[str, Any]], name: str) -> int:
-    """Index of the tool named *name* in *tool_defs*, or -1."""
-    for i, td in enumerate(tool_defs):
-        if td.get("function", {}).get("name") == name:
-            return i
-    return -1
+def _apply_toolset_selection(tools: set, names: List[str], quiet_mode: bool, *, disable: bool) -> None:
+    """Add (or subtract) every toolset in *names* to/from *tools*, printing the selection unless quiet."""
+    from toolsets import bundle_non_core_tools, get_toolset
+    verb, icon = ("Disabled", "🚫") if disable else ("Enabled", "✅")
+    for name in names:
+        if validate_toolset(name):
+            label = f"{verb} toolset"
+            if disable and (name.startswith("hermes-") or (get_toolset(name) or {}).get("posture")):
+                # Platform bundles and posture toolsets re-list the core tools
+                # without owning them; subtracting the whole set would empty
+                # the tool list. Remove only the non-core delta.
+                resolved = sorted(bundle_non_core_tools(name))
+                if not quiet_mode and name.startswith("hermes-") and name not in _WARNED_DISABLED_BUNDLES:
+                    _WARNED_DISABLED_BUNDLES.add(name)
+                    logger.info(
+                        "agent.disabled_toolsets contains platform-bundle "
+                        "name '%s'; core tools are preserved and only its "
+                        "platform-specific tools (%s) are removed. Bundle "
+                        "names usually belong in `toolsets:`, not "
+                        "`disabled_toolsets` (#33924).",
+                        name,
+                        ", ".join(resolved) if resolved else "none",
+                    )
+            else:
+                resolved = resolve_toolset(name)
+        elif name in _LEGACY_TOOLSET_MAP:
+            label = f"{verb} legacy toolset"
+            resolved = _LEGACY_TOOLSET_MAP[name]
+        else:
+            if not quiet_mode:
+                print(f"⚠️  Unknown toolset: {name}")
+            continue
+        (tools.difference_update if disable else tools.update)(resolved)
+        if not quiet_mode:
+            print(f"{icon} {label} '{name}': {', '.join(resolved) if resolved else 'no tools'}")
 
 
-def _drop_tool(tool_defs: List[Dict[str, Any]], available: set, name: str) -> List[Dict[str, Any]]:
-    available.discard(name)
-    return [td for td in tool_defs if td.get("function", {}).get("name") != name]
+def _select_tool_names(
+    enabled_toolsets: Optional[List[str]],
+    disabled_toolsets: Optional[List[str]],
+    quiet_mode: bool,
+) -> set:
+    """Tool names requested by the toolset selection (before check_fn filtering)."""
+    tools: set = set()
+    if enabled_toolsets is not None:
+        enabled = list(enabled_toolsets)
+        # Dispatcher-spawned kanban workers always get the lifecycle handoff
+        # tools, even when the assignee profile restricts its chat toolsets.
+        if (
+            os.environ.get("HERMES_KANBAN_TASK")
+            and not _is_delegated_child_context()
+            and _is_dispatcher_owned_worker()
+            and "kanban" not in enabled
+        ):
+            enabled.append("kanban")
+        _apply_toolset_selection(tools, enabled, quiet_mode, disable=False)
+    else:
+        from toolsets import get_all_toolsets
+        for ts_name in get_all_toolsets():
+            tools.update(resolve_toolset(ts_name))
+    # Disabled toolsets are always subtracted LAST, so a tool in a disabled
+    # toolset is stripped even when a composite (hermes-cli) re-enables it.
+    if disabled_toolsets:
+        _apply_toolset_selection(tools, disabled_toolsets, quiet_mode, disable=True)
+    return tools
+
+
+# --- Dynamic schema rewrites -------------------------------------------------
+# Each rewriter receives the tool definition and the set of tool names that
+# passed check_fn filtering, and returns the (possibly replaced) definition or
+# None to drop the tool. Cross-references must use that set (not the requested
+# names) so the model is never told about a tool that isn't in the list.
+
+_BROWSER_NAVIGATE_WEB_HINT = " For simple information retrieval, prefer web_search or web_extract (faster, cheaper)."
+
+
+def _rewrite_execute_code(td: Dict[str, Any], available: set) -> Optional[Dict[str, Any]]:
+    """List only sandbox tools that are actually available."""
+    from tools.code_execution_tool import SANDBOX_ALLOWED_TOOLS, build_execute_code_schema, _get_execution_mode
+    schema = build_execute_code_schema(SANDBOX_ALLOWED_TOOLS & available, mode=_get_execution_mode())
+    return {"type": "function", "function": schema}
+
+
+def _discord_rewriter(schema_fn_name: str):
+    """Schema depends on the bot's privileged intents and the config action allowlist; None drops the tool."""
+    def _rewrite(td: Dict[str, Any], available: set) -> Optional[Dict[str, Any]]:
+        try:
+            from tools import discord_tool as _dt
+            dynamic = getattr(_dt, schema_fn_name)()
+        except Exception:
+            dynamic = None
+        return None if dynamic is None else {"type": "function", "function": dynamic}
+    return _rewrite
+
+
+def _rewrite_browser_navigate(td: Dict[str, Any], available: set) -> Optional[Dict[str, Any]]:
+    """Drop the "prefer web_search or web_extract" hint when neither web tool is present (else the model hallucinates them)."""
+    if {"web_search", "web_extract"} & available:
+        return td
+    desc = td["function"].get("description", "").replace(_BROWSER_NAVIGATE_WEB_HINT, "")
+    return {"type": "function", "function": {**td["function"], "description": desc}}
+
+
+def _rewrite_browser_exec(td: Dict[str, Any], available: set) -> Optional[Dict[str, Any]]:
+    """browser_exec runs arbitrary host Python; a session without the terminal
+    surface must not regain host execution through the browser toolset. This is
+    a session-level gate rather than a check_fn: check_fns are TTL-cached
+    process-wide while one gateway serves sessions with different toolsets."""
+    return td if "terminal" in available else None
+
+
+def _rewrite_delegate_task(td: Dict[str, Any], available: set) -> Optional[Dict[str, Any]]:
+    """Trim the child-restrictions line to sibling tools actually present, or drop
+    the line when none apply, so the model never learns ghost vocabulary. Two
+    source variants exist (depth-off also names delegate_task itself); test the
+    longer one first because the sibling list is a substring of it."""
+    blocked_present = [t for t in ("clarify", "memory", "cronjob_manage") if t in available]
+    if len(blocked_present) == 3:
+        return td
+    fn = td.get("function", {})
+    desc = fn.get("description", "")
+    full_offvariant = "delegate_task, clarify, memory, or cronjob"
+    full_onvariant = "clarify, memory, or cronjob"
+    if full_offvariant in desc:
+        full, keep_self = full_offvariant, True
+    elif full_onvariant in desc:
+        full, keep_self = full_onvariant, False
+    else:
+        return td
+    names = (["delegate_task"] if keep_self else []) + blocked_present
+    if blocked_present:
+        if len(names) == 1:
+            replacement = names[0]
+        elif len(names) == 2:
+            replacement = f"{names[0]} or {names[1]}"
+        else:
+            replacement = ", ".join(names[:-1]) + ", or " + names[-1]
+        desc = desc.replace(full, replacement)
+    else:
+        # Both variants end at the following newline.
+        start = desc.find("- Children cannot call " + full)
+        if start != -1:
+            end = desc.index("\n", start) + 1
+            desc = desc[:start] + desc[end:]
+    return {**td, "function": {**fn, "description": desc}}
+
+
+_DYNAMIC_SCHEMA_REWRITERS = {
+    "execute_code": _rewrite_execute_code,
+    "discord": _discord_rewriter("get_dynamic_schema_core"),
+    "discord_admin": _discord_rewriter("get_dynamic_schema_admin"),
+    "browser_navigate": _rewrite_browser_navigate,
+    "browser_exec": _rewrite_browser_exec,
+    "delegate_task": _rewrite_delegate_task,
+}
+
+
+def _apply_dynamic_schemas(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Apply _DYNAMIC_SCHEMA_REWRITERS in list order; the availability set is a
+    snapshot taken before any rewrite (no rewriter's inputs are droppable)."""
+    available = {t["function"]["name"] for t in tool_defs}
+    out = []
+    for td in tool_defs:
+        rewrite = _DYNAMIC_SCHEMA_REWRITERS.get(td["function"]["name"])
+        if rewrite is not None:
+            td = rewrite(td, available)
+        if td is not None:
+            out.append(td)
+    return out
 
 
 def _compute_tool_definitions(
@@ -326,174 +484,9 @@ def _compute_tool_definitions(
     skip_tool_search_assembly: bool = False,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
-    tools_to_include: set = set()
-
-    if enabled_toolsets is not None:
-        effective_enabled_toolsets = list(enabled_toolsets)
-        # Dispatcher-spawned kanban workers always get the lifecycle handoff
-        # tools, even when the assignee profile restricts its chat toolsets.
-        if (
-            os.environ.get("HERMES_KANBAN_TASK")
-            and not _is_delegated_child_context()
-            and _is_dispatcher_owned_worker()
-            and "kanban" not in effective_enabled_toolsets
-        ):
-            effective_enabled_toolsets.append("kanban")
-        for toolset_name in effective_enabled_toolsets:
-            if validate_toolset(toolset_name):
-                resolved = resolve_toolset(toolset_name)
-                tools_to_include.update(resolved)
-                if not quiet_mode:
-                    print(f"✅ Enabled toolset '{toolset_name}': {', '.join(resolved) if resolved else 'no tools'}")
-            elif toolset_name in _LEGACY_TOOLSET_MAP:
-                legacy_tools = _LEGACY_TOOLSET_MAP[toolset_name]
-                tools_to_include.update(legacy_tools)
-                if not quiet_mode:
-                    print(f"✅ Enabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
-            elif not quiet_mode:
-                print(f"⚠️  Unknown toolset: {toolset_name}")
-    else:
-        from toolsets import get_all_toolsets
-        for ts_name in get_all_toolsets():
-            tools_to_include.update(resolve_toolset(ts_name))
-
-    # Disabled toolsets are always subtracted LAST, so a tool in a disabled
-    # toolset is stripped even when a composite (hermes-cli) re-enables it.
-    if disabled_toolsets:
-        from toolsets import bundle_non_core_tools, get_toolset
-        for toolset_name in disabled_toolsets:
-            if validate_toolset(toolset_name):
-                if toolset_name.startswith("hermes-") or (get_toolset(toolset_name) or {}).get("posture"):
-                    # Platform bundles and posture toolsets re-list the core tools
-                    # without owning them; subtracting the whole set would empty
-                    # the tool list. Remove only the non-core delta.
-                    to_remove = bundle_non_core_tools(toolset_name)
-                    tools_to_include.difference_update(to_remove)
-                    resolved = sorted(to_remove)
-                    if (not quiet_mode and toolset_name.startswith("hermes-")
-                            and toolset_name not in _WARNED_DISABLED_BUNDLES):
-                        _WARNED_DISABLED_BUNDLES.add(toolset_name)
-                        logger.info(
-                            "agent.disabled_toolsets contains platform-bundle "
-                            "name '%s'; core tools are preserved and only its "
-                            "platform-specific tools (%s) are removed. Bundle "
-                            "names usually belong in `toolsets:`, not "
-                            "`disabled_toolsets` (#33924).",
-                            toolset_name,
-                            ", ".join(resolved) if resolved else "none",
-                        )
-                else:
-                    resolved = resolve_toolset(toolset_name)
-                    tools_to_include.difference_update(resolved)
-                if not quiet_mode:
-                    print(f"🚫 Disabled toolset '{toolset_name}': {', '.join(resolved) if resolved else 'no tools'}")
-            elif toolset_name in _LEGACY_TOOLSET_MAP:
-                legacy_tools = _LEGACY_TOOLSET_MAP[toolset_name]
-                tools_to_include.difference_update(legacy_tools)
-                if not quiet_mode:
-                    print(f"🚫 Disabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
-            elif not quiet_mode:
-                print(f"⚠️  Unknown toolset: {toolset_name}")
-
-    # Registry returns only tools whose check_fn passes. Every cross-reference
-    # below must use available_tool_names (not tools_to_include) so the model
-    # is never told about a tool that isn't actually in the list.
-    filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
-    available_tool_names = {t["function"]["name"] for t in filtered_tools}
-
-    # execute_code: list only sandbox tools that are actually available.
-    if "execute_code" in available_tool_names:
-        from tools.code_execution_tool import SANDBOX_ALLOWED_TOOLS, build_execute_code_schema, _get_execution_mode
-        sandbox_enabled = SANDBOX_ALLOWED_TOOLS & available_tool_names
-        dynamic_schema = build_execute_code_schema(sandbox_enabled, mode=_get_execution_mode())
-        i = _find_tool(filtered_tools, "execute_code")
-        if i != -1:
-            filtered_tools[i] = {"type": "function", "function": dynamic_schema}
-
-    # discord / discord_admin: schema depends on the bot's privileged intents
-    # and the config action allowlist; a None schema drops the tool entirely.
-    _discord_schema_fns = {
-        "discord": "get_dynamic_schema_core",
-        "discord_admin": "get_dynamic_schema_admin",
-    }
-    for discord_tool_name, schema_fn_name in _discord_schema_fns.items():
-        if discord_tool_name in available_tool_names:
-            try:
-                from tools import discord_tool as _dt
-                dynamic = getattr(_dt, schema_fn_name)()
-            except Exception:
-                dynamic = None
-            if dynamic is None:
-                filtered_tools = _drop_tool(filtered_tools, available_tool_names, discord_tool_name)
-            else:
-                i = _find_tool(filtered_tools, discord_tool_name)
-                if i != -1:
-                    filtered_tools[i] = {"type": "function", "function": dynamic}
-
-    # browser_navigate: drop the "prefer web_search or web_extract" hint when
-    # neither web tool is present (otherwise the model hallucinates them).
-    if "browser_navigate" in available_tool_names and not ({"web_search", "web_extract"} & available_tool_names):
-        i = _find_tool(filtered_tools, "browser_navigate")
-        if i != -1:
-            td = filtered_tools[i]
-            desc = td["function"].get("description", "").replace(
-                " For simple information retrieval, prefer web_search or web_extract (faster, cheaper).",
-                "",
-            )
-            filtered_tools[i] = {
-                "type": "function",
-                "function": {**td["function"], "description": desc},
-            }
-
-    # browser_exec runs arbitrary host Python; a session without the terminal
-    # surface must not regain host execution through the browser toolset.
-    # Session-level gate (not a check_fn: those are TTL-cached process-wide
-    # while one gateway serves sessions with different toolsets).
-    if "browser_exec" in available_tool_names and "terminal" not in available_tool_names:
-        filtered_tools = _drop_tool(filtered_tools, available_tool_names, "browser_exec")
-
-    # delegate_task's child-restrictions line names sibling tools (clarify,
-    # memory, cronjob). Trim it to tools actually present, or drop the line
-    # when none apply, so the model never learns ghost vocabulary. Two source
-    # variants exist (depth-off also names delegate_task itself); test the
-    # longer one first because the sibling list is a substring of it.
-    if "delegate_task" in available_tool_names:
-        blocked_present = [
-            t for t in ("clarify", "memory", "cronjob_manage") if t in available_tool_names
-        ]
-        i = _find_tool(filtered_tools, "delegate_task")
-        if len(blocked_present) < 3 and i != -1:
-            td = filtered_tools[i]
-            fn = td.get("function", {})
-            desc = fn.get("description", "")
-            full_offvariant = "delegate_task, clarify, memory, or cronjob"
-            full_onvariant = "clarify, memory, or cronjob"
-            if full_offvariant in desc:
-                full, keep_self = full_offvariant, True
-            elif full_onvariant in desc:
-                full, keep_self = full_onvariant, False
-            else:
-                full = None
-            if full is not None:
-                names = (["delegate_task"] if keep_self else []) + blocked_present
-                if blocked_present:
-                    if len(names) == 1:
-                        replacement = names[0]
-                    elif len(names) == 2:
-                        replacement = f"{names[0]} or {names[1]}"
-                    else:
-                        replacement = ", ".join(names[:-1]) + ", or " + names[-1]
-                    desc = desc.replace(full, replacement)
-                else:
-                    # Both variants end at the following newline.
-                    start = desc.find("- Children cannot call " + full)
-                    if start != -1:
-                        end = desc.index("\n", start) + 1
-                        desc = desc[:start] + desc[end:]
-                filtered_tools[i] = {
-                    **td,
-                    "function": {**fn, "description": desc},
-                }
+    tools_to_include = _select_tool_names(enabled_toolsets, disabled_toolsets, quiet_mode)
+    # Registry returns only tools whose check_fn passes.
+    filtered_tools = _apply_dynamic_schemas(registry.get_definitions(tools_to_include, quiet=quiet_mode))
 
     if not quiet_mode:
         if filtered_tools:
