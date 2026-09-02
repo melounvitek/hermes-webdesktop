@@ -42,9 +42,15 @@ Module map (all names re-exported here): ``mcp_tool_common`` (pure helpers),
 block rendering), ``mcp_tool_errors`` (failure classification, URL/cert/header
 resolution), ``mcp_tool_config`` (config loading, stdio env), ``mcp_tool_sampling``
 (sampling + elicitation handlers), ``mcp_tool_handlers`` (registry handlers and
-per-call recovery), ``mcp_tool_registration`` (registry writes), ``mcp_tool_transport``
-/ ``mcp_tool_health`` (MCPServerTask mixins), ``mcp_tool_lifecycle`` (shutdown,
-orphan reaping), ``mcp_tool_agent`` (live-agent tool list refresh).
+per-call recovery), ``mcp_tool_registration`` (registry writes), ``mcp_tool_server_run``
+/ ``mcp_tool_transport`` / ``mcp_tool_health`` (MCPServerTask mixins: run state
+machine, transport bring-up, keepalive/liveness), ``mcp_tool_loop`` (discovery
+lock, loop thread, cross-thread scheduling and reconnect signalling),
+``mcp_tool_discovery`` (connect, lazy start, ``discover_mcp_tools`` and the status
+API), ``mcp_tool_lifecycle`` (shutdown, orphan reaping), ``mcp_tool_agent``
+(live-agent tool list refresh). This module keeps the SDK loader, the
+``MCPServerTask`` shell and every piece of shared module state (siblings read
+it back through ``tools.mcp_tool`` at call time, never by value).
 """
 
 import asyncio
