@@ -1,9 +1,7 @@
 """OpenAI-compatible shim that forwards Hermes requests to `copilot --acp`.
 
-This adapter lets Hermes treat the GitHub Copilot ACP server as a chat-style
-backend. Each request starts a short-lived ACP session, sends the formatted
-conversation as a single prompt, collects text chunks, and converts the result
-back into the minimal shape Hermes expects from an OpenAI client.
+Each request starts a short-lived ACP session, sends the formatted conversation
+as one prompt, collects text chunks, and returns the minimal OpenAI-client shape.
 """
 
 from __future__ import annotations
@@ -35,27 +33,24 @@ ACP_MARKER_BASE_URL = "acp://copilot"
 logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT_SECONDS = 900.0
 
-# Stderr fingerprint of the deprecated `gh copilot` CLI extension
-# (https://github.blog/changelog/2025-09-25-upcoming-deprecation-of-gh-copilot-cli-extension).
-# We require BOTH the literal product name ("gh-copilot") AND a deprecation
-# marker, so generic stderr from the NEW `@github/copilot` CLI — whose repo
-# is github.com/github/copilot-cli and which legitimately mentions "copilot-cli"
-# in its own banners and error messages — doesn't get misclassified as the
-# deprecated extension.
+# Stderr fingerprint of the deprecated `gh copilot` extension. Require BOTH the
+# product name AND a deprecation marker: the NEW `@github/copilot` CLI (repo
+# github/copilot-cli) legitimately mentions "copilot-cli" in its own banners.
 _DEPRECATION_REQUIRED = ("gh-copilot",)
-_DEPRECATION_MARKERS = (
-    "has been deprecated",
-    "no commands will be executed",
-)
+_DEPRECATION_MARKERS = ("has been deprecated", "no commands will be executed")
+
+_ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant", "tool": "Tool", "context": "Context"}
+
+# Probe verdicts per binary path so the ~50ms --help cost is paid once per
+# process. Only definitive True/False is cached; an inconclusive probe is not,
+# so a CLI installed mid-session is picked up.
+_ACP_PROBE_CACHE: dict[str, bool] = {}
 
 
 def _is_gh_copilot_deprecation_message(stderr_text: str) -> bool:
     """True iff stderr looks like the deprecated gh-copilot extension's banner."""
-
     lower = stderr_text.lower()
-    if not any(req in lower for req in _DEPRECATION_REQUIRED):
-        return False
-    return any(marker in lower for marker in _DEPRECATION_MARKERS)
+    return any(req in lower for req in _DEPRECATION_REQUIRED) and any(m in lower for m in _DEPRECATION_MARKERS)
 
 
 def _resolve_command() -> str:
@@ -68,42 +63,18 @@ def _resolve_command() -> str:
 
 def _resolve_args() -> list[str]:
     raw = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    if not raw:
-        return ["--acp", "--stdio"]
-    return shlex.split(raw)
-
-
-# Probe verdicts cached per binary path so repeated prompts against a
-# CLI that supports --acp pay the ~50ms --help cost exactly once per
-# process. Only definitive verdicts (True/False) are cached; an
-# inconclusive probe (binary missing, --help crashed or timed out) is
-# not cached so a CLI installed mid-session is picked up.
-_ACP_PROBE_CACHE: dict[str, bool] = {}
+    return shlex.split(raw) if raw else ["--acp", "--stdio"]
 
 
 def _acp_supported(command: str, args: list[str]) -> bool | None:
-    """Tri-state probe: does ``command`` accept the ACP args we'd pass?
+    """Tri-state probe: does ``command`` accept ``--acp``?
 
-    Different CLI versions support different transports. The GitHub
-    Copilot CLI (`@github/copilot`, late 2025+) ships with ``--acp``;
-    older releases (and Claude Code v2.x as of Aug 2026) do not.
-    Spawning a CLI that doesn't recognize the flag silently exits
-    with code 1 and ``error: unknown option '--acp'`` on stderr,
-    after which every delegate_task call hangs the parent for
-    ``child_timeout_seconds`` (default 600s) waiting for stdout
-    that never arrives.
-
-    Returns:
-      - ``True``  — help text advertises ``--acp``; safe to spawn.
-      - ``False`` — help ran cleanly but ``--acp`` is absent; spawning
-        would hang, so the caller should fast-fail with a clear error.
-      - ``None``  — inconclusive (binary missing, --help failed or
-        timed out). The caller must fall through to the normal spawn
-        path, which surfaces the existing "Could not start Copilot ACP
-        command" error with full context.
-
-    Only probes when ``--acp`` is actually among ``args``: a custom
-    HERMES_COPILOT_ACP_ARGS transport is the operator's business.
+    A CLI without the flag (older releases, Claude Code v2.x) exits 1 with
+    ``error: unknown option '--acp'`` and the parent then waits the full
+    child timeout for stdout that never arrives. True = help advertises --acp;
+    False = help ran cleanly without it (caller fast-fails); None = inconclusive
+    (binary missing / --help failed), caller falls through to the normal spawn error.
+    Only probes when ``--acp`` is among ``args`` — a custom transport is the operator's business.
     """
     if "--acp" not in args:
         return True
@@ -111,32 +82,25 @@ def _acp_supported(command: str, args: list[str]) -> bool | None:
     if cached is not None:
         return cached
     try:
-        probe = subprocess.run(
-            [command, "--help"],
-            capture_output=True, text=True, timeout=5,
-        )
+        probe = subprocess.run([command, "--help"], capture_output=True, text=True, timeout=5)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
     if probe.returncode != 0:
-        # --help itself failed; can't tell anything about --acp.
         return None
-    # Match ``--acp`` as a flag in the help text; tolerate spacing and
-    # variants like ``[--acp]``.
+    # ``--acp`` as a flag token; tolerate spacing and ``[--acp]`` variants.
     verdict = bool(re.search(r"(?:^|[\s\[])--acp(?:[\s=\],]|$)", probe.stdout, re.MULTILINE))
     _ACP_PROBE_CACHE[command] = verdict
     return verdict
 
 
 def _resolve_home_dir() -> str:
-    """Return a stable HOME for child ACP processes."""
+    """Return a stable HOME for child ACP processes; /tmp as a last resort so the child never starts HOME-less."""
     home = os.environ.get("HOME", "").strip()
     if home:
         return home
-
     expanded = os.path.expanduser("~")
     if expanded and expanded != "~":
         return expanded
-
     try:
         import pwd
 
@@ -145,46 +109,29 @@ def _resolve_home_dir() -> str:
             return resolved
     except Exception:
         pass
-
-    # Last resort: /tmp (writable on any POSIX system). Avoids crashing the
-    # subprocess with no HOME; callers can set HERMES_HOME explicitly if they
-    # need a different writable dir.
     return "/tmp"
 
 
 def _build_subprocess_env() -> dict[str, str]:
-    # Copilot ACP is a model-driving CLI executor: it legitimately needs LLM
-    # provider credentials. Route through the central helper so Tier-1 secrets
-    # (gateway bot tokens, GitHub auth, infra) are still stripped (#29157).
+    # Copilot ACP drives a model and legitimately needs LLM provider credentials;
+    # the central helper still strips Tier-1 secrets (bot tokens, GitHub auth, infra).
     env = hermes_subprocess_env(inherit_credentials=True)
-    home = _resolve_home_dir()
-    env["HOME"] = home
+    env["HOME"] = _resolve_home_dir()
     from hermes_constants import apply_subprocess_home_env
     apply_subprocess_home_env(env)
     return env
 
 
+def _jsonrpc_result(message_id: Any, result: Any) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": message_id, "result": result}
+
+
 def _jsonrpc_error(message_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {
-        "jsonrpc": "2.0",
-        "id": message_id,
-        "error": {
-            "code": code,
-            "message": message,
-        },
-    }
+    return {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": message}}
 
 
 def _permission_denied(message_id: Any) -> dict[str, Any]:
-    return {
-        "jsonrpc": "2.0",
-        "id": message_id,
-        "result": {
-            "outcome": {
-                "outcome": "cancelled",
-            }
-        },
-    }
+    return _jsonrpc_result(message_id, {"outcome": {"outcome": "cancelled"}})
 
 
 def _model_selection_request(
@@ -264,14 +211,10 @@ def _format_messages_as_prompt(
         "IMPORTANT: If you take an action with a tool, you MUST output tool calls using <tool_call>{...}</tool_call> blocks with JSON exactly in OpenAI function-call shape.",
         "If no tool is needed, answer normally.",
     ]
-    # Deliberately no "requested model" line in the prompt: the model is
-    # applied for real via ACP session/set_model, and when the backend can't
-    # honor it (org-policy-disabled id) a prompt-text mention makes the
-    # serving model FALSELY self-identify as the requested one. Identity
-    # must come from the backend, not from prompt suggestion.
-
-    # Copilot has no tools of its own that would collide with Hermes', so it
-    # forwards the whole toolset (no allowlist).
+    # Deliberately no "requested model" line: the model is applied for real via ACP
+    # session/set_model; a prompt-text mention makes a substituted backend model
+    # FALSELY self-identify as the requested one. Identity comes from the backend.
+    # Copilot has no tools of its own that collide with Hermes', so forward the whole toolset.
     sections.extend(_render_tool_bridge_sections(tools, tool_choice))
 
     transcript: list[str] = []
@@ -279,28 +222,13 @@ def _format_messages_as_prompt(
         if not isinstance(message, dict):
             continue
         role = str(message.get("role") or "unknown").strip().lower()
-        if role == "tool":
-            role = "tool"
-        elif role not in {"system", "user", "assistant"}:
+        if role not in _ROLE_LABELS:
             role = "context"
-
-        content = message.get("content")
-        rendered = _render_message_content(content)
-        if not rendered:
-            continue
-
-        label = {
-            "system": "System",
-            "user": "User",
-            "assistant": "Assistant",
-            "tool": "Tool",
-            "context": "Context",
-        }.get(role, role.title())
-        transcript.append(f"{label}:\n{rendered}")
-
+        rendered = _render_message_content(message.get("content"))
+        if rendered:
+            transcript.append(f"{_ROLE_LABELS[role]}:\n{rendered}")
     if transcript:
         sections.append("Conversation transcript:\n\n" + "\n\n".join(transcript))
-
     sections.append("Continue the conversation from the latest user request.")
     return "\n\n".join(section.strip() for section in sections if section and section.strip())
 
@@ -313,7 +241,7 @@ def _render_message_content(content: Any) -> str:
     if isinstance(content, dict):
         if "text" in content:
             return str(content.get("text") or "").strip()
-        if "content" in content and isinstance(content.get("content"), str):
+        if isinstance(content.get("content"), str):
             return str(content.get("content") or "").strip()
         return json.dumps(content, ensure_ascii=True)
     if isinstance(content, list):
@@ -340,6 +268,58 @@ def _ensure_path_within_cwd(path_text: str, cwd: str) -> Path:
     except ValueError as exc:
         raise PermissionError(f"Path '{resolved}' is outside the session cwd '{root}'.") from exc
     return resolved
+
+
+def _effective_timeout(timeout: Any) -> float:
+    """Normalise a float or httpx.Timeout-like object to wall-clock seconds (largest component wins)."""
+    if timeout is None:
+        return _DEFAULT_TIMEOUT_SECONDS
+    if isinstance(timeout, (int, float)):
+        return float(timeout)
+    _candidates = [getattr(timeout, attr, None) for attr in ("read", "write", "connect", "pool", "timeout")]
+    _numeric = [float(v) for v in _candidates if isinstance(v, (int, float))]
+    return max(_numeric) if _numeric else _DEFAULT_TIMEOUT_SECONDS
+
+
+def _fs_read_text_file(params: dict[str, Any], cwd: str) -> Any:
+    path = _ensure_path_within_cwd(str(params.get("path") or ""), cwd)
+    block_error = get_read_block_error(str(path))
+    if block_error:
+        raise PermissionError(block_error)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        content = ""
+    line = params.get("line")
+    limit = params.get("limit")
+    if isinstance(line, int) and line > 1:
+        lines = content.splitlines(keepends=True)
+        start = line - 1
+        end = start + limit if isinstance(limit, int) and limit > 0 else None
+        content = "".join(lines[start:end])
+    if content:
+        content = redact_sensitive_text(content, force=True)
+    return {"content": content}
+
+
+def _fs_write_text_file(params: dict[str, Any], cwd: str) -> Any:
+    path = _ensure_path_within_cwd(str(params.get("path") or ""), cwd)
+    denied = get_write_denied_error(str(path))
+    if denied:
+        raise PermissionError(denied)
+    # Approval-gated paths (e.g. ~/.ssh/config) are only soft-gated for interactive
+    # tools, but the ACP shim has no human channel to confirm — fail closed.
+    if is_write_approval_required(str(path)):
+        raise PermissionError(
+            f"Write denied: '{path}' requires interactive approval "
+            "and cannot be written through the ACP file bridge."
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(params.get("content") or ""), encoding="utf-8")
+    return None
+
+
+_FS_HANDLERS = {"fs/read_text_file": _fs_read_text_file, "fs/write_text_file": _fs_write_text_file}
 
 
 class _ACPChatCompletions:
@@ -389,7 +369,6 @@ class CopilotACPClient:
         self._active_process_lock = threading.Lock()
 
     def close(self) -> None:
-        proc: subprocess.Popen[str] | None
         with self._active_process_lock:
             proc = self._active_process
             self._active_process = None
@@ -416,34 +395,10 @@ class CopilotACPClient:
         stream: bool = False,
         **_: Any,
     ) -> Any:
-        prompt_text = _format_messages_as_prompt(
-            messages or [],
-            model=model,
-            tools=tools,
-            tool_choice=tool_choice,
-        )
-        # Normalise timeout: run_agent.py may pass an httpx.Timeout object
-        # (used natively by the OpenAI SDK) rather than a plain float.
-        if timeout is None:
-            _effective_timeout = _DEFAULT_TIMEOUT_SECONDS
-        elif isinstance(timeout, (int, float)):
-            _effective_timeout = float(timeout)
-        else:
-            # httpx.Timeout or similar — pick the largest component so the
-            # subprocess has enough wall-clock time for the full response.
-            _candidates = [
-                getattr(timeout, attr, None)
-                for attr in ("read", "write", "connect", "pool", "timeout")
-            ]
-            _numeric = [float(v) for v in _candidates if isinstance(v, (int, float))]
-            _effective_timeout = max(_numeric) if _numeric else _DEFAULT_TIMEOUT_SECONDS
-
+        prompt_text = _format_messages_as_prompt(messages or [], model=model, tools=tools, tool_choice=tool_choice)
         response_text, reasoning_text = self._run_prompt(
-            prompt_text,
-            timeout_seconds=_effective_timeout,
-            model=model,
+            prompt_text, timeout_seconds=_effective_timeout(timeout), model=model
         )
-
         tool_calls, cleaned_text = _extract_tool_calls_from_text(response_text)
 
         usage = SimpleNamespace(
@@ -459,33 +414,14 @@ class CopilotACPClient:
             reasoning_content=reasoning_text or None,
             reasoning_details=None,
         )
-        finish_reason = "tool_calls" if tool_calls else "stop"
-        choice = SimpleNamespace(message=assistant_message, finish_reason=finish_reason)
-        completion = SimpleNamespace(
-            choices=[choice],
-            usage=usage,
-            model=model or "copilot-acp",
-        )
-        if stream:
-            return _completion_to_stream_chunks(completion)
-        return completion
+        choice = SimpleNamespace(message=assistant_message, finish_reason="tool_calls" if tool_calls else "stop")
+        completion = SimpleNamespace(choices=[choice], usage=usage, model=model or "copilot-acp")
+        return _completion_to_stream_chunks(completion) if stream else completion
 
-    def _run_prompt(
-        self,
-        prompt_text: str,
-        *,
-        timeout_seconds: float,
-        model: str | None = None,
-    ) -> tuple[str, str]:
-        # Fast-fail when the CLI doesn't support the ACP args we'd pass.
-        # Without this guard, a CLI like Claude Code v2.x exits with
-        # ``error: unknown option '--acp'`` immediately, then the parent
-        # ACP loop waits the full ``child_timeout_seconds`` (default 600s)
-        # for stdout that never arrives. The probe costs ~50ms and turns
-        # a 600s silent hang into a 280ms clear error.
-        # ``None`` (inconclusive probe — e.g. binary missing) falls
-        # through to the spawn below, which raises the established
-        # "Could not start Copilot ACP command" error.
+    def _spawn(self) -> subprocess.Popen[str]:
+        # Fast-fail when the CLI rejects --acp: without the probe the parent waits
+        # the full child timeout for stdout that never arrives. ``None`` falls
+        # through to the spawn, which raises the established start error.
         if _acp_supported(self._acp_command, self._acp_args) is False:
             preview = " ".join(self._acp_args[:3]) if self._acp_args else "(none)"
             raise RuntimeError(
@@ -498,17 +434,8 @@ class CopilotACPClient:
                 f"HERMES_COPILOT_ACP_COMMAND / HERMES_COPILOT_ACP_ARGS "
                 f"to a working pair."
             )
-
-        # Note the model Hermes selected; it is applied after session/new via
-        # the ACP-native `session/set_model` call. The CLI's `--model` spawn
-        # flag is deliberately NOT used here: `copilot --acp` validates it
-        # (an unknown id aborts the spawn) but then ignores it for the actual
-        # session, so it adds a failure mode without selecting anything.
-        requested_model = str(model or "").strip()
-
         try:
-            # Hide the console the CLI child would otherwise flash on Windows
-            # (#56747). Hide-only — stdio pipes stay intact for the ACP wire.
+            # Hide the console the child would flash on Windows; stdio pipes stay intact.
             from hermes_cli._subprocess_compat import windows_hide_flags
 
             proc = subprocess.Popen(
@@ -527,21 +454,24 @@ class CopilotACPClient:
                 f"Could not start Copilot ACP command '{self._acp_command}'. "
                 "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
             ) from exc
-
         if proc.stdin is None or proc.stdout is None:
             proc.kill()
             raise RuntimeError("Copilot ACP process did not expose stdin/stdout pipes.")
-
         self.is_closed = False
         with self._active_process_lock:
             self._active_process = proc
+        return proc
 
+    def _run_prompt(self, prompt_text: str, *, timeout_seconds: float, model: str | None = None) -> tuple[str, str]:
+        # The CLI's `--model` spawn flag is deliberately NOT used: `copilot --acp`
+        # validates it (unknown id aborts the spawn) but ignores it for the session.
+        # The model is applied after session/new via ACP-native model selection.
+        requested_model = str(model or "").strip()
+        proc = self._spawn()
         inbox: queue.Queue[dict[str, Any]] = queue.Queue()
         stderr_tail: deque[str] = deque(maxlen=40)
 
         def _stdout_reader() -> None:
-            if proc.stdout is None:
-                return
             for line in proc.stdout:
                 try:
                     inbox.put(json.loads(line))
@@ -554,24 +484,15 @@ class CopilotACPClient:
             for line in proc.stderr:
                 stderr_tail.append(line.rstrip("\n"))
 
-        out_thread = threading.Thread(target=_stdout_reader, daemon=True)
-        err_thread = threading.Thread(target=_stderr_reader, daemon=True)
-        out_thread.start()
-        err_thread.start()
-
+        threading.Thread(target=_stdout_reader, daemon=True).start()
+        threading.Thread(target=_stderr_reader, daemon=True).start()
         next_id = 0
 
         def _request(method: str, params: dict[str, Any], *, text_parts: list[str] | None = None, reasoning_parts: list[str] | None = None) -> Any:
             nonlocal next_id
             next_id += 1
             request_id = next_id
-            payload = {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": method,
-                "params": params,
-            }
-            proc.stdin.write(json.dumps(payload) + "\n")
+            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
             proc.stdin.flush()
 
             deadline = time.monotonic() + timeout_seconds
@@ -582,23 +503,15 @@ class CopilotACPClient:
                     msg = inbox.get(timeout=0.1)
                 except queue.Empty:
                     continue
-
                 if self._handle_server_message(
-                    msg,
-                    process=proc,
-                    cwd=self._acp_cwd,
-                    text_parts=text_parts,
-                    reasoning_parts=reasoning_parts,
+                    msg, process=proc, cwd=self._acp_cwd, text_parts=text_parts, reasoning_parts=reasoning_parts
                 ):
                     continue
-
                 if msg.get("id") != request_id:
                     continue
                 if "error" in msg:
                     err = msg.get("error") or {}
-                    raise RuntimeError(
-                        f"Copilot ACP {method} failed: {err.get('message') or err}"
-                    )
+                    raise RuntimeError(f"Copilot ACP {method} failed: {err.get('message') or err}")
                 return msg.get("result")
 
             stderr_text = "\n".join(stderr_tail).strip()
@@ -626,35 +539,17 @@ class CopilotACPClient:
                 "initialize",
                 {
                     "protocolVersion": 1,
-                    "clientCapabilities": {
-                        "fs": {
-                            "readTextFile": True,
-                            "writeTextFile": True,
-                        }
-                    },
-                    "clientInfo": {
-                        "name": "hermes-agent",
-                        "title": "Hermes Agent",
-                        "version": "0.0.0",
-                    },
+                    "clientCapabilities": {"fs": {"readTextFile": True, "writeTextFile": True}},
+                    "clientInfo": {"name": "hermes-agent", "title": "Hermes Agent", "version": "0.0.0"},
                 },
             )
-            session = _request(
-                "session/new",
-                {
-                    "cwd": self._acp_cwd,
-                    "mcpServers": [],
-                },
-            ) or {}
+            session = _request("session/new", {"cwd": self._acp_cwd, "mcpServers": []}) or {}
             session_id = str(session.get("sessionId") or "").strip()
             if not session_id:
                 raise RuntimeError("Copilot ACP did not return a sessionId.")
 
-            # Select the model Hermes asked for. Prefer the stable ACP v1
-            # session-config API: session/new advertises a category="model"
-            # select option and session/set_config_option updates it. Copilot
-            # still exposes the older models/session/set_model extension too,
-            # so retain that only as compatibility fallback for older agents.
+            # Prefer the stable ACP v1 session-config API (category="model" select
+            # option + session/set_config_option); session/set_model is the fallback.
             if requested_model and requested_model != "copilot-acp":
                 try:
                     selection = _model_selection_request(session, requested_model)
@@ -679,15 +574,7 @@ class CopilotACPClient:
             reasoning_parts: list[str] = []
             _request(
                 "session/prompt",
-                {
-                    "sessionId": session_id,
-                    "prompt": [
-                        {
-                            "type": "text",
-                            "text": prompt_text,
-                        }
-                    ],
-                },
+                {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt_text}]},
                 text_parts=text_parts,
                 reasoning_parts=reasoning_parts,
             )
@@ -704,18 +591,16 @@ class CopilotACPClient:
         text_parts: list[str] | None,
         reasoning_parts: list[str] | None,
     ) -> bool:
+        """Consume a server->client message; True when handled (notification or request answered)."""
         method = msg.get("method")
         if not isinstance(method, str):
             return False
 
         if method == "session/update":
-            params = msg.get("params") or {}
-            update = params.get("update") or {}
+            update = (msg.get("params") or {}).get("update") or {}
             kind = str(update.get("sessionUpdate") or "").strip()
             content = update.get("content") or {}
-            chunk_text = ""
-            if isinstance(content, dict):
-                chunk_text = str(content.get("text") or "")
+            chunk_text = str(content.get("text") or "") if isinstance(content, dict) else ""
             if kind == "agent_message_chunk" and chunk_text and text_parts is not None:
                 text_parts.append(chunk_text)
             elif kind == "agent_thought_chunk" and chunk_text and reasoning_parts is not None:
@@ -727,66 +612,15 @@ class CopilotACPClient:
 
         message_id = msg.get("id")
         params = msg.get("params") or {}
-
         if method == "session/request_permission":
             response = _permission_denied(message_id)
-        elif method == "fs/read_text_file":
+        elif method in _FS_HANDLERS:
             try:
-                path = _ensure_path_within_cwd(str(params.get("path") or ""), cwd)
-                block_error = get_read_block_error(str(path))
-                if block_error:
-                    raise PermissionError(block_error)
-                try:
-                    content = path.read_text(encoding="utf-8")
-                except FileNotFoundError:
-                    content = ""
-                line = params.get("line")
-                limit = params.get("limit")
-                if isinstance(line, int) and line > 1:
-                    lines = content.splitlines(keepends=True)
-                    start = line - 1
-                    end = start + limit if isinstance(limit, int) and limit > 0 else None
-                    content = "".join(lines[start:end])
-                if content:
-                    content = redact_sensitive_text(content, force=True)
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": message_id,
-                    "result": {
-                        "content": content,
-                    },
-                }
-            except Exception as exc:
-                response = _jsonrpc_error(message_id, -32602, str(exc))
-        elif method == "fs/write_text_file":
-            try:
-                path = _ensure_path_within_cwd(str(params.get("path") or ""), cwd)
-                denied = get_write_denied_error(str(path))
-                if denied:
-                    raise PermissionError(denied)
-                # Approval-gated paths (e.g. ~/.ssh/config) are not hard-denied
-                # for interactive tools, but the ACP shim has no human channel
-                # to confirm the write — fail closed here.
-                if is_write_approval_required(str(path)):
-                    raise PermissionError(
-                        f"Write denied: '{path}' requires interactive approval "
-                        "and cannot be written through the ACP file bridge."
-                    )
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(str(params.get("content") or ""), encoding="utf-8")
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": message_id,
-                    "result": None,
-                }
+                response = _jsonrpc_result(message_id, _FS_HANDLERS[method](params, cwd))
             except Exception as exc:
                 response = _jsonrpc_error(message_id, -32602, str(exc))
         else:
-            response = _jsonrpc_error(
-                message_id,
-                -32601,
-                f"ACP client method '{method}' is not supported by Hermes yet.",
-            )
+            response = _jsonrpc_error(message_id, -32601, f"ACP client method '{method}' is not supported by Hermes yet.")
 
         process.stdin.write(json.dumps(response) + "\n")
         process.stdin.flush()

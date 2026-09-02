@@ -10,13 +10,13 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+_CA_BUNDLE_ENV_VARS = ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+
 
 def _coerce_insecure(ssl_verify: Any) -> bool:
     if ssl_verify is False:
         return True
-    if isinstance(ssl_verify, str) and ssl_verify.strip().lower() in {"false", "0", "no", "off"}:
-        return True
-    return False
+    return isinstance(ssl_verify, str) and ssl_verify.strip().lower() in {"false", "0", "no", "off"}
 
 
 def resolve_httpx_verify(
@@ -25,17 +25,8 @@ def resolve_httpx_verify(
     ssl_verify: Any = None,
     base_url: str = "",
 ) -> bool | ssl.SSLContext:
-    """Resolve httpx ``verify`` for provider HTTP clients.
-
-    Priority:
-    1. ``ssl_verify: false`` — disable verification (local dev only)
-    2. explicit ``ca_bundle`` (per-provider ``ssl_ca_cert`` config field)
-    3. ``HERMES_CA_BUNDLE``, ``SSL_CERT_FILE``, ``REQUESTS_CA_BUNDLE``,
-       ``CURL_CA_BUNDLE`` env vars
-    4. ``True`` (httpx/certifi default)
-
-    ``base_url`` is used only for the insecure-mode warning message.
-    """
+    """Resolve httpx ``verify``: ``ssl_verify: false`` > explicit ``ca_bundle`` >
+    CA-bundle env vars > ``True`` (certifi default). ``base_url`` only feeds the warning."""
     if _coerce_insecure(ssl_verify):
         logger.warning(
             "TLS certificate verification DISABLED (ssl_verify: false) for %s — "
@@ -45,13 +36,11 @@ def resolve_httpx_verify(
         )
         return False
 
-    effective_ca = (
-        (ca_bundle or "").strip()
-        or os.getenv("HERMES_CA_BUNDLE", "").strip()
-        or os.getenv("SSL_CERT_FILE", "").strip()
-        or os.getenv("REQUESTS_CA_BUNDLE", "").strip()
-        or os.getenv("CURL_CA_BUNDLE", "").strip()
-    )
+    effective_ca = (ca_bundle or "").strip()
+    for env_var in _CA_BUNDLE_ENV_VARS:
+        if effective_ca:
+            break
+        effective_ca = os.getenv(env_var, "").strip()
     if effective_ca:
         ca_path = str(Path(effective_ca).expanduser())
         if os.path.isfile(ca_path):

@@ -1,21 +1,20 @@
-"""Transport layer types and registry for provider response normalization.
+"""Transport registry for provider response normalization.
 
-Usage:
-    from agent.transports import get_transport
     transport = get_transport("anthropic_messages")
     result = transport.normalize_response(raw_response)
 """
 
-from agent.transports.types import (
+from agent.transports.types import (  # noqa: F401
     NormalizedResponse,
     ToolCall,
     Usage,
     build_tool_call,
     map_finish_reason,
-)  # noqa: F401
+)
 
 _REGISTRY: dict = {}
 _discovered: bool = False
+_TRANSPORT_MODULES = ("anthropic", "codex", "chat_completions", "bedrock")
 
 
 def register_transport(api_mode: str, transport_cls: type) -> None:
@@ -24,45 +23,26 @@ def register_transport(api_mode: str, transport_cls: type) -> None:
 
 
 def get_transport(api_mode: str):
-    """Get a transport instance for the given api_mode.
-
-    Returns None if no transport is registered for this api_mode.
-    This allows gradual migration — call sites can check for None
-    and fall back to the legacy code path.
-    """
-    global _discovered
+    """Return a transport instance for ``api_mode``, or None so callers can fall back to the legacy path."""
     if not _discovered:
         _discover_transports()
     cls = _REGISTRY.get(api_mode)
     if cls is None:
-        # The registry can be partially populated when a specific transport
-        # module was imported directly (for example chat_completions before
-        # codex).  Discover on misses, not only when the registry is empty, so
-        # test/order-dependent imports do not make valid api_modes unavailable.
+        # A directly-imported transport module leaves the registry partially
+        # populated; discover on misses so import order can't hide a valid api_mode.
         _discover_transports()
         cls = _REGISTRY.get(api_mode)
-    if cls is None:
-        return None
-    return cls()
+    return None if cls is None else cls()
 
 
 def _discover_transports() -> None:
     """Import all transport modules to trigger auto-registration."""
     global _discovered
     _discovered = True
-    try:
-        import agent.transports.anthropic  # noqa: F401
-    except ImportError:
-        pass
-    try:
-        import agent.transports.codex  # noqa: F401
-    except ImportError:
-        pass
-    try:
-        import agent.transports.chat_completions  # noqa: F401
-    except ImportError:
-        pass
-    try:
-        import agent.transports.bedrock  # noqa: F401
-    except ImportError:
-        pass
+    import importlib
+
+    for name in _TRANSPORT_MODULES:
+        try:
+            importlib.import_module(f"agent.transports.{name}")
+        except ImportError:
+            pass
