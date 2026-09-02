@@ -14,6 +14,8 @@ from __future__ import annotations
 from hermes_cli.cli_output import line_input
 from hermes_cli.config import clear_model_endpoint_credentials
 
+_HTTP = ("http://", "https://")
+
 
 def _say(*lines: str) -> None:
     """``print`` each line (``""`` = blank line); one call per banner block."""
