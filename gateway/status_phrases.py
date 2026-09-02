@@ -1,17 +1,12 @@
 """Human-friendly generic gateway status phrases.
 
-These helpers deliberately avoid relaying raw model scratch text.  They turn
-Hermes' long-running gateway status surface into short status lines suitable
-for chat surfaces.
+Turns Hermes' long-running gateway status surface into short chat-safe lines
+without relaying raw model scratch text: only configured phrase strings are
+used — tool args, commands, previews, and reasoning are never interpolated.
 
 Built-in defaults live in ``gateway/assets/status_phrases.yaml``. Users can add
-portable, profile-relative phrase catalogs under ``HERMES_HOME`` either by using
-conventional paths::
-
-    ~/.hermes/status_phrases.yaml
-    ~/.hermes/status_phrases/*.yaml
-
-or by pointing config at a relative file/directory::
+profile-relative catalogs under ``HERMES_HOME`` via the conventional paths
+``status_phrases.yaml`` / ``status_phrases/*.yaml`` or via config::
 
     display:
       status_phrases:
@@ -19,10 +14,7 @@ or by pointing config at a relative file/directory::
         mode: append                        # append (default) or replace
 
 Absolute paths and ``..`` escapes are ignored on purpose so config stays
-profile-portable and does not accidentally read arbitrary files.
-
-Only configured phrase strings are used; raw tool args, commands, previews, and
-reasoning text are never interpolated into the returned phrase.
+profile-portable and cannot read arbitrary files.
 """
 
 from __future__ import annotations
@@ -36,13 +28,14 @@ import yaml
 
 from hermes_constants import get_hermes_home
 
-# These are Hermes UI surfaces, not app/vendor/domain buckets.  Keep this
-# long-running-only: regular tool/thinking/interim chatter is intentionally not
-# rewritten into generic placeholders because that gets noisy fast in chat.
+# Hermes UI surfaces, not app/vendor buckets.  Long-running-only: regular
+# tool/thinking/interim chatter is deliberately not rewritten (too noisy in chat).
 _STATUS_SURFACES = ("status", "generic")
 _MAX_CUSTOM_PHRASES_PER_SURFACE = 80
 _MAX_PHRASE_CHARS = 160
 _CONVENTIONAL_RELATIVE_PATHS = ("status_phrases.yaml", "status_phrases")
+_YAML_SUFFIXES = {".yaml", ".yml"}
+_CONFIG_KEYS = ("generic_status_phrases", "status_phrases")  # legacy alias first
 
 _FALLBACK_PHRASES: dict[str, list[str]] = {
     "status": ["still on it", "still working through it", "waiting for the result"],
@@ -54,25 +47,20 @@ def _clean_phrase_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     cleaned: list[str] = []
-    seen: set[str] = set()
     for item in value[:_MAX_CUSTOM_PHRASES_PER_SURFACE]:
         phrase = str(item or "").strip()
-        if not phrase or len(phrase) > _MAX_PHRASE_CHARS or phrase in seen:
-            continue
-        cleaned.append(phrase)
-        seen.add(phrase)
+        if phrase and len(phrase) <= _MAX_PHRASE_CHARS and phrase not in cleaned:
+            cleaned.append(phrase)
     return cleaned
 
 
 def _merge_phrase_mapping(catalog: dict[str, list[str]], section: Mapping[str, Any], *, inherited_mode: str | None = None) -> None:
-    mode = str(section.get("mode") or inherited_mode or "append").strip().lower()
-    replace = mode == "replace"
+    replace = str(section.get("mode") or inherited_mode or "append").strip().lower() == "replace"
     phrase_map = section.get("phrases") if isinstance(section.get("phrases"), Mapping) else section
     for surface in _STATUS_SURFACES:
         phrases = _clean_phrase_list(phrase_map.get(surface) if isinstance(phrase_map, Mapping) else None)
-        if not phrases:
-            continue
-        catalog[surface] = phrases if replace else [*catalog.get(surface, []), *phrases]
+        if phrases:
+            catalog[surface] = phrases if replace else [*catalog.get(surface, []), *phrases]
 
 
 def _merge_phrase_file(catalog: dict[str, list[str]], path: Path, *, inherited_mode: str | None = None) -> None:
@@ -101,56 +89,43 @@ def _relative_path_under(base_dir: Path, raw_path: Any) -> Path | None:
 
 
 def _iter_phrase_files(path: Path) -> list[Path]:
-    if path.is_file() and path.suffix.lower() in {".yaml", ".yml"}:
+    if path.is_file() and path.suffix.lower() in _YAML_SUFFIXES:
         return [path]
     if path.is_dir():
-        return sorted(
-            child for child in path.iterdir()
-            if child.is_file() and child.suffix.lower() in {".yaml", ".yml"}
-        )
+        return sorted(c for c in path.iterdir() if c.is_file() and c.suffix.lower() in _YAML_SUFFIXES)
     return []
 
 
-def _merge_phrase_paths(
-    catalog: dict[str, list[str]],
-    paths: Any,
-    *,
-    base_dir: Path,
-    inherited_mode: str | None = None,
-) -> None:
+def _merge_phrase_paths(catalog: dict[str, list[str]], paths: Any, *, base_dir: Path, inherited_mode: str | None = None) -> None:
     if paths is None:
         return
-    raw_paths = paths if isinstance(paths, list) else [paths]
-    for raw_path in raw_paths:
+    for raw_path in paths if isinstance(paths, list) else [paths]:
         resolved = _relative_path_under(base_dir, raw_path)
-        if resolved is None:
-            continue
-        for phrase_file in _iter_phrase_files(resolved):
-            _merge_phrase_file(catalog, phrase_file, inherited_mode=inherited_mode)
+        if resolved is not None:
+            for phrase_file in _iter_phrase_files(resolved):
+                _merge_phrase_file(catalog, phrase_file, inherited_mode=inherited_mode)
+
+
+def _copy_catalog(catalog: Mapping[str, list[str]]) -> dict[str, list[str]]:
+    return {surface: list(phrases) for surface, phrases in catalog.items()}
 
 
 def _load_builtin_catalog() -> dict[str, list[str]]:
-    catalog = {surface: list(phrases) for surface, phrases in _FALLBACK_PHRASES.items()}
-    catalog_path = Path(__file__).resolve().parent / "assets" / "status_phrases.yaml"
-    _merge_phrase_file(catalog, catalog_path, inherited_mode="replace")
+    catalog = _copy_catalog(_FALLBACK_PHRASES)
+    _merge_phrase_file(catalog, Path(__file__).resolve().parent / "assets" / "status_phrases.yaml", inherited_mode="replace")
     return catalog
 
 
 _DEFAULT_PHRASES: dict[str, list[str]] = _load_builtin_catalog()
 
 
-def _copy_default_catalog() -> dict[str, list[str]]:
-    return {surface: list(phrases) for surface, phrases in _DEFAULT_PHRASES.items()}
-
-
-def _merge_phrase_config(catalog: dict[str, list[str]], section: Any, *, base_dir: Path | None = None) -> None:
-    """Merge one display.status_phrases-style section into ``catalog``."""
+def _merge_phrase_config(catalog: dict[str, list[str]], section: Any, *, base_dir: Path) -> None:
+    """Merge one display.status_phrases-style section (files first, then inline phrases)."""
     if not isinstance(section, Mapping):
         return
     mode = str(section.get("mode") or "append").strip().lower()
-    if base_dir is not None:
-        _merge_phrase_paths(catalog, section.get("path"), base_dir=base_dir, inherited_mode=mode)
-        _merge_phrase_paths(catalog, section.get("paths"), base_dir=base_dir, inherited_mode=mode)
+    for key in ("path", "paths"):
+        _merge_phrase_paths(catalog, section.get(key), base_dir=base_dir, inherited_mode=mode)
     _merge_phrase_mapping(catalog, section)
 
 
@@ -162,7 +137,7 @@ def resolve_status_phrase_catalog(user_config: Mapping[str, Any] | None, platfor
     alias ``generic_status_phrases``), then
     ``display.platforms.<platform>.status_phrases``.
     """
-    catalog = _copy_default_catalog()
+    catalog = _copy_catalog(_DEFAULT_PHRASES)
     hermes_home = get_hermes_home()
     _merge_phrase_paths(catalog, list(_CONVENTIONAL_RELATIVE_PATHS), base_dir=hermes_home)
 
@@ -170,15 +145,13 @@ def resolve_status_phrase_catalog(user_config: Mapping[str, Any] | None, platfor
     if not isinstance(display, Mapping):
         return catalog
 
-    _merge_phrase_config(catalog, display.get("generic_status_phrases"), base_dir=hermes_home)
-    _merge_phrase_config(catalog, display.get("status_phrases"), base_dir=hermes_home)
-
+    sections = [display]
     platforms = display.get("platforms")
-    if platform_key and isinstance(platforms, Mapping):
-        platform_display = platforms.get(platform_key)
-        if isinstance(platform_display, Mapping):
-            _merge_phrase_config(catalog, platform_display.get("generic_status_phrases"), base_dir=hermes_home)
-            _merge_phrase_config(catalog, platform_display.get("status_phrases"), base_dir=hermes_home)
+    if platform_key and isinstance(platforms, Mapping) and isinstance(platforms.get(platform_key), Mapping):
+        sections.append(platforms[platform_key])
+    for section in sections:
+        for key in _CONFIG_KEYS:
+            _merge_phrase_config(catalog, section.get(key), base_dir=hermes_home)
     return catalog
 
 
@@ -190,8 +163,7 @@ def classify_status_context(
     args: Any = None,
 ) -> str:
     """Classify an internal gateway event into a Hermes UI-surface bucket."""
-    normalized = str(kind or "").strip().lower()
-    if normalized in {"heartbeat", "waiting", "long_running", "status"}:
+    if str(kind or "").strip().lower() in {"heartbeat", "waiting", "long_running", "status"}:
         return "status"
     return "generic"
 
@@ -216,11 +188,8 @@ def choose_status_phrase(
     candidates = list(phrase_catalog.get(category) or phrase_catalog.get("generic") or _DEFAULT_PHRASES["generic"])
     if recent:
         recent_set = set(recent)
-        fresh = [phrase for phrase in candidates if phrase not in recent_set]
-        if fresh:
-            candidates = fresh
-    picker = rng or _random
-    phrase = picker.choice(candidates)
+        candidates = [p for p in candidates if p not in recent_set] or candidates
+    phrase = (rng or _random).choice(candidates)
     if recent is not None:
         recent.append(phrase)
         del recent[:-6]

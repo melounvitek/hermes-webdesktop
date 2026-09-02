@@ -1,18 +1,15 @@
 """Detect when the gateway is running stale code after a hot ``git pull``.
 
-The gateway is a single long-lived process; its ``sys.modules`` is frozen at
-boot. If the checkout is updated underneath it (a manual ``git pull``, or the
-window before ``hermes update``'s graceful restart fires), a first-time lazy
-import on a new code path can resolve a freshly-pulled consumer module against a
-stale cached dependency -> ImportError (see
-``tests/test_stale_utils_module_import.py`` for the exact failure).
+The gateway's ``sys.modules`` is frozen at boot.  If the checkout is updated
+underneath it (manual ``git pull``, or the window before ``hermes update``'s
+graceful restart), a first-time lazy import can resolve a freshly-pulled module
+against a stale cached dependency -> ImportError
+(``tests/test_stale_utils_module_import.py``).  We snapshot the revision at
+startup so risky callers (e.g. ``/model`` switching) can refuse with a clear
+"restart the gateway" message instead.
 
-We snapshot the checkout revision at gateway startup and compare on demand, so
-risky callers (e.g. ``/model`` switching) can refuse with a clear "restart the
-gateway" message instead of crashing on a cryptic import error.
-
-If the revision can't be read (non-git install, IO error), the boot snapshot
-stays ``None`` and skew detection no-ops — it never produces a false positive.
+If the revision can't be read (non-git install, IO error) the boot snapshot
+stays ``None`` and detection no-ops — never a false positive.
 """
 
 from __future__ import annotations
@@ -24,12 +21,8 @@ _boot_fingerprint: str | None = None
 
 
 def _fingerprint() -> str | None:
-    """Current checkout fingerprint, reusing the CLI's git-rev reader.
-
-    ``hermes_cli.main`` is always already imported in a gateway process (it's
-    the entry point), so this import is free and avoids duplicating the
-    worktree-aware ref resolution.
-    """
+    """Current checkout fingerprint via the CLI's worktree-aware git-rev reader
+    (``hermes_cli.main`` is always already imported in a gateway process)."""
     try:
         from hermes_cli.main import _read_git_revision_fingerprint
 

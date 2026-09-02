@@ -1,11 +1,7 @@
-"""
-Sticker description cache for Telegram.
+"""Sticker description cache for Telegram.
 
-When users send stickers, we describe them via the vision tool and cache
-the descriptions keyed by file_unique_id so we don't re-analyze the same
-sticker image on every send. Descriptions are concise (1-2 sentences).
-
-Cache location: ~/.hermes/sticker_cache.json
+Stickers are described via the vision tool once and cached by file_unique_id
+(``~/.hermes/sticker_cache.json``) so the same image is never re-analyzed.
 """
 
 import json
@@ -19,7 +15,7 @@ from hermes_cli.config import get_hermes_home
 
 CACHE_PATH = get_hermes_home() / "sticker_cache.json"
 
-# Vision prompt for describing stickers -- kept concise to save tokens
+# Kept concise to save tokens.
 STICKER_VISION_PROMPT = (
     "Describe this sticker in 1-2 sentences. Focus on what it depicts -- "
     "character, action, emotion. Be concise and objective."
@@ -27,7 +23,6 @@ STICKER_VISION_PROMPT = (
 
 
 def _load_cache() -> dict:
-    """Load the sticker cache from disk."""
     if CACHE_PATH.exists():
         try:
             return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
@@ -37,11 +32,9 @@ def _load_cache() -> dict:
 
 
 def _save_cache(cache: dict) -> None:
-    """Save the sticker cache to disk atomically."""
+    """Write the cache atomically (temp file + fsync + replace)."""
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        dir=str(CACHE_PATH.parent), suffix=".tmp"
-    )
+    fd, tmp_path = tempfile.mkstemp(dir=str(CACHE_PATH.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(cache, f, indent=2, ensure_ascii=False)
@@ -57,65 +50,32 @@ def _save_cache(cache: dict) -> None:
 
 
 def get_cached_description(file_unique_id: str) -> Optional[dict]:
-    """
-    Look up a cached sticker description.
+    """Return ``{description, emoji, set_name, cached_at}`` or None."""
+    return _load_cache().get(file_unique_id)
 
-    Returns:
-        dict with keys {description, emoji, set_name, cached_at} or None.
-    """
+
+def cache_sticker_description(file_unique_id: str, description: str, emoji: str = "", set_name: str = "") -> None:
+    """Store a vision-generated description under Telegram's stable sticker id."""
     cache = _load_cache()
-    return cache.get(file_unique_id)
-
-
-def cache_sticker_description(
-    file_unique_id: str,
-    description: str,
-    emoji: str = "",
-    set_name: str = "",
-) -> None:
-    """
-    Store a sticker description in the cache.
-
-    Args:
-        file_unique_id: Telegram's stable sticker identifier.
-        description:    Vision-generated description text.
-        emoji:          Associated emoji (e.g. "😀").
-        set_name:       Sticker set name if available.
-    """
-    cache = _load_cache()
-    cache[file_unique_id] = {
-        "description": description,
-        "emoji": emoji,
-        "set_name": set_name,
-        "cached_at": time.time(),
-    }
+    cache[file_unique_id] = {"description": description, "emoji": emoji, "set_name": set_name, "cached_at": time.time()}
     _save_cache(cache)
 
 
-def build_sticker_injection(
-    description: str,
-    emoji: str = "",
-    set_name: str = "",
-) -> str:
-    """
-    Build the warm-style injection text for a sticker description.
-
-    Returns a string like:
-      [The user sent a sticker 😀 from "MyPack"~ It shows: "A cat waving" (=^.w.^=)]
+def build_sticker_injection(description: str, emoji: str = "", set_name: str = "") -> str:
+    """Warm-style injection text, e.g.
+    ``[The user sent a sticker 😀 from "MyPack"~ It shows: "A cat waving" (=^.w.^=)]``.
+    ``set_name`` is only shown together with an emoji.
     """
     context = ""
     if set_name and emoji:
         context = f" {emoji} from \"{set_name}\""
     elif emoji:
         context = f" {emoji}"
-
     return f"[The user sent a sticker{context}~ It shows: \"{description}\" (=^.w.^=)]"
 
 
 def build_animated_sticker_injection(emoji: str = "") -> str:
-    """
-    Build injection text for animated/video stickers we can't analyze.
-    """
+    """Injection text for animated/video stickers we can't analyze."""
     if emoji:
         return (
             f"[The user sent an animated sticker {emoji}~ "

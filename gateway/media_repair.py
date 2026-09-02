@@ -1,21 +1,19 @@
 """Repair model-mangled ``computer_use`` screenshot paths in final responses.
 
-``computer_use`` persists a bounded screenshot into the Hermes image cache and
-tells the model its absolute path.  Some models rewrite a Windows path into a
-POSIX-looking one (``C:\\Users\\Alice\\...`` -> ``/Users/Alice/...``) when
-emitting an explicit ``MEDIA:`` directive, so delivery-path validation rejects
-the nonexistent path and the attachment is dropped.
+``computer_use`` persists a screenshot into the Hermes image cache and tells the
+model its absolute path. Some models rewrite a Windows path into a POSIX-looking
+one (``C:\\Users\\Alice\\...`` -> ``/Users/Alice/...``) inside an explicit
+``MEDIA:`` directive, so delivery-path validation rejects it and drops the
+attachment.
 
-The repair is deliberately narrow: it only rewrites paths inside a response
-that *already* carries an explicit ``MEDIA:`` directive, and only when the
-directive's generated ``computer_use_<uuid>`` basename exactly matches a
-canonical screenshot path returned by ``computer_use`` in the current turn.
-It never auto-attaches captures, and normal media path validation still runs
-after the repair.
+The repair is deliberately narrow: it only rewrites paths inside a response that
+*already* carries an explicit ``MEDIA:`` directive, and only when the directive's
+generated ``computer_use_<uuid>`` basename exactly matches a canonical screenshot
+path returned by ``computer_use`` in the current turn. It never auto-attaches
+captures; normal media path validation still runs afterwards.
 
-This lives in its own module (mirroring ``gateway/media_policy.py``) so every
-delivery surface — the messaging gateway's main turn path, gateway background
-tasks, and cron job delivery — shares one implementation.
+Own module (like ``gateway/media_policy.py``) so the gateway turn path, gateway
+background tasks and cron delivery share one implementation.
 """
 
 from __future__ import annotations
@@ -27,9 +25,8 @@ from typing import Any, Dict, Iterator, List
 
 logger = logging.getLogger(__name__)
 
-# Absolute-path prefix accepted for canonical capture paths: Windows drive
-# letter, POSIX root, or UNC share. Kept as a pattern string so the summary
-# regex below and the compiled prefix check stay in sync.
+# Absolute-path prefix for canonical capture paths: Windows drive letter, POSIX
+# root, or UNC share. Shared string so the summary regex stays in sync.
 _ABS_PATH_PREFIX_PATTERN = r"(?:[A-Za-z]:[/\\]|/|\\\\)"
 _ABS_PATH_PREFIX_RE = re.compile(r"^" + _ABS_PATH_PREFIX_PATTERN)
 
@@ -61,30 +58,25 @@ def tool_name_by_call_id(messages: List[Dict[str, Any]]) -> Dict[str, str]:
 
 
 def _computer_use_capture_basename(path: Any) -> str:
-    """Return a canonical capture basename for either path separator style."""
+    """Canonical (lowercased) capture basename for either separator style, or ''."""
     value = str(path or "").strip().strip("`\"'")
     basename = re.split(r"[/\\]", value)[-1]
-    if _COMPUTER_USE_CAPTURE_BASENAME_RE.fullmatch(basename):
-        return basename.lower()
-    return ""
+    return basename.lower() if _COMPUTER_USE_CAPTURE_BASENAME_RE.fullmatch(basename) else ""
 
 
 def _iter_computer_use_capture_paths(content: Any) -> Iterator[str]:
     """Yield persisted screenshot paths from computer_use result content.
 
-    The tool can return JSON, a multimodal content list, or a text fallback.
-    The latter two retain the canonical path in the human-readable summary
-    even though the multimodal envelope's ``meta`` dictionary is not stored in
-    the tool message.
+    The tool can return JSON, a multimodal content list, or a text fallback; the
+    latter two keep the canonical path in the human-readable summary even though
+    the multimodal envelope's ``meta`` is not stored in the tool message.
     """
     if isinstance(content, str):
         stripped = content.strip()
         if stripped.startswith(("{", "[")):
-            # JSON-looking content: parse first, never regex-scan the raw
-            # text. JSON escaping doubles backslashes, so a summary-regex hit
-            # on the raw string would yield ``C:\\\\Users\\\\...`` — a path
-            # that exists nowhere. Fail closed on unparseable JSON (tool
-            # output truncation) rather than repair to a corrupted path.
+            # Parse JSON first, never regex-scan it: JSON escaping doubles
+            # backslashes, so a raw-text hit would yield a path that exists
+            # nowhere. Fail closed on unparseable (truncated) JSON.
             try:
                 payload = json.loads(stripped)
             except Exception:
@@ -111,13 +103,27 @@ def _iter_computer_use_capture_paths(content: Any) -> Iterator[str]:
     if isinstance(meta, dict) and isinstance(meta.get("screenshot_path"), str):
         yield meta["screenshot_path"]
     # Producer shapes (tools/computer_use/tool.py::_capture_response):
-    # "content"/"text" — multimodal envelope parts; "text_summary"/"summary" —
-    # the human-readable summary carrying the "(shareable screenshot saved
-    # to ...)" line.
+    # content/text = multimodal parts; text_summary/summary = the line carrying
+    # "(shareable screenshot saved to ...)".
     for field in ("content", "text", "text_summary", "summary"):
         nested = content.get(field)
         if isinstance(nested, (str, dict, list)):
             yield from _iter_computer_use_capture_paths(nested)
+
+
+def _current_turn_messages(messages: List[Dict[str, Any]], history_offset: int) -> List[Dict[str, Any]]:
+    if not history_offset:
+        return messages
+    if len(messages) >= history_offset:
+        return messages[history_offset:]
+    # Compression can invalidate the slice boundary: recover the turn from its
+    # last user message, fail closed if none remains. Deliberately narrower than
+    # gateway/run.py::_collect_auto_append_media_tags' scan-everything fallback —
+    # that decides whether to ATTACH; this only rewrites paths already emitted.
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            return messages[index:]
+    return []
 
 
 def repair_explicit_computer_use_media_paths(
@@ -127,13 +133,10 @@ def repair_explicit_computer_use_media_paths(
 ) -> str:
     """Recover model-mangled paths for explicitly requested screenshots.
 
-    Repair only an already-explicit ``MEDIA:`` directive whose unique
-    generated basename case-insensitively matches a canonical screenshot
-    path from this turn. This does not auto-attach ordinary computer-use
-    captures, and normal media path validation still runs after the repair.
-
-    Fail-open: the repair is cosmetic, so an unexpected error returns the
-    response unchanged rather than aborting delivery.
+    Repairs only an already-explicit ``MEDIA:`` directive whose generated
+    basename case-insensitively matches a canonical screenshot path from this
+    turn. Fail-open: the repair is cosmetic, so any unexpected error returns
+    the response unchanged rather than aborting delivery.
     """
     try:
         return _repair_explicit_computer_use_media_paths_inner(
@@ -152,27 +155,7 @@ def _repair_explicit_computer_use_media_paths_inner(
     if "MEDIA:" not in response:
         return response
 
-    if history_offset and len(messages) >= history_offset:
-        turn_messages = messages[history_offset:]
-    elif history_offset:
-        # Compression can invalidate the original slice boundary. Recover the
-        # current turn from its last user message; fail closed if none
-        # remains. (Deliberately narrower than the scan-everything fallback
-        # in gateway/run.py::_collect_auto_append_media_tags — that helper
-        # decides whether to ATTACH, this one only rewrites paths the model
-        # already explicitly emitted.)
-        last_user = next(
-            (
-                index
-                for index in range(len(messages) - 1, -1, -1)
-                if messages[index].get("role") == "user"
-            ),
-            None,
-        )
-        turn_messages = messages[last_user:] if last_user is not None else []
-    else:
-        turn_messages = messages
-
+    turn_messages = _current_turn_messages(messages, history_offset)
     call_id_names = tool_name_by_call_id(turn_messages)
 
     canonical_by_basename: Dict[str, str] = {}
@@ -181,10 +164,7 @@ def _repair_explicit_computer_use_media_paths_inner(
             continue
         call_id = str(msg.get("tool_call_id") or msg.get("call_id") or "")
         tool_name = str(
-            msg.get("name")
-            or msg.get("tool_name")
-            or call_id_names.get(call_id)
-            or ""
+            msg.get("name") or msg.get("tool_name") or call_id_names.get(call_id) or ""
         )
         if tool_name != "computer_use":
             continue
@@ -196,18 +176,14 @@ def _repair_explicit_computer_use_media_paths_inner(
     if not canonical_by_basename:
         return response
 
-    # Lazy on purpose: keeps `import gateway.media_repair` cheap for
-    # standalone cron processes that may never hit a MEDIA: response.
-    # No import cycle either way (base.py imports neither this module
-    # nor gateway.run at module level).
+    # Lazy: keeps `import gateway.media_repair` cheap for standalone cron
+    # processes that may never hit a MEDIA: response. No import cycle either way.
     from gateway.platforms.base import BasePlatformAdapter
 
     media_files, _ = BasePlatformAdapter.extract_media(response)
     repaired = response
     for emitted_path, _is_voice in media_files:
-        canonical = canonical_by_basename.get(
-            _computer_use_capture_basename(emitted_path)
-        )
+        canonical = canonical_by_basename.get(_computer_use_capture_basename(emitted_path))
         if canonical and emitted_path != canonical:
             repaired = repaired.replace(emitted_path, canonical)
     return repaired

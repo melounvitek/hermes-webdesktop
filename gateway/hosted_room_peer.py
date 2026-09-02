@@ -1,8 +1,8 @@
 """Typed contracts for autonomous cross-gateway hosted-room members.
 
-The Desktop may bootstrap an invitation, but it is never the issuer or the
-runtime courier. The target gateway verifies a scoped grant and the full task
-coordinates before it admits any model or tool work.
+The Desktop may bootstrap an invitation but is never the issuer or runtime
+courier: the target gateway verifies a scoped grant and the full task
+coordinates before admitting any model or tool work.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ import re
 import stat
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 
 from gateway.hosted_room_execution_policy import (
     RoomExecutionPolicy,
@@ -29,21 +29,15 @@ from gateway.hosted_room_execution_policy import (
 )
 
 
-# Version 2 adds authority/member lineage to scoped grants. It is intentionally
-# not wire-compatible with the unpublished v1 draft; mixed gateways must fall
-# back to Desktop-driven rooms instead of accepting a weaker token shape.
+# v2 adds authority/member lineage to scoped grants and is deliberately not
+# wire-compatible with the unpublished v1 draft; mixed gateways must fall back
+# to Desktop-driven rooms instead of accepting a weaker token shape.
 PROTOCOL_VERSION = 2
 MAX_TOKEN_BYTES = 16 * 1024
 MAX_PROMPT_BYTES = 256 * 1024
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
-_LINK_PRIORITY = {
-    "direct": 0,
-    "overlay": 1,
-    "relay": 2,
-    "pull": 3,
-    "desktop": 4,
-}
+_LINK_MODES = frozenset({"direct", "overlay", "relay", "pull", "desktop"})
 LinkMode = Literal["direct", "overlay", "relay", "pull", "desktop"]
 TransportSecurity = Literal["tls", "loopback"]
 
@@ -255,28 +249,16 @@ class GatewayRoomCatalog:
             raise HostedRoomPeerError("link_modes must be a non-empty list")
         links: list[LinkMode] = []
         for item in links_raw:
-            if item not in _LINK_PRIORITY:
+            if item not in _LINK_MODES:
                 raise HostedRoomPeerError("link_modes contains an unsupported mode")
             if item not in links:
                 links.append(item)
         for field in ("persistent_process", "text", "attachments"):
             if not isinstance(value[field], bool):
                 raise HostedRoomPeerError(f"{field} must be a boolean")
+        policy = RoomExecutionPolicy.from_mapping(value["execution_policy"])
 
-        unsigned = {
-            "installation_id": installation_id,
-            "protocol_versions": list(versions),
-            "link_modes": links,
-            "persistent_process": value["persistent_process"],
-            "text": value["text"],
-            "attachments": value["attachments"],
-            "execution_policy": RoomExecutionPolicy.from_mapping(
-                value["execution_policy"]
-            ).as_mapping(),
-        }
-        endpoint_url = None
-        endpoint_reason = None
-        transport_security = None
+        endpoint_url = endpoint_reason = transport_security = None
         if "endpoint" in value:
             endpoint = value["endpoint"]
             if not isinstance(endpoint, Mapping) or not isinstance(
@@ -296,11 +278,6 @@ class GatewayRoomCatalog:
                     raise HostedRoomPeerError(
                         "endpoint transport_security does not match its URL"
                     )
-                normalized_endpoint = {
-                    "available": True,
-                    "url": endpoint_url,
-                    "transport_security": transport_security,
-                }
             else:
                 _exact_fields(
                     endpoint,
@@ -310,30 +287,41 @@ class GatewayRoomCatalog:
                 endpoint_reason = _identifier(
                     endpoint["reason"], field="endpoint.reason"
                 )
-                normalized_endpoint = {
-                    "available": False,
-                    "reason": endpoint_reason,
-                }
-            unsigned["endpoint"] = normalized_endpoint
-        expected = hashlib.sha256(_canonical_json(unsigned)).hexdigest()
-        supplied = _digest(value["catalog_digest"], field="catalog_digest")
-        if not hmac.compare_digest(expected, supplied):
-            raise HostedRoomPeerError("catalog_digest does not match the catalog")
-        return cls(
+        catalog = cls(
             installation_id=installation_id,
             protocol_versions=versions,
             link_modes=tuple(links),
             persistent_process=value["persistent_process"],
             text=value["text"],
             attachments=value["attachments"],
-            execution_policy=RoomExecutionPolicy.from_mapping(
-                value["execution_policy"]
-            ),
-            catalog_digest=supplied,
+            execution_policy=policy,
+            catalog_digest=_digest(value["catalog_digest"], field="catalog_digest"),
             endpoint_url=endpoint_url,
             endpoint_reason=endpoint_reason,
             transport_security=transport_security,
         )
+        unsigned = catalog.as_mapping()
+        del unsigned["catalog_digest"]
+        expected = hashlib.sha256(_canonical_json(unsigned)).hexdigest()
+        if not hmac.compare_digest(expected, catalog.catalog_digest):
+            raise HostedRoomPeerError("catalog_digest does not match the catalog")
+        return catalog
+
+    def as_mapping(self) -> dict[str, Any]:
+        """Canonical catalog mapping; ``endpoint`` appears only when advertised."""
+        value = {
+            "installation_id": self.installation_id,
+            "protocol_versions": list(self.protocol_versions),
+            "link_modes": list(self.link_modes),
+            "persistent_process": self.persistent_process,
+            "text": self.text,
+            "attachments": self.attachments,
+            "execution_policy": self.execution_policy.as_mapping(),
+            "catalog_digest": self.catalog_digest,
+        }
+        if self.endpoint_url is not None or self.endpoint_reason is not None:
+            value["endpoint"] = self.endpoint_mapping()
+        return value
 
     def endpoint_mapping(self) -> dict[str, Any]:
         """Return the normalized self-advertised endpoint capability."""
@@ -362,9 +350,8 @@ def catalog_mapping(
     execution_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a canonical catalog mapping with its digest."""
-    # A Desktop-managed gateway exits with the app.  Treat the caller's flag
-    # as an upper bound so every local catalog construction site stays honest,
-    # including older call sites that still pass ``True`` explicitly.
+    # A Desktop-managed gateway exits with the app: the caller's flag is only an
+    # upper bound, so call sites that still pass ``True`` stay honest.
     persistent_process = bool(persistent_process and os.getenv("HERMES_DESKTOP") != "1")
     checked_policy = RoomExecutionPolicy.from_mapping(
         execution_policy
@@ -377,9 +364,8 @@ def catalog_mapping(
         )
     )
     # A RoomLink run is initiated by another installation. Process-wide YOLO
-    # mode bypasses the scoped approval ContextVar, so it cannot be made safe by
-    # rewriting the advertised policy. Refuse to advertise or accept remote
-    # room execution until the target enables manual or smart approvals.
+    # mode bypasses the scoped approval ContextVar, so rewriting the advertised
+    # policy cannot make it safe: refuse until manual or smart approvals are on.
     if checked_policy.approval_mode == "off":
         raise HostedRoomPeerError(
             "remote room execution requires manual or smart approvals"
@@ -392,7 +378,7 @@ def catalog_mapping(
         # Direct HTTPS/loopback is the only RoomLink transport implemented by
         # this backend slice. Do not advertise pull/relay placeholders.
         "link_modes": [mode for mode in dict.fromkeys(link_modes) if mode == "direct"],
-        "persistent_process": bool(persistent_process),
+        "persistent_process": persistent_process,
         "text": bool(text),
         "attachments": bool(attachments),
         "execution_policy": checked_policy.as_mapping(),
@@ -423,7 +409,6 @@ def local_catalog_mapping(
         persistent_process=True,
         text=text,
         attachments=attachments,
-        endpoint=local_room_link_endpoint(),
         target_profile=target_profile,
         execution_policy=execution_policy,
     )
@@ -467,7 +452,7 @@ def _room_link_url_from_config(home: str) -> str | None:
 
 
 def _configured_room_link_url() -> str | None:
-    """Resolve the explicit endpoint with environment override precedence."""
+    """Resolve the explicit endpoint: env override > profile config > root config."""
     override = os.getenv("HERMES_ROOM_LINK_URL")
     if override is not None:
         return override
@@ -479,9 +464,8 @@ def _configured_room_link_url() -> str | None:
         return configured
 
     # RoomLink is a gateway reachability property, not a Bot personality
-    # setting. Named profiles may override it, but otherwise inherit the
-    # process gateway's root endpoint so adding a Bot does not require
-    # repeating network configuration in every profile.
+    # setting: named profiles may override it but otherwise inherit the process
+    # gateway's root endpoint, so adding a Bot needs no repeated network config.
     root = get_default_hermes_root()
     if root != home:
         return _room_link_url_from_config(str(root))
@@ -491,9 +475,8 @@ def _configured_room_link_url() -> str | None:
 def validate_room_link_url(value: Any) -> tuple[str, TransportSecurity]:
     """Validate a RoomLink endpoint and classify its transport protection.
 
-    Scoped grants and room prompts may use plaintext HTTP only when the peer
-    is reached through the local loopback interface.  Every non-loopback
-    endpoint must use HTTPS.
+    Plaintext HTTP is allowed only toward the local loopback interface; every
+    non-loopback endpoint must use HTTPS.
     """
     raw = str(value or "").strip().rstrip("/")
     try:
@@ -523,6 +506,27 @@ def validate_room_link_url(value: Any) -> tuple[str, TransportSecurity]:
     return raw, "loopback"
 
 
+# Validator per dispatch field, in validation order. ``prompt`` and
+# ``prompt_digest`` are checked together against each other in from_mapping.
+_DISPATCH_FIELDS: dict[str, Callable[..., Any]] = {
+    "protocol_version": _positive_int,
+    "room_id": _identifier,
+    "home_install_id": _identifier,
+    "authority_gateway_id": _identifier,
+    "authority_epoch": _positive_int,
+    "member_id": _identifier,
+    "target_install_id": _identifier,
+    "target_profile": _identifier,
+    "task_id": _identifier,
+    "execution_generation": _positive_int,
+    "source_event_seq": _positive_int,
+    "cancellation_scope_id": _identifier,
+    "capability_digest": _digest,
+    "execution_policy_digest": _digest,
+    "trace_id": _identifier,
+}
+
+
 @dataclass(frozen=True)
 class HostedMemberDispatch:
     """Recipient-validated identity for one remote room member attempt."""
@@ -547,48 +551,15 @@ class HostedMemberDispatch:
 
     def as_mapping(self) -> dict[str, Any]:
         """Return the canonical wire mapping used for fingerprinting."""
-        return {
-            "protocol_version": self.protocol_version,
-            "room_id": self.room_id,
-            "home_install_id": self.home_install_id,
-            "authority_gateway_id": self.authority_gateway_id,
-            "authority_epoch": self.authority_epoch,
-            "member_id": self.member_id,
-            "target_install_id": self.target_install_id,
-            "target_profile": self.target_profile,
-            "task_id": self.task_id,
-            "execution_generation": self.execution_generation,
-            "source_event_seq": self.source_event_seq,
-            "cancellation_scope_id": self.cancellation_scope_id,
-            "prompt": self.prompt,
-            "prompt_digest": self.prompt_digest,
-            "capability_digest": self.capability_digest,
-            "execution_policy_digest": self.execution_policy_digest,
-            "trace_id": self.trace_id,
-        }
+        return asdict(self)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "HostedMemberDispatch":
-        required = {
-            "protocol_version",
-            "room_id",
-            "home_install_id",
-            "authority_gateway_id",
-            "authority_epoch",
-            "member_id",
-            "target_install_id",
-            "target_profile",
-            "task_id",
-            "execution_generation",
-            "source_event_seq",
-            "cancellation_scope_id",
-            "prompt",
-            "prompt_digest",
-            "capability_digest",
-            "execution_policy_digest",
-            "trace_id",
-        }
-        _exact_fields(value, required=required, label="dispatch")
+        _exact_fields(
+            value,
+            required=set(_DISPATCH_FIELDS) | {"prompt", "prompt_digest"},
+            label="dispatch",
+        )
         prompt = value["prompt"]
         if not isinstance(prompt, str) or not prompt.strip():
             raise HostedRoomPeerError("prompt must be a non-empty string")
@@ -599,85 +570,13 @@ class HostedMemberDispatch:
         if not hmac.compare_digest(expected_prompt_digest, prompt_digest):
             raise HostedRoomPeerError("prompt_digest does not match prompt")
         return cls(
-            protocol_version=_positive_int(
-                value["protocol_version"], field="protocol_version"
-            ),
-            room_id=_identifier(value["room_id"], field="room_id"),
-            home_install_id=_identifier(
-                value["home_install_id"], field="home_install_id"
-            ),
-            authority_gateway_id=_identifier(
-                value["authority_gateway_id"], field="authority_gateway_id"
-            ),
-            authority_epoch=_positive_int(
-                value["authority_epoch"], field="authority_epoch"
-            ),
-            member_id=_identifier(value["member_id"], field="member_id"),
-            target_install_id=_identifier(
-                value["target_install_id"], field="target_install_id"
-            ),
-            target_profile=_identifier(value["target_profile"], field="target_profile"),
-            task_id=_identifier(value["task_id"], field="task_id"),
-            execution_generation=_positive_int(
-                value["execution_generation"], field="execution_generation"
-            ),
-            source_event_seq=_positive_int(
-                value["source_event_seq"], field="source_event_seq"
-            ),
-            cancellation_scope_id=_identifier(
-                value["cancellation_scope_id"], field="cancellation_scope_id"
-            ),
             prompt=prompt,
             prompt_digest=prompt_digest,
-            capability_digest=_digest(
-                value["capability_digest"], field="capability_digest"
-            ),
-            execution_policy_digest=_digest(
-                value["execution_policy_digest"],
-                field="execution_policy_digest",
-            ),
-            trace_id=_identifier(value["trace_id"], field="trace_id"),
+            **{
+                name: check(value[name], field=name)
+                for name, check in _DISPATCH_FIELDS.items()
+            },
         )
-
-
-@dataclass(frozen=True)
-class RoomLinkProbe:
-    """One gateway-verified route candidate."""
-
-    mode: LinkMode
-    verified: bool
-    encrypted: bool
-    latency_ms: float
-
-
-def select_room_link(
-    probes: Iterable[RoomLinkProbe],
-    *,
-    desktop_available: bool,
-) -> RoomLinkProbe | None:
-    """Choose the fastest safe route without weakening encryption."""
-    candidates = [
-        probe
-        for probe in probes
-        if probe.verified
-        and probe.encrypted
-        and probe.mode != "desktop"
-        and math.isfinite(probe.latency_ms)
-        and probe.latency_ms >= 0
-    ]
-    if candidates:
-        return min(
-            candidates,
-            key=lambda item: (_LINK_PRIORITY[item.mode], item.latency_ms),
-        )
-    if desktop_available:
-        return RoomLinkProbe(
-            mode="desktop",
-            verified=True,
-            encrypted=True,
-            latency_ms=0,
-        )
-    return None
 
 
 _GRANT_FIELDS = {

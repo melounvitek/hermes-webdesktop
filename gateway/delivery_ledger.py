@@ -1,48 +1,42 @@
 """Durable delivery-obligation ledger for gateway final responses.
 
-A final agent response that was generated but not yet confirmed-delivered
-to the messaging platform is the one artifact the gateway can lose without
-a trace: the turn already burned its tokens, the text exists only in a
-Python local, and a crash / planned restart between finalize and platform
-ACK drops it silently (#58818, #41696, #63695).
+A final agent response generated but not yet confirmed-delivered is the one
+artifact the gateway can lose without a trace: the turn already burned its
+tokens, the text exists only in a Python local, and a crash / restart between
+finalize and platform ACK drops it silently.
 
-This module records a small durable row per outbound final response in the
-shared ``state.db`` (same file and conventions as
-``tools.async_delegation`` — WAL, owner pid + process-start-time liveness,
-bounded retention). The gateway writes three checkpoints around the send:
+Each outbound final response gets a small durable row in the shared ``state.db``
+(same conventions as ``tools.async_delegation`` — WAL, owner pid + process-start
+liveness, bounded retention). The gateway writes three checkpoints:
 
     record_obligation()   state='pending'     before any send attempt
     mark_attempting()     state='attempting'  immediately before the await
     mark_delivered() /    state='delivered'   only on SendResult.success
     mark_failed()         state='failed'      on a definitive rejection
 
-On startup, ``sweep_recoverable()`` claims rows whose owning process is
-dead and hands them to the gateway for redelivery. After a platform adapter
-reconnects without a process restart, ``sweep_failed_for_runtime()`` may claim
-only the same live process's explicitly allowlisted transient failures. Crash
-semantics are explicit about ambiguity (the contract review of the earlier
-delivery-outbox attempt, #61790, closed it for silently resending ambiguous
-sends):
+On startup ``sweep_recoverable()`` claims rows whose owner is dead and hands
+them back for redelivery. After an adapter reconnects without a restart,
+``sweep_failed_for_runtime()`` may claim only the same live process's
+allowlisted transient failures. Crash semantics are explicit about ambiguity
+(never silently resend an ambiguous send):
 
-- ``pending``     — the send never started: redeliver plainly, no dup risk.
-- ``attempting``  — crashed mid-await: the platform MAY already have the
-  message. Redelivered WITH a visible recovered-reply marker so the
-  contract is honest at-least-once, never a silent duplicate.
-- ``failed``      — definitively rejected once; the restart is a natural
-  retry boundary. Also carries the marker.
+- ``pending``     — send never started: redeliver plainly, no dup risk.
+- ``attempting``  — crashed mid-await: the platform MAY already have it.
+  Redelivered WITH a visible recovered-reply marker (honest at-least-once).
+- ``failed``      — definitively rejected once; restart is a natural retry
+  boundary. Also carries the marker.
 - ``delivered``   — nothing to do; retention prunes.
 
-Poison rows cannot spin: attempts are capped, stale rows expire, and both
-transition to ``abandoned`` (kept briefly for inspection, then pruned).
+Poison rows cannot spin: attempts are capped and stale rows expire, both
+transitioning to ``abandoned`` (kept briefly, then pruned).
 
-Everything here is best-effort by design: ledger failures must never block
-or delay an actual send. Callers wrap every call in try/except.
+Everything here is best-effort: ledger failures must never block or delay an
+actual send. Callers wrap every call in try/except.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import sqlite3
@@ -57,9 +51,8 @@ logger = logging.getLogger(__name__)
 
 _DB_LOCK = threading.Lock()
 
-# Redelivery policy knobs (module constants; deliberately not config — the
-# ledger itself is gated by ``gateway.delivery_ledger`` and these bounds
-# only matter in the rare recovery path).
+# Redelivery policy knobs (deliberately not config — the ledger is gated by
+# ``gateway.delivery_ledger`` and these only matter in the rare recovery path).
 MAX_ATTEMPTS = 3
 STALE_AFTER_SECONDS = 24 * 60 * 60
 _RETENTION_SECONDS = 7 * 24 * 60 * 60
@@ -72,18 +65,16 @@ RECOVERED_MARKER = (
     "so this may be a duplicate:\n\n"
 )
 
-# Runtime recovery uses a distinct marker because no gateway restart occurred.
-# Keep the ambiguity explicit: a network rejection normally means the platform
-# did not accept the message, but an acknowledgement can be lost independently.
+# Runtime recovery uses a distinct marker: no restart occurred, but a network
+# rejection's acknowledgement can still have been lost independently.
 RECONNECTED_MARKER = (
     "♻️ Recovered reply — the messaging platform reconnected after the original "
     "delivery failed, so this may be a duplicate:\n\n"
 )
 
-# Runtime replay is deliberately fail-closed. Only errors whose send contract
-# proves they are transient reconnect failures belong here; permanent rejects
-# (blocked bot, bad auth, missing chat) must not be retried merely because an
-# adapter reconnected.
+# Runtime replay is fail-closed: only errors whose send contract proves they are
+# transient reconnect failures. Permanent rejects (blocked bot, bad auth, missing
+# chat) must not be retried merely because an adapter reconnected.
 _RUNTIME_RETRYABLE_ERRORS = frozenset({"send_path_degraded"})
 
 
@@ -98,8 +89,7 @@ def _connect() -> sqlite3.Connection:
     try:
         _initialize_schema(conn)
     except Exception:
-        # A PRAGMA/DDL failure after a successful connect() must not leak the
-        # just-opened connection back to the caller.
+        # A PRAGMA/DDL failure after connect() must not leak the connection.
         conn.close()
         raise
     return conn
@@ -127,14 +117,10 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             adapter_profile TEXT
         )"""
     )
-    columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(delivery_obligations)")
-    }
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(delivery_obligations)")}
     if "adapter_profile" not in columns:
         try:
-            conn.execute(
-                "ALTER TABLE delivery_obligations ADD COLUMN adapter_profile TEXT"
-            )
+            conn.execute("ALTER TABLE delivery_obligations ADD COLUMN adapter_profile TEXT")
         except sqlite3.OperationalError as exc:
             # Concurrent first-use connections can both observe the old schema.
             if "duplicate column" not in str(exc).lower():
@@ -145,13 +131,10 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
 def _transaction() -> Iterator[sqlite3.Connection]:
     """Open a connection, commit/rollback on exit, and ALWAYS close it.
 
-    ``sqlite3.Connection.__enter__``/``__exit__`` only commit or roll back the
-    transaction; they do not close the connection. Using ``with _connect()``
-    alone therefore leaks a connection — and its WAL/SHM file descriptors — on
-    every call, deferring the close to the garbage collector. On a long-running
-    gateway that exhausts ``RLIMIT_NOFILE`` (the cron-ledger sibling of this
-    bug was #69567 / PR #69594). ``record_obligation`` runs on every outbound
-    final response, so this ledger is the highest-frequency leaker.
+    ``sqlite3.Connection`` as a context manager only commits/rolls back; it does
+    not close. ``with _connect()`` alone would leak a connection (and its WAL/SHM
+    fds) per call until GC — ``record_obligation`` runs on every outbound final
+    response, so this ledger would exhaust ``RLIMIT_NOFILE`` on a long-running gateway.
     """
     conn = _connect()
     try:
@@ -186,20 +169,16 @@ def _owner_alive(pid: Any, started_at: Any) -> bool:
     except Exception:
         current_start = None
     if current_start is None:
-        # No such process (or unreadable) — treat unreadable-but-extant
-        # processes as alive only if the pid exists. Route through the
-        # cross-platform probe: ``os.kill(pid, 0)`` on Windows is NOT a
-        # no-op (bpo-14484 — CPython maps sig=0 to
-        # ``GenerateConsoleCtrlEvent(0, pid)``), so a raw probe here could
-        # Ctrl+C the gateway's own console group whenever psutil failed to
-        # read the start time of a live pid. ``_pid_exists`` keeps the
-        # EPERM-means-alive semantics (exists but owned by another user).
+        # Start time unreadable: alive iff the pid exists. Route through the
+        # cross-platform probe — ``os.kill(pid, 0)`` on Windows is NOT a no-op
+        # (bpo-14484: it maps to ``GenerateConsoleCtrlEvent(0, pid)`` and could
+        # Ctrl+C the gateway's own console group). ``_pid_exists`` keeps the
+        # EPERM-means-alive semantics (pid exists but is owned by another user).
         try:
             from gateway.status import _pid_exists
         except Exception:
             if os.name == "nt":
-                # Never fall back to a raw sig-0 probe on Windows.
-                return False
+                return False  # never fall back to a raw sig-0 probe on Windows
             try:
                 os.kill(pid, 0)  # windows-footgun: ok — POSIX-only fallback branch
             except ProcessLookupError:
@@ -222,10 +201,9 @@ def _owner_alive(pid: Any, started_at: Any) -> bool:
 
 
 def compute_obligation_id(session_key: str, message_ref: str, content: str) -> str:
-    """Stable id: same turn + same content re-records idempotently, while
-    distinct threads/topics on the same chat can never collide (the
-    session_key carries platform, chat and thread; ``message_ref`` is the
-    triggering inbound message id, distinguishing turns in one session)."""
+    """Stable id: same turn + same content re-records idempotently, while distinct
+    threads/topics on one chat never collide (session_key carries platform, chat and
+    thread; ``message_ref`` is the triggering inbound message id)."""
     payload = f"{session_key}|{message_ref}|{content}"
     return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:24]
 
@@ -273,11 +251,10 @@ def mark_failed(obligation_id: str, error: str = "") -> None:
 def release_runtime_claim(obligation_id: str, error: str = "") -> bool:
     """Return an unsent runtime claim to ``failed`` without spending an attempt.
 
-    Runtime recovery claims before clearing ``resume_pending`` so that two
-    reconnect paths cannot send the same row. If the session flag cannot be
-    cleared, no platform send was attempted and the claim must not consume the
-    bounded redelivery budget. Release is fail-closed to the exact current
-    process instance and the ``attempting`` state.
+    Runtime recovery claims before clearing ``resume_pending`` so two reconnect
+    paths cannot send the same row. If the session flag cannot be cleared, no
+    send was attempted and the claim must not consume the redelivery budget.
+    Fail-closed to the exact current process instance and ``attempting`` state.
     """
     pid, started = _owner_stamp()
     if started is None:
@@ -306,31 +283,32 @@ def _update_state(obligation_id: str, state: str, error: str = "") -> None:
         )
 
 
+def _exhausted(attempts: int, created_at: float, now: float) -> bool:
+    return attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS
+
+
 def sweep_recoverable(
     now: Optional[float] = None,
     *,
     deliverable_platforms: Optional[set] = None,
     deliverable_targets: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
-    """Claim undelivered rows owned by dead processes; return them for
-    redelivery.
+    """Claim undelivered rows owned by dead processes; return them for redelivery.
 
     Claiming atomically re-stamps the owner to THIS process and increments
-    ``attempts``, so a second gateway racing the same sweep cannot
-    double-claim (the UPDATE is guarded on the previous owner stamp).
-    Rows over the attempts cap or older than the stale cutoff transition to
-    'abandoned' instead of being returned.
+    ``attempts`` (the UPDATE is guarded on the previous owner stamp, so a second
+    gateway racing the same sweep cannot double-claim). Rows over the attempts
+    cap or stale cutoff transition to 'abandoned' instead of being returned.
 
-    ``deliverable_platforms`` (platform value strings) restricts claiming to
-    platforms the caller can actually send on this boot.  ``attempts`` is the
-    redelivery budget, so it must only be spent on a real send: a platform
-    that failed to connect would otherwise burn one attempt per boot and hit
-    the cap having never been sent once.  Rows for absent platforms are left
-    untouched for a later boot; the stale cutoff still bounds them.
+    ``deliverable_platforms`` restricts claiming to platforms the caller can
+    actually send on this boot: ``attempts`` is the redelivery budget and must
+    only be spent on a real send, else a platform that failed to connect burns
+    one attempt per boot and hits the cap having never been sent once. Rows for
+    absent platforms are left untouched (the stale cutoff still bounds them).
 
     ``deliverable_targets`` further scopes multiplexed gateways by exact
-    ``(platform, adapter_profile)`` identity, preventing one connected bot from
-    spending another disconnected bot's retry budget.
+    ``(platform, adapter_profile)`` so one connected bot cannot spend another
+    disconnected bot's retry budget.
     """
     now = now if now is not None else time.time()
     pid, started = _owner_stamp()
@@ -348,24 +326,16 @@ def sweep_recoverable(
              adapter_profile) in rows:
             if _owner_alive(owner_pid, owner_started_at):
                 continue  # a live gateway still owns this row
-            if attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS:
+            if _exhausted(attempts, created_at, now):
                 conn.execute(
                     """UPDATE delivery_obligations
                        SET state='abandoned', updated_at=? WHERE obligation_id=?""",
                     (now, oid),
                 )
                 continue
-            if (
-                deliverable_platforms is not None
-                and platform not in deliverable_platforms
-            ):
-                # No adapter for this platform this boot — the caller cannot
-                # send, so claiming would spend an attempt on a no-op.
-                continue
-            if (
-                deliverable_targets is not None
-                and (platform, adapter_profile) not in deliverable_targets
-            ):
+            if deliverable_platforms is not None and platform not in deliverable_platforms:
+                continue  # no adapter this boot — claiming would spend an attempt on a no-op
+            if deliverable_targets is not None and (platform, adapter_profile) not in deliverable_targets:
                 continue
             cursor = conn.execute(
                 """UPDATE delivery_obligations
@@ -382,8 +352,7 @@ def sweep_recoverable(
                     "chat_id": chat_id,
                     "thread_id": thread_id,
                     "content": content,
-                    # pending = send never started, redeliver plainly;
-                    # attempting/failed = ambiguous or rejected, carry marker.
+                    # pending = never started, redeliver plainly; else carry marker.
                     "needs_marker": state != "pending",
                     "profile": adapter_profile,
                     "attempts": attempts + 1,
@@ -399,32 +368,27 @@ def sweep_failed_for_runtime(
 ) -> List[Dict[str, Any]]:
     """Claim this process's reconnect-retryable failed rows for one adapter.
 
-    ``profile`` scopes multiplexed gateways to the bot identity that actually
-    owned the failed send; ``None`` means the primary/default adapter. The
-    persisted adapter owner is independent of the routed session namespace.
+    ``profile`` scopes multiplexed gateways to the bot identity that owned the
+    failed send; ``None`` means the primary/default adapter. The persisted
+    adapter owner is independent of the routed session namespace. Unowned rows
+    and rows owned by another process are left for the startup/dead-owner sweep.
 
-    Startup recovery intentionally ignores rows owned by a live gateway. That
-    protects concurrent processes, but it also means a final response rejected
-    with ``send_path_degraded`` remains stranded when only the platform adapter
-    reconnects. This runtime sweep closes that gap without weakening ownership:
-
-    - only rows stamped to this exact process instance are eligible;
-    - only explicitly allowlisted transient errors are eligible;
-    - attempts/staleness bounds match startup recovery;
-    - every update is guarded by the prior owner stamp and ``failed`` state.
-
-    Unowned rows and rows owned by another process are left untouched for the
-    normal startup/dead-owner sweep. Claimed rows always carry the reconnect
+    Startup recovery ignores rows owned by a live gateway, so a final response
+    rejected with ``send_path_degraded`` would stay stranded when only the
+    adapter reconnects. This sweep closes that gap without weakening ownership:
+    only rows stamped to this exact process instance, only allowlisted transient
+    errors, same attempts/staleness bounds, every update guarded by the prior
+    owner stamp and ``failed`` state. Claimed rows always carry the reconnect
     marker because the failed send's acknowledgement is not safe to infer.
     """
     now = now if now is not None else time.time()
     pid, started = _owner_stamp()
     if started is None:
-        # PID equality alone cannot distinguish this process from a stale row
-        # left by an earlier process incarnation after PID reuse. Runtime replay
-        # is optional recovery, so fail closed when the process fingerprint is
-        # unavailable; startup recovery remains the durable fallback.
+        # PID alone cannot distinguish this process from a stale row left after
+        # PID reuse. Runtime replay is optional, so fail closed; startup
+        # recovery remains the durable fallback.
         return []
+    expected_profile = "default" if not profile or profile == "default" else str(profile)
     claimed: List[Dict[str, Any]] = []
     with _DB_LOCK, _transaction() as conn:
         rows = conn.execute(
@@ -435,33 +399,18 @@ def sweep_failed_for_runtime(
                WHERE state='failed' AND platform=?""",
             (platform,),
         ).fetchall()
-        for (
-            oid,
-            session_key,
-            row_platform,
-            chat_id,
-            thread_id,
-            content,
-            attempts,
-            created_at,
-            owner_pid,
-            owner_started_at,
-            last_error,
-            adapter_profile,
-        ) in rows:
-            expected_profile = (
-                "default" if not profile or profile == "default" else str(profile)
-            )
+        for (oid, session_key, row_platform, chat_id, thread_id, content,
+             attempts, created_at, owner_pid, owner_started_at, last_error,
+             adapter_profile) in rows:
             if adapter_profile != expected_profile:
                 continue
-            # Runtime reconnect recovery may act only on its own rows. Exact
-            # process-start matching prevents PID reuse from stealing work.
+            # Exact process-start matching prevents PID reuse from stealing work.
             if owner_pid != pid or owner_started_at != started:
                 continue
             if str(last_error or "").strip().lower() not in _RUNTIME_RETRYABLE_ERRORS:
                 continue
             owner_guard = (oid, owner_pid, owner_started_at)
-            if attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS:
+            if _exhausted(attempts, created_at, now):
                 conn.execute(
                     """UPDATE delivery_obligations
                        SET state='abandoned', updated_at=?
@@ -504,9 +453,7 @@ def _prune(now: Optional[float] = None) -> None:
                    WHERE state IN ('delivered', 'abandoned') AND updated_at < ?""",
                 (cutoff,),
             )
-            total = conn.execute(
-                "SELECT COUNT(*) FROM delivery_obligations"
-            ).fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM delivery_obligations").fetchone()[0]
             excess = max(0, total - _MAX_ROWS)
             if excess:
                 conn.execute(
@@ -538,25 +485,3 @@ def ledger_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
         return bool(value)
     except Exception:
         return True
-
-
-def debug_rows(limit: int = 20) -> str:
-    """Human-readable dump for ad-hoc inspection (sqlite3-free path)."""
-    with _DB_LOCK, _transaction() as conn:
-        rows = conn.execute(
-            """SELECT obligation_id, session_key, state, attempts,
-                      created_at, updated_at, last_error
-               FROM delivery_obligations
-               ORDER BY updated_at DESC LIMIT ?""",
-            (limit,),
-        ).fetchall()
-    return json.dumps(
-        [
-            {
-                "id": r[0], "session": r[1], "state": r[2], "attempts": r[3],
-                "created_at": r[4], "updated_at": r[5], "last_error": r[6],
-            }
-            for r in rows
-        ],
-        indent=2,
-    )

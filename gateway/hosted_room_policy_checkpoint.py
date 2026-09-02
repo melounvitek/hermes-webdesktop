@@ -11,7 +11,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from gateway import hosted_rooms
 
@@ -26,6 +26,68 @@ _TERMINAL_KINDS = frozenset({
     "turn.deferred",
 })
 
+_SCHEMA_DDL = (
+    """CREATE TABLE IF NOT EXISTS hosted_room_policy_cursors (
+                    room_id TEXT PRIMARY KEY,
+                    through_seq INTEGER NOT NULL DEFAULT 0,
+                    stopped_through_seq INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL DEFAULT 0
+                )""",
+    """CREATE TABLE IF NOT EXISTS hosted_room_policy_threads (
+                    room_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    discussion_event_id TEXT NOT NULL,
+                    latest_user_seq INTEGER NOT NULL,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(room_id, thread_id)
+                )""",
+    """CREATE INDEX IF NOT EXISTS idx_hosted_room_policy_pending
+                   ON hosted_room_policy_threads(
+                       room_id, completed, latest_user_seq, thread_id
+                   )""",
+    """CREATE TABLE IF NOT EXISTS hosted_room_policy_events (
+                    room_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    discussion_event_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    event_json TEXT NOT NULL,
+                    PRIMARY KEY(room_id, seq)
+                )""",
+    """CREATE INDEX IF NOT EXISTS idx_hosted_room_policy_events_active
+                   ON hosted_room_policy_events(
+                       room_id, discussion_event_id, seq
+                   )""",
+    """CREATE TABLE IF NOT EXISTS hosted_room_policy_watermarks (
+                    room_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    member_id TEXT NOT NULL,
+                    seen_through_seq INTEGER NOT NULL,
+                    PRIMARY KEY(room_id, thread_id, member_id)
+                )""",
+    """CREATE TABLE IF NOT EXISTS hosted_room_policy_publications (
+                    room_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    execution_generation INTEGER NOT NULL DEFAULT 0,
+                    seq INTEGER NOT NULL,
+                    PRIMARY KEY(room_id, task_id, kind, execution_generation)
+                )""",
+    # Transcript stores only references into the already bounded room log, so
+    # prompt payloads are never duplicated outside room byte limits.
+    """CREATE TABLE IF NOT EXISTS hosted_room_policy_transcript (
+                    room_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    settled_seq INTEGER,
+                    PRIMARY KEY(room_id, thread_id, seq)
+                )""",
+    """CREATE TABLE IF NOT EXISTS hosted_room_policy_transcript_state (
+                    room_id TEXT PRIMARY KEY,
+                    schema_version INTEGER NOT NULL
+                )""",
+)
+
 
 @dataclass(frozen=True)
 class PolicySnapshot:
@@ -37,12 +99,36 @@ class PolicySnapshot:
     watermarks: Mapping[tuple[str, str], int]
 
 
+def _event_from_room_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "room_id": str(row["room_id"]),
+        "seq": int(row["seq"]),
+        "event_id": str(row["event_id"]),
+        "kind": str(row["kind"]),
+        "actor": json.loads(row["actor_json"]),
+        "authority_epoch": row["authority_epoch"],
+        "payload": json.loads(row["payload_json"]),
+        "created_at": float(row["created_at"]),
+        "idempotent": False,
+    }
+
+
+def _require_room(conn: sqlite3.Connection, room_id: str) -> None:
+    if conn.execute(
+        "SELECT 1 FROM hosted_rooms WHERE room_id=?",
+        (room_id,),
+    ).fetchone() is None:
+        raise hosted_rooms.RoomNotFoundError("hosted room not found")
+
+
 class HostedRoomPolicyCheckpoint:
     """Incrementally index room policy without compacting visible history."""
 
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
-        self._initialize()
+        with self._connect() as conn:
+            for ddl in _SCHEMA_DDL:
+                conn.execute(ddl)
 
     def _connect(self) -> sqlite3.Connection:
         from hermes_state import apply_wal_with_fallback
@@ -53,97 +139,8 @@ class HostedRoomPolicyCheckpoint:
         apply_wal_with_fallback(conn, db_label="state.db (room policy checkpoint)")
         return conn
 
-    def _initialize(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS hosted_room_policy_cursors (
-                    room_id TEXT PRIMARY KEY,
-                    through_seq INTEGER NOT NULL DEFAULT 0,
-                    stopped_through_seq INTEGER NOT NULL DEFAULT 0,
-                    updated_at REAL NOT NULL DEFAULT 0
-                )"""
-            )
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS hosted_room_policy_threads (
-                    room_id TEXT NOT NULL,
-                    thread_id TEXT NOT NULL,
-                    discussion_event_id TEXT NOT NULL,
-                    latest_user_seq INTEGER NOT NULL,
-                    completed INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY(room_id, thread_id)
-                )"""
-            )
-            conn.execute(
-                """CREATE INDEX IF NOT EXISTS idx_hosted_room_policy_pending
-                   ON hosted_room_policy_threads(
-                       room_id, completed, latest_user_seq, thread_id
-                   )"""
-            )
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS hosted_room_policy_events (
-                    room_id TEXT NOT NULL,
-                    thread_id TEXT NOT NULL,
-                    discussion_event_id TEXT NOT NULL,
-                    seq INTEGER NOT NULL,
-                    event_json TEXT NOT NULL,
-                    PRIMARY KEY(room_id, seq)
-                )"""
-            )
-            conn.execute(
-                """CREATE INDEX IF NOT EXISTS idx_hosted_room_policy_events_active
-                   ON hosted_room_policy_events(
-                       room_id, discussion_event_id, seq
-                   )"""
-            )
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS hosted_room_policy_watermarks (
-                    room_id TEXT NOT NULL,
-                    thread_id TEXT NOT NULL,
-                    member_id TEXT NOT NULL,
-                    seen_through_seq INTEGER NOT NULL,
-                    PRIMARY KEY(room_id, thread_id, member_id)
-                )"""
-            )
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS hosted_room_policy_publications (
-                    room_id TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    execution_generation INTEGER NOT NULL DEFAULT 0,
-                    seq INTEGER NOT NULL,
-                    PRIMARY KEY(room_id, task_id, kind, execution_generation)
-                )"""
-            )
-            conn.execute(
-                # Store only references into the already bounded room log. This
-                # avoids duplicating prompt payloads outside room byte limits.
-                """CREATE TABLE IF NOT EXISTS hosted_room_policy_transcript (
-                    room_id TEXT NOT NULL,
-                    thread_id TEXT NOT NULL,
-                    seq INTEGER NOT NULL,
-                    kind TEXT NOT NULL,
-                    settled_seq INTEGER,
-                    PRIMARY KEY(room_id, thread_id, seq)
-                )"""
-            )
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS hosted_room_policy_transcript_state (
-                    room_id TEXT PRIMARY KEY,
-                    schema_version INTEGER NOT NULL
-                )"""
-            )
-
     @staticmethod
-    def _event_json(event: Mapping[str, Any]) -> str:
-        return json.dumps(
-            dict(event),
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
     def _store_active_event(
-        self,
         conn: sqlite3.Connection,
         *,
         event: Mapping[str, Any],
@@ -159,12 +156,17 @@ class HostedRoomPolicyCheckpoint:
                 thread_id,
                 discussion_event_id,
                 int(event["seq"]),
-                self._event_json(event),
+                json.dumps(
+                    dict(event),
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             ),
         )
 
+    @staticmethod
     def _store_transcript_event(
-        self,
         conn: sqlite3.Connection,
         *,
         event: Mapping[str, Any],
@@ -207,20 +209,6 @@ class HostedRoomPolicyCheckpoint:
                     (event["room_id"], thread_id, int(cutoff["seq"])),
                 )
 
-    @staticmethod
-    def _event_from_room_row(row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "room_id": str(row["room_id"]),
-            "seq": int(row["seq"]),
-            "event_id": str(row["event_id"]),
-            "kind": str(row["kind"]),
-            "actor": json.loads(row["actor_json"]),
-            "authority_epoch": row["authority_epoch"],
-            "payload": json.loads(row["payload_json"]),
-            "created_at": float(row["created_at"]),
-            "idempotent": False,
-        }
-
     def _backfill_transcript(
         self,
         conn: sqlite3.Connection,
@@ -259,7 +247,7 @@ class HostedRoomPolicyCheckpoint:
                 and row["event_id"] not in settled_seq_by_message
             ):
                 continue
-            event = self._event_from_room_row(row)
+            event = _event_from_room_row(row)
             thread_id = str(event["payload"].get("thread_id") or "")
             if thread_id:
                 self._store_transcript_event(
@@ -269,13 +257,29 @@ class HostedRoomPolicyCheckpoint:
                     settled_seq=settled_seq_by_message.get(str(row["event_id"])),
                 )
 
-    def _transcript_events(
+    def _discussion_events(
         self,
         conn: sqlite3.Connection,
         *,
         room_id: str,
         thread_id: str,
+        discussion_event_id: str,
+        bound_error: str,
     ) -> list[dict[str, Any]]:
+        """Merge the thread transcript with the active projection, ordered by seq."""
+
+        active_rows = conn.execute(
+            """SELECT event_json FROM hosted_room_policy_events
+                   WHERE room_id=? AND discussion_event_id=?
+                   ORDER BY seq LIMIT ?""",
+            (
+                room_id,
+                discussion_event_id,
+                MAX_ACTIVE_POLICY_EVENTS + 1,
+            ),
+        ).fetchall()
+        if len(active_rows) > MAX_ACTIVE_POLICY_EVENTS:
+            raise RuntimeError(bound_error)
         rows = conn.execute(
             """WITH transcript_events(seq) AS (
                    SELECT seq FROM hosted_room_policy_transcript
@@ -294,22 +298,30 @@ class HostedRoomPolicyCheckpoint:
                ORDER BY events.seq""",
             (room_id, thread_id, room_id, thread_id, room_id),
         ).fetchall()
-        return [self._event_from_room_row(row) for row in rows]
+        events_by_seq = {
+            int(event["seq"]): event
+            for event in (
+                *(_event_from_room_row(row) for row in rows),
+                *(json.loads(row["event_json"]) for row in active_rows),
+            )
+        }
+        return [events_by_seq[seq] for seq in sorted(events_by_seq)]
 
-    def _apply_event(self, conn: sqlite3.Connection, event: Mapping[str, Any]) -> None:
+    # -- per-kind projection handlers (dispatched by _apply_event) -----------
+
+    def _apply_user_message(
+        self,
+        conn: sqlite3.Connection,
+        event: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> None:
         room_id = str(event["room_id"])
-        seq = int(event["seq"])
-        kind = str(event.get("kind") or "")
-        payload = event.get("payload")
-        payload = payload if isinstance(payload, Mapping) else {}
-
-        if kind == "message.user":
-            thread_id = str(payload.get("thread_id") or "")
-            event_id = str(event.get("event_id") or "")
-            if not thread_id or not event_id:
-                return
-            conn.execute(
-                """INSERT INTO hosted_room_policy_threads(
+        thread_id = str(payload.get("thread_id") or "")
+        event_id = str(event.get("event_id") or "")
+        if not thread_id or not event_id:
+            return
+        conn.execute(
+            """INSERT INTO hosted_room_policy_threads(
                        room_id, thread_id, discussion_event_id,
                        latest_user_seq, completed
                    ) VALUES (?, ?, ?, ?, 0)
@@ -317,92 +329,92 @@ class HostedRoomPolicyCheckpoint:
                        discussion_event_id=excluded.discussion_event_id,
                        latest_user_seq=excluded.latest_user_seq,
                        completed=0""",
-                (room_id, thread_id, event_id, seq),
-            )
-            self._store_active_event(
-                conn,
-                event=event,
-                thread_id=thread_id,
-                discussion_event_id=event_id,
-            )
-            self._store_transcript_event(
-                conn,
-                event=event,
-                thread_id=thread_id,
-            )
-            return
+            (room_id, thread_id, event_id, int(event["seq"])),
+        )
+        self._store_active_event(
+            conn,
+            event=event,
+            thread_id=thread_id,
+            discussion_event_id=event_id,
+        )
+        self._store_transcript_event(conn, event=event, thread_id=thread_id)
 
-        if kind in {"message.member", *_TERMINAL_KINDS}:
-            thread_id = str(payload.get("thread_id") or "")
-            discussion_event_id = str(payload.get("discussion_event_id") or "")
-            source = conn.execute(
-                """SELECT 1 FROM hosted_room_policy_events
+    def _apply_discussion_event(
+        self,
+        conn: sqlite3.Connection,
+        event: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Index member messages and terminal turn outcomes of a known discussion."""
+
+        room_id = str(event["room_id"])
+        seq = int(event["seq"])
+        kind = str(event.get("kind") or "")
+        thread_id = str(payload.get("thread_id") or "")
+        discussion_event_id = str(payload.get("discussion_event_id") or "")
+        source = conn.execute(
+            """SELECT 1 FROM hosted_room_policy_events
                    WHERE room_id=? AND discussion_event_id=? LIMIT 1""",
-                (room_id, discussion_event_id),
-            ).fetchone()
-            if source is None:
-                return
-            self._store_active_event(
-                conn,
-                event=event,
-                thread_id=thread_id,
-                discussion_event_id=discussion_event_id,
-            )
-            if kind in _TERMINAL_KINDS:
-                task_id = str(payload.get("task_id") or "")
-                execution_generation = (
-                    int(payload.get("execution_generation") or 0)
-                    if kind == "turn.deferred"
-                    else 0
-                )
-                if task_id:
-                    conn.execute(
-                        """INSERT OR IGNORE INTO hosted_room_policy_publications(
+            (room_id, discussion_event_id),
+        ).fetchone()
+        if source is None:
+            return
+        self._store_active_event(
+            conn,
+            event=event,
+            thread_id=thread_id,
+            discussion_event_id=discussion_event_id,
+        )
+        if kind not in _TERMINAL_KINDS:
+            return
+        task_id = str(payload.get("task_id") or "")
+        execution_generation = (
+            int(payload.get("execution_generation") or 0)
+            if kind == "turn.deferred"
+            else 0
+        )
+        if task_id:
+            conn.execute(
+                """INSERT OR IGNORE INTO hosted_room_policy_publications(
                                room_id, task_id, kind, execution_generation, seq
                            ) VALUES (?, ?, ?, ?, ?)""",
-                        (
-                            room_id,
-                            task_id,
-                            kind,
-                            execution_generation,
-                            seq,
-                        ),
-                    )
-                member_id = str(payload.get("member_id") or "")
-                seen_through_seq = int(payload.get("seen_through_seq") or 0)
-                if kind == "turn.settled" and payload.get("message_event_id"):
-                    messages = conn.execute(
-                        """SELECT seq, event_json FROM hosted_room_policy_events
+                (
+                    room_id,
+                    task_id,
+                    kind,
+                    execution_generation,
+                    seq,
+                ),
+            )
+        member_id = str(payload.get("member_id") or "")
+        seen_through_seq = int(payload.get("seen_through_seq") or 0)
+        if kind == "turn.settled" and payload.get("message_event_id"):
+            messages = conn.execute(
+                """SELECT seq, event_json FROM hosted_room_policy_events
                            WHERE room_id=? AND discussion_event_id=?""",
-                        (room_id, discussion_event_id),
-                    ).fetchall()
-                    decoded_messages = [
-                        json.loads(message["event_json"])
-                        for message in messages
-                    ]
-                    committed = next(
-                        (
-                            message
-                            for message in decoded_messages
-                            if message.get("event_id")
-                            == payload["message_event_id"]
-                        ),
-                        None,
+                (room_id, discussion_event_id),
+            ).fetchall()
+            committed = next(
+                (
+                    message
+                    for message in (
+                        json.loads(row["event_json"]) for row in messages
                     )
-                    if committed is not None:
-                        seen_through_seq = max(
-                            seen_through_seq,
-                            int(committed["seq"]),
-                        )
-                        self._store_transcript_event(
-                            conn,
-                            event=committed,
-                            thread_id=thread_id,
-                            settled_seq=int(event["seq"]),
-                        )
-                if member_id and seen_through_seq > 0:
-                    conn.execute(
-                        """INSERT INTO hosted_room_policy_watermarks(
+                    if message.get("event_id") == payload["message_event_id"]
+                ),
+                None,
+            )
+            if committed is not None:
+                seen_through_seq = max(seen_through_seq, int(committed["seq"]))
+                self._store_transcript_event(
+                    conn,
+                    event=committed,
+                    thread_id=thread_id,
+                    settled_seq=int(event["seq"]),
+                )
+        if member_id and seen_through_seq > 0:
+            conn.execute(
+                """INSERT INTO hosted_room_policy_watermarks(
                                room_id, thread_id, member_id, seen_through_seq
                            ) VALUES (?, ?, ?, ?)
                            ON CONFLICT(room_id, thread_id, member_id) DO UPDATE SET
@@ -410,43 +422,63 @@ class HostedRoomPolicyCheckpoint:
                                    hosted_room_policy_watermarks.seen_through_seq,
                                    excluded.seen_through_seq
                                )""",
-                        (room_id, thread_id, member_id, seen_through_seq),
-                    )
-            return
+                (room_id, thread_id, member_id, seen_through_seq),
+            )
 
-        if kind == "room.activity":
-            thread_id = str(payload.get("thread_id") or "")
-            discussion_event_id = str(payload.get("discussion_event_id") or "")
-            conn.execute(
-                """DELETE FROM hosted_room_policy_events
+    def _apply_room_activity(
+        self,
+        conn: sqlite3.Connection,
+        event: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> None:
+        room_id = str(event["room_id"])
+        thread_id = str(payload.get("thread_id") or "")
+        discussion_event_id = str(payload.get("discussion_event_id") or "")
+        conn.execute(
+            """DELETE FROM hosted_room_policy_events
                    WHERE room_id=? AND discussion_event_id=?""",
-                (room_id, discussion_event_id),
-            )
-            conn.execute(
-                """DELETE FROM hosted_room_policy_threads
+            (room_id, discussion_event_id),
+        )
+        conn.execute(
+            """DELETE FROM hosted_room_policy_threads
                    WHERE room_id=? AND thread_id=?""",
-                (room_id, thread_id),
-            )
-            return
+            (room_id, thread_id),
+        )
 
-        if kind == "room.stop_requested":
-            conn.execute(
-                """UPDATE hosted_room_policy_cursors
+    def _apply_stop_requested(
+        self,
+        conn: sqlite3.Connection,
+        event: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> None:
+        conn.execute(
+            """UPDATE hosted_room_policy_cursors
                    SET stopped_through_seq=MAX(stopped_through_seq, ?)
                    WHERE room_id=?""",
-                (seq, room_id),
-            )
+            (int(event["seq"]), str(event["room_id"])),
+        )
+
+    _APPLY_BY_KIND: dict[str, Callable[..., None]] = {
+        "message.user": _apply_user_message,
+        "message.member": _apply_discussion_event,
+        **dict.fromkeys(_TERMINAL_KINDS, _apply_discussion_event),
+        "room.activity": _apply_room_activity,
+        "room.stop_requested": _apply_stop_requested,
+    }
+
+    def _apply_event(self, conn: sqlite3.Connection, event: Mapping[str, Any]) -> None:
+        handler = self._APPLY_BY_KIND.get(str(event.get("kind") or ""))
+        if handler is None:
+            return
+        payload = event.get("payload")
+        handler(self, conn, event, payload if isinstance(payload, Mapping) else {})
 
     def sync(self, *, room_id: str, latest_seq: int) -> int:
         """Materialize each unseen event exactly once by durable cursor."""
 
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if conn.execute(
-                "SELECT 1 FROM hosted_rooms WHERE room_id=?",
-                (room_id,),
-            ).fetchone() is None:
-                raise hosted_rooms.RoomNotFoundError("hosted room not found")
+            _require_room(conn, room_id)
             conn.execute(
                 """INSERT OR IGNORE INTO hosted_room_policy_cursors(
                        room_id, through_seq, stopped_through_seq, updated_at
@@ -499,11 +531,7 @@ class HostedRoomPolicyCheckpoint:
                 raise RuntimeError("hosted room policy cursor did not advance")
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                if conn.execute(
-                    "SELECT 1 FROM hosted_rooms WHERE room_id=?",
-                    (room_id,),
-                ).fetchone() is None:
-                    raise hosted_rooms.RoomNotFoundError("hosted room not found")
+                _require_room(conn, room_id)
                 for event in rows:
                     self._apply_event(conn, event)
                 updated = conn.execute(
@@ -545,44 +573,26 @@ class HostedRoomPolicyCheckpoint:
                     events=(),
                     watermarks={},
                 )
-            active_rows = conn.execute(
-                """SELECT event_json FROM hosted_room_policy_events
-                   WHERE room_id=? AND discussion_event_id=?
-                   ORDER BY seq LIMIT ?""",
-                (
-                    room_id,
-                    str(thread["discussion_event_id"]),
-                    MAX_ACTIVE_POLICY_EVENTS + 1,
-                ),
-            ).fetchall()
-            if len(active_rows) > MAX_ACTIVE_POLICY_EVENTS:
-                raise RuntimeError("active room policy projection exceeded its bound")
-            transcript_events = self._transcript_events(
+            thread_id = str(thread["thread_id"])
+            events = self._discussion_events(
                 conn,
                 room_id=room_id,
-                thread_id=str(thread["thread_id"]),
+                thread_id=thread_id,
+                discussion_event_id=str(thread["discussion_event_id"]),
+                bound_error="active room policy projection exceeded its bound",
             )
             watermark_rows = conn.execute(
                 """SELECT member_id, seen_through_seq
                    FROM hosted_room_policy_watermarks
                    WHERE room_id=? AND thread_id=?""",
-                (room_id, str(thread["thread_id"])),
+                (room_id, thread_id),
             ).fetchall()
-        events_by_seq = {
-            int(event["seq"]): event
-            for event in (
-                *transcript_events,
-                *(json.loads(row["event_json"]) for row in active_rows),
-            )
-        }
         return PolicySnapshot(
             through_seq=through_seq,
             stopped_through_seq=stopped_through_seq,
-            events=tuple(events_by_seq[seq] for seq in sorted(events_by_seq)),
+            events=tuple(events),
             watermarks={
-                (str(thread["thread_id"]), str(row["member_id"])): int(
-                    row["seen_through_seq"]
-                )
+                (thread_id, str(row["member_id"])): int(row["seen_through_seq"])
                 for row in watermark_rows
             },
         )
@@ -634,31 +644,13 @@ class HostedRoomPolicyCheckpoint:
             ).fetchone()
             if source is None:
                 return []
-            active_rows = conn.execute(
-                """SELECT event_json FROM hosted_room_policy_events
-                   WHERE room_id=? AND discussion_event_id=?
-                   ORDER BY seq LIMIT ?""",
-                (
-                    room_id,
-                    str(source["discussion_event_id"]),
-                    MAX_ACTIVE_POLICY_EVENTS + 1,
-                ),
-            ).fetchall()
-            transcript_events = self._transcript_events(
+            return self._discussion_events(
                 conn,
                 room_id=room_id,
                 thread_id=str(source["thread_id"]),
+                discussion_event_id=str(source["discussion_event_id"]),
+                bound_error="task policy projection exceeded its bound",
             )
-        if len(active_rows) > MAX_ACTIVE_POLICY_EVENTS:
-            raise RuntimeError("task policy projection exceeded its bound")
-        events_by_seq = {
-            int(event["seq"]): event
-            for event in (
-                *transcript_events,
-                *(json.loads(row["event_json"]) for row in active_rows),
-            )
-        }
-        return [events_by_seq[seq] for seq in sorted(events_by_seq)]
 
     def compact_completed(self, *, room_id: str) -> None:
         """Drop any completed projections left by an interrupted sync."""

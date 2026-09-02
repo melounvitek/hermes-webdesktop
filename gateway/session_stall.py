@@ -1,21 +1,15 @@
-"""Gateway session stall notification policy (#72016 item 2).
+"""Gateway session stall notification policy.
 
-Consumes the shared activity observation contract from
-``agent.session_activity`` / ``AIAgent.get_activity_summary()``
-(#72039) as the **single progress source**. This module owns only the
-notify-once policy for "pending inbound + stale progress"; it does not
-invent a parallel progress clock from turn-start or inbound event
-timestamps.
+Consumes the shared activity observation contract from ``agent.session_activity``
+/ ``AIAgent.get_activity_summary()`` as the **single progress source**.  This
+module owns only the notify-once policy for "pending inbound + stale progress";
+it never derives a parallel progress clock from turn-start or inbound timestamps.
 
-Boundaries (keep separate):
-- ``gateway/shutdown_watchdog.py`` — process / event-loop liveness
-- ``gateway/delivery_ledger.py`` — outbound delivery obligations
-- Pending inbound here is a stall *policy gate* (queued follow-up exists),
-  not an outbound obligation and not a progress timestamp.
-
-Notification / timeout / kill / retry policy stay in their own components;
-the shared contract remains observation-only (timestamp + bounded
-description + provenance).
+Boundaries (keep separate): ``gateway/shutdown_watchdog.py`` is process /
+event-loop liveness; ``gateway/delivery_ledger.py`` is outbound delivery
+obligations.  Pending inbound here is a stall *policy gate* (a queued follow-up
+exists), not an obligation and not a progress timestamp.  Timeout / kill / retry
+policy stay in their own components.
 """
 
 from __future__ import annotations
@@ -32,15 +26,13 @@ def should_emit_session_stall_notification(
     already_notified: bool,
 ) -> bool:
     """Return True when a stall warning should be sent for this session."""
-    if timeout_seconds <= 0:
-        return False
-    if not has_pending_inbound:
-        return False
-    if already_notified:
-        return False
-    if idle_seconds is None:
-        return False
-    return idle_seconds >= timeout_seconds
+    return (
+        timeout_seconds > 0
+        and has_pending_inbound
+        and not already_notified
+        and idle_seconds is not None
+        and idle_seconds >= timeout_seconds
+    )
 
 
 def should_clear_session_stall_notification(
@@ -50,23 +42,27 @@ def should_clear_session_stall_notification(
     has_pending_inbound: bool,
 ) -> bool:
     """Return True when a prior stall notice may be cleared (episode ended)."""
-    if not has_pending_inbound:
-        return True
-    if timeout_seconds <= 0:
+    if not has_pending_inbound or timeout_seconds <= 0:
         return True
     # Unknown progress: hold the latch. Do not treat observation gaps as recovery.
-    if idle_seconds is None:
-        return False
-    return idle_seconds < timeout_seconds
+    return idle_seconds is not None and idle_seconds < timeout_seconds
 
 
 def format_session_stall_notification(idle_seconds: float) -> str:
-    """User-facing stall warning (ASCII minutes; matches issue #72016 copy)."""
+    """User-facing stall warning (ASCII minutes)."""
     mins = max(1, int(idle_seconds // 60))
-    return (
-        f"⚠️ Agent session appears stalled (last activity {mins} min ago). "
-        f"Try /new to reset."
-    )
+    return f"⚠️ Agent session appears stalled (last activity {mins} min ago). Try /new to reset."
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    """``value`` as a finite float, or None (bools are rejected as non-numeric)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
 
 
 def resolve_session_idle_seconds_from_activity(
@@ -74,52 +70,26 @@ def resolve_session_idle_seconds_from_activity(
     *,
     now: Optional[float] = None,
 ) -> Optional[float]:
-    """Idle seconds from a shared activity snapshot only (#72039 contract).
+    """Idle seconds from a shared activity snapshot only.
 
-    Prefers ``seconds_since_activity`` when present and finite; otherwise
-    derives from ``last_activity_at`` / ``last_activity_ts``. Returns
-    ``None`` when there is no usable progress timestamp — callers must
-    not fall back to turn-start or pending-inbound clocks.
+    Prefers ``seconds_since_activity`` when present and finite; otherwise derives
+    from ``last_activity_at`` / ``last_activity_ts``.  Returns None when there is
+    no usable progress timestamp — callers must not fall back to turn-start or
+    pending-inbound clocks.
     """
     if not activity:
         return None
 
-    elapsed = activity.get("seconds_since_activity")
-    if isinstance(elapsed, bool):
-        elapsed = None
-    if elapsed is not None:
-        try:
-            idle = float(elapsed)
-        except (TypeError, ValueError):
-            idle = None
-        else:
-            if math.isfinite(idle):
-                if idle < 0:
-                    return 0.0
-                return idle
-            # Non-finite: fall through to last_activity_at / last_activity_ts
+    idle = _finite_float(activity.get("seconds_since_activity"))
+    if idle is not None:
+        return max(0.0, idle)
 
     ts = activity.get("last_activity_at")
-    if ts is None:
-        ts = activity.get("last_activity_ts")
-    if ts is None:
+    when = _finite_float(activity.get("last_activity_ts") if ts is None else ts)
+    if when is None:
         return None
-    if isinstance(ts, bool):
-        return None
-    try:
-        when = float(ts)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(when):
-        return None
-
     if now is None:
         import time as _time
 
-        clock = float(_time.time())
-    else:
-        clock = float(now)
-    idle = clock - when
-    if idle < 0:
-        return 0.0
-    return idle
+        now = _time.time()
+    return max(0.0, float(now) - when)

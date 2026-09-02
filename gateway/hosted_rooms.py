@@ -282,11 +282,7 @@ def local_authority_gateway_id() -> str:
     install_id = get_install_id()
     if not install_id:
         raise HostedRoomError("stable gateway install identity is unavailable")
-    return _validate_identifier(
-        f"install:{install_id}",
-        label="authority_gateway_id",
-        max_chars=MAX_ACTOR_ID_CHARS,
-    )
+    return _actor_id(f"install:{install_id}", "authority_gateway_id")
 
 
 def _canonical_json(value: Any, *, label: str, max_bytes: int) -> str:
@@ -313,13 +309,46 @@ def _validate_identifier(value: Any, *, label: str, max_chars: int) -> str:
     return value
 
 
+def _room_id(value: Any) -> str:
+    return _validate_identifier(value, label="room_id", max_chars=MAX_ROOM_ID_CHARS)
+
+
+def _event_id(value: Any, *, label: str = "event_id") -> str:
+    return _validate_identifier(value, label=label, max_chars=MAX_EVENT_ID_CHARS)
+
+
+def _actor_id(value: Any, label: str) -> str:
+    return _validate_identifier(value, label=label, max_chars=MAX_ACTOR_ID_CHARS)
+
+
+def _require_positive_int(value: Any, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise HostedRoomError(f"{label} must be a positive integer")
+
+
+def _now(now: float | None) -> float:
+    return time.time() if now is None else float(now)
+
+
+def _system_actor_json(actor_id: str) -> str:
+    return _canonical_json({"kind": "system", "id": actor_id}, label="actor", max_bytes=4 * 1024)
+
+
+def _claim_payload_json(previous_gateway_id: str, new_gateway_id: str, epoch: int) -> str:
+    return _canonical_json(
+        {
+            "previous_gateway_id": previous_gateway_id,
+            "authority_gateway_id": new_gateway_id,
+            "authority_epoch": epoch,
+        },
+        label="payload",
+        max_bytes=MAX_EVENT_JSON_BYTES,
+    )
+
+
 def user_event_id(client_event_id: Any) -> str:
     """Map a client retry key into the server-owned user-event namespace."""
-    normalized = _validate_identifier(
-        client_event_id,
-        label="event_id",
-        max_chars=MAX_EVENT_ID_CHARS,
-    )
+    normalized = _event_id(client_event_id)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"user:{digest}"
 
@@ -415,11 +444,7 @@ def _validate_actor(value: Any, *, kind: str) -> tuple[dict[str, str], str]:
     if kind not in _EVENT_KINDS_BY_ACTOR[actor_kind]:
         raise HostedRoomError(f"actor kind '{actor_kind}' cannot append '{kind}'")
 
-    actor_id = _validate_identifier(
-        value.get("id"),
-        label="actor.id",
-        max_chars=MAX_ACTOR_ID_CHARS,
-    )
+    actor_id = _actor_id(value.get("id"), "actor.id")
     actor = {"kind": actor_kind, "id": actor_id}
     for field, max_chars in (
         ("display_name", MAX_ACTOR_LABEL_CHARS),
@@ -557,11 +582,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         # Draft builds before the actor contract carried no identity. Preserve
         # their inert replay rows explicitly as legacy system events rather
         # than guessing a user or Bot author.
-        legacy_actor = _canonical_json(
-            {"kind": "system", "id": "legacy"},
-            label="actor",
-            max_bytes=4 * 1024,
-        )
+        legacy_actor = _system_actor_json("legacy")
         escaped_actor = legacy_actor.replace("'", "''")
         conn.execute(
             "ALTER TABLE hosted_room_events "
@@ -731,7 +752,7 @@ def update_room_link_status(
                  WHERE room_id=? AND member_id=?""",
             (
                 status,
-                float(now if now is not None else time.time()),
+                _now(now),
                 room_id,
                 member_id,
             ),
@@ -781,7 +802,7 @@ def revoke_room_grant_scope(
 ) -> None:
     """Revoke every grant issued at or before now for one exact room scope."""
     scope_key = _room_grant_scope_key(claims)
-    timestamp = float(now if now is not None else time.time())
+    timestamp = _now(now)
     expiry = float(expires_at)
     if expiry <= timestamp:
         return
@@ -827,27 +848,15 @@ def reserve_peer_room(
 ) -> None:
     """Fence direct Desktop prompts before the first peer run is admitted."""
 
-    timestamp = float(now if now is not None else time.time())
+    timestamp = _now(now)
     expiry = float(expires_at)
     if expiry <= timestamp:
         raise HostedRoomError("peer room reservation must expire in the future")
     values = (
-        _validate_identifier(
-            claims.get("room_id"), label="room_id", max_chars=MAX_ROOM_ID_CHARS
-        ),
-        _validate_identifier(
-            claims.get("member_id"), label="member_id", max_chars=MAX_ACTOR_ID_CHARS
-        ),
-        _validate_identifier(
-            claims.get("target_profile"),
-            label="target_profile",
-            max_chars=MAX_ACTOR_ID_CHARS,
-        ),
-        _validate_identifier(
-            claims.get("authority_gateway_id"),
-            label="authority_gateway_id",
-            max_chars=MAX_ACTOR_ID_CHARS,
-        ),
+        _room_id(claims.get("room_id")),
+        _actor_id(claims.get("member_id"), "member_id"),
+        _actor_id(claims.get("target_profile"), "target_profile"),
+        _actor_id(claims.get("authority_gateway_id"), "authority_gateway_id"),
         int(claims.get("authority_epoch") or 0),
     )
     if values[4] < 1:
@@ -919,7 +928,7 @@ def peer_room_is_reserved(
 ) -> bool:
     """Return whether a live target-side RoomLink reservation fences Desktop."""
 
-    timestamp = float(now if now is not None else time.time())
+    timestamp = _now(now)
     with _transaction(db_path) as conn:
         row = conn.execute(
             """SELECT 1 FROM hosted_room_peer_reservations
@@ -927,14 +936,8 @@ def peer_room_is_reserved(
                   AND expires_at>? AND revoked_at IS NULL
                 LIMIT 1""",
             (
-                _validate_identifier(
-                    room_id, label="room_id", max_chars=MAX_ROOM_ID_CHARS
-                ),
-                _validate_identifier(
-                    target_profile,
-                    label="target_profile",
-                    max_chars=MAX_ACTOR_ID_CHARS,
-                ),
+                _room_id(room_id),
+                _actor_id(target_profile, "target_profile"),
                 timestamp,
             ),
         ).fetchone()
@@ -949,23 +952,11 @@ def peer_room_grant_is_current(
 ) -> bool:
     """Require a grant to match the target's current live reservation."""
 
-    timestamp = float(now if now is not None else time.time())
-    room_id = _validate_identifier(
-        claims.get("room_id"), label="room_id", max_chars=MAX_ROOM_ID_CHARS
-    )
-    member_id = _validate_identifier(
-        claims.get("member_id"), label="member_id", max_chars=MAX_ACTOR_ID_CHARS
-    )
-    target_profile = _validate_identifier(
-        claims.get("target_profile"),
-        label="target_profile",
-        max_chars=MAX_ACTOR_ID_CHARS,
-    )
-    authority_gateway_id = _validate_identifier(
-        claims.get("authority_gateway_id"),
-        label="authority_gateway_id",
-        max_chars=MAX_ACTOR_ID_CHARS,
-    )
+    timestamp = _now(now)
+    room_id = _room_id(claims.get("room_id"))
+    member_id = _actor_id(claims.get("member_id"), "member_id")
+    target_profile = _actor_id(claims.get("target_profile"), "target_profile")
+    authority_gateway_id = _actor_id(claims.get("authority_gateway_id"), "authority_gateway_id")
     authority_epoch = int(claims.get("authority_epoch") or 0)
     if authority_epoch < 1:
         raise HostedRoomError("authority_epoch must be positive")
@@ -995,7 +986,7 @@ def room_grant_is_revoked(
     now: float | None = None,
 ) -> bool:
     """Return whether a grant predates its exact scope's revocation fence."""
-    timestamp = float(now if now is not None else time.time())
+    timestamp = _now(now)
     scope_key = _room_grant_scope_key(claims)
     issued_at = float(claims.get("issued_at") or 0)
     with _transaction(db_path) as conn:
@@ -1018,7 +1009,7 @@ def upsert_remote_run_receipt(
     now: float | None = None,
 ) -> None:
     """Durably bind one logical peer task attempt to its remote run handle."""
-    timestamp = float(now if now is not None else time.time())
+    timestamp = _now(now)
     identity = _remote_run_identity(record)
     with _transaction(db_path, immediate=True) as conn:
         existing = conn.execute(
@@ -1236,9 +1227,7 @@ def _room_from_row(row: sqlite3.Row, *, idempotent: bool = False) -> dict[str, A
     return room
 
 
-def _event_storage_bytes(
-    *, event_id: str, kind: str, actor_json: str, payload_json: str
-) -> int:
+def _event_storage_bytes(event_id: str, kind: str, actor_json: str, payload_json: str) -> int:
     return len((event_id + kind + actor_json + payload_json).encode("utf-8"))
 
 
@@ -1390,7 +1379,7 @@ def prune_disbanded_rooms(
 ) -> int:
     """Purge deleted Group Chat payloads while reserving their identities."""
 
-    timestamp = time.time() if now is None else float(now)
+    timestamp = _now(now)
     with _transaction(db_path, immediate=True) as conn:
         return _prune_disbanded_rooms_locked(conn, now=timestamp)
 
@@ -1421,19 +1410,11 @@ def create_room(
     now: float | None = None,
 ) -> dict[str, Any]:
     """Create a room, or return the identical existing room idempotently."""
-    room_id = _validate_identifier(
-        room_id,
-        label="room_id",
-        max_chars=MAX_ROOM_ID_CHARS,
-    )
+    room_id = _room_id(room_id)
     name = _validate_room_name(name)
     normalized_members, members_json = _validate_members(members)
-    authority_gateway_id = _validate_identifier(
-        authority_gateway_id,
-        label="authority_gateway_id",
-        max_chars=MAX_ACTOR_ID_CHARS,
-    )
-    now = time.time() if now is None else float(now)
+    authority_gateway_id = _actor_id(authority_gateway_id, "authority_gateway_id")
+    now = _now(now)
 
     with _transaction(db_path, immediate=True) as conn:
         if conn.execute(
@@ -1464,32 +1445,10 @@ def create_room(
             if legacy_adoption:
                 target_epoch = int(existing["authority_epoch"]) + 1
                 seq = int(existing["next_seq"])
-                claim_actor_json = _canonical_json(
-                    {"kind": "system", "id": "authority-control"},
-                    label="actor",
-                    max_bytes=4 * 1024,
-                )
-                claim_payload_json = _canonical_json(
-                    {
-                        "previous_gateway_id": "legacy",
-                        "authority_gateway_id": authority_gateway_id,
-                        "authority_epoch": target_epoch,
-                    },
-                    label="payload",
-                    max_bytes=MAX_EVENT_JSON_BYTES,
-                )
-                claim_bytes = _event_storage_bytes(
-                    event_id="system:authority-adopted",
-                    kind="authority.claimed",
-                    actor_json=claim_actor_json,
-                    payload_json=claim_payload_json,
-                )
-                _assert_event_capacity(
-                    conn,
-                    room=existing,
-                    additional_bytes=claim_bytes,
-                    allow_control=True,
-                )
+                claim_actor_json = _system_actor_json("authority-control")
+                claim_payload_json = _claim_payload_json("legacy", authority_gateway_id, target_epoch)
+                claim_bytes = _event_storage_bytes("system:authority-adopted", "authority.claimed", claim_actor_json, claim_payload_json)
+                _assert_event_capacity(conn, room=existing, additional_bytes=claim_bytes, allow_control=True)
                 conn.execute(
                     """INSERT INTO hosted_room_events
                        (room_id, seq, event_id, kind, actor_json,
@@ -1627,19 +1586,11 @@ def rename_room(
     now: float | None = None,
 ) -> dict[str, Any]:
     """Rename a live room and append its replay event atomically."""
-    room_id = _validate_identifier(
-        room_id, label="room_id", max_chars=MAX_ROOM_ID_CHARS
-    )
-    event_id = _validate_identifier(
-        event_id, label="event_id", max_chars=MAX_EVENT_ID_CHARS
-    )
+    room_id = _room_id(room_id)
+    event_id = _event_id(event_id)
     name = _validate_room_name(name)
-    now = time.time() if now is None else float(now)
-    actor_json = _canonical_json(
-        {"kind": "system", "id": "room-control"},
-        label="actor",
-        max_bytes=4 * 1024,
-    )
+    now = _now(now)
+    actor_json = _system_actor_json("room-control")
     payload_json = _canonical_json(
         {"name": name}, label="payload", max_bytes=MAX_EVENT_JSON_BYTES
     )
@@ -1671,12 +1622,7 @@ def rename_room(
             return result
         seq = int(room["next_seq"])
         epoch = int(room["authority_epoch"])
-        event_bytes = _event_storage_bytes(
-            event_id=event_id,
-            kind="room.renamed",
-            actor_json=actor_json,
-            payload_json=payload_json,
-        )
+        event_bytes = _event_storage_bytes(event_id, "room.renamed", actor_json, payload_json)
         _assert_event_capacity(conn, room=room, additional_bytes=event_bytes)
         conn.execute(
             """UPDATE hosted_rooms
@@ -1727,16 +1673,8 @@ def append_event(
     Repeating the same ``event_id`` and immutable content returns the original
     event. Reusing the id for different content fails closed.
     """
-    room_id = _validate_identifier(
-        room_id,
-        label="room_id",
-        max_chars=MAX_ROOM_ID_CHARS,
-    )
-    event_id = _validate_identifier(
-        event_id,
-        label="event_id",
-        max_chars=MAX_EVENT_ID_CHARS,
-    )
+    room_id = _room_id(room_id)
+    event_id = _event_id(event_id)
     kind = _validate_event_kind(kind)
     normalized_actor, actor_json = _validate_actor(actor, kind=kind)
     authority_scoped = normalized_actor["kind"] in {
@@ -1748,22 +1686,13 @@ def append_event(
     normalized_authority_gateway_id: str | None = None
     normalized_authority_epoch: int | None = None
     if authority_scoped:
-        normalized_authority_gateway_id = _validate_identifier(
-            authority_gateway_id,
-            label="authority_gateway_id",
-            max_chars=MAX_ACTOR_ID_CHARS,
-        )
+        normalized_authority_gateway_id = _actor_id(authority_gateway_id, "authority_gateway_id")
         if (
             normalized_actor["kind"] == "gateway"
             and normalized_actor["id"] != normalized_authority_gateway_id
         ):
             raise HostedRoomError("gateway actor.id must match authority_gateway_id")
-        if (
-            isinstance(authority_epoch, bool)
-            or not isinstance(authority_epoch, int)
-            or authority_epoch < 1
-        ):
-            raise HostedRoomError("authority_epoch must be a positive integer")
+        _require_positive_int(authority_epoch, "authority_epoch")
         normalized_authority_epoch = authority_epoch
     elif authority_gateway_id is not None or authority_epoch is not None:
         raise HostedRoomError(
@@ -1771,12 +1700,8 @@ def append_event(
         )
     if not isinstance(payload, dict):
         raise HostedRoomError("payload must be an object")
-    payload_json = _canonical_json(
-        payload,
-        label="payload",
-        max_bytes=MAX_EVENT_JSON_BYTES,
-    )
-    now = time.time() if now is None else float(now)
+    payload_json = _canonical_json(payload, label="payload", max_bytes=MAX_EVENT_JSON_BYTES)
+    now = _now(now)
 
     with _transaction(db_path, immediate=True) as conn:
         existing = conn.execute(
@@ -1811,12 +1736,7 @@ def append_event(
         ):
             raise AuthorityConflictError("stale hosted room authority")
         seq = int(room["next_seq"])
-        event_bytes = _event_storage_bytes(
-            event_id=event_id,
-            kind=kind,
-            actor_json=actor_json,
-            payload_json=payload_json,
-        )
+        event_bytes = _event_storage_bytes(event_id, kind, actor_json, payload_json)
         _assert_event_capacity(
             conn,
             room=room,
@@ -1874,11 +1794,7 @@ def probe_hosted_room(db_path: Path | str, *, room_id: Any) -> bool:
     WebSocket reader for SQLite's normal ten-second timeout.
     """
 
-    checked_room_id = _validate_identifier(
-        room_id,
-        label="room_id",
-        max_chars=MAX_ROOM_ID_CHARS,
-    )
+    checked_room_id = _room_id(room_id)
     path = Path(db_path)
     if not path.is_file():
         return False
@@ -1916,20 +1832,12 @@ def probe_peer_room_reservation(
 ) -> bool:
     """Check a peer reservation without creating or migrating shared state."""
 
-    checked_room_id = _validate_identifier(
-        room_id,
-        label="room_id",
-        max_chars=MAX_ROOM_ID_CHARS,
-    )
-    checked_profile = _validate_identifier(
-        target_profile,
-        label="target_profile",
-        max_chars=MAX_ACTOR_ID_CHARS,
-    )
+    checked_room_id = _room_id(room_id)
+    checked_profile = _actor_id(target_profile, "target_profile")
     path = Path(db_path)
     if not path.is_file():
         return False
-    checked_now = float(now if now is not None else time.time())
+    checked_now = _now(now)
     try:
         conn = sqlite3.connect(path, timeout=0.05)
         try:
@@ -1964,11 +1872,7 @@ def room_state(
     include_disbanded: bool = False,
 ) -> dict[str, Any]:
     """Return durable replay and authority state for one room."""
-    room_id = _validate_identifier(
-        room_id,
-        label="room_id",
-        max_chars=MAX_ROOM_ID_CHARS,
-    )
+    room_id = _room_id(room_id)
     with _transaction(db_path) as conn:
         row = conn.execute(
             """SELECT room_id, name, members_json, authority_gateway_id,
@@ -2006,11 +1910,7 @@ def request_room_stop(
 ) -> dict[str, Any]:
     """Append an idempotent fence that supersedes earlier user turns."""
 
-    cancel_id = _validate_identifier(
-        cancel_id,
-        label="cancel_id",
-        max_chars=MAX_EVENT_ID_CHARS,
-    )
+    cancel_id = _event_id(cancel_id, label="cancel_id")
     digest = hashlib.sha256(cancel_id.encode()).hexdigest()[:32]
     return append_event(
         db_path,
@@ -2040,50 +1940,15 @@ def claim_authority(
     replicated driver must call it only after its lease/quorum policy has
     established that the previous owner can no longer commit.
     """
-    room_id = _validate_identifier(
-        room_id,
-        label="room_id",
-        max_chars=MAX_ROOM_ID_CHARS,
-    )
-    expected_gateway_id = _validate_identifier(
-        expected_gateway_id,
-        label="expected_gateway_id",
-        max_chars=MAX_ACTOR_ID_CHARS,
-    )
-    new_gateway_id = _validate_identifier(
-        new_gateway_id,
-        label="new_gateway_id",
-        max_chars=MAX_ACTOR_ID_CHARS,
-    )
-    event_id = _validate_identifier(
-        event_id,
-        label="event_id",
-        max_chars=MAX_EVENT_ID_CHARS,
-    )
-    if (
-        isinstance(expected_epoch, bool)
-        or not isinstance(expected_epoch, int)
-        or expected_epoch < 1
-    ):
-        raise HostedRoomError("expected_epoch must be a positive integer")
-    now = time.time() if now is None else float(now)
+    room_id = _room_id(room_id)
+    expected_gateway_id = _actor_id(expected_gateway_id, "expected_gateway_id")
+    new_gateway_id = _actor_id(new_gateway_id, "new_gateway_id")
+    event_id = _event_id(event_id)
+    _require_positive_int(expected_epoch, "expected_epoch")
+    now = _now(now)
     target_epoch = expected_epoch + 1
-    claim_actor = {"kind": "system", "id": "authority-control"}
-    claim_actor_json = _canonical_json(
-        claim_actor,
-        label="actor",
-        max_bytes=4 * 1024,
-    )
-    claim_payload = {
-        "previous_gateway_id": expected_gateway_id,
-        "authority_gateway_id": new_gateway_id,
-        "authority_epoch": target_epoch,
-    }
-    claim_payload_json = _canonical_json(
-        claim_payload,
-        label="payload",
-        max_bytes=MAX_EVENT_JSON_BYTES,
-    )
+    claim_actor_json = _system_actor_json("authority-control")
+    claim_payload_json = _claim_payload_json(expected_gateway_id, new_gateway_id, target_epoch)
 
     with _transaction(db_path, immediate=True) as conn:
         row = conn.execute(
@@ -2121,18 +1986,8 @@ def claim_authority(
             raise AuthorityConflictError("hosted room authority changed")
         else:
             seq = int(row["next_seq"])
-            claim_bytes = _event_storage_bytes(
-                event_id=event_id,
-                kind="authority.claimed",
-                actor_json=claim_actor_json,
-                payload_json=claim_payload_json,
-            )
-            _assert_event_capacity(
-                conn,
-                room=row,
-                additional_bytes=claim_bytes,
-                allow_control=True,
-            )
+            claim_bytes = _event_storage_bytes(event_id, "authority.claimed", claim_actor_json, claim_payload_json)
+            _assert_event_capacity(conn, room=row, additional_bytes=claim_bytes, allow_control=True)
             conn.execute(
                 """INSERT INTO hosted_room_events
                    (room_id, seq, event_id, kind, actor_json, authority_epoch,
@@ -2201,23 +2056,10 @@ def disband_room(
     now: float | None = None,
 ) -> dict[str, Any]:
     """Tombstone a room id permanently and idempotently."""
-    room_id = _validate_identifier(
-        room_id,
-        label="room_id",
-        max_chars=MAX_ROOM_ID_CHARS,
-    )
-    expected_gateway_id = _validate_identifier(
-        expected_gateway_id,
-        label="expected_gateway_id",
-        max_chars=MAX_ACTOR_ID_CHARS,
-    )
-    if (
-        isinstance(expected_epoch, bool)
-        or not isinstance(expected_epoch, int)
-        or expected_epoch < 1
-    ):
-        raise HostedRoomError("expected_epoch must be a positive integer")
-    now = time.time() if now is None else float(now)
+    room_id = _room_id(room_id)
+    expected_gateway_id = _actor_id(expected_gateway_id, "expected_gateway_id")
+    _require_positive_int(expected_epoch, "expected_epoch")
+    now = _now(now)
 
     with _transaction(db_path, immediate=True) as conn:
         room = conn.execute(
@@ -2268,28 +2110,14 @@ def disband_room(
         ):
             raise AuthorityConflictError("stale hosted room authority")
         seq = int(room["next_seq"])
-        actor_json = _canonical_json(
-            {"kind": "system", "id": "room-control"},
-            label="actor",
-            max_bytes=4 * 1024,
-        )
+        actor_json = _system_actor_json("room-control")
         payload_json = _canonical_json(
             {"room_id": room_id},
             label="payload",
             max_bytes=MAX_EVENT_JSON_BYTES,
         )
-        disband_bytes = _event_storage_bytes(
-            event_id="system:room-disbanded",
-            kind="room.disbanded",
-            actor_json=actor_json,
-            payload_json=payload_json,
-        )
-        _assert_event_capacity(
-            conn,
-            room=room,
-            additional_bytes=disband_bytes,
-            allow_control=True,
-        )
+        disband_bytes = _event_storage_bytes("system:room-disbanded", "room.disbanded", actor_json, payload_json)
+        _assert_event_capacity(conn, room=room, additional_bytes=disband_bytes, allow_control=True)
         conn.execute(
             """INSERT INTO hosted_room_events
                (room_id, seq, event_id, kind, actor_json, authority_epoch,
@@ -2357,11 +2185,7 @@ def read_events(
     include_disbanded: bool = False,
 ) -> dict[str, Any]:
     """Read a monotonic room-log delta after ``since_seq``."""
-    room_id = _validate_identifier(
-        room_id,
-        label="room_id",
-        max_chars=MAX_ROOM_ID_CHARS,
-    )
+    room_id = _room_id(room_id)
     if isinstance(since_seq, bool) or not isinstance(since_seq, int) or since_seq < 0:
         raise HostedRoomError("since_seq must be a non-negative integer")
     if (

@@ -22,7 +22,7 @@ class _Unavailable:
 
 
 class _HealthSource:
-    pass
+    """Weak-keyable identity for one cache's health entries."""
 
 
 _health_lock = threading.Lock()
@@ -32,29 +32,26 @@ _health_states: weakref.WeakKeyDictionary[_HealthSource, dict[Path, str]] = (
 
 
 def _publish_health(source: _HealthSource, path: Path, state: str) -> None:
-    """Publish one privacy-safe aggregate for every live gateway DB cache."""
+    """Publish one privacy-safe aggregate (no paths, no errors) across all live caches."""
     with _health_lock:
-        states = _health_states.setdefault(source, {})
-        states[path] = state
-        all_states = [value for item in _health_states.values() for value in item.values()]
-        if "retrying" in all_states:
-            aggregate = "retrying"
-        elif "unavailable" in all_states:
-            aggregate = "unavailable"
-        else:
-            aggregate = "ok"
-
+        _health_states.setdefault(source, {})[path] = state
+        all_states = {value for item in _health_states.values() for value in item.values()}
+        aggregate = next((s for s in ("retrying", "unavailable") if s in all_states), "ok")
     try:
         from gateway.status import write_runtime_status
 
         write_runtime_status(session_store={"status": aggregate})
     except Exception:
-        # Runtime health is diagnostic only; persistence must not depend on it.
-        pass
+        pass  # Runtime health is diagnostic only; persistence must not depend on it.
 
 
 class RecoverableHandleCache:
-    """Cache handles by path while allowing failed opens to heal in-process."""
+    """Cache handles by path while allowing failed opens to heal in-process.
+
+    Opens run OUTSIDE ``lock`` (single-flight per path via ``in_flight``); a
+    ``close_all`` bumps ``_generation`` so any open that completes afterwards is
+    treated as stale and rejected rather than resurrecting a drained cache.
+    """
 
     def __init__(
         self,
@@ -69,13 +66,15 @@ class RecoverableHandleCache:
         self.lock = lock if lock is not None else threading.Lock()
         self._clock = clock
         self._initial_retry_delay = max(0.0, float(initial_retry_delay))
-        self._max_retry_delay = max(
-            self._initial_retry_delay, float(max_retry_delay)
-        )
+        self._max_retry_delay = max(self._initial_retry_delay, float(max_retry_delay))
         self._unavailable: dict[Path, _Unavailable] = {}
         self._health_source = _HealthSource()
         self._generation = 0
         self._close_rejected: Callable[[Any], None] | None = None
+
+    def _is_stale(self, path: Path, unavailable: _Unavailable, generation: int) -> bool:
+        """Caller holds ``lock``: True when close_all ran or the slot was replaced mid-open."""
+        return generation != self._generation or self._unavailable.get(path) is not unavailable
 
     def get(
         self,
@@ -86,15 +85,18 @@ class RecoverableHandleCache:
         on_recovered: Callable[[], None] | None = None,
         non_cacheable: Callable[[Exception], bool] | None = None,
     ) -> Any:
-        """Return a cached handle or make one bounded, single-flight open attempt."""
+        """Return a cached handle or make one bounded, single-flight open attempt.
+
+        Returns None while a retry is in flight or backing off (callers fall back).
+        ``non_cacheable`` exceptions (e.g. a live-system guard) are re-raised
+        without recording a failure so the next call retries immediately.
+        """
         path = Path(path)
         with self.lock:
             if path in self.handles:
                 return self.handles[path]
-
             unavailable = self._unavailable.setdefault(path, _Unavailable())
-            now = self._clock()
-            if unavailable.in_flight or now < unavailable.next_retry_at:
+            if unavailable.in_flight or self._clock() < unavailable.next_retry_at:
                 return None
             unavailable.in_flight = True
             was_unavailable = unavailable.failures > 0
@@ -106,46 +108,33 @@ class RecoverableHandleCache:
         try:
             handle = opener()
         except Exception as exc:
-            if non_cacheable is not None and non_cacheable(exc):
-                with self.lock:
-                    if (
-                        generation == self._generation
-                        and self._unavailable.get(path) is unavailable
-                    ):
-                        self._unavailable.pop(path, None)
-                raise
+            uncacheable = non_cacheable is not None and non_cacheable(exc)
             with self.lock:
-                current = self._unavailable.get(path)
-                stale = generation != self._generation or current is not unavailable
+                stale = self._is_stale(path, unavailable, generation)
+                if uncacheable:
+                    if not stale:
+                        self._unavailable.pop(path, None)
+                    raise
                 if not stale:
                     unavailable.failures += 1
                     delay = min(
-                        self._initial_retry_delay
-                        * (2 ** min(unavailable.failures - 1, 30)),
+                        self._initial_retry_delay * (2 ** min(unavailable.failures - 1, 30)),
                         self._max_retry_delay,
                     )
                     unavailable.next_retry_at = self._clock() + delay
                     unavailable.in_flight = False
-            if stale:
-                if raise_on_error:
-                    raise
-                return None
-            _publish_health(self._health_source, path, "unavailable")
+            if not stale:
+                _publish_health(self._health_source, path, "unavailable")
             if raise_on_error:
                 raise
             return None
 
         with self.lock:
-            stale = (
-                generation != self._generation
-                or self._unavailable.get(path) is not unavailable
-            )
-            if stale:
-                close_rejected = self._close_rejected
-            else:
+            stale = self._is_stale(path, unavailable, generation)
+            if not stale:
                 self.handles[path] = handle
                 self._unavailable.pop(path, None)
-                close_rejected = None
+            close_rejected = self._close_rejected if stale else None
         if stale:
             if close_rejected is not None:
                 try:
@@ -177,13 +166,3 @@ class RecoverableHandleCache:
             if states is not None:
                 for path in paths:
                     states.pop(path, None)
-
-    def status_for(self, path: Path) -> str:
-        """Return a sanitized state for tests and internal diagnostics."""
-        with self.lock:
-            if Path(path) in self.handles:
-                return "ok"
-            unavailable = self._unavailable.get(Path(path))
-            if unavailable is None:
-                return "unknown"
-            return "retrying" if unavailable.in_flight else "unavailable"
