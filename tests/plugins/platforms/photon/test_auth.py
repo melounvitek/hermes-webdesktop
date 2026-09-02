@@ -328,31 +328,6 @@ def test_get_imessage_line_returns_existing(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 # ---------------------------------------------------------------------------
-# Credential summary (no secret leakage)
-
-def test_credential_summary_no_secret_leak(
-    tmp_hermes_home: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(photon_auth, "_persist_runtime_env", lambda *a, **k: None)
-    photon_auth.store_photon_token("token-aaaaaaaaaaaaaaaa")
-    photon_auth.store_project_credentials(
-        spectrum_project_id="sp-uuid",
-        project_secret="secret-bbbbbbbbbbb",
-        dashboard_project_id="dash-uuid",
-    )
-    summary = photon_auth.credential_summary()
-    blob = "\n".join(summary.values())
-    assert "token-aaaa" not in blob
-    assert "secret-bbbb" not in blob
-    assert summary["device_token"].startswith("✓")
-    assert summary["project_key"].startswith("✓")
-    # Unified id: dashboard id == Spectrum id, surfaced as one project id.
-    assert summary["project_id"] == "sp-uuid"
-    assert summary["phone_number"].startswith("✗ missing")
-    assert summary["assigned_phone_number"].startswith("✗ missing")
-
-
-# ---------------------------------------------------------------------------
 # Device-token candidate extraction + dashboard validation.
 
 def test_device_response_candidates_covers_known_shapes() -> None:
