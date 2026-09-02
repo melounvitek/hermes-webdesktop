@@ -556,8 +556,6 @@ TOOLSETS = {
 }
 
 
-
-
 def _registry():
     """Live tool registry, or None when tools.registry can't be imported."""
     try:
@@ -707,14 +705,6 @@ def resolve_toolset(name: str, visited: Set[str] = None, *, include_registry: bo
     return result
 
 
-def resolve_multiple_toolsets(toolset_names: List[str]) -> List[str]:
-    """Union of resolve_toolset() over several names, sorted."""
-    all_tools = set()
-    for name in toolset_names:
-        all_tools.update(resolve_toolset(name))
-    return sorted(all_tools)
-
-
 def _get_plugin_toolset_names() -> Set[str]:
     """Registry toolset names absent from the static TOOLSETS dict."""
     registry = _registry()
@@ -802,42 +792,3 @@ def get_toolset_info(name: str) -> Dict[str, Any]:
         "tool_count": len(resolved_tools),
         "is_composite": bool(toolset["includes"])
     }
-
-
-if __name__ == "__main__":
-    print("Toolsets System Demo")
-    print("=" * 60)
-
-    print("\nAvailable Toolsets:")
-    print("-" * 40)
-    for name, toolset in get_all_toolsets().items():
-        info = get_toolset_info(name)
-        composite = "[composite]" if info["is_composite"] else "[leaf]"
-        print(f"  {composite} {name:20} - {toolset['description']}")
-        print(f"     Tools: {len(info['resolved_tools'])} total")
-
-    print("\nToolset Resolution Examples:")
-    print("-" * 40)
-    for name in ["web", "terminal", "safe", "debugging"]:
-        tools = resolve_toolset(name)
-        print(f"\n  {name}:")
-        print(f"    Resolved to {len(tools)} tools: {', '.join(sorted(tools))}")
-
-    print("\nMultiple Toolset Resolution:")
-    print("-" * 40)
-    combined = resolve_multiple_toolsets(["web", "vision", "terminal"])
-    print("  Combining ['web', 'vision', 'terminal']:")
-    print(f"    Result: {', '.join(sorted(combined))}")
-
-    print("\nCustom Toolset Creation:")
-    print("-" * 40)
-    create_custom_toolset(
-        name="my_custom",
-        description="My custom toolset for specific tasks",
-        tools=["web_search"],
-        includes=["terminal", "vision"]
-    )
-    custom_info = get_toolset_info("my_custom")
-    print("  Created 'my_custom' toolset:")
-    print(f"    Description: {custom_info['description']}")
-    print(f"    Resolved tools: {', '.join(custom_info['resolved_tools'])}")
