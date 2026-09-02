@@ -1761,6 +1761,24 @@ def interruptible_api_call(agent, api_kwargs: dict):
     _call_start = time.time()
     agent._touch_activity("waiting for non-streaming API response")
 
+    def _abort_request(reason: str) -> None:
+        """Watchdog/interrupt kill: abort the request client and retire the codex
+        token; the worker sees its own forced close via the cancel flags."""
+        try:
+            # #67142: routes by client kind — anthropic aborts the request-local
+            # client's sockets from this poll (stranger) thread instead of
+            # closing the shared _anthropic_client.
+            _clients.close_once(reason)
+        except Exception:
+            pass
+        _retire_codex_request_token()
+
+    def _await_worker_after_kill(timeout_message: str) -> None:
+        # Wait briefly for the worker to notice the closed connection.
+        t.join(timeout=2.0)
+        if result["error"] is None and result["response"] is None:
+            result["error"] = TimeoutError(timeout_message)
+
     t = threading.Thread(target=_context_thread_target(_call), daemon=True)
     t.start()
     _poll_count = 0
@@ -1828,11 +1846,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
                     f"Reconnecting."
                 )
-            try:
-                _clients.close_once("codex_ttfb_kill")
-            except Exception:
-                pass
-            _retire_codex_request_token()
+            _abort_request("codex_ttfb_kill")
             agent._emit_wait_notice(
                 f"⚠ no response from provider in {int(_elapsed)}s — "
                 f"reconnecting..."
@@ -1840,19 +1854,11 @@ def interruptible_api_call(agent, api_kwargs: dict):
             agent._touch_activity(
                 f"codex stream killed after {int(_elapsed)}s with no first byte"
             )
-            # Wait briefly for the worker to notice the closed connection.
-            t.join(timeout=2.0)
-            if result["error"] is None and result["response"] is None:
-                if _silent_hint:
-                    result["error"] = TimeoutError(
-                        f"Codex stream produced no bytes within {int(_elapsed)}s "
-                        f"(TTFB threshold: {int(_ttfb_timeout)}s). {_silent_hint}"
-                    )
-                else:
-                    result["error"] = TimeoutError(
-                        f"Codex stream produced no bytes within {int(_elapsed)}s "
-                        f"(TTFB threshold: {int(_ttfb_timeout)}s)"
-                    )
+            _await_worker_after_kill(
+                f"Codex stream produced no bytes within {int(_elapsed)}s "
+                f"(TTFB threshold: {int(_ttfb_timeout)}s)"
+                + (f". {_silent_hint}" if _silent_hint else "")
+            )
             break
 
         # Stream-idle detector: the Codex backend emitted at least one SSE
@@ -1879,20 +1885,14 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 f"after first byte (model: {api_kwargs.get('model', 'unknown')}). "
                 f"Reconnecting."
             )
-            try:
-                _clients.close_once("codex_stream_idle_kill")
-            except Exception:
-                pass
-            _retire_codex_request_token()
+            _abort_request("codex_stream_idle_kill")
             agent._touch_activity(
                 f"codex stream killed after {int(_event_stale_elapsed)}s with no SSE events"
             )
-            t.join(timeout=2.0)
-            if result["error"] is None and result["response"] is None:
-                result["error"] = TimeoutError(
-                    f"Codex stream produced no SSE events for {int(_event_stale_elapsed)}s "
-                    f"after first byte (threshold: {int(_codex_idle_timeout)}s)"
-                )
+            _await_worker_after_kill(
+                f"Codex stream produced no SSE events for {int(_event_stale_elapsed)}s "
+                f"after first byte (threshold: {int(_codex_idle_timeout)}s)"
+            )
             break
 
         # Stale-call detector: kill the connection if no response
@@ -1902,32 +1902,16 @@ def interruptible_api_call(agent, api_kwargs: dict):
             _report_stale_nonstream_kill(
                 agent, api_kwargs, _elapsed, _stale_timeout, hint=_silent_hint
             )
-            try:
-                # #67142: routes by client kind — anthropic now aborts the
-                # request-local client's sockets from this poll (stranger)
-                # thread instead of closing the shared _anthropic_client.
-                _clients.close_once("stale_call_kill")
-            except Exception:
-                pass
-            _retire_codex_request_token()
+            _abort_request("stale_call_kill")
             # Circuit breaker (#58962): count the stale kill.  See the
             # canonical comment block above ``_stale_streak()``.
             _bump_stale_streak(agent)
             _touch_stale_kill_activity(agent, _elapsed)
-            # Wait briefly for the thread to notice the closed connection.
-            t.join(timeout=2.0)
-            if result["error"] is None and result["response"] is None:
-                if _silent_hint:
-                    result["error"] = TimeoutError(
-                        f"Non-streaming API call timed out after {int(_elapsed)}s "
-                        f"with no response (threshold: {int(_stale_timeout)}s). "
-                        f"{_silent_hint}"
-                    )
-                else:
-                    result["error"] = TimeoutError(
-                        f"Non-streaming API call timed out after {int(_elapsed)}s "
-                        f"with no response (threshold: {int(_stale_timeout)}s)"
-                    )
+            _await_worker_after_kill(
+                f"Non-streaming API call timed out after {int(_elapsed)}s "
+                f"with no response (threshold: {int(_stale_timeout)}s)"
+                + (f". {_silent_hint}" if _silent_hint else "")
+            )
             break
 
         if agent._interrupt_requested:
@@ -1953,11 +1937,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
             # request-local client's sockets from this poll (stranger) thread
             # rather than closing the shared _anthropic_client, which could
             # release a TLS FD mid-SSL-BIO and corrupt an unrelated SQLite DB.
-            try:
-                _clients.close_once("interrupt_abort")
-            except Exception:
-                pass
-            _retire_codex_request_token()
+            _abort_request("interrupt_abort")
             # #81521 (sibling of the streaming-path fix): wait for the worker
             # to unwind Relay-managed scopes before surfacing
             # InterruptedError, so turn teardown cannot race a still-open
