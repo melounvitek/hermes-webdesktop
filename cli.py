@@ -223,11 +223,6 @@ _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_constants import get_hermes_home, display_hermes_home
-from hermes_cli.browser_connect import (
-    DEFAULT_BROWSER_CDP_URL,
-    is_browser_debug_ready,
-    manual_chrome_debug_command,
-)
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import base_url_host_matches, base_url_hostname, fast_safe_load
 
@@ -1291,9 +1286,7 @@ def _should_emit_cleanup_session_finalize(session_id: str | None) -> bool:
         return True
     if session_id is None:
         return False
-    if session_id in _single_query_finalize_attempted_session_ids:
-        return False
-    return True
+    return session_id not in _single_query_finalize_attempted_session_ids
 
 
 def _notify_session_finalize(
@@ -1849,10 +1842,7 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
 
     if name:
         safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-._")[:40]
-        if safe:
-            wt_name = safe
-        else:
-            wt_name = f"hermes-{uuid.uuid4().hex[:8]}"
+        wt_name = safe or f"hermes-{uuid.uuid4().hex[:8]}"
     else:
         wt_name = f"hermes-{uuid.uuid4().hex[:8]}"
     branch_name = f"hermes/{wt_name}"
@@ -4227,9 +4217,8 @@ def _hermes_call_output_screen_diff(
        the event loop with ``'cell' object has no attribute 'char'``.
     """
     try:
-        if previous_screen is not None and hasattr(previous_screen, "height"):
-            if previous_screen.height < screen.height:
-                previous_screen.height = screen.height
+        if previous_screen is not None and hasattr(previous_screen, "height") and previous_screen.height < screen.height:
+            previous_screen.height = screen.height
     except Exception:
         pass
 
@@ -4414,9 +4403,7 @@ def _terminal_supports_extended_enter_keys(env: Optional[Mapping[str, str]] = No
         return True
     if term == "xterm-ghostty":
         return True
-    if term.startswith("tmux") or term_program.lower() == "tmux":
-        return True
-    return False
+    return term.startswith("tmux") or term_program.lower() == "tmux"
 
 
 def _enable_extended_enter_keys(output=None, env: Optional[Mapping[str, str]] = None) -> bool:
@@ -7102,9 +7089,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         agent = getattr(self, "agent", None)
         if agent is not None and getattr(agent, "quiet_mode", False):
             return False
-        if not getattr(self, "_interactive_turn", False):
-            return False
-        return True
+        return bool(getattr(self, "_interactive_turn", False))
 
     def _turn_summary_begin(self) -> None:
         """Start per-turn accounting for the turn that is about to run."""
@@ -9771,10 +9756,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             model_short = model_short[:27] + "..."
 
         # Get API status indicator
-        if self.api_key:
-            api_indicator = "[green bold]●[/]"
-        else:
-            api_indicator = "[red bold]●[/]"
+        api_indicator = "[green bold]●[/]" if self.api_key else "[red bold]●[/]"
 
         # Build status line with proper markup — skin-aware colors
         try:
@@ -14594,6 +14576,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
     def _confirm_and_reload_mcp(self, cmd_original: str = "") -> None:
         """Interactive /reload-mcp — confirm with the user, then reload.
 
+        The auto-reload path (config file watcher) calls ``_reload_mcp``
+        directly and never goes through this confirmation.
+
         Reloading MCP tools invalidates the provider prompt cache for the
         active session (tool schemas are baked into the system prompt).
         The next message re-sends full input tokens — can be expensive on
@@ -16633,10 +16618,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 num_prefix = '0'
             else:
                 num_prefix = ' '  # No number for items beyond 10th
-            if i == selected:
-                prefix = f'❯ {num_prefix}. '
-            else:
-                prefix = f'  {num_prefix}. '
+            prefix = f'❯ {num_prefix}. ' if i == selected else f'  {num_prefix}. '
             for wrapped in _wrap_panel_text(f"{prefix}{label}", inner_text_width, subsequent_indent="    "):
                 choice_wrapped.append((i, wrapped))
 
@@ -19560,13 +19542,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         """
         self._force_full_redraw()
 
-    def _tui_handle_alt_enter(self, event):
-        """Alt+Enter inserts a newline for multi-line input.
+    def _tui_insert_newline(self, event):
+        """Insert a newline for multi-line input (Alt+Enter, and Ctrl+J/Ctrl+Enter
+        when multiline shortcuts are on).
 
-        Works on mac/Linux/WSL. On Windows Terminal this keystroke is
-        intercepted at the terminal layer (toggles fullscreen) and never
-        reaches here — Windows users get newline via Ctrl+Enter instead
-        (bound below as c-j, since WT delivers Ctrl+Enter as LF).
+        Alt+Enter works on mac/Linux/WSL. On Windows Terminal that keystroke is
+        intercepted at the terminal layer (toggles fullscreen) and never reaches
+        here — Windows users get newline via Ctrl+Enter, which WT delivers as c-j.
         """
         event.current_buffer.insert_text('\n')
 
@@ -20329,9 +20311,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         # If resuming a session, load history and display it immediately
         # so the user has context before typing their first message.
-        if self._resumed:
-            if self._preload_resumed_session():
-                self._display_resumed_history()
+        if self._resumed and self._preload_resumed_session():
+            self._display_resumed_history()
 
         try:
             from hermes_cli.skin_engine import get_active_skin
@@ -20573,21 +20554,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             multiline_shortcuts_enabled=_multiline_shortcuts_enabled,
         )
 
-        kb.add('escape', 'enter')(self._tui_handle_alt_enter)
+        kb.add('escape', 'enter')(self._tui_insert_newline)
 
+        # Ctrl+J inserts a newline (matches Claude Code / Codex / OpenCode).
+        # Windows Terminal delivers Ctrl+Enter as the same c-j code, so this
+        # covers Ctrl+Enter there. display.cli_multiline_shortcuts: false
+        # restores legacy c-j submit on unusual POSIX PTYs where Enter is LF.
         if _multiline_shortcuts_enabled or _preserve_ctrl_enter_newline():
-            @kb.add('c-j')
-            def handle_ctrl_enter_newline(event):
-                """Ctrl+J inserts a newline for multi-line input.
-
-                This is enabled by default to match Claude Code / Codex /
-                OpenCode behavior. On Windows Terminal and similar environments,
-                Ctrl+Enter is delivered as the same c-j key code, so this also
-                covers Ctrl+Enter there. Set display.cli_multiline_shortcuts:
-                false to restore legacy c-j submit behavior on unusual POSIX
-                PTYs where plain Enter arrives as LF.
-                """
-                event.current_buffer.insert_text('\n')
+            kb.add('c-j')(self._tui_insert_newline)
 
         # VSCode/Cursor bind Ctrl+G to "Find Next" at the editor level, so
         # the keystroke never reaches the embedded terminal. Alt+G is unbound
