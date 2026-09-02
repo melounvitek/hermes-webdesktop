@@ -2993,9 +2993,7 @@ class SessionDB(
                 self._delete_unreferenced_system_prompts(conn)
             if parent_session_id:
                 self._inherit_parent_session_metadata(conn, session_id)
-        # Session-row creation is transcript-critical: if it fails, the
-        # first flush of a new session fails and the turn is aborted as
-        # session_persistence_failed. Ride out long sibling holds.
+        # Transcript-critical: a failed row creation aborts the turn. Ride out long holds.
         self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
@@ -3005,21 +3003,15 @@ class SessionDB(
 
 
     def set_expiry_finalized(self, session_id: str, finalized: bool = True) -> None:
-        """Mark a gateway session's expiry-finalization flag in state.db.
-
-        Mirrors ``SessionEntry.expiry_finalized`` (sessions.json) so the flag
-        survives even if the JSON index is pruned or lost (#9006).
-        """
+        """Mirror ``SessionEntry.expiry_finalized`` so it survives a lost sessions.json."""
         if not session_id:
             return
-
         self._write_sql(
             "UPDATE sessions SET expiry_finalized = ? WHERE id = ?",
             (1 if finalized else 0, session_id),
         )
 
-    # ── Gateway routing index (replaces sessions.json, #9006 follow-up) ────
-
+    # ── Gateway routing index (replaces sessions.json) ────
 
     def find_session_by_origin(
         self,
@@ -3029,14 +3021,10 @@ class SessionDB(
         thread_id: Optional[str] = None,
         user_id: Optional[str] = None,
     ) -> Optional[str]:
-        """Find the most recent live session_id for a platform + chat origin.
-
-        Equivalent of gateway/mirror's sessions.json scan: matches on
-        source + chat_id (+ thread_id when provided).  When ``user_id`` is
-        provided, exact sender matches are preferred; if multiple distinct
-        users share the chat and none matches, returns None rather than
-        contaminating another participant's session.
-        """
+        """Most recent live session_id for source + chat_id (+ thread_id). With
+        ``user_id``, exact sender matches win; if several distinct users share
+        the chat and none matches, None rather than contaminating another
+        participant's session."""
         if not platform or chat_id in (None, ""):
             return None
         query = """
@@ -3071,32 +3059,21 @@ class SessionDB(
         return str(rows[0]["id"])
 
 
-    # ── Orphaned gateway-session repair (#82616) ──────────────────────────
-    # A write-path failure (corrupt FTS, crash between routing publication
-    # and row creation) can leave the live conversation in a session row
-    # that never received its identity columns. Both queries above require
-    # those columns, so the row holding the real transcript is invisible to
-    # recovery: the chat resolves to the last keyed row instead — days older
-    # — and the conversation time-travels. Hardening the write side cannot
-    # reach a row that is *already* damaged; these two methods are the
-    # offline repair path behind ``hermes sessions repair-routing``.
-
-    # Widest plausible gap between a keyed predecessor going quiet and its
-    # unkeyed successor being minted. The reported incident gap was ~60s;
-    # 15 minutes stays generous without spanning unrelated conversations.
+    # ── Orphaned gateway-session repair (``hermes sessions repair-routing``) ──
+    # A write-path failure between routing publication and row creation leaves
+    # the live transcript in a row without identity columns, invisible to
+    # recovery (the chat resolves to a days-older keyed row). Widest plausible
+    # gap between a keyed predecessor going quiet and its unkeyed successor:
+    # the reported incident was ~60s; 15 minutes stays generous without
+    # spanning unrelated conversations.
     _ORPHAN_ADOPTION_MAX_GAP_S = 900.0
 
-
-    # Children that carry a ``parent_session_id`` but are NOT compression
-    # continuations: branches, delegate/subagent runs, and tool sessions.
-    # A marker only disqualifies a child when it points at the parent being
-    # queried — compression continuations inherit the rotated agent's
-    # ``model_config`` verbatim (``publish_compression_child`` callers pass
-    # ``agent._session_init_model_config``), so a delegate subagent's
-    # continuation carries ``_delegate_from=<the delegate's own parent>``.
-    # Matching markers by mere presence misclassified those real
-    # continuations as delegate children (fail-open for orphan reopen,
-    # fail-closed for adoption). Bind the parent id for both markers.
+    # Children with a ``parent_session_id`` that are NOT compression
+    # continuations (branches, delegate runs, tool sessions). Markers are bound
+    # to the queried parent id: compression continuations inherit the rotated
+    # agent's model_config verbatim, so a delegate's continuation carries
+    # ``_delegate_from=<the delegate's own parent>`` and presence-matching
+    # misclassified real continuations as delegate children.
     _NON_CONTINUATION_CHILD_FILTER_SQL = (
         "  AND COALESCE(json_extract(COALESCE({alias}model_config, '{{}}'),"
         " '$._branched_from'), '') != ?\n"
@@ -3105,40 +3082,29 @@ class SessionDB(
         "  AND COALESCE({alias}source, '') != 'tool'\n"
     )
 
-
     def end_session(self, session_id: str, end_reason: str) -> None:
-        """Mark a session as ended.
-
-        No-ops when the session is already ended. The first end_reason wins:
-        compression-split sessions must keep their ``end_reason = 'compression'``
-        record even if a later stale ``end_session()`` call (e.g. from a
-        desynced CLI session_id after ``/resume`` or ``/branch``) targets them
-        with a different reason. Use ``reopen_session()`` first if you
-        intentionally need to re-end a closed session with a new reason.
-        """
+        """Mark a session ended. The first end_reason wins (no-op when already
+        ended): a compression split must keep ``'compression'`` even if a stale
+        desynced-CLI end_session() targets it later. reopen_session() first to
+        deliberately re-end with a new reason."""
         def _do(conn):
             changed = conn.execute(
                 "UPDATE sessions SET ended_at = ?, end_reason = ? "
                 "WHERE id = ? AND ended_at IS NULL",
                 (time.time(), end_reason, session_id),
             ).rowcount
-            # Only a boundary this call actually wrote advances the generation:
-            # the first end_reason wins, so a no-op must not rotate the peer.
+            # Only a boundary this call wrote advances the generation (a no-op must not rotate the peer).
             if changed:
                 self._bump_conversation_generation(conn, session_id, end_reason)
         self._execute_write(_do)
 
     def reopen_session(self, session_id: str) -> None:
-        """Clear ended_at/end_reason so a session can be resumed.
-
-        Before clearing a reset boundary, stabilize markerless legacy reset
-        children that still depend on the parent's mutable end_reason.
-        """
+        """Clear ended_at/end_reason so a session can be resumed. First stamp
+        markerless legacy reset children that depend on the parent's mutable
+        end_reason (WHERE shared with the listing predicate via
+        _legacy_reset_child_sql so the two cannot drift)."""
         def _do(conn):
             placeholders = ",".join("?" for _ in _RESET_END_REASONS)
-            # WHERE shape shared with _RESET_CHILD_SQL's fallback arm via
-            # _legacy_reset_child_sql so the stamping and the listing
-            # predicate cannot drift.
             conn.execute(
                 "UPDATE sessions AS child SET model_config = json_set("
                 "COALESCE(child.model_config, '{}'), '$._reset_from', "
@@ -3156,32 +3122,17 @@ class SessionDB(
         self._execute_write(_do)
 
     def promote_to_session_reset(self, session_id: str, reason: str = "session_reset") -> bool:
-        """Durably mark a session as ended by an intentional reset boundary.
+        """Durably mark a session ended by an intentional reset boundary.
 
-        Promotes *only* live rows (``ended_at IS NULL``) or rows carrying an
-        accidental end_reason that the recovery query
-        (``find_latest_gateway_session_for_peer``) treats as recoverable:
-        ``agent_close`` (older gateway cleanup bug) and ``ws_orphan_reap``
-        (mistaken TUI reaper).  Explicit conversation boundaries such as
-        ``compression``, ``session_reset``, ``session_switch``, etc. are
-        preserved — the first writer wins for those, and a later expiry
-        finalization must not silently overwrite them.
-
-        Plain ``end_session()`` is NOT sufficient for reset boundaries: it
-        no-ops on an already-ended row, so a row that agent cleanup already
-        closed as ``agent_close`` would stay recoverable and stale-route
-        recovery would resurrect the reset session with its full history
-        (#61220, #61993, #63539).
-
-        Keep this promotion set in sync with the recoverable set in
-        ``find_latest_gateway_session_for_peer`` — any reason recovery would
-        reopen must be promotable here.
-
-        ``reason`` lets reset paths keep their auditable specific reasons
-        (``idle``, ``daily``, ``suspended``, ``resume_pending_expired``).
-
-        Returns ``True`` when the row was promoted, ``False`` when skipped
-        (already has a different explicit end_reason, or row not found).
+        Promotes only live rows or rows carrying a *recoverable* accidental
+        end_reason (``agent_close``, ``ws_orphan_reap``); explicit boundaries
+        (compression, session_reset, ...) are preserved — first writer wins.
+        Plain end_session() is not enough: it no-ops on an already-ended row,
+        so an ``agent_close`` row would stay recoverable and stale-route
+        recovery would resurrect the reset session with its full history. Keep
+        the promotion set in sync with find_latest_gateway_session_for_peer.
+        ``reason`` keeps reset paths auditable (idle, daily, suspended, ...).
+        True when promoted, False when skipped or missing.
         """
         if not session_id:
             return False
@@ -3194,9 +3145,8 @@ class SessionDB(
                 f"OR end_reason IN ({_RECOVERABLE_END_REASONS_SQL}))",
                 (now, reason, session_id),
             )
-            # /new and the policy auto-resets promote rather than end_session,
-            # so the generation has to advance here too — in the same
-            # transaction as the boundary, and only when one was written.
+            # /new and policy auto-resets promote rather than end_session, so the
+            # generation advances here too — same transaction, only when written.
             if cursor.rowcount:
                 self._bump_conversation_generation(conn, session_id, reason)
             return cursor.rowcount
@@ -3216,29 +3166,17 @@ class SessionDB(
     ) -> Optional[int]:
         """Persist the authoritative cwd and claim a Git metadata generation.
 
-        ``git_branch`` records the git branch checked out in ``cwd`` at the time
-        the session started/resumed. The sidebar groups main-checkout sessions
-        by this so feature-branch work doesn't pile under a single "main" row
-        (the main checkout's *current* branch is transient and would
-        misattribute past sessions).
-
-        ``git_repo_root`` records the git repo this cwd belongs to — the
-        authoritative project key. Resolving it here, at the lowest level, means
-        every surface reads the same membership instead of re-probing git in the
-        GUI over a partial page. Each field is only written when non-empty so a
-        probe failure never clobbers a previously-captured value.
-
-        ``replace_git_meta`` inverts that non-empty rule: a deliberate workspace
-        MOVE (re-homing a session into another project) must overwrite the old
-        repo identity even when the new cwd resolves to none — keeping the stale
-        root would leave the session grouped under the project it just left.
-
-        Every call increments ``git_metadata_generation`` in the same write
-        transaction. Async Git probes must publish through
-        :meth:`publish_session_git_metadata` with the returned generation, so
-        an older worker cannot overwrite a newer cwd claim even after an
-        A -> B -> A transition or from another process sharing this database.
-        Metadata from a different cwd is cleared atomically with the move.
+        ``git_branch`` is the branch checked out at start/resume (the sidebar
+        groups by it; the checkout's *current* branch is transient and would
+        misattribute past sessions). ``git_repo_root`` is the authoritative
+        project key, resolved here so every surface reads the same membership.
+        Each field is written only when non-empty so a probe failure never
+        clobbers a captured value — except ``replace_git_meta`` (a deliberate
+        workspace MOVE must overwrite the old repo identity even when the new
+        cwd resolves to none). Every call bumps ``git_metadata_generation`` in
+        the same transaction; async probes publish via
+        :meth:`publish_session_git_metadata` with that generation, so an older
+        worker cannot overwrite a newer claim (A -> B -> A, or another process).
         """
         if not session_id or not cwd:
             return None
@@ -3316,12 +3254,8 @@ class SessionDB(
         ) == 1
 
     def backfill_repo_roots(self, cwd_to_root: Dict[str, str]) -> None:
-        """Persist resolved git repo roots for cwds that don't have one yet.
-
-        Backfills history so projects light up for sessions created before the
-        column existed, without clobbering an already-recorded root. Only
-        non-empty roots are written (a non-git cwd stays NULL).
-        """
+        """Backfill git repo roots for cwds without one (pre-column sessions);
+        never clobbers a recorded root; empty roots are skipped."""
         pairs = [(root, cwd) for cwd, root in cwd_to_root.items() if root and cwd]
         if pairs:
             self._write_sql(
@@ -3331,28 +3265,9 @@ class SessionDB(
             )
 
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Compression locks
-    # ──────────────────────────────────────────────────────────────────────
-    # Atomic per-session locks that prevent two compression paths from
-    # racing on the same session_id and producing orphan child sessions.
-    #
-    # The race: ``conversation_compression.py`` rotates ``agent.session_id``
-    # as a side effect of a successful compression (end old session, create
-    # new). That mutation is local to the AIAgent instance — but ``state.db``
-    # is shared across all instances. Two AIAgents that share the same
-    # ``session_id`` at the moment they both decide to compress (most
-    # commonly the parent turn's agent + a background-review fork started
-    # right after the turn ended) each end the parent and create their own
-    # NEW session, parented to the same old id. The gateway SessionEntry
-    # only catches one rotation; the other child silently accumulates
-    # writes — Damien's "parent → two orphan children" repro shape.
-    #
-    # The lock is keyed by ``session_id`` and is held for the duration of
-    # the compress() call plus the rotation. ``holder`` identifies the
-    # current owner (pid:tid:nonce) for diagnostics; the lock is recovered
-    # via ``expires_at`` if the holder process crashed without releasing.
-
+    # Compression locks (atomic per-session, keyed by session_id, recovered via
+    # expires_at) live in SessionCompressionMixin; they stop two AIAgents that
+    # share a session_id from both rotating it into two orphan children.
 
     def touch_session_activity(
         self,
@@ -3362,17 +3277,9 @@ class SessionDB(
         description: Optional[str] = None,
         provenance: Optional[ActivityProvenance] = None,
     ) -> None:
-        """Stamp durable mid-turn session activity (observation-only).
-
-        Called (rate-limited) from ``AIAgent._touch_activity`` so gateway/CLI
-        surfaces and stall consumers observe API/tool/compaction activity
-        even when no new message row has been written yet (#72016 / #72039).
-
-        Never moves ``last_activity_at`` backwards. When the timestamp
-        advances, bounded ``last_activity_description`` /
-        ``last_activity_provenance`` are written with it. No-ops when
-        ``session_id`` is empty or the row does not exist.
-        """
+        """Stamp durable mid-turn activity (observation-only; rate-limited by
+        AIAgent._touch_activity) so surfaces see API/tool/compaction activity
+        before any message row lands. Never moves ``last_activity_at`` backwards."""
         if not session_id:
             return
         from agent.session_activity import (
@@ -3384,11 +3291,6 @@ class SessionDB(
         desc = bound_activity_description(description)
         prov = normalize_activity_provenance(provenance).value
 
-        # Observation-only write: never let it ride the full routine
-        # write-patience budget (#76354 review S1). Under contention a
-        # heartbeat that waits ~20s would delay the response-critical path
-        # it is merely observing; give up after a sub-second budget instead
-        # (the next due window retries naturally).
         self._write_sql(
             "UPDATE sessions SET "
             "last_activity_at = ?, "
@@ -3400,26 +3302,14 @@ class SessionDB(
         )
 
     def clear_session_activity_labels(self, session_id: str) -> None:
-        """Clear mid-turn activity labels after a turn ends.
-
-        Keeps ``last_activity_at`` intact so idle / watchdog clocks stay
-        continuous. Description and provenance are observation labels for
-        *what was happening at* that timestamp during an active turn; once
-        the turn is idle they must not keep advertising "compressing" /
-        "executing tool" (#72039).
-
-        Response-critical-path contract (#76354 review S1): runs in the
-        turn's ``finally``; a no-op clear (labels already empty) skips the
-        write transaction entirely, and a real clear uses the same short
-        sub-second busy budget as :meth:`touch_session_activity` instead of
-        the full routine write patience.
-        """
+        """Clear activity labels after a turn (keep ``last_activity_at`` so idle /
+        watchdog clocks stay continuous; an idle turn must not keep advertising
+        "compressing"). Runs in the turn's finally: a no-op clear skips the
+        write transaction, a real one uses the short activity budget."""
         if not session_id:
             return
         from agent.session_activity import ActivityProvenance
 
-        # No-op fast path: skip the transaction when there is nothing to
-        # clear. Read-only, no write lock.
         try:
             row = self._read_one(
                 "SELECT last_activity_description, last_activity_provenance "
@@ -3459,15 +3349,8 @@ class SessionDB(
         model_config_json: str,
         model: Optional[str] = None,
     ) -> None:
-        """Update model_config and optionally model for an existing session.
-
-        Uses COALESCE so that passing model=None leaves the stored model
-        column unchanged.  Routes through _execute_write for the standard
-        BEGIN IMMEDIATE + jitter-retry + lock guarantee.
-        """
-        # Barrier against queued token deltas — see update_session_model.
-        self.flush_token_counts()
-
+        """Update model_config and (COALESCE) optionally model."""
+        self.flush_token_counts()  # barrier against queued token deltas — see update_session_model
         self._write_sql(
             "UPDATE sessions SET model_config = ?, model = COALESCE(?, model) WHERE id = ?",
             (model_config_json, model, session_id),
@@ -3486,43 +3369,24 @@ class SessionDB(
         self._execute_write(_do)
 
     def update_session_tool_names(self, session_id: str, tool_names: Optional[List[str]]) -> None:
-        """Persist the session's resolved ``tools[]`` name order (JSON array).
-
-        Read back by ``tools.mcp_tool.restore_agent_tool_prefix`` when a fresh
-        ``AIAgent`` is rebuilt for an existing session (gateway agent-cache
-        eviction) so a flipped ``check_fn`` verdict can't fork the cached tool
-        prefix. ``None`` clears the pin.
-        """
+        """Persist the resolved ``tools[]`` name order so a rebuilt AIAgent
+        (agent-cache eviction) can't fork the cached tool prefix on a flipped
+        check_fn verdict. ``None`` clears the pin."""
         payload = json.dumps(list(tool_names)) if tool_names is not None else None
-
         self._write_sql("UPDATE sessions SET tool_names = ? WHERE id = ?", (payload, session_id))
 
     def update_session_model(
         self, session_id: str, model: str, provider: Optional[str] = None
     ) -> None:
-        """Update the model for a session after a mid-session switch.
-
-        Unlike ``update_token_counts`` which uses ``COALESCE(model, ?)``
-        (only filling in NULL), this unconditionally sets the model column
-        so that the dashboard reflects the user's latest /model choice.
-        Also nulls ``system_prompt`` so stale ``Model:`` / ``Provider:``
-        footer metadata is rebuilt on the next turn. A successful /model
-        switch explicitly replaces any confirmed Browser runtime lock while
-        preserving unrelated lineage markers in ``model_config``.
-
-        When *provider* is given, it is merged into ``model_config``
-        alongside the model (``$.model`` / ``$.provider``) so a later
-        resume recombines the persisted model with the provider that
-        actually serves it instead of the config.yaml primary provider
-        (#79536). Callers without provider knowledge leave any stored
-        provider untouched.
-        """
-        # This write bypasses the token queue, so deltas enqueued before the
-        # switch must land first: a still-queued first delta carries the
-        # pre-switch route, and applying it after this UPDATE would trip the
-        # first_accounted_route overwrite in update_token_counts (row sees
-        # api_call_count == 0 + a route mismatch) and resurrect the old
-        # model/provider. Flushing here restores the pre-queue ordering.
+        """Set the model after a mid-session /model switch (unconditionally,
+        unlike update_token_counts' COALESCE), null system_prompt so stale
+        Model:/Provider: footers rebuild, and replace any confirmed Browser
+        runtime lock while keeping lineage markers. *provider* is merged into
+        model_config so resume recombines the model with the provider that
+        actually serves it, not the config.yaml primary."""
+        # This write bypasses the token queue: a still-queued first delta carries
+        # the pre-switch route and, applied after this UPDATE, would trip the
+        # first_accounted_route overwrite and resurrect the old model/provider.
         self.flush_token_counts()
         # browser_model_lock is deleted via a None patch value (same semantics
         # as the old json_remove); lineage markers survive the merge.
@@ -3568,20 +3432,12 @@ class SessionDB(
         *,
         on_missing: str = "skip",
     ):
-        """SELECT + tolerant-parse + merge ``patch`` into a session's model_config.
-
-        Shared by every model_config writer (``update_session_runtime_lock``,
-        ``set_session_yolo``, ``archive_and_compact``,
-        ``patch_session_model_config``) so the merge discipline that keeps
-        lineage markers like ``_branched_from`` / ``_delegate_from`` alive
-        lives in exactly one place. A ``None`` patch value deletes that key.
-        Must run inside an open write transaction (callers own the UPDATE).
-
-        Returns the serialized merged JSON — ``None`` when the merged dict is
-        empty (matching ``create_session``'s NULL convention) — or the
-        ``_MODEL_CONFIG_ROW_MISSING`` sentinel when the row doesn't exist and
-        ``on_missing == "skip"``; ``on_missing == "raise"`` raises ValueError.
-        """
+        """SELECT + tolerant-parse + merge ``patch`` into model_config — the one
+        place the merge discipline keeping ``_branched_from``/``_delegate_from``
+        alive lives. ``None`` deletes a key. Runs inside the caller's write
+        transaction. Returns serialized JSON (``None`` when empty, matching
+        create_session's NULL) or ``_MODEL_CONFIG_ROW_MISSING`` when the row
+        doesn't exist (``on_missing="raise"`` raises ValueError instead)."""
         row = conn.execute(
             "SELECT model_config FROM sessions WHERE id = ?",
             (session_id,),
@@ -3599,14 +3455,9 @@ class SessionDB(
         return json.dumps(config) if config else None
 
     def patch_session_model_config(self, session_id: str, patch: Dict[str, Any]) -> None:
-        """Merge ``patch`` into a session's model_config JSON atomically.
-
-        A ``None`` patch value removes that key. No-op when the session row
-        doesn't exist or the patch is empty. This is the standalone setter for
-        callers that need to update model_config *without* rewriting the
-        transcript (the transcript-coupled path is ``archive_and_compact``'s
-        ``model_config_patch``, which shares the same merge helper).
-        """
+        """Merge ``patch`` into model_config atomically (``None`` removes a key);
+        no-op when the row or patch is empty. The transcript-coupled path is
+        archive_and_compact's ``model_config_patch``."""
         if not session_id or not patch:
             return
         self._write_model_config_patch(
@@ -3630,12 +3481,8 @@ class SessionDB(
         route_source: Optional[str] = None,
         confirmed: bool = False,
     ) -> None:
-        """Persist a Browser / API client runtime lock without clobbering lineage markers.
-
-        Merges ``browser_model_lock`` into the existing ``model_config`` JSON so
-        ``_branched_from`` / ``_delegate_from`` survive. Nulls ``system_prompt``
-        so cached ``Model:`` / ``Provider:`` footers cannot lie after a switch.
-        """
+        """Persist a Browser / API-client runtime lock into model_config (lineage
+        markers survive); null system_prompt so cached footers cannot lie."""
         lock = {
             "provider": provider or "",
             "model": model or "",
@@ -3658,17 +3505,9 @@ class SessionDB(
         )
 
     def set_session_yolo(self, session_id: str, enabled: bool) -> None:
-        """Persist the per-session YOLO bypass flag into ``model_config``.
-
-        Merges ``yolo_mode`` into the existing ``model_config`` JSON (same
-        merge discipline as ``update_session_runtime_lock`` so lineage
-        markers like ``_branched_from`` / ``_delegate_from`` survive). The
-        CLI resume paths read this flag back so a ``/yolo ON`` toggle — or a
-        ``--yolo`` launch — survives ``hermes --resume`` into a fresh
-        process. No-op when the session row doesn't exist yet; the
-        creation-time ``model_config`` carries the flag for ``--yolo``
-        launches.
-        """
+        """Persist the per-session YOLO flag into model_config so ``/yolo`` or
+        ``--yolo`` survives ``hermes --resume``. No-op when the row doesn't exist
+        yet (creation-time model_config carries the flag for --yolo launches)."""
         if not session_id:
             return
         self._write_model_config_patch(
@@ -3679,32 +3518,20 @@ class SessionDB(
 
     @staticmethod
     def session_yolo_enabled(session_meta: Optional[Dict[str, Any]]) -> bool:
-        """Read the persisted YOLO flag off a session row dict.
-
-        Accepts the dict returned by ``get_session`` (``model_config`` is a
-        JSON string) or an already-parsed dict. Returns False on any parse
-        failure — resume must never enable the bypass by accident.
-        """
+        """Persisted YOLO flag from a session row (JSON string or parsed dict);
+        False on any parse failure — resume must never enable the bypass by accident."""
         return bool(_parse_model_config((session_meta or {}).get("model_config")).get("yolo_mode"))
 
 
-    # ── Async token accounting ──
-    # update_token_counts() runs a sessions UPDATE (plus a per-model usage
-    # upsert) inside BEGIN IMMEDIATE; against a cold multi-GB state.db one
-    # call can stall the turn thread for tens to hundreds of ms, and the
-    # tool loop pays it after EVERY API call (measured p50 3.3ms / p95 70ms
-    # per call in production). queue_token_counts() reduces the critical
-    # path to a deque append: a dedicated single-writer thread applies
-    # deltas in enqueue order, coalescing consecutive same-route deltas
-    # into one UPDATE when a backlog forms. Readers that need exact
-    # mid-turn totals (get_session and friends) call flush_token_counts()
-    # first — a plain attribute check when nothing is queued.
-
-    # Delta fields summed when coalescing. Route fields must be equal for
-    # two deltas to merge: model/billing_* feed COALESCE backfill and the
-    # per-model usage attribution key, and cost_status/cost_source are
-    # last-non-None-wins — equality makes the merged UPDATE byte-for-byte
-    # equivalent to applying the deltas sequentially.
+    # ── Async token accounting (SessionUsageMixin) ──
+    # update_token_counts() stalls the turn thread for tens-hundreds of ms on a
+    # cold multi-GB DB after EVERY API call; queue_token_counts() reduces the
+    # critical path to a deque append, a single-writer thread applies deltas in
+    # order, coalescing consecutive same-route deltas. Exact readers call
+    # flush_token_counts() first. Route fields must be equal for two deltas to
+    # merge (model/billing_* feed COALESCE backfill and the per-model
+    # attribution key; cost_status/source are last-non-None-wins) so the merged
+    # UPDATE is byte-for-byte equivalent to applying the deltas sequentially.
     _TOKEN_DELTA_SUM_FIELDS = (
         "input_tokens", "output_tokens", "cache_read_tokens",
         "cache_write_tokens", "reasoning_tokens", "api_call_count",
@@ -3723,25 +3550,12 @@ class SessionDB(
         model: str = None,
         **kwargs,
     ) -> str:
-        """Ensure a session row exists (INSERT OR IGNORE). Accepts optional kwargs."""
+        """Ensure a session row exists (upsert). Accepts optional kwargs."""
         self._insert_session_row(session_id, source, model=model, **kwargs)
         return session_id
 
-
-    # ── Cross-backend heartbeat API (#94895) ───────────────────────────
-    # Each serve / tui_gateway process registers a heartbeat row at startup
-    # and refreshes ``last_heartbeat`` periodically. The startup orphan
-    # sweep reads these rows to avoid reaping sessions owned by another
-    # still-live backend that just happens to be idle. Backends remove
-    # their own row on graceful shutdown; a row that survives a crash is
-    # reclaimed by the staleness sweep once ``last_heartbeat`` ages out.
-
-
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get a session by ID."""
-        # Cost/usage readers (/status, /usage, gateway endpoints) reach the
-        # row through here; drain queued token deltas so they see exact
-        # totals. No-op attribute check when nothing is queued.
+        """Get a session by ID (drains queued token deltas first so cost readers see exact totals)."""
         self.flush_token_counts()
         row = self._read_one(
             "SELECT s.*, "
@@ -3754,13 +3568,9 @@ class SessionDB(
         return self._session_row_dict(row) if row else None
 
     def get_dominant_session_model_route(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Return the main-loop model route that served most API calls.
-
-        ``sessions`` is a legacy aggregate row and can hold model/provider fields
-        written by different route changes. ``session_model_usage`` keeps the
-        coherent per-call tuple, so persisted status and billing reads should use
-        its dominant main-loop route when one is available.
-        """
+        """Main-loop model route that served most API calls. ``sessions`` is a
+        legacy aggregate mixing route changes; ``session_model_usage`` keeps the
+        coherent per-call tuple, so status/billing reads prefer it."""
         self.flush_token_counts()
         row = self._read_one(
             """SELECT model, billing_provider, billing_base_url, billing_mode,
@@ -3780,12 +3590,7 @@ class SessionDB(
         return dict(row) if row else None
 
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
-        """Resolve an exact or uniquely prefixed session ID to the full ID.
-
-        Returns the exact ID when it exists. Otherwise treats the input as a
-        prefix and returns the single matching session ID if the prefix is
-        unambiguous. Returns None for no matches or ambiguous prefixes.
-        """
+        """Exact id, else the single unambiguous prefix match, else None."""
         exact = self.get_session(session_id_or_prefix)
         if exact:
             return exact["id"]
@@ -3797,51 +3602,30 @@ class SessionDB(
         )]
         return matches[0] if len(matches) == 1 else None
 
-    # Maximum length for session titles
     MAX_TITLE_LENGTH = 100
 
-    # Title provenance, lowest to highest authority. An auto-titling write may
-    # only replace a title of strictly lower authority, so the instant
-    # ``derived`` title upgrades to the model's ``llm`` title exactly once and
-    # nothing the agent generates can ever clobber a name the user typed.
+    # Title provenance, lowest to highest authority: auto-titling may only
+    # replace a strictly lower-authority title, so ``derived`` upgrades to
+    # ``llm`` exactly once and nothing generated clobbers a user-typed name.
     TITLE_SOURCE_DERIVED = "derived"
     TITLE_SOURCE_LLM = "llm"
     TITLE_SOURCE_USER = "user"
     _TITLE_SOURCE_RANK = {TITLE_SOURCE_DERIVED: 0, TITLE_SOURCE_LLM: 1, TITLE_SOURCE_USER: 2}
 
-    # Bot Mode's forever-chat registry: the session titled exactly this, on a
-    # bot's profile, IS the bot's canonical chat — resolved by exact-title
-    # lookup on every open (no session-id pointer exists). The title is the
-    # identity, which is why _set_session_title refuses renames of a hidden
-    # row holding it (#92473).
+    # Bot Mode's canonical chat is resolved by exact-title lookup (no session-id
+    # pointer exists); the title IS the identity, so _set_session_title refuses
+    # renames of a hidden row holding it.
     CANONICAL_BOT_CHAT_TITLE = "Bot Chat"
 
-
     def backfill_null_session_profiles(self, profile_name: str) -> int:
-        """One-shot owner backfill for legacy pre-ownership session rows.
-
-        Sessions created before the durable-ownership work (#95407 lineage)
-        carry ``profile_name = NULL``. On single-backend installs that was
-        harmless, but once a Desktop registers a second connection the
-        fail-closed owner ladder (which is correct for new sessions) can no
-        longer route those rows anywhere — every pre-campaign session becomes
-        unresumable after upgrade (#94724, field report).
-
-        This store belongs to exactly one profile — the profile whose
-        ``state.db`` this is — so stamping its own name onto rows that never
-        recorded one is a single-match backfill, not a guess. Rules mirror the
-        ``create_session`` COALESCE contract:
-
-        * only ``NULL``/empty ``profile_name`` rows are touched — a non-NULL
-          owner is NEVER overwritten;
-        * idempotent and one-shot-per-row: a second run matches zero rows.
-
-        Returns the number of rows stamped (0 when nothing was legacy).
-        """
+        """Stamp this store's own profile onto legacy ``profile_name IS NULL``
+        rows, which the fail-closed owner ladder cannot route once a Desktop
+        registers a second connection (pre-ownership sessions became
+        unresumable). Single-match, not a guess: a store belongs to exactly one
+        profile. Never overwrites a non-NULL owner; idempotent. Returns rows stamped."""
         stamp = (profile_name or "").strip()
         if not stamp:
             return 0
-
         return int(self._write_rowcount(
             """UPDATE sessions
                SET profile_name = ?
@@ -3850,14 +3634,10 @@ class SessionDB(
         ) or 0)
 
     def _set_lineage_column(self, column: str, session_id: str, value: Any) -> bool:
-        """Set one ``sessions`` column across a whole compression lineage.
-
-        Walks ancestors and descendants joined by ``end_reason='compression'``
-        so the root and every continuation flip as a unit — Desktop projects
-        compression roots forward to their latest tip, and updating only the
-        displayed tip would let the untouched root resurrect it on refresh.
-        Returns True when at least one row changed.
-        """
+        """Set one ``sessions`` column across a whole compression lineage
+        (ancestors + descendants joined by end_reason='compression'): Desktop
+        projects roots forward to their tip, and updating only the displayed tip
+        would let the untouched root resurrect it on refresh. True if any row changed."""
         return self._write_rowcount(
             f"""
             WITH RECURSIVE
@@ -3892,37 +3672,19 @@ class SessionDB(
         ) > 0
 
     def set_session_archived(self, session_id: str, archived: bool) -> bool:
-        """Archive or unarchive a session.
-
-        Archived sessions are hidden from the default session list but keep all
-        their messages — this is a soft hide, not a delete. For compression
-        chains, archive the whole logical conversation. Desktop lists compression
-        roots projected forward to their latest continuation; updating only the
-        displayed tip lets the still-unarchived root resurrect it on refresh.
-        Returns True when at least one row was updated.
-        """
+        """Soft-hide (or unhide) a session and its whole compression lineage;
+        messages are kept. True when at least one row changed."""
         return self._set_lineage_column('archived', session_id, 1 if archived else 0)
 
-    # Accidental end reasons that recovery treats as resumable. Single source
-    # of truth: hermes_state_common._RECOVERABLE_END_REASONS, interpolated
-    # into find_latest_gateway_session_for_peer / promote_to_session_reset
-    # SQL — literals cannot drift (docs/session-lifecycle.md "recoverable
-    # accidental reasons").
+    # Accidental end reasons recovery treats as resumable; the same constant is
+    # interpolated into the recovery/promotion SQL so literals cannot drift.
     RECOVERABLE_END_REASONS = _RECOVERABLE_END_REASONS
 
     def unarchive_recoverable_session(self, session_id: str) -> bool:
-        """Un-archive a session that was archived by a recoverable accident.
-
-        Registry-style lookups (Bot Mode's canonical "Bot Chat") use this to
-        resurrect a row the ws-orphan reaper (``ws_orphan_reap``) or older
-        agent cleanup (``agent_close``) archived: those ends are accidents,
-        not user intent, so the identity-scoped canonical chat must survive
-        them (#92687). Sessions archived with no end_reason or an explicit
-        boundary reason (user archived deliberately, ``session_reset``, …)
-        are left untouched — returns ``False`` for those, ``True`` only when
-        the row was archived for a recoverable reason and is now un-archived
-        (whole compression lineage, via :meth:`set_session_archived`).
-        """
+        """Un-archive a session archived by a recoverable accident (ws_orphan_reap,
+        agent_close) — used by registry lookups like Bot Mode's canonical chat.
+        Deliberate archives (no end_reason, or an explicit boundary) are left
+        alone. True only when a recoverable row was un-archived (whole lineage)."""
         if not session_id:
             return False
         try:
@@ -3931,9 +3693,8 @@ class SessionDB(
             return False
         if not row or not row.get("archived"):
             return False
-        # A compressed lineage's registry row keeps end_reason='compression';
-        # the accidental stamp lives on the live TIP. Judge recoverability at
-        # the tip (== the row itself when uncompressed).
+        # The accidental stamp lives on the live TIP (the registry row keeps
+        # end_reason='compression'); judge recoverability there.
         tip = row
         try:
             tip_id = self.get_compression_tip(session_id) or session_id
@@ -3946,10 +3707,8 @@ class SessionDB(
         if not self.set_session_archived(session_id, False):
             return False
 
-        # Clear the accidental end stamp: the session is live again, and a
-        # surviving ws_orphan_reap/agent_close reason would make a LATER
-        # deliberate archive (which never writes end_reason) auto-resurrect
-        # on the next lookup — permanently overriding user intent.
+        # Clear the accidental end stamp, or a LATER deliberate archive (which
+        # never writes end_reason) would auto-resurrect on the next lookup.
         self._write_sql(
             "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
             (tip["id"],),
@@ -3957,65 +3716,28 @@ class SessionDB(
         return True
 
     def set_session_pinned(self, session_id: str, pinned: bool) -> bool:
-        """Pin or unpin a session (and its whole compression lineage).
-
-        ``pinned`` is a durable "keep" flag: pinned sessions are exempt from
-        the ``sessions.auto_archive`` stale sweep (see
-        :meth:`archive_stale_sessions`). Desktop is the current writer — its
-        sidebar pins mirror here so a backend/other-surface sweep honours
-        them. Like :meth:`set_session_archived` the whole compression chain is
-        flipped as a unit, so pinning the surfaced tip protects the root (and
-        vice-versa) no matter which id the caller holds. Returns True when at
-        least one row changed.
-        """
+        """Pin/unpin a session and its compression lineage. Pinned sessions are
+        exempt from the ``sessions.auto_archive`` sweep; Desktop mirrors its
+        sidebar pins here so backend sweeps honour them."""
         return self._set_lineage_column('pinned', session_id, 1 if pinned else 0)
 
     def set_session_hidden(self, session_id: str, hidden: bool) -> bool:
-        """Hide or unhide a session (and its whole compression lineage).
-
-        ``hidden`` is a generic "don't show in the global Sessions sidebar"
-        flag: a hidden session is dropped from the default
-        :meth:`list_sessions_rich` listing (which omits ``include_hidden``) but
-        stays fully resumable by the surface that owns it — useful for plugins
-        that manage their own sessions (e.g. kanban) and don't want them
-        cluttering the shared recents list. Like :meth:`set_session_archived`
-        / :meth:`set_session_pinned` the whole compression chain is flipped as
-        a unit, so hiding the surfaced tip hides the root (and vice-versa) no
-        matter which id the caller holds. Returns True when at least one row
-        changed.
-        """
+        """Hide/unhide a session and its compression lineage from the default
+        list_sessions_rich listing; it stays resumable by the owning surface
+        (plugins such as kanban manage their own sessions)."""
         return self._set_lineage_column('hidden', session_id, 1 if hidden else 0)
 
     def set_session_read(self, session_id: str, read: bool = True) -> bool:
-        """Mark a session read or unread (and its whole compression lineage).
-
-        Read state is a watermark, not a flag: ``last_read_at`` records when
-        the conversation was last read, and it counts as unread when activity
-        postdates that watermark (the derived ``unread`` key on
-        :meth:`list_sessions_rich` rows). New messages therefore flip a read
-        conversation back to unread without any write on the message path.
-        Three states:
-
-        * NULL — never tracked (every pre-feature row): treated as read, so
-          shipping the column doesn't badge a user's entire history at once.
-        * 0 — explicitly marked unread: any activity postdates it.
-        * timestamp — read up to that moment.
-
-        Like :meth:`set_session_archived` / :meth:`set_session_pinned`, the
-        whole compression chain is stamped as a unit, so reading the surfaced
-        tip clears the root (and vice-versa) no matter which id the caller
-        holds. Returns True when at least one row changed.
-        """
+        """Mark read/unread across the compression lineage. ``last_read_at`` is a
+        watermark, not a flag: unread when activity postdates it, so new
+        messages flip it back without any write on the message path. NULL =
+        never tracked = read (shipping the column doesn't badge all history);
+        0 = explicitly unread; timestamp = read up to then."""
         return self._set_lineage_column('last_read_at', session_id, time.time() if read else 0.0)
 
     @staticmethod
     def session_unread(session_row: Dict[str, Any]) -> bool:
-        """Derive unread from a session row's watermark and activity.
-
-        Shared by ``list_sessions_rich`` and any future surface that holds a
-        row (or projected row) with ``last_read_at`` and ``last_active``.
-        NULL watermark = never tracked = read.
-        """
+        """Unread = activity postdates the ``last_read_at`` watermark (NULL = read)."""
         last_read = session_row.get("last_read_at")
         if last_read is None:
             return False
@@ -4023,12 +3745,8 @@ class SessionDB(
         return float(last_active or 0) > float(last_read)
 
 
-    # Columns excluded from compact_rows projections: only the payload-heavy
-    # blob no list consumer renders. Everything else — including gateway
-    # routing fields and desktop sidebar fields like git_branch — stays, and
-    # the projection is derived from SCHEMA_SQL so columns added later via
-    # declarative reconciliation are included automatically instead of
-    # silently dropping out of list rows.
+    # compact_rows excludes only payload-heavy blobs no list consumer renders;
+    # the projection derives from SCHEMA_SQL so new columns join automatically.
     _SESSION_COMPACT_EXCLUDED = frozenset(
         {"system_prompt", "system_prompt_hash", "git_metadata_generation"}
     )
@@ -4157,32 +3875,21 @@ class SessionDB(
         session_key: str = None,
         include_hidden: bool = False,
     ) -> List[Dict[str, Any]]:
-        """List sessions with preview (first user message) and last_active, in one query.
+        """List sessions with preview (first user message) and ``last_active``
+        (freshest of heartbeat / latest message / started_at) in one query.
 
-        ``last_active`` = freshest of the activity heartbeat and the latest
-        message timestamp, else ``started_at``. Implementation-detail children
-        (subagent runs, compression continuations) are excluded unless
+        Subagent runs and compression continuations are excluded unless
         ``include_children``; branch/reset children stay listable.
-
-        ``project_compression_tips`` (default) surfaces each compression chain
-        as ONE entry showing the live tip's id/message_count/title/last_active;
-        ``False`` returns raw root rows (admin/debug UIs).
-        ``order_by_last_active`` sorts by the chain TIP's activity via a
-        recursive CTE, so LIMIT/OFFSET stay cheap and a recently continued old
-        conversation lands in the right slot. ``search_query`` (that path
-        only) substring-matches title/id across the forward chain, plus a
-        punctuation-stripped variant (``an94`` finds ``AN-94``).
-        ``compact_rows`` omits the ``system_prompt`` blob from the SELECT so
-        SQLite never copies tens of KB per row out of the B-tree page.
-        ``include_pinned`` back-fills pinned conversations the page window left
-        out (a pin means "always reachable"; the desktop sidebar would
-        otherwise render an empty Pinned section) — they still obey the
-        source/archived/min_message_count filters. ``session_key`` restricts to
-        one gateway conversation scope.
+        ``project_compression_tips`` surfaces each chain as ONE entry with the
+        live tip's fields. ``order_by_last_active`` sorts by the chain TIP's
+        activity via a recursive CTE so LIMIT/OFFSET stay cheap; ``id_query`` /
+        ``search_query`` (that path only) match across the forward chain, the
+        latter also a punctuation-stripped variant. ``compact_rows`` omits the
+        system_prompt blob so SQLite never copies tens of KB per row.
+        ``include_pinned`` back-fills pins the page window missed (a pin means
+        "always reachable"), still obeying the other filters.
         """
-        # Rows carry token/cost totals — drain queued deltas first so
-        # listings (sidebar, /resume, dashboards) show exact counters.
-        self.flush_token_counts()
+        self.flush_token_counts()  # rows carry token/cost totals
         where_clauses, params = _session_filter_where(
             exclude_children=not include_children,
             source=source, sources=sources, session_key=session_key,
@@ -4193,9 +3900,7 @@ class SessionDB(
         if not include_hidden:
             where_clauses.append("s.hidden = 0")
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        # Snapshot the filter params before the query builders below extend
-        # them with LIMIT/OFFSET — the pinned back-fill reuses the same WHERE.
-        base_where_params = list(params)
+        base_where_params = list(params)  # pinned back-fill reuses the WHERE before LIMIT/OFFSET
         prompt_select = (
             "" if compact_rows
             else ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved"
@@ -4206,30 +3911,15 @@ class SessionDB(
         )
         _sel = self._compact_session_cols() if compact_rows else "s.*"
 
-        # Optional session-id filter, pushed into SQL so callers (Desktop
-        # session-id search) don't have to fetch every row and filter in
-        # Python. ``id_query`` is matched as a case-insensitive substring
-        # against each surfaced row's id AND every id in its forward
-        # compression chain — so searching a compression *root* id or a *tip*
-        # id both resolve to the same projected conversation. Only used in the
-        # order_by_last_active path (which builds the chain CTE); other callers
-        # pass id_query=None.
         id_needle = (id_query or "").strip().lower()
         search_needle = (search_query or "").strip().lower()
         if order_by_last_active:
-            # Compute effective_last_active by walking each surfaced session's
-            # compression-continuation chain forward in SQL and taking the MAX
-            # timestamp across the chain. This lets us ORDER BY + LIMIT at SQL
-            # level instead of fetching every row and sorting in Python, while
-            # still surfacing old compression roots whose live tip is fresh.
-            #
-            # The CTE seeds from rows the outer WHERE admits (roots +
-            # user-visible branch/reset children), then recursively joins through
-            # compression-continuation edges. Do NOT require
-            # child.started_at >= parent.ended_at here: real desktop/gateway
-            # races can insert the continuation row before the parent's
-            # ended_at is written, while stale websocket siblings may satisfy
-            # the timestamp test and hijack resume/list projection.
+            # The CTE seeds from rows the outer WHERE admits and walks
+            # compression-continuation edges forward; MAX over the chain gives
+            # effective_last_active so ORDER BY + LIMIT happen in SQL. Do NOT
+            # require child.started_at >= parent.ended_at: races insert the
+            # continuation before the parent's ended_at is written, while stale
+            # websocket siblings could pass the timestamp test and hijack projection.
             outer_where, id_params = self._chain_search_where(where_sql, id_needle, search_needle)
             query = f"""
                 WITH RECURSIVE chain(root_id, cur_id) AS (
@@ -4262,9 +3952,7 @@ class SessionDB(
                 ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
                 LIMIT ? OFFSET ?
             """
-            # WHERE params apply twice (CTE seed + outer select); the id filter
-            # only applies to the outer select.
-            params = params + params + id_params + [limit, offset]
+            params = params + params + id_params + [limit, offset]  # WHERE binds twice (seed + outer)
         else:
             query = f"""
                 SELECT {_sel}{prompt_select},
@@ -4279,11 +3967,8 @@ class SessionDB(
             params.extend([limit, offset])
         sessions = [self._list_row(row) for row in self._read_all(query, params)]
 
-        # Back-fill pinned conversations the page missed. A pin outlives
-        # recency, so this runs BEFORE compression projection below — a
-        # back-filled root then projects to its live tip exactly like a row
-        # that had made the page on its own. One extra query, bounded by the
-        # number of pins (a handful), never N+1 per pin.
+        # Pinned back-fill runs BEFORE compression projection so a back-filled
+        # root projects to its tip like any other row. One query, never N+1.
         if include_pinned:
             seen_ids = {s["id"] for s in sessions}
             pinned_where = (f"{where_sql} AND s.pinned = 1" if where_sql else "WHERE s.pinned = 1")
@@ -4308,33 +3993,16 @@ class SessionDB(
         if project_compression_tips and not include_children:
             sessions = self._project_compression_tips(sessions, compact_rows)
 
-        # Derive read state per surfaced conversation. ``last_read_at`` is
-        # lineage-stamped by set_session_read, so a projected row's root
-        # watermark and its tip's are the same value — comparing it against
-        # the tip's last_active is correct either way.
+        # last_read_at is lineage-stamped, so root and tip watermarks agree.
         for s in sessions:
             s["unread"] = self.session_unread(s)
 
         return sessions
 
     def session_lifecycle_statuses(self, session_ids: List[str]) -> Dict[str, str]:
-        """Classify each session's lifecycle state from its LAST message row.
-
-        Returns ``{session_id: status}`` where status is one of:
-
-        - ``'complete'``    — last message is a normal assistant reply
-        - ``'interrupted'`` — last message is a user turn, a pending assistant
-          tool call (no tool result followed), or a tool result the assistant
-          never responded to
-        - ``'error'``       — last message carries an error finish_reason
-        - ``'empty'``       — session has no messages
-
-        Cost-bounded by design: one query that resolves each listed session's
-        newest message id via ``MAX(id)`` (an index seek on
-        ``idx_messages_session_id``) and joins back for that single row's
-        role/tool_calls/finish_reason. Never scans transcripts, so it stays
-        cheap on large databases regardless of total message volume.
-        """
+        """``{session_id: status}`` from each session's LAST message row (see
+        :func:`classify_session_status`; ``'empty'`` when no messages). One query:
+        MAX(id) per session (index seek) joined back for that row — never scans transcripts."""
         ids = [sid for sid in (session_ids or []) if sid]
         if not ids:
             return {}
@@ -4361,28 +4029,16 @@ class SessionDB(
             )
         return statuses
 
-    # =========================================================================
-    # Message storage
-    # =========================================================================
-
-    # Sentinel prefix used to distinguish JSON-encoded structured content
-    # (multimodal messages: lists of parts like text + image_url) from plain
-    # string content. The NUL byte is not legal in normal text, so this
-    # cannot collide with real user content.
+    # ── Message storage constants (SessionMessagesMixin) ──
+    # Prefix distinguishing JSON-encoded structured content (multimodal parts)
+    # from plain strings; NUL is not legal in normal text, so it cannot collide.
     _CONTENT_JSON_PREFIX = "\x00json:"
-
-
-    #: Key under which message reactions live inside ``display_metadata``.
-    #: Reactions share the existing per-message JSON column rather than a side
-    #: table so they survive rewind/compaction row rewrites with the row itself.
+    #: Reactions live inside ``display_metadata`` (not a side table) so they
+    #: survive rewind/compaction row rewrites with the row itself.
     REACTIONS_METADATA_KEY = "reactions"
-
-
-    # Columns every conversation projection decodes. Shared by
-    # get_messages_as_conversation and get_resume_conversations so a single
-    # SELECT can feed both the model-fed and display views. ``active`` rides
-    # along so a display read can split the compaction-archived rows from the
-    # live set (and feed _dedupe_display_generations) without a second query.
+    # Columns every conversation projection decodes (model-fed and display
+    # views share one SELECT); ``active`` rides along so a display read can
+    # split compaction-archived rows from the live set without a second query.
     _CONVERSATION_ROW_COLUMNS = (
         "id, role, content, tool_call_id, tool_calls, tool_name, effect_disposition, "
         "finish_reason, reasoning, reasoning_content, reasoning_details, "
@@ -4391,26 +4047,16 @@ class SessionDB(
         "api_content, display_kind, display_metadata"
     )
 
-
     def assert_export_safe(self, session_id: str, max_messages: Optional[int] = None) -> int:
-        """Return active row count or reject an unsafe in-memory export.
-
-        Exporting one session does not include compression ancestors, so this
-        guard deliberately counts only the requested segment. The limited
-        subquery stops as soon as it proves the transcript exceeds the bound.
-
-        ``max_messages=None`` resolves the limit from config
-        (``sessions.max_export_messages``); 0 disables the guard and returns
-        the active row count without raising.
-        """
+        """Active row count of this segment (compression ancestors excluded), or
+        raise SessionExportTooLargeError. The LIMITed subquery stops once it
+        proves the bound is exceeded. ``None`` resolves ``sessions.max_export_messages``;
+        0 disables the guard (returns 0 without counting)."""
         if max_messages is None:
             max_messages = resolved_max_export_messages()
         if max_messages < 0:
             raise ValueError("max_messages must be non-negative")
         if max_messages == 0:
-            # Guard disabled by config — skip the COUNT; live callers use
-            # this for its raise side effect only (and skip calling it
-            # entirely when the limit is 0).
             return 0
         row = self._read_one(
             "SELECT COUNT(*) FROM ("
@@ -4425,14 +4071,8 @@ class SessionDB(
 
 
     def _is_explicit_branch_session(self, session_id: str) -> bool:
-        """Return whether *session_id* is a copied user-facing branch.
-
-        Branches and compression continuations both use ``parent_session_id``,
-        but they have different history semantics: a branch owns a copied
-        transcript, while a compression continuation needs its ended parent's
-        archived rows for display. The durable ``_branched_from`` marker is the
-        existing discriminator written by all branch creation paths.
-        """
+        """Copied user-facing branch (``_branched_from`` marker)? Branches own a
+        copied transcript; compression continuations need the parent's archived rows."""
         if not session_id:
             return False
         row = self._read_one("SELECT model_config FROM sessions WHERE id = ?", (session_id,))
@@ -4464,15 +4104,6 @@ class SessionDB(
         return list(reversed(chain)) or [session_id]
 
 
-    # =========================================================================
-    # Rewind (soft-delete) — see /rewind slash command + issue #21910
-    # =========================================================================
-
-
-    # =========================================================================
-    # Search
-    # =========================================================================
-
     def search_sessions(
         self,
         source: str = None,
@@ -4480,17 +4111,9 @@ class SessionDB(
         offset: int = 0,
         workspace_key: str = None,
     ) -> List[Dict[str, Any]]:
-        """List sessions, optionally filtered by source.
-
-        Returns rows enriched with a computed ``last_active`` column
-        (freshest of ``last_activity_at`` and latest message timestamp,
-        else ``started_at``), ordered by most-recently-used first.
-
-        Pass ``workspace_key`` to scope rows to one workspace - matching
-        :func:`workspace_key` semantics (git repo root, else cwd). Used by
-        ``hermes -c``/``--resume`` so the "last" session is the last one in
-        the *current* workspace, not the global MRU.
-        """
+        """Sessions MRU-first with a computed ``last_active``; ``workspace_key``
+        scopes to one workspace (:func:`workspace_key` semantics) so
+        ``hermes -c``/``--resume`` picks the current workspace's last session."""
         select_with_last_active = (
             "SELECT s.*, "
             "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved, "
@@ -4516,10 +4139,6 @@ class SessionDB(
             params,
         )]
 
-    # =========================================================================
-    # Utility
-    # =========================================================================
-
     def session_count(
         self,
         source: str = None,
@@ -4531,22 +4150,9 @@ class SessionDB(
         exclude_children: bool = False,
         exclude_sources: List[str] = None,
     ) -> int:
-        """Count sessions, optionally filtered by source.
-
-        Pass ``exclude_children=True`` to count only the conversations that
-        ``list_sessions_rich`` surfaces (root + branch/reset sessions), hiding
-        sub-agent runs and compression continuations. Use it whenever the count
-        is paired with a ``list_sessions_rich`` page (e.g. sidebar "load more"
-        totals) so the total matches the number of listable rows — otherwise the
-        raw row count is inflated by children and "load more" never settles.
-
-        Pass ``exclude_sources`` to drop whole source classes from the count
-        (e.g. ``["cron"]`` so the recents "load more" total matches a
-        cron-excluded ``list_sessions_rich`` page and doesn't keep "load more"
-        stuck on for buried scheduler sessions).
-        """
-        # Mirrors list_sessions_rich's filter exactly so the count lines up
-        # with the rows (roots plus user-visible branch/reset children).
+        """Count sessions with the same filters as list_sessions_rich, so a
+        paired "load more" total matches the listable rows (children or a
+        cron-excluded page would otherwise inflate it and never settle)."""
         where_clauses, params = _session_filter_where(
             exclude_children=exclude_children, source=source, sources=sources,
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix,
@@ -4557,16 +4163,9 @@ class SessionDB(
         return self._read_one(f"SELECT COUNT(*) FROM sessions s{where_sql}", params)[0]
 
     def session_count_ge(self, n: int = 1) -> bool:
-        """Check if at least N sessions exist (archived included).
-
-        Short-circuits via LIMIT — much cheaper than ``session_count()``,
-        which pays a full index scan for its default ``archived = 0``
-        filter (measured 543us vs 4us on a 20k-session DB). Archived
-        sessions count: every caller so far asks "has this install ever
-        had sessions", and an archived session is still a created one.
-        Use this instead of ``session_count() >= n`` when the exact count
-        is irrelevant.
-        """
+        """At least N sessions exist (archived included — "has this install ever
+        had sessions"). LIMIT short-circuits: 4us vs session_count()'s 543us
+        index scan on a 20k-session DB."""
         rows = self._read_all("SELECT 1 FROM sessions LIMIT ?", (n,))
         return len(rows) >= n
 
@@ -4577,19 +4176,9 @@ class SessionDB(
         archived_only: bool = False,
         exclude_children: bool = False,
     ) -> Dict[str, int]:
-        """Return a ``{source: count}`` dict via a single ``GROUP BY`` query.
-
-        Replaces the O(N) ``list_sessions_rich`` histogram loop with an
-        aggregate query. When ``exclude_children`` is False the query uses
-        ``idx_sessions_source``; when True, the child-exclusion predicates
-        require a full table scan (same as ``session_count`` and
-        ``list_sessions_rich``).
-
-        ``exclude_children=True`` mirrors ``list_sessions_rich`` visibility
-        (roots + branch/reset sessions, excluding sub-agent runs, delegates,
-        and compression continuations) so the source counts match what the
-        Sessions page actually lists.
-        """
+        """``{source: count}`` via one GROUP BY (uses idx_sessions_source unless
+        ``exclude_children``, whose predicates need a table scan like
+        list_sessions_rich). ``exclude_children`` mirrors listing visibility."""
         where_clauses, params = _session_filter_where(
             exclude_children=exclude_children,
             archived_only=archived_only, include_archived=include_archived,
@@ -4608,27 +4197,10 @@ class SessionDB(
         return {str(row["source"]): int(row["count"] or 0) for row in rows}
 
 
-    # =========================================================================
-    # Export and cleanup
-    # =========================================================================
-
-
     def declared_scope_identity(self, session_id: str) -> Tuple[bool, str]:
-        """Fork verdict and recorded ``source`` for *session_id*, in ONE read.
-
-        ``agent/prompt_cache_scope.py`` needs both to resolve a host-declared
-        conversation scope, and both live on the same ``sessions`` row; asking
-        for them separately read that row twice per resolution (@teknium1 on
-        #98811).  The marker rules stay here, beside
-        :meth:`is_explicit_fork_child`, instead of being re-implemented by the
-        caller.
-
-        A missing row is not a fork and has no source, which is the right
-        answer before ``_ensure_db_session`` persists it.  This raises whatever
-        :meth:`get_session` raises: the caller fails closed on a DB error, and
-        merging the two reads cannot weaken that, because the fork check was
-        already the first of the two.
-        """
+        """(is_fork_child, source) for *session_id* in ONE read — prompt_cache_scope
+        needs both from the same row. A missing row is (False, ""); DB errors
+        propagate so the caller fails closed."""
         session = self.get_session(session_id)
         if not session:
             return False, ""
@@ -4637,13 +4209,8 @@ class SessionDB(
 
     @staticmethod
     def _remove_session_files(sessions_dir: Optional[Path], session_id: str) -> None:
-        """Remove on-disk transcript files for a session.
-
-        Cleans up ``{session_id}.json``, ``{session_id}.jsonl``, and any
-        ``request_dump_{session_id}_*.json`` files left by the gateway.
-        Silently skips files that don't exist and swallows OSError so a
-        filesystem hiccup never blocks a DB operation.
-        """
+        """Remove ``<id>.json``/``.jsonl`` and gateway ``request_dump_<id>_*.json``;
+        OSError is swallowed so a filesystem hiccup never blocks a DB operation."""
         if sessions_dir is None:
             return
         targets = [sessions_dir / f"{session_id}{suffix}" for suffix in (".json", ".jsonl")]
@@ -4659,22 +4226,12 @@ class SessionDB(
                 pass
 
     def get_session_delete_targets(self, session_id: str) -> List[str]:
-        """Return every session row that :meth:`delete_session` would remove.
-
-        The requested session is first, followed by its recursively discovered
-        delegate/subagent children. Branch and compression children are not
-        included because deletion preserves them by orphaning their parent
-        reference.
-        """
+        """Rows :meth:`delete_session` would remove: the session, then its
+        recursive delegate children (branch/compression children are orphaned, not deleted)."""
         with self._read_ctx() as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)
-            ).fetchone()
-            if not exists:
+            if not conn.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)).fetchone():
                 return []
-            # Use the borrowed read connection, never self._conn: handing the
-            # shared writer connection to a helper here executes on it without
-            # self._lock — the same unsynchronized-read class as #99349/#90734.
+            # The borrowed read connection, never self._conn (unlocked writer use).
             delegate_ids = _collect_delegate_child_ids(conn, [session_id])
         return [session_id, *sorted(delegate_ids)]
 
@@ -4684,22 +4241,12 @@ class SessionDB(
         sessions_dir: Optional[Path] = None,
         expected_delete_ids: Optional[List[str]] = None,
     ) -> bool:
-        """Delete a session and all its messages.
-
-        Delegate subagent children (``model_config._delegate_from``) are
-        cascade-deleted with the parent so they never resurface in session
-        pickers as orphaned rows. Branch / compression children are orphaned
-        (``parent_session_id → NULL``) so they remain accessible independently.
-        When *sessions_dir* is provided, also removes on-disk transcript
-        files (``.json`` / ``.jsonl`` / ``request_dump_*``) for every deleted
-        session. When *expected_delete_ids* is provided, deletion proceeds only
-        if the parent plus delegate cascade still matches that exact set. This
-        lets export-before-delete callers fail closed if a new delegate appears
-        after they materialize their archive. The delegate tree is re-walked
-        inside the write transaction on purpose (TOCTOU guard); the cost is
-        accepted for correctness. Returns True if the session was found and
-        deleted.
-        """
+        """Delete a session and its messages. Delegate children cascade (they'd
+        resurface as orphans in pickers); branch/compression children are
+        orphaned (parent -> NULL). *sessions_dir*: also remove transcript files.
+        *expected_delete_ids*: proceed only if parent + delegate cascade still
+        equals that set (export-before-delete fails closed if a new delegate
+        appeared); the tree is re-walked inside the transaction on purpose (TOCTOU)."""
         removed_delegate_ids: List[str] = []
         expected_ids = set(expected_delete_ids) if expected_delete_ids is not None else None
 
@@ -4711,8 +4258,7 @@ class SessionDB(
             }:
                 return False
             removed_delegate_ids.extend(_delete_delegate_children(conn, [session_id]))
-            # Orphan remaining child sessions (branches, etc.) so FK is satisfied.
-            conn.execute(
+            conn.execute(  # orphan remaining children (branches) so FK is satisfied
                 "UPDATE sessions SET parent_session_id = NULL "
                 "WHERE parent_session_id = ?",
                 (session_id,),
@@ -4729,20 +4275,10 @@ class SessionDB(
         return bool(deleted)
 
     def delete_session_if_empty(self, session_id: str, sessions_dir: Optional[Path] = None) -> bool:
-        """Delete *session_id* only when it never gained resumable content.
-
-        A session is considered empty when it has no messages and no
-        user-assigned title. Used by CLI exit / session-rotation paths so
-        immediately-started-and-quit sessions don't pile up in ``/resume``
-        and ``hermes sessions list`` output. (Pattern ported from
-        google-gemini/gemini-cli#27770.)
-
-        The emptiness check and delete run in one transaction, so a message
-        flushed concurrently by another writer can't be lost. Sessions with
-        children (delegate subagent runs) are preserved — a parent that
-        spawned work is not "empty" even if its own transcript never
-        flushed. Returns True if the session was deleted.
-        """
+        """Delete *session_id* only if it has no messages, no title and no
+        children (a parent that spawned work is not "empty"), so start-and-quit
+        sessions don't pile up in /resume. Check and delete share one
+        transaction so a concurrently flushed message can't be lost."""
         def _do(conn):
             cursor = conn.execute(
                 """
@@ -4769,35 +4305,13 @@ class SessionDB(
         return bool(deleted)
 
     def delete_sessions(self, session_ids: List[str], sessions_dir: Optional[Path] = None) -> int:
-        """Delete every session in *session_ids* in a single transaction.
-
-        Backs the dashboard's bulk-select-then-delete flow on the
-        sessions page (``POST /api/sessions/bulk-delete``). Mirrors the
-        single-session :meth:`delete_session` contract per row:
-
-        * Unknown IDs are silently skipped (no 404) — selection state
-          in the UI can race against another tab's delete, and we'd
-          rather succeed-on-the-rest than fail-the-whole-batch.
-        * Delegate subagent children (``model_config._delegate_from``) are
-          cascade-deleted with their parent; branch children are orphaned
-          (``parent_session_id → NULL``) so they stay accessible.
-        * Messages and the session row both go in one
-          ``_execute_write`` call so a partial failure can't leave the
-          DB in a "messages gone but session row still there" state.
-        * On-disk transcript / ``request_dump_*`` files are cleaned up
-          outside the DB transaction when *sessions_dir* is provided,
-          matching :meth:`prune_sessions` and
-          :meth:`delete_empty_sessions`.
-
-        Returns the count of sessions that actually existed and were
-        deleted (may be less than ``len(session_ids)`` if some IDs were
-        already gone).
-        """
+        """Bulk delete (dashboard multi-select) with :meth:`delete_session`
+        semantics per row, in ONE transaction so a partial failure can't leave
+        "messages gone, row still there". Unknown ids are skipped (UI selection
+        can race another tab's delete: succeed-on-the-rest). Returns the number
+        that actually existed and were deleted."""
         if not session_ids:
             return 0
-        # Dedup + drop any non-string entries up-front. Avoids
-        # double-counting in the WHERE-IN list and protects against
-        # callers that pass a list with stray ``None`` values.
         unique_ids = list({sid for sid in session_ids if isinstance(sid, str) and sid})
         if not unique_ids:
             return 0
@@ -4816,12 +4330,7 @@ class SessionDB(
 
             existing_placeholders = ",".join("?" * len(existing))
             removed_delegate_ids.extend(_delete_delegate_children(conn, existing))
-            # Orphan remaining children whose parent is in the kill list so the
-            # FK constraint stays satisfied. Pin children whose parent
-            # is itself in the kill list rather than NULL-ing parents
-            # of survivors — the IN list on ``parent_session_id`` does
-            # exactly this.
-            conn.execute(
+            conn.execute(  # orphan children whose parent is in the kill list (FK)
                 f"UPDATE sessions SET parent_session_id = NULL "
                 f"WHERE parent_session_id IN ({existing_placeholders})",
                 existing,
@@ -4840,16 +4349,11 @@ class SessionDB(
             self._remove_session_files(sessions_dir, sid)
         return count
 
-    #: Shared selector for :meth:`count_empty_sessions` and
-    #: :meth:`delete_empty_sessions` so the badge and the sweep agree.
-    #:
-    #: ``message_count`` tracks live (``active = 1``) rows only; rewind
-    #: (:meth:`replace_messages` w/ ``archive_dropped``) and in-place
-    #: compaction (:meth:`archive_and_compact`) reset it to 0 while keeping
-    #: dropped turns on disk as ``active = 0`` — the only recoverable copy
-    #: (#70516 / #80763 / #82756). The ``NOT EXISTS`` probe is the authority;
-    #: ``message_count = 0`` stays as a cheap prefilter. Same shape as every
-    #: other emptiness guard in this module. (#95868)
+    #: Shared by count_empty_sessions / delete_empty_sessions so badge and sweep
+    #: agree. ``message_count`` counts live rows only — rewind and compaction
+    #: reset it to 0 while keeping dropped turns as ``active = 0`` (the only
+    #: recoverable copy) — so NOT EXISTS is the authority; message_count = 0 is
+    #: a cheap prefilter.
     _EMPTY_SESSION_WHERE = (
         "message_count = 0 "
         "AND ended_at IS NOT NULL "
@@ -4860,53 +4364,16 @@ class SessionDB(
     )
 
     def count_empty_sessions(self) -> int:
-        """Return the count of empty, non-active, non-archived sessions.
-
-        "Empty" = the session holds no message rows at all AND has ended
-        (``ended_at IS NOT NULL``) AND is not archived. The ``ended_at``
-        guard matches the safety contract used by :meth:`prune_sessions`:
-        only ended sessions are candidates for bulk deletion, so a freshly
-        spawned session whose first message hasn't landed yet — or one
-        held open by the live agent — is never sniped out from under
-        the runtime.
-
-        Emptiness is decided by :data:`_EMPTY_SESSION_WHERE` — see that
-        constant for why the ``NOT EXISTS`` probe is needed instead of
-        trusting ``message_count`` alone.
-
-        Backs the ``GET /api/sessions/empty/count`` endpoint that lets the
-        web dashboard hide its "Delete empty" button when there's nothing
-        to clean up, and pre-populate the confirm dialog with the actual
-        count.
-        """
+        """Count of empty, ended, non-archived sessions (:data:`_EMPTY_SESSION_WHERE`).
+        The ended_at guard matches prune_sessions: a fresh session whose first
+        message hasn't landed is never sniped out from under the runtime."""
         return self._read_one(f"SELECT COUNT(*) FROM sessions WHERE {self._EMPTY_SESSION_WHERE}")[0]
 
     def delete_empty_sessions(self, sessions_dir: Optional[Path] = None) -> int:
-        """Delete every empty, ended, non-archived session.
-
-        Mirrors :meth:`prune_sessions`' transactional shape:
-
-        * Selects candidate IDs first (:data:`_EMPTY_SESSION_WHERE`) so we
-          never touch a live session, one the user deliberately archived,
-          or one whose transcript survives as soft-archived rows.
-        * Orphans any child whose parent is in the kill list — children
-          of an empty parent are kept and re-parented to ``NULL`` rather
-          than cascade-deleted, matching ``delete_session`` /
-          ``prune_sessions`` semantics so branch/subagent transcripts
-          survive an inadvertent parent cleanup.
-        * Deletes the rows in a single ``_execute_write`` callback so
-          the operation is atomic — a partial failure (e.g. SIGKILL
-          mid-loop) doesn't leave the DB in a "messages-deleted but
-          session-row-still-there" half-state.
-        * Cleans up on-disk transcript files (``.json`` / ``.jsonl`` /
-          ``request_dump_*``) outside the DB transaction when
-          ``sessions_dir`` is provided. Empty sessions don't typically
-          have transcript files, but the gateway can leave a stub
-          ``request_dump_*`` if it crashed before the first reply —
-          so we still sweep, matching ``prune_sessions``.
-
-        Returns the number of sessions deleted.
-        """
+        """Delete every empty, ended, non-archived session (:data:`_EMPTY_SESSION_WHERE`)
+        in one transaction, orphaning (not cascading) children so branch/subagent
+        transcripts survive. Transcript files are swept too: the gateway can
+        leave a stub request_dump_* if it crashed before the first reply."""
         removed_ids: list[str] = []
 
         def _do(conn):
@@ -4942,18 +4409,9 @@ class SessionDB(
         source: str = None,
         **filters,
     ) -> int:
-        """Bulk-archive (soft-hide) every session matching the filters.
-
-        Same filter surface as :meth:`prune_sessions`, but instead of deleting
-        rows it flips ``archived = 1`` via :meth:`set_session_archived` so
-        each match's compression lineage is archived as a unit (an unarchived
-        compression root would otherwise resurrect the conversation in
-        Desktop's projected list). Nothing is deleted; messages and transcript
-        files are untouched. Returns the number of sessions matched.
-
-        ``archived`` defaults to ``False`` here (only select rows not yet
-        archived) so repeat runs are idempotent no-ops.
-        """
+        """Bulk soft-hide with prune_sessions' filter surface, via
+        set_session_archived so each lineage flips as a unit. ``archived``
+        defaults to False so repeat runs are idempotent. Returns matches."""
         filters.setdefault("archived", False)
         rows = self.list_prune_candidates(older_than_days=older_than_days, source=source, **filters)
         for row in rows:
@@ -4961,16 +4419,12 @@ class SessionDB(
         return len(rows)
 
 
-    # ── Meta key/value (for scheduler bookkeeping) ──
+    # ── Meta key/value (scheduler bookkeeping) ──
 
     def get_meta(self, key: str) -> Optional[str]:
-        """Read a value from the state_meta key/value store."""
-        # Kept on self._lock (not _read_ctx) because callers like
-        # fts_rebuild_step read progress before entering a write
-        # transaction, and the read-only WAL connection sees only
-        # committed data — a pending write transaction's uncommitted
-        # meta writes would be invisible.  This is a cheap point lookup,
-        # not the convoy bottleneck the read-path split targets.
+        """Read state_meta[key]. On self._lock, not _read_ctx: fts_rebuild_step
+        reads progress before its write transaction, and a read-only WAL
+        connection would not see uncommitted meta writes."""
         with self._lock:
             row = self._conn.execute(
                 "SELECT value FROM state_meta WHERE key = ?", (key,)
@@ -4978,14 +4432,8 @@ class SessionDB(
         return None if row is None else row[0]
 
     def set_meta(self, key: str, value: str, *, cursor: Optional[sqlite3.Cursor] = None) -> None:
-        """Write a value to the state_meta key/value store.
-
-        When ``cursor`` is provided the write is issued on that cursor
-        inline (used during ``_init_schema``, which already holds an open
-        transaction — routing through ``_execute_write`` there would nest
-        BEGIN IMMEDIATE and deadlock). Otherwise a normal write transaction
-        is used.
-        """
+        """Upsert state_meta[key]. With ``cursor`` the write is inline (_init_schema
+        already holds a transaction; _execute_write would nest BEGIN IMMEDIATE and deadlock)."""
         sql = (
             "INSERT INTO state_meta (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
@@ -4996,18 +4444,10 @@ class SessionDB(
             self._write_sql(sql, (key, value))
 
     def retag_kanban_worker_sessions(self, workspaces_root: str) -> int:
-        """Retag legacy kanban worker rows from ``cli`` to ``kanban``.
-
-        Workers used to spawn without ``HERMES_SESSION_SOURCE``, so their runs
-        landed as untitled ``cli`` rows and the sidebar rendered one per attempt
-        labeled with the worker's own prompt. New workers tag themselves; this
-        reclaims the rows already on disk so they drop out of the session lists
-        too. Identified by cwd under the board's workspaces root — a path only
-        the dispatcher ever runs a session in.
-
-        Gated per workspaces root (``state_meta``) so each board reclaims its
-        own rows exactly once. Returns the number of rows retagged.
-        """
+        """Retag legacy kanban worker rows (spawned without HERMES_SESSION_SOURCE)
+        from ``cli`` to ``kanban``, identified by cwd under the board's workspaces
+        root — a path only the dispatcher runs sessions in. Gated once per root
+        via state_meta. Returns rows retagged."""
         prefix = str(workspaces_root).rstrip("/\\")
         if not prefix:
             return 0
@@ -5022,8 +4462,7 @@ class SessionDB(
                 "WHERE source = 'cli' AND (cwd = ? OR cwd LIKE ? ESCAPE '\\')",
                 (prefix, _escape_like(prefix) + "/%"),
             )
-            # Read rowcount before set_meta reuses this cursor for its INSERT,
-            # which would otherwise overwrite it with the meta write's count.
+            # rowcount BEFORE set_meta reuses this cursor for its INSERT.
             retagged = cursor.rowcount or 0
             self.set_meta(gate, "1", cursor=cursor)
             return retagged
@@ -5031,13 +4470,8 @@ class SessionDB(
         return self._execute_write(_do)
 
     def list_meta_prefix(self, prefix: str) -> List[Tuple[str, str]]:
-        """Return ``[(key, value), ...]`` for state_meta keys with ``prefix``.
-
-        Used by feature stores that persist one row per session under a
-        namespaced key (e.g. ``loop:<session_id>``) and need to enumerate
-        them across sessions (the gateway's idle /loop wakeup watcher).
-        ``prefix`` is matched literally — LIKE wildcards in it are escaped.
-        """
+        """``[(key, value), ...]`` for state_meta keys starting with the literal
+        ``prefix`` (LIKE wildcards escaped) — e.g. ``loop:<session_id>`` rows."""
         if not prefix:
             return []
         escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -5048,12 +4482,8 @@ class SessionDB(
         return [(row[0], row[1]) for row in rows]
 
 
-    # ── Space reclamation ──
-
-    # FTS5 virtual tables whose b-tree segments we merge on optimize. The
-    # trigram table is created lazily / may be disabled, and the cjk-bigram
-    # table only exists (and is only queryable) when the loadable tokenizer
-    # is present — so we probe each before touching it (see optimize_fts).
+    # FTS5 tables merged on optimize; trigram may be disabled and cjk exists only
+    # with the loadable tokenizer, so each is probed before touching (optimize_fts).
     _FTS_TABLES = ("messages_fts", "messages_fts_trigram", "messages_fts_cjk")
 
 
@@ -5063,20 +4493,10 @@ class SessionDB(
         min_interval_hours: int = 24,
         exclude_pinned: bool = True,
     ) -> Dict[str, Any]:
-        """Idempotent auto-archive: soft-hide sessions idle for ``idle_days``.
-
-        Sibling of :meth:`maybe_auto_prune_and_vacuum` but non-destructive —
-        it archives (hides) rather than deletes, and ages on last activity
-        (see :meth:`archive_stale_sessions`) rather than creation. Records the
-        last run in ``state_meta['last_auto_archive']`` so calls within
-        ``min_interval_hours`` no-op; safe to call opportunistically (startup
-        hooks, or when the Desktop backend lists sessions).
-
-        Never raises. Returns a dict with:
-          - ``"skipped"`` (bool) — within min_interval_hours of last run
-          - ``"archived"`` (int) — sessions archived this run
-          - ``"error"`` (str, optional) — present only on failure
-        """
+        """Idempotent auto-archive of sessions idle for ``idle_days`` (ages on last
+        activity, non-destructive). ``state_meta['last_auto_archive']`` gates
+        runs within ``min_interval_hours``; safe to call opportunistically.
+        Never raises: {"skipped", "archived", "error"?}."""
         result: Dict[str, Any] = {"skipped": False, "archived": 0}
         try:
             last_raw = self.get_meta("last_auto_archive")
@@ -5090,8 +4510,7 @@ class SessionDB(
                     pass  # corrupt meta; treat as no prior run
             archived = result["archived"] = self.archive_stale_sessions(idle_days, exclude_pinned=exclude_pinned)
 
-            # Record even a zero-archive run so we don't re-sweep every call
-            # within the interval window.
+            # Record even a zero-archive run so we don't re-sweep every call.
             self.set_meta("last_auto_archive", str(now))
 
             if archived > 0:
@@ -5106,21 +4525,9 @@ class SessionDB(
 
         return result
 
-    # ── Handoff (cross-platform session transfer) ──────────────────────────
-    #
-    # State machine:
-    #   None       — no handoff in flight
-    #   "pending"  — CLI requested handoff, gateway hasn't picked it up yet
-    #   "running"  — gateway is processing (session switch + synthetic turn)
-    #   "completed"— gateway successfully delivered the synthetic turn
-    #   "failed"   — gateway hit an error; reason in handoff_error
-    #
-    # The CLI writes "pending" then poll-waits for terminal state. The gateway
-    # watcher transitions pending→running→{completed,failed}.
-
-
 class AsyncSessionDB:
-    """Async door onto SessionDB: offloads each call via asyncio.to_thread so a blocking SQLite call never freezes the event loop. Generic forwarder — the audit confirms no method returns a live cursor/generator."""
+    """Async door onto SessionDB: each call is offloaded via asyncio.to_thread so a
+    blocking SQLite call never freezes the event loop (no method returns a live cursor)."""
 
     def __init__(self, db: "SessionDB") -> None:
         self._db = db
