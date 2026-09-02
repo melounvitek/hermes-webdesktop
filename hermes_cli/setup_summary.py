@@ -255,8 +255,8 @@ def _print_section_header(title):
 def _print_setup_summary(config: dict, hermes_home):
     """Print the setup completion summary."""
     from hermes_cli.setup import (
-        print_header, print_info, print_warning, get_config_path, get_env_path,
-        get_nous_subscription_features, Colors, color,
+        Colors, color, get_config_path, get_env_path, get_nous_subscription_features, _info, print_header,
+        print_info, print_warning,
     )
     # Provider readiness — the one thing setup absolutely must produce. Previously a user
     # could cancel the API-key prompt mid-wizard (Enter → "Cancelled."), watch the wizard
@@ -272,9 +272,9 @@ def _print_setup_summary(config: dict, hermes_home):
     if not _provider_ready:
         print()
         print_warning("No inference provider is configured — Hermes cannot chat yet.")
-        print_info("  Finish this one step with either of:")
-        print_info("    hermes model            (pick any provider/model)")
-        print_info("    hermes setup --portal   (Nous Portal OAuth, no API key)")
+        _info("  Finish this one step with either of:",
+              "    hermes model            (pick any provider/model)",
+              "    hermes setup --portal   (Nous Portal OAuth, no API key)")
 
     print()
     print_header("Tool Availability Summary")

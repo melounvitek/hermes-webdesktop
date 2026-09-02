@@ -15,13 +15,6 @@ def _is_valid_telegram_bot_token(token: str) -> bool:
     return bool(_TELEGRAM_BOT_TOKEN_RE.match(token))
 
 
-def _info(*lines: str | None) -> None:
-    """print_info each line in order; ``None`` emits a bare blank ``print()``."""
-    from hermes_cli.setup import print_info
-    for line in lines:
-        print() if line is None else print_info(line)
-
-
 def _profile_name_from_hermes_home(hermes_home) -> str | None:
     """Return the active profile name when HERMES_HOME is a profile dir."""
     if hermes_home.parent.name == "profiles":
@@ -108,7 +101,7 @@ def _telegram_allowlist_nudge() -> None:
 
 def _obtain_telegram_token():
     """Return (token, setup_result); auto flow first when chosen, else manual paste."""
-    from hermes_cli.setup import print_error, prompt
+    from hermes_cli.setup import _info, print_error, prompt
     _info("How would you like to create your Telegram bot?", None,
           "  [1] Automatic (recommended)",
           "      Scan a QR code → confirm in Telegram → done.",
@@ -139,7 +132,7 @@ def _obtain_telegram_token():
 def _setup_telegram():
     """Configure Telegram bot credentials and allowlist."""
     from hermes_cli.setup import print_header, print_info, print_success, prompt, prompt_yes_no
-    from hermes_cli.setup import save_env_value
+    from hermes_cli.setup import _info, save_env_value
     print_header("Telegram")
     if _declines_reconfigure("TELEGRAM_BOT_TOKEN", "Telegram", "Reconfigure Telegram?"):
         _telegram_allowlist_nudge()
@@ -205,7 +198,7 @@ def _setup_telegram():
 def _setup_bluebubbles():
     """Configure BlueBubbles iMessage gateway."""
     from hermes_cli.setup import print_header, print_info, print_success, print_warning, prompt
-    from hermes_cli.setup import prompt_yes_no, save_env_value
+    from hermes_cli.setup import _info, prompt_yes_no, save_env_value
     print_header("BlueBubbles (iMessage)")
     if _declines_reconfigure("BLUEBUBBLES_SERVER_URL", "BlueBubbles", "Reconfigure BlueBubbles?"):
         return
@@ -252,7 +245,7 @@ def _setup_bluebubbles():
 
 def _setup_webhooks():
     """Configure webhook integration."""
-    from hermes_cli.setup import print_header, print_success, print_warning, prompt, save_env_value
+    from hermes_cli.setup import _info, print_header, print_success, print_warning, prompt, save_env_value
     print_header("Webhooks")
     if _declines_reconfigure("WEBHOOK_ENABLED", "Webhooks", "Reconfigure webhooks?"):
         return
@@ -308,7 +301,7 @@ def _is_progress(status: str) -> bool:
 
 def _warn_missing_home_channels() -> None:
     """Platforms with a token but no home channel."""
-    from hermes_cli.setup import get_env_value, print_warning
+    from hermes_cli.setup import get_env_value, _info, print_warning
     missing_home = [
         plat for plat, token_var, home_vars in _HOME_CHANNEL_CHECKS
         if get_env_value(token_var) and not any(get_env_value(v) for v in home_vars)
@@ -362,7 +355,7 @@ def _restart_running_gateway(any_messaging: bool, supports_systemd: bool) -> Non
 
 def setup_gateway(config: dict):
     """Configure messaging platform integrations."""
-    from hermes_cli.setup import print_header, print_info, print_success, prompt_checklist
+    from hermes_cli.setup import _info, print_header, print_info, print_success, prompt_checklist
     from hermes_cli.gateway import _all_platforms, _platform_status, _configure_platform
     print_header("Messaging Platforms")
     _info("Connect to messaging platforms to chat with Hermes from anywhere.",

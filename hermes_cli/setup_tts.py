@@ -46,7 +46,7 @@ _ESPEAK_INSTALL = {
 
 def _install_neutts_deps() -> bool:
     """Install NeuTTS dependencies with user approval. Returns True on success."""
-    from hermes_cli.setup import print_info, print_success, print_warning, prompt_yes_no
+    from hermes_cli.setup import _info, print_info, print_success, print_warning, prompt_yes_no
     if not _check_espeak_ng():
         hint, install_cmd = _ESPEAK_INSTALL.get(sys.platform, _ESPEAK_INSTALL["linux"])
         print()
@@ -64,23 +64,19 @@ def _install_neutts_deps() -> bool:
         else:
             print_warning("espeak-ng is required for NeuTTS. Install it manually before using NeuTTS.")
 
-    print()
-    print_info("Installing neutts Python package...")
-    print_info("This will also download the TTS model (~300MB) on first use.")
-    print()
+    _info(None, "Installing neutts Python package...",
+          "This will also download the TTS model (~300MB) on first use.", None)
     return _pip_install_tts_package("neutts", ["-U", "neutts[all]", "--quiet"], "uv pip install -U 'neutts[all]'")
 
 
 def _install_kittentts_deps() -> bool:
     """Install KittenTTS dependencies with user approval. Returns True on success."""
-    from hermes_cli.setup import print_info
+    from hermes_cli.setup import _info
     wheel_url = (
         "https://github.com/KittenML/KittenTTS/releases/download/"
         "0.8.1/kittentts-0.8.1-py3-none-any.whl"
     )
-    print()
-    print_info("Installing kittentts Python package (~25-80MB model downloaded on first use)...")
-    print()
+    _info(None, "Installing kittentts Python package (~25-80MB model downloaded on first use)...", None)
     return _pip_install_tts_package(
         "kittentts", ["-U", wheel_url, "soundfile", "--quiet"], f"uv pip install -U '{wheel_url}' soundfile",
     )

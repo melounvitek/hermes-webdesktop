@@ -48,6 +48,12 @@ from hermes_cli.cli_output import print_error, print_info, print_success, print_
 from hermes_cli.secret_prompt import masked_secret_prompt  # noqa: E402
 
 
+def _info(*lines: str | None) -> None:
+    """print_info each line in order; ``None`` emits a bare blank ``print()``."""
+    for line in lines:
+        print() if line is None else print_info(line)
+
+
 def _current_reasoning_effort(config: dict) -> str:
     agent_cfg = config.get("agent")
     if isinstance(agent_cfg, dict):
@@ -81,16 +87,13 @@ def print_noninteractive_setup_guidance(reason: str | None = None) -> None:
     print()
     if reason:
         print_info(reason)
-    print_info("The interactive wizard cannot be used here.")
-    print()
-    print_info("Configure Hermes using environment variables or config commands:")
-    print_info("  hermes config set model.provider custom")
-    print_info("  hermes config set model.base_url http://localhost:8080/v1")
-    print_info("  hermes config set model.default your-model-name")
-    print()
-    print_info("Or set OPENROUTER_API_KEY / OPENAI_API_KEY in your environment.")
-    print_info("Run 'hermes setup' in an interactive terminal to use the full wizard.")
-    print()
+    _info("The interactive wizard cannot be used here.", None,
+          "Configure Hermes using environment variables or config commands:",
+          "  hermes config set model.provider custom",
+          "  hermes config set model.base_url http://localhost:8080/v1",
+          "  hermes config set model.default your-model-name", None,
+          "Or set OPENROUTER_API_KEY / OPENAI_API_KEY in your environment.",
+          "Run 'hermes setup' in an interactive terminal to use the full wizard.", None)
 
 
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
@@ -473,11 +476,9 @@ def _apply_default_agent_settings(config: dict):
 
     save_config(config)
     print_success("Applied recommended defaults:")
-    print_info("  Max iterations: 150")
-    print_info("  Tool progress: all")
-    print_info("  Compression threshold: 0.50")
-    print_info("  Session reset: never (use /reset or compression)")
-    print_info("  Run `hermes setup agent` later to customize.")
+    _info("  Max iterations: 150", "  Tool progress: all", "  Compression threshold: 0.50",
+          "  Session reset: never (use /reset or compression)",
+          "  Run `hermes setup agent` later to customize.")
 
 
 def _prompt_int_setting(section: dict, key: str, label: str, current, accept) -> None:
@@ -786,10 +787,9 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
     print_info("You can edit these files directly or use 'hermes config edit'")
 
     if migration_ran:
-        print()
-        print_info("Settings were imported from OpenClaw.")
-        print_info("Each section below will show what was imported — press Enter to keep,")
-        print_info("or choose to reconfigure if needed.")
+        _info(None, "Settings were imported from OpenClaw.",
+              "Each section below will show what was imported — press Enter to keep,",
+              "or choose to reconfigure if needed.")
 
     # Agent Settings are not prompted: first installs get defaults, existing keep theirs.
     if not is_existing:
@@ -896,11 +896,10 @@ def _run_setup_wizard_impl(args):
         print()
         print_header("Reconfigure")
         print_success("You already have Hermes configured.")
-        print_info("Running the full wizard — each prompt shows your current value.")
-        print_info("Press Enter to keep it, or type a new value to change it.")
-        print_info("")
-        print_info("Tip: jump straight to a section with 'hermes setup model|terminal|")
-        print_info("     gateway|tools|agent', or fill only missing items with --quick.")
+        _info("Running the full wizard — each prompt shows your current value.",
+              "Press Enter to keep it, or type a new value to change it.", "",
+              "Tip: jump straight to a section with 'hermes setup model|terminal|",
+              "     gateway|tools|agent', or fill only missing items with --quick.")
         # --reconfigure is kept for backwards compatibility and is a no-op here.
     else:
         # ── First-Time Setup ── (--reconfigure / --quick are meaningless here; fall through)

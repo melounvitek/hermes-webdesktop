@@ -18,13 +18,11 @@ _SANDBOX_IMAGE = "nikolaik/python-nodejs:python3.11-nodejs20"
 def _prompt_vercel_sandbox_settings(config: dict):
     """Prompt for Vercel Sandbox settings without exposing unsupported disk sizing."""
     from hermes_cli.setup import (
-        get_env_value, print_info, print_warning, prompt, remove_env_value, save_env_value,
+        get_env_value, _info, print_info, print_warning, prompt, remove_env_value, save_env_value,
     )
     terminal = config.setdefault("terminal", {})
-    print()
-    print_info("Vercel Sandbox settings:")
-    print_info("  Filesystem persistence uses Vercel snapshots.")
-    print_info("  Snapshots restore files only; live processes do not continue after sandbox recreation.")
+    _info(None, "Vercel Sandbox settings:", "  Filesystem persistence uses Vercel snapshots.",
+          "  Snapshots restore files only; live processes do not continue after sandbox recreation.")
 
     from tools.terminal_tool import _SUPPORTED_VERCEL_RUNTIMES
 
@@ -57,9 +55,7 @@ def _prompt_vercel_sandbox_settings(config: dict):
         )
     terminal["container_disk"] = 51200
 
-    print()
-    print_info("Vercel authentication:")
-    print_info("  Use a long-lived Vercel access token plus project/team IDs.")
+    _info(None, "Vercel authentication:", "  Use a long-lived Vercel access token plus project/team IDs.")
     linked = _read_nearest_vercel_project()
     if linked:
         print_info("  Found defaults in nearest .vercel/project.json.")
@@ -136,7 +132,7 @@ def _setup_backend_local(config: dict) -> None:
 
 
 def _setup_backend_docker(config: dict) -> None:
-    from hermes_cli.setup import print_info, print_success, print_warning, prompt_yes_no
+    from hermes_cli.setup import _info, print_info, print_success, print_warning, prompt_yes_no
     print_success("Terminal backend: Docker")
     docker_bin = shutil.which("docker")
     if not docker_bin:
@@ -147,13 +143,10 @@ def _setup_backend_docker(config: dict) -> None:
 
     # Image and resource limits use defaults; tune via `hermes setup terminal`.
     config["terminal"].setdefault("docker_image", _SANDBOX_IMAGE)
-    print()
-    print_info("Docker sandboxes can be protected with the egress credential firewall.")
-    print_info(
-        "It routes sandbox traffic through iron-proxy so containers receive "
-        "proxy tokens instead of real API keys."
-    )
-    print_info("   Docker only for now; Modal, SSH, Daytona, and Singularity are not wired yet.")
+    _info(None, "Docker sandboxes can be protected with the egress credential firewall.",
+          "It routes sandbox traffic through iron-proxy so containers receive "
+        "proxy tokens instead of real API keys.",
+          "   Docker only for now; Modal, SSH, Daytona, and Singularity are not wired yet.")
     if prompt_yes_no("  Enable egress firewall for Docker sandboxes?", False):
         proxy_cfg = config.setdefault("proxy", {})
         proxy_cfg["enabled"] = True
@@ -179,7 +172,7 @@ def _setup_backend_singularity(config: dict) -> None:
 
 def _setup_backend_modal(config: dict) -> None:
     from hermes_cli.setup import (
-        cfg_get, get_env_value, get_nous_subscription_features, managed_nous_tools_enabled,
+        cfg_get, get_env_value, get_nous_subscription_features, _info, managed_nous_tools_enabled,
         print_info, print_success, prompt_choice, prompt_yes_no,
     )
     print_success("Terminal backend: Modal")
@@ -217,9 +210,7 @@ def _setup_backend_modal(config: dict) -> None:
     config["terminal"]["modal_mode"] = "direct"
     print_info("Requires a Modal account: https://modal.com")
     _ensure_sdk("modal", "uv pip install modal")
-    print()
-    print_info("Modal authentication:")
-    print_info("  Get your token at: https://modal.com/settings")
+    _info(None, "Modal authentication:", "  Get your token at: https://modal.com/settings")
     if get_env_value("MODAL_TOKEN_ID"):
         print_info("  Modal token: already configured")
         if not prompt_yes_no("  Update Modal credentials?", False):
@@ -229,11 +220,11 @@ def _setup_backend_modal(config: dict) -> None:
 
 
 def _setup_backend_daytona(config: dict) -> None:
-    from hermes_cli.setup import get_env_value, print_info, print_success, prompt_yes_no
+    from hermes_cli.setup import get_env_value, _info, print_info, print_success, prompt_yes_no
     print_success("Terminal backend: Daytona")
-    print_info("Persistent cloud development environments.")
-    print_info("Each session gets a dedicated sandbox with filesystem persistence.")
-    print_info("Sign up at: https://daytona.io")
+    _info("Persistent cloud development environments.",
+          "Each session gets a dedicated sandbox with filesystem persistence.",
+          "Sign up at: https://daytona.io")
     _ensure_sdk("daytona", "uv pip install daytona", show_stderr=True)
     print()
     if get_env_value("DAYTONA_API_KEY"):
