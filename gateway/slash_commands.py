@@ -491,6 +491,36 @@ def _spawn_detached_update(hermes_cmd, output_path, exit_code_path) -> None:
     subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
+def _reset_process_scoped_tool_state() -> None:
+    """Drop env-passthrough and credential-file state at a conversation boundary (best-effort)."""
+    try:
+        from tools.env_passthrough import clear_env_passthrough
+        clear_env_passthrough()
+    except Exception:
+        pass
+    try:
+        from tools.credential_files import clear_credential_files
+        clear_credential_files()
+    except Exception:
+        pass
+
+
+_BRANCH_COPIED_FIELDS = (
+    "content", "tool_calls", "tool_call_id", "finish_reason", "reasoning", "reasoning_content",
+    "reasoning_details", "codex_reasoning_items", "codex_message_items", "timestamp",
+)
+
+
+def _branch_row(msg: dict) -> dict:
+    """Transcript row copied into a /branch child. Keeps the api_content sidecar so the branch's
+    first turn replays the parent's exact wire bytes (warm provider prompt cache), not a cold prefill."""
+    row = {k: msg.get(k) for k in _BRANCH_COPIED_FIELDS}
+    row["role"] = msg.get("role", "user")
+    row["tool_name"] = msg.get("tool_name") or msg.get("name")
+    row["api_content"] = extract_api_content_sidecar(msg)
+    return row
+
+
 def _home_thread_from_source(source) -> Optional[str]:
     """The thread id /sethome should persist on the home target, or None.
 
@@ -702,18 +732,7 @@ class GatewaySlashCommandsMixin:
             )
         except Exception:
             pass
-
-        try:
-            from tools.env_passthrough import clear_env_passthrough
-            clear_env_passthrough()
-        except Exception:
-            pass
-
-        try:
-            from tools.credential_files import clear_credential_files
-            clear_credential_files()
-        except Exception:
-            pass
+        _reset_process_scoped_tool_state()
 
         # Reset the session
         new_entry = await self.async_session_store.reset_session(session_key)
@@ -722,6 +741,7 @@ class GatewaySlashCommandsMixin:
         # cleared via _clear_conversation_scope above.)
 
         _old_sid = old_entry.session_id if old_entry else None
+        platform_value = source.platform.value if source.platform else ""
 
         # Fire plugin on_session_finalize hook (session boundary). Off-loop + bounded: finalize
         # hooks can block arbitrarily (observability trace exports) and this handler runs on the
@@ -729,25 +749,16 @@ class GatewaySlashCommandsMixin:
         with contextlib.suppress(Exception):
             await self._finalize_session_off_loop(
                 session_id=_old_sid,
-                platform=source.platform.value if source.platform else "",
+                platform=platform_value,
                 reason="new_session",
                 old_session_id=_old_sid,
                 new_session_id=new_entry.session_id if new_entry else None,
             )
 
-        # Emit session:end hook (session is ending)
-        await self.hooks.emit("session:end", {
-            "platform": source.platform.value if source.platform else "",
-            "user_id": source.user_id,
-            "session_key": session_key,
-        })
-
-        # Emit session:reset hook
-        await self.hooks.emit("session:reset", {
-            "platform": source.platform.value if source.platform else "",
-            "user_id": source.user_id,
-            "session_key": session_key,
-        })
+        # Emit session:end (session is ending) then session:reset hooks.
+        hook_payload = {"platform": platform_value, "user_id": source.user_id, "session_key": session_key}
+        await self.hooks.emit("session:end", dict(hook_payload))
+        await self.hooks.emit("session:reset", dict(hook_payload))
 
         # Resolve session config info to surface to the user, scoped to the
         # profile serving this source so a multiplexed /reset //new banner
@@ -787,7 +798,7 @@ class GatewaySlashCommandsMixin:
             _invoke_hook(
                 "on_session_reset",
                 session_id=_new_sid,
-                platform=source.platform.value if source.platform else "",
+                platform=platform_value,
                 reason="new_session",
                 old_session_id=_old_sid,
                 new_session_id=_new_sid,
@@ -4866,29 +4877,7 @@ class GatewaySlashCommandsMixin:
         # Best-effort like the old loop — a failed copy still yields a usable (partial) branch.
         try:
             await self._session_db.append_messages_batch(
-                new_session_id,
-                [
-                    {
-                        "role": msg.get("role", "user"),
-                        "content": msg.get("content"),
-                        "tool_name": msg.get("tool_name") or msg.get("name"),
-                        "tool_calls": msg.get("tool_calls"),
-                        "tool_call_id": msg.get("tool_call_id"),
-                        "finish_reason": msg.get("finish_reason"),
-                        "reasoning": msg.get("reasoning"),
-                        "reasoning_content": msg.get("reasoning_content"),
-                        "reasoning_details": msg.get("reasoning_details"),
-                        "codex_reasoning_items": msg.get("codex_reasoning_items"),
-                        "codex_message_items": msg.get("codex_message_items"),
-                        # Keep the api_content sidecar so the branch's first turn
-                        # replays the parent's exact wire bytes (warm provider
-                        # prompt cache) instead of a full cold prefill.
-                        "api_content": extract_api_content_sidecar(msg),
-                        "timestamp": msg.get("timestamp"),
-                    }
-                    for msg in history
-                ],
-                chunk_rows=500,
+                new_session_id, [_branch_row(msg) for msg in history], chunk_rows=500,
             )
         except Exception:
             pass  # Best-effort copy
