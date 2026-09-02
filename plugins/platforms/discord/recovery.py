@@ -54,7 +54,6 @@ class DiscordRecoveryStore:
 
     def _initialize(self, conn: sqlite3.Connection) -> None:
         from hermes_state import apply_wal_with_fallback
-
         apply_wal_with_fallback(conn, db_label="discord_recovery.db")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS discord_messages (
@@ -97,16 +96,11 @@ class DiscordRecoveryStore:
                 updated_at TEXT NOT NULL
             )
         """)
-        cutoff = (
-            dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=_RETENTION_DAYS)
-        ).isoformat()
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=_RETENTION_DAYS)).isoformat()
         conn.execute("DELETE FROM discord_messages WHERE updated_at < ?", (cutoff,))
         conn.execute(
             "DELETE FROM discord_recovery_scans "
             "WHERE COALESCE(completed_at, started_at) < ?",
             (cutoff,),
         )
-        conn.execute(
-            "DELETE FROM discord_recovery_cursors WHERE updated_at < ?",
-            (cutoff,),
-        )
+        conn.execute("DELETE FROM discord_recovery_cursors WHERE updated_at < ?", (cutoff,))
