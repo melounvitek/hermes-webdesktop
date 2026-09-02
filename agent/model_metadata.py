@@ -1201,6 +1201,79 @@ def _endpoint_model_entry(model: Dict[str, Any], model_id: str, context_length: 
     return entry
 
 
+def _lmstudio_native_models(normalized: str, headers: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
+    """LM Studio ``/api/v1/models`` → cache; context comes from the first loaded instance."""
+    response = requests.get(
+        _lmstudio_server_root(normalized).rstrip("/") + "/api/v1/models",
+        headers=headers,
+        timeout=(5, 10),
+        verify=_resolve_requests_verify(normalized),
+    )
+    response.raise_for_status()
+    cache: Dict[str, Dict[str, Any]] = {}
+    for model in response.json().get("models", []):
+        if not isinstance(model, dict):
+            continue
+        model_id = model.get("key") or model.get("id")
+        if not model_id:
+            continue
+        context_length = None
+        for inst in model.get("loaded_instances", []) or []:
+            if not isinstance(inst, dict):
+                continue
+            cfg = inst.get("config", {})
+            ctx = cfg.get("context_length") if isinstance(cfg, dict) else None
+            if isinstance(ctx, int) and ctx > 0:
+                context_length = ctx
+                break
+        entry = _endpoint_model_entry(model, model_id, context_length)
+        _add_model_aliases(cache, model_id, entry)
+        alt_id = model.get("id")
+        if isinstance(alt_id, str) and alt_id and alt_id != model_id:
+            _add_model_aliases(cache, alt_id, entry)
+    return cache
+
+
+def _apply_llamacpp_props(cache: Dict[str, Dict[str, Any]], request_candidate: str, headers: Dict[str, str], verify) -> None:
+    """Overwrite ``context_length`` with llama.cpp's actually allocated ``n_ctx`` from /props.
+
+    ``/v1/props`` first (current builds), ``/props`` for older ones. In router
+    mode the bare endpoint 400s, so each LOADED child's granted window is read
+    via ``/props?model=``; unloaded children are skipped — probing could autoload them.
+    """
+    base = request_candidate.rstrip("/").replace("/v1", "")
+
+    def _props(params=None):
+        resp = requests.get(base + "/v1/props", params=params, headers=headers, timeout=5, verify=verify)
+        if not resp.ok:
+            resp = requests.get(base + "/props", params=params, headers=headers, timeout=5, verify=verify)
+        return resp
+
+    props_resp = _props()
+    if props_resp.ok:
+        props = props_resp.json()
+        n_ctx = props.get("default_generation_settings", {}).get("n_ctx")
+        model_alias = props.get("model_alias", "")
+        if n_ctx and model_alias and model_alias in cache:
+            cache[model_alias]["context_length"] = n_ctx
+        return
+    native = requests.get(base + "/models", headers=headers, timeout=5, verify=verify)
+    if not native.ok:
+        return
+    for child in (native.json() or {}).get("data", [])[:16]:
+        if not isinstance(child, dict):
+            continue
+        child_id = child.get("id")
+        status = (child.get("status") or {}).get("value")
+        if not child_id or child_id not in cache or status not in ("loaded", "ready"):
+            continue
+        pr = _props({"model": child_id})
+        if pr.ok:
+            child_ctx = (pr.json().get("default_generation_settings") or {}).get("n_ctx")
+            if child_ctx:
+                cache[child_id]["context_length"] = child_ctx
+
+
 def fetch_endpoint_model_metadata(
     base_url: str,
     api_key: str = "",
@@ -1242,37 +1315,7 @@ def fetch_endpoint_model_metadata(
     if is_local_endpoint(normalized):
         try:
             if detect_local_server_type(normalized, api_key=api_key) == "lm-studio":
-                server_url = _lmstudio_server_root(normalized)
-                response = requests.get(
-                    server_url.rstrip("/") + "/api/v1/models",
-                    headers=headers,
-                    timeout=(5, 10),
-                    verify=_resolve_requests_verify(normalized),
-                )
-                response.raise_for_status()
-                payload = response.json()
-                cache: Dict[str, Dict[str, Any]] = {}
-                for model in payload.get("models", []):
-                    if not isinstance(model, dict):
-                        continue
-                    model_id = model.get("key") or model.get("id")
-                    if not model_id:
-                        continue
-                    context_length = None
-                    for inst in model.get("loaded_instances", []) or []:
-                        if not isinstance(inst, dict):
-                            continue
-                        cfg = inst.get("config", {})
-                        ctx = cfg.get("context_length") if isinstance(cfg, dict) else None
-                        if isinstance(ctx, int) and ctx > 0:
-                            context_length = ctx
-                            break
-                    entry = _endpoint_model_entry(model, model_id, context_length)
-                    _add_model_aliases(cache, model_id, entry)
-                    alt_id = model.get("id")
-                    if isinstance(alt_id, str) and alt_id and alt_id != model_id:
-                        _add_model_aliases(cache, alt_id, entry)
-
+                cache = _lmstudio_native_models(normalized, headers)
                 _endpoint_model_metadata_cache[normalized] = cache
                 _endpoint_model_metadata_cache_time[normalized] = time.time()
                 return cache
@@ -1315,51 +1358,9 @@ def fetch_endpoint_model_metadata(
                     continue
                 _add_model_aliases(cache, model_id, _endpoint_model_entry(model, model_id, _extract_context_length(model)))
 
-            # llama.cpp: /props carries the actually allocated context.
-            is_llamacpp = any(
-                m.get("owned_by") == "llamacpp"
-                for m in payload.get("data", []) if isinstance(m, dict)
-            )
-            if is_llamacpp:
+            if any(m.get("owned_by") == "llamacpp" for m in payload.get("data", []) if isinstance(m, dict)):
                 try:
-                    # Try /v1/props first (current llama.cpp); fall back to /props for older builds
-                    base = request_candidate.rstrip("/").replace("/v1", "")
-                    _verify = _resolve_requests_verify(normalized)
-                    props_resp = requests.get(base + "/v1/props", headers=headers, timeout=5, verify=_verify)
-                    if not props_resp.ok:
-                        props_resp = requests.get(base + "/props", headers=headers, timeout=5, verify=_verify)
-                    if props_resp.ok:
-                        props = props_resp.json()
-                        gen_settings = props.get("default_generation_settings", {})
-                        n_ctx = gen_settings.get("n_ctx")
-                        model_alias = props.get("model_alias", "")
-                        if n_ctx and model_alias and model_alias in cache:
-                            cache[model_alias]["context_length"] = n_ctx
-                    else:
-                        # Router mode: bare /props 400s; read each LOADED
-                        # child's granted window via /props?model=. Unloaded
-                        # children are skipped — probing could autoload them.
-                        native = requests.get(base + "/models", headers=headers, timeout=5, verify=_verify)
-                        if native.ok:
-                            children = (native.json() or {}).get("data", [])
-                            for child in children[:16]:
-                                if not isinstance(child, dict):
-                                    continue
-                                child_id = child.get("id")
-                                status = (child.get("status") or {}).get("value")
-                                if not child_id or child_id not in cache or status not in ("loaded", "ready"):
-                                    continue
-                                pr = requests.get(
-                                    base + "/v1/props", params={"model": child_id},
-                                    headers=headers, timeout=5, verify=_verify)
-                                if not pr.ok:
-                                    pr = requests.get(
-                                        base + "/props", params={"model": child_id},
-                                        headers=headers, timeout=5, verify=_verify)
-                                if pr.ok:
-                                    child_ctx = (pr.json().get("default_generation_settings") or {}).get("n_ctx")
-                                    if child_ctx:
-                                        cache[child_id]["context_length"] = child_ctx
+                    _apply_llamacpp_props(cache, request_candidate, headers, _resolve_requests_verify(normalized))
                 except Exception:
                     pass
 
