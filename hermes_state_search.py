@@ -50,6 +50,37 @@ _LIKE_COALESCED_COLUMN_SQL = (
 # ``sort`` -> ORDER BY for the FTS routes; anything unknown is rank-only so
 # callers can pass user input through.
 _FTS_ORDER_BY = {"newest": "ORDER BY m.timestamp DESC, rank", "oldest": "ORDER BY m.timestamp ASC, rank"}
+# One row before + the hit + one row after, in (timestamp, id) order.
+_CONTEXT_WINDOW_SQL = """WITH target AS (
+                               SELECT session_id, timestamp, id
+                               FROM messages
+                               WHERE id = ?
+                           )
+                           SELECT role, content
+                           FROM (
+                               SELECT m.id, m.timestamp, m.role, m.content
+                               FROM messages m
+                               JOIN target t ON t.session_id = m.session_id
+                               WHERE (m.timestamp < t.timestamp)
+                                  OR (m.timestamp = t.timestamp AND m.id < t.id)
+                               ORDER BY m.timestamp DESC, m.id DESC
+                               LIMIT 1
+                           )
+                           UNION ALL
+                           SELECT role, content
+                           FROM messages
+                           WHERE id = ?
+                           UNION ALL
+                           SELECT role, content
+                           FROM (
+                               SELECT m.id, m.timestamp, m.role, m.content
+                               FROM messages m
+                               JOIN target t ON t.session_id = m.session_id
+                               WHERE (m.timestamp > t.timestamp)
+                                  OR (m.timestamp = t.timestamp AND m.id > t.id)
+                               ORDER BY m.timestamp ASC, m.id ASC
+                               LIMIT 1
+                           )"""
 
 
 def _meta_row(conn, key: str) -> Optional[sqlite3.Row]:
@@ -1053,50 +1084,17 @@ class SessionSearchMixin:
         """Attach neighboring messages (1 before + after, only when the
         projection consumes ``context``) and trim full content. Each context
         query takes its own read transaction, never a lock across N queries."""
-        context_matches = matches if result_fields is None or "context" in result_fields else ()
-        for match in context_matches:
-            try:
-                with self._read_ctx() as conn:
-                    ctx_cursor = conn.execute(
-                        """WITH target AS (
-                               SELECT session_id, timestamp, id
-                               FROM messages
-                               WHERE id = ?
-                           )
-                           SELECT role, content
-                           FROM (
-                               SELECT m.id, m.timestamp, m.role, m.content
-                               FROM messages m
-                               JOIN target t ON t.session_id = m.session_id
-                               WHERE (m.timestamp < t.timestamp)
-                                  OR (m.timestamp = t.timestamp AND m.id < t.id)
-                               ORDER BY m.timestamp DESC, m.id DESC
-                               LIMIT 1
-                           )
-                           UNION ALL
-                           SELECT role, content
-                           FROM messages
-                           WHERE id = ?
-                           UNION ALL
-                           SELECT role, content
-                           FROM (
-                               SELECT m.id, m.timestamp, m.role, m.content
-                               FROM messages m
-                               JOIN target t ON t.session_id = m.session_id
-                               WHERE (m.timestamp > t.timestamp)
-                                  OR (m.timestamp = t.timestamp AND m.id > t.id)
-                               ORDER BY m.timestamp ASC, m.id ASC
-                               LIMIT 1
-                           )""",
-                        (match["id"], match["id"]),
-                    )
-                    match["context"] = [
-                        {"role": row["role"], "content": _flatten_text(self._decode_content(row["content"]))[:200]}
-                        for row in ctx_cursor.fetchall()
-                    ]
-            except Exception:
-                match["context"] = []
-
+        if result_fields is None or "context" in result_fields:
+            for match in matches:
+                try:
+                    with self._read_ctx() as conn:
+                        rows = conn.execute(_CONTEXT_WINDOW_SQL, (match["id"], match["id"])).fetchall()
+                        match["context"] = [
+                            {"role": row["role"], "content": _flatten_text(self._decode_content(row["content"]))[:200]}
+                            for row in rows
+                        ]
+                except Exception:
+                    match["context"] = []
         # No route selects full content; the pop guards any future one that does.
         for match in matches:
             match.pop("content", None)
