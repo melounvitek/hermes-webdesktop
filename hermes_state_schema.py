@@ -53,9 +53,7 @@ _FTS_TRIGRAM_TRIGGERS = tuple(n for n in _FTS_TRIGGERS if "_trigram_" in n)
 _FTS_BASE_TRIGGERS = tuple(n for n in _FTS_TRIGGERS if n not in _FTS_TRIGRAM_TRIGGERS)
 
 _LEGACY_INLINE_CONCAT_SQL = (
-    "COALESCE(content, '') || ' ' || "
-    "COALESCE(tool_name, '') || ' ' || "
-    "COALESCE(tool_calls, '') "
+    "COALESCE(content, '') || ' ' || COALESCE(tool_name, '') || ' ' || COALESCE(tool_calls, '') "
 )
 _SESSION_MODEL_USAGE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_session_model_usage_session ON session_model_usage(session_id)",
@@ -167,8 +165,7 @@ class SessionSchemaMixin:
         """
         try:
             rows = cursor.execute(
-                "SELECT id, system_prompt FROM sessions "
-                "WHERE system_prompt IS NOT NULL"
+                "SELECT id, system_prompt FROM sessions WHERE system_prompt IS NOT NULL"
             ).fetchall()
         except sqlite3.OperationalError:
             return
@@ -176,9 +173,7 @@ class SessionSchemaMixin:
             try:
                 prompt_hash = self._store_system_prompt(cursor, prompt)
                 cursor.execute(
-                    "UPDATE sessions "
-                    "SET system_prompt_hash = ?, system_prompt = NULL "
-                    "WHERE id = ?",
+                    "UPDATE sessions SET system_prompt_hash = ?, system_prompt = NULL WHERE id = ?",
                     (prompt_hash, session_id),
                 )
             except sqlite3.OperationalError as exc:
@@ -293,8 +288,7 @@ class SessionSchemaMixin:
     def _cjk_update_trigger_is_narrowed(self, cursor: sqlite3.Cursor) -> bool:
         """True when messages_fts_cjk_update exists with AFTER UPDATE OF."""
         row = cursor.execute(
-            "SELECT sql FROM sqlite_master "
-            "WHERE type = 'trigger' AND name = ?",
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
             ("messages_fts_cjk_update",),
         ).fetchone()
         return bool(row) and not self._fts_update_trigger_needs_narrowing(row[0])
@@ -323,8 +317,7 @@ class SessionSchemaMixin:
         if include_trigram:
             cursor.execute("INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')")
         cursor.execute(
-            "DELETE FROM state_meta WHERE key IN "
-            "('fts_rebuild_high_water', 'fts_rebuild_progress')"
+            "DELETE FROM state_meta WHERE key IN ('fts_rebuild_high_water', 'fts_rebuild_progress')"
         )
 
     @staticmethod
@@ -593,8 +586,7 @@ class SessionSchemaMixin:
         self._fts_enabled = True
         self._trigram_available = include_trigram
         logger.warning(
-            "Rebuilt stale state.db FTS indexes from canonical messages and "
-            "restored sync triggers."
+            "Rebuilt stale state.db FTS indexes from canonical messages and restored sync triggers."
         )
         return True
 
@@ -637,8 +629,7 @@ class SessionSchemaMixin:
             ref.executescript(schema_sql)
             table_columns: Dict[str, Dict[str, str]] = {}
             for (tbl,) in ref.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall():
                 cols: Dict[str, str] = {}
                 for _cid, col_name, col_type, notnull, default, pk in ref.execute(
@@ -990,8 +981,7 @@ class SessionSchemaMixin:
             fts5_available
             and not self._db_has_legacy_inline_fts(cursor)
             and cursor.execute(
-                "SELECT 1 FROM state_meta "
-                "WHERE key = 'fts_rebuild_high_water' LIMIT 1"
+                "SELECT 1 FROM state_meta WHERE key = 'fts_rebuild_high_water' LIMIT 1"
             ).fetchone() is None
             and not self._has_fts_trash(cursor)
             and not self._fts_external_index_empty_with_messages(cursor)

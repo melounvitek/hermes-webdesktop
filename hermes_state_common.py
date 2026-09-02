@@ -313,7 +313,6 @@ _FTS_TRIGGERS = (
     "messages_fts_trigram_insert", "messages_fts_trigram_delete", "messages_fts_trigram_update",
 )
 
-
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
@@ -700,7 +699,6 @@ BEGIN
 END;
 """
 
-
 _FTS_CJK_TRIGGERS = (
     "messages_fts_cjk_insert", "messages_fts_cjk_delete", "messages_fts_cjk_update",
 )
@@ -752,7 +750,6 @@ AFTER UPDATE OF content, tool_name, tool_calls ON messages BEGIN
     );
 END;
 """
-
 
 LEGACY_FTS_TRIGRAM_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
