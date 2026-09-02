@@ -939,7 +939,7 @@ def test_execution_adapters_do_not_create_relay_host_without_a_consumer(
 
     assert result is tool_result
     assert observed_args is tool_args
-    assert relay_runtime.get_host(create=False) is None
+    assert relay_runtime.HOST_REGISTRY.for_profile(create=False) is None
     assert imports == []
 
 
@@ -958,7 +958,7 @@ def test_core_runtime_is_fail_open_without_a_published_binding(monkeypatch, capl
     monkeypatch.setattr(relay_runtime.importlib, "import_module", missing_relay)
 
     assert relay_runtime.get_runtime() is None
-    host = relay_runtime.get_host()
+    host = relay_runtime.HOST_REGISTRY.for_profile()
     assert isinstance(host, relay_runtime.NoopRelayRuntime)
     assert host.profile_key == relay_runtime.current_profile_key()
     assert "nemo_relay" in host.reason
