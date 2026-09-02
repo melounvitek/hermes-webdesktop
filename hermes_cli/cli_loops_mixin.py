@@ -542,6 +542,25 @@ class CLILoopsMixin:
             except Exception:
                 pass
 
+    def _last_assistant_response_text(self) -> str:
+        """Text of the most recent assistant message ("" when none); multimodal parts are flattened."""
+        try:
+            hist = self.conversation_history or []
+            for msg in reversed(hist):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        parts = [
+                            p.get("text", "")
+                            for p in content
+                            if isinstance(p, dict) and p.get("type") in {"text", "output_text"}
+                        ]
+                        return "\n".join(t for t in parts if t)
+                    return str(content or "")
+        except Exception:
+            pass
+        return ""
+
     def _maybe_complete_loop_tick_after_turn(self) -> None:
         """Post-turn hook: evaluate a finished /loop wakeup turn.
 
@@ -571,24 +590,7 @@ class CLILoopsMixin:
             )
             return
 
-        last_response = ""
-        try:
-            hist = self.conversation_history or []
-            for msg in reversed(hist):
-                if msg.get("role") == "assistant":
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        parts = [
-                            p.get("text", "")
-                            for p in content
-                            if isinstance(p, dict) and p.get("type") in {"text", "output_text"}
-                        ]
-                        last_response = "\n".join(t for t in parts if t)
-                    else:
-                        last_response = str(content or "")
-                    break
-        except Exception:
-            last_response = ""
+        last_response = self._last_assistant_response_text()
 
         decision = mgr.complete_tick(last_response)
         msg = decision.get("message") or ""
@@ -674,25 +676,7 @@ class CLILoopsMixin:
             return
 
         # Extract the agent's final response for this turn.
-        last_response = ""
-        try:
-            hist = self.conversation_history or []
-            for msg in reversed(hist):
-                if msg.get("role") == "assistant":
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        # Multimodal content — flatten text parts.
-                        parts = [
-                            p.get("text", "")
-                            for p in content
-                            if isinstance(p, dict) and p.get("type") in {"text", "output_text"}
-                        ]
-                        last_response = "\n".join(t for t in parts if t)
-                    else:
-                        last_response = str(content or "")
-                    break
-        except Exception:
-            last_response = ""
+        last_response = self._last_assistant_response_text()
 
         # Skip judging on empty/whitespace-only responses. These are almost
         # always transient failures (API error, empty stream) where the

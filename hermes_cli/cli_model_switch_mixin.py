@@ -506,41 +506,17 @@ class CLIModelSwitchMixin:
         except Exception:
             save_config_value("model.context_length", None)
 
-    def _apply_model_switch_result(
-        self, result, persist_global: bool, custom_providers=None
-    ) -> None:
-        from cli import HermesCLI, _cprint, logger, save_config_value
-        if not result.success:
-            _cprint(f"  ✗ {result.error_message}")
-            return
+    def _stage_and_swap_model(self, result, old_model) -> bool:
+        """Stage ``result`` onto the CLI fields, then swap the live agent in place.
 
-        if self.agent is not None:
-            try:
-                from hermes_cli.context_switch_guard import merge_preflight_compression_warning
-
-                # Prefer the fresh inventory list (same source as switch_model /
-                # TUI); fall back to the agent-init snapshot.
-                _cp = (
-                    custom_providers
-                    if custom_providers is not None
-                    else getattr(self.agent, "_custom_providers", None)
-                )
-                merge_preflight_compression_warning(
-                    result,
-                    agent=self.agent,
-                    messages=list(self.conversation_history or []),
-                    custom_providers=_cp,
-                    config_context_length=getattr(self.agent, "_config_context_length", None),
-                )
-            except Exception as exc:
-                logger.debug("preflight-compression switch warning failed: %s", exc)
-
-        old_model = self.model
-        # Snapshot the CLI-level credential/runtime fields BEFORE mutating them
-        # so a failed in-place agent swap can roll the whole CLI back to the old
-        # working model.  Otherwise the broken credentials staged below leak into
-        # the next turn's resolution even though the agent itself rolled back
-        # (#50163).
+        CLI-level fields are snapshotted first (mirrors the gateway) so a failed
+        in-place agent swap rolls the whole CLI back to the old working model —
+        otherwise the broken credentials staged here leak into the next turn's
+        resolution even though the agent itself rolled back (#50163). Returns
+        False after printing the failure (caller aborts the rest of the commit:
+        note + success print), so a failed switch is a no-op, not a dead session.
+        """
+        from cli import _cprint
         _cli_snapshot = {
             "model": self.model,
             "provider": self.provider,
@@ -577,17 +553,47 @@ class CLIModelSwitchMixin:
                     capabilities=getattr(result, "runtime_capabilities", None),
                 )
             except Exception as exc:
-                # The agent rolled itself back to the old working model/client.
-                # Roll the CLI's own staged fields back too and abort the rest
-                # of the commit (note + success print) so a failed switch is a
-                # no-op rather than a dead session (#50163).
                 for _k, _v in _cli_snapshot.items():
                     setattr(self, _k, _v)
                 _cprint(
                     f"  ⚠ Model switch to {result.new_model} failed ({exc}); "
                     f"staying on {old_model}."
                 )
-                return
+                return False
+        return True
+
+    def _apply_model_switch_result(
+        self, result, persist_global: bool, custom_providers=None
+    ) -> None:
+        from cli import HermesCLI, _cprint, logger, save_config_value
+        if not result.success:
+            _cprint(f"  ✗ {result.error_message}")
+            return
+
+        if self.agent is not None:
+            try:
+                from hermes_cli.context_switch_guard import merge_preflight_compression_warning
+
+                # Prefer the fresh inventory list (same source as switch_model /
+                # TUI); fall back to the agent-init snapshot.
+                _cp = (
+                    custom_providers
+                    if custom_providers is not None
+                    else getattr(self.agent, "_custom_providers", None)
+                )
+                merge_preflight_compression_warning(
+                    result,
+                    agent=self.agent,
+                    messages=list(self.conversation_history or []),
+                    custom_providers=_cp,
+                    config_context_length=getattr(self.agent, "_config_context_length", None),
+                )
+            except Exception as exc:
+                logger.debug("preflight-compression switch warning failed: %s", exc)
+
+        old_model = self.model
+        if not self._stage_and_swap_model(result, old_model):
+            return
 
         from hermes_cli.model_switch import format_model_for_display
         _display_old = format_model_for_display(old_model)
@@ -932,54 +938,8 @@ class CLIModelSwitchMixin:
         # overwrite the switch on the next turn (it re-resolves from this).
         old_model = self.model
         _one_turn_restore_snapshot = self._snapshot_model_runtime() if one_turn else None
-        # Snapshot CLI-level fields before mutation so a failed in-place swap
-        # rolls the whole CLI back to the old working model (#50163).
-        _cli_snapshot = {
-            "model": self.model,
-            "provider": self.provider,
-            "requested_provider": self.requested_provider,
-            "_explicit_api_key": getattr(self, "_explicit_api_key", None),
-            "_explicit_base_url": getattr(self, "_explicit_base_url", None),
-            "api_key": self.api_key,
-            "base_url": self.base_url,
-            "api_mode": self.api_mode,
-        }
-        self.model = result.new_model
-        self.provider = result.target_provider
-        self.requested_provider = result.target_provider
-        # Always overwrite explicit overrides so stale credentials from the
-        # previous provider (e.g. Ollama api_key/base_url) don't leak into
-        # the new provider's credential resolution on the next turn.
-        self._explicit_api_key = result.api_key
-        self._explicit_base_url = result.base_url
-        if result.api_key:
-            self.api_key = result.api_key
-        if result.base_url:
-            self.base_url = result.base_url
-        if result.api_mode:
-            self.api_mode = result.api_mode
-
-        # Apply to running agent (in-place swap)
-        if self.agent is not None:
-            try:
-                self.agent.switch_model(
-                    new_model=result.new_model,
-                    new_provider=result.target_provider,
-                    api_key=result.api_key,
-                    base_url=result.base_url,
-                    api_mode=result.api_mode,
-                    capabilities=getattr(result, "runtime_capabilities", None),
-                )
-            except Exception as exc:
-                # Agent rolled itself back; roll the CLI back too and abort so a
-                # failed switch is a no-op rather than a dead session (#50163).
-                for _k, _v in _cli_snapshot.items():
-                    setattr(self, _k, _v)
-                _cprint(
-                    f"  ⚠ Model switch to {result.new_model} failed ({exc}); "
-                    f"staying on {old_model}."
-                )
-                return
+        if not self._stage_and_swap_model(result, old_model):
+            return
 
         # Store a note to prepend to the next user message so the model
         # knows a switch occurred (avoids injecting system messages mid-history
