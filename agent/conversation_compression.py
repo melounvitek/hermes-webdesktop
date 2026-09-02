@@ -3886,6 +3886,188 @@ def _publish_rotated_compaction(
                     )
 
 
+def _warn_summary_or_aux_fallback(agent: Any) -> None:
+    """Surface a failed summary, or a recovered-but-broken aux compression model, once."""
+    summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
+    if summary_error:
+        if getattr(agent, "_last_compression_summary_warning", None) != summary_error:
+            agent._last_compression_summary_warning = summary_error
+            agent._emit_warning(
+                f"⚠ Compression summary failed: {summary_error}. "
+                "Inserted a fallback context marker."
+            )
+    else:
+        # Aux model may have errored and been recovered on main; tell the user their
+        # auxiliary.compression.model is broken even though compression succeeded.
+        _aux_fail_model = getattr(agent.context_compressor, "_last_aux_model_failure_model", None)
+        _aux_fail_err = getattr(agent.context_compressor, "_last_aux_model_failure_error", None)
+        if _aux_fail_model:
+            # Dedup on (model, error) so we don't spam on every compaction
+            _aux_key = (_aux_fail_model, _aux_fail_err)
+            if getattr(agent, "_last_aux_fallback_warning_key", None) != _aux_key:
+                agent._last_aux_fallback_warning_key = _aux_key
+                agent._emit_warning(
+                    f"ℹ Configured compression model '{_aux_fail_model}' failed "
+                    f"({_aux_fail_err or 'unknown error'}). Recovered using main model — "
+                    "check auxiliary.compression.model in config.yaml."
+                )
+
+
+def _finish_compaction_boundary(
+    agent: Any,
+    compressed: list,
+    *,
+    new_system_prompt: str,
+    old_session_id: Optional[str],
+    in_place: bool,
+    compacted_in_place: bool,
+    session_commit_succeeded: bool,
+    defer_context_engine_notification: bool,
+    compression_made_progress: bool,
+    compression_used_fallback: bool,
+    compression_feasibility_skip: bool,
+    task_id: str,
+) -> int:
+    """Post-commit bookkeeping: notify engines/providers/hooks, re-arm usage tracking.
+
+    Returns the rough post-compression token estimate (diagnostics only).
+    """
+    # old_session_id is bound only on rotation; _boundary_parent is the id the
+    # boundary notifications attribute prior state to (old id, or same id in-place).
+    _old_sid = old_session_id
+    _is_boundary = bool(_old_sid) or in_place
+    _context_engine_boundary_committed = session_commit_succeeded and (
+        bool(_old_sid) or compacted_in_place
+    )
+    _boundary_parent = _old_sid or agent.session_id or ""
+
+    # The heartbeat's terminal stamp landed on the PARENT before the id re-pointed;
+    # clear labels (keep last_activity_at) so the archived row isn't falsely fresh.
+    if _old_sid and session_commit_succeeded:
+        try:
+            _labels_db = getattr(agent, "_session_db", None)
+            _clear_labels = getattr(
+                type(_labels_db) if _labels_db is not None else None,
+                "clear_session_activity_labels",
+                None,
+            )
+            if callable(_clear_labels):
+                _clear_labels(_labels_db, _old_sid)
+        except Exception:
+            logger.debug(
+                "failed to clear archived compression parent's activity "
+                "labels (ignored)",
+                exc_info=True,
+            )
+
+    # Plugin engines use boundary_reason="compression" to keep lineage/checkpoint
+    # state. Fires in BOTH modes: in-place passes the same id, the boundary is real.
+    if _context_engine_boundary_committed:
+        if defer_context_engine_notification:
+            _queue_context_engine_compression_notification(
+                agent,
+                new_session_id=agent.session_id or "",
+                old_session_id=_boundary_parent,
+            )
+        else:
+            _notify_context_engine_compression_complete(
+                agent,
+                new_session_id=agent.session_id or "",
+                old_session_id=_boundary_parent,
+            )
+
+    # Providers refresh cached per-session state; reset=False, conversation goes on.
+    # Fires in BOTH modes so buffers don't double-count dropped turns in-place.
+    try:
+        if _is_boundary and agent._memory_manager:
+            agent._memory_manager.on_session_switch(
+                agent.session_id or "",
+                parent_session_id=_boundary_parent,
+                reset=False,
+                reason="compression",
+            )
+    except Exception as _me_err:
+        logger.debug("memory manager on_session_switch (compression): %s", _me_err)
+
+    # Route via _emit_status so the warning reaches gateway platforms; store it on
+    # _compression_warning so a late-bound status_callback can replay it.
+    _cc = agent.context_compressor.compression_count
+    if _cc >= 2:
+        _cc_msg = (
+            f"{agent.log_prefix}⚠️  Session compressed {_cc} times — "
+            f"accuracy may degrade. Consider /new to start fresh."
+        )
+        agent._compression_warning = _cc_msg
+        agent._emit_status(_cc_msg)
+
+    # session:compress lets hooks ingest the old session before it's lost;
+    # in_place=True tells them the same id was compacted rather than rotated.
+    if getattr(agent, "event_callback", None):
+        try:
+            agent.event_callback("session:compress", {
+                "platform": agent.platform or "",
+                "session_id": agent.session_id,
+                "old_session_id": _old_sid or "",
+                "in_place": in_place,
+                "compression_count": agent.context_compressor.compression_count,
+            })
+        except Exception as e:
+            logger.debug("event_callback error on session:compress: %s", e)
+
+    # Rotation-independent flag: the gateway uses it (not an id diff) to re-baseline
+    # transcript handling (history_offset=0 + rewrite on the same id) in-place.
+    agent._last_compression_attempt_in_place = compacted_in_place
+    agent._last_compaction_in_place = compacted_in_place
+
+    # Diagnostics only, not provider usage: schema-heavy rough estimates can stay
+    # above threshold even after the next real request fits.
+    _compressed_est = estimate_request_tokens_rough(
+        compressed,
+        system_prompt=new_system_prompt or "",
+        tools=agent.tools or None,
+    )
+    agent.context_compressor.last_compression_rough_tokens = _compressed_est
+    agent.context_compressor.last_prompt_tokens = -1
+    agent.context_compressor.last_completion_tokens = 0
+    agent.context_compressor.awaiting_real_usage_after_compression = True
+    # Transcript rewritten: invalidate the usage anchor's base snapshot explicitly
+    # (its structural check would fail closed anyway); estimate until re-anchored.
+    agent._usage_anchor = None
+    agent._turn_base_usage_anchor = None
+    # Arm the effectiveness verdict only after a completed rewrite crosses the
+    # boundary so later usage isn't charged to an attempt that changed nothing.
+    if compression_made_progress:
+        record_boundary = getattr(
+            type(agent.context_compressor),
+            "record_completed_compaction",
+            None,
+        )
+        if callable(record_boundary):
+            record_boundary(
+                agent.context_compressor,
+                used_fallback=compression_used_fallback,
+                feasibility_skip=compression_feasibility_skip,
+            )
+        else:
+            agent.context_compressor._verify_compaction_cleared_threshold = True
+
+    # Clear file-read dedup cache: original read content was summarized away, so a
+    # re-read needs full content, not a "file unchanged" stub.
+    try:
+        from tools.file_tools import reset_file_dedup
+        reset_file_dedup(task_id)
+    except Exception:
+        pass
+    # Same for the skill_view repeat-view dedup: a post-compression
+    # re-view must return the full skill content again.
+    try:
+        from tools.skills_tool import reset_skill_view_dedup
+        reset_skill_view_dedup(task_id)
+    except Exception:
+        pass
+    return _compressed_est
+
+
 def compress_context(
     agent: Any,
     messages: list,
@@ -4339,29 +4521,7 @@ def compress_context(
                 lease.release()
                 return messages, _existing_sp
 
-        summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
-        if summary_error:
-            if getattr(agent, "_last_compression_summary_warning", None) != summary_error:
-                agent._last_compression_summary_warning = summary_error
-                agent._emit_warning(
-                    f"⚠ Compression summary failed: {summary_error}. "
-                    "Inserted a fallback context marker."
-                )
-        else:
-            # Aux model may have errored and been recovered on main; tell the user their
-            # auxiliary.compression.model is broken even though compression succeeded.
-            _aux_fail_model = getattr(agent.context_compressor, "_last_aux_model_failure_model", None)
-            _aux_fail_err = getattr(agent.context_compressor, "_last_aux_model_failure_error", None)
-            if _aux_fail_model:
-                # Dedup on (model, error) so we don't spam on every compaction
-                _aux_key = (_aux_fail_model, _aux_fail_err)
-                if getattr(agent, "_last_aux_fallback_warning_key", None) != _aux_key:
-                    agent._last_aux_fallback_warning_key = _aux_key
-                    agent._emit_warning(
-                        f"ℹ Configured compression model '{_aux_fail_model}' failed "
-                        f"({_aux_fail_err or 'unknown error'}). Recovered using main model — "
-                        "check auxiliary.compression.model in config.yaml."
-                    )
+        _warn_summary_or_aux_fallback(agent)
 
         _fold_todo_snapshot(agent, compressed)
         compressed_user_turn_outcome = _ensure_compressed_has_user_turn(
@@ -4519,139 +4679,20 @@ def compress_context(
                         exc_info=True,
                     )
 
-        # old_session_id is bound only on rotation; _boundary_parent is the id the
-        # boundary notifications attribute prior state to (old id, or same id in-place).
-        _old_sid = old_session_id
-        _is_boundary = bool(_old_sid) or in_place
-        _context_engine_boundary_committed = _session_commit_succeeded and (
-            bool(_old_sid) or compacted_in_place
-        )
-        _boundary_parent = _old_sid or agent.session_id or ""
-
-        # The heartbeat's terminal stamp landed on the PARENT before the id re-pointed;
-        # clear labels (keep last_activity_at) so the archived row isn't falsely fresh.
-        if _old_sid and _session_commit_succeeded:
-            try:
-                _labels_db = getattr(agent, "_session_db", None)
-                _clear_labels = getattr(
-                    type(_labels_db) if _labels_db is not None else None,
-                    "clear_session_activity_labels",
-                    None,
-                )
-                if callable(_clear_labels):
-                    _clear_labels(_labels_db, _old_sid)
-            except Exception:
-                logger.debug(
-                    "failed to clear archived compression parent's activity "
-                    "labels (ignored)",
-                    exc_info=True,
-                )
-
-        # Plugin engines use boundary_reason="compression" to keep lineage/checkpoint
-        # state. Fires in BOTH modes: in-place passes the same id, the boundary is real.
-        if _context_engine_boundary_committed:
-            if defer_context_engine_notification:
-                _queue_context_engine_compression_notification(
-                    agent,
-                    new_session_id=agent.session_id or "",
-                    old_session_id=_boundary_parent,
-                )
-            else:
-                _notify_context_engine_compression_complete(
-                    agent,
-                    new_session_id=agent.session_id or "",
-                    old_session_id=_boundary_parent,
-                )
-
-        # Providers refresh cached per-session state; reset=False, conversation goes on.
-        # Fires in BOTH modes so buffers don't double-count dropped turns in-place.
-        try:
-            if _is_boundary and agent._memory_manager:
-                agent._memory_manager.on_session_switch(
-                    agent.session_id or "",
-                    parent_session_id=_boundary_parent,
-                    reset=False,
-                    reason="compression",
-                )
-        except Exception as _me_err:
-            logger.debug("memory manager on_session_switch (compression): %s", _me_err)
-
-        # Route via _emit_status so the warning reaches gateway platforms; store it on
-        # _compression_warning so a late-bound status_callback can replay it.
-        _cc = agent.context_compressor.compression_count
-        if _cc >= 2:
-            _cc_msg = (
-                f"{agent.log_prefix}⚠️  Session compressed {_cc} times — "
-                f"accuracy may degrade. Consider /new to start fresh."
-            )
-            agent._compression_warning = _cc_msg
-            agent._emit_status(_cc_msg)
-
-        # session:compress lets hooks ingest the old session before it's lost;
-        # in_place=True tells them the same id was compacted rather than rotated.
-        if getattr(agent, "event_callback", None):
-            try:
-                agent.event_callback("session:compress", {
-                    "platform": agent.platform or "",
-                    "session_id": agent.session_id,
-                    "old_session_id": _old_sid or "",
-                    "in_place": in_place,
-                    "compression_count": agent.context_compressor.compression_count,
-                })
-            except Exception as e:
-                logger.debug("event_callback error on session:compress: %s", e)
-
-        # Rotation-independent flag: the gateway uses it (not an id diff) to re-baseline
-        # transcript handling (history_offset=0 + rewrite on the same id) in-place.
-        agent._last_compression_attempt_in_place = compacted_in_place
-        agent._last_compaction_in_place = compacted_in_place
-
-        # Diagnostics only, not provider usage: schema-heavy rough estimates can stay
-        # above threshold even after the next real request fits.
-        _compressed_est = estimate_request_tokens_rough(
+        _compressed_est = _finish_compaction_boundary(
+            agent,
             compressed,
-            system_prompt=new_system_prompt or "",
-            tools=agent.tools or None,
+            new_system_prompt=new_system_prompt,
+            old_session_id=old_session_id,
+            in_place=in_place,
+            compacted_in_place=compacted_in_place,
+            session_commit_succeeded=_session_commit_succeeded,
+            defer_context_engine_notification=defer_context_engine_notification,
+            compression_made_progress=_compression_made_progress,
+            compression_used_fallback=_compression_used_fallback,
+            compression_feasibility_skip=_compression_feasibility_skip,
+            task_id=task_id,
         )
-        agent.context_compressor.last_compression_rough_tokens = _compressed_est
-        agent.context_compressor.last_prompt_tokens = -1
-        agent.context_compressor.last_completion_tokens = 0
-        agent.context_compressor.awaiting_real_usage_after_compression = True
-        # Transcript rewritten: invalidate the usage anchor's base snapshot explicitly
-        # (its structural check would fail closed anyway); estimate until re-anchored.
-        agent._usage_anchor = None
-        agent._turn_base_usage_anchor = None
-        # Arm the effectiveness verdict only after a completed rewrite crosses the
-        # boundary so later usage isn't charged to an attempt that changed nothing.
-        if _compression_made_progress:
-            record_boundary = getattr(
-                type(agent.context_compressor),
-                "record_completed_compaction",
-                None,
-            )
-            if callable(record_boundary):
-                record_boundary(
-                    agent.context_compressor,
-                    used_fallback=_compression_used_fallback,
-                    feasibility_skip=_compression_feasibility_skip,
-                )
-            else:
-                agent.context_compressor._verify_compaction_cleared_threshold = True
-
-        # Clear file-read dedup cache: original read content was summarized away, so a
-        # re-read needs full content, not a "file unchanged" stub.
-        try:
-            from tools.file_tools import reset_file_dedup
-            reset_file_dedup(task_id)
-        except Exception:
-            pass
-        # Same for the skill_view repeat-view dedup: a post-compression
-        # re-view must return the full skill content again.
-        try:
-            from tools.skills_tool import reset_skill_view_dedup
-            reset_skill_view_dedup(task_id)
-        except Exception:
-            pass
 
         logger.info(
             "context compression done: session=%s messages=%d->%d rough_tokens=~%s awaiting_real_usage=true",
