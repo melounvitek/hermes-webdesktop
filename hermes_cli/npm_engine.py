@@ -1,27 +1,12 @@
 """Recover from npm ``EBADENGINE`` failures by upgrading a managed npm.
 
-The repo's ``.npmrc`` sets ``engine-strict=true`` and the root ``package.json``
-pins an ``engines.npm`` range, so an npm outside that range aborts every
-``npm ci`` / ``npm install`` we run inside the checkout::
+Rather than predicting the failure (which would mean a semver range matcher and an ``npm --version``
+probe before work that usually succeeds), we react to it: npm states the required range in the
+error, so the recovery reads the constraint straight out of the output it just produced.
 
-    npm error code EBADENGINE
-    npm error notsup Required: {"node":">=26.0.0","npm":">=12.0.0"}
-    npm error notsup Actual:   {"npm":"10.9.8","node":"v22.23.1"}
-
-Rather than predicting the failure (which would mean a semver range matcher and
-an ``npm --version`` probe before work that usually succeeds), we react to it:
-npm states the required range in the error, so the recovery reads the
-constraint straight out of the output it just produced.
-
-Scope of the repair is deliberately narrow. Hermes only upgrades an npm that
-lives inside its **own** managed Node tree (``$HERMES_HOME/node``), installing
-in place with ``--prefix`` so ``bin/npm`` keeps resolving to the upgraded
-``lib/node_modules/npm``. A system / nvm / brew / Nix npm belongs to the user
-and their other projects; Hermes never modifies those. When the failing npm is
-one of those foreign installs, Hermes instead provisions its own managed Node
-tree (the same tree a fresh install creates), upgrades *that* npm into range,
-and hands the caller the managed npm to retry with — leaving the user's
-toolchain untouched.
+Scope of the repair is deliberately narrow. Hermes only upgrades an npm that lives inside its
+**own** managed Node tree (``$HERMES_HOME/node``), installing in place with ``--prefix`` so
+``bin/npm`` keeps resolving to the upgraded ``lib/node_modules/npm``.
 """
 
 from __future__ import annotations
@@ -61,14 +46,12 @@ _UPGRADE_TIMEOUT = 300
 
 def is_ebadengine(output: str) -> bool:
     """Return True when *output* is an npm engine-compatibility failure."""
-    if not output:
-        return False
-    return "EBADENGINE" in output or "Unsupported engine" in output
+    return bool(output) and ("EBADENGINE" in output or "Unsupported engine" in output)
 
 
-def _iter_required_blocks(output: str) -> list[dict]:
+def _iter_json_blocks(pattern: re.Pattern[str], output: str) -> list[dict]:
     blocks: list[dict] = []
-    for match in _REQUIRED_RE.finditer(output or ""):
+    for match in pattern.finditer(output or ""):
         try:
             parsed = json.loads(match.group(1))
         except ValueError:
@@ -78,17 +61,19 @@ def _iter_required_blocks(output: str) -> list[dict]:
     return blocks
 
 
+def _iter_required_blocks(output: str) -> list[dict]:
+    return _iter_json_blocks(_REQUIRED_RE, output)
+
+
 def required_npm_range(output: str) -> str | None:
     """Return the ``engines.npm`` range npm demanded in *output*.
 
-    Returns ``None`` when the output has no engine failure, or when the
-    failure is about Node rather than npm — upgrading npm cannot fix a Node
-    version mismatch, so the caller must not try.
+    Returns ``None`` when the output has no engine failure, or when the failure is about Node rather
+    than npm — upgrading npm cannot fix a Node version mismatch, so the caller must not try.
 
-    When several packages report conflicting npm ranges the repo's own root
-    constraint is preferred (it is the one we control); otherwise the first
-    range wins, since any of them is a strict improvement over an npm that
-    satisfies none.
+    When several packages report conflicting npm ranges the repo's own root constraint is preferred
+    (it is the one we control); otherwise the first range wins, since any of them is a strict
+    improvement over an npm that satisfies none.
     """
     if not is_ebadengine(output):
         return None
@@ -109,12 +94,8 @@ def required_npm_range(output: str) -> str | None:
 
 def actual_npm_version(output: str) -> str | None:
     """Return the npm version npm reported as ``Actual`` in *output*."""
-    for match in _ACTUAL_RE.finditer(output or ""):
-        try:
-            parsed = json.loads(match.group(1))
-        except ValueError:
-            continue
-        if isinstance(parsed, dict) and parsed.get("npm"):
+    for parsed in _iter_json_blocks(_ACTUAL_RE, output):
+        if parsed.get("npm"):
             return str(parsed["npm"]).strip()
     return None
 
@@ -137,10 +118,9 @@ def managed_npm_prefix(npm: str | os.PathLike[str] | None) -> Path | None:
     """Return the Hermes-managed Node root *npm* lives in, else ``None``.
 
     Symlinks are resolved first: an install links ``~/.local/bin/npm`` at
-    ``$HERMES_HOME/node/bin/npm``, which itself links into
-    ``lib/node_modules/npm/bin/npm-cli.js``. Every one of those spellings is
-    the managed npm and must be recognised as such, or the repair silently
-    declines to fix the very install it owns.
+    ``$HERMES_HOME/node/bin/npm``, which itself links into ``lib/node_modules/npm/bin/npm-cli.js``.
+    Every one of those spellings is the managed npm and must be recognised as such, or the repair
+    silently declines to fix the very install it owns.
     """
     if not npm:
         return None
@@ -175,10 +155,10 @@ def upgrade_managed_npm(
 ) -> bool:
     """Upgrade the managed npm at *npm* in place to satisfy *npm_range*.
 
-    ``--prefix`` targets the managed tree explicitly: a managed install writes
-    ``prefix=~/.local`` into ``$HERMES_HOME/node/etc/npmrc`` so that global
-    installs land on PATH, and without the override the "upgrade" would install
-    a second npm somewhere else while the managed one stayed stale.
+    ``--prefix`` targets the managed tree explicitly: a managed install writes ``prefix=~/.local``
+    into ``$HERMES_HOME/node/etc/npmrc`` so that global installs land on PATH, and without the
+    override the "upgrade" would install a second npm somewhere else while the managed one stayed
+    stale.
     """
     if not quiet:
         print(
@@ -274,13 +254,10 @@ def _print_manual_fix(npm: str, npm_range: str, actual: str | None) -> None:
 def _provision_managed_npm(npm_range: str | None, *, quiet: bool = False) -> str | None:
     """Provision a Hermes-managed Node tree and return a satisfying npm.
 
-    Installs the managed tree under ``$HERMES_HOME/node`` (reusing a healthy
-    one when present), then upgrades its bundled npm to *npm_range* — a fresh
-    Node LTS bundles an npm that may itself be outside the repo's range, so
-    without the upgrade the caller's single retry would fail the same way.
-    Falls back to the checkout's own ``engines.npm`` when npm did not state a
-    range (a Node-only mismatch), so the managed npm ends up in range either
-    way. Returns the managed npm path, or ``None`` when provisioning failed.
+    Installs (or reuses) the tree under ``$HERMES_HOME/node``, then upgrades its bundled npm to
+    *npm_range*: a fresh Node LTS may bundle an npm outside the repo's range, so without the
+    upgrade the caller's single retry would fail the same way. Falls back to the checkout's
+    ``engines.npm`` when no range was stated. Returns the npm path, or ``None`` on failure.
     """
     if not quiet:
         print(
@@ -314,18 +291,9 @@ def maybe_repair_npm_engine(
 ) -> str | None:
     """Repair an ``EBADENGINE`` failure, never touching a foreign toolchain.
 
-    *output* is the combined stdout/stderr of the npm command that just failed.
-    Returns the npm executable the caller should retry its command with —
-    the same *npm* after an in-place upgrade of a Hermes-managed install, or
-    a freshly provisioned managed npm when the failing npm belongs to the
-    user (system / nvm / brew / Nix installs are never modified). Returns
-    ``None`` when no repair happened — not an engine failure, a Node mismatch
-    a managed npm upgrade cannot fix, or a failed upgrade/bootstrap — leaving
-    the original failure to stand.
-
-    The returned value is truthy exactly when the caller should retry once,
-    so ``if maybe_repair_npm_engine(...)`` call sites keep working; they just
-    must run the retry with the returned path.
+    The returned value is truthy exactly when the caller should retry once, so ``if
+    maybe_repair_npm_engine(...)`` call sites keep working; they just must run the retry with the
+    returned path.
     """
     if not npm or not is_ebadengine(output):
         return None
@@ -336,9 +304,7 @@ def maybe_repair_npm_engine(
     if prefix is not None:
         # Hermes owns this npm — upgrade it in place. Only an npm-range
         # failure is fixable this way; a Node mismatch needs a Node upgrade.
-        if not npm_range:
-            return None
-        if upgrade_managed_npm(npm, npm_range, prefix=prefix, quiet=quiet):
+        if npm_range and upgrade_managed_npm(npm, npm_range, prefix=prefix, quiet=quiet):
             return npm
         return None
 

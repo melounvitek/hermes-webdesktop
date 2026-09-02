@@ -1,29 +1,12 @@
 """Session heartbeats — recurring re-entry prompts for the current session.
 
-A heartbeat is one user-owned recurring instruction bound to a session
-(`/heartbeat every 10m Check the deployment and report meaningful changes`).
-When due AND the session is idle, the prompt is injected as a normal user
-turn — same mechanism as a /goal continuation, so message-role alternation
-and prompt caching are untouched. If the agent is busy at the due moment,
-the tick coalesces: it fires once when the session next goes idle, never
-stacking a backlog.
+This is deliberately session-scoped and in-process (CLI process or gateway process must be running)
+— the durable cross-process scheduling surface remains ``hermes cron`` / the ``cronjob`` tool, which
+runs in isolated sessions.
 
-This is deliberately session-scoped and in-process (CLI process or gateway
-process must be running) — the durable cross-process scheduling surface
-remains ``hermes cron`` / the ``cronjob`` tool, which runs in isolated
-sessions. A heartbeat is for "keep re-entering THIS conversation", the
-cron system is for "run this job on a schedule". Distinct by design.
-
-State is persisted in SessionDB ``state_meta`` keyed by
-``heartbeat:<session_id>`` so ``/resume`` picks it up.
-
-Invariants (mirrors goals.py):
-- Injection is a plain user message. No system-prompt mutation, no toolset
-  swap — prompt caching stays intact.
-- A real user message always wins: heartbeats only fire into an idle
-  session with an empty input queue.
-- Failures are contained: any DB/import error degrades to "no heartbeat",
-  never to a crashed input loop.
+Invariants (mirrors goals.py): - Injection is a plain user message. No system-prompt mutation, no
+toolset swap — prompt caching stays intact. - A real user message always wins: heartbeats only fire
+into an idle session with an empty input queue.
 """
 
 from __future__ import annotations
@@ -32,8 +15,8 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, Optional
+from dataclasses import asdict, dataclass
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -68,32 +51,22 @@ _UNIT_SECONDS = {
 def parse_interval(text: str) -> Optional[int]:
     """Parse ``10m`` / ``every 2h`` / ``every 90 minutes`` into seconds.
 
-    Returns None when the text is not an interval. Values below
-    ``MIN_INTERVAL_SECONDS`` are rejected (returns -1 so callers can
-    distinguish "not an interval" from "too small").
+    Returns None when the text is not an interval; values below ``MIN_INTERVAL_SECONDS`` return
+    -1 so callers can distinguish "not an interval" from "too small".
     """
-    if not text:
-        return None
-    m = _INTERVAL_RE.match(text)
+    m = _INTERVAL_RE.match(text) if text else None
     if not m:
         return None
-    value = float(m.group(1))
-    unit = m.group(2).lower()
-    seconds = int(value * _UNIT_SECONDS[unit])
-    if seconds < MIN_INTERVAL_SECONDS:
-        return -1
-    return seconds
+    seconds = int(float(m.group(1)) * _UNIT_SECONDS[m.group(2).lower()])
+    return -1 if seconds < MIN_INTERVAL_SECONDS else seconds
 
 
 def format_interval(seconds: int) -> str:
     """Human-readable interval (``600`` → ``10m``)."""
     seconds = int(seconds)
-    if seconds % 86400 == 0:
-        return f"{seconds // 86400}d"
-    if seconds % 3600 == 0:
-        return f"{seconds // 3600}h"
-    if seconds % 60 == 0:
-        return f"{seconds // 60}m"
+    for unit, suffix in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds % unit == 0:
+            return f"{seconds // unit}{suffix}"
     return f"{seconds}s"
 
 
@@ -114,14 +87,11 @@ class HeartbeatState:
     @classmethod
     def from_json(cls, raw: str) -> "HeartbeatState":
         data = json.loads(raw)
-        return cls(
-            prompt=str(data.get("prompt") or ""),
-            interval_seconds=int(data.get("interval_seconds", 0) or 0),
-            status=str(data.get("status") or "active"),
-            created_at=float(data.get("created_at", 0.0) or 0.0),
-            last_fired_at=float(data.get("last_fired_at", 0.0) or 0.0),
-            fire_count=int(data.get("fire_count", 0) or 0),
-        )
+        # Falsy/missing values fall back to the default before type coercion.
+        return cls(**{
+            name: coerce(data.get(name) or default)
+            for name, (coerce, default) in _STATE_FIELDS.items()
+        })
 
     def is_due(self, now: Optional[float] = None) -> bool:
         if self.status != "active" or not self.prompt or self.interval_seconds <= 0:
@@ -137,9 +107,18 @@ class HeartbeatState:
         )
 
 
-# ──────────────────────────────────────────────────────────────────────
+# field -> (coercer, default used when the stored value is missing/falsy)
+_STATE_FIELDS = {
+    "prompt": (str, ""),
+    "interval_seconds": (int, 0),
+    "status": (str, "active"),
+    "created_at": (float, 0.0),
+    "last_fired_at": (float, 0.0),
+    "fire_count": (int, 0),
+}
+
+
 # Persistence (SessionDB state_meta) — same pattern as goals.py
-# ──────────────────────────────────────────────────────────────────────
 
 
 def _meta_key(session_id: str) -> str:
@@ -159,9 +138,7 @@ def _get_session_db() -> Optional[Any]:
 
 
 def load_heartbeat(session_id: str) -> Optional[HeartbeatState]:
-    if not session_id:
-        return None
-    db = _get_session_db()
+    db = _get_session_db() if session_id else None
     if db is None:
         return None
     try:
@@ -194,18 +171,15 @@ def save_heartbeat(session_id: str, state: HeartbeatState) -> None:
         logger.debug("HeartbeatManager: set_meta failed: %s", exc)
 
 
-# ──────────────────────────────────────────────────────────────────────
 # Manager — the surface CLI + gateway talk to
-# ──────────────────────────────────────────────────────────────────────
 
 
 class HeartbeatManager:
     """Per-session heartbeat state + due-tick decisions.
 
-    Drivers (CLI thread / gateway task) call :meth:`due_prompt` on a poll
-    cadence while the session is idle; a non-None return is the user-role
-    message to inject. Firing is recorded immediately so a slow turn can't
-    double-fire.
+    Drivers (CLI thread / gateway task) call :meth:`due_prompt` on a poll cadence while the session
+    is idle; a non-None return is the user-role message to inject. Firing is recorded immediately so
+    a slow turn can't double-fire.
     """
 
     def __init__(self, session_id: str):
@@ -232,9 +206,8 @@ class HeartbeatManager:
             anchor = s.last_fired_at or s.created_at
             next_in = max(0, int(anchor + s.interval_seconds - time.time()))
             return f"♥ Heartbeat (every {every}, next in ~{next_in}s{fired}): {s.prompt}"
-        if s.status == "paused":
-            return f"⏸ Heartbeat (paused, every {every}{fired}): {s.prompt}"
-        return f"Heartbeat ({s.status}, every {every}{fired}): {s.prompt}"
+        icon = "⏸ " if s.status == "paused" else ""
+        return f"{icon}Heartbeat ({s.status}, every {every}{fired}): {s.prompt}"
 
     # --- mutation -----------------------------------------------------
 
@@ -246,36 +219,31 @@ class HeartbeatManager:
         if interval_seconds < MIN_INTERVAL_SECONDS:
             raise ValueError(f"interval must be at least {MIN_INTERVAL_SECONDS}s")
         state = HeartbeatState(
-            prompt=prompt,
-            interval_seconds=interval_seconds,
-            status="active",
-            created_at=time.time(),
+            prompt=prompt, interval_seconds=interval_seconds, status="active", created_at=time.time()
         )
         self._state = state
         save_heartbeat(self.session_id, state)
         return state
 
-    def pause(self) -> Optional[HeartbeatState]:
+    def _set_status(self, status: str, *, reanchor: bool = False) -> Optional[HeartbeatState]:
         if not self._state:
             return None
-        self._state.status = "paused"
+        self._state.status = status
+        if reanchor:
+            self._state.last_fired_at = time.time()
         save_heartbeat(self.session_id, self._state)
         return self._state
+
+    def pause(self) -> Optional[HeartbeatState]:
+        return self._set_status("paused")
 
     def resume(self) -> Optional[HeartbeatState]:
-        if not self._state:
-            return None
-        self._state.status = "active"
         # Re-anchor so resuming doesn't instantly fire a stale tick.
-        self._state.last_fired_at = time.time()
-        save_heartbeat(self.session_id, self._state)
-        return self._state
+        return self._set_status("active", reanchor=True)
 
     def clear(self) -> bool:
-        if self._state is None:
+        if self._set_status("cleared") is None:
             return False
-        self._state.status = "cleared"
-        save_heartbeat(self.session_id, self._state)
         self._state = None
         return True
 
@@ -284,10 +252,9 @@ class HeartbeatManager:
     def due_prompt(self, now: Optional[float] = None) -> Optional[str]:
         """Return the injection prompt if the heartbeat is due, else None.
 
-        Records the fire immediately (before the turn runs) so overlapping
-        polls or a long turn can never double-fire the same tick. Missed
-        ticks coalesce into one — the anchor resets to NOW, not to the
-        theoretical schedule.
+        Records the fire immediately (before the turn runs) so overlapping polls or a long turn can
+        never double-fire the same tick. Missed ticks coalesce into one — the anchor resets to NOW,
+        not to the theoretical schedule.
         """
         s = self._state
         if s is None or not s.is_due(now):
@@ -301,16 +268,14 @@ class HeartbeatManager:
 def migrate_heartbeat_to_session(old_session_id: str, new_session_id: str) -> bool:
     """Carry a heartbeat across a compression session rotation.
 
-    Same shape as ``goals.migrate_goal_to_session`` — copy to the child,
-    archive the parent row, never raise.
+    Same shape as ``goals.migrate_goal_to_session`` — copy to the child, archive the parent row,
+    never raise.
     """
     if not old_session_id or not new_session_id or old_session_id == new_session_id:
         return False
     try:
         state = load_heartbeat(old_session_id)
-        if state is None:
-            return False
-        if load_heartbeat(new_session_id) is not None:
+        if state is None or load_heartbeat(new_session_id) is not None:
             return False
         save_heartbeat(new_session_id, state)
         state.status = "cleared"
@@ -322,14 +287,7 @@ def migrate_heartbeat_to_session(old_session_id: str, new_session_id: str) -> bo
 
 
 __all__ = [
-    "HeartbeatState",
-    "HeartbeatManager",
-    "parse_interval",
-    "format_interval",
-    "load_heartbeat",
-    "save_heartbeat",
-    "migrate_heartbeat_to_session",
-    "HEARTBEAT_PROMPT_TEMPLATE",
-    "MIN_INTERVAL_SECONDS",
-    "POLL_SECONDS",
+    "HeartbeatState", "HeartbeatManager", "parse_interval", "format_interval",
+    "load_heartbeat", "save_heartbeat", "migrate_heartbeat_to_session",
+    "HEARTBEAT_PROMPT_TEMPLATE", "MIN_INTERVAL_SECONDS", "POLL_SECONDS",
 ]

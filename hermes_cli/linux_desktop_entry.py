@@ -1,26 +1,10 @@
 """Install and remove the Linux desktop entry (``hermes.desktop``).
 
-``hermes desktop`` builds and launches the Electron app. On Linux, a
-freshly-built app has no launcher presence: no menu item, no icon. This
-module writes the XDG desktop entry that gives it one.
-``hermes uninstall --gui`` removes the entry again.
-
 Two values must be absolute for the entry to work:
 
-  - ``Exec`` — the launcher runs without shell ``PATH`` customizations, so
-    a bare ``hermes desktop`` fails when hermes lives in ``~/.local/bin``
-    or a venv. Resolve the real binary and write its full path.
-  - ``Icon`` — an unqualified icon name needs an indexed icon theme. The
-    spec allows an absolute path instead, so point at the app icon in the
-    checkout. Do not copy the icon: ``Exec`` already depends on that tree.
-
-Cache refresh is best-effort and tool-gated: ``update-desktop-database``
-for the freedesktop menu cache, ``gtk-update-icon-cache`` for the user
-hicolor tree, and ``kbuildsycoca6``/``kbuildsycoca5`` for Plasma. Run
-each tool only when it exists. A missing tool is not an error.
-
-Import-light and side-effect-free at import time: the uninstaller uses
-this without loading the full CLI.
+Cache refresh is best-effort and tool-gated: ``update-desktop-database`` for the freedesktop menu
+cache, ``gtk-update-icon-cache`` for the user hicolor tree, and ``kbuildsycoca6``/``kbuildsycoca5``
+for Plasma. Run each tool only when it exists. A missing tool is not an error.
 """
 
 from __future__ import annotations
@@ -60,23 +44,12 @@ def icon_path(project_root: Path) -> Path:
 
 
 def _running_interpreter() -> str:
-    """The venv-semantic interpreter path for the persisted ``Exec=`` line.
-    ``sys.executable`` inside a venv is commonly a SYMLINK into a shared
-    base-interpreter tree (uv, pyenv, conda). ``Path.resolve()`` follows it
-    out of the venv, and CPython discovers ``pyvenv.cfg`` from the
-    *lexical* argv[0] — so a dereferenced path boots without the venv's
-    site-packages and dies on the first third-party import (#90292, one
-    level up; identified in #80547's review and confirmed on real Zorin/uv
-    hardware in this PR's review).
-
-    Keep the lexical path only when it actually is venv-semantic (a
-    ``pyvenv.cfg`` sits at or above it in the tree); otherwise the
-    dereferenced absolute path is the more durable form (survives the
-    symlink being re-pointed or its parent moving).
-
-    Idea credit: the lexical-preservation rule was independently proposed
-    in #92516/#94115/#94544 and by nosliwhtes' review of this PR; the
-    pyvenv.cfg-detection refinement here keeps both properties.
+    """The venv-semantic interpreter path for the persisted ``Exec=`` line. ``sys.executable`` inside a
+    venv is commonly a SYMLINK into a shared base-interpreter tree (uv, pyenv, conda).
+    ``Path.resolve()`` follows it out of the venv, and CPython discovers ``pyvenv.cfg`` from the
+    *lexical* argv[0] — so a dereferenced path boots without the venv's site-packages and dies on
+    the first third-party import (#90292, one level up; identified in #80547's review and confirmed
+    on real Zorin/uv hardware in this PR's review).
     """
     lexical = os.path.abspath(sys.executable)
     path = Path(lexical)
@@ -92,18 +65,10 @@ _probe_cache: "dict[str, bool]" = {}
 def _can_import_hermes_cli(interpreter: Path) -> bool:
     """Whether *interpreter* can import ``hermes_cli.main`` unaided.
 
-    Runs the import in a subprocess under ``-I`` (isolated mode: no
-    user site, no PYTHONPATH inheritance, no cwd on ``sys.path``) from
-    a neutral cwd, so the answer matches what a cold desktop
-    environment would get — a checkout cwd or an inherited
-    ``PYTHONPATH`` cannot produce a false positive. Bounded by a
-    timeout so a hung interpreter cannot stall entry generation.
-
-    Result is cached per interpreter path for the process lifetime, so
-    a desktop launch pays the subprocess cost at most once.
-
-    Probe design per @nosliwhtes' isolated-mode capability check
-    (#92122 lineage, commit 4150501f641).
+    Runs the import in a subprocess under ``-I`` (isolated mode: no user site, no PYTHONPATH
+    inheritance, no cwd on ``sys.path``) from a neutral cwd, so the answer matches what a cold
+    desktop environment would get — a checkout cwd or an inherited ``PYTHONPATH`` cannot produce a
+    false positive.
     """
     key = str(interpreter)
     cached = _probe_cache.get(key)
@@ -134,9 +99,9 @@ def _can_import_hermes_cli(interpreter: Path) -> bool:
 def _running_interpreter_fallback() -> str:
     """The interpreter to persist when the candidate fails the import probe.
 
-    The RUNNING interpreter by definition has ``hermes_cli`` importable
-    (this module is executing), so the module-form entry under it is the
-    safe landing when every candidate path failed the capability check.
+    The RUNNING interpreter by definition has ``hermes_cli`` importable (this module is executing),
+    so the module-form entry under it is the safe landing when every candidate path failed the
+    capability check.
     """
     return os.path.abspath(sys.executable)
 
@@ -144,22 +109,11 @@ def _running_interpreter_fallback() -> str:
 def resolve_exec_command(project_root: Optional[Path] = None) -> str:
     """Build the absolute ``Exec=`` command line for ``hermes desktop``.
 
-    Prefer the real ``hermes`` executable (argv[0] or PATH). When Hermes
-    runs as a module with no launcher installed, use the current
-    interpreter, also absolute.
+    Prefer the real ``hermes`` executable (argv[0] or PATH). When Hermes runs as a module with no
+    launcher installed, use the current interpreter, also absolute.
 
-    The persisted entry must be launch-context independent: whatever
-    process writes it, the next launch must read and rewrite the same
-    bytes. ``resolve_hermes_bin()`` prefers ``sys.argv[0]``, which differs
-    per launch path (wrapper, repo script, ``python -m``), so for this
-    one caller an argv[0] that points inside the checkout is not a
-    durable installed launcher — skip it and resolve from PATH instead.
-    Otherwise a broken entry keeps regenerating itself (the repo-script
-    form pins a mutable uv interpreter path; the ``python -m`` form
-    persists a bare ``<python> desktop`` that no DE can run).
-
-    ``project_root`` pins which checkout counts as "internal"; defaults to
-    the running checkout.
+    The persisted entry must be launch-context independent: whatever process writes it, the next
+    launch must read and rewrite the same bytes.
     """
     from hermes_cli.relaunch import resolve_hermes_bin
 
@@ -209,17 +163,11 @@ def _resolve_hermes_bin_for_desktop_entry(
 ) -> Optional[str]:
     """Resolve the launcher binary for the persisted ``.desktop`` entry.
 
-    Wraps :func:`hermes_cli.relaunch.resolve_hermes_bin` with one
-    desktop-entry-specific rule: an ``argv[0]`` that points inside this
-    checkout is a launch-context artifact (the repo ``hermes`` script the
-    wrapper execs with, or an interpreter binary surfaced by programmatic
-    relaunch paths), not a durable installed launcher. Persisting it makes
-    the entry a function of however the previous launch happened — the
-    bootstrap loop behind #90492's incomplete fix. Skip argv[0]/relative
-    candidates in that case and fall through to PATH, where the shell
-    installer's wrapper lives.
-
-    ``resolve_fn`` is injectable for tests.
+    Wraps :func:`hermes_cli.relaunch.resolve_hermes_bin` with one rule: an ``argv[0]`` inside
+    this checkout is a launch-context artifact, not a durable installed launcher — persisting it
+    makes the entry depend on how the previous launch happened (a bootstrap loop). Skip
+    argv[0]/relative candidates then and fall through to PATH, where the shell installer's
+    wrapper lives. ``resolve_fn`` is injectable for tests.
     """
     if resolve_fn is None:
         from hermes_cli.relaunch import resolve_hermes_bin as resolve_fn
@@ -271,12 +219,9 @@ def _resolve_hermes_bin_for_desktop_entry(
     def _is_interpreter(candidate: Path) -> bool:
         """A python interpreter binary (``bin/python*``), not a launcher.
 
-        Strict basename match — accepts ``python``, ``python3``,
-        ``python3.11``, ``python2.7``; rejects lookalikes such as
-        ``python3-config``, ``pythonw``, and anything else merely
-        *containing* "python". Regex approach proposed independently in
-        #94051; kept here with the parent-dir guard so a script named
-        ``python`` outside a bin/Scripts tree is not misclassified.
+        Strict basename match — accepts ``python``, ``python3``, ``python3.11``; rejects lookalikes
+        such as ``python3-config`` and ``pythonw``. The parent-dir guard keeps a script named
+        ``python`` outside a bin/Scripts tree from being misclassified.
         """
         import re
 
@@ -353,13 +298,10 @@ def _resolve_hermes_bin_for_desktop_entry(
 def _wrapper_shebang_safe(wrapper: Path) -> bool:
     """Whether an executable wrapper can actually run in the DE context.
 
-    A wrapper whose own shebang escapes the venv (``#!/usr/bin/env
-    python3`` or a bare interpreter name) would die exactly like the
-    broken entry this module exists to fix — the checkout reference in
-    its body does not save it. Native binaries and shell launchers are
-    safe by construction (they exec the right interpreter themselves).
-    A python-shebang wrapper is safe only when its interpreter resolves
-    to the RUNNING venv's interpreter directory.
+    A wrapper whose shebang escapes the venv (``#!/usr/bin/env python3`` or a bare interpreter
+    name) would die exactly like the broken entry this module fixes. Native binaries and shell
+    launchers are safe by construction; a python-shebang wrapper is safe only when its
+    interpreter resolves to the RUNNING venv's interpreter directory.
     """
     try:
         with open(wrapper, "rb") as fh:
@@ -406,20 +348,10 @@ def _wrapper_shebang_safe(wrapper: Path) -> bool:
 def _wrapper_targets_checkout(wrapper: Path, checkout_root: Path) -> bool:
     """Whether a candidate launcher script actually launches THIS checkout.
 
-    Expects the LEXICAL checkout root (the caller keeps it un-resolved):
-    the installer writes ``$INSTALL_DIR`` lexically into the shim, so on a
-    symlinked home the shim text and the resolved root would never match.
-    Both lexical and resolved forms of the root are tried regardless, to
+    Expects the LEXICAL checkout root (the caller keeps it un-resolved): the installer writes
+    ``$INSTALL_DIR`` lexically into the shim, so on a symlinked home the shim text and the resolved
+    root would never match. Both lexical and resolved forms of the root are tried regardless, to
     tolerate either caller convention.
-
-    The installer's shim is a small bash script that execs
-    ``<checkout>/venv/bin/python <checkout>/hermes``; a venv console
-    script carries the venv interpreter in its shebang. Either way, a
-    text launcher belonging to this installation references the
-    checkout path (or its venv) somewhere in its first few KB. A
-    binary launcher (PyInstaller & friends) cannot be inspected that
-    way — accept it, since binary installs are self-contained and the
-    external-primary-first rule has already had its say.
     """
     try:
         head = wrapper.read_bytes()[:4096]
@@ -467,9 +399,8 @@ def _wrapper_targets_checkout(wrapper: Path, checkout_root: Path) -> bool:
 def _known_wrapper_candidates():
     """Durable installed-launcher locations, most likely first.
 
-    Mirrors the installer's ``get_command_link_dir()`` layouts: user
-    (``~/.local/bin``), root FHS (``/usr/local/bin``), and Termux
-    (``$PREFIX/bin``). The wrapper is always named ``hermes``.
+    Mirrors the installer's ``get_command_link_dir()`` layouts: user (``~/.local/bin``), root FHS
+    (``/usr/local/bin``), and Termux (``$PREFIX/bin``). The wrapper is always named ``hermes``.
     """
     candidates = []
     home = Path.home()
@@ -485,9 +416,9 @@ def _known_wrapper_candidates():
 def _project_root() -> Path:
     """This file lives at ``<checkout>/hermes_cli/linux_desktop_entry.py``.
 
-    Lexical (no .resolve()): callers feed this into shim-text matching
-    where the installer's lexically-written $INSTALL_DIR must be able to
-    match; symlinked homes would break a resolved comparison.
+    Lexical (no .resolve()): callers feed this into shim-text matching where the installer's
+    lexically-written $INSTALL_DIR must be able to match; symlinked homes would break a resolved
+    comparison.
     """
     return Path(os.path.abspath(__file__)).parent.parent
 
@@ -515,30 +446,15 @@ def _needs_interpreter(bin_path: Path) -> bool:
 def _shebang_escapes_running_env(shebang: str) -> bool:
     """Whether a python shebang resolves OUTSIDE the running interpreter's env.
 
-    Tokenizes the shebang (interpreter path plus any flags) and compares
-    PATH COMPONENTS, never substrings: ``<venv>/bin-extra/python`` is not
-    inside ``<venv>/bin`` even though it starts with it (sibling-directory
-    confusion; independently surfaced in nosliwhtes' #92122 hardening
+    Tokenizes the shebang (interpreter path plus any flags) and compares PATH COMPONENTS, never
+    substrings: ``<venv>/bin-extra/python`` is not inside ``<venv>/bin`` even though it starts with
+    it (sibling-directory confusion; independently surfaced in nosliwhtes' #92122 hardening
     ``b96427d0`` — reimplemented here with two extensions).
 
-    Extensions over the parent-equality form:
-
-    * ``env`` shebangs (``#!/usr/bin/env python3``) ALWAYS escape: ``env``
-      resolves through PATH, which in the DE's cold environment is not the
-      interactive PATH that installed the venv — the parent-equality form
-      could be fooled when the resolved ``env`` binary happens to sit in
-      the same directory tree.
-    * Flags after the interpreter (``-S``, ``-E``...) are stripped before
-      comparing, so a legitimate ``#!<venv>/bin/python -S`` is not
-      misclassified by comparing against the flag token.
-
-    The comparison uses the LEXICAL interpreter directory (abspath, not
-    resolve()): on uv venvs the resolved parent is the base interpreter's
-    dir, which makes a valid ``.venv/bin/python`` shebang look foreign
-    (#94443 review case 1). Both sides use the SAME case operation
-    (``.lower()``): interpreter paths legitimately carry uppercase (conda
-    env names, usernames, uv's ephemeral build dirs) and an asymmetric
-    compare would flag the venv's own console script as foreign.
+    * ``env`` shebangs (``#!/usr/bin/env python3``) ALWAYS escape: ``env`` resolves through PATH,
+    which in the DE's cold environment is not the interactive PATH that installed the venv — the
+    parent-equality form could be fooled when the resolved ``env`` binary happens to sit in the same
+    directory tree.
     """
     tokens = shebang[2:].strip().split()
     if not tokens:
@@ -560,11 +476,7 @@ def _shebang_escapes_running_env(shebang: str) -> bool:
 
 
 def _quote_exec_arg(arg: str) -> str:
-    """Quote one ``Exec`` argument per the desktop entry spec.
-
-    Reserved characters require double quotes. Inside the quotes, escape
-    a backslash and a double quote with a backslash.
-    """
+    """Quote one ``Exec`` argument per the desktop entry spec."""
     if not any(c in arg for c in " \t\n\"'\\><~|&;$*?#()`"):
         return arg
     escaped = arg.replace("\\", "\\\\").replace('"', '\\"')
@@ -588,16 +500,12 @@ def render_desktop_entry(exec_command: str, icon: str) -> str:
 
 
 def refresh_desktop_databases(applications_dir: Path) -> "list[str]":
-    """Reindex the menu caches. Run each tool only when it exists.
-
-    Return the names of the tools that ran (for logging and tests).
-    """
+    """Reindex the menu caches. Run each tool only when it exists."""
     ran: list[str] = []
 
     update_db = shutil.which("update-desktop-database")
-    if update_db:
-        if _run_quiet([update_db, str(applications_dir)]):
-            ran.append("update-desktop-database")
+    if update_db and _run_quiet([update_db, str(applications_dir)]):
+        ran.append("update-desktop-database")
 
     # Plasma 6 first, then Plasma 5. Only one of them is ever installed.
     for tool in ("kbuildsycoca6", "kbuildsycoca5"):
@@ -664,8 +572,8 @@ def _hicolor_icon_dest(subdir: str) -> Path:
 def _remove_stale_scalable_icon() -> bool:
     """Drop a leftover PNG from ``scalable/`` (the pre-fix install path).
 
-    Return True when a file was removed so the caller can refresh the
-    icon cache. A missing file is not an error.
+    Return True when a file was removed so the caller can refresh the icon cache. A missing file is
+    not an error.
     """
     stale = _hicolor_icon_dest("scalable")
     try:
@@ -690,9 +598,9 @@ def _refresh_hicolor_cache() -> None:
 def _resized_hicolor_pngs(raw: bytes) -> Optional[dict[str, bytes]]:
     """Lanczos-resize *raw* to each panel size. ``None`` when it will not decode.
 
-    Pillow is a core dep but this module stays import-light: the import is
-    local so the uninstaller does not pay it. A truncated/fake PNG (tests,
-    interrupted copy) returns None and the caller falls back to a copy.
+    Pillow is a core dep but this module stays import-light: the import is local so the uninstaller
+    does not pay it. A truncated/fake PNG (tests, interrupted copy) returns None and the caller
+    falls back to a copy.
     """
     try:
         from PIL import Image
@@ -728,15 +636,9 @@ def _write_hicolor_pngs(files: dict[str, bytes]) -> bool:
 def _install_icon_to_hicolor(icon: Path) -> bool:
     """Install the app icon into the user's hicolor icon theme tree.
 
-    The freedesktop icon lookup finds an installed ``apps/hermes.png``
-    by the unqualified name ``hermes``, so the entry can reference the
-    icon without an absolute checkout path. Raster PNGs go to indexed
-    fixed-size dirs, never ``scalable`` (SVG-only). When the source
-    decodes, it is Lanczos-resized to 24/32/48/256 so Cinnamon's panel
-    does not nearest-neighbor a 1024px PNG. Undecodable bytes fall back
-    to a copy into one indexed dir. Idempotent via content-compare;
-    OSError caught internally (False) — the caller then falls back to
-    the absolute path.
+    The freedesktop icon lookup finds an installed ``apps/hermes.png`` by the unqualified name
+    ``hermes``, so the entry can reference the icon without an absolute checkout path. Raster PNGs
+    go to indexed fixed-size dirs, never ``scalable`` (SVG-only).
     """
     try:
         raw = icon.read_bytes()
@@ -762,8 +664,8 @@ def _install_icon_to_hicolor(icon: Path) -> bool:
 def install_desktop_entry(project_root: Path) -> Optional[Path]:
     """Write (or refresh) the Hermes desktop entry. Return its path.
 
-    Return ``None`` on non-Linux platforms or when the write fails. This
-    is a convenience, never a reason to fail a launch.
+    Return ``None`` on non-Linux platforms or when the write fails. This is a convenience, never a
+    reason to fail a launch.
     """
     if not is_supported():
         return None

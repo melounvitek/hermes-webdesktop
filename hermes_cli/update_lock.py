@@ -1,51 +1,12 @@
 """Cross-process mutual exclusion for in-flight Hermes updates.
 
-Three different surfaces can start an update of the same install tree:
+Until now only the Tauri updater published an "update in progress" marker (``UpdateMarkerGuard`` in
+``apps/bootstrap-installer/src-tauri/src/update.rs``), and only the Electron desktop consumed it
+(``electron/update-marker.ts``, to gate local backend startup).
 
-* ``hermes update`` from a terminal,
-* the dashboard's Update button (``POST /api/hermes/update`` →
-  ``_spawn_hermes_action(["update"])``, detached),
-* the desktop's Update button, which hands off to the Tauri
-  ``hermes-setup --update`` and, on its failure screen, to install-mode
-  bootstrap (``install.ps1`` / ``install.sh``).
-
-Until now only the Tauri updater published an "update in progress" marker
-(``UpdateMarkerGuard`` in ``apps/bootstrap-installer/src-tauri/src/update.rs``),
-and only the Electron desktop consumed it (``electron/update-marker.ts``, to
-gate local backend startup). Nothing stopped two *updaters* from running at
-once — so a dashboard-spawned ``hermes update`` and an installer-driven
-``git checkout`` could mutate the same checkout concurrently, rewriting source
-under a live interpreter and leaving the tree half-updated.
-
-This module makes that same marker the single lock for **all** update
-entrypoints instead of adding a fourth mechanism. Format and location are
-unchanged and remain byte-compatible with the Rust and Electron readers:
-
-    <HERMES_HOME>/.hermes-update-in-progress   body: "<pid>\\n<started_at_unix>"
-
-A marker only counts as a live update when its pid is alive AND it is younger
-than :data:`UPDATE_MARKER_MAX_AGE_MS` — mirroring ``readLiveUpdateMarker`` so a
-crashed updater self-heals instead of wedging every future update. A stale
-marker is removed on read by whoever notices it first.
-
-One layering wrinkle: the Tauri updater holds this marker for its WHOLE run and
-then spawns ``hermes update`` as a child stage. Without a handoff the child
-sees its own parent's live marker and refuses — the GUI update deadlocks
-against itself on every attempt ("Hermes is still running", retry forever).
-Two mechanisms recognize the orchestrating parent, and either suffices:
-
-* The updater exports :data:`HANDOFF_PID_ENV` naming its own pid, and
-  ``acquire`` treats a live holder matching that pid as the lock we are
-  already running under. The env var alone grants nothing: the pid must also
-  be the live marker owner, so a stale or forged value cannot bypass the lock.
-* A live holder that is a *process ancestor* of ours is likewise our own
-  orchestrator. This is the load-bearing path for the fleet: the staged
-  ``hermes-setup`` binary under ``~/.hermes`` is only refreshed by a full
-  installer run (``copy_self_to_hermes_home`` deliberately no-ops during
-  ``--update``), so every desktop whose staged updater predates the
-  HANDOFF_PID_ENV export runs an old parent against a new child. Without the
-  ancestry check those users get exit 2 ("Hermes is still running") on every
-  GUI update forever, with no Hermes process actually running.
+This module makes that same marker the single lock for **all** update entrypoints instead of adding
+a fourth mechanism. Format and location are unchanged and remain byte-compatible with the Rust and
+Electron readers:
 """
 
 from __future__ import annotations
@@ -85,10 +46,10 @@ UPDATE_EXIT_CONCURRENT = 2
 def update_marker_path() -> Path:
     """Path of the shared update marker.
 
-    Uses the *process* Hermes home (never the context-local profile override):
-    the Rust updater resolves ``$HERMES_HOME`` or the platform default, and the
-    desktop pins that same value into the updater's env. A profile-scoped path
-    here would put the lock somewhere the other two owners never look.
+    Uses the *process* Hermes home (never the context-local profile override): the Rust updater
+    resolves ``$HERMES_HOME`` or the platform default, and the desktop pins that same value into the
+    updater's env. A profile-scoped path here would put the lock somewhere the other two owners
+    never look.
     """
     from hermes_constants import get_process_hermes_home
 
@@ -98,15 +59,12 @@ def update_marker_path() -> Path:
 def _pid_alive(pid: int) -> bool:
     """True when a process with ``pid`` currently exists.
 
-    Delegates to :func:`gateway.status._pid_exists`, the project's existing
-    no-kill probe. Do NOT hand-roll this with ``os.kill(pid, 0)``: on Windows
-    that is not a no-op — CPython routes ``sig=0`` to
-    ``GenerateConsoleCtrlEvent``, which Ctrl+C's the target's whole console
-    process group (bpo-14484). A liveness check that killed the updater it was
-    asking about would be a spectacular way to fix a concurrency bug.
+    Delegates to :func:`gateway.status._pid_exists`, the project's existing no-kill probe. Do NOT
+    hand-roll this with ``os.kill(pid, 0)``: on Windows that is not a no-op — CPython routes
+    ``sig=0`` to ``GenerateConsoleCtrlEvent``, which Ctrl+C's the target's whole console process
+    group (bpo-14484).
 
-    Any pid we cannot evaluate counts as dead: a corrupt marker must not wedge
-    the lock forever.
+    Any pid we cannot evaluate counts as dead: a corrupt marker must not wedge the lock forever.
     """
     if pid <= 0:
         return False
@@ -124,8 +82,8 @@ def _pid_alive(pid: int) -> bool:
 def _handoff_pid() -> int | None:
     """Pid of the orchestrating updater that spawned us, if any.
 
-    Read from :data:`HANDOFF_PID_ENV`. Malformed values count as absent —
-    a broken handoff must fall back to the normal refusal, never crash.
+    Read from :data:`HANDOFF_PID_ENV`. Malformed values count as absent — a broken handoff must fall
+    back to the normal refusal, never crash.
     """
     raw = os.environ.get(HANDOFF_PID_ENV, "").strip()
     if not raw:
@@ -140,14 +98,12 @@ def _handoff_pid() -> int | None:
 def _is_ancestor_pid(pid: int) -> bool:
     """True when ``pid`` is a live ancestor (parent chain) of this process.
 
-    The orchestrating updater spawns ``hermes update`` as a (grand)child, so a
-    live marker owned by one of our ancestors can only be the claim we are
-    already running under — an unrelated concurrent updater is never in our
-    parent chain. This heals the fleet of staged ``hermes-setup`` binaries
-    that predate the HANDOFF_PID_ENV export and can never send it.
+    The orchestrating updater spawns ``hermes update`` as a (grand)child, so a live marker owned by
+    one of our ancestors can only be the claim we are already running under — an unrelated
+    concurrent updater is never in our parent chain.
 
-    Never includes our own pid, and any failure counts as "not an ancestor":
-    an unprovable ancestry must fall back to the normal refusal.
+    Never includes our own pid, and any failure counts as "not an ancestor": an unprovable ancestry
+    must fall back to the normal refusal.
     """
     if pid <= 0:
         return False
@@ -171,10 +127,9 @@ class UpdateHolder:
 def read_live_update(*, path: Path | None = None) -> UpdateHolder | None:
     """Return the live update holding the lock, or ``None``.
 
-    Mirrors ``readLiveUpdateMarker`` in ``electron/update-marker.ts``: absent,
-    unreadable, malformed, dead-pid, and past-the-ceiling all mean "no live
-    update", and a stale marker file is deleted so it can't strand future runs.
-    Never raises.
+    Mirrors ``readLiveUpdateMarker`` in ``electron/update-marker.ts``: absent, unreadable,
+    malformed, dead-pid, and past-the-ceiling all mean "no live update", and a stale marker file is
+    deleted so it can't strand future runs. Never raises.
     """
     marker = path or update_marker_path()
     try:
@@ -220,11 +175,10 @@ def describe_holder(holder: UpdateHolder) -> str:
 class UpdateLock:
     """Context manager owning the shared update marker for this process.
 
-    ``acquired`` is False when another live update already holds it — callers
-    decide whether that's a hard refusal (CLI/dashboard) or a wait. Releasing
-    only removes the marker when *we* still own it, so a marker rewritten by a
-    handoff partner (the Tauri updater overwrites it with its own pid) is never
-    deleted out from under its new owner.
+    ``acquired`` is False when another live update holds it; callers decide between hard refusal
+    (CLI/dashboard) and waiting. Release only removes the marker when *we* still own it, so a marker
+    rewritten by a handoff partner (the Tauri updater writes its own pid) is never deleted from
+    under its new owner.
     """
 
     def __init__(self, *, path: Path | None = None) -> None:
@@ -235,12 +189,10 @@ class UpdateLock:
     def acquire(self) -> bool:
         """Claim the lock. Returns False (and sets ``holder``) if it's taken.
 
-        A live holder whose pid matches :data:`HANDOFF_PID_ENV` — or is a
-        process ancestor of ours — is our own orchestrating parent (the Tauri
-        updater spawning `hermes update` as a stage): we run under ITS claim
-        rather than refusing or re-writing the marker, and ``release`` leaves
-        the parent's marker untouched. The ancestry path exists because staged
-        updaters older than the HANDOFF_PID_ENV export never send the env var.
+        A live holder whose pid matches :data:`HANDOFF_PID_ENV` — or is an ancestor of ours — is our
+        own orchestrating parent (e.g. the Tauri updater staging ``hermes update``): run under ITS
+        claim and leave its marker untouched on release. The ancestry path covers staged updaters
+        older than the env-var export.
         """
         existing = read_live_update(path=self.path)
         if existing is not None:

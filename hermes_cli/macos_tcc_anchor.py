@@ -1,40 +1,11 @@
 """Stable macOS TCC anchor for the uv-managed Python interpreter (#95596).
 
-Re-land of the interpreter anchor reverted in #95563.  macOS keys TCC grants
-to the resolved absolute path of the client binary.  Hermes' interpreter is
-managed by uv and lives at a versioned store path; every patch bump orphans
-every prior grant (#85345).
+1. Aliases are materialized as real-file copies of the anchor, never symlinks. 2. If the store ships
+``libpython*``, it is hardlinked into ``venv/lib/`` (copy if the store is on another device).
+Existing ``LC_RPATH`` already points at ``@executable_path/../lib`` — no rewrite. 3.
 
-The first landing copied the interpreter into ``venv/bin/python`` but left
-two holes that bricked real Macs:
-
-* Dynamically-linked builds look up ``libpython`` via
-  ``@executable_path/../lib``.  That resolved into ``venv/lib/``, which had
-  no dylib — every hermes command, including update/doctor, died in dyld
-  (#95425).
-* Alias names (``python3``, ``python3.N``) were re-pointed at the copy as
-  *symlinks*.  Invoking the copied interpreter through a symlink makes
-  CPython getpath lose the venv prefix on affected python-build-standalone
-  builds — startup dies with ``ModuleNotFoundError: encodings`` and the
-  stdlib resolves to the build-time ``/install`` prefix (#95541).  Console
-  scripts exec ``python3``, so the entire CLI surface died.
-
-This re-land keeps the copy + identifier-pinned signature (TCC attribution
-stays on the stable venv path) and closes both holes:
-
-1. Aliases are materialized as real-file copies of the anchor, never
-   symlinks.
-2. If the store ships ``libpython*``, it is hardlinked into ``venv/lib/``
-   (copy if the store is on another device).  Existing ``LC_RPATH`` already
-   points at ``@executable_path/../lib`` — no rewrite.
-3. A pre-install boot gate actually launches the staged copy and demands
-   ``import encodings`` plus ``sys.prefix == <venv>``.  Failure rolls the
-   staging file back and leaves the live interpreter untouched (a surplus
-   provisioned dylib in ``venv/lib/`` may remain — harmless), so a bad
-   anchor can never brick update/doctor again.
-
-All functions are no-ops on non-macOS and for interpreters that are not
-uv-managed.  Best-effort: never raises to callers.
+All functions are no-ops on non-macOS and for interpreters that are not uv-managed. Best-effort:
+never raises to callers.
 """
 
 from __future__ import annotations
@@ -68,9 +39,9 @@ class _BootGateFailed(Exception):
 
 
 def _marker_value(source_file: Path) -> str:
-    """Canonical marker value: fully resolved so symlinked spellings of the
-    same store binary (``cpython-3.11-macos-*`` → ``cpython-3.11.15-macos-*``)
-    compare equal."""
+    """Canonical marker value: fully resolved so symlinked spellings of the same store binary
+    (``cpython-3.11-macos-*`` → ``cpython-3.11.15-macos-*``) compare equal.
+    """
     return os.path.realpath(str(source_file))
 
 
@@ -167,9 +138,9 @@ def _anchor_marker(venv_bin: Path) -> Path:
 def _write_marker(venv_bin: Path, source_file: Path) -> None:
     """Write the anchor marker atomically via the shared helper.
 
-    A concurrent ensure (update + doctor --fix) must never observe a
-    partially-written marker: a torn read would compare unequal and trigger
-    a spurious reinstall, and ``write_text`` alone is not atomic.
+    A concurrent ensure (update + doctor --fix) must never observe a partially-written marker: a
+    torn read would compare unequal and trigger a spurious reinstall, and ``write_text`` alone is
+    not atomic.
     """
     atomic_write_text(
         _anchor_marker(venv_bin),
@@ -188,8 +159,8 @@ def _provision_libpython(
 ) -> None:
     """Hardlink (else copy) store ``libpython*`` into ``venv/lib/``.
 
-    Provision-if-present: a surplus hardlink on a statically-linked build is
-    free; a missed detection is the only way #95425 returns.
+    Provision-if-present: a surplus hardlink on a statically-linked build is free; a missed
+    detection is the only way #95425 returns.
     """
     src_lib = _store_root(source_file) / "lib"
     if not src_lib.is_dir():
@@ -222,10 +193,9 @@ def _provision_libpython(
 def _copy_alias(venv_bin: Path, name: str, anchor: Path) -> bool:
     """Materialize *name* as a real-file copy of *anchor* (atomic rename).
 
-    Returns False (and warns) on failure: a leftover alias *symlink* to the
-    anchor is the exact #95541 crash shape, so callers must know when the
-    alias set is incomplete.  The staging name is unique (mkstemp) so a
-    concurrent ensure (update + doctor --fix) cannot promote a truncated
+    Returns False (and warns) on failure: a leftover alias *symlink* to the anchor is the exact
+    #95541 crash shape, so callers must know when the alias set is incomplete. The staging name is
+    unique (mkstemp) so a concurrent ensure (update + doctor --fix) cannot promote a truncated
     interim copy.
     """
     tmp_path: Path | None = None
@@ -278,13 +248,10 @@ def _materialize_aliases(
 def _passes_boot_gate(staged: Path, venv_dir: Path) -> bool:
     """Launch *staged* and demand encodings + the venv prefix.
 
-    The probe runs with ``PYTHONHOME``/``PYTHONPATH`` scrubbed: an inherited
-    ``PYTHONHOME`` papers over exactly the prefix-resolution failure the gate
-    exists to catch.  ``OSError`` is split by errno — ``ENOENT``/``ENOEXEC``
-    (fixture binaries, foreign-arch images) means the binary cannot run here
-    at all, so the symlinked venv was equally dead and installing cannot make
-    things worse: skip.  Anything else (notably ``EACCES`` after our own
-    chmod) is a broken install about to go live: refuse.
+    Runs with ``PYTHONHOME``/``PYTHONPATH`` scrubbed: an inherited PYTHONHOME papers over the very
+    prefix failure this gate exists to catch. ``ENOENT``/``ENOEXEC`` (fixture binaries, foreign
+    arch) mean the binary can't run here at all, so the symlinked venv was equally dead: skip.
+    Anything else (notably ``EACCES`` after our own chmod) is a broken install going live: refuse.
     """
     env = {
         k: v
@@ -368,10 +335,9 @@ def _install_anchor(venv_dir: Path, source_file: Path) -> None:
 def ensure_tcc_anchor(project_root: Path | None = None) -> Path | None:
     """Pin a dylib-complete interpreter anchor for macOS TCC (#95596).
 
-    No-op (returns None) on non-macOS, when no venv interpreter exists, or
-    when the interpreter is not uv-managed.  Idempotent.  Best-effort —
-    returns None (and logs) if the copy or boot-gate fails; callers must
-    never depend on success.
+    No-op (returns None) on non-macOS, when no venv interpreter exists, or when the interpreter is
+    not uv-managed. Idempotent. Best-effort — returns None (and logs) if the copy or boot-gate
+    fails; callers must never depend on success.
     """
     if not is_macos():
         return None
@@ -411,14 +377,11 @@ def ensure_tcc_anchor(project_root: Path | None = None) -> Path | None:
 
 
 def tcc_anchor_state(project_root: Path | None = None) -> tuple[str, str]:
-    """Report the anchor state for ``hermes doctor``.
+    """Report the anchor state for ``hermes doctor`` as ``(status, detail)``.
 
-    Returns ``(status, detail)`` with status one of:
-
-    - ``"skip"``    — not applicable (non-macOS, no venv, or not uv-managed)
-    - ``"active"``  — venv interpreter is pinned at a stable real-file anchor
-    - ``"stale"``   — pinned but the interpreter changed since the last copy
-    - ``"missing"`` — uv-managed interpreter with no stable anchor installed
+    ``skip`` = not applicable (non-macOS, no venv, not uv-managed); ``active`` = pinned at a
+    stable real-file anchor; ``stale`` = pinned but the interpreter changed since the last copy;
+    ``missing`` = uv-managed interpreter with no anchor installed.
     """
     if not is_macos():
         return "skip", "not macOS"

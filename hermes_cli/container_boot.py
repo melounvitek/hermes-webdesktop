@@ -1,21 +1,8 @@
 """Container-boot reconciliation of per-profile gateway s6 services.
 
-Service directories under /run/service/ live on **tmpfs** and are wiped
-on every container restart. Profile directories under
-``$HERMES_HOME/profiles/<name>/`` live on the persistent VOLUME, and
-each one records its gateway's last state in ``gateway_state.json``.
-This module bridges the two: on every container boot, walk the
-persistent profiles, recreate the s6 service slots, and auto-start
-only those whose last recorded state was ``running``.
-
-Wired into the image as /etc/cont-init.d/02-reconcile-profiles by the
-Dockerfile (Phase 4 Task 4.0). Runs as root after 01-hermes-setup
-(the stage2 hook) has chowned the volume and seeded $HERMES_HOME, but
-before s6-rc starts user services.
-
-Without this module, every ``docker restart`` would silently wipe
-every per-profile gateway, even though the user's profiles still
-exist on disk.
+Wired into the image as /etc/cont-init.d/02-reconcile-profiles by the Dockerfile (Phase 4 Task 4.0).
+Runs as root after 01-hermes-setup (the stage2 hook) has chowned the volume and seeded $HERMES_HOME,
+but before s6-rc starts user services.
 """
 from __future__ import annotations
 
@@ -101,34 +88,10 @@ def reconcile_profile_gateways(
 ) -> list[ReconcileAction]:
     """Recreate s6 service registrations for every persistent profile.
 
-    Always registers a ``gateway-default`` slot for the root profile
-    (the implicit profile that lives at the top of ``$HERMES_HOME``,
-    not under ``profiles/``). The dispatcher in ``hermes_cli.gateway``
-    maps an empty profile suffix to ``gateway-default``, so this slot
-    is what ``hermes gateway start`` (no ``-p``) targets. Without it,
-    bare ``hermes gateway start`` inside the container would land on
-    ``s6-svc -u /run/service/gateway-default`` → uncaught
-    ``CalledProcessError`` → traceback to the user (PR #30136 review).
-
-    The default slot's prior state is read from
-    ``$HERMES_HOME/gateway_state.json`` (sibling to the profile root,
-    not under ``profiles/``); stale runtime files there are swept the
-    same way as for named profiles.
-
-    Args:
-        hermes_home: The container's HERMES_HOME (typically /opt/data).
-            Profiles live under ``<hermes_home>/profiles/<name>/``;
-            the default profile lives at ``<hermes_home>`` itself.
-        scandir: The s6 dynamic scandir (typically /run/service). Service
-            directories are created at ``<scandir>/gateway-<profile>/``.
-        dry_run: When True, walk and return the action list without
-            touching the filesystem. For tests and `--dry-run` debug.
-        container_argv: Optional container PID 1 argv override. Production
-            reads ``/proc/1/cmdline``; tests inject it directly.
-
-    Returns:
-        One :class:`ReconcileAction` per profile, in this order:
-        ``default`` first, then named profiles in directory order.
+    Always registers a ``gateway-default`` slot for the root profile (the implicit profile that
+    lives at the top of ``$HERMES_HOME``, not under ``profiles/``). The dispatcher in
+    ``hermes_cli.gateway`` maps an empty profile suffix to ``gateway-default``, so this slot is what
+    ``hermes gateway start`` (no ``-p``) targets.
     """
     actions: list[ReconcileAction] = []
 
@@ -231,13 +194,10 @@ def _maybe_migrate_legacy_gateway_run_state(
 ) -> str | None:
     """Seed root gateway_state for pre-s6 `gateway run` containers.
 
-    The tini image let Docker users run the gateway as the container
-    command (`docker run ... gateway run`). After the s6 migration,
-    profile gateways are restored from persisted gateway_state.json; a
-    legacy container with no state file would therefore register the
-    default service down and never start. Only synthesize state when no
-    root gateway_state.json exists so explicit stopped/failed states keep
-    winning across restarts.
+    The tini image let Docker users run the gateway as the container command (`docker run ...
+    gateway run`). After the s6 migration, profile gateways are restored from persisted
+    gateway_state.json; a legacy container with no state file would therefore register the default
+    service down and never start.
     """
     state_file = hermes_home / "gateway_state.json"
     if state_file.exists():
@@ -264,13 +224,9 @@ def _maybe_migrate_legacy_gateway_run_state(
 def _read_container_argv() -> tuple[str, ...]:
     """Best-effort read of the container's main program argv.
 
-    Under s6-overlay v2, PID 1 is ``/init`` and its argv contains the
-    ``main-wrapper.sh`` path.  Under s6-overlay v3, PID 1 is
-    ``s6-svscan`` and the actual command (``rc.init top main-wrapper.sh
-    ...``) lives on a different PID.  We try PID 1 first (fast path,
-    covers v2 and pre-s6 images), then fall back to scanning
-    ``/proc/*/cmdline`` for a process whose argv contains
-    ``main-wrapper.sh`` (the rc.init-launched PID in v3).
+    s6-overlay v2: PID 1 is ``/init`` and its argv holds ``main-wrapper.sh``. v3: PID 1 is
+    ``s6-svscan`` and the real command lives on another PID, so after the PID 1 fast path we scan
+    ``/proc/*/cmdline`` for a process whose argv contains ``main-wrapper.sh``.
     """
     # Fast path: PID 1 is the command itself (s6-overlay v2 / tini).
     try:
@@ -310,24 +266,10 @@ def _read_container_argv() -> tuple[str, ...]:
 def _strip_container_argv_prefix(argv: Sequence[str]) -> list[str]:
     """Strip the s6/wrapper prefix off the container argv, leaving the hermes args.
 
-    Two container-command argv shapes are handled:
-
-    * **s6-overlay v2 / tini:** PID 1 argv is
-      ``/init /opt/hermes/docker/main-wrapper.sh <subcommand> [args...]``.
-    * **s6-overlay v3:** PID 1 is ``s6-svscan`` and the command lives on the
-      rc.init-launched process as ``/bin/sh -e
-      /run/s6/basedir/scripts/rc.init top /opt/hermes/docker/main-wrapper.sh
-      <subcommand> [args...]`` (see :func:`_read_container_argv`).
-
-    Rather than peel each leading token positionally (which silently breaks
-    the moment s6 changes its launcher shape again — exactly what happened
-    in the v2→v3 bump), drop everything up to and including the
-    ``main-wrapper.sh`` token: that wrapper path is the stable boundary the
-    image owns, and the subcommand always follows it. Pre-s6 / direct
-    ``hermes`` invocations carry no wrapper, so fall back to peeling a bare
-    ``init`` prefix. The wrapper re-execs ``hermes <subcommand>``, so an
-    explicit leading ``hermes`` is peeled too. Shared by the legacy-gateway
-    and dashboard role detectors.
+    Rather than peel each leading token positionally (which silently breaks the moment s6 changes
+    its launcher shape again — exactly what happened in the v2→v3 bump), drop everything up to and
+    including the ``main-wrapper.sh`` token: that wrapper path is the stable boundary the image
+    owns, and the subcommand always follows it.
     """
     args = list(argv)
 
@@ -365,19 +307,8 @@ def _is_legacy_gateway_run_request(argv: Sequence[str]) -> bool:
 def _is_dashboard_container(argv: Sequence[str]) -> bool:
     """Return True when the container's command is the dashboard.
 
-    A dashboard-only container (``hermes dashboard ...``) never spawns or
-    supervises per-profile gateways — that is the gateway container's job.
-    Reconciling profile gateway s6 slots there is not just wasted work: when
-    the gateway and dashboard containers share a bind-mounted HERMES_HOME,
-    both race to ``flock()`` the same ``logs/gateways/<profile>/lock`` files,
-    producing "Resource busy" failures and an s6-log restart storm. So the
-    dashboard container skips reconciliation entirely.
-
-    Detected from PID 1 argv (``/proc/1/cmdline``) rather than an operator
-    flag: the role is a fact about the container's command, not a tunable,
-    and a flag can be forgotten in a hand-written compose/k8s manifest —
-    reintroducing the exact storm this prevents. Mirrors the argv handling
-    in :func:`_is_legacy_gateway_run_request`.
+    A dashboard-only container (``hermes dashboard ...``) never spawns or supervises per-profile
+    gateways — that is the gateway container's job.
     """
     args = _strip_container_argv_prefix(argv)
     return bool(args) and args[0] == "dashboard"
@@ -386,22 +317,12 @@ def _is_dashboard_container(argv: Sequence[str]) -> bool:
 def _read_desired_state(profile_dir: Path) -> str | None:
     """Read the persisted gateway desired state for reconciliation.
 
-    Newer state files carry ``desired_state``: operator intent written by
-    s6 lifecycle commands. Older files only carry ``gateway_state``; keep
-    that as a compatibility fallback so existing running/stopped profiles
-    preserve their behavior until the next explicit start/stop.
+    Newer state files carry ``desired_state``: operator intent written by s6 lifecycle commands.
+    Older files only carry ``gateway_state``; keep that as a compatibility fallback so existing
+    running/stopped profiles preserve their behavior until the next explicit start/stop.
 
-    When falling back to ``gateway_state`` (no explicit ``desired_state``),
-    a transient running sub-state (``draining``) is normalised to ``running``
-    — see ``_TRANSIENT_RUNNING_STATES``. A gateway hard-killed mid-drain
-    leaves ``draining`` as its last persisted value; without this it would be
-    treated as a non-autostart state and the gateway would stay DOWN forever.
-    An explicit ``desired_state`` is always honoured verbatim (it is the
-    operator's durable intent), so this normalisation only affects the
-    legacy/transient fallback path.
-
-    Missing or unparseable files count as "no desired state" so we don't
-    bork the whole reconciliation on a corrupt file.
+    Missing or unparseable files count as "no desired state" so we don't bork the whole
+    reconciliation on a corrupt file.
     """
     state_file = profile_dir / "gateway_state.json"
     if not state_file.exists():
@@ -423,9 +344,9 @@ def _read_desired_state(profile_dir: Path) -> str | None:
 
 
 def _cleanup_stale_runtime_files(profile_dir: Path) -> None:
-    """Remove gateway.pid and processes.json — they reference PIDs in
-    the dead container's process namespace and would otherwise confuse
-    the newly-started gateway's process-mismatch checks."""
+    """Remove gateway.pid and processes.json — they reference PIDs in the dead container's process
+    namespace and would otherwise confuse the newly-started gateway's process-mismatch checks.
+    """
     for name in _STALE_RUNTIME_FILES:
         (profile_dir / name).unlink(missing_ok=True)
 
@@ -433,10 +354,9 @@ def _cleanup_stale_runtime_files(profile_dir: Path) -> None:
 def _read_prior_exit_label(profile_dir: Path) -> str:
     """How the profile's previous gateway life ended (clean/unclean/unknown).
 
-    Thin, exception-free wrapper over
-    :func:`gateway.lifecycle_ledger.read_prior_exit_label` — cont-init runs
-    in a minimal environment and forensics must never block reconciliation
-    (NS-608)."""
+    Thin, exception-free wrapper over :func:`gateway.lifecycle_ledger.read_prior_exit_label` — cont-
+    init runs in a minimal environment and forensics must never block reconciliation (NS-608).
+    """
     try:
         from gateway.lifecycle_ledger import read_prior_exit_label
         return read_prior_exit_label(profile_dir)
@@ -447,20 +367,10 @@ def _read_prior_exit_label(profile_dir: Path) -> str:
 def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
     """Recreate the s6 service slot for one profile.
 
-    Mirrors the rendering in :func:`S6ServiceManager.register_profile_gateway`,
-    but here we control the start state directly via the ``down`` marker
-    file (s6-svscan honors it on rescan). Cannot use the manager
-    directly because the cont-init.d phase runs as root before
-    s6-svscan starts scanning the dynamic scandir — the manager's
-    ``s6-svscanctl -a`` call would fail with no control socket.
-
-    Atomicity: build the new layout in a sibling temp directory and
-    rename it into place via :meth:`Path.replace`. This matches
-    :meth:`S6ServiceManager.register_profile_gateway` (PR #30136
-    review item O4) — even though cont-init.d runs before s6-svscan
-    starts scanning, an atomic publication keeps the contract uniform
-    between the two registration paths and protects against a
-    half-populated dir if the script is interrupted mid-write.
+    Mirrors ``S6ServiceManager.register_profile_gateway`` but sets start state via the ``down``
+    marker directly: cont-init.d runs as root before s6-svscan scans the dynamic scandir, so the
+    manager's ``s6-svscanctl -a`` would fail with no control socket. Built in a sibling temp dir
+    and ``Path.replace``d into place so an interrupted write never leaves a half-populated dir.
     """
     import shutil
 
@@ -547,18 +457,13 @@ def _write_reconcile_log(
 ) -> None:
     """Append one line per profile to $HERMES_HOME/logs/container-boot.log.
 
-    Operators inspect this to debug "why didn't my profile come back
-    up". Keeping a separate log file (vs. mixing into agent.log) lets
-    troubleshooters grep for "profile=foo" without wading through
-    unrelated activity.
+    Operators inspect this to debug "why didn't my profile come back up". Keeping a separate log
+    file (vs. mixing into agent.log) lets troubleshooters grep for "profile=foo" without wading
+    through unrelated activity.
 
-    Size-bounded: when the file exceeds ``_LOG_ROTATE_BYTES``
-    (defaults to 256 KiB ≈ 3000 reconcile lines), the current file
-    is renamed to ``container-boot.log.1`` (replacing any previous
-    rotation) before the new entries are appended. This gives long-
-    lived containers a soft cap of ~512 KiB across the two files
-    without pulling in logrotate or s6-log machinery just for this
-    one append-only file (PR #30136 review item O3).
+    Size-bounded: when the file exceeds ``_LOG_ROTATE_BYTES`` (defaults to 256 KiB ≈ 3000 reconcile
+    lines), the current file is renamed to ``container-boot.log.1`` (replacing any previous
+    rotation) before the new entries are appended.
     """
     import time
     log_dir = hermes_home / "logs"
