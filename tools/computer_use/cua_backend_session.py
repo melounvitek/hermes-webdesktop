@@ -73,14 +73,12 @@ class _AsyncBridge:
 # MAY have landed, so it is never replayed; the caller decides after taking fresh state.
 _UNKNOWN_OUTCOME_MESSAGES = {
     "transport_outcome_unknown": (
-        "cua-driver transport failed during {name}; the action outcome is "
-        "unknown, so Hermes did not replay it. Take fresh state before "
-        "deciding whether to act again."),
+        "cua-driver transport failed during {name}; the action outcome is unknown, so Hermes "
+        "did not replay it. Take fresh state before deciding whether to act again."),
     "timeout_outcome_unknown": (
-        "cua-driver MCP call {name} timed out; the action outcome is "
-        "unknown and may still have taken effect on the remote screen. "
-        "The session has been marked suspect and will be recreated before "
-        "the next computer-use call. Take fresh state before deciding "
+        "cua-driver MCP call {name} timed out; the action outcome is unknown and may still have "
+        "taken effect on the remote screen. The session has been marked suspect and will be "
+        "recreated before the next computer-use call. Take fresh state before deciding "
         "whether to act again."),
 }
 
@@ -309,8 +307,7 @@ class _CuaDriverSession:
     def _start_lifecycle_locked(self) -> None:
         """Spawn the lifecycle owner and wait for ready. Caller holds self._lock."""
         self._ready_event = threading.Event()
-        self._setup_error = None
-        self._shutdown_event = None
+        self._setup_error = self._shutdown_event = None
         # The future tracks the WHOLE lifecycle; readiness is signalled via _ready_event.
         loop = self._bridge._loop
         if loop is None:
@@ -442,14 +439,6 @@ class _CuaDriverSession:
         return any(needle in msg for needle in ("Resource temporarily unavailable", "os error 35",
                                                 "daemon transport error", "daemon proxy"))
 
-    @staticmethod
-    def _unknown_transport_outcome(name: str, exc: Exception) -> Dict[str, Any]:
-        return _outcome_unknown(name, exc, "transport_outcome_unknown")
-
-    @staticmethod
-    def _timeout_outcome(name: str, exc: Exception) -> Dict[str, Any]:
-        return _outcome_unknown(name, exc, "timeout_outcome_unknown")
-
     # ── Recovery ─────────────────────────────────────────────────────
     def _revive_declared_session_once(self, name: str, args: Dict[str, Any],
                                       first_result: Dict[str, Any], timeout: float) -> Dict[str, Any]:
@@ -556,11 +545,11 @@ class _CuaDriverSession:
                 self._timeout_suspect = True
                 logger.warning("cua-driver MCP timed out on %s; marking session suspect "
                                "for recreation before the next call", name)
-                return self._timeout_outcome(name, e)
+                return _outcome_unknown(name, e, "timeout_outcome_unknown")
             if self._is_transient_daemon_error(e):
                 if name not in self._TRANSPORT_REPLAY_SAFE_TOOLS:
                     self._notify_transport_reset()
-                    return self._unknown_transport_outcome(name, e)
+                    return _outcome_unknown(name, e, "transport_outcome_unknown")
                 logger.warning("cua-driver MCP transport failed on %s (%s); "
                                "falling back to CLI transport", name, e)
                 return self._call_tool_via_cli(name, args, timeout)
@@ -569,9 +558,8 @@ class _CuaDriverSession:
             logger.warning("cua-driver MCP session closed during %s; reconnecting once", name)
             self._recreate_session(timeout)
             if name not in self._TRANSPORT_REPLAY_SAFE_TOOLS:
-                return self._unknown_transport_outcome(name, e)
+                return _outcome_unknown(name, e, "transport_outcome_unknown")
             result = self._run_call(name, args, timeout)
-
         # Remember only a SUCCESSFULLY declared identity: no stale recovery state.
         declared_id = args.get("session")
         if (name == "start_session" and result.get("isError") is not True
