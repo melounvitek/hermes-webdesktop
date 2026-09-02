@@ -42,7 +42,7 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
         "thread_id": thread_id,
         # Lets an opt-in delivery mirror resolve the exact participant's
         # session in per-user-isolated group chats (parity with send_message).
-        "user_id": get_session_env("HERMES_SESSION_USER_ID") or None,
+        "user_id": get_session_env("HERMES_SESSION_USER_ID") or None,  # harmless for DMs
         # Workspace/server scope (Slack team, Discord guild...). Slack session
         # keys embed it, so a continuable cron seed built without it would
         # create a row no scoped reply ever resolves to.
@@ -138,7 +138,9 @@ def _split_monitor_arg(
     """Resolve the single model-facing ``monitor`` field into the stored
     ``(monitor_script, monitor_url)`` pair.
 
-    Shape decides transport: http(s):// is a URL, anything else a script path.
+    Shape decides transport: http(s):// is a URL, anything else a script path
+    (a legal script path can never start with a URL scheme). Storage keeps the
+    two fields separate — interface merge, not a storage migration.
     Update semantics: None = unchanged, '' = clear; setting one source clears
     the other so switching transports never trips mutual exclusion. An
     explicit ``monitor`` wins over the legacy alias fields.
@@ -154,8 +156,8 @@ def _split_monitor_arg(
 
 
 def _repeat_display(job: Dict[str, Any]) -> str:
-    times = (job.get("repeat") or {}).get("times")
-    completed = (job.get("repeat") or {}).get("completed", 0)
+    rep = job.get("repeat") or {}
+    times, completed = rep.get("times"), rep.get("completed", 0)
     if times is None:
         return "forever"
     if times == 1:
@@ -174,12 +176,11 @@ def _clean_str_list(items: Any) -> List[str]:
 
 def _canonical_skills(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
     if skills is None:
-        raw_items = [skill] if skill else []
+        skills = [skill] if skill else []
     elif isinstance(skills, str):
-        raw_items = [skills]
-    else:
-        raw_items = list(skills)
-    return list(dict.fromkeys(_clean_str_list(item or "" for item in raw_items)))
+        skills = [skills]
+    # `item or ""`: a None entry must drop out, not stringify to "None".
+    return list(dict.fromkeys(_clean_str_list(item or "" for item in skills)))
 
 
 def _normalize_optional_job_value(value: Optional[Any], *, strip_trailing_slash: bool = False) -> Optional[str]:
@@ -209,7 +210,8 @@ def _validate_bot_chat_deliver(deliver: Optional[str]) -> Optional[str]:
     """Validate ``bot-chat[:<profile>]`` deliver elements at create time.
 
     Bot Chat delivery is machine-local: the profile must exist where the
-    scheduler fires. Fail loudly here rather than as a per-run delivery error.
+    scheduler fires (Desktop multi-gateway rosters may show same-named profiles
+    from other machines). Fail loudly here rather than as a per-run delivery error.
     Returns an error string or None.
     """
     if not deliver:
@@ -245,6 +247,7 @@ def _resolve_cron_context_deliver(deliver: Optional[str]) -> Optional[str]:
     (or an omitted value) becomes the creating run's ``platform:chat_id[:thread]``
     from the HERMES_CRON_AUTO_DELIVER_* contextvars, or ``local`` when the
     creating run has no concrete target; other elements pass through verbatim.
+    Without this the scheduler would fall back to guessing a home channel.
     """
     from gateway.session_context import get_session_env
     from utils import is_truthy_value
@@ -301,6 +304,8 @@ def _validate_cron_base_url(
         return f"Unable to validate base_url override for provider {prov!r}; refused."
 
     if prov.lower() == "custom":
+        # Pure BYOK: key comes from a pool keyed by THIS base_url or host-gated
+        # env vars, never an arbitrary stored secret.
         return None
     if has_named_custom_provider(prov):
         # A NAMED custom provider carries a STORED key that the runtime still
@@ -377,7 +382,8 @@ def _apply_continuity(
 
 def _validate_context_from_refs(refs: List[Any]) -> Optional[str]:
     """Error string if any non-"self" ref names a job that doesn't exist.
-    ("self" resolves to the job's own id at run time.)"""
+    ("self" resolves to the job's own id at run time, so it can't be checked
+    against the store — the job doesn't exist yet at create time.)"""
     from cron.jobs import get_job as _get_job
     for ref_id in refs:
         if isinstance(ref_id, str) and ref_id.strip().lower() == "self":

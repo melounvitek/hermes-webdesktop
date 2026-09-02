@@ -82,15 +82,6 @@ def _zwj_has_emoji_neighbour(text: str, idx: int) -> bool:
     )
 
 
-def _strip_legitimate_emoji_zwj(prompt: str) -> str:
-    if '\u200d' not in prompt:
-        return prompt
-    return ''.join(
-        ch for idx, ch in enumerate(prompt)
-        if not (ch == '\u200d' and _zwj_has_emoji_neighbour(prompt, idx))
-    )
-
-
 def _strip_cron_safe_constructs(prompt: str) -> str:
     """Scrub the bundled GitHub skill's `Authorization: token $GITHUB_TOKEN` +
     api.github.com curl so it doesn't trip the auth-header exfil rule.
@@ -112,10 +103,11 @@ def _strip_cron_safe_constructs(prompt: str) -> str:
 
 
 def _check_invisible_unicode(prompt: str) -> str:
-    """Error string if the prompt holds invisible-unicode markers (emoji ZWJ allowed)."""
-    prompt_for_invisible_scan = _strip_legitimate_emoji_zwj(prompt)
+    """Error string if the prompt holds invisible-unicode markers (emoji ZWJ allowed).
+    Reports the first offender in ``_CRON_INVISIBLE_CHARS`` order."""
+    removed = set(_strip_invisible_unicode(prompt)[1])
     for char in _CRON_INVISIBLE_CHARS:
-        if char in prompt_for_invisible_scan:
+        if f"U+{ord(char):04X}" in removed:
             return f"Blocked: prompt contains invisible unicode U+{ord(char):04X} (possible injection)."
     return ""
 

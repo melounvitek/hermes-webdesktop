@@ -12,6 +12,8 @@ model can self-correct without a registry-listing tool.
 from tools import desktop_ui
 from tools.registry import registry, tool_error
 
+# Renderer answers via the blocking-prompt bridge; layout apply is synchronous
+# there, so the bridge timeout is generous.
 _TIMEOUT_NOTE = "Layout apply is only available in the Hermes desktop app."
 
 

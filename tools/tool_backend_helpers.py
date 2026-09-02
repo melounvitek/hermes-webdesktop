@@ -18,7 +18,8 @@ _VALID_MODAL_MODES = {"auto", "direct", "managed"}
 
 
 def managed_nous_tools_enabled(*, force_fresh: bool = False) -> bool:
-    """True when the user is entitled to the Nous Tool Gateway (coarse gate).
+    """True when the user is entitled to the Nous Tool Gateway (coarse gate:
+    paid Portal service access OR a live free tool pool — "is ANY managed tool usable").
 
     Fails closed on unknown/error entitlement — never blocks startup.
     Per-category coverage is narrowed by callers via ``tool_gateway_entitled_for``.
@@ -125,7 +126,9 @@ def resolve_modal_backend_state(
 
 
 def _scoped_credential(name: str) -> str:
-    """Read a credential env var under the active profile secret scope."""
+    """Read a credential env var under the active profile secret scope. Raw env
+    fallback only if ``agent.secret_scope`` cannot import — a packaging edge must
+    never leave the caller without a key."""
     try:
         from agent.secret_scope import get_secret
 
@@ -280,6 +283,8 @@ def read_selection(section: str) -> str | None:
             text = str(value).strip().lower()
             if text:
                 return text
+    # use_gateway: false with no name key is not a usable selection shape;
+    # per-capability web keys still count as configured via selection_exists().
     return None
 
 
@@ -295,8 +300,10 @@ def selection_exists(section: str) -> bool:
     return any(str(raw.get(key) or "").strip() for key in extra)
 
 
-# Backends that once shipped in-tree but were removed; consulted by the startup
-# config check and selection_error() so a stale selection gets a real message.
+# Backends that once shipped in-tree but were removed. A config still pointing at
+# one would otherwise fail silently at the FIRST tool call with a generic "no
+# registered provider has that name" — no migration, no startup notice. Consulted
+# by the startup config check and selection_error() so the user gets a real message.
 # Add removals here, never as one-off string checks at call sites, e.g.
 #   "web": {"<name>": "the <Name> backend was removed in vX.Y.Z (...)"},
 REMOVED_BACKENDS: Dict[str, Dict[str, str]] = {}
@@ -324,7 +331,8 @@ def selection_error(section: str, selection_name: str, failure: str) -> str:
 
 def fal_key_is_configured() -> bool:
     """True when FAL_KEY is set (scope/env, else ``.env`` for CLI paths that
-    run before dotenv loads) to a non-whitespace value."""
+    run before dotenv loads) to a non-whitespace value — so tool-side and CLI
+    setup-time checks agree; whitespace-only counts as unset everywhere."""
     value = _scoped_credential("FAL_KEY") or None
     if value is None:
         try:

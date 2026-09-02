@@ -38,11 +38,14 @@ from tools.tool_search_catalog import (  # noqa: F401 — re-exported public/tes
     _classify_source,
     _corpus_stats,
     _entry_search_text,
+    _fn,
     _listing_group_label,
+    _registry_entry,
     _short_desc,
     _stem,
     _tokenize,
     build_catalog,
+    build_catalog_listing,
     build_catalog_listing_with_form,
     search_catalog,
 )
@@ -77,7 +80,8 @@ class ToolSearchConfig:
     search_default_limit: int
     max_search_limit: int
     # Embedded name + short-description manifest so deferred tools stay
-    # discoverable. "auto"/"on" = include when it fits; "off" = bare bridge.
+    # DISCOVERABLE (like the skills listing) while full schemas stay deferred.
+    # "auto"/"on" = include when it fits (names-only, then bare); "off" = bare bridge.
     listing: str = "auto"  # "auto" | "on" | "off"
     # Effective budget = min(listing_max_tokens, threshold_pct% of context).
     listing_max_tokens: int = 4000
@@ -98,32 +102,21 @@ class ToolSearchConfig:
             return cls(enabled="off" if raw is False else "auto", threshold_pct=5.0,
                        search_default_limit=5, max_search_limit=25)
 
-        enabled = _tri_state(raw.get("enabled", "auto"))
-        threshold_pct = max(0.0, min(100.0, _safe_float(raw.get("threshold_pct"), 5.0)))
-
-        max_search_limit = max(1, min(50, _safe_int(raw.get("max_search_limit"), 25)))
-        search_default_limit = max(1, min(max_search_limit,
-                                          _safe_int(raw.get("search_default_limit"), 5)))
-
-        listing = _tri_state(raw.get("listing", "auto"))
-        listing_max_tokens = max(200, min(60000, _safe_int(raw.get("listing_max_tokens"), 4000)))
-
+        max_search_limit = _clamped_int(raw.get("max_search_limit"), 25, 1, 50)
         defer_raw = raw.get("defer")
-        if isinstance(defer_raw, (list, tuple, set)):
-            defer_tools = frozenset(
-                str(n).strip() for n in defer_raw if str(n).strip()
-            )
-        else:
-            defer_tools = None  # curated default
-
         return cls(
-            enabled=enabled,
-            threshold_pct=threshold_pct,
-            search_default_limit=search_default_limit,
+            enabled=_tri_state(raw.get("enabled", "auto")),
+            threshold_pct=max(0.0, min(100.0, _safe_float(raw.get("threshold_pct"), 5.0))),
+            search_default_limit=_clamped_int(
+                raw.get("search_default_limit"), 5, 1, max_search_limit),
             max_search_limit=max_search_limit,
-            listing=listing,
-            listing_max_tokens=listing_max_tokens,
-            defer_tools=defer_tools,
+            listing=_tri_state(raw.get("listing", "auto")),
+            listing_max_tokens=_clamped_int(raw.get("listing_max_tokens"), 4000, 200, 60000),
+            # A list replaces the curated default wholesale; anything else = curated.
+            defer_tools=(
+                frozenset(str(n).strip() for n in defer_raw if str(n).strip())
+                if isinstance(defer_raw, (list, tuple, set)) else None
+            ),
         )
 
 
@@ -142,6 +135,11 @@ def _safe_int(value: Any, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _clamped_int(value: Any, fallback: int, lo: int, hi: int) -> int:
+    """``_safe_int`` clamped to ``[lo, hi]`` (the fallback is clamped too)."""
+    return max(lo, min(hi, _safe_int(value, fallback)))
 
 
 def _safe_float(value: Any, fallback: float) -> float:
@@ -218,13 +216,12 @@ def is_deferrable_tool_name(name: str, defer_tools: Optional[frozenset] = None) 
         return True
     if name in _core_tool_names():
         return False
+    entry = _registry_entry(name)
+    if entry is None:
+        return False
     try:
-        from tools.registry import registry
-        entry = registry.get_entry(name)
-        if entry is None:
-            return False
         return entry.toolset.startswith("mcp-") or entry.toolset not in _DIRECT_SURFACE_TOOLSETS
-    except Exception:
+    except Exception:  # malformed entry (no str toolset) is never deferrable
         return False
 
 
@@ -233,11 +230,7 @@ def _describe_classification(
     defer_tools: Optional[frozenset] = None,
 ) -> Literal["available", "not_found", "not_deferrable"]:
     """Classify a describe name without treating unknown names as errors."""
-    try:
-        from tools.registry import registry
-        entry = registry.get_entry(name)
-    except Exception:
-        return "not_found"
+    entry = _registry_entry(name)
     if entry is None:
         return "not_found"
     if defer_tools is not None and name in defer_tools:
@@ -251,6 +244,11 @@ def _describe_classification(
     return "available"
 
 
+def _tool_def_names(tool_defs: Iterable[Dict[str, Any]]) -> Iterable[str]:
+    """Function names of a tool-defs list (``""`` for a nameless def)."""
+    return (_fn(td).get("name", "") for td in tool_defs)
+
+
 def classify_tools(
     tool_defs: List[Dict[str, Any]],
     defer_tools: Optional[frozenset] = None,
@@ -259,16 +257,17 @@ def classify_tools(
     dropped (they are re-added after classification)."""
     visible: List[Dict[str, Any]] = []
     deferrable: List[Dict[str, Any]] = []
-    for td in tool_defs:
-        fn = td.get("function") or {}
-        name = fn.get("name", "")
+    for td, name in zip(tool_defs, _tool_def_names(tool_defs)):
         if name in BRIDGE_TOOL_NAMES:
             continue
-        if is_deferrable_tool_name(name, defer_tools):
-            deferrable.append(td)
-        else:
-            visible.append(td)
+        (deferrable if is_deferrable_tool_name(name, defer_tools) else visible).append(td)
     return visible, deferrable
+
+
+def _deferrable_in(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deferrable subset of a pre-assembly ``tool_defs`` list under the current
+    (read-only) user config — the universe the bridge tools operate on."""
+    return classify_tools(tool_defs, load_config_readonly().effective_defer_tools)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +318,57 @@ def listing_token_budget(
 # ---------------------------------------------------------------------------
 
 
+def _bridge_schema(name: str, description: str, properties: Dict[str, Any],
+                   required: List[str]) -> Dict[str, Any]:
+    """One OpenAI-style function schema (key order is part of the frozen bytes)."""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {"type": "object", "properties": properties, "required": required},
+        },
+    }
+
+
+def _search_description(deferred_count: int, listing: Optional[str], listing_form: str) -> str:
+    """tool_search bridge description with the listing embedded; ``listing_form``
+    picks the framing (see :func:`bridge_tool_schemas`)."""
+    desc = (
+        f"Search {deferred_count} additional tools that are loaded on demand. "
+        "Takes a list of queries searched in parallel against the same "
+        "catalog; send one query per distinct capability you need. Returns "
+        "matching tool names grouped per query plus a shared map with each "
+        "tool's description. Follow with "
+        f"`{TOOL_DESCRIBE_NAME}` to load full parameter schemas, "
+        f"then `{TOOL_CALL_NAME}` to invoke. Tools listed at the top of this "
+        "system prompt are already available and do not need to be searched."
+    )
+    if not listing:
+        return desc
+    if listing_form == "groups":
+        return desc + (
+            "\n\nThe servers below are connected and their tools ARE available "
+            "through this bridge. For any request in these domains, search "
+            "here FIRST — do not claim the capability is unavailable and do "
+            "not substitute a generic tool (terminal/browser) without "
+            "searching.\n\n" + listing
+        )
+    desc += (
+        "\n\nEvery deferred capability is listed below. If a tool name "
+        "appears here, do NOT claim it is unavailable — load it with "
+        f"`{TOOL_DESCRIBE_NAME}` (skip `{TOOL_SEARCH_NAME}` when you "
+        "already see the exact name)."
+    )
+    if listing_form == "mixed":
+        desc += (
+            " For servers marked 'names not listed', the tools exist "
+            f"too — find them with `{TOOL_SEARCH_NAME}` before "
+            "concluding anything is missing."
+        )
+    return desc + "\n\n" + listing
+
+
 def bridge_tool_schemas(
     deferred_count: int,
     listing: Optional[str] = None,
@@ -329,111 +379,51 @@ def bridge_tool_schemas(
     tool_search description; ``listing_form`` picks the framing (per-tool forms
     say "skip search when you see the exact name", the "groups" summary says
     which domains exist and that search is mandatory)."""
-    desc_search = (
-        f"Search {deferred_count} additional tools that are loaded on demand. "
-        "Takes a list of queries searched in parallel against the same "
-        "catalog; send one query per distinct capability you need. Returns "
-        "matching tool names grouped per query plus a shared map with each "
-        "tool's description. Follow with "
-        f"`{TOOL_DESCRIBE_NAME}` to load full parameter schemas, "
-        f"then `{TOOL_CALL_NAME}` to invoke. Tools listed at the top of this "
-        "system prompt are already available and do not need to be searched."
-    )
-    if listing and listing_form == "groups":
-        desc_search += (
-            "\n\nThe servers below are connected and their tools ARE available "
-            "through this bridge. For any request in these domains, search "
-            "here FIRST — do not claim the capability is unavailable and do "
-            "not substitute a generic tool (terminal/browser) without "
-            "searching.\n\n" + listing
-        )
-    elif listing:
-        desc_search += (
-            "\n\nEvery deferred capability is listed below. If a tool name "
-            "appears here, do NOT claim it is unavailable — load it with "
-            f"`{TOOL_DESCRIBE_NAME}` (skip `{TOOL_SEARCH_NAME}` when you "
-            "already see the exact name)."
-        )
-        if listing_form == "mixed":
-            desc_search += (
-                " For servers marked 'names not listed', the tools exist "
-                f"too — find them with `{TOOL_SEARCH_NAME}` before "
-                "concluding anything is missing."
-            )
-        desc_search += "\n\n" + listing
-    desc_describe = (
-        f"Load the full JSON schemas for tools returned by `{TOOL_SEARCH_NAME}`. "
-        f"Required before `{TOOL_CALL_NAME}` if a tool's parameters are unknown. "
-        "Batch every schema you need into one call."
-    )
-    desc_call = (
-        "Invoke a deferred tool by name with the given arguments. Argument shape "
-        f"matches the tool's schema (see `{TOOL_DESCRIBE_NAME}`). Policy, hooks, "
-        "and approvals run exactly as for any directly-listed tool."
-    )
-
     return [
-        {
-            "type": "function",
-            "function": {
-                "name": TOOL_SEARCH_NAME,
-                "description": desc_search,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "queries": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Search queries, each a few keywords describing one capability (e.g. ['create github issue', 'send slack message']). Searched in parallel; results come back grouped per query. A single string is accepted and treated as one query.",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of matches per query. Defaults to 5 and is clamped to the configured maximum (25 by default).",
-                        },
-                    },
-                    "required": ["queries"],
+        _bridge_schema(
+            TOOL_SEARCH_NAME,
+            _search_description(deferred_count, listing, listing_form),
+            {
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Search queries, each a few keywords describing one capability (e.g. ['create github issue', 'send slack message']). Searched in parallel; results come back grouped per query. A single string is accepted and treated as one query.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of matches per query. Defaults to 5 and is clamped to the configured maximum (25 by default).",
                 },
             },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": TOOL_DESCRIBE_NAME,
-                "description": desc_describe,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "names": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Exact tool names (as returned by tool_search). A single string is accepted and treated as one name.",
-                        },
-                    },
-                    "required": ["names"],
+            ["queries"],
+        ),
+        _bridge_schema(
+            TOOL_DESCRIBE_NAME,
+            f"Load the full JSON schemas for tools returned by `{TOOL_SEARCH_NAME}`. "
+            f"Required before `{TOOL_CALL_NAME}` if a tool's parameters are unknown. "
+            "Batch every schema you need into one call.",
+            {
+                "names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exact tool names (as returned by tool_search). A single string is accepted and treated as one name.",
                 },
             },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": TOOL_CALL_NAME,
-                "description": desc_call,
-                "parameters": {
+            ["names"],
+        ),
+        _bridge_schema(
+            TOOL_CALL_NAME,
+            "Invoke a deferred tool by name with the given arguments. Argument shape "
+            f"matches the tool's schema (see `{TOOL_DESCRIBE_NAME}`). Policy, hooks, "
+            "and approvals run exactly as for any directly-listed tool.",
+            {
+                "name": {"type": "string", "description": "Exact tool name to invoke."},
+                "arguments": {
                     "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Exact tool name to invoke.",
-                        },
-                        "arguments": {
-                            "type": "object",
-                            "description": "Arguments for the tool, matching its schema.",
-                        },
-                    },
-                    "required": ["name", "arguments"],
+                    "description": "Arguments for the tool, matching its schema.",
                 },
             },
-        },
+            ["name", "arguments"],
+        ),
     ]
 
 
@@ -452,7 +442,8 @@ class AssemblyResult:
     deferred_tokens: int = 0
     threshold_tokens: int = 0
     # 0 = passthrough; 1 = bridge + per-tool listing (full/names/mixed);
-    # 2 = bare bridge / server-summary only.
+    # 2 = bare bridge / server-summary only — domains stay visible but
+    # individual tools are reachable only via tool_search.
     tier: int = 0
     listing_form: str = "none"  # "full" | "names" | "mixed" | "groups" | "none"
 
@@ -469,8 +460,8 @@ def assemble_tool_defs(
     if config is None:
         config = load_config()
 
-    incoming = [td for td in tool_defs
-                if (td.get("function") or {}).get("name") not in BRIDGE_TOOL_NAMES]
+    incoming = [td for td, name in zip(tool_defs, _tool_def_names(tool_defs))
+                if name not in BRIDGE_TOOL_NAMES]
 
     visible, deferrable = classify_tools(incoming, config.effective_defer_tools)
     if not deferrable:
@@ -487,15 +478,13 @@ def assemble_tool_defs(
             tier=0,
         )
 
-    listing = None
-    listing_form = "none"
+    listing, listing_form = None, "none"
     listing_budget = listing_token_budget(config, context_length)
     if config.listing != "off":
         listing, listing_form = build_catalog_listing_with_form(
             deferrable, max_tokens=listing_budget)
     bridge = bridge_tool_schemas(len(deferrable), listing=listing,
                                  listing_form=listing_form)
-    result = visible + bridge
     tier = 1 if listing_form in ("full", "names", "mixed") else 2
 
     logger.info(
@@ -506,7 +495,7 @@ def assemble_tool_defs(
     )
 
     return AssemblyResult(
-        tool_defs=result,
+        tool_defs=visible + bridge,
         activated=True,
         deferred_count=len(deferrable),
         deferred_tokens=deferrable_tokens,
@@ -531,12 +520,8 @@ def _shared_tool_record(entry: CatalogEntry) -> Dict[str, Any]:
     trivial call without a ``tool_describe`` round-trip."""
     schema = entry.schema if isinstance(entry.schema, dict) else {}
     fn = schema.get("function")
-    if not isinstance(fn, dict):
-        fn = {}
-    params = fn.get("parameters")
-    if not isinstance(params, dict):
-        params = {}
-    required = params.get("required")
+    params = fn.get("parameters") if isinstance(fn, dict) else None
+    required = params.get("required") if isinstance(params, dict) else None
     if not isinstance(required, list):
         required = []
     return {
@@ -549,24 +534,36 @@ def _shared_tool_record(entry: CatalogEntry) -> Dict[str, Any]:
 
 def _available_source_summary(catalog: List[CatalogEntry]) -> List[Dict[str, Any]]:
     """Deterministic ``[{name, tool_count}]`` of connected sources, attached to
-    empty query groups so a lexical miss is not read as a missing capability."""
+    empty query groups so a lexical miss is not read as a missing capability
+    (adds nothing to the fixed per-turn prompt)."""
     counts = Counter(_listing_group_label(entry.source_name) for entry in catalog)
     return [{"name": name, "tool_count": counts[name]} for name in sorted(counts)]
 
 
-def _string_list(raw: Any, *, dedupe: bool) -> Optional[List[str]]:
-    """Normalize a list-of-strings argument. A bare string (a common model slip)
-    counts as a one-item list; non-list input returns None."""
+def _string_list_arg(
+    args: Dict[str, Any], key: str, *, dedupe: bool, max_items: int, retry_hint: str,
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Read a list-of-strings bridge argument -> ``(items, error_json)``. A bare
+    string (a common model slip) counts as a one-item list. Rejects non-list
+    input, an empty list (after stripping blanks), and more than ``max_items``
+    (bounds the work one bridge call can request)."""
+    raw = args.get(key)
     if isinstance(raw, str):
         raw = [raw]
     if not isinstance(raw, list):
-        return None
+        return None, tool_error(f"{key} is required and must be an array of strings")
     out: List[str] = []
     for item in raw:
         text = str(item or "").strip()
         if text and (not dedupe or text not in out):
             out.append(text)
-    return out
+    if not out:
+        return None, tool_error(
+            f"{key} is required and must contain at least one non-empty string")
+    if len(out) > max_items:
+        return None, tool_error(
+            f"too many {key}: {len(out)} > max {max_items}. {retry_hint}")
+    return out, None
 
 
 def dispatch_tool_search(args: Dict[str, Any],
@@ -585,27 +582,19 @@ def dispatch_tool_search(args: Dict[str, Any],
     if config is None:
         config = load_config()
 
-    queries = _string_list(args.get("queries"), dedupe=False)
-    if queries is None:
-        return tool_error("queries is required and must be an array of strings")
-    if not queries:
-        return tool_error("queries is required and must contain at least one non-empty string")
-    if len(queries) > _MAX_QUERIES_PER_CALL:
-        return tool_error(
-            f"too many queries: {len(queries)} > max {_MAX_QUERIES_PER_CALL}. "
-            "Retry with fewer, more targeted queries."
-        )
+    queries, err = _string_list_arg(
+        args, "queries", dedupe=False, max_items=_MAX_QUERIES_PER_CALL,
+        retry_hint="Retry with fewer, more targeted queries.")
+    if err:
+        return err
 
     raw_limit = args.get("limit")
     if raw_limit is None:
         limit = config.search_default_limit
     else:
-        limit = max(1, min(config.max_search_limit, _safe_int(raw_limit, config.search_default_limit)))
+        limit = _clamped_int(raw_limit, config.search_default_limit, 1, config.max_search_limit)
 
-    _, deferrable = classify_tools(
-        current_tool_defs, load_config_readonly().effective_defer_tools
-    )
-    catalog = build_catalog(deferrable)
+    catalog = build_catalog(_deferrable_in(current_tool_defs))
 
     results: List[Dict[str, Any]] = []
     tools_map: Dict[str, Dict[str, Any]] = {}
@@ -614,8 +603,7 @@ def dispatch_tool_search(args: Dict[str, Any],
     for query in queries:
         hits = search_catalog(catalog, query, limit=limit, corpus_stats=corpus_stats)
         for h in hits:
-            if h.name not in tools_map:
-                tools_map[h.name] = _shared_tool_record(h)
+            tools_map.setdefault(h.name, _shared_tool_record(h))
         group: Dict[str, Any] = {"query": query, "matches": [h.name for h in hits]}
         if not hits and catalog:
             group["available_sources"] = available_sources
@@ -627,13 +615,12 @@ def dispatch_tool_search(args: Dict[str, Any],
             )
         results.append(group)
 
-    result: Dict[str, Any] = {
+    return json.dumps({
         "queries": queries,
         "total_available": len(catalog),
         "results": results,
         "tools": tools_map,
-    }
-    return json.dumps(result, ensure_ascii=False)
+    }, ensure_ascii=False)
 
 
 def dispatch_tool_describe(args: Dict[str, Any],
@@ -651,25 +638,14 @@ def dispatch_tool_describe(args: Dict[str, Any],
     if config is None:
         config = load_config_readonly()
 
-    names = _string_list(args.get("names"), dedupe=True)
-    if names is None:
-        return tool_error("names is required and must be an array of strings")
-    if not names:
-        return tool_error("names is required and must contain at least one non-empty string")
-    if len(names) > _MAX_DESCRIBE_NAMES_PER_CALL:
-        return tool_error(
-            f"too many names: {len(names)} > max {_MAX_DESCRIBE_NAMES_PER_CALL}. "
-            "Retry with fewer names per call."
-        )
+    names, err = _string_list_arg(
+        args, "names", dedupe=True, max_items=_MAX_DESCRIBE_NAMES_PER_CALL,
+        retry_hint="Retry with fewer names per call.")
+    if err:
+        return err
 
-    _, deferrable = classify_tools(
-        current_tool_defs, load_config_readonly().effective_defer_tools
-    )
-    by_name: Dict[str, Dict[str, Any]] = {}
-    for td in deferrable:
-        fn = td.get("function") or {}
-        if fn.get("name"):
-            by_name[fn["name"]] = fn
+    deferrable = _deferrable_in(current_tool_defs)
+    by_name = {name: _fn(td) for td, name in zip(deferrable, _tool_def_names(deferrable)) if name}
 
     tools: Dict[str, Dict[str, Any]] = {}
     not_found: List[str] = []
@@ -707,7 +683,7 @@ def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
     out-of-scope tool via the bridge."""
     defer_tools = load_config_readonly().effective_defer_tools
     return frozenset(
-        name for name in ((td.get("function") or {}).get("name", "") for td in tool_defs)
+        name for name in _tool_def_names(tool_defs)
         if name and is_deferrable_tool_name(name, defer_tools)
     )
 
@@ -753,6 +729,7 @@ __all__ = [
     "estimate_tokens_from_schemas",
     "should_activate",
     "build_catalog",
+    "build_catalog_listing",
     "build_catalog_listing_with_form",
     "listing_token_budget",
     "search_catalog",

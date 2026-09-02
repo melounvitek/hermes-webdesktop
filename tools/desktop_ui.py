@@ -33,7 +33,9 @@ def user_enabled(setting: str, default: bool) -> bool:
     The renderer mirrors these toggles onto the CONNECTED gateway's config, so this
     reads the user's real answer for local/SSH/URL/cloud gateways alike (an env var
     would only describe the process). ``check_fn``s use it to withdraw a tool from the
-    schema when the user switched the feature off. Unreadable config -> ``default``.
+    schema when the user switched the feature off — Hermes should not be told about
+    a surface it may not use. Unreadable config -> ``default`` so a shipped-on
+    feature does not vanish on a transient read error.
     """
     try:
         from hermes_cli.config import load_config_readonly

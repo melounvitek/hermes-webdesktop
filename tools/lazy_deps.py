@@ -198,7 +198,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # path for lean/partial installs. Call sites use prompt=False so read_file /
     # vision can never block on an input() prompt mid-session.
     "tool.vision": ("Pillow==12.3.0",),
-    "tool.doc_extract": ("firecrawl-anydoc==0.2.4",),  # lockstep with pyproject
+    "tool.doc_extract": ("firecrawl-anydoc==0.2.4",),  # imports as `anydoc`; lockstep with pyproject
     # MCP client SDK for the cua-driver; covers lean/broken-extra installs so
     # computer_use never dead-ends on `No module named 'mcp'`.
     "tool.computer_use": (
@@ -512,7 +512,10 @@ def _warm_installed_bytecode(specs: tuple[str, ...], target: Optional[Path]) -> 
     on an installer. Best-effort; never invalidates a successful install."""
     if sys.dont_write_bytecode:
         return
-    import compileall
+    try:
+        import compileall
+    except Exception:  # pragma: no cover — stdlib, but never break an install
+        return
 
     for spec in specs:
         try:
@@ -579,6 +582,8 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
             try:
                 # --compile-bytecode: uv writes no __pycache__ by default, so the
                 # first import would recompile the backend AND its transitives.
+                # Covers the whole install; _warm_installed_bytecode is the
+                # belt-and-braces pass for the spec's own roots on any tier.
                 r = _run([uv_bin, "pip", "install", "--compile-bytecode", *extra_args, *specs],
                          timeout=timeout, env=uv_env)
                 if r.returncode != 0:

@@ -107,13 +107,11 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
         if not isinstance(schema, dict):
             return None
         fn = schema.get("function") if schema.get("type") == "function" else schema
-        if not isinstance(fn, dict):
-            return None
-        params = fn.get("parameters")
+        params = fn.get("parameters") if isinstance(fn, dict) else None
         if not isinstance(params, dict):
             return None
         required = params.get("required")
-        if isinstance(required, list) and required:
+        if isinstance(required, list):
             missing = [r for r in required if isinstance(r, str) and r not in args]
             if missing:
                 return _validation_error(
@@ -131,7 +129,7 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
             return None
 
         # Validate the repaired shape dispatch will see; copy because
-        # coerce_tool_args may normalize in place.
+        # coerce_tool_args may normalize in place (dispatch re-coerces canonically).
         candidate_args = dict(args)
         try:
             from model_tools import coerce_tool_args

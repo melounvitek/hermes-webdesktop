@@ -63,6 +63,22 @@ def _tokenize(text: str) -> List[str]:
     return [_stem(token.lower()) for token in _TOKEN_RE.findall(text)]
 
 
+def _fn(td: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``function`` block of a tool-def (``{}`` when absent/None)."""
+    return td.get("function") or {}
+
+
+def _registry_entry(name: str) -> Any:
+    """Registry entry for ``name``; None when unregistered OR when the registry
+    is unavailable/raises (lookup failures must never fail a bridge call).
+    The import stays lazy: tests patch ``tools.registry.registry``."""
+    try:
+        from tools.registry import registry
+        return registry.get_entry(name)
+    except Exception:
+        return None
+
+
 def _entry_search_text(td: Dict[str, Any], source_label: str = "") -> str:
     """Search-text blob: split name words + source label + description +
     top-level parameter names. Schema bodies are excluded (noise, no recall
@@ -70,7 +86,7 @@ def _entry_search_text(td: Dict[str, Any], source_label: str = "") -> str:
     its IDF is ~0. The source label lets a service-name query ("linear") reach
     a tool whose own name omits the vendor.
     """
-    fn = td.get("function") or {}
+    fn = _fn(td)
     name = fn.get("name", "")
     if name.startswith("mcp__"):
         name = name[len("mcp__"):]
@@ -84,15 +100,12 @@ def _entry_search_text(td: Dict[str, Any], source_label: str = "") -> str:
 
 def _classify_source(name: str) -> Tuple[str, str]:
     """Return (source_kind, source_name) for a registered tool name."""
+    entry = _registry_entry(name)
+    if entry is None:
+        return ("other", "")
     try:
-        from tools.registry import registry
-        entry = registry.get_entry(name)
-        if entry is None:
-            return ("other", "")
-        if entry.toolset.startswith("mcp-"):
-            return ("mcp", entry.toolset)
-        return ("plugin", entry.toolset)
-    except Exception:
+        return ("mcp" if entry.toolset.startswith("mcp-") else "plugin", entry.toolset)
+    except Exception:  # malformed entry (no str toolset)
         return ("other", "")
 
 
@@ -100,7 +113,7 @@ def build_catalog(tool_defs: List[Dict[str, Any]]) -> List[CatalogEntry]:
     """Build the deferred-tool catalog from the deferrable subset of tool-defs."""
     catalog: List[CatalogEntry] = []
     for td in tool_defs:
-        fn = td.get("function") or {}
+        fn = _fn(td)
         name = fn.get("name", "")
         if not name:
             continue
@@ -123,7 +136,7 @@ def _bm25_score(query_tokens: List[str], doc_tokens: List[str],
                 doc_freq: Dict[str, int], n_docs: int,
                 k1: float = 1.5, b: float = 0.75) -> float:
     """Standard BM25 score for one query against one document (inlined; the
-    catalog is small enough that a dependency is not worth it)."""
+    catalog is bounded — typically < 500 tools — so a dependency is not worth it)."""
     if not doc_tokens:
         return 0.0
     score = 0.0
@@ -204,7 +217,8 @@ _SENTENCE_END_RE = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\betc)[.!?](?=\s|$)")
 
 def _short_desc(description: str, max_chars: int = 60) -> str:
     """First sentence of a tool description, clipped to ``max_chars`` on a
-    word boundary. Linear-time on hostile input."""
+    word boundary. ``e.g.``/``i.e.``/``etc.`` do not end a sentence; whitespace
+    normalization and the regex search stay linear-time on hostile input."""
     text = " ".join((description or "").split())
     if not text:
         return ""
@@ -222,9 +236,17 @@ def _short_desc(description: str, max_chars: int = 60) -> str:
 def _listing_group_label(source_name: str) -> str:
     """Human-facing group heading for a toolset, e.g. ``mcp-github`` -> ``github``."""
     label = source_name or "other"
-    if label.startswith("mcp-"):
-        label = label[4:]
-    return label
+    return label[4:] if label.startswith("mcp-") else label
+
+
+def build_catalog_listing(
+    deferrable: List[Dict[str, Any]],
+    *,
+    max_tokens: int = 4000,
+) -> Optional[str]:
+    """Render the deferred-catalog manifest; text only (see
+    :func:`build_catalog_listing_with_form` for the degradation ladder)."""
+    return build_catalog_listing_with_form(deferrable, max_tokens=max_tokens)[0]
 
 
 def build_catalog_listing_with_form(
@@ -250,12 +272,13 @@ def build_catalog_listing_with_form(
 
     groups: Dict[str, List[Tuple[str, str]]] = {}
     for td in deferrable:
-        fn = td.get("function") or {}
+        fn = _fn(td)
         name = fn.get("name", "")
         if not name:
             continue
-        source, source_name = _classify_source(name)
-        label = _listing_group_label(source_name if source != "other" else "other")
+        # ``_classify_source`` returns ("other", "") for unregistered names and
+        # ``_listing_group_label("")`` is "other", so one call covers both.
+        label = _listing_group_label(_classify_source(name)[1])
         groups.setdefault(label, []).append((name, _short_desc(fn.get("description", ""))))
 
     if not groups:
@@ -269,8 +292,7 @@ def build_catalog_listing_with_form(
                     f"discover via `{TOOL_SEARCH_NAME}`)")
         lines = [f"{label} tools ({len(tools)}):"]
         if mode == "full":
-            for name, desc in tools:
-                lines.append(f"- {name}: {desc}" if desc else f"- {name}")
+            lines.extend(f"- {name}: {desc}" if desc else f"- {name}" for name, desc in tools)
         else:
             lines.append(", ".join(name for name, _ in tools))
         return "\n".join(lines)
@@ -278,30 +300,26 @@ def build_catalog_listing_with_form(
     header = ("Deferred tool catalog (call schemas via "
               f"`{TOOL_DESCRIBE_NAME}`, invoke via `{TOOL_CALL_NAME}`):")
 
-    def assemble(modes: Dict[str, str]) -> str:
-        return "\n".join([header] + [render_group(lbl, modes[lbl])
-                                     for lbl in sorted(groups)])
+    def assemble_if_fits(modes: Dict[str, str]) -> Optional[str]:
+        text = "\n".join([header] + [render_group(lbl, modes[lbl]) for lbl in sorted(groups)])
+        return text if math.ceil(len(text) / CHARS_PER_TOKEN) <= max_tokens else None
 
-    def fits(text: str) -> bool:
-        return math.ceil(len(text) / CHARS_PER_TOKEN) <= max_tokens
-
-    # 1. Everything full.
-    modes = {lbl: "full" for lbl in groups}
-    if fits(assemble(modes)):
-        return assemble(modes), "full"
-
-    # 2. Everything names-only.
-    modes = {lbl: "names" for lbl in groups}
-    if fits(assemble(modes)):
-        return assemble(modes), "names"
+    # 1. Everything full.  2. Everything names-only.
+    for mode in ("full", "names"):
+        modes = {lbl: mode for lbl in groups}
+        text = assemble_if_fits(modes)
+        if text is not None:
+            return text, mode
 
     # 3. Per-server degradation: collapse the LARGEST rendered groups first
-    #    (deterministic: size then label).
+    #    (deterministic: size then label) so one oversized server does not
+    #    cost a small co-attached server its per-tool names.
     by_size = sorted(groups, key=lambda lbl: (-len(render_group(lbl, "names")), lbl))
     for lbl in by_size:
         modes[lbl] = "summary"
-        if fits(assemble(modes)):
+        text = assemble_if_fits(modes)
+        if text is not None:
             form = "groups" if all(m == "summary" for m in modes.values()) else "mixed"
-            return assemble(modes), form
+            return text, form
 
     return None, "none"
