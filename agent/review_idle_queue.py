@@ -1,40 +1,29 @@
 """Idle deferral for background reviews on the managed local runtime.
 
-The post-turn review fork replays the whole conversation on the review
-runtime. On a cloud provider that costs seconds and runs concurrently
-with whatever the user does next. When the review runtime IS the managed
-llama-server, the same fork monopolizes the GPU the user's next prompt
-needs, for minutes — and the next live turn cancels it, so an active
-session tends to pay the decode cost AND lose the learning.
+When the review runtime IS the managed llama-server, the post-turn review fork
+monopolizes the GPU the user's next prompt needs, for minutes — and the next
+live turn cancels it, so an active session pays the decode cost AND loses the
+learning. This module keeps the decision to learn where it was (turn end, nudge
+intervals, full model, full transcript) and moves only the execution moment:
+reviews bound for the managed local endpoint are queued and dispatched when the
+machine is quiet. Everything else runs immediately.
 
-This module keeps the decision to learn exactly where it was (turn end,
-nudge intervals, full-strength model, full transcript) and moves only
-the execution moment: reviews bound for the managed local endpoint are
-queued and dispatched when the machine is quiet. Everything else runs
-immediately, as before.
-
-Policy (auxiliary.background_review.defer):
-    auto  (default) — defer exactly when the resolved review runtime
-                      targets the managed local server.
-    never           — old behavior everywhere.
-Explicit /refine (focus set) never defers: an explicit ask runs now,
-matching its bypass of the enabled gate.
+Policy (auxiliary.background_review.defer): ``auto`` (default) defers exactly
+when the resolved review runtime targets the managed local server; ``never`` is
+the old behavior. Explicit /refine (focus set) never defers.
 
 Queue semantics:
-- One slot per session, newest snapshot wins. A review replays the whole
-  conversation, so a newer snapshot strictly supersedes an older one —
-  coalescing is deduplication, not loss.
-- Preempted (cancelled-by-live-turn) reviews are requeued by the spawn
-  wrapper observing the run token's cancel flag, not killed-and-forgotten.
-- Aged-out events (defer_max_age_s, default 30 min) dispatch regardless
-  of idleness — deferral may delay learning, never lose it.
-- In-memory, best-effort: dropped on process exit, the same durability
-  contract the immediate daemon-thread fork always had.
+- One slot per session, newest snapshot wins (a review replays the whole
+  conversation, so coalescing is deduplication, not loss).
+- Preempted (cancelled-by-live-turn) reviews are requeued by the spawn wrapper
+  observing the run token's cancel flag.
+- Aged-out events (defer_max_age_s, default 30 min) dispatch regardless of
+  idleness — deferral may delay learning, never lose it.
+- In-memory, best-effort: dropped on process exit, like the immediate fork.
 
-Idle truth comes from the supervisor's /slots (machine-level: it sees
-every client of the managed server, including other Hermes profiles) and
-must hold for a settle window so a review is not launched into the gap
-between two quick prompts. Local in-process turn liveness is tracked via
+Idle truth comes from the supervisor's /slots (machine-level, sees every client
+incl. other profiles) and must hold for a settle window so a review is not
+launched between two quick prompts. In-process turn liveness is tracked via
 note_turn_started/note_turn_finished from run_conversation.
 """
 
@@ -45,13 +34,12 @@ import logging
 import threading
 import time
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Sustained-quiet window before dispatch. Long enough that "typed two
-# prompts back to back" does not look idle; short enough that walking
-# away for coffee runs the queue.
+# Sustained-quiet window before dispatch: long enough that two back-to-back
+# prompts do not look idle, short enough that a coffee break runs the queue.
 _IDLE_SETTLE_S = 15.0
 # Poll cadence while the queue is non-empty. The thread parks when empty.
 _POLL_INTERVAL_S = 5.0
@@ -78,16 +66,11 @@ def review_targets_managed_local(agent: Any,
                                  task_cfg: Optional[Dict[str, Any]]) -> bool:
     """Would this review fork decode on the llama-server WE manage?
 
-    Resolves the review runtime the same way the fork itself will and
-    exact-matches its netloc against the supervisor state file — the
-    matcher that cannot false-positive on external local servers. Any
-    failure reads False: immediate spawn is always the safe default.
-
-    Order matters: the netloc probe (one TTL-cached state-file read)
-    runs FIRST, so machines with no managed server — every cloud-only
-    install — return False without resolving the review runtime at all.
-    This wrapper runs on the turn's tail; runtime resolution belongs on
-    that path only when a managed server actually exists.
+    Resolves the review runtime as the fork will and exact-matches its netloc
+    against the supervisor state file (cannot false-positive on external local
+    servers). Any failure reads False: immediate spawn is the safe default.
+    The netloc probe (one TTL-cached state-file read) runs FIRST so cloud-only
+    installs return False without resolving the runtime on the turn's tail.
     """
     try:
         from agent.auxiliary_client import (
@@ -194,9 +177,7 @@ class ReviewIdleQueue:
                     >= defer_max_age_s(p.kwargs.get("task_cfg"))]
             candidate = aged[0] if aged else None
         if candidate is None:
-            if self._quiet_for() < _IDLE_SETTLE_S:
-                return None
-            if not self._server_idle():
+            if self._quiet_for() < _IDLE_SETTLE_S or not self._server_idle():
                 return None
             with self._lock:
                 if not self._pending:
@@ -238,18 +219,13 @@ class ReviewIdleQueue:
 
     @staticmethod
     def _still_enabled(item: _PendingReview) -> bool:
-        """Re-check the enabled gate at DISPATCH time.
-
-        The entry wrapper gates at enqueue time, but minutes may pass in
-        the queue — a user who sets background_review.enabled: false while
-        a review waits means it, and the dispatch must not resurrect it.
-        Fail-open like the gate itself (a broken config never silently
-        disables reviews)."""
+        """Re-check the enabled gate at DISPATCH time: minutes may pass in the
+        queue, and disabling reviews meanwhile must not be resurrected. Fail-open
+        like the gate itself."""
         try:
             from agent.background_review import load_background_review_settings
 
-            enabled, _ = load_background_review_settings()
-            return enabled
+            return load_background_review_settings()[0]
         except Exception:  # noqa: BLE001
             return True
 
@@ -260,26 +236,23 @@ def _managed_server_idle() -> bool:
     contend with). One /models + one /slots call per loaded model."""
     try:
         from hermes_cli.local_runtime.supervisor import state_path
+        from urllib.parse import quote
 
         state = json.loads(state_path().read_text(encoding="utf-8"))
         base = str(state.get("base_url", "")).rsplit("/v1", 1)[0]
-        key = str(state.get("api_key", ""))
+        headers = {"Authorization": f"Bearer {state.get('api_key', '')}"}
         if not base:
             return True
-        headers = {"Authorization": f"Bearer {key}"}
-        req = urllib.request.Request(f"{base}/models", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as r:
-            models = json.loads(r.read())
-        loaded = [m["id"] for m in models.get("data", [])
-                  if (m.get("status") or {}).get("value") in ("loaded", "ready")]
-        from urllib.parse import quote
 
-        for mid in loaded:
-            req = urllib.request.Request(f"{base}/slots?model={quote(mid)}",
-                                         headers=headers)
+        def _get(path: str) -> Any:
+            req = urllib.request.Request(f"{base}{path}", headers=headers)
             with urllib.request.urlopen(req, timeout=3) as r:
-                slots = json.loads(r.read())
-            if any(s.get("is_processing") for s in slots
+                return json.loads(r.read())
+
+        loaded = [m["id"] for m in _get("/models").get("data", [])
+                  if (m.get("status") or {}).get("value") in ("loaded", "ready")]
+        for mid in loaded:
+            if any(s.get("is_processing") for s in _get(f"/slots?model={quote(mid)}")
                    if isinstance(s, dict)):
                 return False
         return True
