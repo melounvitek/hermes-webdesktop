@@ -186,32 +186,6 @@ def is_compaction_progress_status(text: str | None) -> bool:
     )
 
 
-def _builtin_memory_prompt_snapshot(agent: Any) -> Optional[Tuple[str, str]]:
-    """Return the built-in memory text that can affect a system prompt.
-
-    Rendered after ``load_from_disk()`` so compression can retain a cached prompt
-    that already embeds current memory. ``None`` when unreadable, so callers take
-    the conservative rebuild path.
-    """
-    store = getattr(agent, "_memory_store", None)
-    if store is None:
-        return "", ""
-    try:
-        memory = (
-            store.format_for_system_prompt("memory") or ""
-            if getattr(agent, "_memory_enabled", False)
-            else ""
-        )
-        user = (
-            store.format_for_system_prompt("user") or ""
-            if getattr(agent, "_user_profile_enabled", False)
-            else ""
-        )
-    except Exception:
-        return None
-    return memory, user
-
-
 def _refresh_agent_tool_definitions(agent) -> bool:
     """Rebuild agent.tools at the compaction commit boundary.
 
@@ -228,34 +202,6 @@ def _refresh_agent_tool_definitions(agent) -> bool:
             "Compaction tool refresh added tools: %s", sorted(added),
         )
     return bool(added)
-
-
-def _cached_prompt_reflects_builtin_memory(agent: Any, cached_prompt: str) -> bool:
-    """Whether the cached system prompt already embeds current built-in memory.
-
-    Do NOT compare snapshots before/after reload: a DB-restored prompt can predate
-    memory writes the fresh store already holds, latching stale memory. Instead
-    verify current blocks appear verbatim and no stale block header remains.
-    """
-    snapshot = _builtin_memory_prompt_snapshot(agent)
-    if snapshot is None:
-        return False
-    try:
-        from tools.memory_tool import MEMORY_BLOCK_HEADERS
-    except Exception:
-        return False
-    for target, block in zip(("memory", "user"), snapshot):
-        block = block.strip()
-        if block:
-            # The rendered prompt embeds the block verbatim (incl. usage header), so any
-            # entry/char-count change breaks containment → rebuild.
-            if block not in cached_prompt:
-                return False
-        elif MEMORY_BLOCK_HEADERS[target] in cached_prompt:
-            # The prompt still carries a block for a target that is now
-            # empty/disabled — stale; rebuild.
-            return False
-    return True
 
 
 _COMPRESSOR_ATTEMPT_STATE_FIELDS = (
@@ -854,10 +800,6 @@ def _join_cancelled_worker(future: Any, grace_seconds: float) -> bool:
 _COMPRESS_EXECUTOR_MAX_WORKERS = 4
 _compress_admission_lock = threading.Lock()
 _compress_admitted_count = 0
-
-
-class CompressionExecutorSaturatedError(RuntimeError):
-    """All compression pool slots are occupied; submission was refused."""
 
 
 def _try_admit_compression_job() -> bool:
@@ -4790,56 +4732,35 @@ def _compress_context_via_codex_app_server(
     Rewriting the local transcript would not shrink the Codex thread, so Codex
     compacts its own thread and Hermes' transcript is left unchanged.
     """
+    _sid = getattr(agent, "session_id", None) or "none"
+    _tokens = f"{approx_tokens:,}" if approx_tokens else "unknown"
     auto_mode = str(
         getattr(agent, "codex_app_server_auto_compaction", "native") or "native"
     ).lower()
     if auto_mode not in {"native", "hermes", "off"}:
         auto_mode = "native"
+    skip_reason = None
     if not force and auto_mode != "hermes":
-        logger.info(
-            "codex app-server compaction skipped: mode=%s force=false "
-            "(session=%s messages=%d tokens=~%s)",
-            auto_mode,
-            getattr(agent, "session_id", None) or "none",
-            len(messages),
-            f"{approx_tokens:,}" if approx_tokens else "unknown",
-        )
-        existing_prompt = _existing_system_prompt(agent, system_message)
-        return messages, existing_prompt
-
-    # Automatic entrypoints honor the compressor-owned cooldown: a recent compaction
-    # failed, and retrying every turn is what thrashes.
-    if not force:
+        skip_reason = f"mode={auto_mode} force=false"
+    elif not force:
+        # Automatic entrypoints honor the compressor-owned cooldown: a recent compaction
+        # failed, and retrying every turn is what thrashes.
         _cooldown_remaining = _codex_compaction_cooldown_remaining(agent)
         if _cooldown_remaining > 0:
-            logger.info(
-                "codex app-server compaction skipped: failure cooldown active "
-                "for %.0fs (session=%s messages=%d tokens=~%s)",
-                _cooldown_remaining,
-                getattr(agent, "session_id", None) or "none",
-                len(messages),
-                f"{approx_tokens:,}" if approx_tokens else "unknown",
-            )
-            existing_prompt = _existing_system_prompt(agent, system_message)
-            return messages, existing_prompt
-
+            skip_reason = f"failure cooldown active for {_cooldown_remaining:.0f}s"
     codex_session = getattr(agent, "_codex_session", None)
-    if codex_session is None:
+    if skip_reason is None and codex_session is None:
+        skip_reason = "no active codex thread"
+    if skip_reason is not None:
         logger.info(
-            "codex app-server compaction skipped: no active codex thread "
-            "(session=%s messages=%d tokens=~%s)",
-            getattr(agent, "session_id", None) or "none",
-            len(messages),
-            f"{approx_tokens:,}" if approx_tokens else "unknown",
+            "codex app-server compaction skipped: %s (session=%s messages=%d tokens=~%s)",
+            skip_reason, _sid, len(messages), _tokens,
         )
-        existing_prompt = _existing_system_prompt(agent, system_message)
-        return messages, existing_prompt
+        return messages, _existing_system_prompt(agent, system_message)
 
     logger.info(
         "codex app-server compaction started: session=%s messages=%d tokens=~%s",
-        getattr(agent, "session_id", None) or "none",
-        len(messages),
-        f"{approx_tokens:,}" if approx_tokens else "unknown",
+        _sid, len(messages), _tokens,
     )
     try:
         agent._emit_status(COMPACTION_STATUS)
@@ -4880,8 +4801,7 @@ def _compress_context_via_codex_app_server(
             agent,
             str(getattr(result, "error", None) or "compaction interrupted"),
         )
-        existing_prompt = _existing_system_prompt(agent, system_message)
-        return messages, existing_prompt
+        return messages, _existing_system_prompt(agent, system_message)
 
     try:
         from agent.codex_runtime import (
@@ -4911,7 +4831,7 @@ def _compress_context_via_codex_app_server(
 
     logger.info(
         "codex app-server compaction done: session=%s thread=%s turn=%s",
-        getattr(agent, "session_id", None) or "none",
+        _sid,
         getattr(result, "thread_id", None) or "",
         getattr(result, "turn_id", None) or "",
     )
