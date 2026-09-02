@@ -521,6 +521,56 @@ class SessionSearchMixin:
                 raise sqlite3.OperationalError(failure_message)
             self._conn.commit()
 
+    def _optimize_unsettled_reason(self, conn) -> Optional[str]:
+        """Refusal reason while optimize work remains, else None. Settling after
+        a no-op backfill meant permanent search-index loss for historical rows,
+        so an empty base index against non-empty messages also refuses."""
+        if _meta_row(conn, "fts_rebuild_high_water") is not None:
+            return "backfill_incomplete"
+        if self._has_fts_trash(conn):
+            return "teardown_incomplete"
+        if self._fts_external_index_empty_with_messages(conn):
+            return "backfill_incomplete"
+        return None
+
+    def _optimize_vacuum(self) -> bool:
+        """Phase 3: reclaim freed pages to the OS. False when VACUUM failed
+        (usually no free disk for its temp copy; a later VACUUM reclaims)."""
+        try:
+            with self._lock:
+                self._conn.execute("VACUUM")
+            vacuum_ok = True
+        except sqlite3.OperationalError as exc:
+            logger.warning("VACUUM after FTS optimize failed: %s", exc)
+            vacuum_ok = False
+        # Best-effort WAL fold-back, REFUSED (SQLITE_BUSY) while another
+        # connection holds a read-mark — so callers must size the result via
+        # logical_size_bytes, not stat(). PASSIVE, never TRUNCATE: a TRUNCATE
+        # reset from a transient CLI would race a live writer.
+        try:
+            with self._lock:
+                self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception as exc:
+            logger.debug("WAL checkpoint (PASSIVE) after optimize VACUUM failed: %s", exc)
+        return vacuum_ok
+
+    def _optimize_settle(self, conn) -> Optional[str]:
+        """Phase 4 (inside the write transaction, so a concurrent writer cannot
+        race a stamp past incomplete work): stamp the FTS layout — the source
+        of truth for "optimized" — clear the "available" flag, and advance
+        schema_version if pre-decoupling code left it behind. Returns a
+        refusal reason (nothing stamped) or None."""
+        refusal = self._optimize_unsettled_reason(conn)
+        if refusal is not None:
+            return refusal
+        self.set_meta("fts_storage_version", str(FTS_STORAGE_VERSION), cursor=conn)
+        _delete_meta(conn, "fts_optimize_available")
+        conn.execute(
+            "UPDATE schema_version SET version = ? WHERE version < ?",
+            (SCHEMA_VERSION, SCHEMA_VERSION),
+        )
+        return None
+
     def optimize_fts_storage(
         self, *, progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None, vacuum: bool = True
     ) -> Dict[str, Any]:
@@ -583,9 +633,6 @@ class SessionSearchMixin:
         _emit("teardown")
         _drive("teardown", self._fts_teardown_trash_step)
 
-        # Refuse to stamp "optimized" while work remains or the base index is
-        # empty against non-empty messages (settling after a no-op backfill
-        # meant permanent search-index loss for historical rows).
         with self._lock:
             still_pending = _meta_row(self._conn, "fts_rebuild_high_water") is not None
             still_trash = self._has_fts_trash(self._conn)
@@ -598,48 +645,13 @@ class SessionSearchMixin:
             )
             return {"ok": False, "reason": reason, "vacuumed": None}
 
-        # Phase 3: reclaim freed pages to the OS.
         vacuum_ok = None
         if vacuum:
             _emit("vacuum")
-            try:
-                with self._lock:
-                    self._conn.execute("VACUUM")
-                vacuum_ok = True
-            except sqlite3.OperationalError as exc:
-                # Usually no free disk for VACUUM's temp copy; a later VACUUM reclaims.
-                logger.warning("VACUUM after FTS optimize failed: %s", exc)
-                vacuum_ok = False
-            # Best-effort WAL fold-back, REFUSED (SQLITE_BUSY) while another
-            # connection holds a read-mark — so callers must size the result
-            # via logical_size_bytes, not stat(). PASSIVE, never TRUNCATE: a
-            # TRUNCATE reset from a transient CLI would race a live writer.
-            try:
-                with self._lock:
-                    self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except Exception as exc:
-                logger.debug("WAL checkpoint (PASSIVE) after optimize VACUUM failed: %s", exc)
-
-        # Phase 4: stamp the FTS layout (source of truth for "optimized"), clear
-        # the "available" flag, advance schema_version if pre-decoupling code
-        # left it behind. Re-checked inside the write transaction so a
-        # concurrent writer cannot race a stamp past incomplete work.
-        def _settle(conn):
-            if _meta_row(conn, "fts_rebuild_high_water") is not None:
-                return "backfill_incomplete"
-            if self._has_fts_trash(conn):
-                return "teardown_incomplete"
-            if self._fts_external_index_empty_with_messages(conn):
-                return "backfill_incomplete"
-            self.set_meta("fts_storage_version", str(FTS_STORAGE_VERSION), cursor=conn)
-            _delete_meta(conn, "fts_optimize_available")
-            conn.execute(
-                "UPDATE schema_version SET version = ? WHERE version < ?",
-                (SCHEMA_VERSION, SCHEMA_VERSION),
-            )
-            return None
-        refusal = self._execute_write(_settle)
+            vacuum_ok = self._optimize_vacuum()
+        refusal = self._execute_write(self._optimize_settle)
         if refusal is not None:
+            # A concurrent process changed state since the pre-vacuum check; a re-run can still settle.
             logger.warning("FTS storage optimization settle refused (%s)", refusal)
             return {"ok": False, "reason": refusal, "vacuumed": vacuum_ok}
         _emit("done")
