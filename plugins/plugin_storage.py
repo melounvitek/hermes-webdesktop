@@ -1,32 +1,17 @@
 """Per-plugin persistent storage convention.
 
-Plugins that want durable state today invent their own paths, and most of
-them invent the same wrong one: a scratch directory inside
-``<hermes home>/plugins/<name>/``. That tree is the plugin *install* dir —
-``hermes plugins remove`` deletes it and ``hermes plugins update`` git-pulls
-into it — so user data parked there dies with the code that wrote it.
-
-This module is the sanctioned alternative: one data root per plugin under
-``<hermes home>/plugin-data/<name>/``, owned by the user, untouched by
-install/update/remove. Agent-built plugins get durable state without
-inventing a storage story, and every plugin's data is inspectable in one
-predictable place.
-
-Secrets are deliberately NOT part of this convention — credential reads go
-through ``agent.secret_scope`` / ``.env`` like everywhere else in Hermes.
+Plugins must NOT park state inside ``<hermes home>/plugins/<name>/`` — that is the
+install dir, which ``hermes plugins remove`` deletes and ``update`` git-pulls into. The
+sanctioned root is ``<hermes home>/plugin-data/<name>/``: user-owned, untouched by
+install/update/remove, inspectable in one place. Secrets are deliberately NOT part of
+this convention — credential reads go through ``agent.secret_scope`` / ``.env``.
 
 Usage::
 
     from plugins.plugin_storage import plugin_data_dir, plugin_db
 
     state_file = plugin_data_dir("my-plugin") / "state.json"
-
     conn = plugin_db("my-plugin")             # <data dir>/data.db
-    try:
-        conn.execute("CREATE TABLE IF NOT EXISTS ...")
-        conn.commit()
-    finally:
-        conn.close()
 """
 
 from __future__ import annotations
@@ -37,8 +22,8 @@ from pathlib import Path
 
 __all__ = ["plugin_data_dir", "plugin_db"]
 
-# Mirrors the plugin-name shape `hermes plugins install` accepts. Anything
-# else could escape the data root via separators or traversal.
+# Mirrors the plugin-name shape `hermes plugins install` accepts; anything else could
+# escape the data root via separators or traversal.
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 
 
@@ -49,12 +34,10 @@ def _validate_name(name: str) -> str:
 
 
 def plugin_data_dir(name: str) -> Path:
-    """Return (and create) this plugin's durable data directory.
+    """Return (and create) ``<hermes home>/plugin-data/<name>/``.
 
-    ``<hermes home>/plugin-data/<name>/`` — survives plugin update and
-    removal, and follows the active profile because it resolves through
-    :func:`hermes_constants.get_hermes_home` on every call. Don't cache the
-    result across profile switches.
+    Resolves ``get_hermes_home()`` on every call so it follows the active profile —
+    don't cache the result across profile switches.
     """
     from hermes_constants import get_hermes_home
 
@@ -64,12 +47,10 @@ def plugin_data_dir(name: str) -> Path:
 
 
 def plugin_db(name: str, filename: str = "data.db") -> sqlite3.Connection:
-    """Open this plugin's SQLite database (created on first use).
+    """Open ``<data dir>/<filename>`` (created on first use).
 
-    Lives at ``<data dir>/<filename>``. WAL mode so a dashboard reader and an
-    agent-tool writer can coexist; ``check_same_thread=False`` matches the
-    multi-threaded FastAPI/tool environment plugins actually run in — the
-    caller still owns transaction discipline.
+    WAL so a dashboard reader and an agent-tool writer coexist; ``check_same_thread=False``
+    matches the multi-threaded FastAPI/tool environment — the caller owns transaction discipline.
     """
     if Path(filename).name != filename or not filename:
         raise ValueError(f"invalid plugin db filename: {filename!r}")
