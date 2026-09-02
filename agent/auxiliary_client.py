@@ -8603,6 +8603,509 @@ async def _acreate_with_stream(
 
 
 @_relay_auxiliary_call
+# ── Shared request head + recovery ladder for call_llm / async_call_llm ────────
+# The sync and async entry points differ only in how a provider request is
+# awaited. Route resolution (``_resolve_call_client``) and the ordered recovery
+# ladder (``_aux_recovery_ladder``) are therefore written once; the ladder is a
+# generator that yields ``_LadderStep`` requests and receives the response (or
+# has the exception thrown back in), so rung ORDER and each rung's
+# accept/re-raise contract are identical on both wires by construction.
+
+class _ResolvedAuxRoute(NamedTuple):
+    client: Any
+    final_model: Optional[str]
+    resolved_provider: str
+    effective_provider: str
+
+
+def _resolve_call_client(
+    task: Optional[str],
+    *,
+    provider: Optional[str],
+    model: Optional[str],
+    base_url: Optional[str],
+    api_key: Optional[str],
+    resolved_provider: str,
+    resolved_model: Optional[str],
+    resolved_base_url: Optional[str],
+    resolved_api_key: Optional[str],
+    resolved_api_mode: Optional[str],
+    main_runtime: Optional[Dict[str, Any]],
+    async_mode: bool,
+) -> _ResolvedAuxRoute:
+    """Resolve the client for one aux call: vision chain, or cached text client with
+    the explicit-provider fallback_chain / auto-chain rescue. Raises RuntimeError
+    with the user-facing setup hint when nothing is configured."""
+    effective_provider = resolved_provider
+    if task == "vision":
+        effective_provider, client, final_model = resolve_vision_provider_client(
+            provider=resolved_provider if resolved_provider != "auto" else provider,
+            model=resolved_model or model,
+            base_url=resolved_base_url or base_url,
+            api_key=resolved_api_key or api_key,
+            async_mode=async_mode,
+            main_runtime=main_runtime,
+        )
+        if client is None and resolved_provider != "auto" and not resolved_base_url:
+            logger.warning(
+                "Vision provider %s unavailable, falling back to auto vision backends",
+                resolved_provider,
+            )
+            effective_provider, client, final_model = resolve_vision_provider_client(
+                provider="auto",
+                model=resolved_model,
+                async_mode=async_mode,
+                main_runtime=main_runtime,
+            )
+        if client is None:
+            raise RuntimeError(
+                f"No LLM provider configured for task={task} provider={resolved_provider}. "
+                f"Run: hermes setup"
+            )
+        resolved_provider = effective_provider or resolved_provider
+    else:
+        client, final_model = _get_cached_client(
+            resolved_provider,
+            resolved_model,
+            async_mode=async_mode,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
+            task=task,
+        )
+        effective_provider = _effective_provider_for_client(
+            client, resolved_provider,
+        )
+        if client is None:
+            # Explicit provider with no credentials: honor the task fallback_chain
+            # before raising (fallback entries may use OAuth / credential-pool auth).
+            _explicit = (resolved_provider or "").strip().lower()
+            if _explicit and _explicit not in {"auto", "openrouter", "custom"}:
+                fb_client, fb_model, fb_label = _try_configured_fallback_for_unavailable_client(
+                    task, _explicit,
+                )
+                if fb_client is not None:
+                    client, final_model = fb_client, fb_model
+                    if async_mode:
+                        client, final_model = _to_async_client(
+                            fb_client, fb_model or "", is_vision=(task == "vision")
+                        )
+                    resolved_provider = fb_label or resolved_provider
+                    effective_provider = resolved_provider
+                else:
+                    raise RuntimeError(
+                        f"Provider '{_explicit}' is set in config.yaml but no API key "
+                        f"was found. Set the {_explicit.upper()}_API_KEY environment "
+                        f"variable, or switch to a different provider with `hermes model`."
+                    )
+            # Auto/custom with no credentials: walk the full auto chain (not just
+            # OpenRouter). model=None so each provider uses its own default.
+            if client is None and not resolved_base_url:
+                logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
+                            task or "call", resolved_provider)
+                client, final_model = _get_cached_client(
+                    "auto", async_mode=async_mode, main_runtime=main_runtime, task=task,
+                )
+                effective_provider = _effective_provider_for_client(
+                    client, "auto",
+                )
+        if client is None:
+            raise RuntimeError(
+                f"No LLM provider configured for task={task} provider={resolved_provider}. "
+                f"Run: hermes setup")
+
+    return _ResolvedAuxRoute(client, final_model, resolved_provider, effective_provider)
+
+
+class _LadderStep(NamedTuple):
+    """A provider request the ladder asks its driver to perform.
+
+    kind: "call" (client, kwargs) | "retry_same_provider" (provider, model) |
+    "fallback" (fb_client, fb_model, fb_label).
+    """
+    kind: str
+    args: tuple
+
+
+_RERAISE_ORIGINAL = object()
+
+
+def _aux_recovery_ladder(
+    first_err: Exception,
+    *,
+    client: Any,
+    kwargs: Dict[str, Any],
+    task: Optional[str],
+    async_mode: bool,
+    base_info: str,
+    resolved_provider: str,
+    resolved_model: Optional[str],
+    resolved_base_url: Optional[str],
+    resolved_api_key: Optional[str],
+    resolved_api_mode: Optional[str],
+    final_model: Optional[str],
+    max_tokens: Optional[int],
+    main_runtime: Optional[Dict[str, Any]],
+    route_info: Optional[Dict[str, str]],
+):
+    """Ordered recovery rungs after the primary request failed (generator).
+
+    Rungs, in order: temperature strip → structured-output strip → max_tokens
+    strip → Nous stale-model self-heal → Nous paid/401 credential refresh →
+    OAuth credential refresh + same-provider retry → credential-pool rotation →
+    provider fallback (per-task chain, main fallback chain, discovery chain /
+    main-agent-model net). Each rung either returns a response, narrows
+    ``first_err`` and falls through, or re-raises. Returns ``_RERAISE_ORIGINAL``
+    when every rung is exhausted (after evicting a connection-poisoned client).
+    """
+    tag = " (async)" if async_mode else ""
+
+    def _call(target_client: Any, request_kwargs: Dict[str, Any]) -> _LadderStep:
+        return _LadderStep("call", (target_client, request_kwargs))
+
+    _LadderCall = _LadderStep
+    if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
+        retry_kwargs = dict(kwargs)
+        retry_kwargs.pop("temperature", None)
+        logger.info(
+            "Auxiliary %s%s: provider rejected temperature; retrying once without it",
+            task or "call", tag,
+        )
+        try:
+            return (yield _call(client, retry_kwargs))
+        except Exception as retry_err:
+            retry_err_str = str(retry_err)
+            # Fall through to the max_tokens/payment/auth chains with the
+            # stripped kwargs; re-raise anything those chains won't handle.
+            if not (
+                _is_payment_error(retry_err)
+                or _is_connection_error(retry_err)
+                or _is_auth_error(retry_err)
+                or "max_tokens" in retry_err_str
+                or "unsupported_parameter" in retry_err_str
+            ):
+                raise
+            first_err = retry_err
+            kwargs = retry_kwargs
+
+    if _is_structured_output_rejection(first_err):
+        retry_kwargs = _without_structured_output_format(kwargs)
+        if retry_kwargs is not None:
+            logger.info(
+                "Auxiliary %s%s: provider rejected the structured-output "
+                "format field; retrying once without it (schema "
+                "enforcement degrades to prompt compliance): %s",
+                task or "call", tag, first_err,
+            )
+            try:
+                return (yield _call(client, retry_kwargs))
+            except Exception as retry_err:
+                # Same contract as the temperature rung.
+                if not (
+                    _is_payment_error(retry_err)
+                    or _is_connection_error(retry_err)
+                    or _is_auth_error(retry_err)
+                    or "max_tokens" in str(retry_err)
+                    or "unsupported_parameter" in str(retry_err)
+                ):
+                    raise
+                first_err = retry_err
+                kwargs = retry_kwargs
+
+    err_str = str(first_err)
+    # ZAI vision models reject max_tokens with code 1210 and a message that
+    # never mentions "max_tokens", so detect it explicitly.
+    _is_zai_param_error = (
+        "1210" in err_str
+        and "bigmodel" in str(getattr(client, "base_url", ""))
+    )
+    if max_tokens is not None and (
+        "max_tokens" in err_str
+        or "unsupported_parameter" in err_str
+        or _is_unsupported_parameter_error(first_err, "max_tokens")
+        or _is_zai_param_error
+    ):
+        kwargs.pop("max_tokens", None)
+        kwargs.pop("max_completion_tokens", None)
+        try:
+            return (yield _call(client, kwargs))
+        except Exception as retry_err:
+            if not (_is_payment_error(retry_err) or _is_connection_error(retry_err) or _is_rate_limit_error(retry_err)):
+                raise
+            first_err = retry_err
+
+    # ── Stale-model self-heal (Nous Portal recommendation drift) ───
+    # A long-lived process can pin a Portal model since dropped from the catalog
+    # (every call 404s); force a fresh Portal fetch and retry once. Nous-only.
+    _heal_is_nous = (
+        resolved_provider == "nous"
+        or base_url_host_matches(base_info, "inference-api.nousresearch.com")
+    )
+    if _is_model_not_found_error(first_err) and _heal_is_nous:
+        healed_model = _refresh_nous_recommended_model(
+            vision=(task == "vision"), stale_model=kwargs.get("model"))
+        if healed_model and healed_model != kwargs.get("model"):
+            logger.warning(
+                "Auxiliary %s%s: model %r no longer in Nous catalog; "
+                "retrying with refreshed recommendation %r",
+                task or "call", tag, kwargs.get("model"), healed_model,
+            )
+            kwargs["model"] = healed_model
+            try:
+                return (yield _call(client, kwargs))
+            except Exception as retry_err:
+                first_err = retry_err
+
+    # ── Nous auth refresh parity with main agent ──────────────────
+    client_is_nous = (
+        resolved_provider == "nous"
+        or base_url_host_matches(base_info, "inference-api.nousresearch.com")
+    )
+    if (
+        _is_payment_error(first_err)
+        and client_is_nous
+        and _nous_portal_account_has_fresh_paid_access()
+    ):
+        refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
+            cache_provider=resolved_provider or "nous",
+            model=final_model,
+            lookup_model=resolved_model,
+            lookup_task=task,
+            async_mode=async_mode,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
+            is_vision=(task == "vision"),
+        )
+        if refreshed_client is not None:
+            logger.info(
+                "Auxiliary %s%s: refreshed Nous runtime credentials after paid account check, retrying",
+                task or "call", tag,
+            )
+            if refreshed_model and refreshed_model != kwargs.get("model"):
+                kwargs["model"] = refreshed_model
+            try:
+                return (yield _call(refreshed_client, kwargs))
+            except Exception as retry_err:
+                if not (
+                    _is_auth_error(retry_err)
+                    or _is_payment_error(retry_err)
+                    or _is_connection_error(retry_err)
+                    or _is_rate_limit_error(retry_err)
+                ):
+                    raise
+                first_err = retry_err
+
+    if _is_auth_error(first_err) and client_is_nous:
+        refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
+            cache_provider=resolved_provider or "nous",
+            model=final_model,
+            lookup_model=resolved_model,
+            lookup_task=task,
+            async_mode=async_mode,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
+            is_vision=(task == "vision"),
+        )
+        if refreshed_client is not None:
+            logger.info("Auxiliary %s%s: refreshed Nous runtime credentials after 401, retrying",
+                        task or "call", tag)
+            if refreshed_model and refreshed_model != kwargs.get("model"):
+                kwargs["model"] = refreshed_model
+            return (yield _call(refreshed_client, kwargs))
+
+    # ── Auth refresh retry ───────────────────────────────────────
+    auth_refresh_provider = _auth_refresh_provider_for_route(
+        resolved_provider, base_info)
+    if (_is_auth_error(first_err)
+            and auth_refresh_provider not in {"auto", "", None}
+            and not client_is_nous):
+        if _refresh_provider_credentials(auth_refresh_provider):
+            if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
+                # The stale client is cached under the route label
+                # (e.g. "auto"), not the concrete backend we refreshed.
+                _evict_cached_clients(resolved_provider)
+            logger.info(
+                "Auxiliary %s%s: refreshed %s credentials after auth error, retrying",
+                task or "call", tag, auth_refresh_provider,
+            )
+            return (yield _LadderCall("retry_same_provider", (auth_refresh_provider, resolved_model or final_model)))
+
+    # ── Same-provider credential-pool recovery ─────────────────────
+    pool_provider = _recoverable_pool_provider(resolved_provider, client, main_runtime=main_runtime)
+    # Capture the exact key used so recovery finds the right pool entry even if
+    # another process rotated the pool meanwhile (current() would be None).
+    _client_api_key = str(getattr(client, "api_key", "") or "")
+    if pool_provider and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err)):
+        recovery_err = first_err
+        # Skip the extra retry for clear payment/quota errors — the endpoint
+        # won't accept another request with the same exhausted key.
+        if _is_rate_limit_error(first_err) and not _is_payment_error(first_err):
+            try:
+                return (yield _call(client, kwargs))
+            except Exception as retry_err:
+                if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
+                    raise
+                recovery_err = retry_err
+        if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key):
+            logger.info(
+                "Auxiliary %s%s: recovered %s via credential-pool rotation after %s",
+                task or "call", tag, pool_provider, type(recovery_err).__name__,
+            )
+            try:
+                return (yield _LadderCall("retry_same_provider", (resolved_provider, resolved_model)))
+            except Exception as retry2_err:
+                # Rotated key also hit a wall: mark it now so concurrent processes
+                # skip it, then fall through to the payment fallback below.
+                if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
+                        or _is_rate_limit_error(retry2_err)):
+                    _recover_provider_pool(pool_provider, retry2_err)
+                    first_err = retry2_err
+                else:
+                    raise
+
+    # ── Payment / connection / rate-limit / auth fallback ─────────
+    # Try alternative providers when the resolved one returns 402/credit
+    # exhaustion, is unreachable, is rate-limited (429), or 401s past the
+    # refresh paths. Auth is NOT a capacity error: it only bypasses the
+    # explicit-provider gate in auto mode.
+    should_fallback = (
+        _is_auth_error(first_err)
+        or _is_payment_error(first_err)
+        or _is_connection_error(first_err)
+        or _is_rate_limit_error(first_err)
+        or _is_model_incompatible_error(first_err)
+        or _is_invalid_aux_response_error(first_err)
+    )
+    is_auto = resolved_provider in {"auto", "", None}
+    # Capacity errors (payment/quota, connection, exhausted 429, model
+    # incompatible with route) bypass the explicit-provider gate: the provider
+    # cannot serve this request regardless of user intent.
+    is_capacity_error = (
+        _is_payment_error(first_err)
+        or _is_connection_error(first_err)
+        or _is_rate_limit_error(first_err)
+        or _is_model_incompatible_error(first_err)
+        or _is_invalid_aux_response_error(first_err)
+    )
+    if should_fallback and (is_auto or is_capacity_error):
+        if _is_auth_error(first_err):
+            reason = "auth error"
+        elif _is_payment_error(first_err):
+            reason = "payment error"
+            # Mark the concrete backend (not the "auto" label) unhealthy so
+            # later aux calls skip it instead of paying another doomed RTT.
+            _mark_provider_unhealthy(
+                _recoverable_pool_provider(resolved_provider, client, main_runtime=main_runtime) or resolved_provider
+            )
+        elif _is_rate_limit_error(first_err):
+            reason = "rate limit"
+        elif _is_model_incompatible_error(first_err):
+            reason = "model incompatible with route"
+        elif _is_invalid_aux_response_error(first_err):
+            reason = "invalid provider response"
+        else:
+            reason = "connection error"
+        logger.info("Auxiliary %s%s: %s on %s (%s), trying fallback",
+                    task or "call", tag, reason, resolved_provider, first_err)
+
+        # Skip only the failed model for model-specific failures; 401/402 are
+        # provider-wide, so keep skipping the whole provider.
+        _chain_failed_model = (
+            None if reason in ("auth error", "payment error") else final_model
+        )
+        # Fallback order: per-task fallback_chain; then for auto: main
+        # fallback_providers, then built-in discovery chain; for explicit
+        # providers: main agent model safety net.
+        fb_client, fb_model, fb_label = (None, None, "")
+        if is_auto:
+            fb_client, fb_model, fb_label = _try_configured_fallback_chain(
+                task, resolved_provider or "auto", reason=reason,
+                failed_model=_chain_failed_model)
+            if fb_client is None:
+                fb_client, fb_model, fb_label = _try_main_fallback_chain(
+                    task, resolved_provider or "auto", reason=reason)
+            if fb_client is None:
+                fb_client, fb_model, fb_label = _try_payment_fallback(
+                    resolved_provider, task, reason=reason)
+        else:
+            fb_client, fb_model, fb_label = _try_configured_fallback_chain(
+                task, resolved_provider or "auto", reason=reason,
+                failed_model=_chain_failed_model)
+            if fb_client is None:
+                fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
+                    resolved_provider, task, reason=reason,
+                    failed_model=_chain_failed_model)
+
+        if fb_client is not None:
+            _record_route_info(
+                route_info, _fallback_provider_from_label(fb_label), fb_model
+            )
+            fb_resp = yield _LadderCall("fallback", (fb_client, fb_model, fb_label))
+            if fb_resp is not None:
+                return fb_resp
+            # Candidate credential was stale and quarantined — walk the
+            # discovery chain once more (unhealthy entries are skipped).
+            fb_client, fb_model, fb_label = _try_payment_fallback(
+                resolved_provider, task, reason="stale fallback credential")
+            if fb_client is not None:
+                _record_route_info(
+                    route_info, _fallback_provider_from_label(fb_label), fb_model
+                )
+                fb_resp = yield _LadderCall("fallback", (fb_client, fb_model, fb_label))
+                if fb_resp is not None:
+                    return fb_resp
+        # All fallback layers exhausted — one user-visible warning, then re-raise.
+        logger.warning(
+            "Auxiliary %s%s: %s on %s and all fallbacks exhausted "
+            "(fallback_chain + main agent model). Raising original error.",
+            task or "call", tag, reason, resolved_provider,
+        )
+    # Connection/timeout errors poison the cached client (closed transport,
+    # half-read stream); evict so the next aux call rebuilds a fresh one.
+    if _is_connection_error(first_err):
+        try:
+            _evict_cached_client_instance(client)
+        except Exception:
+            logger.debug("Auxiliary%s: cache eviction after connection error failed",
+                         tag, exc_info=True)
+    return _RERAISE_ORIGINAL
+
+
+def _drive_ladder(ladder, perform: Callable[[_LadderStep], Any]) -> Any:
+    """Run a ladder generator, feeding each step's result (or exception) back in."""
+    try:
+        step = next(ladder)
+        while True:
+            try:
+                result = perform(step)
+            except Exception as exc:
+                step = ladder.throw(exc)
+            else:
+                step = ladder.send(result)
+    except StopIteration as stop:
+        return stop.value
+
+
+async def _drive_ladder_async(ladder, perform: Callable[[_LadderStep], Any]) -> Any:
+    """Async twin of :func:`_drive_ladder` (``perform`` is awaited)."""
+    try:
+        step = next(ladder)
+        while True:
+            try:
+                result = await perform(step)
+            except Exception as exc:
+                step = ladder.throw(exc)
+            else:
+                step = ladder.send(result)
+    except StopIteration as stop:
+        return stop.value
+
+
 def call_llm(
     task: str = None,
     *,
@@ -8746,80 +9249,14 @@ def _call_llm_impl(
         resolved_api_mode = api_mode
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
-    effective_provider = resolved_provider
-
-    if task == "vision":
-        effective_provider, client, final_model = resolve_vision_provider_client(
-            provider=resolved_provider if resolved_provider != "auto" else provider,
-            model=resolved_model or model,
-            base_url=resolved_base_url or base_url,
-            api_key=resolved_api_key or api_key,
-            async_mode=False,
-            main_runtime=main_runtime,
-        )
-        if client is None and resolved_provider != "auto" and not resolved_base_url:
-            logger.warning(
-                "Vision provider %s unavailable, falling back to auto vision backends",
-                resolved_provider,
-            )
-            effective_provider, client, final_model = resolve_vision_provider_client(
-                provider="auto",
-                model=resolved_model,
-                async_mode=False,
-                main_runtime=main_runtime,
-            )
-        if client is None:
-            raise RuntimeError(
-                f"No LLM provider configured for task={task} provider={resolved_provider}. "
-                f"Run: hermes setup"
-            )
-        resolved_provider = effective_provider or resolved_provider
-    else:
-        client, final_model = _get_cached_client(
-            resolved_provider,
-            resolved_model,
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            api_mode=resolved_api_mode,
-            main_runtime=main_runtime,
-            task=task,
-        )
-        effective_provider = _effective_provider_for_client(
-            client, resolved_provider,
-        )
-        if client is None:
-            # Explicit provider with no credentials: honor the task fallback_chain
-            # before raising (fallback entries may use OAuth / credential-pool auth).
-            _explicit = (resolved_provider or "").strip().lower()
-            if _explicit and _explicit not in {"auto", "openrouter", "custom"}:
-                fb_client, fb_model, fb_label = _try_configured_fallback_for_unavailable_client(
-                    task, _explicit,
-                )
-                if fb_client is not None:
-                    client, final_model = fb_client, fb_model
-                    resolved_provider = fb_label or resolved_provider
-                    effective_provider = resolved_provider
-                else:
-                    raise RuntimeError(
-                        f"Provider '{_explicit}' is set in config.yaml but no API key "
-                        f"was found. Set the {_explicit.upper()}_API_KEY environment "
-                        f"variable, or switch to a different provider with `hermes model`."
-                    )
-            # Auto/custom with no credentials: walk the full auto chain (not just
-            # OpenRouter). model=None so each provider uses its own default.
-            if client is None and not resolved_base_url:
-                logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
-                            task or "call", resolved_provider)
-                client, final_model = _get_cached_client(
-                    "auto", main_runtime=main_runtime, task=task,
-                )
-                effective_provider = _effective_provider_for_client(
-                    client, "auto",
-                )
-        if client is None:
-            raise RuntimeError(
-                f"No LLM provider configured for task={task} provider={resolved_provider}. "
-                f"Run: hermes setup")
+    client, final_model, resolved_provider, effective_provider = _resolve_call_client(
+        task,
+        provider=provider, model=model, base_url=base_url, api_key=api_key,
+        resolved_provider=resolved_provider, resolved_model=resolved_model,
+        resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
+        resolved_api_mode=resolved_api_mode, main_runtime=main_runtime,
+        async_mode=False,
+    )
 
     effective_timeout = _effective_aux_timeout(task, timeout)
     request_provider = effective_provider or resolved_provider
@@ -8962,214 +9399,20 @@ def _call_llm_impl(
                     _last_transient = retry_transient
             raise _last_transient
     except Exception as first_err:
-        if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
-            retry_kwargs = dict(kwargs)
-            retry_kwargs.pop("temperature", None)
-            logger.info(
-                "Auxiliary %s: provider rejected temperature; retrying once without it",
-                task or "call",
-            )
-            try:
+        def _perform(step: _LadderStep) -> Any:
+            if step.kind == "call":
+                target_client, request_kwargs = step.args
                 return _validate_llm_response(
                     _relay_sync_completion(
-                        client,
-                        retry_kwargs,
-                        provider=resolved_provider,
-                        api_mode=resolved_api_mode,
+                        target_client, request_kwargs,
+                        provider=resolved_provider, api_mode=resolved_api_mode,
                     ), task)
-            except Exception as retry_err:
-                retry_err_str = str(retry_err)
-                # Fall through to the max_tokens/payment/auth chains with the
-                # stripped kwargs; re-raise anything those chains won't handle.
-                if not (
-                    _is_payment_error(retry_err)
-                    or _is_connection_error(retry_err)
-                    or _is_auth_error(retry_err)
-                    or "max_tokens" in retry_err_str
-                    or "unsupported_parameter" in retry_err_str
-                ):
-                    raise
-                first_err = retry_err
-                kwargs = retry_kwargs
-
-        if _is_structured_output_rejection(first_err):
-            retry_kwargs = _without_structured_output_format(kwargs)
-            if retry_kwargs is not None:
-                logger.info(
-                    "Auxiliary %s: provider rejected the structured-output "
-                    "format field; retrying once without it (schema "
-                    "enforcement degrades to prompt compliance): %s",
-                    task or "call", first_err,
-                )
-                try:
-                    return _validate_llm_response(
-                        _relay_sync_completion(
-                            client,
-                            retry_kwargs,
-                            provider=resolved_provider,
-                            api_mode=resolved_api_mode,
-                        ), task)
-                except Exception as retry_err:
-                    # Same contract as the temperature rung.
-                    if not (
-                        _is_payment_error(retry_err)
-                        or _is_connection_error(retry_err)
-                        or _is_auth_error(retry_err)
-                        or "max_tokens" in str(retry_err)
-                        or "unsupported_parameter" in str(retry_err)
-                    ):
-                        raise
-                    first_err = retry_err
-                    kwargs = retry_kwargs
-
-        err_str = str(first_err)
-        # ZAI vision models reject max_tokens with code 1210 and a message that
-        # never mentions "max_tokens", so detect it explicitly.
-        _is_zai_param_error = (
-            "1210" in err_str
-            and "bigmodel" in str(getattr(client, "base_url", ""))
-        )
-        if max_tokens is not None and (
-            "max_tokens" in err_str
-            or "unsupported_parameter" in err_str
-            or _is_unsupported_parameter_error(first_err, "max_tokens")
-            or _is_zai_param_error
-        ):
-            kwargs.pop("max_tokens", None)
-            kwargs.pop("max_completion_tokens", None)
-            try:
-                return _validate_llm_response(
-                    _relay_sync_completion(
-                        client,
-                        kwargs,
-                        provider=resolved_provider,
-                        api_mode=resolved_api_mode,
-                    ), task)
-            except Exception as retry_err:
-                if not (_is_payment_error(retry_err) or _is_connection_error(retry_err) or _is_rate_limit_error(retry_err)):
-                    raise
-                first_err = retry_err
-
-        # ── Stale-model self-heal (Nous Portal recommendation drift) ───
-        # A long-lived process can pin a Portal model since dropped from the catalog
-        # (every call 404s); force a fresh Portal fetch and retry once. Nous-only.
-        _heal_is_nous = (
-            resolved_provider == "nous"
-            or base_url_host_matches(_base_info, "inference-api.nousresearch.com")
-        )
-        if _is_model_not_found_error(first_err) and _heal_is_nous:
-            healed_model = _refresh_nous_recommended_model(
-                vision=(task == "vision"), stale_model=kwargs.get("model"))
-            if healed_model and healed_model != kwargs.get("model"):
-                logger.warning(
-                    "Auxiliary %s: model %r no longer in Nous catalog; "
-                    "retrying with refreshed recommendation %r",
-                    task or "call", kwargs.get("model"), healed_model,
-                )
-                kwargs["model"] = healed_model
-                try:
-                    return _validate_llm_response(
-                        _relay_sync_completion(
-                            client,
-                            kwargs,
-                            provider=resolved_provider,
-                            api_mode=resolved_api_mode,
-                        ), task)
-                except Exception as retry_err:
-                    first_err = retry_err
-
-        # ── Nous auth refresh parity with main agent ──────────────────
-        client_is_nous = (
-            resolved_provider == "nous"
-            or base_url_host_matches(_base_info, "inference-api.nousresearch.com")
-        )
-        if (
-            _is_payment_error(first_err)
-            and client_is_nous
-            and _nous_portal_account_has_fresh_paid_access()
-        ):
-            refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
-                cache_provider=resolved_provider or "nous",
-                model=final_model,
-                lookup_model=resolved_model,
-                lookup_task=task,
-                async_mode=False,
-                base_url=resolved_base_url,
-                api_key=resolved_api_key,
-                api_mode=resolved_api_mode,
-                main_runtime=main_runtime,
-                is_vision=(task == "vision"),
-            )
-            if refreshed_client is not None:
-                logger.info(
-                    "Auxiliary %s: refreshed Nous runtime credentials after paid account check, retrying",
-                    task or "call",
-                )
-                if refreshed_model and refreshed_model != kwargs.get("model"):
-                    kwargs["model"] = refreshed_model
-                try:
-                    return _validate_llm_response(
-                        _relay_sync_completion(
-                            refreshed_client,
-                            kwargs,
-                            provider=resolved_provider,
-                            api_mode=resolved_api_mode,
-                        ), task)
-                except Exception as retry_err:
-                    if not (
-                        _is_auth_error(retry_err)
-                        or _is_payment_error(retry_err)
-                        or _is_connection_error(retry_err)
-                        or _is_rate_limit_error(retry_err)
-                    ):
-                        raise
-                    first_err = retry_err
-
-        if _is_auth_error(first_err) and client_is_nous:
-            refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
-                cache_provider=resolved_provider or "nous",
-                model=final_model,
-                lookup_model=resolved_model,
-                lookup_task=task,
-                async_mode=False,
-                base_url=resolved_base_url,
-                api_key=resolved_api_key,
-                api_mode=resolved_api_mode,
-                main_runtime=main_runtime,
-                is_vision=(task == "vision"),
-            )
-            if refreshed_client is not None:
-                logger.info("Auxiliary %s: refreshed Nous runtime credentials after 401, retrying",
-                            task or "call")
-                if refreshed_model and refreshed_model != kwargs.get("model"):
-                    kwargs["model"] = refreshed_model
-                return _validate_llm_response(
-                    _relay_sync_completion(
-                        refreshed_client,
-                        kwargs,
-                        provider=resolved_provider,
-                        api_mode=resolved_api_mode,
-                    ), task)
-
-        # ── Auth refresh retry ───────────────────────────────────────
-        auth_refresh_provider = _auth_refresh_provider_for_route(
-            resolved_provider, _base_info)
-        if (_is_auth_error(first_err)
-                and auth_refresh_provider not in {"auto", "", None}
-                and not client_is_nous):
-            if _refresh_provider_credentials(auth_refresh_provider):
-                if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
-                    # The stale client is cached under the route label
-                    # (e.g. "auto"), not the concrete backend we refreshed.
-                    _evict_cached_clients(resolved_provider)
-                logger.info(
-                    "Auxiliary %s: refreshed %s credentials after auth error, retrying",
-                    task or "call", auth_refresh_provider,
-                )
+            if step.kind == "retry_same_provider":
+                retry_provider, retry_model = step.args
                 return _retry_same_provider_sync(
                     task=task,
-                    resolved_provider=auth_refresh_provider,
-                    resolved_model=resolved_model or final_model,
+                    resolved_provider=retry_provider,
+                    resolved_model=retry_model,
                     resolved_base_url=resolved_base_url,
                     resolved_api_key=resolved_api_key,
                     resolved_api_mode=resolved_api_mode,
@@ -9184,181 +9427,30 @@ def _call_llm_impl(
                     reasoning_config=reasoning_config,
                     extra_headers=extra_headers,
                 )
+            fb_client, fb_model, fb_label = step.args
+            return _call_fallback_candidate_sync(
+                fb_client, fb_model, fb_label,
+                task=task, messages=messages,
+                temperature=temperature, max_tokens=max_tokens,
+                tools=tools, effective_timeout=effective_timeout,
+                effective_extra_body=effective_extra_body,
+                reasoning_config=reasoning_config)
 
-        # ── Same-provider credential-pool recovery ─────────────────────
-        pool_provider = _recoverable_pool_provider(resolved_provider, client, main_runtime=main_runtime)
-        # Capture the exact key used so recovery finds the right pool entry even if
-        # another process rotated the pool meanwhile (current() would be None).
-        _client_api_key = str(getattr(client, "api_key", "") or "")
-        if pool_provider and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err)):
-            recovery_err = first_err
-            # Skip the extra retry for clear payment/quota errors — the endpoint
-            # won't accept another request with the same exhausted key.
-            if _is_rate_limit_error(first_err) and not _is_payment_error(first_err):
-                try:
-                    return _validate_llm_response(
-                        _relay_sync_completion(
-                            client,
-                            kwargs,
-                            provider=resolved_provider,
-                            api_mode=resolved_api_mode,
-                        ), task)
-                except Exception as retry_err:
-                    if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
-                        raise
-                    recovery_err = retry_err
-            if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key):
-                logger.info(
-                    "Auxiliary %s: recovered %s via credential-pool rotation after %s",
-                    task or "call", pool_provider, type(recovery_err).__name__,
-                )
-                try:
-                    return _retry_same_provider_sync(
-                        task=task,
-                        resolved_provider=resolved_provider,
-                        resolved_model=resolved_model,
-                        resolved_base_url=resolved_base_url,
-                        resolved_api_key=resolved_api_key,
-                        resolved_api_mode=resolved_api_mode,
-                        main_runtime=main_runtime,
-                        final_model=final_model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        tools=tools,
-                        effective_timeout=effective_timeout,
-                        effective_extra_body=effective_extra_body,
-                        reasoning_config=reasoning_config,
-                        extra_headers=extra_headers,
-                    )
-                except Exception as retry2_err:
-                    # Rotated key also hit a wall: mark it now so concurrent processes
-                    # skip it, then fall through to the payment fallback below.
-                    if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
-                            or _is_rate_limit_error(retry2_err)):
-                        _recover_provider_pool(pool_provider, retry2_err)
-                        first_err = retry2_err
-                    else:
-                        raise
-
-        # ── Payment / connection / rate-limit / auth fallback ─────────
-        # Try alternative providers when the resolved one returns 402/credit
-        # exhaustion, is unreachable, is rate-limited (429), or 401s past the
-        # refresh paths. Auth is NOT a capacity error: it only bypasses the
-        # explicit-provider gate in auto mode.
-        should_fallback = (
-            _is_auth_error(first_err)
-            or _is_payment_error(first_err)
-            or _is_connection_error(first_err)
-            or _is_rate_limit_error(first_err)
-            or _is_model_incompatible_error(first_err)
-            or _is_invalid_aux_response_error(first_err)
+        result = _drive_ladder(
+            _aux_recovery_ladder(
+                first_err,
+                client=client, kwargs=kwargs, task=task, async_mode=False,
+                base_info=_base_info,
+                resolved_provider=resolved_provider, resolved_model=resolved_model,
+                resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
+                resolved_api_mode=resolved_api_mode, final_model=final_model,
+                max_tokens=max_tokens, main_runtime=main_runtime, route_info=route_info,
+            ),
+            _perform,
         )
-        is_auto = resolved_provider in {"auto", "", None}
-        # Capacity errors (payment/quota, connection, exhausted 429, model
-        # incompatible with route) bypass the explicit-provider gate: the provider
-        # cannot serve this request regardless of user intent.
-        is_capacity_error = (
-            _is_payment_error(first_err)
-            or _is_connection_error(first_err)
-            or _is_rate_limit_error(first_err)
-            or _is_model_incompatible_error(first_err)
-            or _is_invalid_aux_response_error(first_err)
-        )
-        if should_fallback and (is_auto or is_capacity_error):
-            if _is_auth_error(first_err):
-                reason = "auth error"
-            elif _is_payment_error(first_err):
-                reason = "payment error"
-                # Mark the concrete backend (not the "auto" label) unhealthy so
-                # later aux calls skip it instead of paying another doomed RTT.
-                _mark_provider_unhealthy(
-                    _recoverable_pool_provider(resolved_provider, client, main_runtime=main_runtime) or resolved_provider
-                )
-            elif _is_rate_limit_error(first_err):
-                reason = "rate limit"
-            elif _is_model_incompatible_error(first_err):
-                reason = "model incompatible with route"
-            elif _is_invalid_aux_response_error(first_err):
-                reason = "invalid provider response"
-            else:
-                reason = "connection error"
-            logger.info("Auxiliary %s: %s on %s (%s), trying fallback",
-                        task or "call", reason, resolved_provider, first_err)
-
-            # Skip only the failed model for model-specific failures; 401/402 are
-            # provider-wide, so keep skipping the whole provider.
-            _chain_failed_model = (
-                None if reason in ("auth error", "payment error") else final_model
-            )
-            # Fallback order: per-task fallback_chain; then for auto: main
-            # fallback_providers, then built-in discovery chain; for explicit
-            # providers: main agent model safety net.
-            fb_client, fb_model, fb_label = (None, None, "")
-            if is_auto:
-                fb_client, fb_model, fb_label = _try_configured_fallback_chain(
-                    task, resolved_provider or "auto", reason=reason,
-                    failed_model=_chain_failed_model)
-                if fb_client is None:
-                    fb_client, fb_model, fb_label = _try_main_fallback_chain(
-                        task, resolved_provider or "auto", reason=reason)
-                if fb_client is None:
-                    fb_client, fb_model, fb_label = _try_payment_fallback(
-                        resolved_provider, task, reason=reason)
-            else:
-                fb_client, fb_model, fb_label = _try_configured_fallback_chain(
-                    task, resolved_provider or "auto", reason=reason,
-                    failed_model=_chain_failed_model)
-                if fb_client is None:
-                    fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
-                        resolved_provider, task, reason=reason,
-                        failed_model=_chain_failed_model)
-
-            if fb_client is not None:
-                _record_route_info(
-                    route_info, _fallback_provider_from_label(fb_label), fb_model
-                )
-                fb_resp = _call_fallback_candidate_sync(
-                    fb_client, fb_model, fb_label,
-                    task=task, messages=messages,
-                    temperature=temperature, max_tokens=max_tokens,
-                    tools=tools, effective_timeout=effective_timeout,
-                    effective_extra_body=effective_extra_body,
-                    reasoning_config=reasoning_config)
-                if fb_resp is not None:
-                    return fb_resp
-                # Candidate credential was stale and quarantined — walk the
-                # discovery chain once more (unhealthy entries are skipped).
-                fb_client, fb_model, fb_label = _try_payment_fallback(
-                    resolved_provider, task, reason="stale fallback credential")
-                if fb_client is not None:
-                    _record_route_info(
-                        route_info, _fallback_provider_from_label(fb_label), fb_model
-                    )
-                    fb_resp = _call_fallback_candidate_sync(
-                        fb_client, fb_model, fb_label,
-                        task=task, messages=messages,
-                        temperature=temperature, max_tokens=max_tokens,
-                        tools=tools, effective_timeout=effective_timeout,
-                        effective_extra_body=effective_extra_body,
-                        reasoning_config=reasoning_config)
-                    if fb_resp is not None:
-                        return fb_resp
-            # All fallback layers exhausted — one user-visible warning, then re-raise.
-            logger.warning(
-                "Auxiliary %s: %s on %s and all fallbacks exhausted "
-                "(fallback_chain + main agent model). Raising original error.",
-                task or "call", reason, resolved_provider,
-            )
-        # Connection/timeout errors poison the cached client (closed transport,
-        # half-read stream); evict so the next aux call rebuilds a fresh one.
-        if _is_connection_error(first_err):
-            try:
-                _evict_cached_client_instance(client)
-            except Exception:
-                logger.debug("Auxiliary: cache eviction after connection error failed",
-                             exc_info=True)
-        raise
+        if result is _RERAISE_ORIGINAL:
+            raise
+        return result
 
 
 def _coerce_llm_message(response):
@@ -9520,86 +9612,19 @@ async def _async_call_llm_impl(
     """Centralized asynchronous LLM call; see call_llm() for full documentation."""
     # Keep every async phase on one runtime identity across awaits (concurrent /model switch).
     main_runtime = _normalize_main_runtime(main_runtime)
+    extra_headers = None  # async entry point has no per-request header override
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
-    effective_provider = resolved_provider
-
-    if task == "vision":
-        effective_provider, client, final_model = resolve_vision_provider_client(
-            provider=resolved_provider if resolved_provider != "auto" else provider,
-            model=resolved_model or model,
-            base_url=resolved_base_url or base_url,
-            api_key=resolved_api_key or api_key,
-            async_mode=True,
-            main_runtime=main_runtime,
-        )
-        if client is None and resolved_provider != "auto" and not resolved_base_url:
-            logger.warning(
-                "Vision provider %s unavailable, falling back to auto vision backends",
-                resolved_provider,
-            )
-            effective_provider, client, final_model = resolve_vision_provider_client(
-                provider="auto",
-                model=resolved_model,
-                async_mode=True,
-                main_runtime=main_runtime,
-            )
-        if client is None:
-            raise RuntimeError(
-                f"No LLM provider configured for task={task} provider={resolved_provider}. "
-                f"Run: hermes setup"
-            )
-        resolved_provider = effective_provider or resolved_provider
-    else:
-        client, final_model = _get_cached_client(
-            resolved_provider,
-            resolved_model,
-            async_mode=True,
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            api_mode=resolved_api_mode,
-            main_runtime=main_runtime,
-            task=task,
-        )
-        effective_provider = _effective_provider_for_client(
-            client, resolved_provider,
-        )
-        if client is None:
-            _explicit = (resolved_provider or "").strip().lower()
-            if _explicit and _explicit not in {"auto", "openrouter", "custom"}:
-                fb_client, fb_model, fb_label = _try_configured_fallback_for_unavailable_client(
-                    task, _explicit,
-                )
-                if fb_client is not None:
-                    client, final_model = _to_async_client(
-                        fb_client, fb_model or "", is_vision=(task == "vision")
-                    )
-                    resolved_provider = fb_label or resolved_provider
-                    effective_provider = resolved_provider
-                else:
-                    raise RuntimeError(
-                        f"Provider '{_explicit}' is set in config.yaml but no API key "
-                        f"was found. Set the {_explicit.upper()}_API_KEY environment "
-                        f"variable, or switch to a different provider with `hermes model`."
-                    )
-            if client is None and not resolved_base_url:
-                logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
-                            task or "call", resolved_provider)
-                client, final_model = _get_cached_client(
-                    "auto",
-                    async_mode=True,
-                    main_runtime=main_runtime,
-                    task=task,
-                )
-                effective_provider = _effective_provider_for_client(
-                    client, "auto",
-                )
-        if client is None:
-            raise RuntimeError(
-                f"No LLM provider configured for task={task} provider={resolved_provider}. "
-                f"Run: hermes setup")
+    client, final_model, resolved_provider, effective_provider = _resolve_call_client(
+        task,
+        provider=provider, model=model, base_url=base_url, api_key=api_key,
+        resolved_provider=resolved_provider, resolved_model=resolved_model,
+        resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
+        resolved_api_mode=resolved_api_mode, main_runtime=main_runtime,
+        async_mode=True,
+    )
 
     effective_timeout = _effective_aux_timeout(task, timeout)
     request_provider = effective_provider or resolved_provider
@@ -9683,216 +9708,24 @@ async def _async_call_llm_impl(
                 ),
                 task)
     except Exception as first_err:
-        if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
-            retry_kwargs = dict(kwargs)
-            retry_kwargs.pop("temperature", None)
-            logger.info(
-                "Auxiliary %s (async): provider rejected temperature; retrying once without it",
-                task or "call",
-            )
-            try:
+        async def _perform(step: _LadderStep) -> Any:
+            if step.kind == "call":
+                target_client, request_kwargs = step.args
                 return _validate_llm_response(
                     await _relay_async_completion(
-                        client,
-                        retry_kwargs,
-                        provider=resolved_provider,
-                        api_mode=resolved_api_mode,
+                        target_client, request_kwargs,
+                        provider=resolved_provider, api_mode=resolved_api_mode,
                     ), task)
-            except Exception as retry_err:
-                retry_err_str = str(retry_err)
-                if not (
-                    _is_payment_error(retry_err)
-                    or _is_connection_error(retry_err)
-                    or _is_auth_error(retry_err)
-                    or "max_tokens" in retry_err_str
-                    or "unsupported_parameter" in retry_err_str
-                ):
-                    raise
-                first_err = retry_err
-                kwargs = retry_kwargs
-
-        if _is_structured_output_rejection(first_err):
-            retry_kwargs = _without_structured_output_format(kwargs)
-            if retry_kwargs is not None:
-                logger.info(
-                    "Auxiliary %s (async): provider rejected the "
-                    "structured-output format field; retrying once without "
-                    "it (schema enforcement degrades to prompt "
-                    "compliance): %s",
-                    task or "call", first_err,
-                )
-                try:
-                    return _validate_llm_response(
-                        await _relay_async_completion(
-                            client,
-                            retry_kwargs,
-                            provider=resolved_provider,
-                            api_mode=resolved_api_mode,
-                        ), task)
-                except Exception as retry_err:
-                    # Same contract as the temperature rung.
-                    if not (
-                        _is_payment_error(retry_err)
-                        or _is_connection_error(retry_err)
-                        or _is_auth_error(retry_err)
-                        or "max_tokens" in str(retry_err)
-                        or "unsupported_parameter" in str(retry_err)
-                    ):
-                        raise
-                    first_err = retry_err
-                    kwargs = retry_kwargs
-
-        err_str = str(first_err)
-        # ZAI vision models reject max_tokens with code 1210 and a message that
-        # never mentions "max_tokens", so detect it explicitly.
-        _is_zai_param_error = (
-            "1210" in err_str
-            and "bigmodel" in str(getattr(client, "base_url", ""))
-        )
-        if max_tokens is not None and (
-            "max_tokens" in err_str
-            or "unsupported_parameter" in err_str
-            or _is_unsupported_parameter_error(first_err, "max_tokens")
-            or _is_zai_param_error
-        ):
-            kwargs.pop("max_tokens", None)
-            kwargs.pop("max_completion_tokens", None)
-            try:
-                return _validate_llm_response(
-                    await _relay_async_completion(
-                        client,
-                        kwargs,
-                        provider=resolved_provider,
-                        api_mode=resolved_api_mode,
-                    ), task)
-            except Exception as retry_err:
-                if not (_is_payment_error(retry_err) or _is_connection_error(retry_err) or _is_rate_limit_error(retry_err)):
-                    raise
-                first_err = retry_err
-
-        # ── Stale-model self-heal (Nous Portal recommendation drift) ───
-        # See the sync call_llm() path: refresh the Portal recommendation and
-        # retry once when a pinned model has dropped from the catalog.
-        _heal_is_nous = (
-            resolved_provider == "nous"
-            or base_url_host_matches(_client_base, "inference-api.nousresearch.com")
-        )
-        if _is_model_not_found_error(first_err) and _heal_is_nous:
-            healed_model = _refresh_nous_recommended_model(
-                vision=(task == "vision"), stale_model=kwargs.get("model"))
-            if healed_model and healed_model != kwargs.get("model"):
-                logger.warning(
-                    "Auxiliary %s (async): model %r no longer in Nous catalog; "
-                    "retrying with refreshed recommendation %r",
-                    task or "call", kwargs.get("model"), healed_model,
-                )
-                kwargs["model"] = healed_model
-                try:
-                    return _validate_llm_response(
-                        await _relay_async_completion(
-                            client,
-                            kwargs,
-                            provider=resolved_provider,
-                            api_mode=resolved_api_mode,
-                        ), task)
-                except Exception as retry_err:
-                    first_err = retry_err
-
-        # ── Nous auth refresh parity with main agent ──────────────────
-        client_is_nous = (
-            resolved_provider == "nous"
-            or base_url_host_matches(_client_base, "inference-api.nousresearch.com")
-        )
-        if (
-            _is_payment_error(first_err)
-            and client_is_nous
-            and _nous_portal_account_has_fresh_paid_access()
-        ):
-            refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
-                cache_provider=resolved_provider or "nous",
-                model=final_model,
-                lookup_model=resolved_model,
-                lookup_task=task,
-                async_mode=True,
-                base_url=resolved_base_url,
-                api_key=resolved_api_key,
-                api_mode=resolved_api_mode,
-                main_runtime=main_runtime,
-                is_vision=(task == "vision"),
-            )
-            if refreshed_client is not None:
-                logger.info(
-                    "Auxiliary %s (async): refreshed Nous runtime credentials after paid account check, retrying",
-                    task or "call",
-                )
-                if refreshed_model and refreshed_model != kwargs.get("model"):
-                    kwargs["model"] = refreshed_model
-                try:
-                    return _validate_llm_response(
-                        await _relay_async_completion(
-                            refreshed_client,
-                            kwargs,
-                            provider=resolved_provider,
-                            api_mode=resolved_api_mode,
-                        ), task)
-                except Exception as retry_err:
-                    if not (
-                        _is_auth_error(retry_err)
-                        or _is_payment_error(retry_err)
-                        or _is_connection_error(retry_err)
-                        or _is_rate_limit_error(retry_err)
-                    ):
-                        raise
-                    first_err = retry_err
-
-        if _is_auth_error(first_err) and client_is_nous:
-            refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
-                cache_provider=resolved_provider or "nous",
-                model=final_model,
-                lookup_model=resolved_model,
-                lookup_task=task,
-                async_mode=True,
-                base_url=resolved_base_url,
-                api_key=resolved_api_key,
-                api_mode=resolved_api_mode,
-                main_runtime=main_runtime,
-                is_vision=(task == "vision"),
-            )
-            if refreshed_client is not None:
-                logger.info("Auxiliary %s (async): refreshed Nous runtime credentials after 401, retrying",
-                            task or "call")
-                if refreshed_model and refreshed_model != kwargs.get("model"):
-                    kwargs["model"] = refreshed_model
-                return _validate_llm_response(
-                    await _relay_async_completion(
-                        refreshed_client,
-                        kwargs,
-                        provider=resolved_provider,
-                        api_mode=resolved_api_mode,
-                    ), task)
-
-        # ── Auth refresh retry (mirrors sync call_llm) ───────────────
-        auth_refresh_provider = _auth_refresh_provider_for_route(
-            resolved_provider, _client_base)
-        if (_is_auth_error(first_err)
-                and auth_refresh_provider not in {"auto", "", None}
-                and not client_is_nous):
-            if _refresh_provider_credentials(auth_refresh_provider):
-                if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
-                    # The stale client is cached under the route label
-                    # (e.g. "auto"), not the concrete backend we refreshed.
-                    _evict_cached_clients(resolved_provider)
-                logger.info(
-                    "Auxiliary %s (async): refreshed %s credentials after auth error, retrying",
-                    task or "call", auth_refresh_provider,
-                )
+            if step.kind == "retry_same_provider":
+                retry_provider, retry_model = step.args
                 return await _retry_same_provider_async(
                     task=task,
-                    resolved_provider=auth_refresh_provider,
-                    resolved_model=resolved_model or final_model,
+                    resolved_provider=retry_provider,
+                    resolved_model=retry_model,
                     resolved_base_url=resolved_base_url,
                     resolved_api_key=resolved_api_key,
                     resolved_api_mode=resolved_api_mode,
+                    main_runtime=main_runtime,
                     final_model=final_model,
                     messages=messages,
                     temperature=temperature,
@@ -9901,174 +9734,32 @@ async def _async_call_llm_impl(
                     effective_timeout=effective_timeout,
                     effective_extra_body=effective_extra_body,
                     reasoning_config=reasoning_config,
+                    extra_headers=extra_headers,
                 )
-
-        # ── Same-provider credential-pool recovery (mirrors sync) ─────
-        pool_provider = _recoverable_pool_provider(resolved_provider, client, main_runtime=main_runtime)
-        _client_api_key = str(getattr(client, "api_key", "") or "")
-        if pool_provider and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err)):
-            recovery_err = first_err
-            # Skip the extra retry for clear payment/quota errors — the endpoint
-            # won't accept another request with the same exhausted key.
-            if _is_rate_limit_error(first_err) and not _is_payment_error(first_err):
-                try:
-                    return _validate_llm_response(
-                        await _relay_async_completion(
-                            client,
-                            kwargs,
-                            provider=resolved_provider,
-                            api_mode=resolved_api_mode,
-                        ), task)
-                except Exception as retry_err:
-                    if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
-                        raise
-                    recovery_err = retry_err
-            if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key):
-                logger.info(
-                    "Auxiliary %s (async): recovered %s via credential-pool rotation after %s",
-                    task or "call", pool_provider, type(recovery_err).__name__,
-                )
-                try:
-                    return await _retry_same_provider_async(
-                        task=task,
-                        resolved_provider=resolved_provider,
-                        resolved_model=resolved_model,
-                        resolved_base_url=resolved_base_url,
-                        resolved_api_key=resolved_api_key,
-                        resolved_api_mode=resolved_api_mode,
-                        final_model=final_model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        tools=tools,
-                        effective_timeout=effective_timeout,
-                        effective_extra_body=effective_extra_body,
-                        reasoning_config=reasoning_config,
-                    )
-                except Exception as retry2_err:
-                    if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
-                            or _is_rate_limit_error(retry2_err)):
-                        _recover_provider_pool(pool_provider, retry2_err)
-                        first_err = retry2_err
-                    else:
-                        raise
-
-        # ── Payment / connection / rate-limit / auth fallback (mirrors sync) ──
-        # Auth is NOT a capacity error: on an explicit provider it respects the
-        # user's choice via the is_auto/is_capacity_error gate.
-        should_fallback = (
-            _is_auth_error(first_err)
-            or _is_payment_error(first_err)
-            or _is_connection_error(first_err)
-            or _is_rate_limit_error(first_err)
-            or _is_model_incompatible_error(first_err)
-            or _is_invalid_aux_response_error(first_err)
-        )
-        # Capacity errors bypass the explicit-provider gate — see sync path.
-        is_auto = resolved_provider in {"auto", "", None}
-        is_capacity_error = (
-            _is_payment_error(first_err)
-            or _is_connection_error(first_err)
-            or _is_rate_limit_error(first_err)
-            or _is_model_incompatible_error(first_err)
-            or _is_invalid_aux_response_error(first_err)
-        )
-        if should_fallback and (is_auto or is_capacity_error):
-            if _is_auth_error(first_err):
-                reason = "auth error"
-            elif _is_payment_error(first_err):
-                reason = "payment error"
-                _mark_provider_unhealthy(
-                    _recoverable_pool_provider(resolved_provider, client) or resolved_provider
-                )
-            elif _is_rate_limit_error(first_err):
-                reason = "rate limit"
-            elif _is_model_incompatible_error(first_err):
-                reason = "model incompatible with route"
-            elif _is_invalid_aux_response_error(first_err):
-                reason = "invalid provider response"
-            else:
-                reason = "connection error"
-            logger.info("Auxiliary %s (async): %s on %s (%s), trying fallback",
-                        task or "call", reason, resolved_provider, first_err)
-
-            # Skip only the failed model for model-specific failures; 401/402 are
-            # provider-wide, so keep skipping the whole provider.
-            _chain_failed_model = (
-                None if reason in ("auth error", "payment error") else final_model
+            fb_client, fb_model, fb_label = step.args
+            fb_client, _ = _to_async_client(
+                fb_client, fb_model or "", is_vision=(task == "vision")
             )
-            # Fallback order (same as sync): per-task fallback_chain → auto: main
-            # fallback_providers, then discovery chain; explicit: main-agent-model net.
-            fb_client, fb_model, fb_label = (None, None, "")
-            if is_auto:
-                fb_client, fb_model, fb_label = _try_configured_fallback_chain(
-                    task, resolved_provider or "auto", reason=reason,
-                    failed_model=_chain_failed_model)
-                if fb_client is None:
-                    fb_client, fb_model, fb_label = _try_main_fallback_chain(
-                        task, resolved_provider or "auto", reason=reason)
-                if fb_client is None:
-                    fb_client, fb_model, fb_label = _try_payment_fallback(
-                        resolved_provider, task, reason=reason)
-            else:
-                fb_client, fb_model, fb_label = _try_configured_fallback_chain(
-                    task, resolved_provider or "auto", reason=reason,
-                    failed_model=_chain_failed_model)
-                if fb_client is None:
-                    fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
-                        resolved_provider, task, reason=reason,
-                        failed_model=_chain_failed_model)
+            return await _call_fallback_candidate_async(
+                fb_client, fb_model, fb_label,
+                task=task, messages=messages,
+                temperature=temperature, max_tokens=max_tokens,
+                tools=tools, effective_timeout=effective_timeout,
+                effective_extra_body=effective_extra_body,
+                reasoning_config=reasoning_config)
 
-            if fb_client is not None:
-                async_fb, async_fb_model = _to_async_client(
-                    fb_client, fb_model or "", is_vision=(task == "vision")
-                )
-                _record_route_info(
-                    route_info,
-                    _fallback_provider_from_label(fb_label),
-                    async_fb_model or fb_model,
-                )
-                fb_resp = await _call_fallback_candidate_async(
-                    async_fb, async_fb_model or fb_model, fb_label,
-                    task=task, messages=messages,
-                    temperature=temperature, max_tokens=max_tokens,
-                    tools=tools, effective_timeout=effective_timeout,
-                    effective_extra_body=effective_extra_body,
-                    reasoning_config=reasoning_config)
-                if fb_resp is not None:
-                    return fb_resp
-                # Stale candidate credential quarantined — walk the chain once more.
-                fb_client, fb_model, fb_label = _try_payment_fallback(
-                    resolved_provider, task, reason="stale fallback credential")
-                if fb_client is not None:
-                    async_fb, async_fb_model = _to_async_client(
-                        fb_client, fb_model or "", is_vision=(task == "vision")
-                    )
-                    _record_route_info(
-                        route_info,
-                        _fallback_provider_from_label(fb_label),
-                        async_fb_model or fb_model,
-                    )
-                    fb_resp = await _call_fallback_candidate_async(
-                        async_fb, async_fb_model or fb_model, fb_label,
-                        task=task, messages=messages,
-                        temperature=temperature, max_tokens=max_tokens,
-                        tools=tools, effective_timeout=effective_timeout,
-                        effective_extra_body=effective_extra_body,
-                        reasoning_config=reasoning_config)
-                    if fb_resp is not None:
-                        return fb_resp
-            # All fallback layers exhausted — warn before re-raising.
-            logger.warning(
-                "Auxiliary %s (async): %s on %s and all fallbacks exhausted "
-                "(fallback_chain + main agent model). Raising original error.",
-                task or "call", reason, resolved_provider,
-            )
-        # Mirror the sync path: evict poisoned clients on connection/timeout.
-        if _is_connection_error(first_err):
-            try:
-                _evict_cached_client_instance(client)
-            except Exception:
-                logger.debug("Auxiliary (async): cache eviction after connection error failed",
-                             exc_info=True)
-        raise
+        result = await _drive_ladder_async(
+            _aux_recovery_ladder(
+                first_err,
+                client=client, kwargs=kwargs, task=task, async_mode=True,
+                base_info=_client_base,
+                resolved_provider=resolved_provider, resolved_model=resolved_model,
+                resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
+                resolved_api_mode=resolved_api_mode, final_model=final_model,
+                max_tokens=max_tokens, main_runtime=main_runtime, route_info=route_info,
+            ),
+            _perform,
+        )
+        if result is _RERAISE_ORIGINAL:
+            raise
+        return result
