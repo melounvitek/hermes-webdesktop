@@ -350,13 +350,22 @@ class SessionPortabilityMixin:
             raise ValueError(f"{field} must be JSON serializable") from exc
 
     @staticmethod
-    def _float_or_none(value: Any) -> Optional[float]:
+    def _coerce_or(value: Any, cast, default):
+        """``cast(value)``; *default* for None or an unparsable value."""
         if value is None:
-            return None
+            return default
         try:
-            return float(value)
+            return cast(value)
         except (TypeError, ValueError):
-            return None
+            return default
+
+    @classmethod
+    def _float_or_none(cls, value: Any) -> Optional[float]:
+        return cls._coerce_or(value, float, None)
+
+    @classmethod
+    def _int_or_default(cls, value: Any, default: int = 0) -> int:
+        return cls._coerce_or(value, int, default)
 
     @staticmethod
     def _import_int_or_none(value: Any, field: str) -> Optional[int]:
@@ -366,15 +375,6 @@ class SessionPortabilityMixin:
             return int(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{field} must be an integer") from exc
-
-    @staticmethod
-    def _int_or_default(value: Any, default: int = 0) -> int:
-        if value is None:
-            return default
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
 
     @staticmethod
     def _reasoning_json_value(value: Any) -> Any:
