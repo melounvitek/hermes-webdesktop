@@ -126,6 +126,14 @@ def bind_module(module_globals: dict, server, *, skip=()) -> None:
                     setattr(obj, attr, rebind(val, g))
                 elif isinstance(val, (staticmethod, classmethod)):
                     setattr(obj, attr, type(val)(rebind(val.__func__, g)))
+        prev = g.get(name)
+        if isinstance(prev, types.FunctionType) and isinstance(obj, types.FunctionType):
+            owner = getattr(prev, "_hermes_split_module", None)
+            if owner and owner != mod_name:
+                raise RuntimeError(
+                    f"split-module name collision: {mod_name}.{name} would overwrite {owner}.{name}"
+                )
+            obj._hermes_split_module = mod_name
         setattr(server, name, obj)
     registry = module_globals.get("_registry")
     if isinstance(registry, HandlerRegistry):

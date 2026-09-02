@@ -24,7 +24,7 @@ _profile_scoped = _registry.profile_scoped
 # ── shared helpers ────────────────────────────────────────────────────
 
 
-def _display_cfg(cfg: dict) -> dict:
+def _display_section(cfg: dict) -> dict:
     display = cfg.get("display")
     return display if isinstance(display, dict) else {}
 
@@ -35,7 +35,7 @@ def _write_display_sections(*, thinking=None, **display_fields) -> None:
     Write-back round-trip through the raw (uncached) config so other keys survive.
     """
     cfg = _load_cfg_raw()
-    display = _display_cfg(cfg)
+    display = _display_section(cfg)
     sections = display.get("sections") if isinstance(display.get("sections"), dict) else {}
     display.update(display_fields)
     if thinking is not None:
@@ -59,7 +59,7 @@ def _emit_all_session_info() -> None:
 def _toggle_display_bool(rid, key, value, *, cfg_key, on_words, off_words):
     """Shared body of the on/off/toggle display booleans (``density``, ``battery``)."""
     raw = str(value or "").strip().lower()
-    cur_b = bool(_display_cfg(_load_cfg()).get(cfg_key, False))
+    cur_b = bool(_display_section(_load_cfg()).get(cfg_key, False))
     if raw in {"", "toggle"}:
         nv_b = not cur_b
     elif raw in on_words:
@@ -382,7 +382,7 @@ def _set_focus(rid, params, key, value, session):
         resolve_focus_arg,
     )
 
-    d_f = _display_cfg(_load_cfg())
+    d_f = _display_section(_load_cfg())
     cur_focus = bool(d_f.get("focus_view", False))
     action, target = resolve_focus_arg(str(value or ""), cur_focus)
     if action == "usage":
@@ -572,7 +572,7 @@ def _set_details_mode(rid, params, key, value, session):
     if nv not in _DETAIL_MODES:
         return _err(rid, 4002, f"unknown details_mode: {value}")
     cfg = _load_cfg_raw()  # write-back round-trip
-    display = _display_cfg(cfg)
+    display = _display_section(cfg)
     sections = display.get("sections") if isinstance(display.get("sections"), dict) else {}
     display["details_mode"] = nv
     for section in _DETAIL_SECTION_NAMES:
@@ -593,7 +593,7 @@ def _set_details_section(rid, params, key, value, session):
         return _err(rid, 4002, f"unknown section: {section}")
 
     cfg = _load_cfg_raw()  # write-back round-trip
-    display = _display_cfg(cfg)
+    display = _display_section(cfg)
     sections_cfg = display.get("sections") if isinstance(display.get("sections"), dict) else {}
 
     nv = str(value or "").strip().lower()
@@ -644,7 +644,7 @@ def _set_theme(rid, params, key, value, session):
 
 def _set_statusbar(rid, params, key, value, session):
     raw = str(value or "").strip().lower()
-    current = _coerce_statusbar(_display_cfg(_load_cfg()).get("tui_statusbar", "top"))
+    current = _coerce_statusbar(_display_section(_load_cfg()).get("tui_statusbar", "top"))
 
     if raw in {"", "toggle"}:
         nv = "top" if current == "off" else "off"
@@ -666,7 +666,7 @@ def _set_mouse(rid, params, key, value, session):
     # '' and triggering the toggle path. The slash command always passes
     # a string, but programmatic JSON-RPC callers may send booleans.
     raw = ("" if value is None else str(value)).strip().lower()
-    current = _display_mouse_tracking(_display_cfg(_load_cfg()))
+    current = _display_mouse_tracking(_display_section(_load_cfg()))
 
     if raw in {"", "toggle"}:
         nv = "all" if current == "off" else "off"
