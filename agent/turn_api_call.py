@@ -1,7 +1,9 @@
-"""The provider call itself for the conversation turn's retry loop: streaming decision,
-MoA prepared-request handshake, the LLM execution middleware wrapper, the redirect
-``_model_request_active`` bracket and the response-vs-redirect crossing check. Extracted
-from ``run_conversation``; nothing here imports ``agent.conversation_loop`` at module level.
+"""The provider call for the conversation turn's retry loop: ``nous_rate_limit_guard`` (skip
+the attempt while another session's Nous Portal rate limit is active), ``perform_api_call``
+(streaming decision, MoA prepared-request handshake, LLM execution middleware wrapper, the
+redirect ``_model_request_active`` bracket and the response-vs-redirect crossing check) and
+``handle_api_interrupt`` (``InterruptedError`` mid-call). Extracted from
+``run_conversation``; nothing here imports ``agent.conversation_loop`` at module level.
 """
 
 from __future__ import annotations

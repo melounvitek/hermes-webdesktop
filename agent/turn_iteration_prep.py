@@ -1,9 +1,12 @@
-"""Per-iteration transcript preparation for the conversation turn loop, run before the request
-is assembled: the ``agent:step`` callback, skill-nudge counter, pre-API ``/steer`` drain into
-the newest tool result (never a user message — alternation), run-budget wrap-up notice,
-tool_call argument sanitization, legacy interrupt-scaffold ghost-row drop and role-alternation
-repair. Extracted from ``run_conversation``; nothing here imports
-``agent.conversation_loop`` at module level (cycle).
+"""Outer-iteration bookkeeping for the conversation turn loop, in call order:
+
+``begin_iteration`` (pending redirect, interrupt / review-budget / iteration-budget exits),
+``prepare_iteration`` (``agent:step`` callback, skill-nudge counter, pre-API ``/steer`` drain
+into the newest tool result — never a user message, alternation — run-budget wrap-up notice,
+tool_call argument sanitization, legacy interrupt-scaffold ghost-row drop, role-alternation
+repair), ``announce_api_call`` (verbose summary / quiet thinking spinner) and, after the retry
+loop, ``apply_retry_restarts`` (consumes the ``TurnRetryState`` restart flags). Extracted from
+``run_conversation``; nothing here imports ``agent.conversation_loop`` at module level (cycle).
 """
 
 from __future__ import annotations
