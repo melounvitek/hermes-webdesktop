@@ -46,6 +46,9 @@ def _run_cli(binary: str, *args: str, timeout: float) -> subprocess.CompletedPro
     return subprocess.run([binary, *args], capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=timeout, env=_sanitized_cua_env())
 
+def _combined_output(completed: subprocess.CompletedProcess) -> str:
+    return ((completed.stdout or "") + (completed.stderr or "")).strip()
+
 def _read_cli_version(binary: str, *, timeout: float = 5.0) -> Optional[str]:
     """First line of ``cua-driver --version`` or None. health_report's ``driver_version``
     can disagree with the real binary (seen on Windows); doctor surfaces both."""
@@ -62,20 +65,18 @@ def _cli_driver_version(binary: str, timeout: float = 5.0) -> Tuple[str, Optiona
         completed = _run_cli(binary, "--version", timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         return "fail", f"--version failed: {e}"
-    text = ((completed.stdout or "") + (completed.stderr or "")).strip()
-    if completed.returncode != 0 and not text:
+    text, failed = _combined_output(completed), completed.returncode != 0
+    if failed and not text:
         return "fail", f"--version exited {completed.returncode}"
     m = re.search(r"(\d+\.\d+\.\d+(?:[-+][\w.]+)?)", text)  # typical: "cua-driver 0.10.0"
-    version = m.group(1) if m else (text.splitlines()[0] if text else "unknown")
-    return ("fail" if completed.returncode != 0 else "pass"), version
+    return ("fail" if failed else "pass"), m.group(1) if m else (text.splitlines()[0] if text else "unknown")
 
 def _cli_doctor_snippet(binary: str, timeout: float = 8.0) -> Optional[str]:
     """Optional one-shot ``cua-driver doctor`` text (best-effort, never fatal)."""
     try:
-        completed = _run_cli(binary, "doctor", timeout=timeout)
+        return _combined_output(_run_cli(binary, "doctor", timeout=timeout)) or None
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return ((completed.stdout or "") + (completed.stderr or "")).strip() or None
 
 def _build_identity(binary: str, report: Report) -> Report:
     """Hermes-side identity block comparing resolved binary vs health_report."""
@@ -94,8 +95,7 @@ def _build_identity(binary: str, report: Report) -> Report:
 
 def _is_valid_health_report(payload: Any) -> bool:
     """True when *payload* looks like a schema_version=1 health_report."""
-    return (isinstance(payload, dict) and "schema_version" in payload
-            and "overall" in payload and isinstance(payload.get("checks"), list))
+    return isinstance(payload, dict) and {"schema_version", "overall"} <= payload.keys() and isinstance(payload.get("checks"), list)
 
 def _text_items(result: Report) -> Iterator[str]:
     """Text of every ``{"type": "text"}`` content item of an MCP tools/call result."""
@@ -154,8 +154,7 @@ def _mcp_rpc(proc: subprocess.Popen, msg_id: int, method: str, params: Any = Non
     proc.stdin.flush()
     line = proc.stdout.readline()
     if not line:
-        raise RuntimeError(f"cua-driver mcp produced no response for {method!r}. "
-                           f"stderr tail: {_stderr_tail(proc) or '(empty)'}")
+        raise RuntimeError(f"cua-driver mcp produced no response for {method!r}. stderr tail: {_stderr_tail(proc) or '(empty)'}")
     try:
         resp = json.loads(line)
     except (ValueError, TypeError) as e:
@@ -240,8 +239,7 @@ def _drive_fallback_probes(binary: str, *, timeout: float = 12.0) -> Report:
     return out
 
 def _platform_name() -> str:
-    sysname = (_platform_mod.system() or "").lower()
-    return sysname if sysname in _SUPPORTED_PLATFORMS else (sysname or "unknown")
+    return (_platform_mod.system() or "").lower() or "unknown"
 
 def _check(name: str, status: str, message: str, **extra: Any) -> Report:
     """Build one health check dict (``hint`` / ``data`` only when given)."""
@@ -276,8 +274,7 @@ def _tcc_checks(perms: Optional[Report], perm_err: Optional[str], plat: str) -> 
     }
     ax_status, ax_msg, ax_extra = ax_rows[ax]
     scr_status, scr_msg, scr_extra = scr_rows[(scr, capturable is False and scr is True)]
-    return [_check("tcc_accessibility", ax_status, ax_msg, **ax_extra),
-            _check("tcc_screen_recording", scr_status, scr_msg, **scr_extra)]
+    return [_check("tcc_accessibility", ax_status, ax_msg, **ax_extra), _check("tcc_screen_recording", scr_status, scr_msg, **scr_extra)]
 
 def _ax_capability_check(probes: Report, ax_granted: bool) -> Report:
     """ax_capability — inferred from list_apps success or the accessibility grant."""
@@ -340,15 +337,6 @@ def _compose_fallback_report(binary: str, *, reason: str = "", timeout: float = 
     return {"schema_version": "1", "platform": plat, "driver_version": str(driver_version),
             "overall": _overall_from(checks), "checks": checks,
             "fallback": True, "fallback_reason": reason or "health_report unavailable"}
-
-def _drive_health_report_or_fallback(binary: str, *, include: Sequence[str] = (), skip: Sequence[str] = (),
-                                     timeout: float = 12.0) -> Report:
-    """Prefer real health_report; on denial/non-schema, synthesize via probes."""
-    try:
-        report = _drive_health_report(binary, include=include, skip=skip, timeout=timeout)
-    except HealthReportUnavailable as e:
-        report = _compose_fallback_report(binary, reason=str(e), timeout=timeout)
-    return _apply_display_count_guard(report)
 
 def _apply_display_count_guard(report: Report) -> Report:
     """Downgrade an 'ok' report whose screen capture has zero displays.
@@ -433,11 +421,15 @@ def run_doctor(driver_cmd: Optional[str] = None, *, include: Sequence[str] = (),
         print(f"cua-driver: not installed (looked for {driver_cmd or 'cua-driver (PATH and canonical install paths)'!r}).")
         print("  Run: hermes computer-use install")
         return 2
-    try:
-        report = _drive_health_report_or_fallback(binary, include=include, skip=skip)
+    try:  # prefer real health_report; on denial/non-schema, synthesize via probes
+        try:
+            report = _drive_health_report(binary, include=include, skip=skip, timeout=12.0)
+        except HealthReportUnavailable as e:
+            report = _compose_fallback_report(binary, reason=str(e), timeout=12.0)
     except RuntimeError as e:
         print(f"cua-driver health_report failed: {e}", file=sys.stderr)
         return 2
+    report = _apply_display_count_guard(report)
     identity = _build_identity(binary, report)
     if json_output:
         # Additive envelope: upstream health_report keys preserved, Hermes identity
