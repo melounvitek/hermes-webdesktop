@@ -139,9 +139,7 @@ def _assess_parked_branch_switch(
     cherry = _git_run(git_cmd, ["cherry", f"origin/{target_branch}"], cwd)
     if cherry.returncode != 0:
         return False, "unverifiable"
-    unmerged = [
-        line for line in cherry.stdout.splitlines() if line.startswith("+")
-    ]
+    unmerged = [line for line in cherry.stdout.splitlines() if line.startswith("+")]
     if unmerged:
         # Safe (checkout keeps commits); reason tells caller to print the loud notice.
         return True, f"unmerged:{len(unmerged)}"
@@ -170,10 +168,7 @@ def _print_parked_branch_skip_warning(
     elif reason == "disabled":
         why = "updates.auto_switch_parked_branch is set to false in config.yaml"
     else:
-        why = (
-            f"the branch state could not be verified against "
-            f"origin/{target_branch}"
-        )
+        why = f"the branch state could not be verified against origin/{target_branch}"
 
     bar = "=" * 68
     print()
@@ -189,10 +184,7 @@ def _print_parked_branch_skip_warning(
     print("  To resolve, inspect the branch and switch back yourself:")
     print(f"    git -C {cwd} status")
     print(f"    git -C {cwd} checkout {target_branch} && hermes update")
-    print(
-        "  (commit or stash your work on the branch first if you want to "
-        "keep it)"
-    )
+    print("  (commit or stash your work on the branch first if you want to keep it)")
     print(bar)
 
 
@@ -378,9 +370,7 @@ def _sync_with_upstream_if_needed(
         if response in {"", "y", "yes"}:
             print("→ Adding upstream remote...")
             if _add_upstream_remote(git_cmd, cwd):
-                print(
-                    "  ✓ Added upstream: https://github.com/NousResearch/hermes-agent.git"
-                )
+                print("  ✓ Added upstream: https://github.com/NousResearch/hermes-agent.git")
                 has_upstream = True
             else:
                 print("  ✗ Failed to add upstream remote. Skipping upstream sync.")
@@ -408,9 +398,7 @@ def _sync_with_upstream_if_needed(
         return False
 
     origin_ahead = _count_commits_between(git_cmd, cwd, "upstream/main", "origin/main")
-    upstream_ahead = _count_commits_between(
-        git_cmd, cwd, "origin/main", "upstream/main"
-    )
+    upstream_ahead = _count_commits_between(git_cmd, cwd, "origin/main", "upstream/main")
 
     if origin_ahead < 0 or upstream_ahead < 0:
         print("  ✗ Could not compare branches. Skipping upstream sync.")
@@ -440,9 +428,7 @@ def _sync_with_upstream_if_needed(
             **_no_prompt_git_kwargs(),
         )
     except subprocess.CalledProcessError:
-        print(
-            "  ✗ Failed to pull from upstream. You may need to resolve conflicts manually."
-        )
+        print("  ✗ Failed to pull from upstream. You may need to resolve conflicts manually.")
         return False
 
     print("  ✓ Updated from upstream")
@@ -451,9 +437,7 @@ def _sync_with_upstream_if_needed(
     if _sync_fork_with_upstream(git_cmd, cwd):
         print("  ✓ Fork synced with upstream")
     else:
-        print(
-            "  ℹ Got updates from upstream but couldn't push to fork (no write access?)"
-        )
+        print("  ℹ Got updates from upstream but couldn't push to fork (no write access?)")
         print("    Your local repo is updated, but your fork on GitHub may be behind.")
     return True
 
@@ -532,9 +516,7 @@ def _portable_git_candidates() -> list:
     candidates = []
     with suppress(Exception):
         for root in (get_default_hermes_root(), Path(get_hermes_home())):
-            candidates.append(
-                root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe"
-            )
+            candidates.append(root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe")
     return candidates
 
 
@@ -581,10 +563,7 @@ def _ensure_non_trampoline_git(git_cmd: list) -> list:
             "git binary — the update will fall back to the ZIP path."
         )
         return git_cmd
-    print(
-        f"⚠ Detected a broken git trampoline; switching to real git at "
-        f"{real_git}"
-    )
+    print(f"⚠ Detected a broken git trampoline; switching to real git at {real_git}")
     return [str(real_git)] + list(git_cmd[1:])
 
 

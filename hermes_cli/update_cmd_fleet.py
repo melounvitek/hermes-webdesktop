@@ -57,9 +57,7 @@ def _write_fleet_restart_pending_marker(*, expected_sha: str = "") -> None:
 def _clear_fleet_restart_pending_marker() -> None:
     """Remove the pull→restart obligation breadcrumb. Never raises."""
     from hermes_cli.update_cmd import _m
-    _m()._clear_marker_file(
-        _fleet_restart_pending_marker_path(), label="fleet-restart-pending"
-    )
+    _m()._clear_marker_file(_fleet_restart_pending_marker_path(), label="fleet-restart-pending")
 
 
 def _current_checkout_sha() -> str | None:
@@ -152,15 +150,9 @@ def _warn_pending_fleet_restart(*, startup: bool = False) -> None:
         "restart running gateways.",
         file=stream,
     )
-    print(
-        "  Gateways may still be serving pre-update modules (mixed sys.modules).",
-        file=stream,
-    )
+    print("  Gateways may still be serving pre-update modules (mixed sys.modules).", file=stream)
     if startup:
-        print(
-            "  Run `hermes update` or `hermes gateway restart`.",
-            file=stream,
-        )
+        print("  Run `hermes update` or `hermes gateway restart`.", file=stream)
 
 
 def _warn_pending_fleet_restart_on_startup() -> None:
@@ -390,8 +382,7 @@ def _warn_incomplete_gateway_fleet_restart(failed_units: list) -> None:
         print("  running pre-update code (mixed sys.modules). Recover with:")
         print("    hermes gateway status")
         print("    launchctl list | grep <label>")
-        print("    launchctl bootstrap gui/$(id -u) "
-              "~/Library/LaunchAgents/<label>.plist")
+        print("    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist")
         return
     print("  Skipped units may still be running pre-update code (mixed")
     print("  sys.modules). Restart them manually, then verify:")
@@ -487,9 +478,7 @@ def _restart_macos_launchd_gateways(
     )
 
     # --- Current profile ---
-    _restarted, _failed = _restart_launchd_gateway_after_update(
-        supervision_verify=True
-    )
+    _restarted, _failed = _restart_launchd_gateway_after_update(supervision_verify=True)
     restarted_services.extend(_restarted)
     failed_or_stale_units.extend(_failed)
     current_label = get_launchd_label()
@@ -508,9 +497,7 @@ def _restart_macos_launchd_gateways(
             graceful_ok = False
             if old_pid is not None and old_pid > 0:
                 print(f"  → {label}: draining (up to {int(drain_budget)}s)...")
-                graceful_ok = _graceful_restart_via_sigusr1(
-                    old_pid, drain_timeout=drain_budget
-                )
+                graceful_ok = _graceful_restart_via_sigusr1(old_pid, drain_timeout=drain_budget)
             if graceful_ok and _wait_for_launchd_service_pid(
                 label, old_pid=old_pid, timeout=10.0, domain=domain
             ):
@@ -571,12 +558,7 @@ def _gateway_service_matches_profile(profile: str, service: object) -> bool:
     """
     name = str(service).removesuffix(".service")
     if profile == "default":
-        return name in {
-            "hermes-gateway",
-            "ai.hermes.gateway",
-            "gateway",
-            "gateway-default",
-        }
+        return name in {"hermes-gateway", "ai.hermes.gateway", "gateway", "gateway-default"}
     return name in {
         f"hermes-gateway-{profile}",
         f"ai.hermes.gateway-{profile}",
@@ -740,11 +722,7 @@ def _resolve_manage_cmd(cache: dict, scope_: str, scope_cmd_: list, svc_name_: s
         sudo_cmd = ["sudo", "-n"] + scope_cmd_ + ["--no-ask-password"]
         sudo_ok = False
         try:
-            _probe = subprocess.run(
-                ["sudo", "-n", "true"],
-                capture_output=True,
-                timeout=5,
-            )
+            _probe = subprocess.run(["sudo", "-n", "true"], capture_output=True, timeout=5)
             sudo_ok = _probe.returncode == 0
             if not sudo_ok:
                 # Blanket sudo refused — a targeted NOPASSWD sudoers entry may still work.
@@ -807,9 +785,7 @@ def _restart_systemd_gateway_units(
 
                 # None ⇒ no non-interactive privilege path; avoid manage-units verbs
                 # entirely or polkit prompts inside the captured subprocess.
-                _manage_cmd = _resolve_manage_cmd(_manage_cmd_cache,
-                    scope, scope_cmd, svc_name
-                )
+                _manage_cmd = _resolve_manage_cmd(_manage_cmd_cache, scope, scope_cmd, svc_name)
 
                 # Graceful SIGUSR1 first so in-flight runs drain: handler →
                 # request_restart(via_service=True) → drain → exit, Restart=always
@@ -852,15 +828,8 @@ def _restart_systemd_gateway_units(
                             return
                     # Passive poll: auto-restart fires after RestartSec regardless of
                     # privileges — primary when _manage_cmd is None, fallback otherwise.
-                    _restart_sec = _service_restart_sec(
-                        scope_cmd,
-                        svc_name,
-                        default=0.0,
-                    )
-                    _post_drain_timeout = max(
-                        10.0,
-                        _restart_sec + 10.0,
-                    )
+                    _restart_sec = _service_restart_sec(scope_cmd, svc_name, default=0.0)
+                    _post_drain_timeout = max(10.0, _restart_sec + 10.0)
                     if _manage_cmd is None and _restart_sec > 5.0:
                         print(
                             f"  → {svc_name}: waiting for systemd "
@@ -876,9 +845,7 @@ def _restart_systemd_gateway_units(
                         return
                     # Exited but not respawned (older unit without Restart=on-failure /
                     # RestartForceExitStatus=75); fall through to forced restart.
-                    print(
-                        f"  ⚠ {svc_name} drained but didn't relaunch — forcing restart"
-                    )
+                    print(f"  ⚠ {svc_name} drained but didn't relaunch — forcing restart")
 
                 # Forcing needs manage-units privileges; without a non-interactive path
                 # polkit would prompt inside the captured subprocess — skip, instruct.
@@ -908,9 +875,7 @@ def _restart_systemd_gateway_units(
                     else:
                         # Retry once — transient startup failures (stale module cache,
                         # import race) often clear; reset-failed so the retry isn't blocked.
-                        print(
-                            f"  ⚠ {svc_name} died after restart, retrying..."
-                        )
+                        print(f"  ⚠ {svc_name} died after restart, retrying...")
                         _systemctl_reset_and_restart(_manage_cmd, svc_name)
                         if _wait_for_service_active(
                             scope_cmd,
@@ -932,9 +897,7 @@ def _restart_systemd_gateway_units(
                             )
                 else:
                     failed_or_stale_units.append(svc_name)
-                    print(
-                        f"  ⚠ Failed to restart {svc_name}: {restart.stderr.strip()}"
-                    )
+                    print(f"  ⚠ Failed to restart {svc_name}: {restart.stderr.strip()}")
 
             def _on_unit_timeout(svc_name: str, exc: subprocess.TimeoutExpired) -> None:
                 # Isolate to this unit; a scope-wide handler used to abort every
@@ -998,9 +961,7 @@ def _restart_manual_gateways(
 
     # Exclude just-restarted service PIDs so we don't kill what systemd/launchd spawned.
     service_pids = _get_service_pids(all_profiles=True)
-    manual_pids = find_gateway_pids(
-        exclude_pids=service_pids, all_profiles=True
-    )
+    manual_pids = find_gateway_pids(exclude_pids=service_pids, all_profiles=True)
     profile_processes = {
         proc.pid: proc
         for proc in find_profile_gateway_processes(exclude_pids=service_pids)
@@ -1010,9 +971,7 @@ def _restart_manual_gateways(
     # the unmapped sweep below stops them and lists them under "Restart manually".
     unrestartable_pids = set()
     for pid, proc in profile_processes.items():
-        restart_mode = _prepare_profile_gateway_update_restart(
-            proc.profile, pid
-        )
+        restart_mode = _prepare_profile_gateway_update_restart(proc.profile, pid)
         if restart_mode is None:
             # A bare ``continue`` here left it serving stale modules with no signal.
             print(
@@ -1025,9 +984,7 @@ def _restart_manual_gateways(
         # SIGUSR1 drain first, SIGTERM fallback if unsupported/over budget — the
         # watcher relaunches either way. The helper announces its choice first
         # because a silent full-budget wait reads as a hung update.
-        drained = _drain_or_signal_gateway_for_update(
-            pid, _drain_budget, proc.profile
-        )
+        drained = _drain_or_signal_gateway_for_update(pid, _drain_budget, proc.profile)
         if not drained:
             with suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, _signal.SIGTERM)
@@ -1057,10 +1014,7 @@ def _restart_manual_gateways(
             print(f"  ✓ Restarting manual gateway profile(s): {names}")
         if externally_supervised_profiles:
             names = ", ".join(externally_supervised_profiles)
-            print(
-                "  ✓ Handed gateway profile(s) back to their external "
-                f"supervisor: {names}"
-            )
+            print(f"  ✓ Handed gateway profile(s) back to their external supervisor: {names}")
         unmapped_count = (
             len(killed_pids)
             - len(relaunched_profiles)
@@ -1070,9 +1024,7 @@ def _restart_manual_gateways(
             print(f"  → Stopped {unmapped_count} manual gateway process(es)")
             print("    Restart manually: hermes gateway run")
             if unmapped_count > 1:
-                print(
-                    "    (or: hermes -p <profile> gateway run  for each profile)"
-                )
+                print("    (or: hermes -p <profile> gateway run  for each profile)")
 
 
 def _force_kill_stuck_gateways(killed_pids, *, find_gateway_pids, _get_service_pids):
@@ -1082,17 +1034,12 @@ def _force_kill_stuck_gateways(killed_pids, *, find_gateway_pids, _get_service_p
     with _best_effort('Post-restart survivor sweep failed: %s'):
         _time.sleep(3.0)
         _service_pids_after = _get_service_pids(all_profiles=True)
-        _surviving = find_gateway_pids(
-            exclude_pids=_service_pids_after,
-            all_profiles=True,
-        )
+        _surviving = find_gateway_pids(exclude_pids=_service_pids_after, all_profiles=True)
         # Only PIDs we already tried to kill; newer ones are left alone.
         _stuck = [pid for pid in _surviving if pid in killed_pids]
         if _stuck:
             print()
-            print(
-                f"  ⚠ {len(_stuck)} gateway process(es) ignored SIGTERM — force-killing"
-            )
+            print(f"  ⚠ {len(_stuck)} gateway process(es) ignored SIGTERM — force-killing")
             from gateway.status import (
                 get_process_start_time as _get_process_start_time,
                 terminate_pid as _terminate_pid,
@@ -1168,9 +1115,7 @@ def _recover_after_restart_phase_abort(
     # serve/dashboard still the SAME pre-update process is live on old code
     # (unreachable by `gateway restart`): recovery may not claim success while one
     # remains, and must never kill one (manual/Desktop serves have no relaunch authority).
-    _stale_runtime_rows = _surviving_pre_update_serve_runtimes(
-        _pre_update_plan
-    )
+    _stale_runtime_rows = _surviving_pre_update_serve_runtimes(_pre_update_plan)
     _recovery_result["stale_runtimes"] = _stale_runtime_rows
     # Only systemd-VERIFIED outcomes claim coverage; a relaunch that merely exited 0
     # ("relaunch_attempted") was never observed and must not clear incomplete.
@@ -1187,12 +1132,8 @@ def _recover_after_restart_phase_abort(
         if getattr(runtime, "kind", None) == "gateway"
         and isinstance(getattr(runtime, "profile", None), str)
     ]
-    _planned_gateway_profiles = {
-        runtime.profile for runtime in _planned_gateway_runtimes
-    }
-    _covered_gateway_profiles = (
-        _already_restarted_profiles | _recovery_verified
-    )
+    _planned_gateway_profiles = {runtime.profile for runtime in _planned_gateway_runtimes}
+    _covered_gateway_profiles = _already_restarted_profiles | _recovery_verified
     _recovery_complete = _abort_recovery_is_complete(
         planned_gateway_profiles=_planned_gateway_profiles,
         covered_gateway_profiles=_covered_gateway_profiles,

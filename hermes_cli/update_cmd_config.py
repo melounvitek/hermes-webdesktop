@@ -104,9 +104,7 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
                 if after_ver > current_ver:
                     migrated.append((entry.name, current_ver, after_ver))
             except Exception as exc:
-                logger.debug(
-                    "Config migration for profile %s failed: %s", entry.name, exc
-                )
+                logger.debug("Config migration for profile %s failed: %s", entry.name, exc)
             finally:
                 reset_hermes_home_override(token)
     return migrated
@@ -154,22 +152,16 @@ def _check_and_apply_config_migration(
         return
 
     has_new_options = bool(missing_env or missing_config)
-    version_bump_only = (
-        not has_new_options and current_ver < latest_ver
-    )
+    version_bump_only = not has_new_options and current_ver < latest_ver
     needs_migration = has_new_options or current_ver < latest_ver
 
     if version_bump_only:
         # Only the format version changed (defaults merge transparently); prompting
         # would look like a no-op on yes — apply silently and say what happened.
         print()
-        print(
-            f"  ℹ Updating config format (v{current_ver} → v{latest_ver})…"
-        )
+        print(f"  ℹ Updating config format (v{current_ver} → v{latest_ver})…")
         try:
-            _mig_results = _run_migrate_config_fresh(
-                interactive=False, quiet=True
-            )
+            _mig_results = _run_migrate_config_fresh(interactive=False, quiet=True)
             print("  ✓ Config format updated (no new settings to configure)")
             # quiet=True also mutes steps that RESET/REMOVE a setting; re-surface them so an
             # unattended update never silently changes config (config_added holds only mutations here).
@@ -184,9 +176,7 @@ def _check_and_apply_config_migration(
         print()
         # Show WHAT changed, not just a count, for an informed yes/no.
         if missing_env:
-            print(
-                f"  ⚠️  {len(missing_env)} new required setting(s) need configuration"
-            )
+            print(f"  ⚠️  {len(missing_env)} new required setting(s) need configuration")
             _print_items(missing_env, "New settings", "name")
         if missing_config:
             print(f"  ℹ️  {len(missing_config)} new config option(s) available")
@@ -194,9 +184,7 @@ def _check_and_apply_config_migration(
 
         print()
         if assume_yes:
-            print(
-                "  ℹ --yes: auto-applying config migration (skipping API-key prompts)."
-            )
+            print("  ℹ --yes: auto-applying config migration (skipping API-key prompts).")
             response = "y"
         elif gateway_mode:
             response = (
@@ -230,9 +218,7 @@ def _check_and_apply_config_migration(
             print()
             # Gateway/--yes/non-interactive can't prompt for API keys; still run the
             # non-interactive pass so defaults and version bumps land before the gateway restarts.
-            interactive_migration = not (
-                gateway_mode or assume_yes or response == "auto"
-            )
+            interactive_migration = not (gateway_mode or assume_yes or response == "auto")
             results = _run_migrate_config_fresh(interactive=interactive_migration, quiet=False)
 
             if results["env_added"] or results["config_added"]:
@@ -251,10 +237,7 @@ def _check_and_apply_config_migration(
     with _best_effort('Sibling config migration failed: %s'):
         _migrated_siblings = _migrate_sibling_profile_configs()
         for _name, _from_ver, _to_ver in _migrated_siblings:
-            print(
-                f"  ✓ Profile '{_name}': config format updated "
-                f"(v{_from_ver} → v{_to_ver})"
-            )
+            print(f"  ✓ Profile '{_name}': config format updated " f"(v{_from_ver} → v{_to_ver})")
 
     # Safety net: migrations/desktop scheduler have emptied or truncated cron/jobs.json;
     # restore from the pre-update snapshot if jobs went missing.
@@ -278,9 +261,7 @@ def _check_and_apply_config_migration(
     try:
         from hermes_cli.backup import restore_config_model_settings_if_rewritten
 
-        cfg_restore = restore_config_model_settings_if_rewritten(
-            pre_update_snapshot_id
-        )
+        cfg_restore = restore_config_model_settings_if_rewritten(pre_update_snapshot_id)
         if cfg_restore:
             print()
             print(

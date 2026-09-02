@@ -22,22 +22,12 @@ from hermes_cli.update_cmd_common import _best_effort
 logger = logging.getLogger("hermes_cli.update_cmd")
 
 
-_UPDATE_RUNTIME_RELOAD_MODULES = (
-    "hermes_constants",
-    "tools.environments.local",
-    "tools.lazy_deps",
-)
+_UPDATE_RUNTIME_RELOAD_MODULES = "hermes_constants", "tools.environments.local", "tools.lazy_deps"
 
 
 #: Package prefixes whose cached modules go stale when the checkout changes under this
 #: process; purged (not reloaded) so any LATER import chain resolves against fresh source.
-_STALE_PURGE_PREFIXES = (
-    "hermes_cli",
-    "gateway",
-    "tools",
-    "tui_gateway",
-    "agent",
-)
+_STALE_PURGE_PREFIXES = "hermes_cli", "gateway", "tools", "tui_gateway", "agent"
 
 
 #: Modules EXECUTING the update survive the purge: evicting them buys nothing (running frames
@@ -82,9 +72,7 @@ def _purge_stale_hermes_modules() -> None:
             if _m().sys.modules.pop(name, None) is not None:
                 purged.append(name)
         if purged:
-            logger.debug(
-                "Purged %d stale Hermes module(s) after checkout update", len(purged)
-            )
+            logger.debug("Purged %d stale Hermes module(s) after checkout update", len(purged))
 
 
 def _reload_updated_runtime_modules() -> None:
@@ -135,9 +123,7 @@ def _print_curator_first_run_notice() -> None:
     )
     print("  Preview now:  hermes curator run --dry-run")
     print("  Pause it:     hermes curator pause")
-    print(
-        "  Docs:         https://hermes-agent.nousresearch.com/docs/user-guide/features/curator"
-    )
+    print("  Docs:         https://hermes-agent.nousresearch.com/docs/user-guide/features/curator")
 
 
 def _print_fts_optimize_available_notice() -> None:
@@ -279,10 +265,7 @@ def _print_curator_recent_run_notice() -> None:
     print(f"ℹ Skill curator — last run {when}")
     for line in summary.splitlines():
         print(f"  {line}")
-    print(
-        "  (This message shows once per curator run. "
-        "View anytime: hermes curator status)"
-    )
+    print("  (This message shows once per curator run. View anytime: hermes curator status)")
 
     with suppress(Exception):
         state["last_run_summary_shown_at"] = last_run_at
@@ -327,11 +310,7 @@ def _reload_process_scan_modules() -> None:
                 importlib.reload(mod)
             except Exception as exc:
                 # warning, not debug: a failed reload surfaces as ImportError seconds later.
-                logger.warning(
-                    "Could not reload %s for post-update cleanup: %s",
-                    mod_name,
-                    exc,
-                )
+                logger.warning("Could not reload %s for post-update cleanup: %s", mod_name, exc)
 
 
 def _finish_dashboard_update_cleanup(
@@ -475,13 +454,9 @@ def _print_update_summary(
     if node_failures or not desktop_build_ok or not sqlite_runtime_ok:
         parts = []
         if node_failures:
-            parts.append(
-                f"Node.js dependencies for {', '.join(node_failures)} did not refresh"
-            )
+            parts.append(f"Node.js dependencies for {', '.join(node_failures)} did not refresh")
         if not desktop_build_ok:
-            parts.append(
-                "the desktop app was not rebuilt and is still on the previous build"
-            )
+            parts.append("the desktop app was not rebuilt and is still on the previous build")
         if not sqlite_runtime_ok and sqlite_info is not None:
             parts.append(
                 f"SQLite {sqlite_info.sqlite_version_string} still has the "
@@ -538,9 +513,7 @@ def _restore_state_db_from_snapshot(state_path: Path, snap_state: Path) -> bool:
             "handles (or restart Hermes) and retry."
         )
         return False
-    restored = verify_sqlite_integrity(
-        state_path, check_header=True, run_pragma=True
-    )
+    restored = verify_sqlite_integrity(state_path, check_header=True, run_pragma=True)
     return bool(restored.get("valid"))
 
 
@@ -555,11 +528,7 @@ def _verify_and_restore_one_state_db(home: Path, *, label: str) -> None:
             return
         ok = verify_sqlite_integrity(state_path, check_header=True, run_pragma=True)
         if ok.get("valid"):
-            logger.debug(
-                "Post-update state.db integrity OK (%s): %s",
-                label,
-                ok.get("message"),
-            )
+            logger.debug("Post-update state.db integrity OK (%s): %s", label, ok.get("message"))
             return
         print()
         print(
@@ -576,29 +545,20 @@ def _verify_and_restore_one_state_db(home: Path, *, label: str) -> None:
             snap_state = snap_dir / "state.db"
             if not snap_state.exists():
                 continue
-            snap_ok = verify_sqlite_integrity(
-                snap_state, check_header=True, run_pragma=True
-            )
+            snap_ok = verify_sqlite_integrity(snap_state, check_header=True, run_pragma=True)
             if not snap_ok.get("valid"):
                 continue
             try:
                 if _restore_state_db_from_snapshot(state_path, snap_state):
-                    print(
-                        f"  ✓ Auto-restored from snapshot {snap_dir.name} ({label})"
-                    )
+                    print(f"  ✓ Auto-restored from snapshot {snap_dir.name} ({label})")
                 else:
-                    print(
-                        "  ✗ Auto-restore FAILED — restored copy also failed "
-                        "integrity"
-                    )
+                    print("  ✗ Auto-restore FAILED — restored copy also failed integrity")
             except OSError as exc:
                 print(f"  ✗ Auto-restore file copy failed: {exc}")
             return
         print("  ⚠ No valid pre-update snapshot found for this home")
     except Exception as exc:
-        logger.debug(
-            "Post-update state.db guard (%s) failed: %s", label, exc
-        )
+        logger.debug("Post-update state.db guard (%s) failed: %s", label, exc)
 
 
 def _verify_and_restore_state_dbs_post_update() -> None:
@@ -622,15 +582,10 @@ def _print_bundled_skills_sync_report() -> None:
     if result["copied"]:
         print(f"  + {len(result['copied'])} new: {', '.join(result['copied'])}")
     if result.get("updated"):
-        print(
-            f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}"
-        )
+        print(f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}")
     if result.get("user_modified"):
         print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
-        print(
-            "    → see them: hermes skills list-modified  "
-            "(diff/reset to resume updates)"
-        )
+        print("    → see them: hermes skills list-modified  (diff/reset to resume updates)")
     if result.get("cleaned"):
         print(f"  − {len(result['cleaned'])} removed from manifest")
     if result.get("relocated"):
@@ -684,9 +639,7 @@ def _ensure_fhs_path_guard() -> None:
         return  # already on PATH, nothing to do
 
     path_line = 'export PATH="/usr/local/bin:$PATH"'
-    path_comment = (
-        "# Hermes Agent — ensure /usr/local/bin is on PATH " "(RHEL non-login shells)"
-    )
+    path_comment = "# Hermes Agent — ensure /usr/local/bin is on PATH (RHEL non-login shells)"
     wrote_any = False
     for candidate in (".bashrc", ".bash_profile"):
         cfg = Path(home) / candidate
@@ -775,9 +728,7 @@ def _resolve_pre_update_backup_mode(args) -> str:
 
         cfg = load_config()
     except Exception as exc:
-        logger.debug(
-            "Could not load config for pre-update backup: %s", exc
-        )
+        logger.debug("Could not load config for pre-update backup: %s", exc)
         cfg = {}
 
     updates_cfg = cfg.get("updates", {}) if isinstance(cfg, dict) else {}
@@ -794,9 +745,7 @@ def _resolve_pre_update_backup_mode(args) -> str:
         return "full"
     if mode == "quick":
         return "quick"
-    logger.warning(
-        "Unknown updates.pre_update_backup value %r — using 'quick'", raw
-    )
+    logger.warning("Unknown updates.pre_update_backup value %r — using 'quick'", raw)
     return "quick"
 
 
@@ -848,9 +797,7 @@ def _run_pre_update_backup(args) -> Optional[str]:
                 )
                 if not _integrity.get("valid"):
                     _msg = _integrity.get("message", "unknown error")
-                    print(
-                        f"  ⚠ state.db integrity check FAILED after snapshot: {_msg}"
-                    )
+                    print(f"  ⚠ state.db integrity check FAILED after snapshot: {_msg}")
                     _snap_root = _quick_snapshot_root(_get_home())
                     _snap_state = _snap_root / snapshot_id / "state.db"
                     if _snap_state.exists():
@@ -858,21 +805,15 @@ def _run_pre_update_backup(args) -> Optional[str]:
                             _snap_state, check_header=True, run_pragma=True
                         )
                         if _snap_ok.get("valid"):
-                            print(
-                                "  ✓ Snapshot copy is valid — continuing update."
-                            )
-                            print(
-                                "    If state.db is lost after update it will be auto-restored."
-                            )
+                            print("  ✓ Snapshot copy is valid — continuing update.")
+                            print("    If state.db is lost after update it will be auto-restored.")
                         else:
                             print(
                                 "  ✗ Snapshot copy ALSO failed integrity — "
                                 "the source was already corrupted before the backup."
                             )
                     else:
-                        print(
-                            "  ⚠ Snapshot does not contain state.db (was skipped or too large)."
-                        )
+                        print("  ⚠ Snapshot does not contain state.db (was skipped or too large).")
                     print()
         if snapshot_id:
             print(f"◆ Pre-update snapshot: {snapshot_id}")
@@ -887,10 +828,7 @@ def _run_pre_update_backup(args) -> Optional[str]:
                 max_file_size=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
             )
             if _sibling_snaps:
-                print(
-                    f"◆ Sibling profile snapshot(s): "
-                    + ", ".join(sorted(_sibling_snaps))
-                )
+                print(f"◆ Sibling profile snapshot(s): " + ", ".join(sorted(_sibling_snaps)))
                 _record_update_step(
                     "sibling_profile_snapshots",
                     True,
@@ -911,9 +849,7 @@ def _run_pre_update_backup(args) -> Optional[str]:
     try:
         from hermes_cli.backup import create_pre_update_backup
     except Exception as exc:
-        print(
-            f"⚠ Pre-update backup: could not load backup module ({exc}); continuing update."
-        )
+        print(f"⚠ Pre-update backup: could not load backup module ({exc}); continuing update.")
         print()
         return snapshot_id
 
@@ -975,9 +911,7 @@ def _sweep_bytecode_after_update(branch: str) -> None:
     from hermes_cli.update_cmd import _m
     removed = _m()._clear_bytecode_cache(_m().PROJECT_ROOT)
     if removed:
-        print(
-            f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
-        )
+        print(f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}")
     _m()._record_bytecode_fingerprint()
     _m()._refresh_bootstrap_cache_scripts(branch)
 
@@ -1136,9 +1070,7 @@ def _run_post_update_maintenance(
 
             _update_cfg = (load_config() or {}).get("updates", {})
             if isinstance(_update_cfg, dict):
-                refresh_cua_driver = bool(
-                    _update_cfg.get("refresh_cua_driver", True)
-                )
+                refresh_cua_driver = bool(_update_cfg.get("refresh_cua_driver", True))
 
         if (
             refresh_cua_driver

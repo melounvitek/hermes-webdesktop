@@ -140,15 +140,13 @@ def _zip_overlay_block_reason(
     # swap, so they must not cause a false refusal. Everything else — including ignored files — blocks.
     lines = [line for line in lines if not _is_zip_preserved_entry_status_line(line)]
     if ignore_staging_artifacts:
-        lines = [
-            line for line in lines if not _is_zip_staging_artifact_status_line(line)
-        ]
+        lines = [line for line in lines if not _is_zip_staging_artifact_status_line(line)]
     if lines:
         return "the working tree has uncommitted changes or untracked files"
     return None
 
 
-_ZIP_STAGING_ARTIFACT_SUFFIXES = (".hermes-update-staging", ".hermes-update-old")
+_ZIP_STAGING_ARTIFACT_SUFFIXES = ".hermes-update-staging", ".hermes-update-old"
 
 
 # Single source of truth for entries the ZIP swap preserves — used by the dirty-tree filter and the swap loop.
@@ -166,9 +164,7 @@ def _is_zip_preserved_entry_status_line(line: str) -> bool:
     is_rename = any(code in "RC" for code in status)
     paths = payload.split(" -> ") if is_rename else [payload]
     for path in paths:
-        top_level = (
-            path.strip().strip('"').replace("\\", "/").rstrip("/").split("/", 1)[0]
-        )
+        top_level = path.strip().strip('"').replace("\\", "/").rstrip("/").split("/", 1)[0]
         if top_level not in _ZIP_PRESERVED_TOP_LEVEL:
             return False
     return True
@@ -177,9 +173,7 @@ def _is_zip_preserved_entry_status_line(line: str) -> bool:
 def _is_zip_staging_artifact_status_line(line: str) -> bool:
     """True when a porcelain status line is our own two-phase-swap artifact."""
     payload = line[3:] if len(line) >= 3 else line
-    top_level = (
-        payload.strip().strip('"').replace("\\", "/").rstrip("/").split("/", 1)[0]
-    )
+    top_level = payload.strip().strip('"').replace("\\", "/").rstrip("/").split("/", 1)[0]
     return top_level.endswith(_ZIP_STAGING_ARTIFACT_SUFFIXES)
 
 
@@ -233,9 +227,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
                 # Unix mode lives in the upper 16 bits of external_attr; mask to the file-type bits.
                 mode = (member.external_attr >> 16) & 0o170000
                 if _stat.S_ISLNK(mode):
-                    raise ValueError(
-                        f"ZIP contains unsupported symlink member: {member.filename}"
-                    )
+                    raise ValueError(f"ZIP contains unsupported symlink member: {member.filename}")
             zf.extractall(tmp_dir)
 
         # GitHub ZIPs extract to hermes-agent-<branch>/
@@ -284,9 +276,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
                 # it deletes the build and breaks the shortcut. Graft the live release dir in BEFORE the swap.
                 if item == "apps":
                     live_release = os.path.join(dst, "desktop", "release")
-                    staged_release = os.path.join(
-                        staged[-1][0], "desktop", "release"
-                    )
+                    staged_release = os.path.join(staged[-1][0], "desktop", "release")
                     if os.path.isdir(live_release) and not os.path.exists(
                         staged_release
                     ):
@@ -416,10 +406,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     # prevent. Refuse rather than lie.
     branch = _m()._resolve_update_branch(args)
     if branch != "main":
-        print(
-            f"✗ --branch={branch} is not supported on the Windows ZIP-fallback "
-            "update path."
-        )
+        print(f"✗ --branch={branch} is not supported on the Windows ZIP-fallback " "update path.")
         print(
             "  This path runs when git file I/O is broken on the system. "
             "Either resolve the git-side breakage (typically an antivirus "
@@ -428,9 +415,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
         )
         _m().sys.exit(1)
     _abort_zip_update_if_dirty_tree()
-    zip_url = (
-        f"https://github.com/NousResearch/hermes-agent/archive/refs/heads/{branch}.zip"
-    )
+    zip_url = f"https://github.com/NousResearch/hermes-agent/archive/refs/heads/{branch}.zip"
 
     _download_and_swap_zip(branch, zip_url)
 
@@ -447,9 +432,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     # Verify the tree imports (catches the parse-OK-but-skewed tree an interrupted copy leaves). Runs
     # *after* the dep reinstall so a genuinely-new third-party requirement isn't misreported as a partial
     # copy. No SHA to roll back to — surface a concrete recovery step instead of success over a bricked install.
-    import_ok, failing_module, import_error = _validate_critical_modules_import(
-        _m().PROJECT_ROOT
-    )
+    import_ok, failing_module, import_error = _validate_critical_modules_import(_m().PROJECT_ROOT)
     if not import_ok:
         print()
         print("✗ Update left the install in an unimportable state:")
@@ -495,7 +478,5 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     with _best_effort('Update receipt finalize (zip path) failed: %s'):
         from hermes_cli.update_receipt import finalize_update_receipt
 
-        finalize_update_receipt(
-            "success" if update_complete and not node_failures else "partial"
-        )
+        finalize_update_receipt("success" if update_complete and not node_failures else "partial")
     return update_complete

@@ -29,9 +29,7 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
 
     from datetime import datetime, timezone
 
-    stash_name = datetime.now(timezone.utc).strftime(
-        f"{_AUTOSTASH_NAME_PREFIX}%Y%m%d-%H%M%S"
-    )
+    stash_name = datetime.now(timezone.utc).strftime(f"{_AUTOSTASH_NAME_PREFIX}%Y%m%d-%H%M%S")
     print("→ Local changes detected — stashing before update...")
     prev_stash = _git_run(git_cmd, ["rev-parse", "--verify", "refs/stash"], cwd).stdout.strip()
     push = _git_run(git_cmd, ["stash", "push", "--include-untracked", "-m", stash_name], cwd)
@@ -39,9 +37,7 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
         print(push.stdout.strip())
     stash_probe = _git_run(git_cmd, ["rev-parse", "--verify", "refs/stash"], cwd)
     stash_ref = stash_probe.stdout.strip()
-    stash_created = (
-        stash_probe.returncode == 0 and bool(stash_ref) and stash_ref != prev_stash
-    )
+    stash_created = stash_probe.returncode == 0 and bool(stash_ref) and stash_ref != prev_stash
 
     if push.returncode != 0:
         if stash_created:
@@ -59,11 +55,7 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
             )
             # A partially-failed push also skips cleanup of TRACKED modifications;
             # they'd break the following pull. Safe to reset: all is in the stash.
-            subprocess.run(
-                git_cmd + ["reset", "--hard", "HEAD"],
-                cwd=cwd,
-                capture_output=True,
-            )
+            subprocess.run(git_cmd + ["reset", "--hard", "HEAD"], cwd=cwd, capture_output=True)
         else:
             # No entry created: changes NOT saved — bail before touching HEAD.
             print("✗ Could not stash local changes — update aborted.")
@@ -115,9 +107,7 @@ def _warn_orphaned_update_autostashes(git_cmd: list[str], cwd: Path) -> int:
         stash_list = _git_run(git_cmd, ["stash", "list", "--format=%gd %s"], cwd)
         if stash_list.returncode != 0:
             return 0
-        cutoff = datetime.now(timezone.utc) - timedelta(
-            days=_AUTOSTASH_WARN_AGE_DAYS
-        )
+        cutoff = datetime.now(timezone.utc) - timedelta(days=_AUTOSTASH_WARN_AGE_DAYS)
         marker = _AUTOSTASH_NAME_PREFIX
         stale: list[tuple[str, str]] = []
         for line in stash_list.stdout.splitlines():
@@ -127,9 +117,7 @@ def _warn_orphaned_update_autostashes(git_cmd: list[str], cwd: Path) -> int:
                 continue
             stamp = subject[pos + len(marker):][:15]  # "YYYYMMDD-HHMMSS"
             try:
-                stash_time = datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(
-                    tzinfo=timezone.utc
-                )
+                stash_time = datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
             except ValueError:
                 continue  # age unknown — leave it alone rather than guess
             if stash_time < cutoff:
@@ -156,9 +144,7 @@ def _warn_orphaned_update_autostashes(git_cmd: list[str], cwd: Path) -> int:
 def _print_stash_cleanup_guidance(
     stash_ref: str, stash_selector: Optional[str] = None
 ) -> None:
-    print(
-        "  Check `git status` first so you don't accidentally reapply the same change twice."
-    )
+    print("  Check `git status` first so you don't accidentally reapply the same change twice.")
     print("  Find the saved entry with: git stash list --format='%gd %H %s'")
     if stash_selector:
         print(f"  Remove it with: git stash drop {stash_selector}")
@@ -216,10 +202,7 @@ def _git_untracked_paths(git_cmd: list[str], cwd: Path) -> set[str] | None:
     except (OSError, subprocess.SubprocessError):
         result = None
     if result is None or result.returncode != 0:
-        print(
-            "  ⚠ Could not enumerate untracked files while validating the "
-            "restored stash."
-        )
+        print("  ⚠ Could not enumerate untracked files while validating the restored stash.")
         return None
     return {path for path in result.stdout.split("\0") if path}
 
@@ -276,9 +259,7 @@ def _reject_unsafe_stash_restore(
         else set()
     )
     try:
-        reset = subprocess.run(
-            git_cmd + ["reset", "--hard", "HEAD"], cwd=cwd, capture_output=True
-        )
+        reset = subprocess.run(git_cmd + ["reset", "--hard", "HEAD"], cwd=cwd, capture_output=True)
     except (OSError, subprocess.SubprocessError):
         reset = None
 
@@ -340,9 +321,7 @@ def _restore_stashed_changes(
         prompt_suffix = "[y/N]" if remote_prompt else "[Y/n]"
         print()
         print("⚠ Local changes were stashed before updating.")
-        print(
-            "  Restoring them may reapply local customizations onto the updated codebase."
-        )
+        print("  Restoring them may reapply local customizations onto the updated codebase.")
         print("  Review the result afterward if Hermes behaves unexpectedly.")
         print(f"Restore local changes now? {prompt_suffix}")
         if input_fn is not None:
@@ -364,9 +343,7 @@ def _restore_stashed_changes(
         print("  The stash was not restored because its cleanup baseline is unknown.")
         print(f"  Restore manually with: git stash apply {stash_ref}")
         return False
-    clean_import_failures = _critical_module_import_failures(
-        cwd, report_runtime_errors=True
-    )
+    clean_import_failures = _critical_module_import_failures(cwd, report_runtime_errors=True)
     print("→ Restoring local changes...")
     restore = _git_run(git_cmd, ["stash", "apply", stash_ref], cwd)
 
@@ -400,11 +377,7 @@ def _restore_stashed_changes(
         print(f"  Stash ref: {stash_ref}")
 
         # Always reset: conflict markers make hermes unrunnable; changes stay in the stash.
-        subprocess.run(
-            git_cmd + ["reset", "--hard", "HEAD"],
-            cwd=cwd,
-            capture_output=True,
-        )
+        subprocess.run(git_cmd + ["reset", "--hard", "HEAD"], cwd=cwd, capture_output=True)
         print("Working tree reset to clean state.")
         print(f"Restore your changes later with: git stash apply {stash_ref}")
         # Don't exit: code update succeeded; cmd_update continues (deps, skills, gateway).
@@ -420,9 +393,7 @@ def _restore_stashed_changes(
             "restored Python source discovery",
             "could not determine which restored Python files require validation",
         )
-    syntax_ok, failing_path, syntax_error = _validate_python_files_syntax(
-        cwd, restored_python
-    )
+    syntax_ok, failing_path, syntax_error = _validate_python_files_syntax(cwd, restored_python)
     if not syntax_ok:
         _reject_unsafe_stash_restore(
             git_cmd,
@@ -433,9 +404,7 @@ def _restore_stashed_changes(
             syntax_error,
         )
 
-    restored_import_failures = _critical_module_import_failures(
-        cwd, report_runtime_errors=True
-    )
+    restored_import_failures = _critical_module_import_failures(cwd, report_runtime_errors=True)
     changed_import_failure = next(
         (
             (module, error)
@@ -457,9 +426,7 @@ def _restore_stashed_changes(
 
     stash_selector = _resolve_stash_selector(git_cmd, cwd, stash_ref)
     if stash_selector is None:
-        print(
-            "⚠ Local changes were restored, but Hermes couldn't find the stash entry to drop."
-        )
+        print("⚠ Local changes were restored, but Hermes couldn't find the stash entry to drop.")
         print(
             "  The stash was left in place. You can remove it manually after checking the result."
         )
@@ -467,9 +434,7 @@ def _restore_stashed_changes(
     else:
         drop = _git_run(git_cmd, ["stash", "drop", stash_selector], cwd)
         if drop.returncode != 0:
-            print(
-                "⚠ Local changes were restored, but Hermes couldn't drop the saved stash entry."
-            )
+            print("⚠ Local changes were restored, but Hermes couldn't drop the saved stash entry.")
             if drop.stdout.strip():
                 print(drop.stdout.strip())
             if drop.stderr.strip():

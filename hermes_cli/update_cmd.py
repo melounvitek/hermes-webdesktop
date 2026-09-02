@@ -351,11 +351,7 @@ def _gateway_prompt(prompt_text: str, default: str = "", timeout: float = 300.0)
 
     response_path.unlink(missing_ok=True)
 
-    payload = {
-        "prompt": prompt_text,
-        "default": default,
-        "id": str(_uuid.uuid4()),
-    }
+    payload = {"prompt": prompt_text, "default": default, "id": str(_uuid.uuid4())}
     tmp = prompt_path.with_suffix(".tmp")
     tmp.write_text(_json.dumps(payload), encoding="utf-8")
     tmp.replace(prompt_path)
@@ -510,9 +506,7 @@ def _write_marker_file(path: Path, *, label: str) -> None:
         logger.debug("Skipping %s marker under pytest (live checkout)", label)
         return
     try:
-        path.write_text(
-            f"started={_time.time()}\npid={os.getpid()}\n", encoding="utf-8"
-        )
+        path.write_text(f"started={_time.time()}\npid={os.getpid()}\n", encoding="utf-8")
     except OSError as exc:
         logger.debug("Could not write %s marker: %s", label, exc)
 
@@ -673,10 +667,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
 
     if branch == "main":
         # Probe locally for an 'upstream' remote before a network fetch non-forks always fail.
-        has_upstream_remote = (
-            _git_run(git_cmd, ["remote", "get-url", "upstream"]).returncode
-            == 0
-        )
+        has_upstream_remote = _git_run(git_cmd, ["remote", "get-url", "upstream"]).returncode == 0
         fetch_result = None
         if has_upstream_remote:
             print("→ Fetching from upstream...")
@@ -759,10 +750,7 @@ def _repair_current_checkout(
     runtime_repairs = []
     update_managed_uv(repair_observer=runtime_repairs.append)
     ensure_uv(repair_observer=runtime_repairs.append)
-    runtime_repaired = next(
-        (result for result in runtime_repairs if result.repaired),
-        None,
-    )
+    runtime_repaired = next((result for result in runtime_repairs if result.repaired), None)
 
     # A current checkout does NOT imply a healthy install (a prior sync may have died
     # partway, e.g. Windows locked .pyd); probe or "Already up to date!" hides a bricked venv.
@@ -792,11 +780,7 @@ def _repair_current_checkout(
         ).exists()
         if venv_python_missing and repair_uv:
             print("→ Recreating virtual environment...")
-            subprocess.run(
-                [repair_uv, "venv", "venv"],
-                cwd=_m().PROJECT_ROOT,
-                check=False,
-            )
+            subprocess.run([repair_uv, "venv", "venv"], cwd=_m().PROJECT_ROOT, check=False)
         if repair_uv:
             # Isolated from third-party UV env vars, like the other dependency syncs.
             from hermes_cli.managed_uv import managed_python_env
@@ -842,9 +826,7 @@ def _repair_current_checkout(
                 desktop_dir,
                 had_desktop_app_before_update=had_desktop_app_before_update,
             ):
-                current_checkout_complete = _print_verified_update_completion(
-                    "✓ Update complete!"
-                )
+                current_checkout_complete = _print_verified_update_completion("✓ Update complete!")
             else:
                 current_checkout_complete = False
                 _print_update_completion(
@@ -870,9 +852,7 @@ def _repair_current_checkout(
         )
     if runtime_repaired is not None and not _m()._is_windows():
         print()
-        print(
-            "⚠ Restart required to finish the managed Python runtime repair."
-        )
+        print("⚠ Restart required to finish the managed Python runtime repair.")
         print(
             "  Any running Hermes gateways, Desktop backends, or other "
             "long-lived processes still use the previous runtime."
@@ -904,10 +884,7 @@ def _pull_updates(
         if pull_result.returncode != 0:
             # Diverged. A custom branch (local commits atop origin/<branch>) also can't ff,
             # and reset --hard would discard that work: merge instead, stop on conflict.
-            _cur_branch = (
-                _git_run(git_cmd, ["branch", "--show-current"]).stdout
-                or ""
-            ).strip()
+            _cur_branch = (_git_run(git_cmd, ["branch", "--show-current"]).stdout or "").strip()
             if _cur_branch and _cur_branch != branch:
                 print(
                     f"  ⚠ Checkout is on custom branch '{_cur_branch}' — "
@@ -937,9 +914,7 @@ def _pull_updates(
                         f"  Resolve manually: cd {_m().PROJECT_ROOT} && "
                         f"git merge origin/{branch}"
                     )
-                    print(
-                        "  Then re-run the update. Local work is untouched."
-                    )
+                    print("  Then re-run the update. Local work is untouched.")
                     sys.exit(1)
             else:
                 # Same branch: a true upstream force-push/rebase; local changes are stashed, so
@@ -986,15 +961,11 @@ def _pull_updates(
                     print(f"✗ Failed to reset to origin/{branch}.")
                     if reset_result.stderr.strip():
                         print(f"  {reset_result.stderr.strip()}")
-                    print(
-                        f"  Try manually: git fetch origin && git reset --hard origin/{branch}"
-                    )
+                    print(f"  Try manually: git fetch origin && git reset --hard origin/{branch}")
                     sys.exit(1)
 
         # Post-pull syntax guard: a bad commit past CI (admin-merge) is rolled back so the CLI stays bootable.
-        syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(
-            _m().PROJECT_ROOT
-        )
+        syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(_m().PROJECT_ROOT)
         if not syntax_ok:
             print()
             print("✗ Pulled code has a syntax error in a critical file:")
@@ -1026,17 +997,11 @@ def _pull_updates(
         if auto_stash_ref is not None:
             # No stash restore if the update failed — tree state is unknown.
             if not update_succeeded:
-                print(
-                    f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
-                )
+                print(f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})")
                 print("  Restore manually with: git stash apply")
             elif discard_local_changes:
                 # Non-interactive + updates.non_interactive_local_changes: discard.
-                _m()._discard_stashed_changes(
-                    git_cmd,
-                    _m().PROJECT_ROOT,
-                    auto_stash_ref,
-                )
+                _m()._discard_stashed_changes(git_cmd, _m().PROJECT_ROOT, auto_stash_ref)
             elif keep_stash:
                 # --keep-stash (desktop updater): leave edits parked rather than re-apply silently.
                 _m()._park_stashed_changes(auto_stash_ref)
@@ -1106,9 +1071,7 @@ def _prepare_checkout_for_update(
                 "⚠ Update finished — code update SKIPPED"
                 f"{_branch_head_suffix(git_cmd, _m().PROJECT_ROOT)}"
             )
-            _m()._resume_windows_gateways_after_update(
-                _windows_gateway_resume
-            )
+            _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
             sys.exit(1)
         if switch_block_reason.startswith("unmerged:"):
             _in_place_configured = False
@@ -1148,10 +1111,7 @@ def _prepare_checkout_for_update(
 
     if not in_place_update and current_branch != branch:
         if current_branch == "HEAD":
-            print(
-                f"  ⚠ Currently on detached HEAD — switching to {branch} "
-                "for update..."
-            )
+            print(f"  ⚠ Currently on detached HEAD — switching to {branch} " "for update...")
         auto_stash_ref = _m()._stash_local_changes_if_needed(git_cmd, _m().PROJECT_ROOT)
         checkout_result = _git_run(git_cmd, ["checkout", branch])
         if checkout_result.returncode != 0:
@@ -1323,9 +1283,7 @@ def _begin_update_receipt_and_plan(args):
         record_plan_in_receipt(_pre_update_plan)
         if _pre_update_plan.runtimes:
             _n = len(_pre_update_plan.runtimes)
-            _profiles = ", ".join(
-                sorted({r.profile for r in _pre_update_plan.runtimes})
-            )
+            _profiles = ", ".join(sorted({r.profile for r in _pre_update_plan.runtimes}))
             print(f"→ Fleet: {_n} running service(s) across profiles: {_profiles}")
 
     # Windows: another hermes.exe holding the venv shim means WinError 32 spam and a
@@ -1336,15 +1294,9 @@ def _begin_update_receipt_and_plan(args):
         if scripts_dir is not None:
             concurrent = _m()._detect_concurrent_hermes_instances(scripts_dir)
             if concurrent:
-                non_gateway = _m()._filter_non_gateway_concurrent_instances(
-                    concurrent
-                )
+                non_gateway = _m()._filter_non_gateway_concurrent_instances(concurrent)
                 if non_gateway:
-                    print(
-                        _format_concurrent_instances_message(
-                            non_gateway, scripts_dir
-                        )
-                    )
+                    print(_format_concurrent_instances_message(non_gateway, scripts_dir))
                     sys.exit(2)
     return _pre_update_plan
 
@@ -1360,9 +1312,7 @@ def _prepare_git_command() -> tuple[bool, list, bool]:
             use_zip_update = True
         else:
             print("✗ Not a git repository. Please reinstall:")
-            print(
-                "  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
-            )
+            print("  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash")
             sys.exit(1)
 
     # Windows git can fail "unable to write loose object file: Invalid argument" (fs atomicity).
@@ -1590,10 +1540,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
     if _windows_gateway_resume:
         import atexit as _atexit
 
-        _atexit.register(
-            _m()._resume_windows_gateways_after_update,
-            _windows_gateway_resume,
-        )
+        _atexit.register(_m()._resume_windows_gateways_after_update, _windows_gateway_resume)
 
     # Any venv python still running (typically the Desktop `hermes serve` backend) keeps .pyd
     # locked and would corrupt the sync; refuse rather than race (the app respawns a killed

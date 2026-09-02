@@ -21,13 +21,7 @@ logger = logging.getLogger("hermes_cli.update_cmd")
 
 
 # Files defining the editable install; a pull touching none of them cannot invalidate it.
-_INSTALL_DEFINING_FILES = (
-    "pyproject.toml",
-    "setup.py",
-    "setup.cfg",
-    "MANIFEST.in",
-    "uv.lock",
-)
+_INSTALL_DEFINING_FILES = "pyproject.toml", "setup.py", "setup.cfg", "MANIFEST.in", "uv.lock"
 
 
 def _editable_install_is_current(git_cmd, cwd, pre_pull_sha: str | None) -> bool:
@@ -59,12 +53,7 @@ def _editable_install_is_current(git_cmd, cwd, pre_pull_sha: str | None) -> bool
 
 # Modules imported on every startup. Unlike _UPDATE_CRITICAL_FILES (only parsed) these are
 # *imported*, catching cross-module breakage (a name pulled from a sibling no longer exists).
-_UPDATE_CRITICAL_MODULES = (
-    "hermes_cli.main",
-    "run_agent",
-    "model_tools",
-    "toolsets",
-)
+_UPDATE_CRITICAL_MODULES = "hermes_cli.main", "run_agent", "model_tools", "toolsets"
 
 
 def _critical_module_import_failures(
@@ -116,9 +105,7 @@ def _critical_module_import_failures(
     try:
         interpreter = sys.executable
         with suppress(Exception):
-            venv_python = venv_python_path(
-                Path(root) / "venv", windows=_m()._is_windows()
-            )
+            venv_python = venv_python_path(Path(root) / "venv", windows=_m()._is_windows())
             if venv_python.exists():
                 interpreter = str(venv_python)
         result = subprocess.run(
@@ -160,10 +147,7 @@ def _critical_module_import_failures(
             for item in failures
         ):
             raise ValueError("invalid import-health payload")
-        return {
-            str(module): (str(kind), str(detail))
-            for module, kind, detail in failures
-        }
+        return {str(module): (str(kind), str(detail)) for module, kind, detail in failures}
     except (TypeError, ValueError):
         return {
             "critical-module probe": (
@@ -177,9 +161,7 @@ def _validate_critical_modules_import(
     root, *, report_runtime_errors: bool = False
 ) -> tuple[bool, str | None, str | None]:
     """Return the first critical-module import failure, if any."""
-    failures = _critical_module_import_failures(
-        root, report_runtime_errors=report_runtime_errors
-    )
+    failures = _critical_module_import_failures(root, report_runtime_errors=report_runtime_errors)
     if failures:
         module = next(iter(failures))
         return False, module, failures[module][1]
@@ -423,20 +405,14 @@ def _refresh_active_lazy_features(
     # wiped. Unavailable probes are indeterminate, not healthy — keep the lazy marker.
     status = _m()._repair_venv_via_import_probes(install_cmd_prefix, env=env)
     if status == "repaired":
-        print(
-            "  Lazy backend(s) keep their previous version until refresh succeeds."
-        )
+        print("  Lazy backend(s) keep their previous version until refresh succeeds.")
         return True
     if status == "healthy":
-        print(
-            "  Lazy backend(s) keep their previous version; probed packages look intact."
-        )
+        print("  Lazy backend(s) keep their previous version; probed packages look intact.")
         print("  Rerun `hermes update` once the upstream issue is resolved.")
         return True
     if status == "indeterminate":
-        print(
-            "  ⚠ Leaving `.lazy-refresh-incomplete` until import probes can confirm health."
-        )
+        print("  ⚠ Leaving `.lazy-refresh-incomplete` until import probes can confirm health.")
     return False
 
 
@@ -553,9 +529,7 @@ def _npm_manifest_paths() -> tuple[Path, ...]:
     root_pkg = _m().PROJECT_ROOT / "package.json"
     paths = [_m().PROJECT_ROOT / "package-lock.json", root_pkg]
     with suppress(OSError, json.JSONDecodeError, TypeError):
-        workspaces = json.loads(root_pkg.read_text(encoding="utf-8")).get(
-            "workspaces", []
-        )
+        workspaces = json.loads(root_pkg.read_text(encoding="utf-8")).get("workspaces", [])
         if isinstance(workspaces, dict):  # legacy {"packages": [...]} form
             workspaces = workspaces.get("packages", [])
         for pattern in workspaces:
@@ -645,9 +619,7 @@ def _repair_node_deps_on_current_checkout(
     if node_failures:
         print(f"  ⚠ Node.js refresh failed for: {', '.join(node_failures)}")
         print("    Fix npm and re-run `hermes update`.")
-        print_completion(
-            "⚠ Checkout is current, but Node.js dependencies could not be repaired."
-        )
+        print_completion("⚠ Checkout is current, but Node.js dependencies could not be repaired.")
         return False
     # Pair with the web build like every other call site; it staleness-checks internally.
     _m()._build_web_ui(_m().PROJECT_ROOT / "web")
@@ -1068,9 +1040,7 @@ def _venv_foreign_owned_paths(venv_root, limit: int = 5) -> list:
         _scan_dir(venv_root / "bin")
 
         # First lib/python*/site-packages (POSIX venv layout).
-        site_packages = next(
-            iter(sorted(venv_root.glob("lib/python*/site-packages"))), None
-        )
+        site_packages = next(iter(sorted(venv_root.glob("lib/python*/site-packages"))), None)
         if site_packages is not None:
             _scan_dir(site_packages, recurse_dist_info=True)
 
@@ -1125,9 +1095,7 @@ def _sync_python_dependencies_after_pull(
     # Drop the core-install breadcrumb BEFORE touching the venv so a killed install is finished
     # by the next launch (``_recover_from_interrupted_install``). Lazy refresh uses its own marker.
     _write_update_incomplete_marker()
-    deps_current = _editable_install_is_current(
-        git_cmd, _m().PROJECT_ROOT, pre_pull_sha
-    )
+    deps_current = _editable_install_is_current(git_cmd, _m().PROJECT_ROOT, pre_pull_sha)
     if deps_current:
         print("→ Python dependencies unchanged — skipping reinstall")
     else:
@@ -1181,9 +1149,7 @@ def _sync_python_dependencies_after_pull(
     if deps_current:
         # Verification normally runs inside the skipped install; run it here so a wrong skip
         # self-heals (both verifiers reinstall what they find missing).
-        _m()._verify_core_dependencies_installed(
-            install_prefix, env=lazy_env, group=install_group
-        )
+        _m()._verify_core_dependencies_installed(install_prefix, env=lazy_env, group=install_group)
         _m()._verify_console_scripts_installed(install_prefix, env=lazy_env)
 
     # Clear the core breadcrumb before lazy refresh, which uses its own marker so a lazy
@@ -1214,20 +1180,14 @@ def _sync_python_dependencies_after_pull(
             "to finish import-based venv repair."
         )
 
-    _m()._restore_active_tool_dependencies(
-        active_tool_dependencies,
-        install_prefix,
-        env=lazy_env,
-    )
+    _m()._restore_active_tool_dependencies(active_tool_dependencies, install_prefix, env=lazy_env)
 
     # Heal memory-provider bridge packages last — the steps above may have stripped them.
     _m()._refresh_active_memory_provider_dependencies()
 
     # Remaining import failures are real breakage. Warn only — never roll back: `cannot import
     # name X` is also the stale-bytecode signature, which self-heals next launch.
-    import_ok, failing_module, import_error = _validate_critical_modules_import(
-        _m().PROJECT_ROOT
-    )
+    import_ok, failing_module, import_error = _validate_critical_modules_import(_m().PROJECT_ROOT)
     if not import_ok:
         print()
         print(f"  ⚠ {failing_module} still fails to import after updating:")
