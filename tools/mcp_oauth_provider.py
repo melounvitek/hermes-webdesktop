@@ -49,16 +49,17 @@ class HermesProviderMixin:
         return request
 
     def _coerce_client_secret_post(self) -> None:
+        """Same rule as ``HermesTokenStorage._coerce_secret_auth_method``, applied
+        to the in-memory client info right before a token-endpoint request."""
         info = self.context.client_info
-        if not info or not getattr(info, "client_secret", None):
-            return
-        if getattr(info, "token_endpoint_auth_method", None) not in (None, "none", ""):
+        if not info:
             return
         from mcp.shared.auth import OAuthClientInformationFull
+        from tools.mcp_oauth import HermesTokenStorage
 
         data = info.model_dump(mode="json", exclude_none=True)
-        data["token_endpoint_auth_method"] = "client_secret_post"
-        self.context.client_info = OAuthClientInformationFull.model_validate(data)
+        if HermesTokenStorage._coerce_secret_auth_method(data):
+            self.context.client_info = OAuthClientInformationFull.model_validate(data)
 
     async def _exchange_token_authorization_code(self, *args: Any, **kwargs: Any):
         self._coerce_client_secret_post()
