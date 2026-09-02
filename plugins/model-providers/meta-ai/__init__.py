@@ -60,8 +60,7 @@ class MetaAIProfile(ProviderProfile):
 
     # Non-chat model prefixes excluded from the agent picker.  The live
     # /v1/models catalog includes image-generation and transcription models
-    # that are not suitable for agentic chat.  New chat model families
-    # (muse-spark, muse-nova, etc.) pass through automatically.
+    # that are not suitable for agentic chat.
     _NON_CHAT_PREFIXES = ("muse-image-", "muse-voice-")
 
     def fetch_models(
@@ -129,8 +128,7 @@ meta_ai = MetaAIProfile(
     # can finish with empty content. 16k is a safe floor.
     default_max_tokens=16384,
     # Minimal fallback shown when the live /v1/models fetch fails or no
-    # credentials are configured yet. The live catalog is the primary source;
-    # new models appear without a PR.  Keep this list small — just enough so
+    # credentials are configured yet. Keep this list small — just enough so
     # the picker isn't empty when the API is unreachable.
     fallback_models=(
         "muse-spark-1.2",
