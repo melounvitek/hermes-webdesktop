@@ -1179,7 +1179,7 @@ _SCOPED_PROVIDER_REGISTRARS: Tuple[Tuple[str, str, str, str, str, Dict[str, Any]
      {"normalize": "lower", "reject_message": "Plugin '%s' terminal environment provider rejected: %s"}),
     ("register_secret_source", "secret_source", "agent.secret_sources.registry",
      "agent.secret_sources.base:SecretSource", "secret source",
-     {"normalize": None, "register": "register_source"}),
+     {"normalize": None, "register": "register_source", "param": "source"}),
     ("register_tts_provider", "tts_provider", "agent.tts_registry",
      "agent.tts_provider:TTSProvider", "TTS provider", {"normalize": "lower"}),
     ("register_transcription_provider", "transcription_provider", "agent.transcription_registry",
@@ -1227,6 +1227,12 @@ def _make_scoped_provider_registrar(method_name, kind, registry_mod, base_ref, l
     )
 
     def register(self, provider) -> Optional[PluginRegistration]:
+        return _register(self, provider)
+
+    def register_source(self, source) -> Optional[PluginRegistration]:  # secret sources: ``source``
+        return _register(self, source)
+
+    def _register(self, provider):
         registry = importlib.import_module(registry_mod)
         base_class = getattr(importlib.import_module(base_mod), base_attr)
         register_fn = options.get("register")
@@ -1237,10 +1243,11 @@ def _make_scoped_provider_registrar(method_name, kind, registry_mod, base_ref, l
             reject_message=options.get("reject_message"),
         )
 
-    register.__name__ = method_name
-    register.__qualname__ = f"PluginContext.{method_name}"
-    register.__doc__ = _SCOPED_PROVIDER_DOCS[method_name]
-    return _serialized_replacement(register)
+    method = register_source if options.get("param") == "source" else register
+    method.__name__ = method_name
+    method.__qualname__ = f"PluginContext.{method_name}"
+    method.__doc__ = _SCOPED_PROVIDER_DOCS[method_name]
+    return _serialized_replacement(method)
 
 
 for _row in _SCOPED_PROVIDER_REGISTRARS:
