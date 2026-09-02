@@ -43,195 +43,86 @@ from hermes_cli.config import (
 from hermes_constants import OPENROUTER_BASE_URL, secure_parent_dir
 from agent.credential_persistence import sanitize_borrowed_credential_payload
 from utils import atomic_replace, atomic_yaml_write, env_float, is_truthy_value  # noqa: F401  (env_float: agent.credential_pool reads auth_mod.env_float)
-from hermes_cli.auth_zai_kimi import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    KIMI_CODE_BASE_URL,
-    ZAI_ENDPOINTS,
-    _normalize_lmstudio_runtime_base_url,
-    _resolve_kimi_base_url,
-    _resolve_zai_base_url,
-    detect_zai_endpoint,
+from hermes_cli.auth_zai_kimi import (  # noqa: F401  re-exported
+    KIMI_CODE_BASE_URL, ZAI_ENDPOINTS, _normalize_lmstudio_runtime_base_url, _resolve_kimi_base_url,
+    _resolve_zai_base_url, detect_zai_endpoint,
 )
-from hermes_cli.auth_model_picker import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    _prompt_model_selection,
-    _save_model_choice,
+from hermes_cli.auth_model_picker import (  # noqa: F401  re-exported
+    _prompt_model_selection, _save_model_choice,
 )
-from hermes_cli.auth_device_flow import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    _can_open_graphical_browser,
-    _default_verify,
-    _is_remote_session,
-    _nous_device_auth_timeout_message,
-    _offer_existing_oauth_credentials,
-    _poll_device_token_generic,
-    _poll_for_token,
-    _print_device_code_instructions,
-    _print_login_success,
-    _print_loopback_ssh_hint,
-    _prompt_yes_no,
-    _request_device_code,
-    _resolve_verify,
-    _ssh_user_at_host,
+from hermes_cli.auth_device_flow import (  # noqa: F401  re-exported
+    _can_open_graphical_browser, _default_verify, _is_remote_session,
+    _nous_device_auth_timeout_message, _offer_existing_oauth_credentials,
+    _poll_device_token_generic, _poll_for_token, _print_device_code_instructions,
+    _print_login_success, _print_loopback_ssh_hint, _prompt_yes_no, _request_device_code,
+    _resolve_verify, _ssh_user_at_host,
 )
-from hermes_cli.auth_oauth_grants import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    SINGLE_USE_REFRESH_POOL_PROVIDERS,
-    _oauth_heal_clean_marks,
-    _oauth_heal_notices,
-    consume_oauth_heal_notices,
-    heal_forked_single_use_oauth_grants,
+from hermes_cli.auth_oauth_grants import (  # noqa: F401  re-exported
+    SINGLE_USE_REFRESH_POOL_PROVIDERS, _oauth_heal_clean_marks, _oauth_heal_notices,
+    consume_oauth_heal_notices, heal_forked_single_use_oauth_grants,
     strip_cloned_single_use_oauth_grants,
 )
-from hermes_cli.auth_nous import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    NOUS_SESSION_TERMINAL,
-    NOUS_SESSION_UNKNOWN,
-    NOUS_SESSION_VALID,
-    _ALLOWED_NOUS_INFERENCE_HOSTS,
-    _agent_key_is_usable,
-    _apply_nous_refreshed_tokens,
-    _assert_nous_inference_jwt_usable,
-    _compute_nous_auth_status,
-    _format_nous_entitlement_auth_error,
-    _healed_nous_inference_url,
-    _login_nous,
-    _merge_shared_nous_oauth_state,
-    _migrate_stale_nous_portal_url,
-    _nous_device_code_login,
-    _nous_inference_env_override,
-    _nous_invoke_jwt_is_usable,
-    _nous_invoke_jwt_status,
-    _nous_portal_env_override,
-    _nous_shared_store_lock,
-    _nous_shared_store_path,
-    _pool_first_oauth_status,
-    _quarantine_nous_oauth_state,
-    _quarantine_nous_pool_entries,
-    _read_shared_nous_state,
-    _refresh_access_token,
-    _refresh_nous_or_quarantine,
-    _select_nous_invoke_jwt,
-    _sync_nous_pool_from_auth_store,
-    _token_fingerprint,
-    _try_import_shared_nous_state,
-    _validate_nous_inference_url_from_network,
-    _write_shared_nous_state,
-    fetch_nous_models,
-    get_nous_auth_status_local,
-    get_nous_session_validity,
-    persist_nous_credentials,
-    refresh_nous_oauth_from_state,
-    resolve_nous_runtime_credentials,
-    step_up_nous_billing_scope,
+from hermes_cli.auth_nous import (  # noqa: F401  re-exported
+    NOUS_SESSION_TERMINAL, NOUS_SESSION_UNKNOWN, NOUS_SESSION_VALID, _ALLOWED_NOUS_INFERENCE_HOSTS,
+    _agent_key_is_usable, _apply_nous_refreshed_tokens, _assert_nous_inference_jwt_usable,
+    _compute_nous_auth_status, _format_nous_entitlement_auth_error, _healed_nous_inference_url,
+    _login_nous, _merge_shared_nous_oauth_state, _migrate_stale_nous_portal_url,
+    _nous_device_code_login, _nous_inference_env_override, _nous_invoke_jwt_is_usable,
+    _nous_invoke_jwt_status, _nous_portal_env_override, _nous_shared_store_lock,
+    _nous_shared_store_path, _pool_first_oauth_status, _quarantine_nous_oauth_state,
+    _quarantine_nous_pool_entries, _read_shared_nous_state, _refresh_access_token,
+    _refresh_nous_or_quarantine, _select_nous_invoke_jwt, _sync_nous_pool_from_auth_store,
+    _token_fingerprint, _try_import_shared_nous_state, _validate_nous_inference_url_from_network,
+    _write_shared_nous_state, fetch_nous_models, get_nous_auth_status_local,
+    get_nous_session_validity, persist_nous_credentials, refresh_nous_oauth_from_state,
+    resolve_nous_runtime_credentials, step_up_nous_billing_scope,
 )
-from hermes_cli.auth_minimax import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    _MINIMAX_OAUTH_ERROR_BODY_LIMIT,
-    _login_minimax_oauth,
-    _minimax_oauth_login,
-    _minimax_pkce_pair,
-    _minimax_poll_token,
-    _minimax_post_form,
-    _minimax_request_user_code,
-    _minimax_resolve_token_expiry_unix,
-    _minimax_response_error_text,
-    _minimax_save_auth_state,
-    _refresh_minimax_oauth_state,
-    build_minimax_oauth_token_provider,
+from hermes_cli.auth_minimax import (  # noqa: F401  re-exported
+    _MINIMAX_OAUTH_ERROR_BODY_LIMIT, _login_minimax_oauth, _minimax_oauth_login, _minimax_pkce_pair,
+    _minimax_poll_token, _minimax_post_form, _minimax_request_user_code,
+    _minimax_resolve_token_expiry_unix, _minimax_response_error_text, _minimax_save_auth_state,
+    _refresh_minimax_oauth_state, build_minimax_oauth_token_provider,
     resolve_minimax_oauth_runtime_credentials,
 )
-from hermes_cli.auth_xai import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    _login_xai_oauth,
-    _read_xai_oauth_tokens,
-    _refresh_xai_oauth_tokens,
-    _save_xai_oauth_tokens,
-    _write_through_xai_oauth_to_global_root,
-    _xai_access_token_is_expiring,
-    _xai_oauth_device_code_login,
-    _xai_oauth_discovery,
-    _xai_oauth_poll_device_token,
-    _xai_oauth_request_device_code,
-    _xai_proactive_refresh_skew_seconds,
-    _xai_validate_inference_base_url,
-    refresh_xai_oauth_pure,
-    resolve_xai_oauth_runtime_credentials,
+from hermes_cli.auth_xai import (  # noqa: F401  re-exported
+    _login_xai_oauth, _read_xai_oauth_tokens, _refresh_xai_oauth_tokens, _save_xai_oauth_tokens,
+    _write_through_xai_oauth_to_global_root, _xai_access_token_is_expiring,
+    _xai_oauth_device_code_login, _xai_oauth_discovery, _xai_oauth_poll_device_token,
+    _xai_oauth_request_device_code, _xai_proactive_refresh_skew_seconds,
+    _xai_validate_inference_base_url, refresh_xai_oauth_pure, resolve_xai_oauth_runtime_credentials,
 )
-from hermes_cli.auth_codex import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    _codex_access_token_is_expiring,
-    _codex_device_code_login,
-    _codex_http_client,
-    _codex_pool_rate_limit_status,
-    _codex_quota_probe_cache,
-    _codex_usage_probe_url,
-    _import_codex_cli_tokens,
-    _is_codex_rate_limit_shaped,
-    _login_openai_codex,
-    _probe_codex_quota_restored,
-    _read_codex_tokens,
-    _refresh_codex_auth_tokens,
-    _save_codex_tokens,
-    clear_codex_pool_quota_cooldowns,
-    refresh_codex_oauth_pure,
-    resolve_codex_runtime_credentials,
+from hermes_cli.auth_codex import (  # noqa: F401  re-exported
+    _codex_access_token_is_expiring, _codex_device_code_login, _codex_http_client,
+    _codex_pool_rate_limit_status, _codex_quota_probe_cache, _codex_usage_probe_url,
+    _import_codex_cli_tokens, _is_codex_rate_limit_shaped, _login_openai_codex,
+    _probe_codex_quota_restored, _read_codex_tokens, _refresh_codex_auth_tokens, _save_codex_tokens,
+    clear_codex_pool_quota_cooldowns, refresh_codex_oauth_pure, resolve_codex_runtime_credentials,
 )
-from hermes_cli.auth_spotify import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    _refresh_spotify_oauth_state,
-    get_spotify_auth_status,
-    login_spotify_command,
+from hermes_cli.auth_spotify import (  # noqa: F401  re-exported
+    _refresh_spotify_oauth_state, get_spotify_auth_status, login_spotify_command,
     resolve_spotify_runtime_credentials,
 )
-from hermes_cli.auth_qwen import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    _qwen_access_token_is_expiring,
-    _qwen_cli_auth_path,
-    _read_qwen_cli_tokens,
-    _refresh_qwen_cli_tokens,
-    _save_qwen_cli_tokens,
-    get_qwen_auth_status,
+from hermes_cli.auth_qwen import (  # noqa: F401  re-exported
+    _qwen_access_token_is_expiring, _qwen_cli_auth_path, _read_qwen_cli_tokens,
+    _refresh_qwen_cli_tokens, _save_qwen_cli_tokens, get_qwen_auth_status,
     resolve_qwen_runtime_credentials,
 )
-from hermes_cli.auth_constants import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
-    _decode_jwt_claims,
-    AUTH_STORE_VERSION,
-    AUTH_LOCK_TIMEOUT_SECONDS,
-    DEFAULT_NOUS_PORTAL_URL,
-    DEFAULT_NOUS_INFERENCE_URL,
-    DEFAULT_NOUS_CLIENT_ID,
-    NOUS_BILLING_MANAGE_SCOPE,
-    DEFAULT_NOUS_SCOPE,
-    NOUS_DEVICE_CODE_SOURCE,
-    NOUS_AUTH_PATH_INVOKE_JWT,
-    ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
-    NOUS_INVOKE_JWT_MIN_TTL_SECONDS,
-    DEFAULT_CODEX_BASE_URL,
-    DEFAULT_XAI_OAUTH_BASE_URL,
-    MINIMAX_OAUTH_CLIENT_ID,
-    MINIMAX_OAUTH_SCOPE,
-    MINIMAX_OAUTH_GLOBAL_BASE,
-    MINIMAX_OAUTH_CN_BASE,
-    MINIMAX_OAUTH_GLOBAL_INFERENCE,
-    MINIMAX_OAUTH_CN_INFERENCE,
-    MINIMAX_OAUTH_REFRESH_SKEW_SECONDS,
-    DEFAULT_QWEN_BASE_URL,
-    DEFAULT_GITHUB_MODELS_BASE_URL,
-    DEFAULT_COPILOT_ACP_BASE_URL,
-    DEFAULT_OLLAMA_CLOUD_BASE_URL,
-    DEFAULT_ACTUAL_BASE_URL,
-    DEFAULT_ACTUAL_LOCAL_BASE_URL,
-    STEPFUN_STEP_PLAN_INTL_BASE_URL,
-    STEPFUN_STEP_PLAN_CN_BASE_URL,
-    CODEX_OAUTH_CLIENT_ID,
-    CODEX_OAUTH_TOKEN_URL,
-    CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
-    XAI_OAUTH_CLIENT_ID,
-    XAI_OAUTH_SCOPE,
-    XAI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
-    QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
-    DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL,
-    DEFAULT_SPOTIFY_API_BASE_URL,
-    SPOTIFY_DOCS_URL,
-    DEFAULT_SPOTIFY_SCOPE,
-    SERVICE_PROVIDER_NAMES,
-    LMSTUDIO_NOAUTH_PLACEHOLDER,
-    ACTUAL_LOCAL_NOAUTH_PLACEHOLDER,
-    CODEX_RATE_LIMITED_CODE,
-    AuthError,
-    _nous_err,
-    httpx,
+from hermes_cli.auth_constants import (  # noqa: F401  re-exported
+    _decode_jwt_claims, AUTH_STORE_VERSION, AUTH_LOCK_TIMEOUT_SECONDS, DEFAULT_NOUS_PORTAL_URL,
+    DEFAULT_NOUS_INFERENCE_URL, DEFAULT_NOUS_CLIENT_ID, NOUS_BILLING_MANAGE_SCOPE,
+    DEFAULT_NOUS_SCOPE, NOUS_DEVICE_CODE_SOURCE, NOUS_AUTH_PATH_INVOKE_JWT,
+    ACCESS_TOKEN_REFRESH_SKEW_SECONDS, NOUS_INVOKE_JWT_MIN_TTL_SECONDS, DEFAULT_CODEX_BASE_URL,
+    DEFAULT_XAI_OAUTH_BASE_URL, MINIMAX_OAUTH_CLIENT_ID, MINIMAX_OAUTH_SCOPE,
+    MINIMAX_OAUTH_GLOBAL_BASE, MINIMAX_OAUTH_CN_BASE, MINIMAX_OAUTH_GLOBAL_INFERENCE,
+    MINIMAX_OAUTH_CN_INFERENCE, MINIMAX_OAUTH_REFRESH_SKEW_SECONDS, DEFAULT_QWEN_BASE_URL,
+    DEFAULT_GITHUB_MODELS_BASE_URL, DEFAULT_COPILOT_ACP_BASE_URL, DEFAULT_OLLAMA_CLOUD_BASE_URL,
+    DEFAULT_ACTUAL_BASE_URL, DEFAULT_ACTUAL_LOCAL_BASE_URL, STEPFUN_STEP_PLAN_INTL_BASE_URL,
+    STEPFUN_STEP_PLAN_CN_BASE_URL, CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_TOKEN_URL,
+    CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, XAI_OAUTH_CLIENT_ID, XAI_OAUTH_SCOPE,
+    XAI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+    DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL, DEFAULT_SPOTIFY_API_BASE_URL, SPOTIFY_DOCS_URL,
+    DEFAULT_SPOTIFY_SCOPE, SERVICE_PROVIDER_NAMES, LMSTUDIO_NOAUTH_PLACEHOLDER,
+    ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, CODEX_RATE_LIMITED_CODE, AuthError, _nous_err, httpx,
 )
 
 logger = logging.getLogger(__name__)
@@ -507,55 +398,44 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
     ),
 }
 
-# Auto-extend PROVIDER_REGISTRY with any api-key provider registered in
-# providers/ that is not already declared above.  New providers only need a
-# plugins/model-providers/<name>/ plugin — no edits to this file required.
+# Providers handled outside the registry: copilot/kimi/zai have bespoke token refresh here;
+# openrouter/custom are aggregator/user-supplied and runtime_provider relies on
+# ``openrouter not in PROVIDER_REGISTRY``.
+_REGISTRY_PLUGIN_SKIP = frozenset({"copilot", "kimi-coding", "kimi-coding-cn", "zai", "openrouter", "custom"})
+
+
+def _register_plugin_provider(pp: Any) -> None:
+    """Auto-register one providers/ profile (plugins/model-providers/<name>/) not declared above.
+
+    External-process providers (an ACP CLI over stdio) have no API-key env vars; registering them is
+    what lets a provider shipped outside this tree pass ``resolve_provider()``'s known-provider gate
+    (otherwise ``hermes -m <that provider>`` dies with "Unknown provider" before a client is built).
+    """
+    if pp.auth_type == "external_process":
+        pconfig = ProviderConfig(
+            id=pp.name, name=pp.display_name or pp.name,
+            auth_type="external_process", inference_base_url=pp.base_url,
+        )
+    elif pp.auth_type == "api_key" and pp.env_vars and pp.name not in _REGISTRY_PLUGIN_SKIP:
+        is_url = lambda v: v.endswith("_BASE_URL") or v.endswith("_URL")  # noqa: E731
+        pconfig = ProviderConfig(
+            id=pp.name, name=pp.display_name or pp.name, auth_type="api_key",
+            inference_base_url=pp.base_url,
+            api_key_env_vars=tuple(v for v in pp.env_vars if not is_url(v)) or pp.env_vars,
+            base_url_env_var=next((v for v in pp.env_vars if is_url(v)), None) or "",
+        )
+    else:
+        return
+    PROVIDER_REGISTRY[pp.name] = pconfig
+    for alias in pp.aliases:  # so resolve_provider() resolves them too
+        PROVIDER_REGISTRY.setdefault(alias, pconfig)
+
+
 try:
     from providers import list_providers as _list_providers_for_registry
     for _pp in _list_providers_for_registry():
-        if _pp.name in PROVIDER_REGISTRY:
-            continue
-        if _pp.auth_type == "external_process":
-            # An external-process provider (an ACP CLI driven over stdio) has no
-            # API-key env vars to resolve — its credentials come from
-            # resolve_external_process_provider_credentials(), keyed on this
-            # auth_type. Registering it here is what lets a provider shipped
-            # outside this tree pass resolve_provider()'s known-provider gate;
-            # without it, `hermes -m <that provider>` dies with
-            # "Unknown provider" before any client is ever built.
-            PROVIDER_REGISTRY[_pp.name] = ProviderConfig(
-                id=_pp.name,
-                name=_pp.display_name or _pp.name,
-                auth_type="external_process",
-                inference_base_url=_pp.base_url,
-            )
-            for _alias in _pp.aliases:
-                if _alias not in PROVIDER_REGISTRY:
-                    PROVIDER_REGISTRY[_alias] = PROVIDER_REGISTRY[_pp.name]
-            continue
-        if _pp.auth_type != "api_key" or not _pp.env_vars:
-            continue
-        # Skip providers that need custom token resolution or are special-cased
-        # in resolve_provider() (copilot/kimi/zai have bespoke token refresh;
-        # openrouter/custom are aggregator/user-supplied and handled outside
-        # the registry — adding them here breaks runtime_provider resolution
-        # that relies on `openrouter not in PROVIDER_REGISTRY`).
-        if _pp.name in {"copilot", "kimi-coding", "kimi-coding-cn", "zai", "openrouter", "custom"}:
-            continue
-        _api_key_vars = tuple(v for v in _pp.env_vars if not v.endswith("_BASE_URL") and not v.endswith("_URL"))
-        _base_url_var = next((v for v in _pp.env_vars if v.endswith("_BASE_URL") or v.endswith("_URL")), None)
-        PROVIDER_REGISTRY[_pp.name] = ProviderConfig(
-            id=_pp.name,
-            name=_pp.display_name or _pp.name,
-            auth_type="api_key",
-            inference_base_url=_pp.base_url,
-            api_key_env_vars=_api_key_vars or _pp.env_vars,
-            base_url_env_var=_base_url_var or "",
-        )
-        # Also register aliases so resolve_provider() resolves them
-        for _alias in _pp.aliases:
-            if _alias not in PROVIDER_REGISTRY:
-                PROVIDER_REGISTRY[_alias] = PROVIDER_REGISTRY[_pp.name]
+        if _pp.name not in PROVIDER_REGISTRY:
+            _register_plugin_provider(_pp)
 except Exception:
     pass
 
