@@ -304,7 +304,7 @@ class TestCheckFnTransientFailureSuppression:
             lambda: {"env_type": "vercel_sandbox", "container_disk": 51200},
         )
         monkeypatch.setattr(
-            terminal_tool_module.importlib.util,
+            importlib.util,
             "find_spec",
             lambda _name: object(),
         )
@@ -326,7 +326,7 @@ class TestCheckFnTransientFailureSuppression:
             },
         )
         monkeypatch.setattr(
-            terminal_tool_module.importlib.util,
+            importlib.util,
             "find_spec",
             lambda _name: object(),
         )
@@ -351,7 +351,7 @@ class TestCheckFnTransientFailureSuppression:
             },
         )
         monkeypatch.setattr(
-            terminal_tool_module.importlib.util,
+            importlib.util,
             "find_spec",
             lambda _name: object(),
         )
