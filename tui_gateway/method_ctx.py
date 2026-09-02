@@ -96,11 +96,17 @@ def bind_module(module_globals: dict, server, *, skip=()) -> None:
     KeyError).  Functions are rebound; classes get their methods rebound in place;
     other values (constants, ``global``-mutated state seeds) are copied as-is.
     Imported modules/functions, dunders and registry plumbing are skipped, so a
-    split module needs no hand-maintained export list.  Finally the module's
-    ``_registry`` (if any) installs its @method handlers.
+    split module needs no hand-maintained export list.  Dispatch tables (dicts
+    whose values are this module's functions) get their values rebound too.
+    Finally the module's ``_registry`` (if any) installs its @method handlers.
     """
     g = vars(server)
     mod_name = module_globals["__name__"]
+    seen: dict = {}
+
+    def _own_fn(v):
+        return isinstance(v, types.FunctionType) and v.__module__ == mod_name
+
     for name, obj in list(module_globals.items()):
         if name.startswith("__") or name in _PLUMBING or name in skip:
             continue
@@ -109,7 +115,9 @@ def bind_module(module_globals: dict, server, *, skip=()) -> None:
         if isinstance(obj, types.FunctionType):
             if obj.__module__ != mod_name:
                 continue
-            obj = rebind(obj, g)
+            obj = rebind(obj, g, seen)
+        elif isinstance(obj, dict) and any(_own_fn(v) for v in obj.values()):
+            obj = {k: rebind(v, g, seen) if _own_fn(v) else v for k, v in obj.items()}
         elif isinstance(obj, type):
             if obj.__module__ != mod_name:
                 continue
