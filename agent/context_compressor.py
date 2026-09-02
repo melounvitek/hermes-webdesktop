@@ -15,6 +15,7 @@ import sqlite3
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from agent.auxiliary_client import (
@@ -26,7 +27,6 @@ from agent.auxiliary_client import (
 )
 from agent.context_engine import ContextEngine, sanitize_memory_context
 from agent.error_classifier import FailoverReason, classify_api_error
-from agent.message_sanitization import tool_result_id_variants
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
     get_model_context_length,
@@ -614,6 +614,17 @@ _HISTORICAL_SUMMARY_PREFIXES = (
 # Bounded probe: catch the restored head plus a few stacked handoff/ack turns
 # without treating arbitrary summary-looking live-tail rows as proof of a resume.
 _RESTART_HANDOFF_PROBE_EXTRA_MESSAGES = 4
+
+
+@dataclass
+class _HandoffScan:
+    """Result of ``ContextCompressor._scan_window_handoffs``."""
+
+    turns_to_summarize: List[Dict[str, Any]]
+    summary_indices: set
+    tail_start: int
+    previous_summary_before: Optional[str]
+    has_user_turn_before: Optional[bool]
 
 _MIN_SUMMARY_TOKENS = 2000
 _SUMMARY_RATIO = 0.20
@@ -5679,6 +5690,105 @@ This compaction should PRIORITISE preserving all information related to the focu
             merged.append(msg)
         return merged
 
+    def _scan_window_handoffs(
+        self,
+        messages: List[Dict[str, Any]],
+        compress_start: int,
+        compress_end: int,
+        turns_to_summarize: List[Dict[str, Any]],
+    ) -> "_HandoffScan":
+        """Rehydrate ``_previous_summary`` / user-turn provenance from in-transcript handoffs.
+
+        Handoff rows are removed from the summarizer window (merged handoffs unwrap to their
+        prior-tail content) and ``tail_start`` advances past a handoff beyond the window. The
+        pre-scan state is captured so an aborted attempt can roll the mutation back (#57835).
+        """
+        # Snapshot so an aborted attempt can roll back the self-heal scan's mutation of
+        # _previous_summary (#57835).
+        _previous_summary_before_scan = self._previous_summary
+        _summary_has_user_turn_before_scan = getattr(self, "_summary_has_user_turn", None)
+        # Always scan the full transcript for handoffs: a narrow scan could hide a same-session
+        # handoff and wrongly trigger the cross-session discard (#57835, #83248).
+        summary_search_start = 1 if messages and messages[0].get("role") == "system" else 0
+        summary_search_end = len(messages)
+        summary_indices: set[int] = set()
+        summary_idx = None
+        summary_body = None
+        tail_start = compress_end
+        summary_hits = self._find_context_summaries(
+            messages,
+            summary_search_start,
+            summary_search_end,
+        )
+        real_user_present = self._transcript_has_real_user_turn(messages)
+        if summary_hits:
+            summary_idx = summary_hits[-1][0]
+            summary_body = summary_hits[-1][1]
+            if not self._previous_summary:
+                summary_bodies = [body for _, body in summary_hits if body]
+                if summary_bodies:
+                    self._previous_summary = "\n\n".join(summary_bodies)
+            # Zero-user provenance (#64650) rides on the newest handoff hit.
+            provenance = messages[summary_idx].get(
+                COMPRESSED_SUMMARY_HAS_USER_TURN_KEY
+            )
+            if real_user_present:
+                self._summary_has_user_turn = True
+            elif isinstance(provenance, bool):
+                self._summary_has_user_turn = provenance
+            elif self._summary_has_user_turn is None:
+                # Legacy handoffs lack provenance: assume a user turn unless the exact no-user
+                # sentinel is present.
+                self._summary_has_user_turn = not (
+                    summary_body and _NO_USER_TASK_SENTINEL in summary_body
+                )
+            summary_indices = {idx for idx, _ in summary_hits}
+            # Summary rows are excluded from summarizer input, but a merged handoff carries genuine
+            # prior-tail user content — unwrap it into the window (#47274).
+            def _window_row(idx: int, msg: Dict[str, Any]):
+                if idx not in summary_indices:
+                    return msg
+                stripped = self._strip_context_summary_handoff_message(
+                    _fresh_compaction_message_copy(msg)
+                )
+                return stripped  # None for standalone handoffs → dropped
+            pre_summary_turns = [
+                row for idx, msg in enumerate(
+                    messages[compress_start:summary_idx],
+                    start=compress_start,
+                )
+                if (row := _window_row(idx, msg)) is not None
+            ]
+            turns_to_summarize = (
+                pre_summary_turns + messages[summary_idx + 1:compress_end]
+            )
+            # The newest hit may itself be a merged handoff — recover its prior-tail content too.
+            _newest_stripped = self._strip_context_summary_handoff_message(
+                _fresh_compaction_message_copy(messages[summary_idx])
+            )
+            if _newest_stripped is not None:
+                turns_to_summarize = (
+                    pre_summary_turns
+                    + [_newest_stripped]
+                    + messages[summary_idx + 1:compress_end]
+                )
+            if summary_idx >= compress_end:
+                tail_start = summary_idx + 1
+        elif self._previous_summary:
+            # No handoff anywhere but _previous_summary is set: it came from another session —
+            # discard. Never decide this from a compress_end-bounded miss (#83248).
+            self._previous_summary = None
+            self._summary_has_user_turn = real_user_present
+        else:
+            self._summary_has_user_turn = real_user_present
+        return _HandoffScan(
+            turns_to_summarize=turns_to_summarize,
+            summary_indices=summary_indices,
+            tail_start=tail_start,
+            previous_summary_before=_previous_summary_before_scan,
+            has_user_turn_before=_summary_has_user_turn_before_scan,
+        )
+
     def compress(
         self,
         messages: List[Dict[str, Any]],
@@ -5791,84 +5901,14 @@ This compaction should PRIORITISE preserving all information related to the focu
         # it aborts.
         if getattr(self, "tail_mode", "lean") == "lean":
             messages = self._demote_stale_tail_tools(messages, compress_end)
-        # Snapshot so an aborted attempt can roll back the self-heal scan's mutation of
-        # _previous_summary (#57835).
-        _previous_summary_before_scan = self._previous_summary
-        _summary_has_user_turn_before_scan = getattr(self, "_summary_has_user_turn", None)
-        # Always scan the full transcript for handoffs: a narrow scan could hide a same-session
-        # handoff and wrongly trigger the cross-session discard (#57835, #83248).
-        summary_search_start = 1 if messages and messages[0].get("role") == "system" else 0
-        summary_search_end = len(messages)
-        summary_indices: set[int] = set()
-        summary_idx = None
-        summary_body = None
-        tail_start = compress_end
-        summary_hits = self._find_context_summaries(
-            messages,
-            summary_search_start,
-            summary_search_end,
+        scan = self._scan_window_handoffs(
+            messages, compress_start, compress_end, turns_to_summarize
         )
-        real_user_present = self._transcript_has_real_user_turn(messages)
-        if summary_hits:
-            summary_idx = summary_hits[-1][0]
-            summary_body = summary_hits[-1][1]
-            if not self._previous_summary:
-                summary_bodies = [body for _, body in summary_hits if body]
-                if summary_bodies:
-                    self._previous_summary = "\n\n".join(summary_bodies)
-            # Zero-user provenance (#64650) rides on the newest handoff hit.
-            provenance = messages[summary_idx].get(
-                COMPRESSED_SUMMARY_HAS_USER_TURN_KEY
-            )
-            if real_user_present:
-                self._summary_has_user_turn = True
-            elif isinstance(provenance, bool):
-                self._summary_has_user_turn = provenance
-            elif self._summary_has_user_turn is None:
-                # Legacy handoffs lack provenance: assume a user turn unless the exact no-user
-                # sentinel is present.
-                self._summary_has_user_turn = not (
-                    summary_body and _NO_USER_TASK_SENTINEL in summary_body
-                )
-            summary_indices = {idx for idx, _ in summary_hits}
-            # Summary rows are excluded from summarizer input, but a merged handoff carries genuine
-            # prior-tail user content — unwrap it into the window (#47274).
-            def _window_row(idx: int, msg: Dict[str, Any]):
-                if idx not in summary_indices:
-                    return msg
-                stripped = self._strip_context_summary_handoff_message(
-                    _fresh_compaction_message_copy(msg)
-                )
-                return stripped  # None for standalone handoffs → dropped
-            pre_summary_turns = [
-                row for idx, msg in enumerate(
-                    messages[compress_start:summary_idx],
-                    start=compress_start,
-                )
-                if (row := _window_row(idx, msg)) is not None
-            ]
-            turns_to_summarize = (
-                pre_summary_turns + messages[summary_idx + 1:compress_end]
-            )
-            # The newest hit may itself be a merged handoff — recover its prior-tail content too.
-            _newest_stripped = self._strip_context_summary_handoff_message(
-                _fresh_compaction_message_copy(messages[summary_idx])
-            )
-            if _newest_stripped is not None:
-                turns_to_summarize = (
-                    pre_summary_turns
-                    + [_newest_stripped]
-                    + messages[summary_idx + 1:compress_end]
-                )
-            if summary_idx >= compress_end:
-                tail_start = summary_idx + 1
-        elif self._previous_summary:
-            # No handoff anywhere but _previous_summary is set: it came from another session —
-            # discard. Never decide this from a compress_end-bounded miss (#83248).
-            self._previous_summary = None
-            self._summary_has_user_turn = real_user_present
-        else:
-            self._summary_has_user_turn = real_user_present
+        turns_to_summarize = scan.turns_to_summarize
+        summary_indices = scan.summary_indices
+        tail_start = scan.tail_start
+        _previous_summary_before_scan = scan.previous_summary_before
+        _summary_has_user_turn_before_scan = scan.has_user_turn_before
 
         self._record_compression_regions(
             head_messages=messages[:compress_start],
