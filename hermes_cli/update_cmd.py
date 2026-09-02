@@ -24,6 +24,7 @@ loaded, so there is no import cycle).
 """
 
 import logging
+from contextlib import suppress
 import os
 import shlex
 import shutil  # noqa: F401  (tests patch update_cmd.shutil.*; split modules resolve it here)
@@ -36,6 +37,7 @@ from pathlib import Path
 # Both re-exported: the split update_cmd_* modules import them lazily from
 # here so tests that monkeypatch ``update_cmd.get_hermes_home`` stay effective.
 from hermes_cli.config import get_hermes_home  # noqa: F401
+from hermes_cli.update_cmd_common import _best_effort
 from hermes_constants import get_default_hermes_root, venv_python_path
 
 # Abort recovery lives in its own bounded module (review on #96235). Re-exported
@@ -305,12 +307,10 @@ _UPDATE_CRITICAL_FILES = (
 
 def _record_update_step(step: str, ok: bool, detail: str = "") -> None:
     """Best-effort ``update_receipt.record_step``; the receipt must never break an update."""
-    try:
+    with suppress(Exception):
         from hermes_cli.update_receipt import record_step
 
         record_step(step, ok, detail)
-    except Exception:
-        pass
 
 
 def _git_run(git_cmd, args, cwd=None, *, check=False, network=False):
@@ -408,13 +408,11 @@ def _gateway_prompt(prompt_text: str, default: str = "", timeout: float = 300.0)
     deadline = _time.monotonic() + timeout
     while _time.monotonic() < deadline:
         if response_path.exists():
-            try:
+            with suppress(OSError, ValueError):
                 answer = response_path.read_text(encoding="utf-8").strip()
                 response_path.unlink(missing_ok=True)
                 prompt_path.unlink(missing_ok=True)
                 return answer if answer else default
-            except (OSError, ValueError):
-                pass
         _time.sleep(0.5)
 
     prompt_path.unlink(missing_ok=True)
@@ -572,12 +570,10 @@ def _invalidate_update_cache():
             if entry.is_dir():
                 homes.append(entry)
     for home in homes:
-        try:
+        with suppress(Exception):
             cache_file = home / ".update_check"
             if cache_file.exists():
                 cache_file.unlink()
-        except Exception:
-            pass
 
 
 def _write_marker_file(path: Path, *, label: str) -> None:
@@ -693,11 +689,9 @@ def _log_only_write(text: str) -> None:
     log_file = getattr(stream, "_log", None)
     if log_file is None:
         return
-    try:
+    with suppress(Exception):
         log_file.write(text if text.endswith("\n") else text + "\n")
         log_file.flush()
-    except Exception:
-        pass
 
 
 def _run_logged_subprocess(cmd, *, cwd=None, env=None):
@@ -1280,7 +1274,7 @@ def _prepare_checkout_for_update(
             sys.exit(1)
         if switch_block_reason.startswith("unmerged:"):
             _in_place_configured = False
-            try:
+            with _best_effort('Could not read updates.parked_branch_strategy: %s'):
                 from hermes_cli.config import load_config as _load_cfg
 
                 _upd_cfg = (_load_cfg() or {}).get("updates", {})
@@ -1288,10 +1282,6 @@ def _prepare_checkout_for_update(
                     isinstance(_upd_cfg, dict)
                     and _upd_cfg.get("parked_branch_strategy", "switch")
                     == "update_in_place"
-                )
-            except Exception as exc:
-                logger.debug(
-                    "Could not read updates.parked_branch_strategy: %s", exc
                 )
             if _in_place_configured and not switch_branch:
                 # The merge source must exist upstream; --branch typos
@@ -1503,19 +1493,17 @@ def _begin_update_receipt_and_plan(args):
     # Phase 1 (#91277): structured update receipt — record what this run
     # discovers, does, and skips, so silent-failure classes (#88848,
     # #74973, #85753, #81193) become diagnosable from disk.
-    try:
+    with _best_effort('Update receipt unavailable: %s'):
         from hermes_cli.update_receipt import begin_update_receipt
 
         begin_update_receipt()
-    except Exception as _receipt_exc:
-        logger.debug("Update receipt unavailable: %s", _receipt_exc)
 
     # Plan phase (#91277): snapshot every running runtime, supervisor and
     # code version into the receipt (read-only; probe failure records
     # nothing). Re-read AFTER the restart phase to reconcile planned
     # runtimes against bookkeeping — the plan is the worklist.
     _pre_update_plan = None
-    try:
+    with _best_effort('Update plan phase failed: %s'):
         from hermes_cli.update_inventory import (
             collect_runtime_inventory,
             record_plan_in_receipt,
@@ -1529,8 +1517,6 @@ def _begin_update_receipt_and_plan(args):
                 sorted({r.profile for r in _pre_update_plan.runtimes})
             )
             print(f"→ Fleet: {_n} running service(s) across profiles: {_profiles}")
-    except Exception as _plan_exc:
-        logger.debug("Update plan phase failed: %s", _plan_exc)
 
     # Windows: abort if another hermes.exe holds the venv shim — continuing
     # yields WinError 32 spam and a deferred-rename leftover or silent ZIP
@@ -1701,12 +1687,10 @@ def _handle_update_called_process_error(
                     '    venv\\Scripts\\python.exe -c '
                     '"from hermes_cli.main import main; main()" update --yes'
                 )
-        try:
+        with suppress(Exception):
             from hermes_cli.update_receipt import finalize_update_receipt
 
             finalize_update_receipt("failed")
-        except Exception:
-            pass
         sys.exit(1)
 
 
@@ -1786,15 +1770,10 @@ def _finish_already_up_to_date(
     if not current_checkout_complete:
         if gateway_mode:
             _write_gateway_update_exit_code(False)
-        try:
+        with _best_effort('Update receipt finalize (current checkout) failed: %s'):
             from hermes_cli.update_receipt import finalize_update_receipt
 
             finalize_update_receipt("partial")
-        except Exception as _receipt_exc:
-            logger.debug(
-                "Update receipt finalize (current checkout) failed: %s",
-                _receipt_exc,
-            )
         sys.exit(1)
 
 

@@ -7,12 +7,15 @@ test patches on ``hermes_cli.update_cmd.<name>`` stay effective).
 """
 
 import logging
+from contextlib import suppress
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+
+from hermes_cli.update_cmd_common import _best_effort
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.update_cmd")
@@ -125,10 +128,8 @@ def _commit_staged_replacements(staged) -> None:
         if backup and os.path.isdir(backup):
             shutil.rmtree(backup, ignore_errors=True)
         elif backup and os.path.exists(backup):
-            try:
+            with suppress(OSError):
                 os.remove(backup)
-            except OSError:
-                pass
 
 
 def _zip_overlay_block_reason(
@@ -534,53 +535,39 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
         had_desktop_app_before_update=had_desktop_app_before_update,
     )
 
-    try:
+    with suppress(Exception):
         print("→ Syncing bundled skills...")
         _print_bundled_skills_sync_report()
-    except Exception:
-        pass
 
     # Seed the model-catalog disk cache from the freshly-unpacked checkout
     # (same rationale as the git-pull path in _cmd_update_impl). Non-fatal.
-    try:
+    with _best_effort('Model catalog seed during zip update failed: %s'):
         from hermes_cli.model_catalog import seed_cache_from_checkout
 
         if seed_cache_from_checkout(_m().PROJECT_ROOT):
             print("  ✓ Model catalog cache refreshed from checkout")
-    except Exception as e:
-        logger.debug("Model catalog seed during zip update failed: %s", e)
 
     # Post-update state.db integrity guard (#68474, #97994): root home AND
     # every sibling profile, each auto-restored from its own snapshot.
-    try:
+    with _best_effort('Post-update state.db integrity check (zip path) failed: %s'):
         _verify_and_restore_state_dbs_post_update()
-    except Exception as exc:
-        logger.debug(
-            "Post-update state.db integrity check (zip path) failed: %s", exc
-        )
 
     update_complete = _print_update_summary(
         node_failures=node_failures,
         desktop_build_ok=desktop_build_ok,
         pre_update_version=pre_update_version,
     )
-    try:
+    with _best_effort('Curator first-run notice failed: %s'):
         _print_curator_first_run_notice()
-    except Exception as e:
-        logger.debug("Curator first-run notice failed: %s", e)
-    try:
+    with _best_effort('Curator recent-run notice failed: %s'):
         _print_curator_recent_run_notice()
-    except Exception as e:
-        logger.debug("Curator recent-run notice failed: %s", e)
     # Don't stop a working dashboard when the Node refresh failed — see the
     # git-update path for rationale (#30271).
     _finish_dashboard_update_cleanup(node_failures)
-    try:
+    with _best_effort('Update receipt finalize (zip path) failed: %s'):
         from hermes_cli.update_receipt import finalize_update_receipt
 
         finalize_update_receipt(
             "success" if update_complete and not node_failures else "partial"
         )
-    except Exception as _receipt_exc:
-        logger.debug("Update receipt finalize (zip path) failed: %s", _receipt_exc)
     return update_complete

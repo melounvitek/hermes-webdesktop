@@ -5,6 +5,7 @@ still resolves/monkeypatches. Origin helpers are imported lazily per function (n
 """
 
 import logging
+from contextlib import suppress
 import hashlib
 import json
 import os
@@ -114,14 +115,12 @@ def _critical_module_import_failures(
     )
     try:
         interpreter = sys.executable
-        try:
+        with suppress(Exception):
             venv_python = venv_python_path(
                 Path(root) / "venv", windows=_m()._is_windows()
             )
             if venv_python.exists():
                 interpreter = str(venv_python)
-        except Exception:
-            pass  # fall back to the running interpreter
         result = subprocess.run(
             [interpreter, "-c", probe],
             cwd=str(root),
@@ -529,7 +528,7 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
     system_uv = shutil.which("uv")
     if system_uv:
         return system_uv
-    try:
+    with suppress(Exception):
         print("  → Termux detected: trying to install uv for faster dependency updates...")
         result = subprocess.run(
             pip_cmd + ["install", "uv", "--only-binary", ":all:"],
@@ -538,8 +537,6 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
         )
         if result.returncode != 0:
             return None
-    except Exception:
-        pass
     return resolve_uv() or shutil.which("uv")
 
 
@@ -555,7 +552,7 @@ def _npm_manifest_paths() -> tuple[Path, ...]:
     from hermes_cli.update_cmd import _m
     root_pkg = _m().PROJECT_ROOT / "package.json"
     paths = [_m().PROJECT_ROOT / "package-lock.json", root_pkg]
-    try:
+    with suppress(OSError, json.JSONDecodeError, TypeError):
         workspaces = json.loads(root_pkg.read_text(encoding="utf-8")).get(
             "workspaces", []
         )
@@ -566,8 +563,6 @@ def _npm_manifest_paths() -> tuple[Path, ...]:
                 manifest = match / "package.json"
                 if manifest.is_file():
                     paths.append(manifest)
-    except (OSError, json.JSONDecodeError, TypeError):
-        pass
     return tuple(paths)
 
 
@@ -712,11 +707,9 @@ def _update_node_dependencies() -> list[str]:
     # Best-effort npx cache warm before the lockfile-unchanged early return. Can block
     # ~11s on a cold cache — print first so it doesn't look like a hang.
     print("→ Warming npx cache for agent-browser...")
-    try:
+    with suppress(Exception):
         from tools.browser_tool import warm_agent_browser_npx_cache
         warm_agent_browser_npx_cache()
-    except Exception:
-        pass
 
     if not _m()._npm_lockfile_changed(shared_hermes_root):
         logger.info("npm lockfile unchanged, skipping npm install")

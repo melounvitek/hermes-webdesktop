@@ -8,6 +8,8 @@ import logging
 import sys
 from pathlib import Path
 
+from hermes_cli.update_cmd_common import _best_effort
+
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.update_cmd")
 
@@ -70,7 +72,7 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
     """
     from hermes_cli.update_cmd import _run_config_check_fresh, _run_migrate_config_fresh
     migrated: list[tuple[str, int, int]] = []
-    try:
+    with _best_effort('Sibling profile enumeration failed: %s'):
         from hermes_constants import (
             get_process_hermes_home,
             reset_hermes_home_override,
@@ -107,8 +109,6 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
                 )
             finally:
                 reset_hermes_home_override(token)
-    except Exception as exc:
-        logger.debug("Sibling profile enumeration failed: %s", exc)
     return migrated
 
 
@@ -248,15 +248,13 @@ def _check_and_apply_config_migration(
 
     # The migration above touched only the active profile; run the same NON-INTERACTIVE
     # migration per sibling home via the context-local HERMES_HOME override (never os.environ).
-    try:
+    with _best_effort('Sibling config migration failed: %s'):
         _migrated_siblings = _migrate_sibling_profile_configs()
         for _name, _from_ver, _to_ver in _migrated_siblings:
             print(
                 f"  ✓ Profile '{_name}': config format updated "
                 f"(v{_from_ver} → v{_to_ver})"
             )
-    except Exception as exc:
-        logger.debug("Sibling config migration failed: %s", exc)
 
     # Safety net: migrations/desktop scheduler have emptied or truncated cron/jobs.json;
     # restore from the pre-update snapshot if jobs went missing.
@@ -295,7 +293,7 @@ def _check_and_apply_config_migration(
         logger.debug("Config model-settings auto-restore check failed: %s", exc)
 
     # Same cron-jobs safety net per sibling profile against ITS OWN pre-update snapshot.
-    try:
+    with _best_effort('Sibling cron auto-restore check failed: %s'):
         from hermes_cli.backup import restore_cron_jobs_all_profiles
 
         for _restored in restore_cron_jobs_all_profiles(
@@ -308,11 +306,9 @@ def _check_and_apply_config_migration(
                 f"{_restored['job_count']} job(s) from pre-update "
                 f"snapshot {_restored['snapshot_id']}."
             )
-    except Exception as exc:
-        logger.debug("Sibling cron auto-restore check failed: %s", exc)
 
     # Same config model-settings safety net for sibling profiles.
-    try:
+    with _best_effort('Sibling config auto-restore check failed: %s'):
         from hermes_cli.backup import restore_config_model_settings_all_profiles
 
         for _cfg_restored in restore_config_model_settings_all_profiles(
@@ -325,8 +321,6 @@ def _check_and_apply_config_migration(
                 f"restored {', '.join(_cfg_restored['keys'])} from "
                 f"pre-update snapshot {_cfg_restored['snapshot_id']}."
             )
-    except Exception as exc:
-        logger.debug("Sibling config auto-restore check failed: %s", exc)
 
 
 # {profile: snapshot_id} from this run's pre-update backup, consumed by the per-profile

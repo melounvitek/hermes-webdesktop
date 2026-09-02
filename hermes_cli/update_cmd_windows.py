@@ -5,12 +5,15 @@ Origin helpers are imported lazily per function (no cycle; test patches on the o
 """
 
 import logging
+from contextlib import suppress
 import os
 import subprocess
 import sys
 import time as _time
 from datetime import datetime
 from pathlib import Path
+
+from hermes_cli.update_cmd_common import _best_effort
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.update_cmd")
@@ -64,11 +67,9 @@ def _wait_for_windows_update_gateway_exit(
 
     survivors: set[int] = set()
     for pid in remaining:
-        try:
+        with suppress(Exception):
             if _pid_exists(pid):
                 survivors.add(pid)
-        except Exception:
-            pass
     return survivors
 
 
@@ -84,7 +85,7 @@ def _self_and_non_gateway_ancestor_pids(psutil) -> set[int]:
     except Exception:
         _is_gw = None
     skip: set[int] = {os.getpid()}
-    try:
+    with suppress(Exception):
         for anc in psutil.Process().parents():
             try:
                 anc_cmdline = " ".join(anc.cmdline() or [])
@@ -93,8 +94,6 @@ def _self_and_non_gateway_ancestor_pids(psutil) -> set[int]:
             if _is_gw is not None and anc_cmdline and _is_gw(anc_cmdline):
                 continue
             skip.add(int(anc.pid))
-    except Exception:
-        pass
     return skip
 
 
@@ -361,10 +360,8 @@ def _leftover_pausable_gateway_pids(
     for pid, _name, cmdline in matches:
         argv = cmdline
         if psutil is not None:
-            try:
+            with suppress(Exception):
                 argv = " ".join(psutil.Process(int(pid)).cmdline()) or cmdline
-            except Exception:
-                pass
         if not _is_pausable_gateway(argv):
             return None
         pids.append(int(pid))
@@ -718,7 +715,7 @@ def _desktop_owns_gateway_lifecycle() -> bool:
     ledger; fall back to the venv-holder scan. An orphaned control plane (supervisor gone) does not count.
     """
     from hermes_cli.update_cmd import _m
-    try:
+    with _best_effort('Desktop-lifecycle ledger probe failed: %s'):
         from hermes_cli.process_identity import ledger_entries, spawner_is_dead
 
         for entry in ledger_entries():
@@ -726,8 +723,6 @@ def _desktop_owns_gateway_lifecycle() -> bool:
                 continue
             if spawner_is_dead(entry) is False:
                 return True
-    except Exception as exc:
-        logger.debug("Desktop-lifecycle ledger probe failed: %s", exc)
 
     try:
         import psutil
@@ -986,19 +981,14 @@ def _pause_windows_gateways_for_update() -> dict | None:
         # until next login (resume only relaunches what was running). Cold-start after update.
         # Exception: Desktop owns the lifecycle — spawning ``gateway run`` beside it races
         # ports/state. The skip is ownership, not liveness.
-        try:
+        with _best_effort('Could not check Desktop gateway-lifecycle ownership before update: %s'):
             if _desktop_owns_gateway_lifecycle():
                 logger.debug(
                     "Skipping Windows gateway cold-start plan: "
                     "Desktop owns gateway lifecycle"
                 )
                 return None
-        except Exception as exc:
-            logger.debug(
-                "Could not check Desktop gateway-lifecycle ownership before update: %s",
-                exc,
-            )
-        try:
+        with _best_effort('Could not check Windows gateway autostart state before update: %s'):
             from hermes_cli import gateway_windows
 
             if gateway_windows.is_installed():
@@ -1009,11 +999,6 @@ def _pause_windows_gateways_for_update() -> dict | None:
                     "unmapped": [],
                     "cold_start_if_installed": True,
                 }
-        except Exception as exc:
-            logger.debug(
-                "Could not check Windows gateway autostart state before update: %s",
-                exc,
-            )
         return None
 
     profiles: dict[str, int] = {}
@@ -1054,13 +1039,11 @@ def _pause_windows_gateways_for_update() -> dict | None:
     if socket_acks:
         # A socket-paused gateway drains its ACTIVE TURN first; honor its declared
         # budget (+ teardown grace) so it isn't force-killed mid-turn.
-        try:
+        with suppress(Exception):
             declared = max(
                 float(a.get("drain_timeout") or 0.0) for a in socket_acks
             )
             drain_timeout = max(drain_timeout, declared + 10.0)
-        except Exception:
-            pass
         print(
             f"  → {len(socket_acks)} gateway(s) ACKed socket pause; "
             f"waiting up to {int(drain_timeout)}s for graceful exit"
@@ -1090,7 +1073,7 @@ def _pause_windows_gateways_for_update() -> dict | None:
     # already gone with its worker raises ProcessLookupError and is skipped.
     force_killed = []
     for pid in sorted(set(survivors).union(unmapped_pids).union(launcher_pids)):
-        try:
+        with suppress(ProcessLookupError, PermissionError, OSError):
             pid_int = int(pid)
             terminate_pid(
                 pid_int,
@@ -1098,8 +1081,6 @@ def _pause_windows_gateways_for_update() -> dict | None:
                 expected_start_time=get_process_start_time(pid_int),
             )
             force_killed.append(pid_int)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
 
     if profiles:
         print(f"  ✓ Paused gateway profile(s): {', '.join(sorted(profiles))}")
@@ -1240,12 +1221,10 @@ def _cold_start_windows_gateway_after_update() -> bool:
     )
     # Persist vouched PIDs so a death AFTER updater exit (Job Object teardown) is
     # reported by the next CLI invocation. Best-effort.
-    try:
+    with suppress(Exception):
         gateway_windows._write_start_attestation(
             ready_pids, "cold-start after update"
         )
-    except Exception:
-        pass
     return True
 
 
@@ -1259,15 +1238,13 @@ def _refresh_windows_gateway_launchers() -> None:
     from hermes_cli.update_cmd import _m
     if not _m()._is_windows():
         return
-    try:
+    with _best_effort('Could not refresh Windows gateway launchers after update: %s'):
         from hermes_cli import gateway_windows
 
         if not gateway_windows.is_installed():
             return
         gateway_windows._write_task_script()
         print("  ✓ Refreshed Windows gateway launcher scripts")
-    except Exception as exc:
-        logger.debug("Could not refresh Windows gateway launchers after update: %s", exc)
 
 
 def _refresh_bootstrap_cache_scripts(branch: str = "main") -> None:
@@ -1280,7 +1257,7 @@ def _refresh_bootstrap_cache_scripts(branch: str = "main") -> None:
     The .ps1 copy gets a UTF-8 BOM to match the cache format. Best-effort: never fails the update.
     """
     from hermes_cli.update_cmd import _m
-    try:
+    with _best_effort('Could not refresh bootstrap-cache scripts after update: %s'):
         import re as _re
 
         cache_dir = Path(_m().get_hermes_home()) / "bootstrap-cache"
@@ -1314,8 +1291,6 @@ def _refresh_bootstrap_cache_scripts(branch: str = "main") -> None:
                 "  ✓ Refreshed installer bootstrap-cache script(s): "
                 + ", ".join(sorted(refreshed))
             )
-    except Exception as exc:
-        logger.debug("Could not refresh bootstrap-cache scripts after update: %s", exc)
 
 
 def _resume_windows_gateways_after_update(token: dict | None) -> None:
@@ -1467,12 +1442,10 @@ def _resume_windows_gateways_after_update(token: dict | None) -> None:
             )
         # Persist vouched PIDs so a death AFTER updater exit is reported by the
         # next CLI invocation. Best-effort.
-        try:
+        with suppress(Exception):
             gateway_windows._write_start_attestation(
                 ready_pids, "post-update relaunch"
             )
-        except Exception:
-            pass
 
     token["resume_needed"] = False
 
@@ -1506,16 +1479,10 @@ def _resume_windows_gateways_and_merge_outcome(outcome, _windows_gateway_resume,
 
     if isinstance(_windows_gateway_resume, dict):
         # Failed relaunches are absent from the token so they still surface. Best-effort.
-        try:
+        with _best_effort('Could not merge Windows relaunch outcome into fleet reconciliation bookkeeping: %s'):
             for _win_profile in _windows_gateway_resume.get("relaunched_profiles") or []:
                 if _win_profile not in outcome.relaunched_profiles:
                     outcome.relaunched_profiles.append(_win_profile)
-        except Exception as _win_reconcile_exc:
-            logger.debug(
-                "Could not merge Windows relaunch outcome into fleet "
-                "reconciliation bookkeeping: %s",
-                _win_reconcile_exc,
-            )
         windows_restarted = list(
             _windows_gateway_resume.get("restarted_services") or []
         )
@@ -1533,7 +1500,7 @@ def _resume_windows_gateways_and_merge_outcome(outcome, _windows_gateway_resume,
             if label not in outcome.failed_or_stale_units:
                 outcome.failed_or_stale_units.append(label)
 
-        try:
+        with suppress(Exception):
             from hermes_cli.update_receipt import record_gateway_restart
 
             record_gateway_restart(
@@ -1548,8 +1515,6 @@ def _resume_windows_gateways_and_merge_outcome(outcome, _windows_gateway_resume,
                 ),
                 phase_error="; ".join(outcome.phase_errors) or None,
             )
-        except Exception:
-            pass
 
 
 def _clear_windows_venv_holders_or_exit(args, gateway_mode: bool, _windows_gateway_resume):

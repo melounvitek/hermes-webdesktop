@@ -6,6 +6,7 @@ test patches on ``update_cmd`` stay effective).
 """
 
 import logging
+from contextlib import suppress
 import os
 import shutil
 import subprocess
@@ -14,6 +15,8 @@ import time as _time
 from pathlib import Path
 from typing import Optional
 from hermes_constants import venv_python_path
+
+from hermes_cli.update_cmd_common import _best_effort
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.update_cmd")
@@ -62,7 +65,7 @@ def _purge_stale_hermes_modules() -> None:
     their module objects — so later imports rebuild a self-consistent graph from the new tree.
     """
     from hermes_cli.update_cmd import _m
-    try:
+    with _best_effort('Could not purge stale Hermes modules: %s'):
         import importlib
 
         importlib.invalidate_caches()
@@ -82,15 +85,13 @@ def _purge_stale_hermes_modules() -> None:
             logger.debug(
                 "Purged %d stale Hermes module(s) after checkout update", len(purged)
             )
-    except Exception as exc:
-        logger.debug("Could not purge stale Hermes modules: %s", exc)
 
 
 def _reload_updated_runtime_modules() -> None:
     """Reload the modules used by lazy-backend refresh: the pre-pull process's cached modules
     can expose old symbols despite new source on disk."""
     from hermes_cli.update_cmd import _m
-    try:
+    with _best_effort('Could not refresh update runtime modules: %s'):
         import importlib
 
         importlib.invalidate_caches()
@@ -102,8 +103,6 @@ def _reload_updated_runtime_modules() -> None:
                 importlib.reload(module)
             except Exception as exc:
                 logger.debug("Could not reload updated module %s: %s", module_name, exc)
-    except Exception as exc:
-        logger.debug("Could not refresh update runtime modules: %s", exc)
 
 
 def _print_curator_first_run_notice() -> None:
@@ -204,10 +203,8 @@ def _print_fts_optimize_available_notice() -> None:
         return
     finally:
         if db is not None:
-            try:
+            with suppress(Exception):
                 db.close()
-            except Exception:
-                pass
     sql = (row[0] if row else "") or ""
     if not sql or ("tool_name" in sql and not interrupted):
         return
@@ -272,11 +269,9 @@ def _print_curator_recent_run_notice() -> None:
 
     # Only a multi-line summary (rename map) is worth showing; still stamp it shown.
     if "\n" not in summary:
-        try:
+        with suppress(Exception):
             state["last_run_summary_shown_at"] = last_run_at
             curator.save_state(state)
-        except Exception:
-            pass
         return
 
     when = _format_time_ago(last_run_at)
@@ -289,11 +284,9 @@ def _print_curator_recent_run_notice() -> None:
         "View anytime: hermes curator status)"
     )
 
-    try:
+    with suppress(Exception):
         state["last_run_summary_shown_at"] = last_run_at
         curator.save_state(state)
-    except Exception:
-        pass
 
 
 def _format_time_ago(iso_ts: str) -> str:
@@ -614,13 +607,11 @@ def _verify_and_restore_state_dbs_post_update() -> None:
     from hermes_cli.update_cmd import get_hermes_home
     home = get_hermes_home()
     _verify_and_restore_one_state_db(home, label="default home")
-    try:
+    with _best_effort('Sibling-profile state.db guard sweep failed: %s'):
         from hermes_cli.backup import _sibling_profile_homes
 
         for name, profile_home in _sibling_profile_homes(home):
             _verify_and_restore_one_state_db(profile_home, label=f"profile {name}")
-    except Exception as exc:
-        logger.debug("Sibling-profile state.db guard sweep failed: %s", exc)
 
 
 def _print_bundled_skills_sync_report() -> None:
@@ -827,7 +818,7 @@ def _run_pre_update_backup(args) -> Optional[str]:
         return None
 
     snapshot_id = None
-    try:
+    with _best_effort('Pre-update snapshot failed: %s'):
         from hermes_cli.backup import (
             _quick_snapshot_root,
             create_quick_snapshot,
@@ -888,7 +879,7 @@ def _run_pre_update_backup(args) -> Optional[str]:
 
         # The code swap + fleet restart touch EVERY profile, so each gets the same snapshot
         # under its own state-snapshots/. Best-effort per profile.
-        try:
+        with _best_effort('Sibling profile snapshots failed: %s'):
             from hermes_cli.backup import create_pre_update_snapshots_all_profiles
 
             _sibling_snaps = create_pre_update_snapshots_all_profiles(
@@ -911,12 +902,6 @@ def _run_pre_update_backup(args) -> Optional[str]:
 
                 # The reader lives in update_cmd_config; write ITS module global, not ours.
                 _cfg._LAST_SIBLING_SNAPSHOTS = _sibling_snaps
-        except Exception as _sib_exc:
-            logger.debug(
-                "Sibling profile snapshots failed: %s", _sib_exc
-            )
-    except Exception as exc:
-        logger.debug("Pre-update snapshot failed: %s", exc)
 
     if mode != "full":
         if snapshot_id:
@@ -1037,30 +1022,24 @@ def _run_post_update_maintenance(
         logger.debug("macOS TCC anchor refresh skipped", exc_info=True)
 
     # state.db integrity guard for root home AND every profile; restore from own snapshot.
-    try:
+    with _best_effort('Post-update state.db integrity check failed: %s'):
         _verify_and_restore_state_dbs_post_update()
-    except Exception as exc:
-        logger.debug("Post-update state.db integrity check failed: %s", exc)
 
     # Seed the model-catalog cache from the checkout instead of a bot-gated, flaky fetch.
-    try:
+    with _best_effort('Model catalog seed during update failed: %s'):
         from hermes_cli.model_catalog import seed_cache_from_checkout
 
         if seed_cache_from_checkout(_m().PROJECT_ROOT):
             print("  ✓ Model catalog cache refreshed from checkout")
-    except Exception as e:
-        logger.debug("Model catalog seed during update failed: %s", e)
 
-    try:
+    with _best_effort('Skills sync during update failed: %s'):
         print()
         print("→ Syncing bundled skills...")
         _print_bundled_skills_sync_report()
-    except Exception as e:
-        logger.debug("Skills sync during update failed: %s", e)
 
     # All profiles incl. the active one: seed_profile_skills() subprocesses with an explicit
     # HERMES_HOME, so sync_skills()'s module-level HERMES_HOME cache can't skew it.
-    try:
+    with suppress(Exception):
         from hermes_cli.profiles import (
             list_profiles,
             seed_profile_skills,
@@ -1092,12 +1071,10 @@ def _run_post_update_maintenance(
                     print(f"  {p.name}: {status}")
                 except Exception as pe:
                     print(f"  {p.name}: error ({pe})")
-    except Exception:
-        pass  # profiles module not available or no profiles
 
     # Backfill .env for profiles created before .env seeding (copy the default's) so they
     # keep the credentials they were effectively using.
-    try:
+    with suppress(Exception):
         from hermes_cli.profiles import backfill_profile_envs
 
         backfilled = backfill_profile_envs(quiet=True)
@@ -1107,17 +1084,13 @@ def _run_post_update_maintenance(
                 f"→ Seeded .env for {len(backfilled)} profile(s) "
                 f"(copied from default): {', '.join(backfilled)}"
             )
-    except Exception:
-        pass  # profiles module not available or no profiles
 
-    try:
+    with suppress(Exception):
         from plugins.memory.honcho.cli import sync_honcho_profiles_quiet
 
         synced = sync_honcho_profiles_quiet()
         if synced:
             print(f"\n-> Honcho: synced {synced} profile(s)")
-    except Exception:
-        pass  # honcho plugin not installed or not configured
 
     _check_and_apply_config_migration(
         assume_yes=assume_yes,
@@ -1132,45 +1105,33 @@ def _run_post_update_maintenance(
     )
 
     # v23 FTS layout is opt-in (existing indexes untouched); surface the command here.
-    try:
+    with _best_effort('FTS optimize notice failed: %s'):
         _print_fts_optimize_available_notice()
-    except Exception as e:
-        logger.debug("FTS optimize notice failed: %s", e)
 
-    try:
+    with _best_effort('Curator first-run notice failed: %s'):
         _print_curator_first_run_notice()
-    except Exception as e:
-        logger.debug("Curator first-run notice failed: %s", e)
 
-    try:
+    with _best_effort('Curator recent-run notice failed: %s'):
         _print_curator_recent_run_notice()
-    except Exception as e:
-        logger.debug("Curator recent-run notice failed: %s", e)
 
-    try:
+    with _best_effort('FHS PATH guard check failed: %s'):
         _ensure_fhs_path_guard()
-    except Exception as e:
-        logger.debug("FHS PATH guard check failed: %s", e)
 
-    try:
+    with _best_effort('hermes-acp launcher self-heal failed: %s'):
         _ensure_acp_launcher()
-    except Exception as e:
-        logger.debug("hermes-acp launcher self-heal failed: %s", e)
 
     # Windows launchers into the managed bin dir: in-checkout launchers were swept by the
     # autostash (--include-untracked) and updates never run install.ps1. No-op on POSIX.
-    try:
+    with _best_effort('Windows bin launcher migration failed: %s'):
         from hermes_cli._install_repair import migrate_windows_bin_path
 
         migrate_windows_bin_path(_m().PROJECT_ROOT)
-    except Exception as e:
-        logger.debug("Windows bin launcher migration failed: %s", e)
 
     # cua-driver refresh, no-op unless on PATH; tied to update for a predictable cadence
     # without a per-launch GitHub API call.
-    try:
+    with _best_effort('cua-driver refresh failed: %s'):
         refresh_cua_driver = True
-        try:
+        with _best_effort('Could not read updates.refresh_cua_driver: %s'):
             from hermes_cli.config import load_config
 
             _update_cfg = (load_config() or {}).get("updates", {})
@@ -1178,8 +1139,6 @@ def _run_post_update_maintenance(
                 refresh_cua_driver = bool(
                     _update_cfg.get("refresh_cua_driver", True)
                 )
-        except Exception as cfg_exc:
-            logger.debug("Could not read updates.refresh_cua_driver: %s", cfg_exc)
 
         if (
             refresh_cua_driver
@@ -1198,6 +1157,4 @@ def _run_post_update_maintenance(
                 require_confirmed_update=True,
                 show_installer_progress=False,
             )
-    except Exception as e:
-        logger.debug("cua-driver refresh failed: %s", e)
     return update_complete

@@ -6,6 +6,7 @@ test patches on ``update_cmd`` stay effective).
 """
 
 import logging
+from contextlib import suppress
 import subprocess
 import sys
 from datetime import datetime
@@ -37,7 +38,7 @@ def _prune_orphan_rescue_refs(
     sort chronologically so ``for-each-ref`` order is creation order. Best-effort, never blocks.
     """
     from hermes_cli.update_cmd import _git_run
-    try:
+    with suppress(OSError):
         list_result = _git_run(
             git_cmd,
             ["for-each-ref", "--format=%(refname)", "--sort=refname",
@@ -65,8 +66,6 @@ def _prune_orphan_rescue_refs(
                     stale.add(ref)
         for ref in sorted(stale):
             _git_run(git_cmd, ["update-ref", "-d", ref], cwd)
-    except OSError:
-        pass
 
 
 def _branch_head_label(git_cmd=None, cwd=None) -> str | None:
@@ -239,12 +238,10 @@ SKIP_UPSTREAM_PROMPT_FILE = ".skip_upstream_prompt"
 def _get_origin_url(git_cmd: list[str], cwd: Path) -> Optional[str]:
     """Get the URL of the origin remote, or None if not set."""
     from hermes_cli.update_cmd import _git_run
-    try:
+    with suppress(Exception):
         result = _git_run(git_cmd, ["remote", "get-url", "origin"], cwd)
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
-        pass
     return None
 
 
@@ -287,12 +284,10 @@ def _add_upstream_remote(git_cmd: list[str], cwd: Path) -> bool:
 def _count_commits_between(git_cmd: list[str], cwd: Path, base: str, head: str) -> int:
     """Count commits on `head` that are not on `base`. Returns -1 on error."""
     from hermes_cli.update_cmd import _git_run
-    try:
+    with suppress(Exception):
         result = _git_run(git_cmd, ["rev-list", "--count", f"{base}..{head}"], cwd)
         if result.returncode == 0:
             return int(result.stdout.strip())
-    except Exception:
-        pass
     return -1
 
 
@@ -305,12 +300,10 @@ def _should_skip_upstream_prompt() -> bool:
 
 def _mark_skip_upstream_prompt():
     """Create marker file to skip future upstream prompts."""
-    try:
+    with suppress(Exception):
         from hermes_constants import get_hermes_home
 
         (get_hermes_home() / SKIP_UPSTREAM_PROMPT_FILE).touch()
-    except Exception:
-        pass
 
 
 def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
@@ -537,13 +530,11 @@ def _portable_git_candidates() -> list:
     not the profile-scoped HERMES_HOME), then profile home as a fallback for custom layouts."""
     from hermes_cli.update_cmd import get_default_hermes_root, get_hermes_home
     candidates = []
-    try:
+    with suppress(Exception):
         for root in (get_default_hermes_root(), Path(get_hermes_home())):
             candidates.append(
                 root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe"
             )
-    except Exception:
-        pass
     return candidates
 
 
@@ -602,7 +593,7 @@ def _discard_lockfile_churn(git_cmd, repo_root):
     sees a clean tree instead of autostashing every run. Only touches lockfiles whose
     package.json is NOT also dirty. Best-effort."""
     from hermes_cli.update_cmd import _git_run
-    try:
+    with suppress(Exception):
         diff = _git_run(git_cmd, ["diff", "--name-only"], repo_root)
         if diff.returncode != 0:
             return
@@ -621,8 +612,6 @@ def _discard_lockfile_churn(git_cmd, repo_root):
             return
         _git_run(git_cmd, ["checkout", "--", *dirty], repo_root)
         print(f"→ Discarded npm lockfile churn ({len(dirty)} file(s))")
-    except Exception:
-        pass
 
 
 def _normalize_managed_eol(git_cmd, repo_root):
@@ -678,7 +667,7 @@ def _normalize_managed_eol(git_cmd, repo_root):
             return None
         return all_dirty - real_dirty
 
-    try:
+    with suppress(Exception):
         effective = _git_run(git_cmd, ["config", "--get", "core.autocrlf"], repo_root)
         # Only "true" rewrites LF->CRLF; unset/false/input leave the tree alone.
         if effective.stdout.strip().lower() != "true":
@@ -709,5 +698,3 @@ def _normalize_managed_eol(git_cmd, repo_root):
             capture_output=True,
             check=False,
         )
-    except Exception:
-        pass
