@@ -39,13 +39,10 @@ def _plugin_relative_segments(key: str) -> tuple[str, ...]:
         raise ValueError("Expected a plugin-relative config key string")
     segments = tuple(key.split("."))
     if (
-        not key
-        or "/" in key
-        or "\\" in key
+        not key or "/" in key or "\\" in key
         or any(
             not _PLUGIN_SETTING_SEGMENT_RE.fullmatch(segment) for segment in segments
-        )
-        or segments[0].lower() in _PLUGIN_SETTING_RESERVED_ROOTS
+        ) or segments[0].lower() in _PLUGIN_SETTING_RESERVED_ROOTS
     ):
         raise ValueError(
             "Expected a plugin-relative config key such as 'endpoint' or "
@@ -74,8 +71,7 @@ def _plugin_data_namespace(plugin_id: str, skill_namespace: str) -> str:
     """Return one Windows-safe directory component for plugin-owned data."""
     candidate = skill_namespace or plugin_id
     if (
-        skill_namespace
-        and candidate.startswith("agent-plugin-")
+        skill_namespace and candidate.startswith("agent-plugin-")
         and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,191}", candidate)
     ):
         # Portable Agent Plugins already receive this exact PLUGIN_DATA path.
@@ -142,11 +138,7 @@ class PluginState:
 
     @staticmethod
     def _validate_key(key: str) -> None:
-        if (
-            not isinstance(key, str)
-            or not _PLUGIN_STATE_KEY_RE.fullmatch(key)
-            or ".." in key
-        ):
+        if (not isinstance(key, str) or not _PLUGIN_STATE_KEY_RE.fullmatch(key) or ".." in key):
             raise ValueError(
                 "Plugin state keys must be 1-128 characters using letters, "
                 "numbers, '_', '-', '.', or ':' (without '..')"

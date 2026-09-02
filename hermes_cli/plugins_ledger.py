@@ -56,12 +56,7 @@ class PluginRegistration:
 
 class PluginLedgerMixin:
     def _track_registration(
-        self,
-        manifest: PluginManifest,
-        kind: str,
-        key: str,
-        release: Callable[[], None],
-        *,
+        self, manifest: PluginManifest, kind: str, key: str, release: Callable[[], None], *,
         persistent: bool = False,
     ) -> PluginRegistration:
         """Record one registration under its canonical plugin key.
@@ -72,11 +67,7 @@ class PluginLedgerMixin:
         """
         plugin_key = manifest_key(manifest)
         registration = PluginRegistration(
-            kind=kind,
-            key=key,
-            release=release,
-            plugin_key=plugin_key,
-            persistent=persistent,
+            kind=kind, key=key, release=release, plugin_key=plugin_key, persistent=persistent,
         )
         registration._on_dispose = lambda disposed: self._forget_registrations([disposed])
         self._ownership_ledger.setdefault(plugin_key, []).append(registration)
@@ -85,15 +76,8 @@ class PluginLedgerMixin:
         return registration
 
     def _track_scoped_registration(
-        self,
-        manifest: PluginManifest,
-        kind: str,
-        name: str,
-        registry: Any,
-        current: Any,
-        previous: Any,
-        *,
-        finalize: Optional[Callable[[], None]] = None,
+        self, manifest: PluginManifest, kind: str, name: str, registry: Any, current: Any,
+        previous: Any, *, finalize: Optional[Callable[[], None]] = None,
     ) -> PluginRegistration:
         """Lease one ``(kind, scope, name)`` slot of a scope-keyed process-global registry.
 
@@ -102,13 +86,10 @@ class PluginLedgerMixin:
         """
         scope = self.scope_key
         lease = replacement_coordinator.acquire(
-            (kind, scope, name),
-            current=current,
-            previous=previous,
+            (kind, scope, name), current=current, previous=previous,
             restore=lambda replacement: registry.restore_registration(
                 name, current, replacement, scope=scope
-            ),
-            finalize=finalize,
+            ), finalize=finalize,
         )
         return self._track_registration(manifest, kind, name, lease.dispose)
 
@@ -121,23 +102,17 @@ class PluginLedgerMixin:
         parked = self._persistent_carryover
         self._persistent_carryover = []
         current = {
-            (registration.kind, registration.key)
-            for owned in self._ownership_ledger.values()
-            for registration in owned
-            if registration.persistent and registration.active
+            (registration.kind, registration.key) for owned in self._ownership_ledger.values()
+            for registration in owned if registration.persistent and registration.active
         }
         stale = [
-            registration
-            for registration in parked
-            if registration.active
+            registration for registration in parked if registration.active
             and (registration.kind, registration.key) not in current
         ]
         for registration in stale:
             logger.info(
                 "Evicting persistent registration %s/%s: plugin '%s' no "
-                "longer supplies it after re-discovery",
-                registration.kind,
-                registration.key,
+                "longer supplies it after re-discovery", registration.kind, registration.key,
                 registration.plugin_key,
             )
         self._dispose_registrations(stale)
@@ -152,10 +127,7 @@ class PluginLedgerMixin:
         return False
 
     def _remove_callback(
-        self,
-        mapping: Dict[str, List[Callable]],
-        key: str,
-        callback: Callable,
+        self, mapping: Dict[str, List[Callable]], key: str, callback: Callable,
     ) -> None:
         callbacks = mapping.get(key)
         if callbacks is None:
@@ -165,11 +137,7 @@ class PluginLedgerMixin:
             mapping.pop(key, None)
 
     def _restore_mapping(
-        self,
-        mapping: Dict[str, Any],
-        key: str,
-        current: Any,
-        previous: Optional[Any],
+        self, mapping: Dict[str, Any], key: str, current: Any, previous: Optional[Any],
     ) -> bool:
         """Restore a manager-local mapping only when *current* is still present."""
         if mapping.get(key) is not current:
@@ -190,9 +158,7 @@ class PluginLedgerMixin:
     def _remove_name_if_unowned(self, kind: str, names: Set[str], name: str) -> None:
         """Drop *name* from the manager-local name set once no active ledger entry owns it."""
         if not any(
-            registration.active
-            and registration.kind == kind
-            and registration.key == name
+            registration.active and registration.kind == kind and registration.key == name
             for registration in self._registration_order
         ):
             names.discard(name)
@@ -208,15 +174,12 @@ class PluginLedgerMixin:
             return
         registration_ids = {id(registration) for registration in registrations}
         self._registration_order = [
-            registration
-            for registration in self._registration_order
+            registration for registration in self._registration_order
             if id(registration) not in registration_ids
         ]
         for plugin_key, owned in list(self._ownership_ledger.items()):
             remaining = [
-                registration
-                for registration in owned
-                if id(registration) not in registration_ids
+                registration for registration in owned if id(registration) not in registration_ids
             ]
             if remaining:
                 self._ownership_ledger[plugin_key] = remaining
@@ -232,11 +195,8 @@ class PluginLedgerMixin:
                 registration.dispose()
             except Exception as exc:  # pragma: no cover - defensive cleanup
                 logger.warning(
-                    "Failed to unload plugin registration %s/%s: %s",
-                    registration.plugin_key,
-                    registration.key,
-                    exc,
-                    exc_info=_PLUGINS_DEBUG,
+                    "Failed to unload plugin registration %s/%s: %s", registration.plugin_key,
+                    registration.key, exc, exc_info=_PLUGINS_DEBUG,
                 )
 
     @staticmethod
@@ -268,16 +228,14 @@ class PluginLedgerMixin:
         else:
             target_keys = self._unload_target_keys(self._resolve_plugin_key(plugin))
             registrations = [
-                registration
-                for registration in self._registration_order
+                registration for registration in self._registration_order
                 if registration.plugin_key in target_keys
             ]
             # Persistent registrations are absent from _registration_order (unload-all keeps them),
             # but a *targeted* unload is the disable/uninstall path: a disabled auth plugin's
             # provider must NOT stay live process-wide.
             registrations.extend(
-                registration
-                for key in target_keys
+                registration for key in target_keys
                 for registration in self._ownership_ledger.get(key, [])
                 if registration.persistent and registration.active
             )
@@ -312,14 +270,10 @@ class PluginLedgerMixin:
         # Ledger-owned tool names are excluded: their handles already restored the previous entry,
         # and blanket deregistration would remove what the ledger just restored.
         ledger_tool_names = {
-            registration.key
-            for registration in registrations
-            if registration.kind == "tool"
+            registration.key for registration in registrations if registration.kind == "tool"
         }
         preledger_tools = tuple(
-            name
-            for name in self._plugin_tool_names
-            if name not in ledger_tool_names
+            name for name in self._plugin_tool_names if name not in ledger_tool_names
         )
         if preledger_tools:
             try:
@@ -336,11 +290,8 @@ class PluginLedgerMixin:
         # carry them over so force re-discovery can evict the ones whose plugin does not come back.
         carryover_ids = {id(registration) for registration in self._persistent_carryover}
         self._persistent_carryover.extend(
-            registration
-            for owned in self._ownership_ledger.values()
-            for registration in owned
-            if registration.persistent
-            and registration.active
+            registration for owned in self._ownership_ledger.values() for registration in owned
+            if registration.persistent and registration.active
             and id(registration) not in carryover_ids
         )
         for container in (

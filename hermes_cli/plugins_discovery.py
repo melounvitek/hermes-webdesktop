@@ -17,12 +17,8 @@ from hermes_cli.config import cfg_get
 from hermes_cli.plugin_capabilities import VALID_CAPABILITY_IDS
 from hermes_cli.plugin_capabilities import parse_declared_capabilities as _parse_declared_capabilities
 from hermes_cli.plugins_manifest import (
-    PluginManifest,
-    _detect_kind_from_source,
-    manifest_key,
-    _resolve_module_source,
-    parse_manifest_file,
-    portable_plugin_manifest,
+    PluginManifest, _detect_kind_from_source, manifest_key, _resolve_module_source,
+    parse_manifest_file, portable_plugin_manifest,
 )
 from hermes_cli.relay_plugin_cutover import LEGACY_RELAY_PLUGIN_KEYS, RELAY_PLUGINS_CONFIG_ENV
 
@@ -67,24 +63,17 @@ def discover_entrypoint_manifests() -> List["PluginManifest"]:
             for capability in VALID_CAPABILITY_IDS:
                 declaration_name = f"{ep.name}.{capability}"
                 if any(
-                    declaration.name == declaration_name
-                    and declaration.value == ep.value
+                    declaration.name == declaration_name and declaration.value == ep.value
                     for declaration in capability_eps
                 ):
                     capabilities.append(capability)
             dist = getattr(ep, "dist", None)
             metadata = getattr(dist, "metadata", None)
             manifest = PluginManifest(
-                name=ep.name,
-                version=str(getattr(dist, "version", "") or ""),
+                name=ep.name, version=str(getattr(dist, "version", "") or ""),
                 description=(
-                    str(metadata.get("Summary", "") or "")
-                    if metadata is not None
-                    else ""
-                ),
-                source="entrypoint",
-                path=ep.value,
-                key=ep.name,
+                    str(metadata.get("Summary", "") or "") if metadata is not None else ""
+                ), source="entrypoint", path=ep.value, key=ep.name,
                 capabilities=_parse_declared_capabilities(
                     capabilities, ep.name
                 ),
@@ -134,11 +123,7 @@ def _get_enabled_plugins() -> Optional[set]:
 
 
 def scan_directory(
-    path: Path,
-    source: str,
-    *,
-    skip_names: Optional[Set[str]] = None,
-    prefix: str = "",
+    path: Path, source: str, *, skip_names: Optional[Set[str]] = None, prefix: str = "",
     depth: int = 0,
 ) -> List[PluginManifest]:
     """Read manifests under *path*: flat ``<root>/<name>/plugin.yaml`` (key ``name``) or category

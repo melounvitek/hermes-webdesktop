@@ -103,9 +103,7 @@ class PluginLoaderMixin:
                 # predecessor and this loader must publish nothing; if loading won, unload waits
                 # and disposes the completed set.
                 with self._discovery_lock, _plugin_home_scope(self.home_path):
-                    if platform_registry.is_deferred_load_cancelled(
-                        platform_name, scope=scope
-                    ):
+                    if platform_registry.is_deferred_load_cancelled(platform_name, scope=scope):
                         return
                     self._load_plugin_scoped(_manifest)
 
@@ -119,15 +117,12 @@ class PluginLoaderMixin:
                     finalize=lambda: self._remove_platform_name_if_unowned(platform_name),
                 )
             logger.debug(
-                "Registered deferred platform loader: %s (plugin=%s)",
-                platform_name,
-                lookup_key,
+                "Registered deferred platform loader: %s (plugin=%s)", platform_name, lookup_key,
             )
         except Exception:
             # Fall back to eager loading so the platform is never silently lost.
             logger.debug(
-                "Deferred platform registration failed for '%s'; eager-loading",
-                lookup_key,
+                "Deferred platform registration failed for '%s'; eager-loading", lookup_key,
                 exc_info=True,
             )
             self._load_plugin(manifest)
@@ -156,8 +151,7 @@ class PluginLoaderMixin:
             # Declared but undeliverable — staying quiet reproduces the very symptom this fixes.
             logger.warning(
                 "Plugin '%s' declares provides_tools %s but has no tools.py; "
-                "those tools will not be available in CLI/TUI sessions.",
-                lookup_key,
+                "those tools will not be available in CLI/TUI sessions.", lookup_key,
                 list(manifest.provides_tools),
             )
             return
@@ -176,9 +170,7 @@ class PluginLoaderMixin:
                 logger.warning(
                     "Plugin '%s' declares provides_tools %s but its tools.py "
                     "has no register_tools(ctx); those tools will not be "
-                    "available in CLI/TUI sessions.",
-                    lookup_key,
-                    list(manifest.provides_tools),
+                    "available in CLI/TUI sessions.", lookup_key, list(manifest.provides_tools),
                 )
                 return
 
@@ -188,10 +180,8 @@ class PluginLoaderMixin:
             loaded.tools_registered = registered
             self._predeclared_tools[lookup_key] = registered
             logger.debug(
-                "Deferred platform '%s': pre-registered %d client tool(s) %s",
-                lookup_key,
-                len(registered),
-                registered,
+                "Deferred platform '%s': pre-registered %d client tool(s) %s", lookup_key,
+                len(registered), registered,
             )
         except Exception as exc:
             # Tools registered before the raise are live: credit them or `hermes plugins list`
@@ -211,13 +201,9 @@ class PluginLoaderMixin:
             else:
                 scope = f"after registering {len(partial)} of {declared} declared tool(s)"
             logger.warning(
-                "Plugin '%s': client-tool pre-registration failed %s (%s).%s",
-                lookup_key,
-                scope,
-                exc,
-                "" if len(partial) >= declared else
-                " The remainder will be missing from CLI/TUI sessions.",
-                exc_info=_PLUGINS_DEBUG,
+                "Plugin '%s': client-tool pre-registration failed %s (%s).%s", lookup_key, scope,
+                exc, "" if len(partial) >= declared else
+                " The remainder will be missing from CLI/TUI sessions.", exc_info=_PLUGINS_DEBUG,
             )
 
     def _warn_python_dependencies(self, manifest: PluginManifest) -> None:
@@ -243,8 +229,7 @@ class PluginLoaderMixin:
                 "Plugin %s declares Python dependencies that are not "
                 "installed: %s. Hermes does not install plugin dependencies "
                 "automatically; install them yourself, e.g.: pip install %s",
-                key, ", ".join(missing),
-                " ".join(f"'{m}'" for m in missing),
+                key, ", ".join(missing), " ".join(f"'{m}'" for m in missing),
             )
         else:
             logger.debug("Plugin %s python_dependencies satisfied: %s", key, ", ".join(deps))
@@ -268,9 +253,7 @@ class PluginLoaderMixin:
             settings = raw if isinstance(raw, Mapping) else {}
         except Exception:
             settings = {}
-        for warning in validate_config_schema(
-            plugin_id, manifest.config_schema, settings
-        ):
+        for warning in validate_config_schema(plugin_id, manifest.config_schema, settings):
             logger.warning("Plugin %s config: %s", plugin_id, warning)
 
     def _load_plugin(self, manifest: PluginManifest) -> None:
@@ -318,8 +301,7 @@ class PluginLoaderMixin:
 
         except Exception as exc:
             owned = [
-                registration
-                for registration in self._registration_order
+                registration for registration in self._registration_order
                 if registration.plugin_key == plugin_key
             ]
             self._dispose_registrations(owned)
@@ -329,8 +311,7 @@ class PluginLoaderMixin:
             # reachable from later event dispatch.
             self._remove_plugin_subscriptions(plugin_key)
             logger.warning(
-                "Failed to load plugin '%s': %s",
-                manifest.name, exc, exc_info=_PLUGINS_DEBUG,
+                "Failed to load plugin '%s': %s", manifest.name, exc, exc_info=_PLUGINS_DEBUG,
             )
         # The failure path swept this plugin's whole ledger (not just the registration_start slice),
         # so discovery-time pre-registrations are gone too.
@@ -349,19 +330,14 @@ class PluginLoaderMixin:
                 module_name, scope=self.scope_key
             )
             current_policy = _registry.register_plugin_override_policy(
-                module_name,
-                PluginContext(manifest, self)._tool_override_allowed(""),
+                module_name, PluginContext(manifest, self)._tool_override_allowed(""),
                 scope=self.scope_key,
             )
             policy_lease = replacement_coordinator.acquire(
-                ("tool_override_policy", self.scope_key, module_name),
-                current=current_policy,
+                ("tool_override_policy", self.scope_key, module_name), current=current_policy,
                 previous=previous_policy,
                 restore=lambda replacement: _registry.restore_plugin_override_policy(
-                    module_name,
-                    current_policy,
-                    replacement,
-                    scope=self.scope_key,
+                    module_name, current_policy, replacement, scope=self.scope_key,
                 ),
             )
             self._track_registration(
@@ -373,8 +349,7 @@ class PluginLoaderMixin:
     ) -> None:
         """Fill ``loaded.*_registered`` from the ledger slice this plugin's register() produced."""
         registrations = [
-            registration
-            for registration in self._registration_order[registration_start:]
+            registration for registration in self._registration_order[registration_start:]
             if registration.plugin_key == plugin_key and registration.active
         ]
 
@@ -384,8 +359,7 @@ class PluginLoaderMixin:
         # Discovery-time tools predate registration_start; credit them back or `hermes plugins
         # list` under-reports once the deferred adapter materializes.
         _predeclared = [
-            t for t in self._predeclared_tools.pop(plugin_key, [])
-            if t in self._plugin_tool_names
+            t for t in self._predeclared_tools.pop(plugin_key, []) if t in self._plugin_tool_names
         ]
         loaded.tools_registered = _predeclared + [
             key for key in _keys("tool") if key not in _predeclared
@@ -395,10 +369,8 @@ class PluginLoaderMixin:
         loaded.commands_registered = _keys("command")
         logger.debug(
             "  registered: %d tool(s), %d hook(s), %d middleware, %d slash command(s), %d CLI command(s)",
-            len(loaded.tools_registered),
-            len(loaded.hooks_registered),
-            len(loaded.middleware_registered),
-            len(loaded.commands_registered),
+            len(loaded.tools_registered), len(loaded.hooks_registered),
+            len(loaded.middleware_registered), len(loaded.commands_registered),
             sum(1 for c in self._cli_commands if c in _keys("cli_command")),
         )
 
@@ -411,39 +383,27 @@ class PluginLoaderMixin:
             from hermes_cli.agent_plugins import load_agent_plugin
 
             package = load_agent_plugin(
-                Path(manifest.path),
-                get_hermes_home() / "plugin-data" / manifest.skill_namespace,
+                Path(manifest.path), get_hermes_home() / "plugin-data" / manifest.skill_namespace,
             )
             ctx = PluginContext(manifest, self)
             for diagnostic in package.diagnostics:
                 logger.warning(
-                    "Agent Plugin '%s' [%s]: %s",
-                    lookup_key,
-                    diagnostic.scope,
-                    diagnostic.message,
+                    "Agent Plugin '%s' [%s]: %s", lookup_key, diagnostic.scope, diagnostic.message,
                 )
             for skill in package.skills:
                 try:
                     ctx.register_skill(
-                        skill.name,
-                        skill.skill_md,
-                        skill.description,
-                        skill.frontmatter,
+                        skill.name, skill.skill_md, skill.description, skill.frontmatter,
                     )
                 except Exception as exc:
                     logger.warning(
-                        "Agent Plugin '%s' skill '%s' skipped: %s",
-                        lookup_key,
-                        skill.name,
-                        exc,
+                        "Agent Plugin '%s' skill '%s' skipped: %s", lookup_key, skill.name, exc,
                     )
             for server_name, config in package.mcp_servers.items():
                 internal_name = f"{manifest.skill_namespace}__{server_name}"
                 if internal_name in self._portable_mcp_servers:
                     logger.warning(
-                        "Agent Plugin '%s' MCP server collision: %s",
-                        lookup_key,
-                        internal_name,
+                        "Agent Plugin '%s' MCP server collision: %s", lookup_key, internal_name,
                     )
                     continue
                 self._portable_mcp_servers[internal_name] = dict(config)
@@ -477,10 +437,7 @@ class PluginLoaderMixin:
         return self._directory_module_name(manifest)
 
     def _load_directory_module(
-        self,
-        manifest: PluginManifest,
-        *,
-        module_name: Optional[str] = None,
+        self, manifest: PluginManifest, *, module_name: Optional[str] = None,
     ) -> types.ModuleType:
         """Import a directory plugin as ``hermes_plugins.<slug>`` (slug from ``manifest.key`` so
         ``image_gen/openai`` cannot collide with ``tts/openai``)."""
@@ -504,9 +461,7 @@ class PluginLoaderMixin:
         _evict_modules(module_name)
 
         spec = importlib.util.spec_from_file_location(
-            module_name,
-            init_file,
-            submodule_search_locations=[str(plugin_dir)],
+            module_name, init_file, submodule_search_locations=[str(plugin_dir)],
         )
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot create module spec for {init_file}")

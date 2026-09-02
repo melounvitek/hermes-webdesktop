@@ -37,8 +37,7 @@ def _portable_skill_namespace(key: str) -> str:
     """Return a readable, collision-resistant namespace for a portable plugin."""
 
     slug = "".join(
-        ch if ch.isascii() and (ch.isalnum() or ch in "_-") else "-"
-        for ch in key.lower()
+        ch if ch.isascii() and (ch.isalnum() or ch in "_-") else "-" for ch in key.lower()
     )
     slug = slug.strip("-_") or "plugin"
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
@@ -49,9 +48,7 @@ def _display_author(value: object) -> str:
     """Normalize a manifest author value for the string PluginManifest field."""
     if isinstance(value, Mapping):
         return ", ".join(
-            str(value[field])
-            for field in ("name", "email", "url")
-            if value.get(field)
+            str(value[field]) for field in ("name", "email", "url") if value.get(field)
         )
     return "" if value is None else str(value)
 
@@ -77,18 +74,9 @@ SUPPORTED_MANIFEST_VERSION = 2
 
 
 _CONFIG_SCHEMA_TYPES: Dict[str, tuple] = {
-    "str": (str,),
-    "string": (str,),
-    "int": (int,),
-    "integer": (int,),
-    "float": (int, float),
-    "number": (int, float),
-    "bool": (bool,),
-    "boolean": (bool,),
-    "list": (list,),
-    "array": (list,),
-    "dict": (dict,),
-    "object": (dict,),
+    "str": (str,), "string": (str,), "int": (int,), "integer": (int,), "float": (int, float),
+    "number": (int, float), "bool": (bool,), "boolean": (bool,), "list": (list,), "array": (list,),
+    "dict": (dict,), "object": (dict,),
 }
 
 
@@ -111,8 +99,7 @@ def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
         mv = int(raw_mv)
     except (TypeError, ValueError):
         logger.warning(
-            "Plugin %s: manifest_version %r is not an integer; treating as 1",
-            key, raw_mv,
+            "Plugin %s: manifest_version %r is not an integer; treating as 1", key, raw_mv,
         )
         mv = 1
     if mv > SUPPORTED_MANIFEST_VERSION:
@@ -194,8 +181,7 @@ def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
         log = logger.warning if mv >= 2 else logger.debug
         log(
             "Plugin %s: unknown manifest field(s) ignored: %s "
-            "(newer manifest schema or typo; plugin still loads)",
-            key, ", ".join(unknown),
+            "(newer manifest schema or typo; plugin still loads)", key, ", ".join(unknown),
         )
 
     return out
@@ -264,8 +250,7 @@ def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List
                 logger.warning(
                     "Plugin %s requires plugin '%s' which is not enabled/"
                     "installed; loading anyway (probe availability at runtime "
-                    "via ctx.has_plugin). Run `hermes plugins enable %s` if "
-                    "it is installed.",
+                    "via ctx.has_plugin). Run `hermes plugins enable %s` if it is installed.",
                     k, dep_id, dep_id,
                 )
                 continue
@@ -281,8 +266,7 @@ def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List
         cycle = exc.args[1] if len(exc.args) > 1 else []
         logger.warning(
             "Plugin dependency cycle detected (%s); falling back to "
-            "alphabetical load order for all plugins",
-            " -> ".join(str(c) for c in cycle),
+            "alphabetical load order for all plugins", " -> ".join(str(c) for c in cycle),
         )
         return keys
 
@@ -432,15 +416,9 @@ def portable_plugin_manifest(child: Path, source: str, prefix: str) -> PluginMan
         logger.warning("Agent Plugin '%s': %s", child, diagnostic.message)
     key = f"{prefix}/{child.name}" if prefix else data["name"]
     return PluginManifest(
-        name=data["name"],
-        version=data.get("version", ""),
-        description=data.get("description", ""),
-        author=_display_author(data.get("author", "")),
-        source=source,
-        path=str(child),
-        key=key,
-        portable=True,
-        skill_namespace=_portable_skill_namespace(key),
+        name=data["name"], version=data.get("version", ""), description=data.get("description", ""),
+        author=_display_author(data.get("author", "")), source=source, path=str(child), key=key,
+        portable=True, skill_namespace=_portable_skill_namespace(key),
     )
 
 
@@ -487,20 +465,14 @@ def parse_manifest_file(
             key, name, kind, source, plugin_dir,
         )
         return PluginManifest(
-            name=name,
-            version=str(data.get("version", "")),
-            description=data.get("description", ""),
-            author=_display_author(data.get("author", "")),
+            name=name, version=str(data.get("version", "")),
+            description=data.get("description", ""), author=_display_author(data.get("author", "")),
             requires_env=data.get("requires_env", []),
             provides_tools=data.get("provides_tools", []),
-            provides_hooks=data.get("provides_hooks", []),
-            source=source,
-            path=str(plugin_dir),
-            kind=kind,
-            key=key,
+            provides_hooks=data.get("provides_hooks", []), source=source, path=str(plugin_dir),
+            kind=kind, key=key,
             capabilities=_parse_declared_capabilities(data.get("capabilities"), name),
-            **_parse_manifest_v2_fields(data, key),
-            emits=data.get("emits") or [],
+            **_parse_manifest_v2_fields(data, key), emits=data.get("emits") or [],
             listens=data.get("listens") or [],
         )
     except Exception as exc:
