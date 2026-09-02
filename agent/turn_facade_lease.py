@@ -42,8 +42,6 @@ class DurableTurnLease:
     def _current_session_id(self) -> str:
         return getattr(self.agent, "session_id", None) or self.session_id
 
-    # ── thread construction ──────────────────────────────────────────────────────
-
     def build_threads(self) -> None:
         """Create (not start) the refresher thread and, when configured, the liveness watchdog.
 
@@ -75,8 +73,6 @@ class DurableTurnLease:
                 commit_abort=self.commit_liveness_abort,
                 deactivate_turn=self.deactivate_after_liveness_abort,
             ).make_thread()
-
-    # ── lifecycle ────────────────────────────────────────────────────────────────
 
     def start(self) -> None:
         with self._lock:
@@ -112,8 +108,6 @@ class DurableTurnLease:
     def is_turn_active(self) -> bool:
         with self._lock:
             return self.turn_active
-
-    # ── interrupts ───────────────────────────────────────────────────────────────
 
     def _interrupt_turn(self, message: str) -> None:
         # Lease-loss interrupts fire UNCONDITIONALLY (no generation claim): a lost lease means this
@@ -202,8 +196,6 @@ class DurableTurnLease:
         else:
             with redirect_lock:
                 _clear_if_owned()
-
-    # ── refresher thread body ────────────────────────────────────────────────────
 
     def refresh_loop(self) -> None:
         """Renew the lease every ``refresh_interval``; a miss or error interrupts the turn.
