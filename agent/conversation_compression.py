@@ -847,6 +847,7 @@ def _join_cancelled_worker(future: Any, grace_seconds: float) -> bool:
         )
         return True
 
+
 # Executor queue is unbounded: a queued job would wait out its timeout unstarted
 # and run stale later. Cap admission at worker count; fail fast (warn, continue
 # uncompressed). Slots free via done-callback; a never-returning worker loses 1.
@@ -1462,6 +1463,7 @@ def run_compress_context_with_progress_timeout(
             # lease before the host unwinds, so the detached worker can never publish.
             fence.revoke_commit_admission()
 
+
 class CompressionCheckpointUnavailable(RuntimeError):
     """Raised when required durable pre-compress checkpointing is unavailable."""
 
@@ -2042,6 +2044,7 @@ class _CompressionActivityHeartbeat:
             if self._should_suppress():
                 return
             self._touch("context compression in progress")
+
 
 def _direct_messages_for_pre_compress_memory(messages: Any) -> list[dict[str, Any]]:
     """Return direct user/assistant evidence safe for memory checkpointing.
@@ -3249,6 +3252,7 @@ def _adopt_grown_durable_parent(
     )
     return durable_parent
 
+
 def _pre_compress_memory_context(
     agent: Any, messages: list, checkpoint_required: bool
 ) -> str:
@@ -3310,6 +3314,7 @@ def _pre_compress_memory_context(
             pass
     return memory_context
 
+
 def _resolve_compress_call(
     agent: Any,
     *,
@@ -3346,6 +3351,7 @@ def _resolve_compress_call(
                 engine_name,
             )
     return compress_fn, compress_kwargs
+
 
 def _run_summary_dispatch(
     agent: Any,
@@ -3426,6 +3432,459 @@ def _run_summary_dispatch(
                 agent.context_compressor, attempt_generation
             )
     return compressed
+
+
+def _fold_todo_snapshot(agent: Any, compressed: list) -> None:
+    """Strip stale todo snapshots from ``compressed`` and fold the live one in (in place)."""
+    todo_snapshot = agent._todo_store.format_for_injection()
+    # Non-empty store (even all done) is authoritative: drop the old snapshot. A
+    # truly empty store may be un-rehydrated post-compaction: keep the snapshot.
+    _todo_has_items = getattr(agent._todo_store, "has_items", None)
+    try:
+        _todo_store_is_authoritative = bool(
+            _todo_has_items()
+        ) if callable(_todo_has_items) else False
+    except Exception:
+        # Store may implement only format_for_injection(); unknown authority must
+        # preserve the pending snapshot rather than risk deleting it.
+        _todo_store_is_authoritative = False
+    if _todo_store_is_authoritative:
+        for _todo_idx in range(len(compressed) - 1, -1, -1):
+            _todo_message = compressed[_todo_idx]
+            if not isinstance(_todo_message, dict) or _todo_message.get("role") != "user":
+                continue
+            _todo_content = _todo_message.get("content")
+            _todo_stripped = _strip_stale_todo_snapshot(_todo_content)
+            if _todo_stripped == _todo_content:
+                continue
+            if (
+                _todo_message.get("_todo_snapshot_synthetic")
+                and _todo_snapshot_is_only_content(
+                    _todo_content, _todo_stripped
+                )
+            ):
+                compressed.pop(_todo_idx)
+                if _todo_idx < len(compressed):
+                    # A standalone snapshot can drift from the tail; deleting it may expose two
+                    # assistant rows, so use the normal replay repair to keep metadata consistent.
+                    agent._repair_message_sequence(compressed)
+            else:
+                _replace_message_content(_todo_message, _todo_stripped)
+                # No longer todo-only scaffolding; other synthetic flags stay authoritative and
+                # _is_real_user_message() recomputes provenance from content + flags.
+                _todo_message.pop("_todo_snapshot_synthetic", None)
+            break
+    if todo_snapshot:
+        # If this boundary pruned skill bodies, the policy behind the todos is gone:
+        # add a reload notice after TODO_INJECTION_HEADER so both strip together.
+        _reload_notice = _pruned_skill_reload_notice(compressed)
+        if _reload_notice:
+            todo_snapshot = f"{todo_snapshot}\n\n{_reload_notice}"
+        # Fold the snapshot into a trailing REAL user msg (no synthetic user/user pair);
+        # strip old snapshots first. Scaffolding tails must not absorb it (provenance).
+        from agent.context_compressor import _append_text_to_content
+
+        merged = False
+        _tail = (
+            compressed[-1]
+            if compressed and isinstance(compressed[-1], dict)
+            else None
+        )
+        if _tail is not None and _tail.get("role") == "user":
+            _stripped = _strip_stale_todo_snapshot(_tail.get("content"))
+            _probe = {
+                key: value for key, value in _tail.items() if key != "content"
+            }
+            _probe["content"] = _stripped
+            if _is_real_user_message(_probe):
+                _snapshot_text = (
+                    f"\n\n{todo_snapshot}"
+                    if isinstance(_stripped, str) and _stripped
+                    else todo_snapshot
+                )
+                _replace_message_content(
+                    _tail,
+                    _append_text_to_content(_stripped, _snapshot_text),
+                )
+                merged = True
+            elif _stripped != _tail.get("content") and not _message_text(
+                {"role": "user", "content": _stripped}
+            ).strip():
+                # The tail was nothing but an earlier snapshot row —
+                # refresh it in place instead of stacking a duplicate.
+                _replace_message_content(_tail, todo_snapshot)
+                _tail["_todo_snapshot_synthetic"] = True
+                merged = True
+        if not merged:
+            compressed.append({
+                "role": "user",
+                "content": todo_snapshot,
+                "_todo_snapshot_synthetic": True,
+            })
+
+
+def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
+    """Refresh tool schemas and rebuild the system prompt at the commit boundary."""
+    cached_system_prompt = agent._cached_system_prompt
+    agent._invalidate_system_prompt()
+
+    # Refresh tool schemas at the commit boundary: forever-sessions never restart,
+    # so config reaches agent.tools here. Keep list identity if byte-equal (cache).
+    try:
+        _refresh_agent_tool_definitions(agent)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "compaction tool-definition refresh failed; keeping the "
+            "session's existing tool snapshot",
+            exc_info=True,
+        )
+
+    # ALWAYS rebuild the prompt here: keeping old bytes meant prompt-builder changes
+    # never reached long sessions. Equal bytes keep KV; preserve object identity.
+    rebuilt_system_prompt = agent._build_system_prompt(system_message)
+    if cached_system_prompt is not None and rebuilt_system_prompt == cached_system_prompt:
+        new_system_prompt = cached_system_prompt
+        agent._cached_system_prompt = cached_system_prompt
+        from agent.system_prompt import reconstruct_static_prefix
+
+        reconstruct_static_prefix(
+            agent,
+            system_message=system_message,
+            log_label="compression keep-prompt",
+        )
+    else:
+        new_system_prompt = rebuilt_system_prompt
+        agent._cached_system_prompt = new_system_prompt
+        if cached_system_prompt is not None:
+            logger.info(
+                "Compaction rebuilt a drifted system prompt "
+                "(session=%s, %d -> %d chars): builder output changed "
+                "since the stored snapshot (update, config change, or "
+                "memory/skills growth)",
+                agent.session_id or "none",
+                len(cached_system_prompt),
+                len(new_system_prompt),
+            )
+    return new_system_prompt
+
+
+def _salvage_or_refuse_grown_transcript(
+    agent: Any,
+    messages: list,
+    compressed: list,
+    *,
+    system_message: str,
+    attempt_started_at: float,
+    attempt_snapshot: dict,
+) -> Tuple[Optional[list], Optional[str]]:
+    """Anti-growth guard at the COMMIT SITE (in-place commits before the gateway can inspect).
+
+    Compares like-for-like rough estimates; on growth tries one mechanical salvage
+    pass, else treats the attempt as a refused no-op. Returns ``(compressed, None)``
+    to proceed or ``(None, prompt)`` when refused (caller releases the lease).
+    """
+    # Anti-growth guard at the COMMIT SITE: in-place commits here before the gateway
+    # can inspect. Compare like-for-like rough estimates; on growth treat as no-op.
+    _rough_in = estimate_messages_tokens_rough(messages)
+    _rough_out = estimate_messages_tokens_rough(compressed)
+    if _rough_out > _rough_in:
+        # Todo refresh and user-turn anchoring run after the compressor's own size check
+        # and can tip a break-even candidate; give it one mechanical salvage pass.
+        from agent.context_compressor import salvage_grown_transcript
+
+        _salvaged = salvage_grown_transcript(
+            messages, compressed, budget=_rough_in
+        )
+        if _salvaged is not None:
+            _salv_est = estimate_messages_tokens_rough(_salvaged)
+            if _salv_est < _rough_in:
+                logger.info(
+                    "Compression salvage recovered a shrinking "
+                    "transcript (session=%s, ~%s -> ~%s tokens)",
+                    agent.session_id or "none",
+                    f"{_rough_in:,}",
+                    f"{_salv_est:,}",
+                )
+                compressed = _salvaged
+                _rough_out = _salv_est
+    if _rough_out > _rough_in:
+        logger.warning(
+            "Compression refused: compressed transcript would be "
+            "larger than the original (session=%s, ~%s -> ~%s "
+            "tokens); keeping the original transcript unchanged",
+            agent.session_id or "none",
+            f"{_rough_in:,}",
+            f"{_rough_out:,}",
+        )
+        # Flag the refusal on compressor state so /compress feedback reports it instead
+        # of comparing list lengths (adoption can change the count), claiming success.
+        try:
+            agent.context_compressor._last_compress_refused_would_grow = True
+        except Exception:
+            pass
+        try:
+            agent._emit_warning(
+                "⚠️ Compression refused: the generated summary "
+                "would have GROWN the conversation instead of "
+                "shrinking it. No messages were dropped — "
+                "conversation continues unchanged."
+            )
+        except Exception:
+            pass
+        _existing_sp = _existing_system_prompt(agent, system_message)
+        _emit_aborted_attempt_telemetry(agent, attempt_started_at, "would_grow")
+        # Count the refusal as an ineffective-compaction strike so the anti-thrash
+        # breaker latches; otherwise auto-compress retries the same summary every turn.
+        try:
+            agent.context_compressor.record_rejected_compaction()
+        except Exception:
+            logger.debug(
+                "could not record rejected-compaction strike",
+                exc_info=True,
+            )
+        _restore_prune_rearm_tokens(agent.context_compressor, attempt_snapshot)
+        return None, _existing_sp
+    return compressed, None
+
+
+def _publish_rotated_compaction(
+    agent: Any,
+    messages: list,
+    compressed: list,
+    *,
+    new_system_prompt: str,
+    lease: _CompressionLease,
+    old_session_id: str,
+    compressed_user_turn_outcome: str,
+) -> None:
+    """Rotate the session: flush the parent, publish the child, re-point the agent.
+
+    Flushes current-turn msgs to the OLD session, passing the durable prefix
+    (messages[:persist idx]) so preflight, which runs before rows are
+    marker-stamped, can't re-append them.
+    """
+    current_idx = getattr(agent, "_persist_user_message_idx", None)
+    persisted_history = (
+        messages[:current_idx]
+        if isinstance(current_idx, int)
+        and 0 <= current_idx <= len(messages)
+        else None
+    )
+    # The flush is durable and NOT rolled back on abort: a deliberately-ended parent
+    # fails publish forever, so check that before writing. Automatic end stamps are
+    # healed by publish (don't abort); the lease is re-acquirable (don't check it).
+    _parent_row_reader = getattr(agent._session_db, "get_session", None)
+    _parent_already_ended = False
+    if callable(_parent_row_reader):
+        try:
+            from hermes_state_common import is_automatic_end_reason
+
+            _parent_row = _parent_row_reader(old_session_id) or {}
+            _parent_already_ended = (
+                _parent_row.get("ended_at") is not None
+                and not is_automatic_end_reason(
+                    _parent_row.get("end_reason")
+                )
+            )
+        except Exception:
+            # Fail OPEN: an unreadable row must not turn a cheap
+            # guard into a new way to lose compression.
+            _parent_already_ended = False
+    if _parent_already_ended:
+        raise RuntimeError(
+            f"Compression parent already ended: {old_session_id}"
+        )
+    # Foreign-tail ceiling: the flush below writes OUR rows (already in handoff);
+    # rows above the start watermark up to this MAX(id) are foreign appends.
+    try:
+        _foreign_tail_ceiling = (
+            agent._session_db.get_active_message_watermark(
+                agent.session_id
+            )
+        )
+    except Exception:
+        # No trustworthy ceiling: the clone could duplicate the handoff, so skip tail
+        # preservation this rotation.
+        _foreign_tail_ceiling = None
+    try:
+        agent._flush_messages_to_session_db(
+            messages,
+            conversation_history=persisted_history,
+        )
+    except Exception:
+        pass  # best-effort — don't block compression on a flush error
+    # Publish closure + child + handoff in one transaction so no reader sees an
+    # empty child. Child stays on the parent's profile ("default" persists as NULL);
+    # publish also COALESCEs from the parent row for threads lacking HERMES_HOME.
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        _profile_for_child = get_active_profile_name()
+        if _profile_for_child == "default":
+            _profile_for_child = None
+    except Exception:
+        _profile_for_child = None
+    old_title = agent._session_db.get_session_title(agent.session_id)
+    new_session_id = (
+        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+        f"{uuid.uuid4().hex[:6]}"
+    )
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+    agent._session_db.publish_compression_child(
+        parent_session_id=old_session_id,
+        child_session_id=new_session_id,
+        source=agent.platform
+        or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+        model=agent.model,
+        model_config=agent._session_init_model_config,
+        system_prompt=new_system_prompt,
+        messages=compressed,
+        cwd=getattr(agent, "working_directory", None),
+        profile_name=_profile_for_child,
+        compression_lock_holder=lease.holder,
+        require_compression_lease=lease.holder is not None,
+        require_lease_refresh=lease.holder is not None,
+        lease_ttl_seconds=lease.ttl,
+        watermark=(
+            lease.watermark
+            if _foreign_tail_ceiling is not None
+            else None
+        ),
+        watermark_ceiling=_foreign_tail_ceiling,
+    )
+    # `already_present` stamping is done by run_agent's _sync_persisted_markers;
+    # this branch covers inserted/merged only; direct callers must use that wrapper.
+    if compressed_user_turn_outcome in {"inserted", "merged"}:
+        # Stamp the anchor source row itself, not the (drifted, possibly out-of-range)
+        # persist index; don't match the HANDOFF row — for `merged` it is a superset.
+        _compressed_anchor_source = None
+        for _reversed_message in reversed(messages):
+            if _is_real_user_message(_reversed_message):
+                _compressed_anchor_source = _reversed_message
+                break
+        if isinstance(_compressed_anchor_source, dict):
+            _compressed_anchor_source[_DB_PERSISTED_MARKER] = True
+            _session_messages = getattr(
+                agent, "_session_messages", None
+            )
+            if (
+                isinstance(_session_messages, list)
+                and _session_messages is not messages
+            ):
+                # Adoption may leave _session_messages on the pre-adoption list with an out-of-
+                # range idx; stamp every scoped twin against the ANCHOR SOURCE, as the wrapper.
+                _anchor_timestamp = _compressed_anchor_source.get(
+                    "timestamp"
+                )
+                _found_exact_timestamp_candidate = False
+                if _anchor_timestamp is not None:
+                    for _twin_message in _session_messages:
+                        if (
+                            isinstance(_twin_message, dict)
+                            and _twin_message.get("timestamp")
+                            == _anchor_timestamp
+                            and _messages_match_scoped_identity(
+                                _twin_message,
+                                _compressed_anchor_source,
+                            )
+                        ):
+                            # Count an exact scoped twin REGARDLESS of marker: an already-stamped twin must
+                            # still suppress the broad fallback or a content-equal old dup gets stamped.
+                            _found_exact_timestamp_candidate = True
+                            if not _twin_message.get(
+                                _DB_PERSISTED_MARKER
+                            ):
+                                _twin_message[
+                                    _DB_PERSISTED_MARKER
+                                ] = True
+                if not _found_exact_timestamp_candidate:
+                    # No exact twin anywhere (or timestamp-less anchor): stamp every scoped match.
+                    # An already-stamped exact hit never opens this branch.
+                    for _twin_message in _session_messages:
+                        if (
+                            isinstance(_twin_message, dict)
+                            and not _twin_message.get(
+                                _DB_PERSISTED_MARKER
+                            )
+                            and _messages_match_scoped_identity(
+                                _twin_message,
+                                _compressed_anchor_source,
+                            )
+                        ):
+                            _twin_message[
+                                _DB_PERSISTED_MARKER
+                            ] = True
+    for _handoff_message in compressed:
+        if isinstance(_handoff_message, dict):
+            _handoff_message[_DB_PERSISTED_MARKER] = True
+    agent.session_id = new_session_id
+    agent._db_flush_scan_prefix = None
+    try:
+        from gateway.session_context import set_current_session_id
+
+        set_current_session_id(agent.session_id)
+    except Exception:
+        os.environ["HERMES_SESSION_ID"] = agent.session_id
+    try:
+        from hermes_logging import set_session_context
+
+        set_session_context(agent.session_id)
+    except Exception:
+        pass
+    agent._session_db_created = True
+    # Carry /goal to the child: load_goal is a flat per-session lookup with no
+    # parent walk, so the goal would silently die at the boundary.
+    try:
+        from hermes_cli.goals import migrate_goal_to_session
+        migrate_goal_to_session(old_session_id, agent.session_id, reason="compression")
+    except Exception as _goal_err:
+        logger.debug("Could not migrate goal on compression: %s", _goal_err)
+    # Same boundary hazard for /heartbeat state — carry it too.
+    try:
+        from hermes_cli.heartbeat import migrate_heartbeat_to_session
+        migrate_heartbeat_to_session(old_session_id, agent.session_id)
+    except Exception as _hb_err:
+        logger.debug("Could not migrate heartbeat on compression: %s", _hb_err)
+    # Same hazard for a persistent /loop: carry it so recurring wakeups survive.
+    try:
+        from hermes_cli.loops import migrate_loop_to_session
+        migrate_loop_to_session(old_session_id, agent.session_id, reason="compression")
+    except Exception as _loop_err:
+        logger.debug("Could not migrate loop on compression: %s", _loop_err)
+    # Carry the title unchanged: renumbering per rotation made one session look
+    # like many. Uniqueness holds: _set_session_title transfers off the ancestor.
+    if old_title:
+        # Read provenance BEFORE the write: the transfer clears the ancestor's row, so
+        # a later read is None and the child would be frozen as "user".
+        _src = None
+        try:
+            _src = agent._session_db.get_session_title_source(
+                old_session_id
+            )
+        except Exception as _src_err:
+            logger.debug(
+                "Could not read title provenance: %s", _src_err
+            )
+        try:
+            agent._session_db.set_session_title(
+                agent.session_id, old_title
+            )
+        except (ValueError, Exception) as e:
+            logger.debug("Could not propagate title on compression: %s", e)
+        else:
+            # set_session_title() records "user"; restore the original authority so an
+            # inherited auto-title stays upgradeable and a manual one stays pinned.
+            if _src is not None:
+                try:
+                    agent._session_db.set_session_title_source(
+                        agent.session_id, _src
+                    )
+                except Exception as _src_err:
+                    logger.debug(
+                        "Could not propagate title provenance: %s",
+                        _src_err,
+                    )
+
 
 def compress_context(
     agent: Any,
@@ -3904,139 +4363,17 @@ def compress_context(
                         "check auxiliary.compression.model in config.yaml."
                     )
 
-        todo_snapshot = agent._todo_store.format_for_injection()
-        # Non-empty store (even all done) is authoritative: drop the old snapshot. A
-        # truly empty store may be un-rehydrated post-compaction: keep the snapshot.
-        _todo_has_items = getattr(agent._todo_store, "has_items", None)
-        try:
-            _todo_store_is_authoritative = bool(
-                _todo_has_items()
-            ) if callable(_todo_has_items) else False
-        except Exception:
-            # Store may implement only format_for_injection(); unknown authority must
-            # preserve the pending snapshot rather than risk deleting it.
-            _todo_store_is_authoritative = False
-        if _todo_store_is_authoritative:
-            for _todo_idx in range(len(compressed) - 1, -1, -1):
-                _todo_message = compressed[_todo_idx]
-                if not isinstance(_todo_message, dict) or _todo_message.get("role") != "user":
-                    continue
-                _todo_content = _todo_message.get("content")
-                _todo_stripped = _strip_stale_todo_snapshot(_todo_content)
-                if _todo_stripped == _todo_content:
-                    continue
-                if (
-                    _todo_message.get("_todo_snapshot_synthetic")
-                    and _todo_snapshot_is_only_content(
-                        _todo_content, _todo_stripped
-                    )
-                ):
-                    compressed.pop(_todo_idx)
-                    if _todo_idx < len(compressed):
-                        # A standalone snapshot can drift from the tail; deleting it may expose two
-                        # assistant rows, so use the normal replay repair to keep metadata consistent.
-                        agent._repair_message_sequence(compressed)
-                else:
-                    _replace_message_content(_todo_message, _todo_stripped)
-                    # No longer todo-only scaffolding; other synthetic flags stay authoritative and
-                    # _is_real_user_message() recomputes provenance from content + flags.
-                    _todo_message.pop("_todo_snapshot_synthetic", None)
-                break
-        if todo_snapshot:
-            # If this boundary pruned skill bodies, the policy behind the todos is gone:
-            # add a reload notice after TODO_INJECTION_HEADER so both strip together.
-            _reload_notice = _pruned_skill_reload_notice(compressed)
-            if _reload_notice:
-                todo_snapshot = f"{todo_snapshot}\n\n{_reload_notice}"
-            # Fold the snapshot into a trailing REAL user msg (no synthetic user/user pair);
-            # strip old snapshots first. Scaffolding tails must not absorb it (provenance).
-            from agent.context_compressor import _append_text_to_content
-
-            merged = False
-            _tail = (
-                compressed[-1]
-                if compressed and isinstance(compressed[-1], dict)
-                else None
-            )
-            if _tail is not None and _tail.get("role") == "user":
-                _stripped = _strip_stale_todo_snapshot(_tail.get("content"))
-                _probe = {
-                    key: value for key, value in _tail.items() if key != "content"
-                }
-                _probe["content"] = _stripped
-                if _is_real_user_message(_probe):
-                    _snapshot_text = (
-                        f"\n\n{todo_snapshot}"
-                        if isinstance(_stripped, str) and _stripped
-                        else todo_snapshot
-                    )
-                    _replace_message_content(
-                        _tail,
-                        _append_text_to_content(_stripped, _snapshot_text),
-                    )
-                    merged = True
-                elif _stripped != _tail.get("content") and not _message_text(
-                    {"role": "user", "content": _stripped}
-                ).strip():
-                    # The tail was nothing but an earlier snapshot row —
-                    # refresh it in place instead of stacking a duplicate.
-                    _replace_message_content(_tail, todo_snapshot)
-                    _tail["_todo_snapshot_synthetic"] = True
-                    merged = True
-            if not merged:
-                compressed.append({
-                    "role": "user",
-                    "content": todo_snapshot,
-                    "_todo_snapshot_synthetic": True,
-                })
+        _fold_todo_snapshot(agent, compressed)
         compressed_user_turn_outcome = _ensure_compressed_has_user_turn(
             messages, compressed
         )
 
-        cached_system_prompt = agent._cached_system_prompt
-        agent._invalidate_system_prompt()
-
-        # Refresh tool schemas at the commit boundary: forever-sessions never restart,
-        # so config reaches agent.tools here. Keep list identity if byte-equal (cache).
-        try:
-            _refresh_agent_tool_definitions(agent)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "compaction tool-definition refresh failed; keeping the "
-                "session's existing tool snapshot",
-                exc_info=True,
-            )
-
-        # ALWAYS rebuild the prompt here: keeping old bytes meant prompt-builder changes
-        # never reached long sessions. Equal bytes keep KV; preserve object identity.
-        rebuilt_system_prompt = agent._build_system_prompt(system_message)
-        if cached_system_prompt is not None and rebuilt_system_prompt == cached_system_prompt:
-            new_system_prompt = cached_system_prompt
-            agent._cached_system_prompt = cached_system_prompt
-            from agent.system_prompt import reconstruct_static_prefix
-
-            reconstruct_static_prefix(
-                agent,
-                system_message=system_message,
-                log_label="compression keep-prompt",
-            )
-        else:
-            new_system_prompt = rebuilt_system_prompt
-            agent._cached_system_prompt = new_system_prompt
-            if cached_system_prompt is not None:
-                logger.info(
-                    "Compaction rebuilt a drifted system prompt "
-                    "(session=%s, %d -> %d chars): builder output changed "
-                    "since the stored snapshot (update, config change, or "
-                    "memory/skills growth)",
-                    agent.session_id or "none",
-                    len(cached_system_prompt),
-                    len(new_system_prompt),
-                )
+        new_system_prompt = _rebuild_system_prompt_at_boundary(agent, system_message)
 
         _session_commit_succeeded = False
         _commit_started_at = time.monotonic()
         split_status = "not_applicable"
+        old_session_id: Optional[str] = None  # bound only once rotation begins
         if agent._session_db:
             split_status = "pending"
             try:
@@ -4052,68 +4389,17 @@ def compress_context(
                     if isinstance(m, dict) and m.pop("_compaction_tail", None)
                 }
 
-                # Anti-growth guard at the COMMIT SITE: in-place commits here before the gateway
-                # can inspect. Compare like-for-like rough estimates; on growth treat as no-op.
-                _rough_in = estimate_messages_tokens_rough(messages)
-                _rough_out = estimate_messages_tokens_rough(compressed)
-                if _rough_out > _rough_in:
-                    # Todo refresh and user-turn anchoring run after the compressor's own size check
-                    # and can tip a break-even candidate; give it one mechanical salvage pass.
-                    from agent.context_compressor import salvage_grown_transcript
-
-                    _salvaged = salvage_grown_transcript(
-                        messages, compressed, budget=_rough_in
-                    )
-                    if _salvaged is not None:
-                        _salv_est = estimate_messages_tokens_rough(_salvaged)
-                        if _salv_est < _rough_in:
-                            logger.info(
-                                "Compression salvage recovered a shrinking "
-                                "transcript (session=%s, ~%s -> ~%s tokens)",
-                                agent.session_id or "none",
-                                f"{_rough_in:,}",
-                                f"{_salv_est:,}",
-                            )
-                            compressed = _salvaged
-                            _rough_out = _salv_est
-                if _rough_out > _rough_in:
-                    logger.warning(
-                        "Compression refused: compressed transcript would be "
-                        "larger than the original (session=%s, ~%s -> ~%s "
-                        "tokens); keeping the original transcript unchanged",
-                        agent.session_id or "none",
-                        f"{_rough_in:,}",
-                        f"{_rough_out:,}",
-                    )
-                    # Flag the refusal on compressor state so /compress feedback reports it instead
-                    # of comparing list lengths (adoption can change the count), claiming success.
-                    try:
-                        agent.context_compressor._last_compress_refused_would_grow = True
-                    except Exception:
-                        pass
-                    try:
-                        agent._emit_warning(
-                            "⚠️ Compression refused: the generated summary "
-                            "would have GROWN the conversation instead of "
-                            "shrinking it. No messages were dropped — "
-                            "conversation continues unchanged."
-                        )
-                    except Exception:
-                        pass
-                    _existing_sp = _existing_system_prompt(agent, system_message)
-                    _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "would_grow")
-                    # Count the refusal as an ineffective-compaction strike so the anti-thrash
-                    # breaker latches; otherwise auto-compress retries the same summary every turn.
-                    try:
-                        agent.context_compressor.record_rejected_compaction()
-                    except Exception:
-                        logger.debug(
-                            "could not record rejected-compaction strike",
-                            exc_info=True,
-                        )
-                    _restore_prune_rearm_tokens(agent.context_compressor, _compressor_attempt_snapshot)
+                compressed, _refused_sp = _salvage_or_refuse_grown_transcript(
+                    agent,
+                    messages,
+                    compressed,
+                    system_message=system_message,
+                    attempt_started_at=_attempt_started_at,
+                    attempt_snapshot=_compressor_attempt_snapshot,
+                )
+                if compressed is None:
                     lease.release()
-                    return messages, _existing_sp
+                    return messages, _refused_sp
 
                 if in_place:
                     # In-place compaction: same session_id; soft-archive old turns (active=0, still
@@ -4152,232 +4438,18 @@ def compress_context(
                     # re-baseline transcript handling.
                     compacted_in_place = True
                 else:
-                    # Rotation: flush current-turn msgs to the OLD session, passing the durable
-                    # prefix (messages[:persist idx]) so preflight, which runs before rows are
-                    # marker-stamped, can't re-append them. Bind old_session_id first: rollback key.
+                    # Bind old_session_id first: it is the rollback key in the handler below.
                     old_session_id = agent.session_id
-                    current_idx = getattr(agent, "_persist_user_message_idx", None)
-                    persisted_history = (
-                        messages[:current_idx]
-                        if isinstance(current_idx, int)
-                        and 0 <= current_idx <= len(messages)
-                        else None
+                    _publish_rotated_compaction(
+                        agent,
+                        messages,
+                        compressed,
+                        new_system_prompt=new_system_prompt,
+                        lease=lease,
+                        old_session_id=old_session_id,
+                        compressed_user_turn_outcome=compressed_user_turn_outcome,
                     )
-                    # The flush is durable and NOT rolled back on abort: a deliberately-ended parent
-                    # fails publish forever, so check that before writing. Automatic end stamps are
-                    # healed by publish (don't abort); the lease is re-acquirable (don't check it).
-                    _parent_row_reader = getattr(agent._session_db, "get_session", None)
-                    _parent_already_ended = False
-                    if callable(_parent_row_reader):
-                        try:
-                            from hermes_state_common import is_automatic_end_reason
-
-                            _parent_row = _parent_row_reader(old_session_id) or {}
-                            _parent_already_ended = (
-                                _parent_row.get("ended_at") is not None
-                                and not is_automatic_end_reason(
-                                    _parent_row.get("end_reason")
-                                )
-                            )
-                        except Exception:
-                            # Fail OPEN: an unreadable row must not turn a cheap
-                            # guard into a new way to lose compression.
-                            _parent_already_ended = False
-                    if _parent_already_ended:
-                        raise RuntimeError(
-                            f"Compression parent already ended: {old_session_id}"
-                        )
-                    # Foreign-tail ceiling: the flush below writes OUR rows (already in handoff);
-                    # rows above the start watermark up to this MAX(id) are foreign appends.
-                    try:
-                        _foreign_tail_ceiling = (
-                            agent._session_db.get_active_message_watermark(
-                                agent.session_id
-                            )
-                        )
-                    except Exception:
-                        # No trustworthy ceiling: the clone could duplicate the handoff, so skip tail
-                        # preservation this rotation.
-                        _foreign_tail_ceiling = None
-                    try:
-                        agent._flush_messages_to_session_db(
-                            messages,
-                            conversation_history=persisted_history,
-                        )
-                    except Exception:
-                        pass  # best-effort — don't block compression on a flush error
-                    # Publish closure + child + handoff in one transaction so no reader sees an
-                    # empty child. Child stays on the parent's profile ("default" persists as NULL);
-                    # publish also COALESCEs from the parent row for threads lacking HERMES_HOME.
-                    try:
-                        from hermes_cli.profiles import get_active_profile_name
-
-                        _profile_for_child = get_active_profile_name()
-                        if _profile_for_child == "default":
-                            _profile_for_child = None
-                    except Exception:
-                        _profile_for_child = None
-                    old_title = agent._session_db.get_session_title(agent.session_id)
-                    new_session_id = (
-                        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
-                        f"{uuid.uuid4().hex[:6]}"
-                    )
-                    from agent.context_compressor import _DB_PERSISTED_MARKER
-                    agent._session_db.publish_compression_child(
-                        parent_session_id=old_session_id,
-                        child_session_id=new_session_id,
-                        source=agent.platform
-                        or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
-                        model=agent.model,
-                        model_config=agent._session_init_model_config,
-                        system_prompt=new_system_prompt,
-                        messages=compressed,
-                        cwd=getattr(agent, "working_directory", None),
-                        profile_name=_profile_for_child,
-                        compression_lock_holder=lease.holder,
-                        require_compression_lease=lease.holder is not None,
-                        require_lease_refresh=lease.holder is not None,
-                        lease_ttl_seconds=lease.ttl,
-                        watermark=(
-                            lease.watermark
-                            if _foreign_tail_ceiling is not None
-                            else None
-                        ),
-                        watermark_ceiling=_foreign_tail_ceiling,
-                    )
-                    # `already_present` stamping is done by run_agent's _sync_persisted_markers;
-                    # this branch covers inserted/merged only; direct callers must use that wrapper.
-                    if compressed_user_turn_outcome in {"inserted", "merged"}:
-                        # Stamp the anchor source row itself, not the (drifted, possibly out-of-range)
-                        # persist index; don't match the HANDOFF row — for `merged` it is a superset.
-                        _compressed_anchor_source = None
-                        for _reversed_message in reversed(messages):
-                            if _is_real_user_message(_reversed_message):
-                                _compressed_anchor_source = _reversed_message
-                                break
-                        if isinstance(_compressed_anchor_source, dict):
-                            _compressed_anchor_source[_DB_PERSISTED_MARKER] = True
-                            _session_messages = getattr(
-                                agent, "_session_messages", None
-                            )
-                            if (
-                                isinstance(_session_messages, list)
-                                and _session_messages is not messages
-                            ):
-                                # Adoption may leave _session_messages on the pre-adoption list with an out-of-
-                                # range idx; stamp every scoped twin against the ANCHOR SOURCE, as the wrapper.
-                                _anchor_timestamp = _compressed_anchor_source.get(
-                                    "timestamp"
-                                )
-                                _found_exact_timestamp_candidate = False
-                                if _anchor_timestamp is not None:
-                                    for _twin_message in _session_messages:
-                                        if (
-                                            isinstance(_twin_message, dict)
-                                            and _twin_message.get("timestamp")
-                                            == _anchor_timestamp
-                                            and _messages_match_scoped_identity(
-                                                _twin_message,
-                                                _compressed_anchor_source,
-                                            )
-                                        ):
-                                            # Count an exact scoped twin REGARDLESS of marker: an already-stamped twin must
-                                            # still suppress the broad fallback or a content-equal old dup gets stamped.
-                                            _found_exact_timestamp_candidate = True
-                                            if not _twin_message.get(
-                                                _DB_PERSISTED_MARKER
-                                            ):
-                                                _twin_message[
-                                                    _DB_PERSISTED_MARKER
-                                                ] = True
-                                if not _found_exact_timestamp_candidate:
-                                    # No exact twin anywhere (or timestamp-less anchor): stamp every scoped match.
-                                    # An already-stamped exact hit never opens this branch.
-                                    for _twin_message in _session_messages:
-                                        if (
-                                            isinstance(_twin_message, dict)
-                                            and not _twin_message.get(
-                                                _DB_PERSISTED_MARKER
-                                            )
-                                            and _messages_match_scoped_identity(
-                                                _twin_message,
-                                                _compressed_anchor_source,
-                                            )
-                                        ):
-                                            _twin_message[
-                                                _DB_PERSISTED_MARKER
-                                            ] = True
-                    for _handoff_message in compressed:
-                        if isinstance(_handoff_message, dict):
-                            _handoff_message[_DB_PERSISTED_MARKER] = True
-                    agent.session_id = new_session_id
-                    agent._db_flush_scan_prefix = None
-                    try:
-                        from gateway.session_context import set_current_session_id
-
-                        set_current_session_id(agent.session_id)
-                    except Exception:
-                        os.environ["HERMES_SESSION_ID"] = agent.session_id
-                    try:
-                        from hermes_logging import set_session_context
-
-                        set_session_context(agent.session_id)
-                    except Exception:
-                        pass
-                    agent._session_db_created = True
                     split_status = "rotated_committed"
-                    # Carry /goal to the child: load_goal is a flat per-session lookup with no
-                    # parent walk, so the goal would silently die at the boundary.
-                    try:
-                        from hermes_cli.goals import migrate_goal_to_session
-                        migrate_goal_to_session(old_session_id, agent.session_id, reason="compression")
-                    except Exception as _goal_err:
-                        logger.debug("Could not migrate goal on compression: %s", _goal_err)
-                    # Same boundary hazard for /heartbeat state — carry it too.
-                    try:
-                        from hermes_cli.heartbeat import migrate_heartbeat_to_session
-                        migrate_heartbeat_to_session(old_session_id, agent.session_id)
-                    except Exception as _hb_err:
-                        logger.debug("Could not migrate heartbeat on compression: %s", _hb_err)
-                    # Same hazard for a persistent /loop: carry it so recurring wakeups survive.
-                    try:
-                        from hermes_cli.loops import migrate_loop_to_session
-                        migrate_loop_to_session(old_session_id, agent.session_id, reason="compression")
-                    except Exception as _loop_err:
-                        logger.debug("Could not migrate loop on compression: %s", _loop_err)
-                    # Carry the title unchanged: renumbering per rotation made one session look
-                    # like many. Uniqueness holds: _set_session_title transfers off the ancestor.
-                    if old_title:
-                        # Read provenance BEFORE the write: the transfer clears the ancestor's row, so
-                        # a later read is None and the child would be frozen as "user".
-                        _src = None
-                        try:
-                            _src = agent._session_db.get_session_title_source(
-                                old_session_id
-                            )
-                        except Exception as _src_err:
-                            logger.debug(
-                                "Could not read title provenance: %s", _src_err
-                            )
-                        try:
-                            agent._session_db.set_session_title(
-                                agent.session_id, old_title
-                            )
-                        except (ValueError, Exception) as e:
-                            logger.debug("Could not propagate title on compression: %s", e)
-                        else:
-                            # set_session_title() records "user"; restore the original authority so an
-                            # inherited auto-title stays upgradeable and a manual one stays pinned.
-                            if _src is not None:
-                                try:
-                                    agent._session_db.set_session_title_source(
-                                        agent.session_id, _src
-                                    )
-                                except Exception as _src_err:
-                                    logger.debug(
-                                        "Could not propagate title provenance: %s",
-                                        _src_err,
-                                    )
 
                 # In-place mode still updates/replaces the current row here.
                 # Rotation already published prompt + compacted handoff atomically.
@@ -4393,7 +4465,7 @@ def compress_context(
             except Exception as e:
                 if (
                     not in_place
-                    and locals().get("old_session_id")
+                    and old_session_id
                     and agent.session_id == old_session_id
                 ):
                     # Atomic publication failed (including lease loss): keep the
@@ -4422,12 +4494,12 @@ def compress_context(
                     _restore_prune_rearm_tokens(agent.context_compressor, _compressor_attempt_snapshot)
                 split_status = (
                     "aborted"
-                    if locals().get("old_session_id") is None and not in_place
+                    if old_session_id is None and not in_place
                     else "failed_not_indexed"
                 )
                 # If rotation rolled back to the parent, agent.session_id is the indexed parent
                 # and old_session_id was cleared: recovery, not an un-indexed orphan.
-                if locals().get("old_session_id") is None and not in_place:
+                if old_session_id is None and not in_place:
                     logger.warning(
                         "Compression rotation aborted and rolled back to the "
                         "parent session (%s): %s", agent.session_id or "?", e,
@@ -4449,7 +4521,7 @@ def compress_context(
 
         # old_session_id is bound only on rotation; _boundary_parent is the id the
         # boundary notifications attribute prior state to (old id, or same id in-place).
-        _old_sid = locals().get("old_session_id")
+        _old_sid = old_session_id
         _is_boundary = bool(_old_sid) or in_place
         _context_engine_boundary_committed = _session_commit_succeeded and (
             bool(_old_sid) or compacted_in_place
