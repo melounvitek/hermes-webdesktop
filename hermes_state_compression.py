@@ -9,7 +9,7 @@ import json
 import logging
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_state_common import _sql_session_last_active, is_automatic_end_reason
 
@@ -25,6 +25,24 @@ _COOLDOWN_ROW_SQL = (
 
 def _ended_by_compression(row) -> bool:
     return row is not None and row["ended_at"] is not None and row["end_reason"] == "compression"
+
+
+def _claim_lease_row(conn, table: str, key_col: str, key: str, holder: str, now: float, expires_at: float,
+                     stale) -> Tuple[bool, Optional[str]]:
+    """Single-transaction lease claim: DELETE a stale holder's row (``stale(holder,
+    expires_at)``), INSERT OR IGNORE ours, then SELECT to confirm ownership (INSERT OR
+    IGNORE gives no rowcount signal). Returns ``(acquired, reclaimed_holder)``."""
+    reclaimed_holder = None
+    row = conn.execute(f"SELECT holder, expires_at FROM {table} WHERE {key_col} = ?", (key,)).fetchone()
+    if row is not None and stale(row["holder"], row["expires_at"]):
+        conn.execute(f"DELETE FROM {table} WHERE {key_col} = ? AND holder = ?", (key, row["holder"]))
+        reclaimed_holder = row["holder"]
+    conn.execute(
+        f"INSERT OR IGNORE INTO {table} ({key_col}, holder, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
+        (key, holder, now, expires_at),
+    )
+    owner = conn.execute(f"SELECT holder FROM {table} WHERE {key_col} = ?", (key,)).fetchone()
+    return owner is not None and owner["holder"] == holder, reclaimed_holder
 
 
 class SessionCompressionMixin:
@@ -427,23 +445,10 @@ class SessionCompressionMixin:
         expires_at = now + ttl_seconds
 
         def _do(conn):
-            reclaimed_holder = None
-            row = conn.execute(_LOCK_ROW_SQL, (session_id,)).fetchone()
-            if row is not None:
-                current_holder, current_expires_at = row[0], row[1]
-                if current_expires_at < now or _compression_lock_holder_process_is_dead(current_holder):
-                    conn.execute(
-                        "DELETE FROM compression_locks WHERE session_id = ? AND holder = ?",
-                        (session_id, current_holder),
-                    )
-                    reclaimed_holder = current_holder
-            conn.execute(
-                "INSERT OR IGNORE INTO compression_locks "
-                "(session_id, holder, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
-                (session_id, holder, now, expires_at),
+            return _claim_lease_row(
+                conn, "compression_locks", "session_id", session_id, holder, now, expires_at,
+                lambda h, e: e < now or _compression_lock_holder_process_is_dead(h),
             )
-            row = conn.execute("SELECT holder FROM compression_locks WHERE session_id = ?", (session_id,)).fetchone()
-            return row is not None and row[0] == holder, reclaimed_holder
 
         try:
             acquired, reclaimed_holder = self._execute_write(_do)
@@ -519,26 +524,10 @@ class SessionCompressionMixin:
 
         def _do(conn):
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
-            row = conn.execute(
-                "SELECT holder, expires_at FROM session_turn_leases WHERE conversation_id = ?",
-                (conversation_id,),
-            ).fetchone()
-            if row is not None:
-                current_holder = row["holder"]
-                if float(row["expires_at"]) <= now or _compression_lock_holder_process_is_dead(current_holder):
-                    conn.execute(
-                        "DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
-                        (conversation_id, current_holder),
-                    )
-            conn.execute(
-                "INSERT OR IGNORE INTO session_turn_leases "
-                "(conversation_id, holder, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
-                (conversation_id, holder, now, expires_at),
-            )
-            owner = conn.execute(
-                "SELECT holder FROM session_turn_leases WHERE conversation_id = ?", (conversation_id,),
-            ).fetchone()
-            return owner is not None and owner["holder"] == holder
+            return _claim_lease_row(
+                conn, "session_turn_leases", "conversation_id", conversation_id, holder, now, expires_at,
+                lambda h, e: float(e) <= now or _compression_lock_holder_process_is_dead(h),
+            )[0]
 
         return bool(self._execute_write(_do, patience_s=patience_s))
 
@@ -637,10 +626,7 @@ class SessionCompressionMixin:
         has messages, no end_reason/ended_at, api_call_count=0, older than 7 days) as
         ``orphaned_compression``. Non-destructive."""
         cutoff = time.time() - 604800  # 7 days
-
-        def _do(conn):
-            now = time.time()
-            result = conn.execute(
+        return self._write_rowcount(
                 """
                 UPDATE sessions
                 SET ended_at = ?,
@@ -661,11 +647,8 @@ class SessionCompressionMixin:
                       WHERE m.session_id = sessions.id
                   )
                 """,
-                (now, cutoff),
-            )
-            return result.rowcount
-
-        return self._execute_write(_do) or 0
+                (time.time(), cutoff),
+        ) or 0
 
     def get_compression_chain(self, session_id: str) -> List[str]:
         """Walk the compression-continuation chain forward: root-first through the tip
