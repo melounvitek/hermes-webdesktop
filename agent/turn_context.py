@@ -107,7 +107,8 @@ def compose_user_api_content(
 ) -> Optional[str]:
     """Compose the API-bound content of the current turn's user message.
 
-    Single source for the ``api_content`` sidecar and the wire bytes (never drift).
+    Single source for the ``api_content`` sidecar and the wire bytes, so they never
+    drift — the prompt-cache invariant: what turn N sends is what turn N+1 replays.
     Returns ``None`` when nothing is injected (message is sent as-is)."""
     if not isinstance(content, str):
         return None
@@ -343,8 +344,9 @@ def _should_run_preflight_estimate(
     """Cheap gate for the (expensive) full preflight token estimate.
 
     ``True`` when message count exceeds the protected ranges OR a rough char-based
-    estimate (``estimate_messages_tokens_rough``, undercounting by design) crosses the
-    threshold — the few-but-huge case (#27405)."""
+    estimate crosses the threshold — the few-but-huge case (#27405). The estimator
+    undercounts by design (omits system/tools) so one large base64 image is not
+    mistaken for ~250K tokens."""
     if len(messages) > protect_first_n + protect_last_n + 1:
         return True
     return estimate_messages_tokens_rough(messages) >= threshold_tokens

@@ -20,9 +20,6 @@ from typing import Any, Dict, List, Optional
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.conversation_compression import (
     COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE,
-    COMPRESSION_RETRY_MESSAGES_STATUS_TEMPLATE,
-    COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE,
-    COMPRESSION_RETRY_TOO_LARGE_STATUS_TEMPLATE,
     PRE_API_COMPRESSION_STATUS_TEMPLATE,
     compression_blocked_transiently,
     compression_skipped_due_to_lock,
@@ -47,6 +44,8 @@ from agent.turn_usage import record_response_usage
 from agent.turn_overflow import recover_from_overflow
 from agent.turn_truncation import recover_from_truncation
 from agent.turn_recovery import (
+    compute_error_backoff,
+    interruptible_backoff_sleep,
     log_api_error_attempt,
     max_retries_exhausted_result,
     nonretryable_client_error_result,
@@ -62,7 +61,6 @@ from agent.message_sanitization import (
     _sanitize_structure_non_ascii,
     _sanitize_structure_surrogates,
     _sanitize_surrogates,
-    serialized_messages_bytes,
 )
 # Must mirror _STALE_TOOL_CALL_MARKER_RE in hermes_state.py; kept local so importing
 # hermes_state (module-level DEFAULT_DB_PATH) is not forced at load time.
@@ -73,10 +71,9 @@ from agent.model_metadata import (
     anchored_context_tokens,
     estimate_messages_tokens_rough,
     estimate_request_tokens_rough,
-    get_context_length_from_provider_error,
     is_output_cap_error,
     parse_available_output_tokens_from_error,
-    save_context_length,
+    save_context_length,  # noqa: F401 — resolved lazily by agent.turn_overflow (tests patch it here)
 )
 from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_caching import (
@@ -87,18 +84,16 @@ from agent.prompt_caching import (
 )
 from agent.provider_projection import splice_provider_projection
 from agent.retry_utils import (
-    adaptive_rate_limit_backoff,
+    adaptive_rate_limit_backoff,  # noqa: F401 — resolved lazily by agent.turn_recovery (tests patch it here)
     is_zai_coding_overload_error,
     jittered_backoff,
     zai_coding_overload_retry_ceiling,
 )
-from agent.repetition_guard import is_repetition_dominated
 from agent.trajectory import has_incomplete_scratchpad
 # Bind before the turn starts so a source-tree swap cannot load a skewed
 # finalizer at turn end.
 from agent.turn_finalizer import finalize_turn
 from agent import empty_response_guard as _empty_guard
-from hermes_constants import PARTIAL_STREAM_STUB_ID
 from hermes_logging import set_session_context
 from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches, env_var_enabled
@@ -1352,6 +1347,18 @@ def _sync_failover_system_message(agent, api_messages, active_system_prompt):
     return sp
 
 
+def _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry):
+    """After ``_try_activate_fallback`` succeeded: sync the system message to the new
+    provider and arm ``restart_with_rebuilt_messages`` (re-issue against the fallback,
+    refunding the stalled attempt). Callers also reset ``retry_count`` /
+    ``compression_attempts`` to 0 and ``break`` the retry loop."""
+    active_system_prompt = _sync_failover_system_message(
+        agent, api_messages, active_system_prompt)
+    _retry.primary_recovery_attempted = False
+    _retry.restart_with_rebuilt_messages = True
+    return active_system_prompt
+
+
 def _ensure_cached_system_prompt_static(agent, system_message=None) -> None:
     """Rebuild ``_cached_system_prompt_static`` when caching becomes active (#72626).
 
@@ -2582,12 +2589,10 @@ def run_conversation(
                         )
                         agent._buffer_status(f"⏳ {_nous_msg}")
                         if agent._try_activate_fallback():
-                            active_system_prompt = _sync_failover_system_message(
-                                agent, api_messages, active_system_prompt)
+                            active_system_prompt = _arm_fallback_restart(
+                                agent, api_messages, active_system_prompt, _retry)
                             retry_count = 0
                             compression_attempts = 0
-                            _retry.primary_recovery_attempted = False
-                            _retry.restart_with_rebuilt_messages = True
                             break
                         # No fallback available — surface buffered context
                         # so user sees the rate-limit message that led here.
@@ -3012,12 +3017,10 @@ def run_conversation(
                     if agent._fallback_index < len(agent._fallback_chain):
                         agent._buffer_status("⚠️ Empty/malformed response — switching to fallback...")
                     if agent._try_activate_fallback():
-                        active_system_prompt = _sync_failover_system_message(
-                            agent, api_messages, active_system_prompt)
+                        active_system_prompt = _arm_fallback_restart(
+                            agent, api_messages, active_system_prompt, _retry)
                         retry_count = 0
                         compression_attempts = 0
-                        _retry.primary_recovery_attempted = False
-                        _retry.restart_with_rebuilt_messages = True
                         break
 
                     # Check for error field in response (some providers include this)
@@ -3086,12 +3089,10 @@ def run_conversation(
                         if agent._has_pending_fallback():
                             agent._buffer_status(f"⚠️ Max retries ({max_retries}) for invalid responses — trying fallback...")
                         if agent._try_activate_fallback():
-                            active_system_prompt = _sync_failover_system_message(
-                                agent, api_messages, active_system_prompt)
+                            active_system_prompt = _arm_fallback_restart(
+                                agent, api_messages, active_system_prompt, _retry)
                             retry_count = 0
                             compression_attempts = 0
-                            _retry.primary_recovery_attempted = False
-                            _retry.restart_with_rebuilt_messages = True
                             break
                         # Terminal — flush buffered retry trace so user sees what happened.
                         agent._flush_status_buffer()
@@ -3113,38 +3114,20 @@ def run_conversation(
                     agent._buffer_vprint(f"⏳ Retrying in {wait_time:.1f}s ({_failure_hint})...")
                     logger.warning("Invalid API response (retry %d/%d): %s | Provider: %s", retry_count, max_retries, ', '.join(error_details), provider_name)
                     
-                    # Sleep in small increments to stay responsive to interrupts
-                    sleep_end = time.time() + wait_time
-                    _backoff_touch_counter = 0
-                    while time.time() < sleep_end:
-                        if agent._interrupt_requested:
-                            # A redirect cancels only the live request;
-                            # clear_interrupt() would DESTROY the pending correction.
-                            # Rebuild from it.
-                            if agent.clear_interrupt(preserve_redirect=True):
-                                _retry.restart_with_redirected_messages = True
-                                break
-                            agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
-                            _interrupt_text = f"Operation interrupted during retry ({_failure_hint}, attempt {retry_count}/{max_retries})."
-                            close_interrupted_tool_sequence(messages, _interrupt_text)
-                            agent._persist_session(messages, conversation_history)
-                            agent.clear_interrupt()
-                            return {
-                                "final_response": _interrupt_text,
-                                "messages": messages,
-                                "api_calls": api_call_count,
-                                "completed": False,
-                                "interrupted": True,
-                            }
-                        time.sleep(0.2)
-                        # Touch activity every ~30s so the gateway's inactivity
-                        # monitor knows we're alive during backoff waits.
-                        _backoff_touch_counter += 1
-                        if _backoff_touch_counter % 150 == 0:  # 150 × 0.2s = 30s
-                            agent._touch_activity(
-                                f"retry backoff ({retry_count}/{max_retries}), "
-                                f"{int(sleep_end - time.time())}s remaining"
-                            )
+                    # A redirect cancels only the live request; the helper preserves the
+                    # pending correction (restart_with_redirected_messages) instead of
+                    # destroying it with clear_interrupt().
+                    _interrupted = interruptible_backoff_sleep(
+                        agent, wait_time, _retry,
+                        messages=messages,
+                        conversation_history=conversation_history,
+                        api_call_count=api_call_count,
+                        abort_message="Interrupt detected during retry wait, aborting.",
+                        interrupt_text=f"Operation interrupted during retry ({_failure_hint}, attempt {retry_count}/{max_retries}).",
+                        activity_label=f"retry backoff ({retry_count}/{max_retries})",
+                    )
+                    if _interrupted is not None:
+                        return _interrupted
                     if _retry.restart_with_redirected_messages:
                         break  # rebuild this iteration from the correction
                     continue  # Retry the API call
@@ -3243,12 +3226,10 @@ def run_conversation(
                             "⚠️ Model declined to respond (safety refusal) — trying fallback..."
                         )
                     if agent._try_activate_fallback():
-                        active_system_prompt = _sync_failover_system_message(
-                            agent, api_messages, active_system_prompt)
+                        active_system_prompt = _arm_fallback_restart(
+                            agent, api_messages, active_system_prompt, _retry)
                         retry_count = 0
                         compression_attempts = 0
-                        _retry.primary_recovery_attempted = False
-                        _retry.restart_with_rebuilt_messages = True
                         break
 
                     agent._flush_status_buffer()
@@ -3700,12 +3681,10 @@ def run_conversation(
                         else:
                             agent._buffer_status("⚠️ Rate limited — switching to fallback provider...")
                         if agent._try_activate_fallback(reason=classified.reason):
-                            active_system_prompt = _sync_failover_system_message(
-                                agent, api_messages, active_system_prompt)
+                            active_system_prompt = _arm_fallback_restart(
+                                agent, api_messages, active_system_prompt, _retry)
                             retry_count = 0
                             compression_attempts = 0
-                            _retry.primary_recovery_attempted = False
-                            _retry.restart_with_rebuilt_messages = True
                             break
 
                 # ── Auth-failure provider failover ───────────────────────
@@ -3722,12 +3701,10 @@ def run_conversation(
                         "switching to fallback provider..."
                     )
                     if agent._try_activate_fallback(reason=classified.reason):
-                        active_system_prompt = _sync_failover_system_message(
-                            agent, api_messages, active_system_prompt)
+                        active_system_prompt = _arm_fallback_restart(
+                            agent, api_messages, active_system_prompt, _retry)
                         retry_count = 0
                         compression_attempts = 0
-                        _retry.primary_recovery_attempted = False
-                        _retry.restart_with_rebuilt_messages = True
                         break
 
                 # ── Nous Portal: record rate limit & skip retries ─────
@@ -3879,12 +3856,10 @@ def run_conversation(
                         else:
                             agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
                     if agent._try_activate_fallback():
-                        active_system_prompt = _sync_failover_system_message(
-                            agent, api_messages, active_system_prompt)
+                        active_system_prompt = _arm_fallback_restart(
+                            agent, api_messages, active_system_prompt, _retry)
                         retry_count = 0
                         compression_attempts = 0
-                        _retry.primary_recovery_attempted = False
-                        _retry.restart_with_rebuilt_messages = True
                         break
                     return nonretryable_client_error_result(
                         agent,
@@ -3921,12 +3896,10 @@ def run_conversation(
                     if agent._has_pending_fallback():
                         agent._buffer_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
                     if agent._try_activate_fallback():
-                        active_system_prompt = _sync_failover_system_message(
-                            agent, api_messages, active_system_prompt)
+                        active_system_prompt = _arm_fallback_restart(
+                            agent, api_messages, active_system_prompt, _retry)
                         retry_count = 0
                         compression_attempts = 0
-                        _retry.primary_recovery_attempted = False
-                        _retry.restart_with_rebuilt_messages = True
                         break
                     return max_retries_exhausted_result(
                         agent,
@@ -3946,88 +3919,29 @@ def run_conversation(
                         model=_model,
                     )
 
-                # For rate limits, respect the Retry-After header if present
-                _retry_after = None
-                if is_rate_limited:
-                    _resp_headers = getattr(getattr(api_error, "response", None), "headers", None)
-                    if _resp_headers and hasattr(_resp_headers, "get"):
-                        _ra_raw = _resp_headers.get("retry-after") or _resp_headers.get("Retry-After")
-                        if _ra_raw:
-                            try:
-                                # Cap at 600s: Anthropic Tier 1 buckets reset in ~171s,
-                                # so a 120s cap retried early and re-tripped the limit.
-                                # (#26293)
-                                _retry_after = min(float(_ra_raw), 600)
-                            except (TypeError, ValueError):
-                                pass
-                wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
-                _backoff_policy = None
-                if (is_rate_limited or _is_zai_coding_overload) and not _retry_after:
-                    wait_time, _backoff_policy = adaptive_rate_limit_backoff(
-                        retry_count,
-                        base_url=str(_base),
-                        model=_model,
-                        error=api_error,
-                        default_wait=wait_time,
-                    )
-                if is_rate_limited or _is_zai_coding_overload:
-                    _policy_note = ""
-                    if _backoff_policy == "zai_coding_overload_long":
-                        _policy_note = " (Z.AI Coding overload adaptive long backoff)"
-                    elif _backoff_policy == "zai_coding_overload_short":
-                        _policy_note = " (Z.AI Coding overload short retry)"
-                    _wait_reason = "Provider overloaded" if _is_zai_coding_overload and not is_rate_limited else "Rate limited"
-                    _rate_limit_status = f"⏱️ {_wait_reason}. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries}){_policy_note}..."
-                    # Normal retries are buffered to avoid chatter; long Z.AI Coding
-                    # waits can last minutes, so surface progress immediately.
-                    if _backoff_policy == "zai_coding_overload_long":
-                        agent._emit_status(_rate_limit_status)
-                    else:
-                        agent._buffer_status(_rate_limit_status)
-                else:
-                    agent._buffer_status(f"⏳ Retrying in {wait_time:.1f}s (attempt {retry_count}/{max_retries})...")
-                logger.warning(
-                    "Retrying API call in %ss (attempt %s/%s) %s policy=%s error=%s",
-                    wait_time,
-                    retry_count,
-                    max_retries,
-                    agent._client_log_context(),
-                    _backoff_policy or "default",
+                wait_time = compute_error_backoff(
+                    agent,
                     api_error,
+                    retry_count=retry_count,
+                    max_retries=max_retries,
+                    is_rate_limited=is_rate_limited,
+                    is_zai_coding_overload=_is_zai_coding_overload,
+                    base_url=_base,
+                    model=_model,
                 )
-                # Sleep in small increments so we can respond to interrupts quickly
-                # instead of blocking the entire wait_time in one sleep() call
-                sleep_end = time.time() + wait_time
-                _backoff_touch_counter = 0
-                while time.time() < sleep_end:
-                    if agent._interrupt_requested:
-                        # Same preserve-redirect rule as the retry-wait above: a
-                        # steering correction must survive backoff, not die as
-                        # "Operation interrupted".
-                        if agent.clear_interrupt(preserve_redirect=True):
-                            _retry.restart_with_redirected_messages = True
-                            break
-                        agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
-                        _interrupt_text = f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries})."
-                        close_interrupted_tool_sequence(messages, _interrupt_text)
-                        agent._persist_session(messages, conversation_history)
-                        agent.clear_interrupt()
-                        return {
-                            "final_response": _interrupt_text,
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "interrupted": True,
-                        }
-                    time.sleep(0.2)  # Check interrupt every 200ms
-                    # Touch activity every ~30s so the gateway's inactivity
-                    # monitor knows we're alive during backoff waits.
-                    _backoff_touch_counter += 1
-                    if _backoff_touch_counter % 150 == 0:  # 150 × 0.2s = 30s
-                        agent._touch_activity(
-                            f"error retry backoff ({retry_count}/{max_retries}), "
-                            f"{int(sleep_end - time.time())}s remaining"
-                        )
+                # Same preserve-redirect rule as the invalid-response wait: a steering
+                # correction must survive backoff, not die as "Operation interrupted".
+                _interrupted = interruptible_backoff_sleep(
+                    agent, wait_time, _retry,
+                    messages=messages,
+                    conversation_history=conversation_history,
+                    api_call_count=api_call_count,
+                    abort_message="Interrupt detected during retry wait, aborting.",
+                    interrupt_text=f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",
+                    activity_label=f"error retry backoff ({retry_count}/{max_retries})",
+                )
+                if _interrupted is not None:
+                    return _interrupted
                 if _retry.restart_with_redirected_messages:
                     # Leave the retry loop — the check below rebuilds this iteration
                     # from the correction instead of re-firing the stale request.
@@ -5088,33 +5002,20 @@ def run_conversation(
                             f"({agent._empty_content_retries}/{_empty_retry_budget}) "
                             f"in {wait_time:.0f}s{_budget_note}"
                         )
-                        # Sleep in small increments to stay responsive to interrupts
-                        sleep_end = time.time() + wait_time
-                        _backoff_touch_counter = 0
-                        while time.time() < sleep_end:
-                            if agent._interrupt_requested:
-                                agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during empty-response retry wait, aborting.", force=True)
-                                _interrupt_text = (
-                                    f"Operation interrupted: retrying empty response from model "
-                                    f"(retry {agent._empty_content_retries}/{_empty_retry_budget})."
-                                )
-                                close_interrupted_tool_sequence(messages, _interrupt_text)
-                                agent._persist_session(messages, conversation_history)
-                                agent.clear_interrupt()
-                                return {
-                                    "final_response": _interrupt_text,
-                                    "messages": messages,
-                                    "api_calls": api_call_count,
-                                    "completed": False,
-                                    "interrupted": True,
-                                }
-                            time.sleep(0.2)
-                            _backoff_touch_counter += 1
-                            if _backoff_touch_counter % 150 == 0:  # 150 × 0.2s = 30s
-                                agent._touch_activity(
-                                    f"empty response retry backoff ({agent._empty_content_retries}/{_empty_retry_budget}), "
-                                    f"{int(sleep_end - time.time())}s remaining"
-                                )
+                        _interrupted = interruptible_backoff_sleep(
+                            agent, wait_time, None,
+                            messages=messages,
+                            conversation_history=conversation_history,
+                            api_call_count=api_call_count,
+                            abort_message="Interrupt detected during empty-response retry wait, aborting.",
+                            interrupt_text=(
+                                f"Operation interrupted: retrying empty response from model "
+                                f"(retry {agent._empty_content_retries}/{_empty_retry_budget})."
+                            ),
+                            activity_label=f"empty response retry backoff ({agent._empty_content_retries}/{_empty_retry_budget})",
+                        )
+                        if _interrupted is not None:
+                            return _interrupted
                         continue
 
                     if _truly_empty and _deterministic_empty:

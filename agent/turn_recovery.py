@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.error_classifier import FailoverReason
@@ -36,6 +37,7 @@ from agent.message_sanitization import (
     _sanitize_tools_non_ascii,
     _strip_images_from_messages,
     _strip_non_ascii,
+    close_interrupted_tool_sequence,
 )
 from agent.turn_retry_state import TurnRetryState
 from utils import base_url_host_matches
@@ -1148,3 +1150,120 @@ def log_api_error_attempt(
                 f"      Did you mean '{_suggestion}'?  Re-pick it with `hermes model`."
             )
     return error_type, error_msg, _provider, _base, _model
+
+
+def interruptible_backoff_sleep(
+    agent: Any,
+    wait_time: float,
+    _retry: Optional[TurnRetryState],
+    *,
+    messages: List[Dict[str, Any]],
+    conversation_history: Any,
+    api_call_count: int,
+    abort_message: str,
+    interrupt_text: str,
+    activity_label: str,
+) -> Optional[Dict[str, Any]]:
+    """Sleep ``wait_time`` in 200 ms slices so interrupts are honoured promptly, touching
+    activity every ~30 s so the gateway's inactivity monitor knows we are alive.
+
+    On interrupt: when ``_retry`` is given and a redirect is pending, preserve it
+    (``clear_interrupt(preserve_redirect=True)``), set
+    ``_retry.restart_with_redirected_messages`` and return ``None`` — the caller
+    rebuilds the turn from the correction. Otherwise close any open tool sequence,
+    persist, clear the interrupt and return the ``interrupted`` result dict.
+    Returns ``None`` when the wait completed."""
+    sleep_end = time.time() + wait_time
+    _touch_counter = 0
+    while time.time() < sleep_end:
+        if agent._interrupt_requested:
+            if _retry is not None and agent.clear_interrupt(preserve_redirect=True):
+                _retry.restart_with_redirected_messages = True
+                return None
+            agent._vprint(f"{agent.log_prefix}⚡ {abort_message}", force=True)
+            close_interrupted_tool_sequence(messages, interrupt_text)
+            agent._persist_session(messages, conversation_history)
+            agent.clear_interrupt()
+            return {
+                "final_response": interrupt_text,
+                "messages": messages,
+                "api_calls": api_call_count,
+                "completed": False,
+                "interrupted": True,
+            }
+        time.sleep(0.2)
+        _touch_counter += 1
+        if _touch_counter % 150 == 0:  # 150 × 0.2s = 30s
+            agent._touch_activity(
+                f"{activity_label}, {int(sleep_end - time.time())}s remaining"
+            )
+    return None
+
+
+def compute_error_backoff(
+    agent: Any,
+    api_error: Exception,
+    *,
+    retry_count: int,
+    max_retries: int,
+    is_rate_limited: bool,
+    is_zai_coding_overload: bool,
+    base_url: Any,
+    model: Any,
+) -> float:
+    """Pick the wait before the next API retry and announce it.
+
+    Retry-After header wins for rate limits (capped at 600s: Anthropic Tier 1 buckets
+    reset in ~171s, so a 120s cap retried early and re-tripped the limit, #26293);
+    otherwise jittered exponential backoff, replaced by the adaptive rate-limit policy
+    for 429s / Z.AI overloads. Normal retries are buffered to avoid chatter; long Z.AI
+    Coding waits can last minutes, so those surface immediately."""
+    # Resolved through the loop module so tests that patch
+    # ``agent.conversation_loop.jittered_backoff`` / ``adaptive_rate_limit_backoff``
+    # (incl. the run_agent conftest fast-backoff fixture) keep intercepting.
+    from agent.conversation_loop import adaptive_rate_limit_backoff, jittered_backoff
+
+    _retry_after = None
+    if is_rate_limited:
+        _resp_headers = getattr(getattr(api_error, "response", None), "headers", None)
+        if _resp_headers and hasattr(_resp_headers, "get"):
+            _ra_raw = _resp_headers.get("retry-after") or _resp_headers.get("Retry-After")
+            if _ra_raw:
+                try:
+                    _retry_after = min(float(_ra_raw), 600)
+                except (TypeError, ValueError):
+                    pass
+    wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
+    _backoff_policy = None
+    if (is_rate_limited or is_zai_coding_overload) and not _retry_after:
+        wait_time, _backoff_policy = adaptive_rate_limit_backoff(
+            retry_count,
+            base_url=str(base_url),
+            model=model,
+            error=api_error,
+            default_wait=wait_time,
+        )
+    if is_rate_limited or is_zai_coding_overload:
+        _policy_note = ""
+        if _backoff_policy == "zai_coding_overload_long":
+            _policy_note = " (Z.AI Coding overload adaptive long backoff)"
+        elif _backoff_policy == "zai_coding_overload_short":
+            _policy_note = " (Z.AI Coding overload short retry)"
+        _wait_reason = "Provider overloaded" if is_zai_coding_overload and not is_rate_limited else "Rate limited"
+        _rate_limit_status = f"⏱️ {_wait_reason}. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries}){_policy_note}..."
+        if _backoff_policy == "zai_coding_overload_long":
+            agent._emit_status(_rate_limit_status)
+        else:
+            agent._buffer_status(_rate_limit_status)
+    else:
+        agent._buffer_status(f"⏳ Retrying in {wait_time:.1f}s (attempt {retry_count}/{max_retries})...")
+    logger.warning(
+        "Retrying API call in %ss (attempt %s/%s) %s policy=%s error=%s",
+        wait_time,
+        retry_count,
+        max_retries,
+        agent._client_log_context(),
+        _backoff_policy or "default",
+        api_error,
+    )
+    return wait_time
