@@ -1,19 +1,17 @@
-"""Cron dashboard routes (extracted verbatim from web_server.py).
+"""Cron dashboard routes.
 
-Handler bodies are byte-identical.  The ``*_sync`` workers, profile resolution
-and the threadpool wrapper (``_run_cron_dashboard_io``) still live in
-web_server — reached via the late-binding seam in :mod:`hermes_cli.web_deps`
-so ``monkeypatch.setattr(web_server, ...)`` keeps working (several cron tests
-rely on exactly that).
+The ``*_sync`` workers, profile resolution and the threadpool wrapper
+(``_run_cron_dashboard_io``) live in web_server and are reached through the
+late-binding seam so ``monkeypatch.setattr(web_server, ...)`` keeps working.
 """
 
-import asyncio  # noqa: F401 — used by handlers
-import functools  # noqa: F401
-import logging
-from typing import Optional  # noqa: F401
+import asyncio
+import functools
+import time
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request  # noqa: F401
-from fastapi.responses import JSONResponse  # noqa: F401
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from hermes_cli.web_deps import late
 from hermes_cli.web_models import (
@@ -21,26 +19,14 @@ from hermes_cli.web_models import (
     CronJobUpdate,
     AutomationBlueprintInstantiate,
 )
-
-# Same logger the handlers used before extraction (identical logger object).
-_log = logging.getLogger("hermes_cli.web_server")
+from hermes_cli.web_routers._common import log as _log
+from typing import Any, Dict, List
+from pathlib import Path
 
 router = APIRouter()
 
-# Late-bound web_server helpers (resolved at call time; cycle-safe,
-# monkeypatch-transparent — includes config readers so existing
-# ``monkeypatch.setattr(web_server, "load_config", ...)`` idioms behave
-# identically for these routes).
 _run_cron_dashboard_io = late("_run_cron_dashboard_io")
-_list_cron_jobs_sync = late("_list_cron_jobs_sync")
-_get_cron_job_sync = late("_get_cron_job_sync")
-_list_cron_job_runs_sync = late("_list_cron_job_runs_sync")
 _create_cron_job_sync = late("_create_cron_job_sync")
-_update_cron_job_sync = late("_update_cron_job_sync")
-_pause_cron_job_sync = late("_pause_cron_job_sync")
-_resume_cron_job_sync = late("_resume_cron_job_sync")
-_trigger_cron_job_sync = late("_trigger_cron_job_sync")
-_delete_cron_job_sync = late("_delete_cron_job_sync")
 _find_cron_job_profile = late("_find_cron_job_profile")
 _fire_cron_job_for_profile = late("_fire_cron_job_for_profile")
 _forward_cron_fire_to_gateway = late("_forward_cron_fire_to_gateway")
@@ -50,13 +36,232 @@ _call_cron_for_profile = late("_call_cron_for_profile")
 _raise_if_cron_registration_error = late("_raise_if_cron_registration_error")
 load_config = late("load_config")
 cfg_get = late("cfg_get")
+_cron_profile_dicts = late("_cron_profile_dicts")
+_cron_profile_home = late("_cron_profile_home")
+_mutate_cron_for_profile = late("_mutate_cron_for_profile")
+_open_session_db_for_profile = late("_open_session_db_for_profile")
+_validate_dashboard_cron_context_from = late("_validate_dashboard_cron_context_from")
+_validate_dashboard_cron_effective_job = late("_validate_dashboard_cron_effective_job")
+_cron_optional_text = late("_cron_optional_text")
+_cron_string_list = late("_cron_string_list")
+_normalize_dashboard_cron_script = late("_normalize_dashboard_cron_script")
 
-# Retry-After hint (seconds) stamped on retryable cron-fire 503s. Sized to
-# clear the common transient windows — a scale-to-zero wake or an s6 gateway
-# restart completes well within a minute — so a scheduler that honors it
-# spaces its next attempt PAST the outage window instead of burning its whole
-# retry budget inside it (OOF-266). Honored by QStash once NAS propagates it;
-# harmless (ignored) until then.
+
+def _normalize_dashboard_cron_updates(
+    updates: Dict[str, Any],
+    profile_home: Path,
+) -> Dict[str, Any]:
+    """Normalize dashboard JSON into cron.jobs.update_job's storage shape.
+
+    This intentionally stays in the dashboard adapter layer: cron/jobs.py is the
+    source of truth for scheduling behaviour; the dashboard only translates form
+    payloads into the shapes that existing core functions already accept.
+    """
+    normalized = dict(updates or {})
+
+    for key in ("model", "provider", "workdir"):
+        if key in normalized:
+            normalized[key] = _cron_optional_text(normalized[key])
+    if "script" in normalized:
+        normalized["script"] = _normalize_dashboard_cron_script(
+            normalized["script"],
+            profile_home,
+        )
+    if "base_url" in normalized:
+        normalized["base_url"] = _cron_optional_text(
+            normalized["base_url"], strip_trailing_slash=True
+        )
+    if "deliver" in normalized:
+        normalized["deliver"] = _cron_optional_text(normalized["deliver"]) or "local"
+    if "failure_deliver" in normalized:
+        # Same text normalization as deliver, but empty CLEARS the override
+        # (failures fall back to deliver) rather than coalescing to a target
+        # — the field is optional by design (NS-788).
+        normalized["failure_deliver"] = _cron_optional_text(
+            normalized["failure_deliver"]
+        )
+    if "context_from" in normalized:
+        normalized["context_from"] = _cron_string_list(normalized["context_from"])
+    if "enabled_toolsets" in normalized:
+        normalized["enabled_toolsets"] = _cron_string_list(normalized["enabled_toolsets"])
+    return normalized
+
+
+def _list_cron_jobs_sync(profile: str = "all"):
+    requested = (profile or "all").strip()
+    if requested.lower() != "all":
+        return _call_cron_for_profile(requested, "list_jobs", True)
+
+    jobs: List[Dict[str, Any]] = []
+    for item in _cron_profile_dicts():
+        name = str(item.get("name") or "")
+        if not name:
+            continue
+        try:
+            jobs.extend(_call_cron_for_profile(name, "list_jobs", True))
+        except Exception:
+            _log.exception("Failed to list cron jobs for profile %s", name)
+    return jobs
+
+
+def _get_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _call_cron_for_profile(selected, "get_job", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _list_cron_job_runs_sync(job_id: str, profile: Optional[str] = None, limit: int = 20):
+    """Run sessions produced by a cron job, newest first.
+
+    Cron runs are stored as ordinary sessions whose id is
+    ``cron_{job_id}_{timestamp}`` (see cron/scheduler.run_job). A job's history
+    is therefore every session whose id carries that prefix; ``source='cron'``
+    narrows it and the id prefix binds it to this job. Powers the run-history
+    list under each job in the desktop cron detail. Same row shape as
+    ``/api/sessions`` so the frontend can reuse SessionInfo.
+
+    Backed by ``SessionDB.list_cron_job_runs`` — a bounded ``[prefix, hi)``
+    id-range scan, not the compression-chain CTE used for the recents list,
+    so the cost scales with the requested window and not the (unbounded) total
+    cron history.
+    """
+    selected = profile or _find_cron_job_profile(job_id)
+    # job_id may be a human name; resolve to the canonical id used in run-session ids.
+    canonical = job_id
+    if selected:
+        job = _call_cron_for_profile(selected, "get_job", job_id)
+        if job and job.get("id"):
+            canonical = str(job["id"])
+
+    try:
+        limit_n = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        limit_n = 20
+
+    db = _open_session_db_for_profile(selected, read_only=True)
+    try:
+        runs = db.list_cron_job_runs(canonical, limit=limit_n, offset=0)
+        now = time.time()
+        for s in runs:
+            s["is_active"] = (
+                s.get("ended_at") is None
+                and (now - s.get("last_active", s.get("started_at", 0))) < 300
+            )
+            s["archived"] = bool(s.get("archived"))
+            if selected:
+                s["profile"] = selected
+        return {"runs": runs, "limit": limit_n}
+    finally:
+        db.close()
+
+
+def _update_cron_job_sync(job_id: str, body: CronJobUpdate, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        profile_name, profile_home = _cron_profile_home(selected)
+        existing = _call_cron_for_profile(profile_name, "get_job", job_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Job not found")
+        updates = _normalize_dashboard_cron_updates(
+            body.updates,
+            profile_home,
+        )
+        if "context_from" in updates:
+            _validate_dashboard_cron_context_from(
+                updates.get("context_from"),
+                profile_name,
+            )
+        execution_fields = {"prompt", "skill", "skills", "script", "no_agent"}
+        if execution_fields.intersection(updates):
+            effective = {**existing, **updates}
+            if "skills" in updates and "skill" not in updates:
+                effective["skill"] = None
+            _validate_dashboard_cron_effective_job(effective)
+        job = _mutate_cron_for_profile(profile_name, "update_job", job_id, updates)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _pause_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _mutate_cron_for_profile(selected, "pause_job", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _resume_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _mutate_cron_for_profile(selected, "resume_job", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _trigger_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _call_cron_for_profile(selected, "resolve_job_ref", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Do not expose the job as due before claiming it: the built-in ticker and
+    # external/manual fire paths share the same durable claim, so only one can
+    # execute this selected run even if they race across processes. Active jobs
+    # keep the legacy provider call shape; paused jobs need the explicit force
+    # flag to resume and claim atomically.
+    force = not job.get("enabled", True) or job.get("state") == "paused"
+    ran = _fire_cron_job_for_profile(selected, job["id"], force=force)
+    refreshed = _call_cron_for_profile(selected, "get_job", job["id"])
+    if refreshed and refreshed.get("last_run_at") != job.get("last_run_at"):
+        return refreshed
+    if not ran:
+        raise HTTPException(
+            status_code=409,
+            detail="Job is already running or was claimed by another scheduler",
+        )
+    if refreshed:
+        return refreshed
+    # A one-shot may remove itself after exhausting repeat=1. Keep the response
+    # shape compatible without inventing an outcome that is no longer present
+    # in the job store; authoritative list refresh removes the completed row.
+    return {
+        **job,
+        "enabled": False,
+        "state": "completed",
+    }
+
+
+def _delete_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        removed = _mutate_cron_for_profile(selected, "remove_job", job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"ok": True}
+
+# Retry-After hint (seconds) on retryable cron-fire 503s: sized to clear a
+# scale-to-zero wake or gateway restart so a scheduler that honors it spaces
+# its next attempt past the outage instead of burning its retry budget in it.
 _CRON_FIRE_RETRY_AFTER_SECONDS = 60
 
 
@@ -82,15 +287,9 @@ async def create_cron_job(body: CronJobCreate, profile: Optional[str] = None):
 
 @router.get("/api/cron/delivery-targets")
 async def get_cron_delivery_targets():
-    """Delivery targets the cron dropdown should offer.
-
-    Always includes the implicit ``local`` option. Beyond that, the list is
-    derived dynamically from the configured gateway platforms via
-    ``cron.scheduler.cron_delivery_targets()`` — no hardcoded platform list. A
-    configured platform that hasn't set its cron home channel is still returned
-    with ``home_target_set: false`` so the UI can surface it as "configure a
-    home channel first" rather than hiding it.
-    """
+    """Delivery targets for the cron dropdown: implicit ``local`` plus the
+    configured gateway platforms (a platform without a cron home channel is
+    still listed with ``home_target_set: false`` so the UI can say so)."""
     targets = [
         {
             "id": "local",
@@ -137,26 +336,13 @@ async def delete_cron_job(job_id: str, profile: Optional[str] = None):
 async def cron_fire_webhook(request: Request):
     """Chronos managed-cron fire webhook (NAS -> agent) — gateway forwarder.
 
-    Authenticated by a short-lived NAS-minted JWT (verified by the pluggable
-    Chronos fire-verifier), NOT the dashboard session cookie — so this path is
-    in ``PUBLIC_API_PATHS`` to bypass the dashboard auth gate, and the JWT is
-    the real gate.
-
-    The dashboard is only the PUBLIC DOOR here (on hosted deployments the Fly
-    proxy exposes exactly one port, the dashboard's). Cron execution belongs
-    to the GATEWAY process, which owns the live platform adapters — required
-    for relay-fronted logical platforms (their only sender is the live relay
-    adapter) and E2EE rooms, neither of which the dashboard's standalone send
-    path can serve. So after verifying the JWT this handler FORWARDS the fire
-    to the gateway api_server's own ``/api/cron/fire`` on loopback and passes
-    the gateway's response through (the gateway re-verifies the JWT — defense
-    in depth, no new trust link).
-
-    Gateway unreachable (scale-to-zero wake still booting, restart window,
-    api_server disabled) → 503, so NAS retries per the Chronos contract
-    (non-2xx = retryable). The store CAS claim de-dupes the eventual double
-    fire. Deliberately NO local-execution fallback: delivering from the wrong
-    process is worse than a delayed retry.
+    Gated by the NAS-minted JWT (this path is in ``PUBLIC_API_PATHS``), not the
+    dashboard cookie.  The dashboard is only the public door: execution belongs
+    to the GATEWAY process (it owns the live platform adapters relay-fronted
+    and E2EE targets need), so the fire is forwarded to the gateway
+    api_server's own ``/api/cron/fire`` on loopback and its response passed
+    through (the gateway re-verifies the JWT).  Gateway unreachable -> 503 so
+    NAS retries; deliberately NO local-execution fallback.
     """
     from plugins.cron_providers.chronos.verify import get_fire_verifier
 
@@ -181,23 +367,17 @@ async def cron_fire_webhook(request: Request):
     if not job_id:
         return JSONResponse({"error": "missing job_id"}, status_code=400)
 
-    # _find_cron_job_profile walks every profile and lists its jobs (file
-    # I/O per profile) — run it off the event loop like the other cron
-    # dashboard endpoints.
+    # Walks every profile's job list (file I/O) — off the event loop.
     profile = await _run_cron_dashboard_io(_find_cron_job_profile, job_id)
     if not profile:
-        # Job is gone (cancelled / completed) — nothing to fire. 200 so NAS
-        # does not retry a fire that is intentionally absent.
+        # Job is gone (cancelled / completed): 200 so NAS does not retry.
         return JSONResponse({"status": "gone", "job_id": job_id}, status_code=200)
 
     forwarded = await _forward_cron_fire_to_gateway(profile, job_id, auth)
     if forwarded is None:
-        # Durably stamp the miss on the job record (last_fire_error) so the
-        # user and their agent can see "scheduled fire could not reach the
-        # runner" in `cronjob list` / the dashboard — without this, a dead
-        # 8642 hop is invisible outside gui.log (no execution row is ever
-        # created because the claim never happens). Best-effort: visibility
-        # must never break the retry contract below.
+        # Stamp the miss on the job record (last_fire_error) so the dead hop is
+        # visible in `cronjob list` / the dashboard, not just gui.log.
+        # Best-effort: visibility must never break the retry contract below.
         try:
             await _run_cron_dashboard_io(
                 _call_cron_for_profile,
@@ -211,25 +391,11 @@ async def cron_fire_webhook(request: Request):
             )
         except Exception:
             _log.debug("could not stamp last_fire_error for %s", job_id, exc_info=True)
-        # Gateway unreachable. Split by OPERATOR INTENT (OOF-266):
-        #
-        # - Deliberately stopped gateway (durable desired_state == "stopped",
-        #   written only by the s6 lifecycle commands): retrying can never
-        #   succeed until a human starts the gateway again, so the retry
-        #   budget is pure waste and the resulting 503→502 storms page the
-        #   NAS on-call for a non-incident. Drop with 200 + a structured log
-        #   line, mirroring NAS's own instance_stopped drop in the relay.
-        #   The fire is NOT lost silently: the log names job and profile,
-        #   and the gateway's Chronos provider reconciles + re-arms every
-        #   job on its next startup (plugins/cron_providers/chronos
-        #   start() -> reconcile()), so fires resume when the operator
-        #   starts the gateway.
-        #
-        # - Transient window (scale-to-zero wake, restart, crash loop —
-        #   desired_state is "running" or unknown): keep the retryable 503,
-        #   but stamp Retry-After so a scheduler that honors it spaces its
-        #   next attempt past the wake/restart window instead of exhausting
-        #   the whole retry budget inside it.
+        # Split by operator intent: a deliberately stopped gateway (durable
+        # desired_state == "stopped") can never be reached by retrying, so drop
+        # with 200 + a structured log line — the Chronos provider re-arms every
+        # job on the next gateway start.  A transient window (wake, restart,
+        # crash loop) keeps the retryable 503 with a Retry-After hint.
         if await _run_cron_dashboard_io(_gateway_intentionally_stopped, profile):
             _log.info(
                 "cron fire dropped: gateway for profile %r is deliberately "
@@ -259,24 +425,16 @@ async def cron_fire_webhook(request: Request):
     status_code, gateway_body = forwarded
     if isinstance(gateway_body, dict):
         gateway_body.setdefault("job_id", job_id)
-    headers = (
-        # The gateway's own 503s (draining, admission failure) are equally
-        # transient — give the scheduler the same spacing hint.
-        {"Retry-After": str(_CRON_FIRE_RETRY_AFTER_SECONDS)}
-        if status_code == 503
-        else None
-    )
+    # The gateway's own 503s (draining, admission failure) are equally
+    # transient — same spacing hint.
+    headers = {"Retry-After": str(_CRON_FIRE_RETRY_AFTER_SECONDS)} if status_code == 503 else None
     return JSONResponse(gateway_body, status_code=status_code, headers=headers)
 
 
 @router.get("/api/cron/blueprints")
 async def list_cron_blueprints():
-    """Return the blueprint catalog as form schemas for the dashboard gallery.
-
-    The ``deliver`` slot's options are rewritten from the user's actually
-    configured gateway platforms (plus the universal origin/local/all), so the
-    form never offers a platform that isn't connected.
-    """
+    """Blueprint catalog as form schemas; the ``deliver`` slot's options are
+    rewritten from the actually configured gateway platforms."""
     try:
         from cron.blueprint_catalog import CATALOG, blueprint_catalog_entry
 
@@ -317,18 +475,14 @@ async def instantiate_blueprint(body: AutomationBlueprintInstantiate, profile: s
         except BlueprintFillError as exc:
             # Field-level validation error — 422 so the form can show it inline.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        # Blueprint-created jobs deliver to the dashboard's configured target by
+        # Blueprint jobs deliver to the dashboard's configured target by
         # default; the form's deliver slot overrides via spec["deliver"].
         spec.pop("origin", None)
-        # create_job does per-profile file I/O — keep it off the event loop
-        # like the sibling cron endpoints (partial avoids **spec keys ever
-        # colliding with the wrapper's own parameters).
+        # Off the event loop like the sibling endpoints; partial keeps **spec
+        # keys from colliding with the wrapper's own parameters.
         _create = functools.partial(_call_cron_for_profile, profile, "create_job", **spec)
         created = await _run_cron_dashboard_io(_create)
-        # Same contract as the other dashboard mutations: reconcile the
-        # profile-scoped provider (best-effort; fail-closed for external
-        # providers on a multi-profile dashboard). Off the event loop —
-        # a Chronos reconcile does file I/O plus NAS network calls.
+        # Reconcile the profile-scoped provider (file I/O + NAS calls) off-loop.
         await _run_cron_dashboard_io(_notify_cron_provider_for_profile, profile)
         return created
     except HTTPException:

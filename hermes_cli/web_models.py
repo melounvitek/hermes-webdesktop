@@ -1,6 +1,5 @@
 """Pydantic request/response models for the Hermes dashboard web server.
 
-Extracted verbatim from ``hermes_cli/web_server.py`` (pure schema move).
 ``web_server`` re-exports every name here, so existing imports like
 ``from hermes_cli.web_server import ConfigUpdate`` keep working.
 """
@@ -13,8 +12,6 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, SecretStr, field_validator
 
 
-# --- from web_server.py (originally lines 1273-1372) ---
-
 class ConfigUpdate(BaseModel):
     config: dict
     profile: Optional[str] = None
@@ -24,11 +21,9 @@ class EnvVarUpdate(BaseModel):
     key: str
     value: str
     profile: Optional[str] = None
-    # Optional bearer key for the connectivity probe of a custom/local endpoint
-    # (``key == "OPENAI_BASE_URL"``). Self-hosted endpoints that gate
-    # ``/v1/models`` behind auth otherwise look "reachable but empty"; sending
-    # the key lets the probe enumerate the served models. Ignored for the
-    # regular PUT /api/env path (which only reads key/value).
+    # Bearer key for the connectivity probe of a custom/local endpoint
+    # (``key == "OPENAI_BASE_URL"``): endpoints that gate ``/v1/models`` behind
+    # auth otherwise look "reachable but empty". Ignored by plain PUT /api/env.
     api_key: str = ""
 
 
@@ -66,8 +61,8 @@ class MessagingPlatformUpdate(BaseModel):
     enabled: Optional[bool] = None
     env: Dict[str, str] = {}
     clear_env: List[str] = []
-    # Explicit body profile beats the query param injected by the global
-    # dashboard profile switcher (same precedence as other scoped writes).
+    # Explicit body profile beats the switcher's query param (same precedence
+    # as other scoped writes).
     profile: Optional[str] = None
 
 
@@ -117,8 +112,6 @@ class ManagedFileDelete(BaseModel):
     recursive: bool = False
 
 
-# --- from web_server.py (originally lines 1398-1491) ---
-
 class ModelAssignment(BaseModel):
     """Payload for POST /api/model/set — assign a provider/model to a slot.
 
@@ -131,18 +124,13 @@ class ModelAssignment(BaseModel):
     provider: str
     model: str
     task: str = ""
-    # Optional OpenAI-compatible endpoint URL. Honored for custom/local
-    # providers on the main slot AND on auxiliary slots — lets the GUI wire a
-    # self-hosted endpoint (vLLM, llama.cpp, Ollama, …) that needs no API key.
-    # The runtime resolvers read model.base_url / auxiliary.<task>.base_url
-    # from config (they ignore OPENAI_BASE_URL), so this is the path that
-    # actually wires a local endpoint into resolution.
+    # OpenAI-compatible endpoint URL for custom/local providers, honored on
+    # the main slot AND auxiliary slots. The runtime resolvers read
+    # model.base_url / auxiliary.<task>.base_url from config (they ignore
+    # OPENAI_BASE_URL), so this is what actually wires a local endpoint.
     base_url: str = ""
-    # Optional API key for a custom/local endpoint. Persisted to
-    # ``model.api_key`` (main slot) or ``auxiliary.<task>.api_key`` (aux
-    # slots) — where the runtime resolvers read it — so a self-hosted
-    # endpoint that requires auth works from the GUI. Mirrors the key the
-    # ``hermes model`` custom flow collects.
+    # API key for a custom/local endpoint, persisted to ``model.api_key`` /
+    # ``auxiliary.<task>.api_key`` where the resolvers read it.
     api_key: str = ""
     confirm_expensive_model: bool = False
     profile: Optional[str] = None
@@ -151,8 +139,7 @@ class ModelAssignment(BaseModel):
 class MoaModelSlot(BaseModel):
     provider: str = ""
     model: str = ""
-    # Optional per-slot reasoning effort. Declared so a client round-tripping
-    # the GET payload doesn't have it stripped at parse time and wiped on save.
+    # Declared so a GET round-trip doesn't strip it at parse time and wipe it.
     reasoning_effort: Optional[str] = None
     enabled: bool = True
 
@@ -190,9 +177,8 @@ class MoaPresetPayload(_MoaReferenceControls):
     reference_temperature: Optional[float] = None
     aggregator_temperature: Optional[float] = None
     max_tokens: int = 4096
-    # Newer per-preset knobs (see moa_config._normalize_preset). Optional so
-    # older clients that never send them keep working; declared so clients
-    # that round-trip the GET payload don't silently erase hand-set values.
+    # Newer per-preset knobs (see moa_config._normalize_preset): optional so
+    # older clients keep working, declared so GET round-trips don't erase them.
     reference_max_tokens: Optional[int] = None
     fanout: Optional[str] = None
     enabled: bool = True
@@ -202,8 +188,7 @@ class MoaConfigPayload(_MoaReferenceControls):
     default_preset: str = "default"
     active_preset: str = ""
     presets: dict[str, MoaPresetPayload] = {}
-    # Backward-compatible flat payload fields used by older dashboard/desktop
-    # clients during this PR's transition window.
+    # Backward-compatible flat payload fields for older dashboard/desktop clients.
     reference_models: list[MoaModelSlot] = []
     aggregator: MoaModelSlot = MoaModelSlot()
     reference_temperature: Optional[float] = None
@@ -215,14 +200,10 @@ class MoaConfigPayload(_MoaReferenceControls):
     profile: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 2718-2720) ---
-
 class FsWriteText(BaseModel):
     path: str
     content: str
 
-
-# --- from web_server.py (originally lines 2826-2856) ---
 
 class GitPathBody(BaseModel):
     path: str
@@ -270,13 +251,9 @@ class GitBranchSwitchBody(BaseModel):
     branch: str
 
 
-# --- from web_server.py (originally lines 3610-3611) ---
-
 class CuratorPause(BaseModel):
     paused: bool
 
-
-# --- from web_server.py (originally lines 3649-3657) ---
 
 class LearningNodeRef(BaseModel):
     id: str
@@ -289,18 +266,13 @@ class LearningNodeEdit(BaseModel):
     profile: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 3786-3792) ---
-
 class DebugShareRequest(BaseModel):
-    # Redaction is ON by default — force-mode scrubs credential-shaped tokens
-    # out of log content before it leaves the machine. The toggle exists so an
-    # operator who knows the logs are clean can opt out for fuller fidelity.
+    # Redaction ON by default scrubs credential-shaped tokens before logs leave
+    # the machine; an operator who knows the logs are clean can opt out.
     redact: bool = True
     # Recent log lines included in the summary tail (full logs are separate).
     lines: int = 200
 
-
-# --- from web_server.py (originally lines 4492-4493) ---
 
 class TTSSpeakRequest(BaseModel):
     text: str
@@ -317,14 +289,10 @@ class TTSLeaseRequest(BaseModel):
     active: bool = True
 
 
-# --- from web_server.py (originally lines 11549-11551) ---
-
 class OAuthSubmitBody(BaseModel):
     session_id: str
     code: str
 
-
-# --- from web_server.py (originally lines 11708-11715) ---
 
 class BulkDeleteSessions(BaseModel):
     ids: List[str]
@@ -336,23 +304,17 @@ class SessionImport(BaseModel):
     profile: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 12082-12090) ---
-
 class SessionRename(BaseModel):
     title: Optional[str] = None
     archived: Optional[bool] = None
-    # Generic visibility flag. This is also used by process-light cross-profile
-    # reconciliation, where the primary backend opens the owner's state.db.
+    # Generic visibility flag; also used by cross-profile reconciliation.
     hidden: Optional[bool] = None
-    # Durable "keep" flag mirrored from the Desktop sidebar's pins; pinned
-    # sessions are exempt from the sessions.auto_archive stale sweep.
+    # Durable "keep" flag (Desktop pins); exempt from the auto_archive sweep.
     pinned: Optional[bool] = None
-    # Read-state watermark toggle (sessions.last_read_at): True marks the
-    # session explicitly unread, False marks it read up to now. Mirrored from
-    # the Desktop sidebar's "Mark as unread"/"Mark as read". None = leave alone.
+    # Read-state watermark (sessions.last_read_at): True = explicitly unread,
+    # False = read up to now, None = leave alone.
     unread: Optional[bool] = None
-    # Mutate a session belonging to another profile (opens its state.db). Omit
-    # for the current/default profile.
+    # Mutate a session owned by another profile (opens its state.db).
     profile: Optional[str] = None
 
 
@@ -366,8 +328,6 @@ class SessionOwnerBackfill(BaseModel):
 
     profile: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 12149-12174) ---
 
 class SessionPrune(BaseModel):
     older_than_days: Optional[float] = 90
@@ -397,8 +357,6 @@ class SessionPrune(BaseModel):
     dry_run: bool = False
 
 
-# --- from web_server.py (originally lines 12335-12352) ---
-
 class CronJobCreate(BaseModel):
     prompt: str = ""
     schedule: str
@@ -419,14 +377,10 @@ class CronJobUpdate(BaseModel):
     updates: dict
 
 
-# --- from web_server.py (originally lines 12924-12926) ---
-
 class AutomationBlueprintInstantiate(BaseModel):
     blueprint: str                      # blueprint key, e.g. "morning-brief"
     values: Dict[str, Any] = {}      # filled slot values from the form
 
-
-# --- from web_server.py (originally lines 13002-13019) ---
 
 class MCPServerCreate(BaseModel):
     name: str
@@ -448,14 +402,10 @@ class MCPServersReplace(BaseModel):
     profile: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 13518-13520) ---
-
 class MCPEnabledToggle(BaseModel):
     enabled: bool
     profile: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 13622-13627) ---
 
 class MCPCatalogInstall(BaseModel):
     name: str
@@ -464,8 +414,6 @@ class MCPCatalogInstall(BaseModel):
     enable: bool = True
     profile: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 13716-13723) ---
 
 class PairingApprove(BaseModel):
     platform: str
@@ -479,8 +427,6 @@ class PairingRevoke(BaseModel):
     user_id: str
     profile: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 13793-13804) ---
 
 class WebhookCreate(BaseModel):
     name: str
@@ -496,23 +442,16 @@ class WebhookCreate(BaseModel):
     secret: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 13930-13931) ---
-
 class WebhookEnabledToggle(BaseModel):
     enabled: bool
 
 
-# --- from web_server.py (originally lines 13997-14002) ---
-
 class CredentialPoolAdd(BaseModel):
     provider: str
-    # api_key for API-key providers; OAuth pooling stays CLI-only (it needs
-    # an interactive browser flow that doesn't belong in a single POST).
+    # OAuth pooling stays CLI-only (needs an interactive browser flow).
     api_key: str
     label: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 14171-14178) ---
 
 class MemoryProviderSelect(BaseModel):
     # "" or "built-in" disables the external provider (built-in only).
@@ -524,68 +463,48 @@ class MemoryReset(BaseModel):
     target: str = "all"
 
 
-# --- from web_server.py (originally lines 14274-14276) ---
-
 class BackupRequest(BaseModel):
     # Optional output path; defaults to a timestamped zip in the home dir.
     output: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 14339-14348) ---
-
 class ImportRequest(BaseModel):
     archive: str
-    # Pass --force to `hermes import`. The spawned action runs with
-    # stdin=DEVNULL, so the CLI's interactive "Continue? [y/N]" overwrite
-    # prompt hits EOF and auto-aborts ("Aborted.", exit 1) whenever the
-    # target already has a config — which it always does when the dashboard
-    # itself is running from it. The dashboard shows its own confirm modal
-    # before calling this endpoint, then sends force=True so the restore
-    # proceeds non-interactively.
+    # Pass --force to `hermes import`: the spawned action runs with
+    # stdin=DEVNULL, so the CLI's "Continue? [y/N]" overwrite prompt hits EOF
+    # and aborts whenever the target already has a config (always, when the
+    # dashboard runs from it). The dashboard confirms in its own modal first.
     force: bool = False
 
-
-# --- from web_server.py (originally lines 14505-14513) ---
 
 class HookCreate(BaseModel):
     event: str
     command: str
     matcher: Optional[str] = None
     timeout: Optional[int] = None
-    # approve: write the consent allowlist entry too (the operator using the
-    # authenticated dashboard is giving consent). Without it the hook is
-    # configured but won't fire until approved.
+    # Also write the consent allowlist entry (the authenticated dashboard
+    # operator is consenting); without it the hook won't fire until approved.
     approve: bool = True
 
-
-# --- from web_server.py (originally lines 14573-14575) ---
 
 class HookDelete(BaseModel):
     event: str
     command: str
 
 
-# --- from web_server.py (originally lines 14667-14669) ---
-
 class SkillInstallRequest(BaseModel):
     identifier: str
     profile: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 14724-14726) ---
 
 class SkillUninstallRequest(BaseModel):
     name: str
     profile: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 14748-14749) ---
-
 class SkillsUpdateRequest(BaseModel):
     profile: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 15116-15166) ---
 
 class ProfileCreate(BaseModel):
     name: str
@@ -598,20 +517,15 @@ class ProfileCreate(BaseModel):
     description: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
-    # Profile-builder additions — all optional, all applied best-effort AFTER
-    # the profile directory exists, so a hiccup in any of them never 500s the
-    # create (the user can fix it from the relevant dashboard page afterward).
-    # MCP servers to write into the new profile's config.yaml.
+    # Profile-builder additions — all applied best-effort AFTER the profile
+    # directory exists, so a hiccup in any of them never 500s the create.
     mcp_servers: List["MCPServerCreate"] = []
-    # Built-in / optional skills to KEEP active. When this list is non-empty,
-    # the builder uses "replace" semantics: the bundle is seeded, then every
-    # seeded skill NOT in this list is added to the profile's disabled list.
-    # Empty list = leave the seeded bundle untouched (legacy behaviour).
+    # Skills to KEEP active. Non-empty = "replace" semantics (every seeded
+    # skill NOT listed is disabled); empty = leave the seeded bundle untouched.
     keep_skills: List[str] = []
-    # Skills-hub identifiers to install into the new profile. Installed async
-    # via a subprocess scoped to the profile (`hermes -p <name> skills install`)
-    # because skills_hub.SKILLS_DIR is import-time-bound and the HERMES_HOME
-    # override can't redirect it. Returns spawned PIDs for the UI to poll.
+    # Skills-hub identifiers, installed async via `hermes -p <name> skills
+    # install` because skills_hub.SKILLS_DIR is import-time-bound and the
+    # HERMES_HOME override can't redirect it. PIDs go back for the UI to poll.
     hub_skills: List[str] = []
 
 
@@ -620,16 +534,14 @@ class ProfileRename(BaseModel):
 
 
 class ProfileExport(BaseModel):
-    # Optional extra root-level files to stage into the archive, filename →
-    # text content (e.g. desktop.json — the desktop appearance overlay).
+    # Extra root-level files to stage, filename → text (e.g. desktop.json).
     extra_files: Dict[str, str] = {}
-    # Where to write the archive. Empty → a staging path under HERMES_HOME.
+    # Archive path; empty → a staging path under HERMES_HOME.
     output: str = ""
 
 
 class ProfileImport(BaseModel):
-    # Path to a profile .tar.gz on the backend's filesystem (the desktop's
-    # local/pooled backends share the machine with the picker dialog).
+    # Path to a profile .tar.gz on the backend's filesystem.
     archive: str
     # Override the profile name inferred from the archive root.
     name: Optional[str] = None
@@ -656,15 +568,11 @@ class ProfileDescribeAuto(BaseModel):
     overwrite: bool = False
 
 
-# --- from web_server.py (originally lines 15831-15834) ---
-
 class SkillToggle(BaseModel):
     name: str
     enabled: bool
     profile: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 15883-15893) ---
 
 class SkillCreate(BaseModel):
     name: str
@@ -679,24 +587,18 @@ class SkillContentUpdate(BaseModel):
     profile: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 16022-16024) ---
-
 class ToolsetToggle(BaseModel):
     enabled: bool
     profile: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 16199-16204) ---
-
 class ToolsetProviderSelect(BaseModel):
     provider: str
     # Web-only capability scope: 'search' | 'extract'. Omitted → whole-provider
-    # selection through the legacy apply_provider_selection path (web.backend).
+    # selection via the legacy apply_provider_selection path (web.backend).
     capability: Optional[str] = None
     profile: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 16324-16327) ---
 
 class ToolsetModelSelect(BaseModel):
     model: str
@@ -704,47 +606,33 @@ class ToolsetModelSelect(BaseModel):
     profile: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 16510-16512) ---
-
 class ToolsetEnvUpdate(BaseModel):
     env: Dict[str, str]
     profile: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 16570-16572) ---
 
 class ToolsetPostSetup(BaseModel):
     key: str
     profile: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 16823-16825) ---
-
 class TerminalBackendSelect(BaseModel):
     backend: str
     profile: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 16919-16921) ---
 
 class RawConfigUpdate(BaseModel):
     yaml_text: str
     profile: Optional[str] = None
 
 
-# --- from web_server.py (originally lines 19410-19411) ---
-
 class ThemeSetBody(BaseModel):
     name: str
 
 
-# --- from web_server.py (originally lines 19449-19450) ---
-
 class FontSetBody(BaseModel):
     font: str
 
-
-# --- from web_server.py (originally lines 19681-19684) ---
 
 class _AgentPluginInstallBody(BaseModel):
     identifier: str
@@ -752,14 +640,10 @@ class _AgentPluginInstallBody(BaseModel):
     enable: bool = True
 
 
-# --- from web_server.py (originally lines 19896-19898) ---
-
 class _PluginProvidersPutBody(BaseModel):
     memory_provider: Optional[str] = None
     context_engine: Optional[str] = None
 
-
-# --- from web_server.py (originally lines 19919-19920) ---
 
 class _PluginVisibilityBody(BaseModel):
     hidden: bool
