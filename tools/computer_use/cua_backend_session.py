@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import contextlib
 import json
 import logging
 import os
@@ -40,10 +41,8 @@ class _AsyncBridge:
             try:
                 self._loop.run_forever()
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     self._loop.close()
-                except Exception:
-                    pass
 
         self._thread = threading.Thread(target=_run, daemon=True, name="cua-driver-loop")
         self._thread.start()
@@ -126,32 +125,26 @@ def _cli_run_json(cmd: List[str], env: Dict[str, str], name: str, timeout: float
 
 def _cli_result(parsed: Any, shot_file: Optional[str]) -> Dict[str, Any]:
     """Remap a ``cua-driver call`` JSON body into the ``_extract_tool_result`` shape."""
-    images: List[str] = []
+    if not isinstance(parsed, dict):
+        return {"data": None, "images": [], "structuredContent": None, "isError": False}
+    # Logical failures may be reported in-band even when the subprocess exits 0 — fail closed.
+    is_error = parsed.get("isError") is True or parsed.get("is_error") is True
+    shot = parsed.get("screenshot_png_b64")
+    if not shot:
+        # Screenshot was routed to a file (ours or the daemon's choice).
+        fpath = parsed.get("screenshot_file_path") or shot_file
+        if fpath and os.path.exists(fpath):
+            try:
+                with open(fpath, "rb") as fh:
+                    shot = base64.b64encode(fh.read()).decode("ascii")
+            except Exception as e:
+                logger.debug("cua-driver CLI fallback: failed reading %s: %s", fpath, e)
     data: Any = None
-    is_error = False
-    if isinstance(parsed, dict):
-        # Logical failures may be reported in-band even when the subprocess
-        # exits 0 — preserve the bit so callers fail closed.
-        is_error = parsed.get("isError") is True or parsed.get("is_error") is True
-        shot = parsed.get("screenshot_png_b64")
-        if not shot:
-            # Screenshot was routed to a file (ours or the daemon's choice).
-            fpath = parsed.get("screenshot_file_path") or shot_file
-            if fpath and os.path.exists(fpath):
-                try:
-                    with open(fpath, "rb") as fh:
-                        shot = base64.b64encode(fh.read()).decode("ascii")
-                except Exception as e:
-                    logger.debug("cua-driver CLI fallback: failed reading %s: %s", fpath, e)
-        if shot:
-            images.append(shot)
-        tree = parsed.get("tree_markdown")
-        if tree is not None:
-            ec = parsed.get("element_count")
-            summary = f"{ec} elements" if ec is not None else ""
-            data = f"{summary}\n{tree}" if summary else tree
-    structured = parsed if isinstance(parsed, dict) else None
-    return {"data": data, "images": images, "structuredContent": structured, "isError": is_error}
+    tree = parsed.get("tree_markdown")
+    if tree is not None:
+        ec = parsed.get("element_count")
+        data = f"{ec} elements\n{tree}" if ec is not None else tree
+    return {"data": data, "images": [shot] if shot else [], "structuredContent": parsed, "isError": is_error}
 
 
 class _CuaDriverSession:
@@ -348,7 +341,6 @@ class _CuaDriverSession:
             logger.debug("cua-driver transport reset callback failed: %s", exc)
 
     def _stop_lifecycle_locked(self) -> None:
-        """Signal shutdown and wait (5s) for the lifecycle coroutine to unwind."""
         self._signal_shutdown_locked()
         fut = self._lifecycle_future
         if fut is None:
@@ -367,10 +359,8 @@ class _CuaDriverSession:
         loop = self._bridge._loop
         event = self._shutdown_event
         if loop is not None and event is not None and loop.is_running():
-            try:
+            with contextlib.suppress(RuntimeError):  # loop closed — nothing to signal
                 loop.call_soon_threadsafe(event.set)
-            except RuntimeError:  # loop closed — nothing to signal
-                pass
 
     async def _call_tool_async(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         result = await self._session.call_tool(name, args)
@@ -451,10 +441,6 @@ class _CuaDriverSession:
         return any(needle in msg for needle in ("Resource temporarily unavailable", "os error 35",
                                                 "daemon transport error", "daemon proxy"))
 
-    @classmethod
-    def _transport_replay_is_safe(cls, name: str) -> bool:
-        return name in cls._TRANSPORT_REPLAY_SAFE_TOOLS
-
     @staticmethod
     def _unknown_transport_outcome(name: str, exc: Exception) -> Dict[str, Any]:
         return _outcome_unknown(
@@ -487,22 +473,23 @@ class _CuaDriverSession:
             return first_result
         logger.warning("cua-driver session %s ended during %s; reviving and retrying once",
                        session_id, name)
-        revive_result = self._run_call("start_session", {"session": session_id}, timeout)
-        if revive_result.get("isError") is True:
-            logger.warning("cua-driver session %s could not be revived: %s",
-                           session_id, self._logical_error_text(revive_result))
+        if not self._redeclare_session(timeout, "cua-driver session %s could not be revived: %s"):
             return first_result
         return self._run_call(name, args, timeout)
 
-    def _restore_declared_session_after_transport_reset(self, timeout: float) -> None:
-        """Re-attach the public label inside a replacement private lifecycle."""
-        session_id = getattr(self, "_declared_session_id", None)
-        if not session_id:
-            return
+    def _redeclare_session(self, timeout: float, failure_msg: str) -> bool:
+        """start_session with the declared id; log *failure_msg* and return False on rejection."""
+        session_id = self._declared_session_id
         result = self._run_call("start_session", {"session": session_id}, timeout)
         if result.get("isError") is True:
-            logger.warning("cua-driver public session label %s could not be restored: %s",
-                           session_id, self._logical_error_text(result))
+            logger.warning(failure_msg, session_id, self._logical_error_text(result))
+            return False
+        return True
+
+    def _restore_declared_session_after_transport_reset(self, timeout: float) -> None:
+        """Re-attach the public label inside a replacement private lifecycle."""
+        if getattr(self, "_declared_session_id", None):
+            self._redeclare_session(timeout, "cua-driver public session label %s could not be restored: %s")
 
     def _restart_session_locked(self) -> None:
         """Recreate the MCP session after the transport closed. Caller holds self._lock."""
@@ -518,11 +505,6 @@ class _CuaDriverSession:
         self._capability_version = ""
         self._start_lifecycle_locked()
         self._started = True
-
-    def _restart_and_restore(self, timeout: float) -> None:
-        with self._lock:
-            self._restart_session_locked()
-        self._restore_declared_session_after_transport_reset(timeout)
 
     def _cli_command(self, name: str, args: Dict[str, Any]) -> Tuple[List[str], Dict[str, str], Optional[str]]:
         """Build ``(cmd, child_env, shot_file)`` for the CLI fallback. ``get_window_state``
@@ -564,10 +546,8 @@ class _CuaDriverSession:
             return _cli_result(parsed, shot_file)
         finally:
             if shot_file and os.path.exists(shot_file):
-                try:
+                with contextlib.suppress(OSError):
                     os.remove(shot_file)
-                except OSError:
-                    pass
 
     def call_tool(self, name: str, args: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
         # A prior MCP timeout marks the session suspect (possibly wedged): recreate it
@@ -597,7 +577,7 @@ class _CuaDriverSession:
                                "for recreation before the next call", name)
                 return self._timeout_outcome(name, e)
             if self._is_transient_daemon_error(e):
-                if not self._transport_replay_is_safe(name):
+                if name not in self._TRANSPORT_REPLAY_SAFE_TOOLS:
                     self._notify_transport_reset()
                     return self._unknown_transport_outcome(name, e)
                 logger.warning("cua-driver MCP transport failed on %s (%s); "
@@ -606,8 +586,10 @@ class _CuaDriverSession:
             if not self._is_closed_session_error(e):
                 raise
             logger.warning("cua-driver MCP session closed during %s; reconnecting once", name)
-            self._restart_and_restore(timeout)
-            if not self._transport_replay_is_safe(name):
+            with self._lock:
+                self._restart_session_locked()
+            self._restore_declared_session_after_transport_reset(timeout)
+            if name not in self._TRANSPORT_REPLAY_SAFE_TOOLS:
                 return self._unknown_transport_outcome(name, e)
             result = self._run_call(name, args, timeout)
 
