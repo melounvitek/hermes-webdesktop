@@ -170,6 +170,13 @@ def test_cold_nous_entitlement_keeps_models_unselectable(monkeypatch):
 
     assert rows[0]["free_tier_pending"] is True
     assert rows[0]["unavailable_models"] == ["free/model", "paid/model"]
+    # The whole list renders locked — the picker's per-provider warning
+    # surface must say why, without clobbering an existing auth warning.
+    assert "entitlement" in rows[0]["warning"]
+
+    rows = [{"slug": "nous", "models": ["m"], "warning": "paste NOUS_API_KEY to activate"}]
+    inv._apply_pricing(rows, cached_only=True)
+    assert rows[0]["warning"] == "paste NOUS_API_KEY to activate"
 
 
 def test_prewarm_preserves_context_and_runs_once_per_profile(tmp_path, monkeypatch):

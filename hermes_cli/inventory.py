@@ -1017,6 +1017,14 @@ def _apply_pricing(
                 # paid models on its first picker open.
                 row["free_tier_pending"] = True
                 row["unavailable_models"] = list(models)
+                # Every model renders locked until the prewarm lands; say why
+                # on the existing per-provider warning surface instead of
+                # leaving the user staring at a greyed-out list.
+                if not row.get("warning"):
+                    row["warning"] = (
+                        "Checking Nous plan entitlement… models unlock on the "
+                        "next picker open (or refresh)."
+                    )
                 continue
         if not raw_pricing:
             if slug == "nous":
