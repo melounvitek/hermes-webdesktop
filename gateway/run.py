@@ -4484,38 +4484,22 @@ class TurnRunner:
                         exc_info=True,
                     )
 
-    async def send_progress_messages(self):
+    @dataclasses.dataclass
+    class _ProgressEditState:
+        """Mutable editable-bubble state shared by ``send_progress_messages`` and its helpers."""
+        adapter: Any
+        progress_lines: list
+        progress_msg_id: Any
+        can_edit: bool
+        _progress_len_fn: Any
+        _PROGRESS_TEXT_LIMIT: int
+        _edit_accepts_metadata: bool
+
+    def _progress_edit_state(self, adapter) -> "TurnRunner._ProgressEditState":
         ctx = self._ctx
-        if not ctx.progress_queue:
-            return
-
-        adapter = self._runner._adapter_for_source(ctx.source)
-        if not adapter:
-            return
-
-        if ctx._native_slack_task_cards and hasattr(
-            adapter, "send_native_task_card_progress"
-        ):
-            await self._send_native_task_card_progress(adapter)
-            return
-
-        # Skip tool progress for platforms that can't edit messages (e.g. iMessage/BlueBubbles):
-        # each update would be a separate bubble. getattr, not attribute access: duck-typed
-        # adapters (test fakes, minimal plugins) may lack edit_message — treated as "can't edit".
-        _adapter_edit = getattr(type(adapter), "edit_message", None)
-        if _adapter_edit is None or _adapter_edit is BasePlatformAdapter.edit_message:
-            while not ctx.progress_queue.empty():
-                try:
-                    ctx.progress_queue.get_nowait()
-                except Exception:
-                    break
-            return
-
         progress_lines = []      # Accumulated tool lines for the CURRENT editable bubble
         progress_msg_id = None   # ID of the current progress message to edit
         can_edit = ctx.progress_grouping != "separate"  # "separate" = one message per tool (pre-v0.9 behavior)
-        _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
-        _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
 
         _progress_len_fn = (
             adapter.message_len_fn
@@ -4558,95 +4542,173 @@ class TurnRunner:
                 )
             except (TypeError, ValueError):
                 _edit_accepts_metadata = False
+        return self._ProgressEditState(
+            adapter=adapter,
+            progress_lines=progress_lines,
+            progress_msg_id=progress_msg_id,
+            can_edit=can_edit,
+            _progress_len_fn=_progress_len_fn,
+            _PROGRESS_TEXT_LIMIT=_PROGRESS_TEXT_LIMIT,
+            _edit_accepts_metadata=_edit_accepts_metadata,
+        )
 
-        async def _edit_progress_message(message_id: str, content: str):
-            kwargs = {
-                "chat_id": ctx.source.chat_id,
-                "message_id": message_id,
-                "content": content,
-            }
-            if getattr(adapter, "REQUIRES_EDIT_FINALIZE", False):
-                kwargs["finalize"] = True
-            if _edit_accepts_metadata:
-                kwargs["metadata"] = ctx._progress_metadata
-            return await adapter.edit_message(**kwargs)
+    async def _edit_progress_message(self, st, message_id: str, content: str):
+        ctx = self._ctx
+        kwargs = {
+            "chat_id": ctx.source.chat_id,
+            "message_id": message_id,
+            "content": content,
+        }
+        if getattr(st.adapter, "REQUIRES_EDIT_FINALIZE", False):
+            kwargs["finalize"] = True
+        if st._edit_accepts_metadata:
+            kwargs["metadata"] = ctx._progress_metadata
+        return await st.adapter.edit_message(**kwargs)
 
-        def _progress_text(lines: list) -> str:
-            return "\n".join(str(line) for line in lines)
+    def _progress_text(self, lines: list) -> str:
+        return "\n".join(str(line) for line in lines)
 
-        def _split_progress_groups(lines: list) -> list[list]:
-            """Partition progress lines into platform-sized editable bubbles."""
-            groups: list[list] = []
-            current: list = []
-            for line in lines:
-                candidate = current + [line]
-                if current and _progress_len_fn(_progress_text(candidate)) > _PROGRESS_TEXT_LIMIT:
-                    groups.append(current)
-                    current = [line]
-                else:
-                    current = candidate
-            if current:
+    def _split_progress_groups(self, st, lines: list) -> list[list]:
+        """Partition progress lines into platform-sized editable bubbles."""
+        groups: list[list] = []
+        current: list = []
+        for line in lines:
+            candidate = current + [line]
+            if current and st._progress_len_fn(self._progress_text(candidate)) > st._PROGRESS_TEXT_LIMIT:
                 groups.append(current)
-            return groups
+                current = [line]
+            else:
+                current = candidate
+        if current:
+            groups.append(current)
+        return groups
 
-        def _track_progress_result(result) -> None:
-            if (
-                ctx._cleanup_progress
-                and getattr(result, "success", False)
-                and getattr(result, "message_id", None)
-            ):
-                ctx._cleanup_msg_ids.append(str(result.message_id))
+    def _track_progress_result(self, result) -> None:
+        ctx = self._ctx
+        if (
+            ctx._cleanup_progress
+            and getattr(result, "success", False)
+            and getattr(result, "message_id", None)
+        ):
+            ctx._cleanup_msg_ids.append(str(result.message_id))
 
-        async def _send_progress_text(text: str):
-            result = await adapter.send(
-                chat_id=ctx.source.chat_id,
-                content=text,
-                reply_to=ctx._progress_reply_to,
-                metadata=ctx._progress_metadata,
-            )
-            _track_progress_result(result)
-            return result
+    async def _send_progress_text(self, st, text: str):
+        ctx = self._ctx
+        result = await st.adapter.send(
+            chat_id=ctx.source.chat_id,
+            content=text,
+            reply_to=ctx._progress_reply_to,
+            metadata=ctx._progress_metadata,
+        )
+        self._track_progress_result(result)
+        return result
 
-        async def _roll_progress_overflow_if_needed() -> bool:
-            """Start fresh editable progress bubbles before a bubble exceeds limit.
+    async def _roll_progress_overflow_if_needed(self, st) -> bool:
+        """Start fresh editable progress bubbles before a bubble exceeds limit.
 
                 Returns True when it delivered/split the buffer or a transient edit failure left it
                 intact for retry — either way the caller skips the normal send/edit path this tick.
                 """
-            nonlocal progress_msg_id, progress_lines, can_edit
-            if not progress_lines or not can_edit:
+        if not st.progress_lines or not st.can_edit:
+            return False
+        groups = self._split_progress_groups(st, st.progress_lines)
+        if len(groups) <= 1:
+            return False
+
+        first_text = self._progress_text(groups[0])
+        if st.progress_msg_id is not None:
+            result = await self._edit_progress_message(st, st.progress_msg_id, first_text)
+            if not result.success:
+                if getattr(result, "retryable", False):
+                    logger.debug(
+                        "[%s] Transient overflow edit failure — keeping can_edit=True",
+                        st.adapter.name,
+                    )
+                    return True
+                st.can_edit = False
+                # Fall back to the existing non-edit behavior below.
                 return False
-            groups = _split_progress_groups(progress_lines)
-            if len(groups) <= 1:
-                return False
+        else:
+            result = await self._send_progress_text(st, first_text)
+            if result.success and result.message_id:
+                st.progress_msg_id = result.message_id
 
-            first_text = _progress_text(groups[0])
-            if progress_msg_id is not None:
-                result = await _edit_progress_message(progress_msg_id, first_text)
-                if not result.success:
-                    if getattr(result, "retryable", False):
-                        logger.debug(
-                            "[%s] Transient overflow edit failure — keeping can_edit=True",
-                            adapter.name,
-                        )
-                        return True
-                    can_edit = False
-                    # Fall back to the existing non-edit behavior below.
-                    return False
-            else:
-                result = await _send_progress_text(first_text)
-                if result.success and result.message_id:
-                    progress_msg_id = result.message_id
+        for group in groups[1:]:
+            result = await self._send_progress_text(st, self._progress_text(group))
+            if result.success and result.message_id:
+                st.progress_msg_id = result.message_id
 
-            for group in groups[1:]:
-                result = await _send_progress_text(_progress_text(group))
-                if result.success and result.message_id:
-                    progress_msg_id = result.message_id
+        # The newest continuation is the only mutable bubble: keep just its lines so later
+        # edits update it instead of replaying the full transcript into new messages.
+        st.progress_lines = groups[-1]
+        return True
 
-            # The newest continuation is the only mutable bubble: keep just its lines so later
-            # edits update it instead of replaying the full transcript into new messages.
-            progress_lines = groups[-1]
-            return True
+    async def _drain_progress_on_cancel(self, st) -> None:
+        ctx = self._ctx
+        # Drain remaining queued messages
+        while not ctx.progress_queue.empty():
+            try:
+                raw = ctx.progress_queue.get_nowait()
+                if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
+                    _, base_msg, count = raw
+                    if st.progress_lines:
+                        st.progress_lines[-1] = f"{base_msg} (×{count + 1})"
+                        await self._roll_progress_overflow_if_needed(st)
+                elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
+                    # Content-bubble marker during drain: close the current progress bubble
+                    # and start a fresh one for tool lines that arrived after.
+                    await self._roll_progress_overflow_if_needed(st)
+                    if st.can_edit and st.progress_lines and st.progress_msg_id:
+                        _pending_text = self._progress_text(st.progress_lines)
+                        with suppress(Exception):
+                            await self._edit_progress_message(st, st.progress_msg_id, _pending_text)
+                    st.progress_msg_id = None
+                    st.progress_lines = []
+                    ctx.last_progress_msg[0] = None
+                    ctx.repeat_count[0] = 0
+                else:
+                    st.progress_lines.append(raw)
+                    await self._roll_progress_overflow_if_needed(st)
+            except Exception:
+                break
+        # Final edit with all remaining tools (only if editing works)
+        if st.can_edit and st.progress_lines and st.progress_msg_id:
+            await self._roll_progress_overflow_if_needed(st)
+        if st.can_edit and st.progress_lines and st.progress_msg_id:
+            full_text = self._progress_text(st.progress_lines)
+            with suppress(Exception):
+                await self._edit_progress_message(st, st.progress_msg_id, full_text)
+
+    async def send_progress_messages(self):
+        ctx = self._ctx
+        if not ctx.progress_queue:
+            return
+
+        adapter = self._runner._adapter_for_source(ctx.source)
+        if not adapter:
+            return
+
+        if ctx._native_slack_task_cards and hasattr(
+            adapter, "send_native_task_card_progress"
+        ):
+            await self._send_native_task_card_progress(adapter)
+            return
+
+        # Skip tool progress for platforms that can't edit messages (e.g. iMessage/BlueBubbles):
+        # each update would be a separate bubble. getattr, not attribute access: duck-typed
+        # adapters (test fakes, minimal plugins) may lack edit_message — treated as "can't edit".
+        _adapter_edit = getattr(type(adapter), "edit_message", None)
+        if _adapter_edit is None or _adapter_edit is BasePlatformAdapter.edit_message:
+            while not ctx.progress_queue.empty():
+                try:
+                    ctx.progress_queue.get_nowait()
+                except Exception:
+                    break
+            return
+
+        st = self._progress_edit_state(adapter)
+        _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
+        _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
 
         while True:
             try:
@@ -4676,26 +4738,26 @@ class TurnRunner:
                 # Handle dedup messages: update last line with repeat counter
                 if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
                     _, base_msg, count = raw
-                    if progress_lines:
-                        progress_lines[-1] = f"{base_msg} (×{count + 1})"
-                    msg = progress_lines[-1] if progress_lines else base_msg
+                    if st.progress_lines:
+                        st.progress_lines[-1] = f"{base_msg} (×{count + 1})"
+                    msg = st.progress_lines[-1] if st.progress_lines else base_msg
                 elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
                     # Content bubble landed — close the tool-progress bubble so the next tool starts
                     # fresh below it; else tool edits hit the ORIGINAL message above (out of order).
-                    progress_msg_id = None
-                    progress_lines = []
+                    st.progress_msg_id = None
+                    st.progress_lines = []
                     ctx.last_progress_msg[0] = None
                     ctx.repeat_count[0] = 0
                     continue
                 else:
                     msg = raw
-                    progress_lines.append(msg)
+                    st.progress_lines.append(msg)
 
-                if await _roll_progress_overflow_if_needed():
+                if await self._roll_progress_overflow_if_needed(st):
                     _last_edit_ts = time.monotonic()
                     await asyncio.sleep(0.3)
                     if ctx._run_still_current():
-                        await adapter.send_typing(ctx.source.chat_id, metadata=ctx._progress_metadata)
+                        await st.adapter.send_typing(ctx.source.chat_id, metadata=ctx._progress_metadata)
                     continue
 
                 # Throttle edits: batch rapid tool updates into fewer API calls to avoid Telegram
@@ -4711,10 +4773,10 @@ class TurnRunner:
                 if not ctx._run_still_current():
                     return
 
-                if can_edit and progress_msg_id is not None:
+                if st.can_edit and st.progress_msg_id is not None:
                     # Try to edit the existing progress message
-                    full_text = "\n".join(progress_lines)
-                    result = await _edit_progress_message(progress_msg_id, full_text)
+                    full_text = "\n".join(st.progress_lines)
+                    result = await self._edit_progress_message(st, st.progress_msg_id, full_text)
                     if not result.success:
                         _err = (getattr(result, "error", "") or "").lower()
                         # Transient network errors (ConnectError, timeouts) must not disable editing;
@@ -4722,7 +4784,7 @@ class TurnRunner:
                         if getattr(result, "retryable", False):
                             logger.debug(
                                 "[%s] Transient edit failure — keeping can_edit=True",
-                                adapter.name,
+                                st.adapter.name,
                             )
                             continue
                         if "flood" in _err or "retry after" in _err:
@@ -4730,12 +4792,12 @@ class TurnRunner:
                             # Only disable edits for non-recoverable errors.
                             logger.info(
                                 "[%s] Progress edit flood control, backing off",
-                                adapter.name,
+                                st.adapter.name,
                             )
                             _last_edit_ts = time.monotonic()
                         else:
-                            can_edit = False
-                        _flood_result = await adapter.send(
+                            st.can_edit = False
+                        _flood_result = await st.adapter.send(
                             chat_id=ctx.source.chat_id,
                             content=msg,
                             reply_to=ctx._progress_reply_to,
@@ -4748,10 +4810,10 @@ class TurnRunner:
                         ):
                             ctx._cleanup_msg_ids.append(str(_flood_result.message_id))
                 else:
-                    if can_edit:
+                    if st.can_edit:
                         # First tool: send all accumulated text as new message
-                        full_text = "\n".join(progress_lines)
-                        result = await adapter.send(
+                        full_text = "\n".join(st.progress_lines)
+                        result = await st.adapter.send(
                             chat_id=ctx.source.chat_id,
                             content=full_text,
                             reply_to=ctx._progress_reply_to,
@@ -4759,14 +4821,14 @@ class TurnRunner:
                         )
                     else:
                         # Editing unsupported: send just this line
-                        result = await adapter.send(
+                        result = await st.adapter.send(
                             chat_id=ctx.source.chat_id,
                             content=msg,
                             reply_to=ctx._progress_reply_to,
                             metadata=ctx._progress_metadata,
                         )
                     if result.success and result.message_id:
-                        progress_msg_id = result.message_id
+                        st.progress_msg_id = result.message_id
                         if ctx._cleanup_progress:
                             ctx._cleanup_msg_ids.append(str(result.message_id))
 
@@ -4775,44 +4837,12 @@ class TurnRunner:
                 # Restore typing indicator
                 await asyncio.sleep(0.3)
                 if ctx._run_still_current():
-                    await adapter.send_typing(ctx.source.chat_id, metadata=ctx._progress_metadata)
+                    await st.adapter.send_typing(ctx.source.chat_id, metadata=ctx._progress_metadata)
 
             except queue.Empty:
                 await asyncio.sleep(0.3)
             except asyncio.CancelledError:
-                # Drain remaining queued messages
-                while not ctx.progress_queue.empty():
-                    try:
-                        raw = ctx.progress_queue.get_nowait()
-                        if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
-                            _, base_msg, count = raw
-                            if progress_lines:
-                                progress_lines[-1] = f"{base_msg} (×{count + 1})"
-                                await _roll_progress_overflow_if_needed()
-                        elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
-                            # Content-bubble marker during drain: close the current progress bubble
-                            # and start a fresh one for tool lines that arrived after.
-                            await _roll_progress_overflow_if_needed()
-                            if can_edit and progress_lines and progress_msg_id:
-                                _pending_text = _progress_text(progress_lines)
-                                with suppress(Exception):
-                                    await _edit_progress_message(progress_msg_id, _pending_text)
-                            progress_msg_id = None
-                            progress_lines = []
-                            ctx.last_progress_msg[0] = None
-                            ctx.repeat_count[0] = 0
-                        else:
-                            progress_lines.append(raw)
-                            await _roll_progress_overflow_if_needed()
-                    except Exception:
-                        break
-                # Final edit with all remaining tools (only if editing works)
-                if can_edit and progress_lines and progress_msg_id:
-                    await _roll_progress_overflow_if_needed()
-                if can_edit and progress_lines and progress_msg_id:
-                    full_text = _progress_text(progress_lines)
-                    with suppress(Exception):
-                        await _edit_progress_message(progress_msg_id, full_text)
+                await self._drain_progress_on_cancel(st)
                 return
             except Exception as e:
                 logger.error("Progress message error: %s", e)
@@ -5015,66 +5045,8 @@ class TurnRunner:
                     ctx._cleanup_msg_ids.append(str(mid))
             _fut.add_done_callback(_track_status_id)
 
-    def run_sync(self):
+    def _setup_stream_consumer(self, platform_key):
         ctx = self._ctx
-        # As a method the turn message lives on the shared TurnContext: every rebind writes
-        # `ctx.message`, so the outer `_run_agent_inner` body sees the update as via the closure cell.
-
-        # session_key propagates via contextvars (_set_session_env / set_current_session_key):
-        # concurrency-safe and inherited by tool worker threads. Deliberately do NOT write
-        # os.environ["HERMES_SESSION_KEY"]: it is process-global, so concurrent sessions would clobber
-        # each other and a tool thread with an unset contextvar would read the wrong key, misrouting
-        # approvals. Only the TUI slash-worker subprocess exports the env var (from its own argv).
-
-        # Map platform enum to the platform hint key the agent understands.
-        # Platform.LOCAL ("local") maps to "cli"; others pass through as-is.
-        platform_key = "cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value
-
-        # Combine platform context, YAML channel_prompts hint for this chat, channel_overrides
-        # system_prompt (or global ephemeral), and the gateway ephemeral prompt.
-        combined_ephemeral = ctx.context_prompt or ""
-        event_channel_prompt = (ctx.channel_prompt or "").strip()
-        if event_channel_prompt:
-            combined_ephemeral = (combined_ephemeral + "\n\n" + event_channel_prompt).strip()
-        cfg_channel_prompt = self._runner._get_system_prompt_for_channel(
-            ctx.source.platform,
-            ctx.source.chat_id or "",
-            thread_id=getattr(ctx.source, "thread_id", None),
-            parent_id=getattr(ctx.source, "parent_chat_id", None),
-        )
-        if cfg_channel_prompt:
-            combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
-
-        max_iterations = _current_max_iterations()
-
-        try:
-            model, runtime_kwargs = self._runner._resolve_session_agent_runtime(
-                source=ctx.source,
-                session_key=ctx.session_key,
-                user_config=ctx.user_config,
-            )
-            logger.debug(
-                "run_agent resolved: model=%s provider=%s session=%s",
-                model, runtime_kwargs.get("provider"), ctx.session_key or "",
-            )
-        except Exception as exc:
-            return {
-                "final_response": f"⚠️ Provider authentication failed: {exc}",
-                "messages": [],
-                "api_calls": 0,
-                "tools": [],
-            }
-
-        pr = self._runner._provider_routing
-        reasoning_config = self._runner._resolve_session_reasoning_config(
-            source=ctx.source,
-            session_key=ctx.session_key,
-            model=model,
-        )
-        self._runner._reasoning_config = reasoning_config
-        self._runner._service_tier = self._runner._resolve_session_service_tier(
-            source=ctx.source, session_key=ctx.session_key
-        )
         # Set up stream consumer for token streaming or interim commentary.
         _stream_consumer = None
         _stream_delta_cb = None
@@ -5165,9 +5137,12 @@ class TurnRunner:
                 logger=logger,
                 log_message="interim_assistant_callback scheduling error",
             )
+        return _stream_consumer, _stream_delta_cb, _interim_assistant_cb, _want_interim_messages
 
-        turn_route = self._runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
-
+    def _resolve_turn_agent(
+        self, turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
+    ):
+        ctx = self._ctx
         # Per-platform skip_context_files — messaging platforms can opt out of filesystem-heavy
         # context-file discovery (SOUL.md, AGENTS.md, .cursorrules) to cut AIAgent build latency.
         _platforms_gw_cfg = (ctx.user_config.get("gateway") or {}).get("platforms") or {}
@@ -5387,7 +5362,13 @@ class TurnRunner:
                     )
                     self._runner._enforce_agent_cache_cap()
             logger.debug("Created new agent for session %s (sig=%s)", ctx.session_key, _sig)
+        return agent, reused_cached_agent
 
+    def _wire_turn_agent_callbacks(
+        self, agent, turn_route, reasoning_config,
+        _stream_delta_cb, _interim_assistant_cb, _want_interim_messages,
+    ):
+        ctx = self._ctx
         # Per-message state — callbacks and reasoning config change every turn, so they aren't baked
         # into the cached agent. The progress callback is ALWAYS attached (never gated to None): its
         # body gates each event class, and subagent-failure notices must fire even with
@@ -5520,144 +5501,7 @@ class TurnRunner:
             _mem_notif = "on" if _mem_notif else "off"
         agent.memory_notifications = str(_mem_notif).lower() if _mem_notif else "on"
 
-        # ------------------------------------------------------------------
-        # Shared native-stream boundary close: for native-streaming platforms (e.g. WeCom), an
-        # interrupting interaction (approval or clarify prompt) must finalize the current stream
-        # and disable native streaming first, or post-interaction output keeps updating the OLD
-        # bubble above the prompt. Runs on the agent thread; the consumer serializes via its queue.
-        def _close_native_stream_boundary(
-            _reason: str, _placeholder: str | None = None, _reopen: bool = False,
-        ) -> bool:
-            _sc = ctx.stream_consumer_holder[0] if ctx.stream_consumer_holder else None
-            if not (_sc and getattr(_sc, "_use_native_streaming", False)):
-                return True
-            _cancelled_flag = None
-            try:
-                _boundary_result = _sc.close_for_approval_prompt(
-                    _placeholder, reason=_reason, reopen=_reopen,
-                )
-                # Returns (future, cancelled_flag) or just a future.
-                if isinstance(_boundary_result, tuple):
-                    _boundary_future, _cancelled_flag = _boundary_result
-                else:
-                    _boundary_future = _boundary_result
-                if hasattr(_boundary_future, "result"):
-                    _ok = _boundary_future.result(timeout=10)
-                    if not _ok:
-                        logger.warning(
-                            "%s boundary failed to close stream properly — "
-                            "prompt may still appear in typing bubble", _reason,
-                        )
-                    return bool(_ok)
-                return True
-            except (TimeoutError, Exception) as _boundary_err:
-                if _cancelled_flag is not None:
-                    _cancelled_flag["cancelled"] = True
-                logger.warning(
-                    "%s boundary timed out or failed: %s", _reason, _boundary_err,
-                )
-                return False
-
-        # ------------------------------------------------------------------
-        # Clarify callback: present a clarify prompt and block on a response. Runs on the agent's
-        # worker thread (clarify_tool's synchronous contract): schedules the adapter's send_clarify
-        # on the gateway loop, then blocks on the primitive's threading.Event with a timeout.
-        # Returns the response string, or a sentinel explaining no response arrived.
-        # ------------------------------------------------------------------
-        def _clarify_callback_sync(question: str, choices, multi_select: bool = False) -> str:
-            from tools import clarify_gateway as _clarify_mod
-            import uuid as _uuid
-
-            if not ctx._status_adapter:
-                return ""
-
-            clarify_id = _uuid.uuid4().hex[:10]
-            _clarify_mod.register(
-                clarify_id=clarify_id,
-                session_key=ctx.session_key or "",
-                question=question,
-                choices=list(choices) if choices else None,
-                multi_select=bool(multi_select),
-            )
-
-            # WeCom native streaming: finalize the current stream before the clarify prompt so the
-            # post-answer output opens a fresh bubble below the question ("气泡割裂" otherwise). Unlike
-            # approval, clarify passes reopen=True so the continuation re-opens a native stream; if
-            # the re-seed fails the consumer degrades to send() automatically.
-            _close_native_stream_boundary(
-                "Clarify", "💬 等待你的选择...", _reopen=True,
-            )
-
-            # Pause typing — as with approval, a "thinking..." status must not obscure the prompt or
-            # block an "Other" reply on platforms that disable input while typing (Slack Assistant).
-            with suppress(Exception):
-                ctx._status_adapter.pause_typing_for_chat(ctx._status_chat_id)
-
-            # Ordering barrier: flush buffered assistant prose to the platform BEFORE sending the
-            # poll, which goes out on a separate agent-thread-blocking path and would otherwise
-            # render ABOVE its own explanation. Best-effort + short timeout so the agent thread
-            # never hangs if the consumer task isn't running.
-            try:
-                _sc = ctx.stream_consumer_holder[0] if ctx.stream_consumer_holder else None
-                _flush = getattr(_sc, "flush_pending_sync", None)
-                if callable(_flush):
-                    _flush(timeout=3.0)
-            except Exception:
-                logger.debug(
-                    "Stream-consumer flush before clarify prompt failed",
-                    exc_info=True,
-                )
-
-            fut = safe_schedule_threadsafe(
-                ctx._status_adapter.send_clarify(
-                    chat_id=ctx._status_chat_id,
-                    question=question,
-                    choices=list(choices) if choices else None,
-                    clarify_id=clarify_id,
-                    session_key=ctx.session_key or "",
-                    metadata=ctx._status_thread_metadata,
-                ),
-                ctx._loop_for_step,
-                logger=logger,
-                log_message="Clarify send failed to schedule",
-            )
-            # Boundary rule (see _approval_send_outcome): a send timeout is AMBIGUOUS — the card may
-            # have posted with a late ack. Only a definitive failure tears down the registration;
-            # ambiguous falls through to the bounded wait so a late reply resolves.
-            _clarify_response = _clarify_send_then_wait(
-                fut,
-                clarify_id=clarify_id,
-                session_key=ctx.session_key or "",
-                clarify_mod=_clarify_mod,
-            )
-            # Only re-arm typing when the user actually answered — the undeliverable sentinel and the
-            # timeout/cancellation strings start with '[' and must pass through untouched.
-            if not (
-                isinstance(_clarify_response, str)
-                and _clarify_response.startswith("[")
-            ):
-                # User answered: reopen typing IMMEDIATELY, not on the LLM's first post-answer token
-                # (native streaming otherwise re-seeds lazily on the first delta: ~48s of dead air).
-                # request_reopen_seed is a no-op outside the reopen-pending native state; always safe.
-                _sc_reopen = ctx.stream_consumer_holder[0] if ctx.stream_consumer_holder else None
-                if _sc_reopen is not None:
-                    try:
-                        _sc_reopen.request_reopen_seed()
-                    except Exception:
-                        logger.debug(
-                            "request_reopen_seed after clarify answer failed",
-                            exc_info=True,
-                        )
-                try:
-                    ctx._status_adapter.resume_typing_for_chat(ctx._status_chat_id)
-                except Exception:
-                    logger.debug(
-                        "resume_typing_for_chat after clarify answer failed",
-                        exc_info=True,
-                    )
-            return _clarify_response
-
-        agent.clarify_callback = _clarify_callback_sync
+        agent.clarify_callback = self._clarify_callback_sync
 
         # Show assistant thinking between tool calls — independent of tool_progress mode. Mattermost
         # needs an explicit per-platform opt-in so global scratch-text doesn't leak into threads.
@@ -5674,6 +5518,147 @@ class TurnRunner:
         # Capture the full tool definitions for transcript logging
         ctx.tools_holder[0] = agent.tools if hasattr(agent, 'tools') else None
 
+    # ------------------------------------------------------------------
+    # Shared native-stream boundary close: for native-streaming platforms (e.g. WeCom), an
+    # interrupting interaction (approval or clarify prompt) must finalize the current stream
+    # and disable native streaming first, or post-interaction output keeps updating the OLD
+    # bubble above the prompt. Runs on the agent thread; the consumer serializes via its queue.
+    def _close_native_stream_boundary(
+        self, _reason: str, _placeholder: str | None = None, _reopen: bool = False,
+    ) -> bool:
+        ctx = self._ctx
+        _sc = ctx.stream_consumer_holder[0] if ctx.stream_consumer_holder else None
+        if not (_sc and getattr(_sc, "_use_native_streaming", False)):
+            return True
+        _cancelled_flag = None
+        try:
+            _boundary_result = _sc.close_for_approval_prompt(
+                _placeholder, reason=_reason, reopen=_reopen,
+            )
+            # Returns (future, cancelled_flag) or just a future.
+            if isinstance(_boundary_result, tuple):
+                _boundary_future, _cancelled_flag = _boundary_result
+            else:
+                _boundary_future = _boundary_result
+            if hasattr(_boundary_future, "result"):
+                _ok = _boundary_future.result(timeout=10)
+                if not _ok:
+                    logger.warning(
+                        "%s boundary failed to close stream properly — "
+                        "prompt may still appear in typing bubble", _reason,
+                    )
+                return bool(_ok)
+            return True
+        except (TimeoutError, Exception) as _boundary_err:
+            if _cancelled_flag is not None:
+                _cancelled_flag["cancelled"] = True
+            logger.warning(
+                "%s boundary timed out or failed: %s", _reason, _boundary_err,
+            )
+            return False
+
+    # ------------------------------------------------------------------
+    # Clarify callback: present a clarify prompt and block on a response. Runs on the agent's
+    # worker thread (clarify_tool's synchronous contract): schedules the adapter's send_clarify
+    # on the gateway loop, then blocks on the primitive's threading.Event with a timeout.
+    # Returns the response string, or a sentinel explaining no response arrived.
+    # ------------------------------------------------------------------
+    def _clarify_callback_sync(self, question: str, choices, multi_select: bool = False) -> str:
+        ctx = self._ctx
+        from tools import clarify_gateway as _clarify_mod
+        import uuid as _uuid
+
+        if not ctx._status_adapter:
+            return ""
+
+        clarify_id = _uuid.uuid4().hex[:10]
+        _clarify_mod.register(
+            clarify_id=clarify_id,
+            session_key=ctx.session_key or "",
+            question=question,
+            choices=list(choices) if choices else None,
+            multi_select=bool(multi_select),
+        )
+
+        # WeCom native streaming: finalize the current stream before the clarify prompt so the
+        # post-answer output opens a fresh bubble below the question ("气泡割裂" otherwise). Unlike
+        # approval, clarify passes reopen=True so the continuation re-opens a native stream; if
+        # the re-seed fails the consumer degrades to send() automatically.
+        self._close_native_stream_boundary(
+            "Clarify", "💬 等待你的选择...", _reopen=True,
+        )
+
+        # Pause typing — as with approval, a "thinking..." status must not obscure the prompt or
+        # block an "Other" reply on platforms that disable input while typing (Slack Assistant).
+        with suppress(Exception):
+            ctx._status_adapter.pause_typing_for_chat(ctx._status_chat_id)
+
+        # Ordering barrier: flush buffered assistant prose to the platform BEFORE sending the
+        # poll, which goes out on a separate agent-thread-blocking path and would otherwise
+        # render ABOVE its own explanation. Best-effort + short timeout so the agent thread
+        # never hangs if the consumer task isn't running.
+        try:
+            _sc = ctx.stream_consumer_holder[0] if ctx.stream_consumer_holder else None
+            _flush = getattr(_sc, "flush_pending_sync", None)
+            if callable(_flush):
+                _flush(timeout=3.0)
+        except Exception:
+            logger.debug(
+                "Stream-consumer flush before clarify prompt failed",
+                exc_info=True,
+            )
+
+        fut = safe_schedule_threadsafe(
+            ctx._status_adapter.send_clarify(
+                chat_id=ctx._status_chat_id,
+                question=question,
+                choices=list(choices) if choices else None,
+                clarify_id=clarify_id,
+                session_key=ctx.session_key or "",
+                metadata=ctx._status_thread_metadata,
+            ),
+            ctx._loop_for_step,
+            logger=logger,
+            log_message="Clarify send failed to schedule",
+        )
+        # Boundary rule (see _approval_send_outcome): a send timeout is AMBIGUOUS — the card may
+        # have posted with a late ack. Only a definitive failure tears down the registration;
+        # ambiguous falls through to the bounded wait so a late reply resolves.
+        _clarify_response = _clarify_send_then_wait(
+            fut,
+            clarify_id=clarify_id,
+            session_key=ctx.session_key or "",
+            clarify_mod=_clarify_mod,
+        )
+        # Only re-arm typing when the user actually answered — the undeliverable sentinel and the
+        # timeout/cancellation strings start with '[' and must pass through untouched.
+        if not (
+            isinstance(_clarify_response, str)
+            and _clarify_response.startswith("[")
+        ):
+            # User answered: reopen typing IMMEDIATELY, not on the LLM's first post-answer token
+            # (native streaming otherwise re-seeds lazily on the first delta: ~48s of dead air).
+            # request_reopen_seed is a no-op outside the reopen-pending native state; always safe.
+            _sc_reopen = ctx.stream_consumer_holder[0] if ctx.stream_consumer_holder else None
+            if _sc_reopen is not None:
+                try:
+                    _sc_reopen.request_reopen_seed()
+                except Exception:
+                    logger.debug(
+                        "request_reopen_seed after clarify answer failed",
+                        exc_info=True,
+                    )
+            try:
+                ctx._status_adapter.resume_typing_for_chat(ctx._status_chat_id)
+            except Exception:
+                logger.debug(
+                    "resume_typing_for_chat after clarify answer failed",
+                    exc_info=True,
+                )
+        return _clarify_response
+
+    def _load_turn_history(self, agent, reused_cached_agent):
+        ctx = self._ctx
         # Convert history to agent format. Transcript path: {role, content, timestamp} dicts — strip
         # timestamps. Interrupt path (agent result["messages"]): full agent messages with
         # tool_calls/tool_call_id/reasoning — pass through intact so the API sees valid assistant→tool
@@ -5710,112 +5695,107 @@ class TurnRunner:
         # Collect MEDIA paths already in history to exclude them from this turn's extraction.
         # Compression-safe: even if the message list shrinks, we know which paths are old.
         _history_media_paths: set = _collect_history_media_paths(agent_history)
+        return agent_history, observed_group_context, _history_media_paths
 
-        # Per-session gateway approval callback: dangerous-command approval blocks the agent thread
-        # (mirrors CLI input()); the callback bridges sync→async to send the request immediately.
-        from tools.approval import (
-            register_gateway_notify,
-            reset_current_session_key,
-            set_current_session_key,
-            unregister_gateway_notify,
-        )
-
-        def _approval_notify_sync(approval_data: dict) -> None:
-            """Send the approval request to the user from the agent thread.
+    def _approval_notify_sync(self, approval_data: dict) -> None:
+        """Send the approval request to the user from the agent thread.
 
             Uses the adapter's interactive button approvals (e.g. ``send_exec_approval``) when
             available, else a plain text message with ``/approve`` instructions.
             """
-            # Pause typing while awaiting approval: Slack's assistant_threads_setStatus disables the
-            # compose box, so the user can't type /approve while "is thinking..." shows. The approval
-            # send auto-clears it; pausing stops _keep_typing re-setting it. Resumed in approve/deny.
-            ctx._status_adapter.pause_typing_for_chat(ctx._status_chat_id)
+        ctx = self._ctx
+        # Pause typing while awaiting approval: Slack's assistant_threads_setStatus disables the
+        # compose box, so the user can't type /approve while "is thinking..." shows. The approval
+        # send auto-clears it; pausing stops _keep_typing re-setting it. Resumed in approve/deny.
+        ctx._status_adapter.pause_typing_for_chat(ctx._status_chat_id)
 
-            # WeCom native streaming: ask the stream consumer to close the current stream before the
-            # approval prompt — via the consumer's queue, so it serializes with pending deltas.
-            _close_native_stream_boundary("Approval")
+        # WeCom native streaming: ask the stream consumer to close the current stream before the
+        # approval prompt — via the consumer's queue, so it serializes with pending deltas.
+        self._close_native_stream_boundary("Approval")
 
-            cmd = approval_data.get("command", "")
-            desc = approval_data.get("description", "dangerous command")
+        cmd = approval_data.get("command", "")
+        desc = approval_data.get("description", "dangerous command")
 
-            # Redact credentials from the command before display — Tirith's findings are already
-            # redacted, but the raw command string still leaks secrets to the chat platform. Done
-            # here so BOTH the button-based and plain-text fallback paths use the redacted value.
-            cmd = _redact_approval_command(cmd)
+        # Redact credentials from the command before display — Tirith's findings are already
+        # redacted, but the raw command string still leaks secrets to the chat platform. Done
+        # here so BOTH the button-based and plain-text fallback paths use the redacted value.
+        cmd = _redact_approval_command(cmd)
 
-            # Prefer button-based approval when the adapter supports it. Check the *class*, not the
-            # instance — avoids false positives from MagicMock auto-attribute creation in tests.
-            if getattr(type(ctx._status_adapter), "send_exec_approval", None) is not None:
-                try:
-                    _approval_fut = safe_schedule_threadsafe(
-                        ctx._status_adapter.send_exec_approval(
-                            chat_id=ctx._status_chat_id,
-                            command=cmd,
-                            session_key=_approval_session_key,
-                            description=desc,
-                            metadata=ctx._status_thread_metadata,
-                            allow_permanent=approval_data.get("allow_permanent", True),
-                            allow_session=approval_data.get("allow_session", True),
-                            smart_denied=approval_data.get("smart_denied", False),
-                        ),
-                        ctx._loop_for_step,
-                        logger=logger,
-                        log_message="send_exec_approval scheduling error",
-                    )
-                    if _approval_fut is None:
-                        raise RuntimeError("send_exec_approval: loop unavailable")
-                    _outcome = _approval_send_outcome(_approval_fut, timeout=15)
-                    if _outcome == "sent":
-                        return
-                    if _outcome == "ambiguous":
-                        # Timeout ≠ failure: the card may have posted with a late ack (slow API or
-                        # backpressure). The prompt registration stays alive so a tap still resolves;
-                        # re-sending made duplicate cards + orphaned "/approve: nothing pending". Skip.
-                        logger.warning(
-                            "Button-based approval send timed out — treating "
-                            "as possibly-delivered (no re-send; the prompt "
-                            "stays armed for a late tap)"
-                        )
-                        return
-                    logger.warning(
-                        "Button-based approval failed (send returned error), falling back to text"
-                    )
-                except Exception as _e:
-                    logger.warning(
-                        "Button-based approval failed, falling back to text: %s", _e
-                    )
-
-            # Fallback: plain-text approval prompt with the adapter's typed prefix (e.g. `!approve`) —
-            # typed "/" is blocked in Slack threads and reserved by Matrix clients.
-            _p = getattr(ctx._status_adapter, "typed_command_prefix", "/")
-            msg = _format_exec_approval_fallback(
-                cmd,
-                desc,
-                _p,
-                allow_permanent=approval_data.get("allow_permanent", True),
-                allow_session=approval_data.get("allow_session", True),
-                smart_denied=approval_data.get("smart_denied", False),
-            )
+        # Prefer button-based approval when the adapter supports it. Check the *class*, not the
+        # instance — avoids false positives from MagicMock auto-attribute creation in tests.
+        if getattr(type(ctx._status_adapter), "send_exec_approval", None) is not None:
             try:
-                # Mark as approval prompt so WeCom routes through control lane
-                _approval_metadata = dict(ctx._status_thread_metadata or {})
-                _approval_metadata["is_approval_prompt"] = True
-
-                _approval_send_fut = safe_schedule_threadsafe(
-                    ctx._status_adapter.send(
-                        ctx._status_chat_id,
-                        msg,
-                        metadata=_interim_metadata(_approval_metadata),
+                _approval_fut = safe_schedule_threadsafe(
+                    ctx._status_adapter.send_exec_approval(
+                        chat_id=ctx._status_chat_id,
+                        command=cmd,
+                        session_key=ctx.session_key or "",
+                        description=desc,
+                        metadata=ctx._status_thread_metadata,
+                        allow_permanent=approval_data.get("allow_permanent", True),
+                        allow_session=approval_data.get("allow_session", True),
+                        smart_denied=approval_data.get("smart_denied", False),
                     ),
                     ctx._loop_for_step,
                     logger=logger,
-                    log_message="Approval text-send scheduling error",
+                    log_message="send_exec_approval scheduling error",
                 )
-                if _approval_send_fut is not None:
-                    _approval_send_fut.result(timeout=15)
+                if _approval_fut is None:
+                    raise RuntimeError("send_exec_approval: loop unavailable")
+                _outcome = _approval_send_outcome(_approval_fut, timeout=15)
+                if _outcome == "sent":
+                    return
+                if _outcome == "ambiguous":
+                    # Timeout ≠ failure: the card may have posted with a late ack (slow API or
+                    # backpressure). The prompt registration stays alive so a tap still resolves;
+                    # re-sending made duplicate cards + orphaned "/approve: nothing pending". Skip.
+                    logger.warning(
+                        "Button-based approval send timed out — treating "
+                        "as possibly-delivered (no re-send; the prompt "
+                        "stays armed for a late tap)"
+                    )
+                    return
+                logger.warning(
+                    "Button-based approval failed (send returned error), falling back to text"
+                )
             except Exception as _e:
-                logger.error("Failed to send approval request: %s", _e)
+                logger.warning(
+                    "Button-based approval failed, falling back to text: %s", _e
+                )
 
+        # Fallback: plain-text approval prompt with the adapter's typed prefix (e.g. `!approve`) —
+        # typed "/" is blocked in Slack threads and reserved by Matrix clients.
+        _p = getattr(ctx._status_adapter, "typed_command_prefix", "/")
+        msg = _format_exec_approval_fallback(
+            cmd,
+            desc,
+            _p,
+            allow_permanent=approval_data.get("allow_permanent", True),
+            allow_session=approval_data.get("allow_session", True),
+            smart_denied=approval_data.get("smart_denied", False),
+        )
+        try:
+            # Mark as approval prompt so WeCom routes through control lane
+            _approval_metadata = dict(ctx._status_thread_metadata or {})
+            _approval_metadata["is_approval_prompt"] = True
+
+            _approval_send_fut = safe_schedule_threadsafe(
+                ctx._status_adapter.send(
+                    ctx._status_chat_id,
+                    msg,
+                    metadata=_interim_metadata(_approval_metadata),
+                ),
+                ctx._loop_for_step,
+                logger=logger,
+                log_message="Approval text-send scheduling error",
+            )
+            if _approval_send_fut is not None:
+                _approval_send_fut.result(timeout=15)
+        except Exception as _e:
+            logger.error("Failed to send approval request: %s", _e)
+
+    def _prepare_turn_message(self, agent_history):
+        ctx = self._ctx
         # Keep real user text separate from API-only recovery guidance: if an auto-continue note is
         # prepended below, persist the original so stale guidance never replays as user text.
         _persist_user_message_override: Optional[Any] = ctx.persist_user_message
@@ -5918,10 +5898,25 @@ class TurnRunner:
                     getattr(_sn_adapter, "interactive_resume", True)
                 ),
             )
+        return _persist_user_message_override, _persist_user_timestamp_override
+
+    def _run_conversation_with_approval(
+        self, agent, agent_history, observed_group_context,
+        _persist_user_message_override, _persist_user_timestamp_override,
+    ):
+        ctx = self._ctx
+        # Per-session gateway approval callback: dangerous-command approval blocks the agent thread
+        # (mirrors CLI input()); the callback bridges sync→async to send the request immediately.
+        from tools.approval import (
+            register_gateway_notify,
+            reset_current_session_key,
+            set_current_session_key,
+            unregister_gateway_notify,
+        )
 
         _approval_session_key = ctx.session_key or ""
         _approval_session_token = set_current_session_key(_approval_session_key)
-        register_gateway_notify(_approval_session_key, _approval_notify_sync)
+        register_gateway_notify(_approval_session_key, self._approval_notify_sync)
         try:
             # If _prepare_inbound_message_text buffered image paths for native attachment, wrap the
             # user turn as an OpenAI-style multimodal content list. Consume-and-clear so subsequent
@@ -5992,6 +5987,10 @@ class TurnRunner:
             except Exception:
                 pass
             reset_current_session_key(_approval_session_token)
+        return result
+
+    def _finish_stream_consumer(self, result, agent_history, _stream_consumer):
+        ctx = self._ctx
         # Canonicalize a model-emitted computer-use screenshot path at the common result boundary: the
         # streaming finalizer below and the non-streaming delivery path must see the same response;
         # repairing only in later media scanning leaves streaming a mangled path + rejected attachment.
@@ -6035,25 +6034,8 @@ class TurnRunner:
             else:
                 _stream_consumer.finish()
 
-        # Signal the streaming-TTS consumer that the agent is done. finish() runs on the outer
-        # event-loop thread after the executor returns, so early run_sync returns are also finalised.
-
-        # Return final response, or a message if something went wrong
-        final_response = result.get("final_response")
-
-        # Extract actual token counts from the agent instance used for this run
-        _last_prompt_toks = 0
-        _input_toks = 0
-        _output_toks = 0
-        _context_length = 0
-        _agent = ctx.agent_holder[0]
-        if _agent and hasattr(_agent, "context_compressor"):
-            _last_prompt_toks = getattr(_agent.context_compressor, "last_prompt_tokens", 0)
-            _input_toks = getattr(_agent, "session_prompt_tokens", 0)
-            _output_toks = getattr(_agent, "session_completion_tokens", 0)
-            _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
-        _resolved_model = getattr(_agent, "model", None) if _agent else None
-
+    def _sync_session_after_run(self, agent_history):
+        ctx = self._ctx
         # Sync session_id right after run_conversation(): compression can rotate before a follow-up
         # model call fails, and the failure return below must still point at the compressed child.
         agent = ctx.agent_holder[0]
@@ -6141,6 +6123,117 @@ class TurnRunner:
         # persist all of it; slicing past the pre-compaction length would drop everything.
         _effective_history_offset = (
             0 if (_session_was_split or _compacted_in_place) else len(agent_history)
+        )
+        return _compacted_in_place, effective_session_id, _effective_history_offset
+
+    def run_sync(self):
+        ctx = self._ctx
+        # As a method the turn message lives on the shared TurnContext: every rebind writes
+        # `ctx.message`, so the outer `_run_agent_inner` body sees the update as via the closure cell.
+
+        # session_key propagates via contextvars (_set_session_env / set_current_session_key):
+        # concurrency-safe and inherited by tool worker threads. Deliberately do NOT write
+        # os.environ["HERMES_SESSION_KEY"]: it is process-global, so concurrent sessions would clobber
+        # each other and a tool thread with an unset contextvar would read the wrong key, misrouting
+        # approvals. Only the TUI slash-worker subprocess exports the env var (from its own argv).
+
+        # Map platform enum to the platform hint key the agent understands.
+        # Platform.LOCAL ("local") maps to "cli"; others pass through as-is.
+        platform_key = "cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value
+
+        # Combine platform context, YAML channel_prompts hint for this chat, channel_overrides
+        # system_prompt (or global ephemeral), and the gateway ephemeral prompt.
+        combined_ephemeral = ctx.context_prompt or ""
+        event_channel_prompt = (ctx.channel_prompt or "").strip()
+        if event_channel_prompt:
+            combined_ephemeral = (combined_ephemeral + "\n\n" + event_channel_prompt).strip()
+        cfg_channel_prompt = self._runner._get_system_prompt_for_channel(
+            ctx.source.platform,
+            ctx.source.chat_id or "",
+            thread_id=getattr(ctx.source, "thread_id", None),
+            parent_id=getattr(ctx.source, "parent_chat_id", None),
+        )
+        if cfg_channel_prompt:
+            combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
+
+        max_iterations = _current_max_iterations()
+
+        try:
+            model, runtime_kwargs = self._runner._resolve_session_agent_runtime(
+                source=ctx.source,
+                session_key=ctx.session_key,
+                user_config=ctx.user_config,
+            )
+            logger.debug(
+                "run_agent resolved: model=%s provider=%s session=%s",
+                model, runtime_kwargs.get("provider"), ctx.session_key or "",
+            )
+        except Exception as exc:
+            return {
+                "final_response": f"⚠️ Provider authentication failed: {exc}",
+                "messages": [],
+                "api_calls": 0,
+                "tools": [],
+            }
+
+        pr = self._runner._provider_routing
+        reasoning_config = self._runner._resolve_session_reasoning_config(
+            source=ctx.source,
+            session_key=ctx.session_key,
+            model=model,
+        )
+        self._runner._reasoning_config = reasoning_config
+        self._runner._service_tier = self._runner._resolve_session_service_tier(
+            source=ctx.source, session_key=ctx.session_key
+        )
+        (
+            _stream_consumer,
+            _stream_delta_cb,
+            _interim_assistant_cb,
+            _want_interim_messages,
+        ) = self._setup_stream_consumer(platform_key)
+
+        turn_route = self._runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
+        agent, reused_cached_agent = self._resolve_turn_agent(
+            turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
+        )
+        self._wire_turn_agent_callbacks(
+            agent, turn_route, reasoning_config,
+            _stream_delta_cb, _interim_assistant_cb, _want_interim_messages,
+        )
+        agent_history, observed_group_context, _history_media_paths = (
+            self._load_turn_history(agent, reused_cached_agent)
+        )
+        _persist_user_message_override, _persist_user_timestamp_override = (
+            self._prepare_turn_message(agent_history)
+        )
+        result = self._run_conversation_with_approval(
+            agent, agent_history, observed_group_context,
+            _persist_user_message_override, _persist_user_timestamp_override,
+        )
+        self._finish_stream_consumer(result, agent_history, _stream_consumer)
+
+        # Signal the streaming-TTS consumer that the agent is done. finish() runs on the outer
+        # event-loop thread after the executor returns, so early run_sync returns are also finalised.
+
+        # Return final response, or a message if something went wrong
+        final_response = result.get("final_response")
+
+        # Extract actual token counts from the agent instance used for this run
+        _last_prompt_toks = 0
+        _input_toks = 0
+        _output_toks = 0
+        _context_length = 0
+        _agent = ctx.agent_holder[0]
+        if _agent and hasattr(_agent, "context_compressor"):
+            _last_prompt_toks = getattr(_agent.context_compressor, "last_prompt_tokens", 0)
+            _input_toks = getattr(_agent, "session_prompt_tokens", 0)
+            _output_toks = getattr(_agent, "session_completion_tokens", 0)
+            _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
+        _resolved_model = getattr(_agent, "model", None) if _agent else None
+
+        _compacted_in_place, effective_session_id, _effective_history_offset = (
+            self._sync_session_after_run(agent_history)
         )
 
         if not final_response:
