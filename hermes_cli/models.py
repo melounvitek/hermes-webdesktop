@@ -1856,34 +1856,25 @@ def _credential_fingerprint(provider: str) -> str:
             + json.dumps(provider_cfg.get("extra_headers", {}), sort_keys=True, default=str)
         )
 
-    # OAuth / external-file mtimes that change on re-auth
+    # OAuth / external credential-file mtimes that change on re-auth.
+    def _mtime_part(label: str, path) -> None:
+        try:
+            parts.append(f"{label}@{_os.stat(path).st_mtime_ns}")
+        except FileNotFoundError:
+            parts.append(f"{label}@missing")
+        except Exception:
+            pass
+
     try:
         from hermes_constants import get_hermes_home
         for rel in ("auth.json", "credentials.json"):
-            p = get_hermes_home() / rel
-            try:
-                parts.append(f"{rel}@{p.stat().st_mtime_ns}")
-            except FileNotFoundError:
-                parts.append(f"{rel}@missing")
-            except Exception:
-                pass
+            _mtime_part(rel, get_hermes_home() / rel)
     except Exception:
         pass
-
-    # External well-known credential file locations
-    for path in (
-        _os.path.expanduser("~/.codex/auth.json"),
-        _os.path.expanduser("~/.claude/.credentials.json"),
-        _os.path.expanduser("~/.config/github-copilot/hosts.json"),
-        _os.path.expanduser("~/.minimax/credentials.json"),
-    ):
-        try:
-            mt = _os.stat(path).st_mtime_ns
-            parts.append(f"{path}@{mt}")
-        except FileNotFoundError:
-            parts.append(f"{path}@missing")
-        except Exception:
-            pass
+    for rel in ("~/.codex/auth.json", "~/.claude/.credentials.json",
+                "~/.config/github-copilot/hosts.json", "~/.minimax/credentials.json"):
+        path = _os.path.expanduser(rel)
+        _mtime_part(path, path)
 
     blob = "|".join(parts).encode("utf-8", errors="replace")
     # blake2b, not sha256: fingerprint only (collisions = a harmless cache miss), and CodeQL's
