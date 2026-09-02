@@ -171,31 +171,13 @@ def _cmd_recover(args):
         if inspect_only:
             report = inspect_session_database(source, work_dir=work_dir)
         else:
-            last_progress = {"table": None}
-
-            def _recovery_progress(info):
-                table = info.get("table")
-                copied = int(info.get("copied_rows") or 0)
-                total = info.get("source_rows")
-                if table != last_progress["table"]:
-                    if last_progress["table"] is not None:
-                        print()
-                    print(f"  {table}: ", end="", flush=True)
-                    last_progress["table"] = table
-                suffix = f"/{int(total):,}" if total is not None else ""
-                print(f"\r  {table}: {copied:,}{suffix}", end="", flush=True)
-
             print("Recovering canonical session data into a new database…")
+            progress = _RecoveryProgress()
             report = recover_session_database(
-                source,
-                output,
-                work_dir=work_dir,
-                chunk_size=getattr(args, "chunk_size", 1000),
-                progress_cb=_recovery_progress,
-                allow_partial=allow_partial,
+                source, output, work_dir=work_dir, chunk_size=getattr(args, "chunk_size", 1000),
+                progress_cb=progress, allow_partial=allow_partial,
             )
-            if last_progress["table"] is not None:
-                print()
+            progress.finish()
     except (SessionRecoveryError, OSError, sqlite3.DatabaseError) as exc:
         print(f"Error: session recovery failed: {exc}")
         print("The supplied source database was not replaced or deleted.")
@@ -213,6 +195,31 @@ def _cmd_recover(args):
 
     if inspect_only:
         return 0 if report.get("recoverable") else 1
+    return _print_recovery_verdict(report, output, allow_partial)
+
+
+class _RecoveryProgress:
+    """`recover` progress printer: one live-updating ``  <table>: n/total`` line per table."""
+
+    def __init__(self):
+        self.table = None
+
+    def __call__(self, info):
+        table = info.get("table")
+        if table != self.table:
+            self.finish()
+            print(f"  {table}: ", end="", flush=True)
+            self.table = table
+        total = info.get("source_rows")
+        suffix = f"/{int(total):,}" if total is not None else ""
+        print(f"\r  {table}: {int(info.get('copied_rows') or 0):,}{suffix}", end="", flush=True)
+
+    def finish(self):
+        if self.table is not None:
+            print()
+
+
+def _print_recovery_verdict(report, output, allow_partial) -> int:
     if report.get("complete"):
         print(f"✓ Recovered database verified at: {output}")
         print("  The active session database was not changed.")
@@ -223,21 +230,19 @@ def _cmd_recover(args):
         if report.get("best_effort"):
             print(f"✓ BEST-EFFORT page-level salvage verified at: {output}")
             print(
-                "  The source table schemas were unreadable; rows were "
-                "rebuilt from raw pages via sqlite3 .recover and mapped "
-                "heuristically."
+                "  The source table schemas were unreadable; rows were rebuilt from raw pages "
+                "via sqlite3 .recover and mapped heuristically."
             )
         else:
             print(f"✓ Partial recovery output verified at: {output}")
         print(
-            "  Recovered "
-            f"{int(counts.get('sessions') or 0):,} sessions and "
+            f"  Recovered {int(counts.get('sessions') or 0):,} sessions and "
             f"{int(counts.get('messages') or 0):,} messages."
         )
         print("  The active session database was not changed.")
         print(
-            "  This output is incomplete. Review every skipped range "
-            "and orphan count in the JSON report before installing it."
+            "  This output is incomplete. Review every skipped range and orphan count in the "
+            "JSON report before installing it."
         )
         return 0
     print("✗ Recovery output did not pass every verification check.")
