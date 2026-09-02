@@ -63,8 +63,6 @@ class _ProviderEntry:
 
 
 # -- HermesMCPOAuthProvider — OAuthClientProvider subclass with disk-watch ----
-
-
 class _HermesRuntimeProviderMixin:
     """Runtime-only provider behaviour layered over ``HermesProviderMixin``:
     pre-flow disk-mtime reload, expiry seeding on cold load, pre-flight metadata
@@ -377,8 +375,6 @@ _HERMES_PROVIDER_CLS: Optional[type] = _make_hermes_provider_class()
 
 
 # -- Manager -----------------------------------------------------------------
-
-
 class MCPOAuthManager:
     """Single source of truth for per-server MCP OAuth state.
 
@@ -592,8 +588,6 @@ class MCPOAuthManager:
 
 
 # -- Module-level singleton ---------------------------------------------------
-
-
 _MANAGER: Optional[MCPOAuthManager] = None
 _MANAGER_LOCK = threading.Lock()
 

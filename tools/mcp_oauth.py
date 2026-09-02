@@ -187,8 +187,6 @@ def _reserve_callback_port() -> int:
 
 
 # -- Cached registration lookups ---------------------------------------------
-
-
 def _cached_client_info(storage: "HermesTokenStorage | None") -> dict | None:
     """The on-disk client registration for *storage*, or None."""
     if storage is None:
@@ -217,9 +215,9 @@ def _cached_redirect_port(storage: "HermesTokenStorage | None") -> int | None:
     ``client_id`` gets ``redirect_uri does not match any registered URIs``.
     """
     for _uri, parsed in _cached_redirect_uris(storage):
-        if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"} and parsed.path == "/callback":
-            if parsed.port is not None:
-                return int(parsed.port)
+        is_loopback_callback = parsed.scheme == "http" and parsed.path == "/callback" and parsed.hostname in {"127.0.0.1", "localhost"}
+        if is_loopback_callback and parsed.port is not None:
+            return int(parsed.port)
     return None
 
 
@@ -232,8 +230,6 @@ def _cached_redirect_uri(storage: "HermesTokenStorage | None") -> str | None:
 
 
 # -- Interactivity -----------------------------------------------------------
-
-
 def _is_interactive() -> bool:
     """True if we can reasonably expect to interact with a user."""
     if not _oauth_interactive_enabled.get():
@@ -281,8 +277,6 @@ def _can_open_browser() -> bool:
 
 
 # -- JSON file I/O ------------------------------------------------------------
-
-
 def _read_json(path: Path) -> dict | None:
     """Read a JSON file, returning None if it doesn't exist or is invalid."""
     if not path.exists():
@@ -320,8 +314,6 @@ def _write_json(path: Path, data: dict) -> None:
 
 
 # -- HermesTokenStorage -- persistent token/client-info on disk --------------
-
-
 class HermesTokenStorage:
     """Persist OAuth tokens and client registration to JSON files.
 
@@ -533,8 +525,6 @@ class HermesTokenStorage:
 
 
 # -- Callback capture -- HTTP listener and stdin paste share one result dict --
-
-
 def _authorization_code_result(code: str, state: "str | None", iss: "str | None" = None):
     """Package redirect parameters in the shape the installed SDK expects: mcp 2.0's
     ``callback_handler`` returns an ``AuthorizationCodeResult`` (the SDK reads
@@ -828,8 +818,6 @@ def _make_callback_waiter(port: int, cimd_url: str | None = None, timeout: float
 
 
 # -- OAuth provider class (legacy build_oauth_auth path) ---------------------
-
-
 HermesOAuthClientProvider: Any = None
 
 
