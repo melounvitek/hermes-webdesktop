@@ -6,11 +6,7 @@ numbered-list fallback when curses is unavailable (Windows, etc.).
 
 from typing import Optional
 
-
-def _relative_time(ts) -> str:
-    from hermes_cli.timefmt import relative_time
-
-    return relative_time(ts)
+from hermes_cli.timefmt import relative_time as _relative_time
 
 
 def _session_status_tag(status: Optional[str]) -> str:
@@ -19,12 +15,8 @@ def _session_status_tag(status: Optional[str]) -> str:
 
 
 def _annotate_session_statuses(sessions: list, session_db) -> None:
-    """Attach a ``_status`` key to each session row (best-effort, cheap).
-
-    Uses ``SessionDB.session_lifecycle_statuses`` — one indexed last-message
-    lookup per listed session, never a transcript scan. On any failure the
-    rows simply stay untagged and the picker renders '-' for status.
-    """
+    """Attach a ``_status`` key to each row via one indexed lookup per session
+    (never a transcript scan). On failure rows stay untagged and render '-'."""
     if session_db is None or not sessions:
         return
     try:
@@ -90,21 +82,13 @@ class _CursesBrowser:
         self.flash = ""  # one-frame notice (e.g. "Deleted.")
         self.filtered = list(sessions)
 
-    # -- helpers -----------------------------------------------------------
-    def _pair(self, n, fallback):
+    def _pair(self, n, fallback=0):
         c = self.curses
         return c.color_pair(n) if c.has_colors() else fallback
 
     def _status_attr(self, status):
-        c = self.curses
-        if not c.has_colors():
-            return c.A_NORMAL
-        return {
-            "complete": c.color_pair(1),
-            "interrupted": c.color_pair(2),
-            "error": c.color_pair(5),
-            "empty": c.color_pair(4),
-        }.get(status or "", c.A_NORMAL)
+        pair = {"complete": 1, "interrupted": 2, "error": 5, "empty": 4}.get(status or "")
+        return self._pair(pair, self.curses.A_NORMAL) if pair else self.curses.A_NORMAL
 
     def _put(self, stdscr, y, x, text, n, attr):
         try:
@@ -118,21 +102,18 @@ class _CursesBrowser:
             self.cursor = 0
             self.scroll = 0
 
-    # -- frame ---------------------------------------------------------------
     def _draw(self, stdscr, max_y, max_x):
         c = self.curses
         if self.search:
-            header = f"  Browse sessions — filter: {self.search}█"
-            header_attr = c.A_BOLD | self._pair(3, 0)
+            header, header_attr = f"  Browse sessions — filter: {self.search}█", c.A_BOLD | self._pair(3)
         else:
-            header = ("  Browse sessions — ↑↓ navigate  Enter select  Type to filter  Esc quit")
-            header_attr = c.A_BOLD | self._pair(2, 0)
+            header = "  Browse sessions — ↑↓ navigate  Enter select  Type to filter  Esc quit"
+            header_attr = c.A_BOLD | self._pair(2)
         self._put(stdscr, 0, 0, header, max_x - 1, header_attr)
 
         name_width = max(20, max_x - _FIXED_COLS)
         col_header = (
-            f"   {'Title / Preview':<{name_width}}  {'Stat':<5}  "
-            f"{'Msgs':>5}  {'Active':<10}  {'Src':<5} {'ID'}"
+            f"   {'Title / Preview':<{name_width}}  {'Stat':<5}  {'Msgs':>5}  {'Active':<10}  {'Src':<5} {'ID'}"
         )
         self._put(stdscr, 1, 0, col_header, max_x - 1, self._pair(4, c.A_DIM))
 
@@ -153,18 +134,12 @@ class _CursesBrowser:
                 s = filtered[i]
                 selected = i == self.cursor
                 row = (" → " if selected else "   ") + _format_row(s, max_x - 3)
-                attr = c.A_BOLD | self._pair(1, 0) if selected else c.A_NORMAL
                 try:
-                    stdscr.addnstr(y, 0, row, max_x - 1, attr)
-                    if not selected:
-                        # Recolor the status tag column in place.
+                    stdscr.addnstr(y, 0, row, max_x - 1, c.A_BOLD | self._pair(1) if selected else c.A_NORMAL)
+                    tag_x = 3 + max(20, (max_x - 3) - _FIXED_COLS) + 2
+                    if not selected and tag_x + 5 < max_x - 1:  # recolor the status tag in place
                         status = s.get("_status")
-                        tag_x = 3 + max(20, (max_x - 3) - _FIXED_COLS) + 2
-                        if tag_x + 5 < max_x - 1:
-                            stdscr.addnstr(
-                                y, tag_x, f"{_session_status_tag(status):<5}", 5,
-                                self._status_attr(status),
-                            )
+                        stdscr.addnstr(y, tag_x, f"{_session_status_tag(status):<5}", 5, self._status_attr(status))
                 except c.error:
                     pass
 
@@ -173,23 +148,18 @@ class _CursesBrowser:
             label = _label(self.confirm_delete)
             if len(label) > 40:
                 label = label[:37] + "..."
-            footer = f"  Delete session '{label}'? [y/N]"
-            footer_attr = c.A_BOLD | self._pair(5, 0)
+            footer, footer_attr = f"  Delete session '{label}'? [y/N]", c.A_BOLD | self._pair(5)
         elif self.flash:
             footer = f"  {self.flash}"
             self.flash = ""
         else:
-            if filtered:
-                footer = f"  {self.cursor + 1}/{len(filtered)} sessions"
-                if len(filtered) < len(self.sessions):
-                    footer += f" (filtered from {len(self.sessions)})"
-            else:
-                footer = f"  0/{len(self.sessions)} sessions"
+            footer = f"  {self.cursor + 1 if filtered else 0}/{len(filtered) or len(self.sessions)} sessions"
+            if filtered and len(filtered) < len(self.sessions):
+                footer += f" (filtered from {len(self.sessions)})"
             if self.delete_fn is not None and not self.search:
                 footer += "   d delete"
         self._put(stdscr, max_y - 1, 0, footer, max_x - 1, footer_attr)
 
-    # -- keys ----------------------------------------------------------------
     def _handle_key(self, key) -> bool:
         """Apply one keypress; return True when the picker should exit."""
         c = self.curses
@@ -207,12 +177,9 @@ class _CursesBrowser:
                     self.flash = "Delete failed."
             return False
 
-        if key == c.KEY_UP:
+        if key in (c.KEY_UP, c.KEY_DOWN):
             if self.filtered:
-                self.cursor = (self.cursor - 1) % len(self.filtered)
-        elif key == c.KEY_DOWN:
-            if self.filtered:
-                self.cursor = (self.cursor + 1) % len(self.filtered)
+                self.cursor = (self.cursor + (1 if key == c.KEY_DOWN else -1)) % len(self.filtered)
         elif key in {c.KEY_ENTER, 10, 13}:
             if self.filtered:
                 self.result = self.filtered[self.cursor]["id"]
@@ -228,14 +195,8 @@ class _CursesBrowser:
                 self._refilter()
         elif key == ord("q") and not self.search:
             return True
-        elif (
-            key == ord("d")
-            and not self.search
-            and self.delete_fn is not None
-            and self.filtered
-        ):
-            # 'd' only acts as delete when the filter is empty — while a
-            # search is active it types into the query below.
+        elif key == ord("d") and not self.search and self.delete_fn is not None and self.filtered:
+            # 'd' deletes only when the filter is empty; mid-search it types into the query.
             self.confirm_delete = self.filtered[self.cursor]
         elif 32 <= key <= 126:
             self.search += chr(key)
@@ -248,11 +209,11 @@ class _CursesBrowser:
         if c.has_colors():
             c.start_color()
             c.use_default_colors()
-            c.init_pair(1, c.COLOR_GREEN, -1)  # selected
-            c.init_pair(2, c.COLOR_YELLOW, -1)  # header
-            c.init_pair(3, c.COLOR_CYAN, -1)  # search
-            c.init_pair(4, 8 if c.COLORS > 8 else c.COLOR_WHITE, -1)  # dim
-            c.init_pair(5, c.COLOR_RED, -1)  # error/delete
+            # 1 selected, 2 header, 3 search, 4 dim, 5 error/delete
+            for n, color in enumerate(
+                (c.COLOR_GREEN, c.COLOR_YELLOW, c.COLOR_CYAN, 8 if c.COLORS > 8 else c.COLOR_WHITE, c.COLOR_RED), 1
+            ):
+                c.init_pair(n, color, -1)
         while True:
             stdscr.clear()
             max_y, max_x = stdscr.getmaxyx()
@@ -327,14 +288,11 @@ def _session_browse_picker(sessions: list, session_db=None) -> Optional[str]:
         except Exception:
             return False
 
-    # Curses first; any failure (no curses module, odd terminal) falls back.
-    try:
+    try:  # curses first; any failure (no curses module, odd terminal) falls back
         import curses
 
         browser = _CursesBrowser(curses, sessions, _delete_session if session_db is not None else None)
         curses.wrapper(browser.run)
         return browser.result
     except Exception:
-        pass
-
-    return _fallback_picker(sessions)
+        return _fallback_picker(sessions)

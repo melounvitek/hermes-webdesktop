@@ -1,15 +1,11 @@
-"""``hermes sessions`` command (extracted from ``hermes_cli/main.py``).
+"""``hermes sessions`` command.
 
 ``cmd_sessions`` routes ``args.sessions_action`` through ``_PRE_DB_HANDLERS``
 (repair / recover / import — must run without opening ``SessionDB()``, which is
-exactly what a malformed schema prevents) and ``_DB_HANDLERS`` (everything
-else, sharing one ``SessionDB`` that is always closed afterwards).
-
-``get_hermes_home`` is delegated to ``hermes_cli.main`` at call time so test
-monkeypatches on ``hermes_cli.main.get_hermes_home`` keep reaching this code
-and imports stay one-way. The browse picker lives in
-:mod:`hermes_cli.sessions_cmd_browse`; its names are re-exported here and by
-``hermes_cli.main``.
+exactly what a malformed schema prevents) and ``_DB_HANDLERS`` (everything else,
+sharing one ``SessionDB`` that is always closed afterwards). ``get_hermes_home``
+is resolved through ``hermes_cli.main`` at call time so monkeypatches there keep
+working and imports stay one-way. Browse picker: :mod:`hermes_cli.sessions_cmd_browse`.
 """
 
 import json
@@ -19,22 +15,13 @@ from functools import partial
 from pathlib import Path
 
 from hermes_cli.sessions_cmd_browse import (  # noqa: F401  (re-exports)
-    _annotate_session_statuses,
-    _relative_time,
-    _session_browse_picker,
-    _session_status_tag,
+    _annotate_session_statuses, _relative_time, _session_browse_picker, _session_status_tag,
 )
 
 
-def _m():
-    """Lazy ``hermes_cli.main`` reference (call-time, keeps patches working)."""
-    from hermes_cli import main
-
-    return main
-
-
 def get_hermes_home():
-    return _m().get_hermes_home()
+    from hermes_cli import main
+    return main.get_hermes_home()
 
 
 def _sessions_dir() -> Path:
@@ -46,12 +33,9 @@ def _size_mb(path) -> float:
 
 
 def _size_delta_label(saved_mb: float) -> str:
-    """Human label for a before/after database size delta, in MB.
-
-    A negative delta means the file GREW — concurrent session writes during a
-    long optimize can outweigh what the rebuild freed. "reclaimed -163.0 MB"
-    reads as data loss, so say "grew by" instead.
-    """
+    """Size delta label. A negative delta means the file GREW (concurrent writes
+    during a long optimize can outweigh what the rebuild freed); "reclaimed
+    -163.0 MB" reads as data loss, so say "grew by" instead."""
     if saved_mb >= 0:
         return f"reclaimed {saved_mb:.1f} MB"
     return f"grew by {-saved_mb:.1f} MB"
@@ -72,7 +56,6 @@ def _not_found(session_id) -> int:
 
 def _print_dry_run_preview(candidates, filters) -> None:
     from hermes_cli.session_filters import describe_filters
-
     print(f"Would export {len(candidates)} session(s) ({describe_filters(filters)}).")
     for row in candidates[:100]:
         print(f"  {row.get('id')}  {row.get('source', '')}")
@@ -82,10 +65,8 @@ def _print_dry_run_preview(candidates, filters) -> None:
 
 _TIME_FILTER_ARGS = ("older_than", "newer_than", "before", "after")
 _NON_TIME_FILTER_ARGS = (
-    "source", "title", "end_reason", "cwd",
-    "min_messages", "max_messages", "model", "provider",
-    "user", "chat_id", "chat_type", "branch",
-    "min_tokens", "max_tokens", "min_cost", "max_cost",
+    "source", "title", "end_reason", "cwd", "min_messages", "max_messages", "model", "provider",
+    "user", "chat_id", "chat_type", "branch", "min_tokens", "max_tokens", "min_cost", "max_cost",
     "min_tool_calls", "max_tool_calls",
 )
 
@@ -94,13 +75,22 @@ def _any_filter_args(args, names) -> bool:
     return any(getattr(args, a, None) is not None for a in names)
 
 
+def _write_output(output, text, summary) -> None:
+    """Write to stdout when *output* is empty or ``-``; else to the file + print *summary*."""
+    if not output or output == "-":
+        sys.stdout.write(text)
+        return
+    with open(output, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(summary)
+
+
 # ---------------------------------------------------------------------------
 # Handlers that must run BEFORE SessionDB() is opened
 # ---------------------------------------------------------------------------
 
 def _cmd_repair(args):
     from hermes_state import DEFAULT_DB_PATH, _db_opens_cleanly, repair_state_db_schema
-
     db_path = DEFAULT_DB_PATH
     if not db_path.exists():
         print(f"No session database at {db_path} (nothing to repair).")
@@ -134,10 +124,8 @@ def _cmd_repair(args):
     if report.get("backup_path"):
         print(f"  A backup is preserved at: {report['backup_path']}")
     print("  Keep state.db and the backup; do not delete them.")
-    # Without this pointer the user is at a dead end: in-place repair has
-    # failed and nothing tells them the non-destructive offline recovery path
-    # exists. Lead with --inspect-only so they confirm the data is readable
-    # before writing anything.
+    # Without this pointer the user is at a dead end after a failed in-place
+    # repair. Lead with --inspect-only so they confirm readability before writing.
     print("")
     print("  Next step — offline recovery (never modifies the source):")
     source_hint = report.get("backup_path") or db_path
@@ -155,12 +143,8 @@ def _cmd_recover(args):
     import sqlite3
 
     from hermes_cli.session_recovery import (
-        SessionRecoveryError,
-        inspect_session_database,
-        recover_session_database,
-        write_recovery_report,
+        SessionRecoveryError, inspect_session_database, recover_session_database, write_recovery_report,
     )
-
     source = args.source
     output = getattr(args, "output", None)
     inspect_only = bool(getattr(args, "inspect_only", False))
@@ -263,11 +247,8 @@ def _cmd_recover(args):
 
 def _cmd_import(args):
     from hermes_cli.foreign_sessions import run_sessions_import
-
-    # A path was explicitly given but nothing imported → real error (bad
-    # path, unknown source, no turns): non-zero exit so scripts can detect
-    # it. An interactive picker cancel (no path) returning None is a normal
-    # no-op → exit 0.
+    # Explicit path but nothing imported (bad path, unknown source, no turns) →
+    # non-zero so scripts can detect it. Picker cancel (no path) → normal exit 0.
     if run_sessions_import(args) is None and getattr(args, "path", None):
         return 1
 
@@ -283,11 +264,9 @@ def _default_exclude(args):
 
 def _cmd_list(db, args):
     from hermes_state import workspace_key as _ws_key
-
     sessions = db.list_sessions_rich(source=args.source, exclude_sources=_default_exclude(args), limit=args.limit)
 
-    # Workspace filter: match a session by its workspace key (git repo root,
-    # else cwd) — path substring or exact basename.
+    # Workspace filter: workspace key (git repo root, else cwd) — path substring or exact basename.
     _ws_filter = (getattr(args, "workspace", None) or "").strip()
     if _ws_filter:
         _needle = _ws_filter.lower()
@@ -302,18 +281,14 @@ def _cmd_list(db, args):
         print("No sessions found.")
         return
 
-    # Short workspace label: the repo/dir basename, "—" when unbound. The
-    # Workspace column only appears once at least one session carries one
-    # (or when filtering), so all-unbound listings read as before.
-    def _ws_label(s):
-        key = _ws_key(s)
-        return (os.path.basename(key.rstrip("/\\")) or key) if key else "—"
-
+    # The Workspace column only appears once at least one session carries a
+    # workspace key (or when filtering), so all-unbound listings read as before.
     has_ws = bool(_ws_filter) or any(_ws_key(s) for s in sessions)
     has_titles = any(s.get("title") for s in sessions)
 
-    def _ws(s):
-        return _ws_label(s)[:16]
+    def _ws(s):  # repo/dir basename, "—" when unbound
+        key = _ws_key(s)
+        return ((os.path.basename(key.rstrip("/\\")) or key) if key else "—")[:16]
 
     def _title(s, n):
         return (s.get("title") or "—")[:n]
@@ -345,7 +320,6 @@ def _cmd_list(db, args):
 
 def _cmd_export(db, args):
     from hermes_cli.session_filters import build_prune_filters
-
     filters = None
     if _any_filter_args(args, _TIME_FILTER_ARGS + _NON_TIME_FILTER_ARGS):
         try:
@@ -360,7 +334,6 @@ def _cmd_export(db, args):
         if not args.redact or data is None:
             return data
         from hermes_cli.session_export_md import redact_session_data
-
         return redact_session_data(data)
 
     def _collect_sessions():
@@ -396,25 +369,17 @@ def _cmd_export(db, args):
 
 
 def _export_only(args, collect):
-    """Prompt-only export (--only user-prompts): one prompt record per line
-    (jsonl) or headed sections (md); rendering in hermes_cli.session_export."""
+    """--only user-prompts: one prompt record per line (jsonl) or headed sections (md)."""
     if args.format not in ("jsonl", "md"):
         print("--only user-prompts supports --format jsonl or md.")
         return
     from hermes_cli.session_export import export_record_count, render_sessions_export
-
     sessions = collect()
     if sessions is None:
         return
     rendered = render_sessions_export(sessions, fmt="markdown" if args.format == "md" else "jsonl", only=args.only)
-    if not args.output or args.output == "-":
-        sys.stdout.write(rendered)
-        return
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write(rendered)
     count, noun = export_record_count(sessions, only=args.only)
-    suffix = "" if count == 1 else "s"
-    print(f"Exported {count} {noun}{suffix} to {args.output}")
+    _write_output(args.output, rendered, f"Exported {count} {noun}{'' if count == 1 else 's'} to {args.output}")
 
 
 def _export_html(args, collect):
@@ -423,7 +388,6 @@ def _export_html(args, collect):
         print("HTML export requires an output file path.")
         return
     from hermes_cli.session_export_html import generate_html_export, generate_multi_session_html_export
-
     sessions = collect()
     if sessions is None:
         return
@@ -445,19 +409,13 @@ def _export_jsonl(args, collect):
     if sessions is None:
         return
     lines = "".join(json.dumps(s, ensure_ascii=False) + "\n" for s in sessions)
-    if args.output == "-":
-        sys.stdout.write(lines)
-        return
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write(lines)
     noun = "session" if args.session_id else "sessions"
-    print(f"Exported {len(sessions)} {noun} to {args.output}")
+    _write_output(args.output, lines, f"Exported {len(sessions)} {noun} to {args.output}")
 
 
 def _export_trace(db, args, filters):
-    """Claude Code JSONL trace export — local file or HF upload. Redaction is
-    ON by default for traces (they leave the machine with --upload);
-    --no-redact opts out after review."""
+    """Claude Code JSONL trace export — local file or HF upload. Redaction is ON
+    by default (traces leave the machine with --upload); --no-redact opts out."""
     session_id = args.session_id
     if not session_id and not filters:
         # Match the shell's common intent: "the last thing I did".
@@ -471,7 +429,6 @@ def _export_trace(db, args, filters):
         return
 
     from agent.trace_upload import TraceRedactionError, build_trace_jsonl, upload_session_trace
-
     redact_trace = not getattr(args, "no_redact", False)
 
     if getattr(args, "upload", False):
@@ -506,12 +463,7 @@ def _export_trace(db, args, filters):
             if not jsonl:
                 print(f"No transcript to export for session '{ids[0]}'.")
                 return
-            if to_stdout:
-                sys.stdout.write(jsonl)
-            else:
-                with open(args.output, "w", encoding="utf-8") as f:
-                    f.write(jsonl)
-                print(f"Exported 1 session trace to {args.output}")
+            _write_output(args.output, jsonl, f"Exported 1 session trace to {args.output}")
         else:
             out_dir = (get_hermes_home() / "session-exports" if to_stdout else Path(args.output).expanduser())
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -530,7 +482,6 @@ def _export_trace(db, args, filters):
 def _export_markdown(db, args, filters, redact):
     """Markdown / QMD export: one file per session plus a manifest entry."""
     from hermes_cli.session_export_md import append_manifest_entry, write_session_markdown
-
     if args.output == "-":
         print("Markdown/QMD export writes files; stdout (-) is only supported with --format jsonl.")
         return
@@ -580,10 +531,8 @@ def _export_markdown(db, args, filters, redact):
 
 
 def _export_markdown_single(db, args, export_one, output_dir, lineage_is_logical):
-    """--session-id markdown export, optionally followed by a verified delete
-    of the session and its delegate set."""
+    """--session-id markdown export, optionally + verified delete of it and its delegates."""
     from hermes_cli.session_export_md import verify_export_file
-
     resolved_session_id = db.resolve_session_id(args.session_id)
     if not resolved_session_id:
         _not_found(args.session_id)
@@ -638,9 +587,8 @@ def _cmd_delete(db, args):
     resolved_session_id = db.resolve_session_id(args.session_id)
     if not resolved_session_id:
         return _not_found(args.session_id)
-    # Note when the explicit target is pinned — the user named this id
-    # directly so we honor the delete, but a pin is a "keep" flag and
-    # silently destroying it is surprising.
+    # The user named this id directly so the delete is honored, but a pin is a
+    # "keep" flag and silently destroying it is surprising — say so.
     _get_session = getattr(db, "get_session", None)
     _meta = (_get_session(resolved_session_id) or {}) if callable(_get_session) else {}
     _pinned_note = " (this session is PINNED)" if _meta.get("pinned") else ""
@@ -659,23 +607,17 @@ def _cmd_delete(db, args):
         return _not_found(args.session_id)
 
 
-#: Default age floor for `hermes sessions prune --never-active`.  Deliberately
-#: generous: the rows are worthless but harmless, and a young never-active row
-#: may simply be a chat that nobody has replied to yet.
+#: Age floor for `prune --never-active`. Generous on purpose: the rows are harmless,
+#: and a young never-active row may simply be a chat nobody has replied to yet.
 _NEVER_ACTIVE_DEFAULT_DAYS = 30.0
 
 
 def _prune_never_active_keyed(db, args):
-    """`hermes sessions prune --never-active` — drop leaked/dead keyed rows.
-
-    Targets keyed gateway rows that were opened and never used at all (mostly
-    escaped test fixtures, which the hermetic-isolation guard can only stop
-    from being *created*). Separate from the shared prune/archive selector,
-    which is pinned to `ended_at IS NOT NULL`: never-closed rows sit outside
-    it by construction and cannot be expressed as one more filter.
-    """
+    """`prune --never-active`: drop keyed gateway rows opened and never used
+    (mostly escaped test fixtures). Separate from the shared prune/archive
+    selector, which is pinned to `ended_at IS NOT NULL`: never-closed rows sit
+    outside it by construction and cannot be expressed as one more filter."""
     from hermes_cli.session_filters import format_epoch, parse_duration_seconds
-
     older_than = getattr(args, "older_than", None)
     if older_than is None:
         days = _NEVER_ACTIVE_DEFAULT_DAYS
@@ -757,12 +699,10 @@ def _cmd_prune_or_archive(db, args, action):
         return _prune_never_active_keyed(db, args)
 
     from hermes_cli.session_filters import build_prune_filters, describe_filters, format_epoch
-
-    # Preserve the historical default ONLY for a truly bare `hermes sessions
-    # prune`: no time window and no filters at all means "older than 90
-    # days". ANY filter — including --source — suppresses the implicit
-    # cutoff, so `prune --source cron` matches ALL cron sessions regardless
-    # of age. The preview + confirmation below is the safety net.
+    # Bare `prune` (no time window, no filters) keeps the historical "older
+    # than 90 days" default. ANY filter — including --source — suppresses the
+    # implicit cutoff (`prune --source cron` matches ALL cron sessions); the
+    # preview + confirmation below is the safety net.
     if action == "prune" and not _any_filter_args(args, _TIME_FILTER_ARGS + _NON_TIME_FILTER_ARGS):
         args.older_than = "90"
 
@@ -779,21 +719,17 @@ def _cmd_prune_or_archive(db, args, action):
         )
         return
 
-    # Prune skips archived sessions unless --include-archived; archive only
-    # targets not-yet-archived rows (idempotent).
-    if action == "prune":
-        filters["archived"] = None if getattr(args, "include_archived", False) else False
-    else:
-        filters["archived"] = False
+    # Prune skips archived rows unless --include-archived; archive only targets
+    # not-yet-archived rows (idempotent).
+    filters["archived"] = None if action == "prune" and getattr(args, "include_archived", False) else False
 
     filters["include_pinned"] = getattr(args, "include_pinned", False)
     if not filters["include_pinned"]:
         _note_pinned_skipped(db, filters, action)
 
     candidates = db.list_prune_candidates(**filters)
-    # Archive expands each selected row to its compression lineage, which can
-    # include open continuations; a direct-open count would therefore
-    # describe the eventual archive effect inaccurately.
+    # Archive expands each row to its compression lineage (may include open
+    # continuations), so a direct-open count would misdescribe its effect.
     skipped_open = db.count_open_prune_matches(**filters) if action == "prune" else 0
     if skipped_open:
         suffix = "" if skipped_open == 1 else "s"
@@ -808,9 +744,8 @@ def _cmd_prune_or_archive(db, args, action):
         print(f"No sessions match ({describe_filters(filters)}).")
         return
 
-    # Candidates are ordered by activity oldest-first. Surface that span so a
-    # long-lived but recently used conversation cannot look old merely
-    # because of its creation date.
+    # Candidates are ordered oldest-activity-first; show the span so a long-lived
+    # but recently used conversation cannot look old merely by creation date.
     _span = (
         f"oldest activity {format_epoch(candidates[0].get('last_active'))}, "
         f"newest activity {format_epoch(candidates[-1].get('last_active'))}"
@@ -855,9 +790,8 @@ def _cmd_rename(db, args):
     if not resolved_session_id:
         return _not_found(args.session_id)
     title = " ".join(args.title)
-    # Reject blank / whitespace-only / newline-bearing titles: an empty title
-    # renders as "—" and embedded newlines corrupt the `list` table. Length
-    # is validated in set_session_title; guard emptiness + control chars here.
+    # Empty titles render as "—" and newlines corrupt the `list` table; length
+    # is validated in set_session_title.
     if not title.strip():
         print("Error: title cannot be empty or whitespace-only.")
         return 1
@@ -875,10 +809,8 @@ def _cmd_rename(db, args):
 
 
 def _cmd_pin(db, args, pinning):
-    """Durable "keep" flag: pinned sessions are exempt from the
-    sessions.auto_archive stale sweep and always surface in listings. Pin
-    state is shared infrastructure, so every surface (GUI, TUI, CLI, scripts)
-    reads/writes the same store."""
+    """Durable "keep" flag (exempt from sessions.auto_archive, always listed);
+    every surface — GUI, TUI, CLI, scripts — reads/writes the same store."""
     failures = 0
     for raw_id in args.session_ids:
         resolved = db.resolve_session_id(raw_id)
@@ -894,10 +826,8 @@ def _cmd_pin(db, args, pinning):
 
 
 def _cmd_pinned(db, args):
-    # List every pinned conversation regardless of age. limit=1 keeps the
-    # recency page minimal; include_pinned back-fills ALL pinned rows the page
-    # missed (bounded by pin count, see list_sessions_rich), so old pins
-    # can't fall off a paging window.
+    # limit=1 keeps the recency page minimal; include_pinned back-fills ALL
+    # pinned rows the page missed, so old pins can't fall off a paging window.
     rows = db.list_sessions_rich(limit=1, include_pinned=True, exclude_sources=_default_exclude(args))
     pinned_rows = [s for s in rows if s.get("pinned")]
     if getattr(args, "json", False):
@@ -927,19 +857,13 @@ def _cmd_pinned(db, args):
 def _cmd_retitle_skills(db, args):
     from agent.skill_commands import describe_skill_invocation
     from agent.title_generator import generate_title
-
     limit = max(1, int(getattr(args, "limit", 200) or 200))
     apply_changes = bool(getattr(args, "apply", False))
 
     def _is_titlelike(candidate: str) -> bool:
-        """Reject a candidate that isn't a title at all.
-
-        An auxiliary model occasionally answers the prompt instead of titling
-        it and echoes the assistant's output ('$ df -h /'). The live path has
-        no alternative and takes what it gets, but this is a REPAIR —
-        replacing a serviceable title with command output would make things
-        worse, so keep the old one.
-        """
+        """Reject non-titles: an auxiliary model occasionally answers the prompt
+        instead of titling it ('$ df -h /'). The live path takes what it gets,
+        but this is a REPAIR — never replace a serviceable title with that."""
         return bool(candidate) and candidate[0].isalnum()
 
     candidates = db.list_skill_scaffolded_sessions(limit=limit)
@@ -968,9 +892,7 @@ def _cmd_retitle_skills(db, args):
         try:
             db.set_session_title(session_id, new_title)
         except ValueError:
-            # Unique-title collision. Dedupe the same way the live auto-titler
-            # does (base #2, base #3, ...) rather than leaving the leaked
-            # title in place.
+            # Unique-title collision: dedupe like the live auto-titler (base #2, #3, ...).
             deduped = db.get_next_title_in_lineage(new_title)
             try:
                 db.set_session_title(session_id, deduped)
@@ -995,8 +917,7 @@ def _cmd_browse(db, args):
         print("No sessions found.")
         return
 
-    # Keep the DB open: the picker uses it for lifecycle status tags and the
-    # 'd' delete-with-confirmation action.
+    # Keep the DB open: the picker uses it for status tags and 'd' delete.
     try:
         selected_id = _session_browse_picker(sessions, session_db=db)
     finally:
@@ -1008,21 +929,16 @@ def _cmd_browse(db, args):
     # Launch hermes --resume <id> by replacing the current process
     print(f"Resuming session: {selected_id}")
     from hermes_cli.relaunch import relaunch
-
     relaunch(["--resume", selected_id])  # won't return after execvp
 
 
 # -- storage maintenance -----------------------------------------------------
 
 def _print_size_change(db, before_mb, prefix=""):
-    """Report before/after size, preferring SQLite's own page accounting.
-
-    In WAL mode a VACUUM's rewrite sits in the -wal file until a checkpoint
-    folds it back, and that checkpoint is refused while another connection (a
-    live gateway) holds a read-mark — so stat() of the main file lags, can
-    understate the win, and can even go negative ("reclaimed -3820.1 MB" on a
-    DB that had shrunk 60%). page_count * page_size is correct immediately.
-    """
+    """Report before/after size, preferring SQLite's page accounting over stat():
+    in WAL mode a VACUUM's rewrite sits in the -wal file until a checkpoint,
+    which is refused while a live gateway holds a read-mark, so the main file
+    lags and stat() can even go negative. page_count * page_size is correct now."""
     after_mb = _size_mb(db.db_path)
     logical_after = db.logical_size_bytes()
     if logical_after is not None:
@@ -1037,8 +953,7 @@ def _cmd_optimize(db, args):
     before_mb = _size_mb(db.db_path)
     print("Optimizing session store (FTS merge + VACUUM)…")
     try:
-        # vacuum() merges FTS5 segments (optimize_fts) then VACUUMs, and
-        # returns the number of indexes it merged.
+        # vacuum() merges FTS5 segments then VACUUMs; returns indexes merged.
         n = db.vacuum()
     except Exception as e:
         print(f"Error: optimization failed: {e}")
@@ -1072,9 +987,8 @@ def _cmd_optimize_storage(db, args):
     before_bytes = os.path.getsize(db_path) if db_path.exists() else 0
     before_mb = before_bytes / (1024 * 1024)
 
-    # Disk preflight: the rebuild adds the new index before the old is torn
-    # down, and the final VACUUM needs a full second copy of the file.
-    # Require headroom ≈ current file size to finish cleanly.
+    # Disk preflight: the new index is built before the old is torn down, and
+    # VACUUM needs a full second copy — require headroom ≈ current file size.
     do_vacuum = not getattr(args, "no_vacuum", False)
     try:
         import shutil
@@ -1162,8 +1076,6 @@ def _cmd_repair_routing(db, args):
         print(f"\n{len(adoptable)} of {len(records)} orphaned session(s) "
               "can be repaired. Re-run with --apply to perform them.")
         return
-    # A running gateway holds the old routing mapping in memory and would
-    # write it back over the repair on its next save.
     print("\nStop the gateway before applying — a running gateway still holds the old routing mapping in memory.")
     if not _confirm_prompt(f"Adopt {len(adoptable)} orphaned session(s)? [y/N] "):
         print("Aborted — nothing was changed.")
