@@ -40,6 +40,7 @@ class DashboardOAuthFlow:
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     async def publish_authorization_url(self, url: str) -> None:
+        """Record the SDK's authorization URL (with its ``state``) for the dashboard to show."""
         state = parse_qs(urlparse(url).query).get("state", [None])[0]
         if not state:
             raise ValueError("OAuth authorization URL did not include state")
@@ -51,10 +52,15 @@ class DashboardOAuthFlow:
             self.status = "authorization_required"
             self._authorization_ready.set()
 
+    @staticmethod
+    async def _await_event(event: threading.Event, timeout: float, message: str) -> None:
+        if not await asyncio.to_thread(event.wait, timeout):
+            raise TimeoutError(message)
+
     async def wait_for_authorization_url(self, timeout: float = 30.0) -> str:
-        ready = await asyncio.to_thread(self._authorization_ready.wait, timeout)
-        if not ready:
-            raise TimeoutError("Timed out waiting for MCP authorization URL")
+        await self._await_event(
+            self._authorization_ready, timeout, "Timed out waiting for MCP authorization URL"
+        )
         if not self.authorization_url:
             raise RuntimeError(self.error or "MCP OAuth flow ended before authorization")
         return self.authorization_url
@@ -66,6 +72,7 @@ class DashboardOAuthFlow:
         state: str | None,
         error: str | None,
     ) -> None:
+        """Hand the browser redirect to the waiting flow; ``state`` must match exactly."""
         with self._lock:
             if self._callback_ready.is_set():
                 raise ValueError("OAuth callback already received")
@@ -84,9 +91,9 @@ class DashboardOAuthFlow:
             self._callback_ready.set()
 
     async def wait_for_callback(self, timeout: float = 300.0) -> tuple[str, str | None]:
-        ready = await asyncio.to_thread(self._callback_ready.wait, timeout)
-        if not ready:
-            raise TimeoutError("Timed out waiting for MCP OAuth callback")
+        await self._await_event(
+            self._callback_ready, timeout, "Timed out waiting for MCP OAuth callback"
+        )
         if self._callback_error:
             raise RuntimeError(f"OAuth authorization failed: {self._callback_error}")
         if self._callback is None:
