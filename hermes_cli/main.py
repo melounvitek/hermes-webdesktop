@@ -416,7 +416,6 @@ if _try_ultrafast_version():
 import argparse
 import json
 import re
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -1803,13 +1802,16 @@ def _resolve_continue_arg(args, *, use_tui: bool) -> None:
                     sys.exit(1)
 
 
-def cmd_chat(args):
-    """Run interactive chat CLI."""
-    _apply_safe_mode(args)
-    _apply_user_config_bypass(args)
-    _guard_noninteractive_user_config(args)
-    use_tui = _resolve_use_tui(args)
+def _resolve_chat_session_args(args, use_tui: bool) -> None:
+    """Normalize --in / --resume / --continue on ``args`` before agent init.
 
+    Order matters: ``--in DIR`` chdirs first so workspace-scoped "latest"/-c
+    lookups key off DIR (and pins the session there, skipping cwd restore);
+    then ``--resume latest`` → MRU id, ``--continue`` → ``--resume``,
+    ``--resume @claude/@codex`` → imported session id, title → id; finally
+    cd back into a resumed session's recorded cwd (best-effort, opt-out via
+    --no-restore-cwd, skipped under --worktree).
+    """
     # --in DIR: run in DIR. Must happen before any session resolution so the
     # workspace-scoped "latest"/-c lookups key off DIR, and it pins the
     # session there — an explicit --in wins over a resumed session's
@@ -1919,7 +1921,9 @@ def cmd_chat(args):
                 except Exception:
                     pass
 
-    # xAI retirement warning — one-shot, non-blocking, never fails startup
+
+def _warn_retired_xai_models() -> None:
+    """One-shot xAI retirement warning on stderr; non-blocking, never fails startup."""
     try:
         from hermes_cli.xai_retirement import (
             MIGRATION_GUIDE_URL,
@@ -1942,38 +1946,17 @@ def cmd_chat(args):
     except Exception:
         pass
 
-    # First-run guard: check if any provider is configured before launching
-    if not _has_any_provider_configured():
-        print()
-        print(
-            "It looks like Hermes isn't configured yet -- no API keys or providers found."
-        )
-        print()
-        print("  Run:  hermes setup")
-        print()
 
-        from hermes_cli.setup import (
-            is_interactive_stdin,
-            print_noninteractive_setup_guidance,
-        )
+def _start_chat_background_prefetch() -> None:
+    """Kick off the update-check/banner prefetch and the bundled-skills sync.
 
-        if not is_interactive_stdin():
-            print_noninteractive_setup_guidance(
-                "No interactive TTY detected for the first-run setup prompt."
-            )
-            sys.exit(1)
-
-        try:
-            reply = input("Run setup now? [Y/n] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            reply = "n"
-        if reply in {"", "y", "yes"}:
-            cmd_setup(args)
-            return
-        print()
-        print("You can run 'hermes setup' at any time to configure.")
-        sys.exit(1)
-
+    Update check is opt-in on Termux (it imports rich/prompt_toolkit in the
+    foreground and competes for CPU on single-core devices). The skills sync
+    is idempotent and hash-gated, so it normally runs in a daemon thread;
+    the ONE exception is an unseeded ~/.hermes/skills — there the banner
+    prefetch would race the sync and cache an empty skills index, so the
+    first run syncs in the foreground and drops the banner's skills cache.
+    """
     # Start update check in background (runs while other init happens).
     # On Termux this imports rich/prompt_toolkit in the foreground and then
     # competes for CPU on single-core devices, so keep it opt-in there.
@@ -2032,6 +2015,52 @@ def cmd_chat(args):
         threading.Thread(
             target=_skills_sync_bg, name="bundled-skills-sync", daemon=True
         ).start()
+
+
+def cmd_chat(args):
+    """Run interactive chat CLI."""
+    _apply_safe_mode(args)
+    _apply_user_config_bypass(args)
+    _guard_noninteractive_user_config(args)
+    use_tui = _resolve_use_tui(args)
+
+    _resolve_chat_session_args(args, use_tui)
+
+    _warn_retired_xai_models()
+
+    # First-run guard: check if any provider is configured before launching
+    if not _has_any_provider_configured():
+        print()
+        print(
+            "It looks like Hermes isn't configured yet -- no API keys or providers found."
+        )
+        print()
+        print("  Run:  hermes setup")
+        print()
+
+        from hermes_cli.setup import (
+            is_interactive_stdin,
+            print_noninteractive_setup_guidance,
+        )
+
+        if not is_interactive_stdin():
+            print_noninteractive_setup_guidance(
+                "No interactive TTY detected for the first-run setup prompt."
+            )
+            sys.exit(1)
+
+        try:
+            reply = input("Run setup now? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            reply = "n"
+        if reply in {"", "y", "yes"}:
+            cmd_setup(args)
+            return
+        print()
+        print("You can run 'hermes setup' at any time to configure.")
+        sys.exit(1)
+
+    _start_chat_background_prefetch()
 
     # --yolo: bypass all dangerous command approvals.
     # Also set in main() before _prepare_agent_startup() — that is the
