@@ -1038,9 +1038,9 @@ def _collect_protected_skill_names(
     protected: set[str] = set()
     for idx, skill in _skill_view_call_sites(messages):
         key = skill.lower()
-        if idx >= recent_start or idx >= tail_start:
-            protected.add(key)
-        elif any(key in text for text in tail_user_texts):
+        if idx >= recent_start or idx >= tail_start or any(
+            key in text for text in tail_user_texts
+        ):
             protected.add(key)
     return protected
 
@@ -1784,42 +1784,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         return "compressor"
 
     def on_session_reset(self) -> None:
-        """Reset all per-session state for /new or /reset."""
+        """Reset all per-session state for /new or /reset (also resets micro-compaction)."""
         super().on_session_reset()
-        self._context_probed = False
-        self._context_probe_persistable = False
-        self._previous_summary = None
-        self._summary_has_user_turn = None
-        self._last_summary_error = None
-        self._consecutive_timeout_failures = 0
-        self._last_summary_dropped_count = 0
-        self._last_summary_fallback_used = False
-        self._last_feasibility_skip = False
-        self._last_aux_model_failure_error = None
-        self._last_aux_model_failure_model = None
-        self._last_compression_savings_pct = 100.0
-        self._ineffective_compression_count = 0
-        self._anti_thrash_recovery_deadline = 0.0
-        self._structural_no_op_backoff_until = 0.0
-        self._prellm_skip_count = 0
-        self._fallback_compression_streak = 0
-        self._verify_compaction_cleared_threshold = False
-        self._last_compression_made_progress = False
-        self._summary_failure_cooldown_until = 0.0  # transient errors must not block a fresh session
-        self._cooldown_persist_failed = False
-        self._last_summary_error = None
-        self._last_compress_aborted = False
-        self._last_compress_refused_would_grow = False
-        self.last_real_prompt_tokens = 0
-        self.last_compression_rough_tokens = 0
-        self.last_rough_tokens_when_real_prompt_fit = 0
-        self._pending_request_rough_tokens = 0
-        self.awaiting_real_usage_after_compression = False
-        self._last_compression_telemetry = None
-        self._active_compression_telemetry = None
-        self._compression_telemetry_seed = None
-        self._proactive_prune_rearm_tokens = 0
-
+        self._reset_session_compaction_state()
         self._micro_compact_cursor = 0
         self._micro_compact_rolling_summary = ""
         self._micro_compact_consecutive_failures = 0
@@ -2045,6 +2012,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         per-session flag/counter can contaminate the next live session (suppressed compression,
         stale cooldowns, misleading warnings), so the whole surface is reset here.
         """
+        self._reset_session_compaction_state()
+
+    def _reset_session_compaction_state(self) -> None:
+        """Shared per-session reset for /new, /reset and session end."""
         self._previous_summary = None
         self._summary_has_user_turn = None
         self._last_summary_error = None
@@ -2107,36 +2078,19 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         previous_fallback_streak = self._fallback_compression_streak
         previous_ineffective_count = self._ineffective_compression_count
         if boundary_reason == "compression" and old_session_id:
-            getter = getattr(session_db, "get_compression_fallback_streak", None)
-            if callable(getter):
-                try:
-                    stored_streak = getter(old_session_id)
-                    if isinstance(stored_streak, (int, float, str)):
-                        previous_fallback_streak = max(0, int(stored_streak))
-                except (TypeError, ValueError, sqlite3.Error) as exc:
-                    logger.debug("compression parent fallback streak lookup failed: %s", exc)
-                except Exception as exc:
-                    logger.debug(
-                        "compression parent fallback streak lookup failed (non-sqlite): %s",
-                        exc,
-                    )
-            count_getter = getattr(
-                session_db, "get_compression_ineffective_count", None,
+            # Parent row carries the streak/strike state across the rotation.
+            found, value = self._durable_read(
+                "get_compression_fallback_streak", "compression parent fallback streak", int, 0,
+                session_db=session_db, session_id=old_session_id,
             )
-            if callable(count_getter):
-                try:
-                    stored_count = count_getter(old_session_id)
-                    if isinstance(stored_count, (int, float, str)):
-                        previous_ineffective_count = max(0, int(stored_count))
-                except (TypeError, ValueError, sqlite3.Error) as exc:
-                    logger.debug(
-                        "compression parent ineffective count lookup failed: %s", exc,
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "compression parent ineffective count lookup failed (non-sqlite): %s",
-                        exc,
-                    )
+            if found and value is not None:
+                previous_fallback_streak = value
+            found, value = self._durable_read(
+                "get_compression_ineffective_count", "compression parent ineffective count", int, 0,
+                session_db=session_db, session_id=old_session_id,
+            )
+            if found and value is not None:
+                previous_ineffective_count = value
         self.bind_session_state(session_db, session_id)
         if boundary_reason == "compression":
             # Rotation creates a fresh child row first; carry the streak until boundary bookkeeping persists it.
@@ -2146,135 +2100,109 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 self._ineffective_compression_count = previous_ineffective_count
                 self._persist_ineffective_compression_count()
 
-    def _load_fallback_compression_streak(self) -> None:
+    def _durable_read(
+        self, method: str, label: str, coerce, default, *args,
+        session_db: Any = None, session_id: Optional[str] = None,
+    ):
+        """Best-effort read of a durable per-session value; ``default`` when unbound/unsupported/failed.
+
+        Returns ``(found, value)``: ``found`` is False when no read happened; ``value`` is None
+        when the row held a non-numeric value. Defaults to the bound session row; pass
+        ``session_db``/``session_id`` to read another row (parent lineage).
+        """
+        if session_db is None:
+            session_db = getattr(self, "_session_db", None)
+        if session_id is None:
+            session_id = getattr(self, "_session_id", "")
+        getter = getattr(session_db, method, None)
+        if not session_id or not callable(getter):
+            return False, default
+        try:
+            stored = getter(session_id, *args)
+            if isinstance(stored, (int, float, str)):
+                return True, max(default, coerce(stored))
+            return True, None
+        except (TypeError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
+            logger.debug("%s lookup failed: %s", label, exc)
+        except Exception as exc:
+            logger.debug("%s lookup failed (non-sqlite): %s", label, exc)
+        return False, default
+
+    def _durable_write(self, method: str, label: str, *args) -> bool:
+        """Best-effort write of a durable per-session value; True only when the write succeeded."""
         session_db = getattr(self, "_session_db", None)
         session_id = getattr(self, "_session_id", "")
-        getter = getattr(session_db, "get_compression_fallback_streak", None)
-        if not session_id or not callable(getter):
-            return
+        setter = getattr(session_db, method, None)
+        if not session_id or not callable(setter):
+            return False
         try:
-            stored_streak = getter(session_id)
-            self._fallback_compression_streak = max(
-                0,
-                int(stored_streak)
-                if isinstance(stored_streak, (int, float, str))
-                else 0,
-            )
-        except (TypeError, ValueError, sqlite3.Error) as exc:
-            logger.debug("compression fallback streak lookup failed: %s", exc)
+            setter(session_id, *args)
+            return True
+        except sqlite3.Error as exc:
+            logger.debug("%s persist failed: %s", label, exc)
         except Exception as exc:
-            logger.debug("compression fallback streak lookup failed (non-sqlite): %s", exc)
+            logger.debug("%s persist failed (non-sqlite): %s", label, exc)
+        return False
+
+    def _load_fallback_compression_streak(self) -> None:
+        found, value = self._durable_read(
+            "get_compression_fallback_streak", "compression fallback streak", int, 0,
+        )
+        if found:
+            self._fallback_compression_streak = 0 if value is None else value
 
     def _load_proactive_prune_rearm_tokens(self) -> None:
         """Restore the cache-boundary runway for a resumed durable session."""
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
-        getter = getattr(session_db, "get_session_model_config_value", None)
-        if not session_id or not callable(getter):
-            return
-        try:
-            value = getter(session_id, PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY, 0)
-            self._proactive_prune_rearm_tokens = max(
-                0,
-                int(value) if isinstance(value, (int, float, str)) else 0,
-            )
-        except (TypeError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
-            logger.debug("proactive prune runway lookup failed: %s", exc)
-        except Exception as exc:
-            logger.debug("proactive prune runway lookup failed (non-sqlite): %s", exc)
+        found, value = self._durable_read(
+            "get_session_model_config_value", "proactive prune runway", int, 0,
+            PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY, 0,
+        )
+        if found:
+            self._proactive_prune_rearm_tokens = 0 if value is None else value
 
     def _clear_durable_proactive_prune_rearm(self) -> None:
         """Best-effort removal of the persisted prune-runway key; transcript untouched."""
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
-        patcher = getattr(session_db, "patch_session_model_config", None)
-        if not session_id or not callable(patcher):
-            return
-        try:
-            patcher(session_id, {PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None})
-        except Exception as exc:
-            logger.debug("proactive prune runway clear failed: %s", exc)
+        self._durable_write(
+            "patch_session_model_config", "proactive prune runway clear",
+            {PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None},
+        )
 
     def _persist_fallback_compression_streak(self) -> None:
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
-        setter = getattr(session_db, "set_compression_fallback_streak", None)
-        if not session_id or not callable(setter):
-            return
-        try:
-            setter(session_id, self._fallback_compression_streak)
-        except sqlite3.Error as exc:
-            logger.debug("compression fallback streak persist failed: %s", exc)
-        except Exception as exc:
-            logger.debug("compression fallback streak persist failed (non-sqlite): %s", exc)
+        self._durable_write(
+            "set_compression_fallback_streak", "compression fallback streak",
+            self._fallback_compression_streak,
+        )
 
     def _load_ineffective_compression_count(self) -> None:
         """Load the durable anti-thrash strike count so a restart never disarms a guard."""
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
-        getter = getattr(session_db, "get_compression_ineffective_count", None)
-        if not session_id or not callable(getter):
-            return
-        try:
-            stored_count = getter(session_id)
-            self._ineffective_compression_count = max(
-                0,
-                int(stored_count)
-                if isinstance(stored_count, (int, float, str))
-                else 0,
-            )
-        except (TypeError, ValueError, sqlite3.Error) as exc:
-            logger.debug("compression ineffective count lookup failed: %s", exc)
-        except Exception as exc:
-            logger.debug("compression ineffective count lookup failed (non-sqlite): %s", exc)
+        found, value = self._durable_read(
+            "get_compression_ineffective_count", "compression ineffective count", int, 0,
+        )
+        if found:
+            self._ineffective_compression_count = 0 if value is None else value
 
     def _persist_ineffective_compression_count(self) -> None:
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
-        setter = getattr(session_db, "set_compression_ineffective_count", None)
-        if not session_id or not callable(setter):
-            return
-        try:
-            setter(session_id, self._ineffective_compression_count)
-        except sqlite3.Error as exc:
-            logger.debug("compression ineffective count persist failed: %s", exc)
-        except Exception as exc:
-            logger.debug("compression ineffective count persist failed (non-sqlite): %s", exc)
+        self._durable_write(
+            "set_compression_ineffective_count", "compression ineffective count",
+            self._ineffective_compression_count,
+        )
 
     def _load_anti_thrash_recovery_deadline(self) -> None:
         """Restore the durable recovery deadline (wall-clock epoch); missing storage leaves it disarmed."""
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
-        getter = getattr(session_db, "get_compression_recovery_deadline", None)
-        if not session_id or not callable(getter):
-            return
-        try:
-            stored = getter(session_id)
-            self._anti_thrash_recovery_deadline = max(
-                0.0,
-                float(stored) if isinstance(stored, (int, float, str)) else 0.0,
-            )
-        except (TypeError, ValueError, sqlite3.Error) as exc:
-            logger.debug("compression recovery deadline lookup failed: %s", exc)
-        except Exception as exc:
-            logger.debug("compression recovery deadline lookup failed (non-sqlite): %s", exc)
+        found, value = self._durable_read(
+            "get_compression_recovery_deadline", "compression recovery deadline", float, 0.0,
+        )
+        if found:
+            self._anti_thrash_recovery_deadline = 0.0 if value is None else value
 
     def _set_anti_thrash_recovery_deadline(self, deadline: float) -> None:
         """Set the recovery deadline, persisting on change only (0 = disarmed)."""
         if deadline == self._anti_thrash_recovery_deadline:
             return
         self._anti_thrash_recovery_deadline = deadline
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
-        setter = getattr(session_db, "set_compression_recovery_deadline", None)
-        if not session_id or not callable(setter):
-            return
-        try:
-            setter(session_id, deadline)
-        except sqlite3.Error as exc:
-            logger.debug("compression recovery deadline persist failed: %s", exc)
-        except Exception as exc:
-            logger.debug("compression recovery deadline persist failed (non-sqlite): %s", exc)
+        self._durable_write(
+            "set_compression_recovery_deadline", "compression recovery deadline", deadline,
+        )
 
     def _record_ineffective_compression_verdict(self, count: int) -> None:
         """Set the anti-thrash strike counter; persists only on change."""
@@ -3245,22 +3173,19 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                     for i in range(max(0, prune_boundary), len(result)):
                         if last_tool_idx is not None and i == last_tool_idx:
                             continue
-                        if result[i].get("role") == "tool":
-                            if _demote_tool_result_at(i, spare_protected_skills=False):
-                                pressure_hits += 1
-                        elif result[i].get("role") == "assistant":
-                            if _truncate_tool_call_args_at(i):
-                                pressure_hits += 1
+                        # _demote_tool_result_at / _truncate_tool_call_args_at each no-op on the
+                        # other role, so both may run unconditionally.
+                        if _demote_tool_result_at(i, spare_protected_skills=False):
+                            pressure_hits += 1
+                        if _truncate_tool_call_args_at(i):
+                            pressure_hits += 1
                     # Last resort: the newest body alone may exceed the soft budget; summarize it.
                     if (
                         last_tool_idx is not None
                         and last_tool_idx >= prune_boundary
                         and _protected_region_tokens() > soft_ceiling
-                    ):
-                        if _demote_tool_result_at(
-                            last_tool_idx, spare_protected_skills=False
-                        ):
-                            pressure_hits += 1
+                    ) and _demote_tool_result_at(last_tool_idx, spare_protected_skills=False):
+                        pressure_hits += 1
                 if pressure_hits and not self.quiet_mode:
                     logger.info(
                         "Pre-compression pressure demotion: reclaimed protected-tail "
@@ -4640,7 +4565,11 @@ This compaction should PRIORITISE preserving all information related to the focu
         cls,
         message: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        """Drop stale handoff data while preserving merged prior-tail content."""
+        """Drop stale handoff data while preserving merged prior-tail content.
+
+        Returns a copy for non-handoff rows, the unwrapped prior-tail content for merged
+        handoffs (delimiter form, or legacy end-marker form), and ``None`` for standalone ones.
+        """
         if not isinstance(message, dict):
             return message
 
@@ -4652,25 +4581,25 @@ This compaction should PRIORITISE preserving all information related to the focu
         if not is_summary:
             return message.copy()
 
+        def _unwrapped(new_content: Any) -> Dict[str, Any]:
+            unwrapped = message.copy()
+            unwrapped["content"] = new_content
+            unwrapped.pop(COMPRESSED_SUMMARY_METADATA_KEY, None)
+            return unwrapped
+
         if isinstance(content, str):
             if _MERGED_SUMMARY_DELIMITER in content:
                 prior = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0].strip()
                 if prior.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
                     prior = prior[len(_MERGED_PRIOR_CONTEXT_HEADER):].lstrip()
                 if prior:
-                    unwrapped = message.copy()
-                    unwrapped["content"] = prior
-                    unwrapped.pop(COMPRESSED_SUMMARY_METADATA_KEY, None)
-                    return unwrapped
+                    return _unwrapped(prior)
             else:
                 marker_idx = content.find(_SUMMARY_END_MARKER)
                 if marker_idx >= 0:
                     remainder = content[marker_idx + len(_SUMMARY_END_MARKER):].lstrip()
                     if remainder:
-                        unwrapped = message.copy()
-                        unwrapped["content"] = remainder
-                        unwrapped.pop(COMPRESSED_SUMMARY_METADATA_KEY, None)
-                        return unwrapped
+                        return _unwrapped(remainder)
 
         if isinstance(content, list):
             prior_blocks: list[Any] = []
@@ -4690,9 +4619,7 @@ This compaction should PRIORITISE preserving all information related to the focu
                     if isinstance(text, str) and _MERGED_SUMMARY_DELIMITER in text:
                         before = text.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
                         if before.strip():
-                            copied = item.copy()
-                            copied["text"] = before
-                            prior_blocks.append(copied)
+                            prior_blocks.append({**item, "text": before})
                         found_delimiter = True
                         break
                     prior_blocks.append(item.copy())
@@ -4708,52 +4635,35 @@ This compaction should PRIORITISE preserving all information related to the focu
                         continue
                     remainder = text.split(_SUMMARY_END_MARKER, 1)[1].lstrip()
                     if remainder:
-                        if isinstance(item, dict):
-                            copied = item.copy()
-                            copied["text"] = remainder
-                            legacy_blocks.append(copied)
-                        else:
-                            legacy_blocks.append(remainder)
+                        legacy_blocks.append({**item, "text": remainder} if isinstance(item, dict) else remainder)
                     for later in content[index + 1:]:
                         legacy_blocks.append(later.copy() if isinstance(later, dict) else later)
                     found_marker = True
                     break
                 if found_marker and legacy_blocks:
-                    unwrapped = message.copy()
-                    unwrapped["content"] = legacy_blocks
-                    unwrapped.pop(COMPRESSED_SUMMARY_METADATA_KEY, None)
-                    return unwrapped
+                    return _unwrapped(legacy_blocks)
 
             if found_delimiter:
+                # Strip the PRIOR CONTEXT header from the first block that carries it.
                 for index, item in enumerate(prior_blocks):
-                    if isinstance(item, str):
-                        if item.lstrip().startswith(_MERGED_PRIOR_CONTEXT_HEADER):
-                            leading = item.lstrip()[len(_MERGED_PRIOR_CONTEXT_HEADER):].lstrip()
-                            if leading:
-                                prior_blocks[index] = leading
-                            else:
-                                prior_blocks.pop(index)
-                            break
-                    elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                        text = item["text"]
-                        if text.lstrip().startswith(_MERGED_PRIOR_CONTEXT_HEADER):
-                            leading = text.lstrip()[len(_MERGED_PRIOR_CONTEXT_HEADER):].lstrip()
-                            if leading:
-                                copied = item.copy()
-                                copied["text"] = leading
-                                prior_blocks[index] = copied
-                            else:
-                                prior_blocks.pop(index)
-                            break
+                    text = item if isinstance(item, str) else item.get("text") if isinstance(item, dict) else None
+                    if not isinstance(text, str):
+                        continue
+                    if not text.lstrip().startswith(_MERGED_PRIOR_CONTEXT_HEADER):
+                        continue
+                    leading = text.lstrip()[len(_MERGED_PRIOR_CONTEXT_HEADER):].lstrip()
+                    if not leading:
+                        prior_blocks.pop(index)
+                    elif isinstance(item, str):
+                        prior_blocks[index] = leading
+                    else:
+                        prior_blocks[index] = {**item, "text": leading}
+                    break
 
                 if prior_blocks:
-                    unwrapped = message.copy()
-                    unwrapped["content"] = prior_blocks
-                    unwrapped.pop(COMPRESSED_SUMMARY_METADATA_KEY, None)
-                    return unwrapped
+                    return _unwrapped(prior_blocks)
 
         return None
-
 
     @staticmethod
     def _get_tool_call_id(tc) -> str:
@@ -5044,10 +4954,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         if len(user_indices) == 0:
             return cut_idx
 
-        if len(user_indices) < n:
-            target_idx = user_indices[-1]
-        else:
-            target_idx = user_indices[n - 1]
+        target_idx = user_indices[-1] if len(user_indices) < n else user_indices[n - 1]
 
         if target_idx >= cut_idx:
             return cut_idx
@@ -5116,45 +5023,36 @@ This compaction should PRIORITISE preserving all information related to the focu
             if available_tail > 1 else 0
         )
         soft_ceiling = int(token_budget * 1.5)
-        accumulated = 0
-        cut_idx = n  # start from beyond the end
 
         # Only the newest assistant turn's thinking ships (#73624), except echo-back providers
         # replay it every turn; must agree with the preflight trigger's estimate (#84371).
         _newest_asst_idx = _last_assistant_index(messages)
         _charge_all_thinking = self._stale_thinking_on_wire()
 
-        for i in range(n - 1, head_end - 1, -1):
-            msg = messages[i]
-            msg_tokens = _estimate_msg_budget_tokens(
-                msg,
-                charge_stale_thinking=(
-                    _charge_all_thinking or i == _newest_asst_idx
-                ),
-            )
-            if accumulated + msg_tokens > soft_ceiling and (n - i) >= min_tail:
-                break
-            accumulated += msg_tokens
-            cut_idx = i
+        def _walk_back(ceiling: int, *, cut_at_break: bool) -> tuple[int, int]:
+            """Accumulate newest-first until ``ceiling`` (once past ``min_tail``).
 
+            Returns ``(cut_idx, accumulated)``. On the budget break the soft walk keeps the cut
+            at the last accepted row; the raw re-cut moves it onto the breaking row.
+            """
+            accumulated = 0
+            cut = n  # start from beyond the end
+            for i in range(n - 1, head_end - 1, -1):
+                msg_tokens = _estimate_msg_budget_tokens(
+                    messages[i],
+                    charge_stale_thinking=(_charge_all_thinking or i == _newest_asst_idx),
+                )
+                if accumulated + msg_tokens > ceiling and (n - i) >= min_tail:
+                    return (i if cut_at_break else cut), accumulated
+                accumulated += msg_tokens
+                cut = i
+            return cut, accumulated
+
+        cut_idx, accumulated = _walk_back(soft_ceiling, cut_at_break=False)
         # Whole transcript fits soft_ceiling: re-cut with the raw budget so a worthwhile middle
         # exists (else #40803 loop).
-        if cut_idx <= head_end and accumulated <= soft_ceiling and accumulated > 0:
-            raw_budget = token_budget
-            raw_accumulated = 0
-            for j in range(n - 1, head_end - 1, -1):
-                raw_msg = messages[j]
-                raw_tok = _estimate_msg_budget_tokens(
-                    raw_msg,
-                    charge_stale_thinking=(
-                        _charge_all_thinking or j == _newest_asst_idx
-                    ),
-                )
-                if raw_accumulated + raw_tok > raw_budget and (n - j) >= min_tail:
-                    cut_idx = j
-                    break
-                raw_accumulated += raw_tok
-                cut_idx = j
+        if cut_idx <= head_end and 0 < accumulated <= soft_ceiling:
+            cut_idx, _ = _walk_back(token_budget, cut_at_break=True)
 
         fallback_cut = n - min_tail
         cut_idx = min(cut_idx, fallback_cut)
