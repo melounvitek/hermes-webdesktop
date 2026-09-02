@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from agent.conversation_compression import (
     IDLE_COMPACTION_STATUS_TEMPLATE,
@@ -1336,3 +1336,128 @@ def build_turn_context(
         ext_prefetch_cache=ext_prefetch_cache,
         preflight_compression_blocked=_preflight_compression_blocked,
     )
+
+
+def build_api_messages(
+    agent: Any,
+    messages: List[Dict[str, Any]],
+    *,
+    current_turn_user_idx: Any,
+    ext_prefetch_cache: Any,
+    plugin_user_context: Any,
+    moa_config: Any,
+    active_system_prompt: Any,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Build the wire copy of ``messages`` for one API call plus the effective system
+    message. Returns ``(api_messages, effective_system)``.
+
+    Prompt-cache invariant: historical user/assistant rows replay their ``api_content``
+    sidecar (the exact bytes sent live) so the prefix stays byte-stable; the current
+    user turn reuses the prologue's stamp (or composes live when a caller bypassed the
+    prologue). Ephemeral context (prefetch, ``pre_llm_call`` hooks, ``ephemeral_system_prompt``)
+    is added at API time only — ``messages`` stays untouched beyond the sidecar stamp,
+    and the system prompt is built ONCE per session and replayed verbatim."""
+    from agent.agent_runtime_helpers import fill_empty_non_final_wire_payload
+    from agent.conversation_loop import _clone_message_for_send
+
+    _ext_prefetch_cache = ext_prefetch_cache
+    _plugin_user_context = plugin_user_context
+    api_messages = []
+    for idx, msg in enumerate(messages):
+
+        # Structural clone, NOT msg.copy(): in-place transforms below must not reach
+        # persisted history via nested containers; see _clone_message_for_send.
+        api_msg = _clone_message_for_send(msg)
+
+        # api_content is the persistence sidecar of the exact bytes sent to the API;
+        # bookkeeping, never a provider field — pop it from EVERY outgoing copy.
+        _api_content = api_msg.pop("api_content", None)
+
+        # Display-only timeline metadata, never a provider field: strict OpenAI
+        # backends reject unknown keys once a typed event row enters live history.
+        api_msg.pop("display_kind", None)
+        api_msg.pop("display_metadata", None)
+
+        # Durable row id from _rows_to_conversation (desktop reactions); only the
+        # chat-completions transport strips underscore keys, so drop it centrally.
+        api_msg.pop("_row_id", None)
+
+        # Inject ephemeral context (memory prefetch + pre_llm_call user hooks)
+        # at API time only; `messages` is untouched beyond the api_content stamp.
+        if idx == current_turn_user_idx and msg.get("role") == "user":
+            if isinstance(_api_content, str) and _api_content:
+                # Reuse the prologue's stamp so sidecar and wire cannot drift
+                # and every pass this turn sends identical bytes.
+                api_msg["content"] = _api_content
+            else:
+                # Callers that bypass the prologue stamping: compose live.
+                _composed = compose_user_api_content(
+                    api_msg.get("content", ""),
+                    _ext_prefetch_cache,
+                    _plugin_user_context,
+                )
+                if _composed is not None:
+                    api_msg["content"] = _composed
+        elif (
+            isinstance(_api_content, str)
+            and _api_content
+            and msg.get("role") in ("user", "assistant")
+        ):
+            # Historical row: replay the exact bytes sent live so the prompt-cache
+            # prefix stays byte-stable. User rows carry the injection sidecar; user
+            # and assistant rows may carry a sanitize-divergence sidecar.
+            api_msg["content"] = _api_content
+
+        # For ALL assistant messages, pass reasoning back to the API
+        # This ensures multi-turn reasoning context is preserved
+        agent._copy_reasoning_content_for_api(msg, api_msg)
+
+        # Remove 'reasoning' field - it's for trajectory storage only
+        # We've copied it to 'reasoning_content' for the API above
+        if "reasoning" in api_msg:
+            api_msg.pop("reasoning")
+        # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
+        if "finish_reason" in api_msg:
+            api_msg.pop("finish_reason")
+        # Fill empty non-final user/assistant wire copies so the pre-call sanitizer
+        # stops re-healing and flooding errors.log; durable history is untouched.
+        # After the reasoning copy so thinking-only turns keep payload (#96870).
+        fill_empty_non_final_wire_payload(
+            api_msg, is_final=(idx == len(messages) - 1)
+        )
+        # _thinking_prefill survives intentionally: the drop pass below needs it.
+        # Strip length-continuation marks; some transports keep underscore keys.
+        api_msg.pop("_length_continuation_fragment", None)
+        api_msg.pop("_length_continuation_nudge", None)
+        # Strip Codex Responses fields (call_id, response_item_id): strict providers
+        # reject unknown fields. New dicts keep the internal list intact for Codex.
+        if agent._should_sanitize_tool_calls():
+            # In MoA mode agent.model is the virtual preset name; use the resolved
+            # aggregator so Gemini keeps thought_signature (extra_content).
+            _sanitize_model = agent.model
+            if agent.provider == "moa":
+                if moa_config:
+                    _agg = moa_config.get("aggregator") or {}
+                    if _agg.get("model"):
+                        _sanitize_model = _agg["model"]
+                if _sanitize_model == agent.model:
+                    # Virtual-provider mode: no moa_config is threaded through; ask
+                    # the facade for the aggregator slot from the previous create().
+                    _moa_client = getattr(agent, "client", None)
+                    _agg_slot = getattr(_moa_client, "last_aggregator_slot", None)
+                    if _agg_slot and _agg_slot.get("model"):
+                        _sanitize_model = _agg_slot["model"]
+            agent._sanitize_tool_calls_for_strict_api(api_msg, model=_sanitize_model)
+        # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
+        # The signature field helps maintain reasoning continuity
+        api_messages.append(api_msg)
+
+    # Final system message = cached prompt + ephemeral additions (API-time only).
+    # Plugin/recall context goes into the user message, never the system prompt: the
+    # prompt is built ONCE per session and replayed verbatim (stable cache prefix).
+    effective_system = active_system_prompt or ""
+    if agent.ephemeral_system_prompt:
+        effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+    if effective_system:
+        api_messages = [{"role": "system", "content": effective_system}] + api_messages
+    return api_messages, effective_system
