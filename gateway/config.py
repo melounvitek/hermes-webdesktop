@@ -11,7 +11,6 @@ Handles loading and validating configuration for:
 import logging
 import math
 import os
-import json
 from pathlib import Path
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Dict, List, Optional, Any, Callable
@@ -25,7 +24,6 @@ from gateway.shutdown_watchdog import (
     DEFAULT_LOOP_WATCHDOG_TIMEOUT_S,
 )
 from utils import is_truthy_value
-import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +62,10 @@ def _normalize_multiplex_profile_allowlist(value: Any) -> Optional[List[str]]:
     from hermes_cli.profiles import normalize_profile_name, validate_profile_name
 
     normalized: List[str] = []
-    seen = set()
     for entry in value:
         if not isinstance(entry, str):
             logger.warning(
-                "Skipping invalid gateway.multiplex_profile_allowlist entry %r "
-                "(expected a profile name)",
+                "Skipping invalid gateway.multiplex_profile_allowlist entry %r (expected a profile name)",
                 entry,
             )
             continue
@@ -77,15 +73,10 @@ def _normalize_multiplex_profile_allowlist(value: Any) -> Optional[List[str]]:
             name = normalize_profile_name(entry)
             validate_profile_name(name)
         except ValueError:
-            logger.warning(
-                "Skipping invalid gateway.multiplex_profile_allowlist entry %r",
-                entry,
-            )
+            logger.warning("Skipping invalid gateway.multiplex_profile_allowlist entry %r", entry)
             continue
-        if name == "default" or name in seen:
-            continue
-        seen.add(name)
-        normalized.append(name)
+        if name != "default" and name not in normalized:
+            normalized.append(name)
     return normalized
 
 
@@ -107,9 +98,7 @@ def _env_multiplex_profiles_override() -> "bool | None":
     secret arrives as ``""`` and must NOT shadow a config.yaml opt-in.
     """
     raw = os.getenv("GATEWAY_MULTIPLEX_PROFILES")
-    if raw is None:
-        return None
-    token = raw.strip().lower()
+    token = (raw or "").strip().lower()
     if not token:
         return None
     if token in _MULTIPLEX_TRUTHY_STRINGS:
@@ -173,14 +162,9 @@ def _coerce_optional_positive_int(value: Any, key: str) -> Optional[int]:
     """
     if value is None:
         return None
-    if isinstance(value, bool):
-        logger.warning(
-            "Ignoring invalid %s=%r (expected a positive integer; 0/null disables)",
-            key,
-            value,
-        )
-        return None
     try:
+        if isinstance(value, bool):
+            raise ValueError(value)
         if isinstance(value, float):
             if not value.is_integer():
                 raise ValueError(value)
@@ -191,14 +175,10 @@ def _coerce_optional_positive_int(value: Any, key: str) -> Optional[int]:
             parsed = int(value)
     except (TypeError, ValueError):
         logger.warning(
-            "Ignoring invalid %s=%r (expected a positive integer; 0/null disables)",
-            key,
-            value,
+            "Ignoring invalid %s=%r (expected a positive integer; 0/null disables)", key, value
         )
         return None
-    if parsed <= 0:
-        return None
-    return parsed
+    return parsed if parsed > 0 else None
 
 
 _SYSTEMD_WATCHDOG_MAX_SECONDS = 2_147_483_647
@@ -214,22 +194,17 @@ def coerce_systemd_watchdog_seconds(
     """
     if value is None:
         return 0
-    if isinstance(value, bool):
-        logger.warning("Ignoring invalid %s (expected a positive integer)", key)
-        return 0
-    if isinstance(value, int):
+    parsed: Optional[int] = None
+    if isinstance(value, int) and not isinstance(value, bool):
         parsed = value
     elif isinstance(value, str):
         raw = value.strip()
-        if not raw or not raw.isascii() or not raw.isdecimal():
-            logger.warning("Ignoring invalid %s (expected a positive integer)", key)
-            return 0
-        try:
-            parsed = int(raw, 10)
-        except (TypeError, ValueError, OverflowError):
-            logger.warning("Ignoring invalid %s (expected a positive integer)", key)
-            return 0
-    else:
+        if raw and raw.isascii() and raw.isdecimal():
+            try:
+                parsed = int(raw, 10)
+            except (TypeError, ValueError, OverflowError):
+                parsed = None
+    if parsed is None:
         logger.warning("Ignoring invalid %s (expected a positive integer)", key)
         return 0
     if parsed == 0:
@@ -249,40 +224,22 @@ def _coerce_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _normalize_unauthorized_dm_behavior(value: Any, default: str = "pair") -> str:
-    """Normalize unauthorized DM behavior to a supported value."""
+def _normalize_choice(value: Any, choices: set, default: str) -> str:
+    """Lower-cased *value* when it is one of *choices*, else *default*."""
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in {"pair", "ignore"}:
+        if normalized in choices:
             return normalized
     return default
 
 
-def _normalize_notice_delivery(value: Any, default: str = "public") -> str:
-    """Normalize notice delivery mode to a supported value."""
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"public", "private"}:
-            return normalized
-    return default
-
-
-def _ensure_platform_extra_dict(platforms_data: dict, name: str) -> tuple[dict, dict]:
-    """Get-or-create ``platforms_data[name]`` and its nested ``extra`` dict.
-
-    Both slots are coerced to ``{}`` if a non-dict value is encountered, so
-    callers can safely write keys without type-checking.  Returns
-    ``(plat_data, extra)`` for in-place mutation.
-    """
-    plat_data = platforms_data.setdefault(name, {})
-    if not isinstance(plat_data, dict):
-        plat_data = {}
-        platforms_data[name] = plat_data
-    extra = plat_data.setdefault("extra", {})
-    if not isinstance(extra, dict):
-        extra = {}
-        plat_data["extra"] = extra
-    return plat_data, extra
+def _dict_slot(container: dict, key: str) -> dict:
+    """Get-or-create ``container[key]`` as a dict, replacing a non-dict value with ``{}``."""
+    value = container.setdefault(key, {})
+    if not isinstance(value, dict):
+        value = {}
+        container[key] = value
+    return value
 
 
 def _getenv(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -297,25 +254,12 @@ def _getenv(name: str, default: Optional[str] = None) -> Optional[str]:
     if current_secret_scope() is not None:
         scope_val = _get_secret(name, None)
         return scope_val if scope_val is not None else default
-    env_val = os.environ.get(name)
-    if env_val is not None:
-        return env_val
-    return default
+    return os.environ.get(name, default)
 
 
 def _getenv_str(name: str, default: str = "") -> str:
     val = _getenv(name, default)
     return val if val is not None else default
-
-
-def _getenv_int(name: str, default: int) -> int:
-    raw = _getenv(name, None)
-    if raw is None:
-        return default
-    try:
-        return int(str(raw).strip(), 10)
-    except (TypeError, ValueError):
-        return default
 
 
 # Module-level cache for bundled platform plugin names (lives outside the
@@ -377,28 +321,27 @@ class Platform(Enum):
         if _Platform__bundled_plugin_names is None:
             _Platform__bundled_plugin_names = cls._scan_bundled_plugin_platforms()
         if value in _Platform__bundled_plugin_names:
-            pseudo = object.__new__(cls)
-            pseudo._value_ = value
-            pseudo._name_ = value.upper().replace("-", "_").replace(" ", "_")
-            cls._value2member_map_[value] = pseudo
-            cls._member_map_[pseudo._name_] = pseudo
-            return pseudo
+            return cls._add_pseudo_member(value)
 
         # Runtime-registered plugins (e.g. user-installed, discovered after
         # the enum was defined).
         try:
             from gateway.platform_registry import platform_registry
             if platform_registry.is_registered(value):
-                pseudo = object.__new__(cls)
-                pseudo._value_ = value
-                pseudo._name_ = value.upper().replace("-", "_").replace(" ", "_")
-                cls._value2member_map_[value] = pseudo
-                cls._member_map_[pseudo._name_] = pseudo
-                return pseudo
+                return cls._add_pseudo_member(value)
         except Exception:
             pass
 
         return None
+
+    @classmethod
+    def _add_pseudo_member(cls, value: str) -> "Platform":
+        pseudo = object.__new__(cls)
+        pseudo._value_ = value
+        pseudo._name_ = value.upper().replace("-", "_").replace(" ", "_")
+        cls._value2member_map_[value] = pseudo
+        cls._member_map_[pseudo._name_] = pseudo
+        return pseudo
 
     @classmethod
     def _scan_bundled_plugin_platforms(cls) -> set:
@@ -408,13 +351,8 @@ class Platform(Enum):
             platforms_dir = Path(__file__).parent.parent / "plugins" / "platforms"
             if platforms_dir.is_dir():
                 for child in platforms_dir.iterdir():
-                    if (
-                        child.is_dir()
-                        and (child / "__init__.py").exists()
-                        and (
-                            (child / "plugin.yaml").exists()
-                            or (child / "plugin.yml").exists()
-                        )
+                    if child.is_dir() and (child / "__init__.py").exists() and (
+                        (child / "plugin.yaml").exists() or (child / "plugin.yml").exists()
                     ):
                         names.add(child.name.lower())
         except Exception:
@@ -498,12 +436,9 @@ class HomeChannel:
             "chat_id": self.chat_id,
             "name": self.name,
         }
-        if self.thread_id:
-            result["thread_id"] = self.thread_id
-        if self.user_id:
-            result["user_id"] = self.user_id
-        if self.scope_id:
-            result["scope_id"] = self.scope_id
+        for key in ("thread_id", "user_id", "scope_id"):
+            if getattr(self, key):
+                result[key] = getattr(self, key)
         return result
     
     @classmethod
@@ -523,14 +458,7 @@ def persist_home_channel(home: HomeChannel, *, enabled_if_new: bool = False) -> 
     from hermes_cli.config import load_config, save_config
 
     config = load_config()
-    platforms = config.setdefault("platforms", {})
-    if not isinstance(platforms, dict):
-        platforms = {}
-        config["platforms"] = platforms
-    platform_config = platforms.setdefault(home.platform.value, {})
-    if not isinstance(platform_config, dict):
-        platform_config = {}
-        platforms[home.platform.value] = platform_config
+    platform_config = _dict_slot(_dict_slot(config, "platforms"), home.platform.value)
     if enabled_if_new:
         platform_config.setdefault("enabled", True)
     platform_config["home_channel"] = home.to_dict()
@@ -578,20 +506,20 @@ class SessionResetPolicy:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionResetPolicy":
         data = _coerce_dict(data)
-        # Handle both missing keys and explicit null values (YAML null → None)
-        mode = data.get("mode")
-        at_hour = data.get("at_hour")
-        idle_minutes = data.get("idle_minutes")
-        notify = data.get("notify")
+
+        def val(key: str, default: Any) -> Any:
+            # Handle both missing keys and explicit null values (YAML null → None)
+            value = data.get(key)
+            return default if value is None else value
+
         exclude = data.get("notify_exclude_platforms")
-        bg_max_age = data.get("bg_process_max_age_hours")
         return cls(
-            mode=mode if mode is not None else "none",
-            at_hour=at_hour if at_hour is not None else 4,
-            idle_minutes=idle_minutes if idle_minutes is not None else 1440,
-            notify=_coerce_bool(notify, True),
+            mode=val("mode", "none"),
+            at_hour=val("at_hour", 4),
+            idle_minutes=val("idle_minutes", 1440),
+            notify=_coerce_bool(data.get("notify"), True),
             notify_exclude_platforms=tuple(exclude) if exclude is not None else ("api_server", "webhook"),
-            bg_process_max_age_hours=bg_max_age if bg_max_age is not None else 24,
+            bg_process_max_age_hours=val("bg_process_max_age_hours", 24),
         )
 
 
@@ -609,14 +537,7 @@ class ChannelOverride:
     system_prompt: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {}
-        if self.model is not None:
-            out["model"] = self.model
-        if self.provider is not None:
-            out["provider"] = self.provider
-        if self.system_prompt is not None:
-            out["system_prompt"] = self.system_prompt
-        return out
+        return {k: v for k, v in asdict(self).items() if v is not None}
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ChannelOverride":
@@ -719,27 +640,15 @@ class PlatformConfig:
         if isinstance(data.get("home_channel"), dict):
             home_channel = HomeChannel.from_dict(data["home_channel"])
 
-        # gateway_restart_notification may be bridged into extra via the
-        # shared-key loop in load_gateway_config(); check both top-level
-        # and extra so YAML ``discord: gateway_restart_notification: false``
-        # works without needing a separate platforms: block.
+        # gateway_restart_notification / typing_indicator / typing_status_text may
+        # arrive top-level or bridged into ``extra`` by the shared-key loop in
+        # load_gateway_config(), so YAML ``discord: gateway_restart_notification: false``
+        # works without a separate platforms: block. Check both (top-level wins).
         extra = _coerce_dict(data.get("extra", {}))
-        _grn = data.get("gateway_restart_notification")
-        if _grn is None:
-            _grn = extra.get("gateway_restart_notification")
 
-        # typing_indicator mirrors gateway_restart_notification: it may arrive
-        # top-level or bridged into extra by the shared-key loop in
-        # load_gateway_config(), so check both.
-        _typing = data.get("typing_indicator")
-        if _typing is None:
-            _typing = extra.get("typing_indicator")
-
-        # typing_status_text takes the same two routes (top-level or bridged
-        # into extra); string passthrough, no coercion.
-        _typing_text = data.get("typing_status_text")
-        if _typing_text is None:
-            _typing_text = extra.get("typing_status_text")
+        def toplevel_or_extra(key: str) -> Any:
+            value = data.get(key)
+            return extra.get(key) if value is None else value
 
         channel_overrides: Dict[str, ChannelOverride] = {}
         raw_overrides = data.get("channel_overrides") or {}
@@ -754,9 +663,9 @@ class PlatformConfig:
             api_key=data.get("api_key"),
             home_channel=home_channel,
             reply_to_mode=data.get("reply_to_mode", "first"),
-            gateway_restart_notification=_coerce_bool(_grn, True),
-            typing_indicator=_coerce_bool(_typing, True),
-            typing_status_text=_typing_text,
+            gateway_restart_notification=_coerce_bool(toplevel_or_extra("gateway_restart_notification"), True),
+            typing_indicator=_coerce_bool(toplevel_or_extra("typing_indicator"), True),
+            typing_status_text=toplevel_or_extra("typing_status_text"),  # string passthrough, no coercion
             channel_overrides=channel_overrides,
             extra=extra,
         )
@@ -1053,30 +962,26 @@ class GatewayConfig:
         insertion order is not a stable contract and a reorder busts the
         prompt cache without any semantic change.
         """
-        connected = []
-        for platform, config in self.platforms.items():
-            if not config.enabled:
-                continue
-            if self._is_platform_connected(platform, config):
-                connected.append(platform)
+        connected = [
+            platform
+            for platform, config in self.platforms.items()
+            if config.enabled and self._is_platform_connected(platform, config)
+        ]
         return sorted(connected, key=lambda p: str(p.value))
 
     def _is_platform_connected(self, platform: Platform, config: PlatformConfig) -> bool:
         """Check whether a single platform is sufficiently configured."""
+        checker = _PLATFORM_CONNECTED_CHECKERS.get(platform)
         # Weixin requires both a token and an account_id (checked first so
         # the generic token branch doesn't let it through without account_id).
         if platform == Platform.WEIXIN:
-            return bool(
-                config.extra.get("account_id")
-                and (config.token or config.extra.get("token"))
-            )
+            return checker(config)
 
         # Generic token/api_key auth covers Telegram, Discord, Slack, etc.
         if config.token or config.api_key:
             return True
 
         # Platform-specific check
-        checker = _PLATFORM_CONNECTED_CHECKERS.get(platform)
         if checker is not None:
             return checker(config)
 
@@ -1106,9 +1011,7 @@ class GatewayConfig:
     def get_home_channel(self, platform: Platform) -> Optional[HomeChannel]:
         """Get the home channel for a platform."""
         config = self.platforms.get(platform)
-        if config:
-            return config.home_channel
-        return None
+        return config.home_channel if config else None
     
     def get_reset_policy(
         self, 
@@ -1173,146 +1076,80 @@ class GatewayConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
         data = _coerce_dict(data)
+        nested_gateway = _coerce_dict(data.get("gateway"))
+
+        def pick(key: str) -> Any:
+            """Top-level key wins by presence; else the nested ``gateway.<key>`` form."""
+            return data[key] if key in data else nested_gateway.get(key)
+
         platforms = {}
-        platforms_data = _coerce_dict(data.get("platforms", {}))
-        for platform_name, platform_data in platforms_data.items():
+        for platform_name, platform_data in _coerce_dict(data.get("platforms", {})).items():
             if not isinstance(platform_data, dict):
                 continue
             try:
-                platform = Platform(platform_name)
-                platforms[platform] = PlatformConfig.from_dict(platform_data)
+                platforms[Platform(platform_name)] = PlatformConfig.from_dict(platform_data)
             except ValueError:
                 pass  # Skip unknown platforms
-        
-        reset_by_type = {}
-        for type_name, policy_data in _coerce_dict(data.get("reset_by_type", {})).items():
-            reset_by_type[type_name] = SessionResetPolicy.from_dict(policy_data)
-        
+
         reset_by_platform = {}
         for platform_name, policy_data in _coerce_dict(data.get("reset_by_platform", {})).items():
             try:
-                platform = Platform(platform_name)
-                reset_by_platform[platform] = SessionResetPolicy.from_dict(policy_data)
+                reset_by_platform[Platform(platform_name)] = SessionResetPolicy.from_dict(policy_data)
             except ValueError:
                 pass
-        
-        default_policy = SessionResetPolicy()
-        if "default_reset_policy" in data:
-            default_policy = SessionResetPolicy.from_dict(data["default_reset_policy"])
-        
-        sessions_dir = get_hermes_home() / "sessions"
-        if "sessions_dir" in data:
-            sessions_dir = Path(data["sessions_dir"])
-        
-        quick_commands = data.get("quick_commands", {})
-        if not isinstance(quick_commands, dict):
-            quick_commands = {}
 
+        stt = _coerce_dict(data.get("stt"))
         stt_enabled = data.get("stt_enabled")
         if stt_enabled is None:
-            stt_enabled = data.get("stt", {}).get("enabled") if isinstance(data.get("stt"), dict) else None
+            stt_enabled = stt.get("enabled")
         stt_echo_transcripts = data.get("stt_echo_transcripts")
         if stt_echo_transcripts is None:
-            stt_echo_transcripts = (
-                data.get("stt", {}).get("echo_transcripts")
-                if isinstance(data.get("stt"), dict)
-                else None
-            )
+            stt_echo_transcripts = stt.get("echo_transcripts")
 
-        group_sessions_per_user = data.get("group_sessions_per_user")
-        thread_sessions_per_user = data.get("thread_sessions_per_user")
-        multiplex_profiles = data.get("multiplex_profiles")
-        raw_gateway = data.get("gateway")
-        nested_gateway = raw_gateway if isinstance(raw_gateway, dict) else {}
-        if "multiplex_profile_allowlist" in data:
-            multiplex_profile_allowlist = data.get("multiplex_profile_allowlist")
-        else:
-            multiplex_profile_allowlist = nested_gateway.get(
-                "multiplex_profile_allowlist"
-            )
         room_link_url = data.get("room_link_url")
-        if room_link_url is not None and not isinstance(room_link_url, str):
+        if not isinstance(room_link_url, str):
             room_link_url = None
-        if "systemd_watchdog_seconds" in data:
-            systemd_watchdog_raw = data.get("systemd_watchdog_seconds")
-            systemd_watchdog_key = "systemd_watchdog_seconds"
-        else:
-            systemd_watchdog_raw = nested_gateway.get("systemd_watchdog_seconds")
-            systemd_watchdog_key = "gateway.systemd_watchdog_seconds"
+
+        # Key prefix for the warning: "gateway." when the nested form was the one consulted.
+        def key_label(key: str) -> str:
+            return key if key in data else f"gateway.{key}"
+
+        # Watchdog knobs: out-of-range / non-finite values fall back to the shipped defaults.
+        probe_interval = _coerce_float(pick("loop_watchdog_probe_interval_s"), DEFAULT_LOOP_WATCHDOG_INTERVAL_S)
+        if not math.isfinite(probe_interval) or not 1.0 <= probe_interval <= 3600.0:
+            probe_interval = DEFAULT_LOOP_WATCHDOG_INTERVAL_S
+        probe_timeout = _coerce_float(pick("loop_watchdog_probe_timeout_s"), DEFAULT_LOOP_WATCHDOG_TIMEOUT_S)
+        if not math.isfinite(probe_timeout) or not 1.0 <= probe_timeout <= 600.0:
+            probe_timeout = DEFAULT_LOOP_WATCHDOG_TIMEOUT_S
+        max_strikes = _coerce_int(pick("loop_watchdog_max_strikes"), DEFAULT_LOOP_WATCHDOG_MAX_STRIKES)
+        if not 1 <= max_strikes <= 1000:
+            max_strikes = DEFAULT_LOOP_WATCHDOG_MAX_STRIKES
+
         systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
-            systemd_watchdog_raw, systemd_watchdog_key
+            pick("systemd_watchdog_seconds"), key_label("systemd_watchdog_seconds")
         )
-        if "loop_watchdog" in data:
-            loop_watchdog_raw = data.get("loop_watchdog")
-        else:
-            loop_watchdog_raw = nested_gateway.get("loop_watchdog")
-        loop_watchdog = _coerce_bool(loop_watchdog_raw, True)
-        loop_watchdog_probe_interval_s = _coerce_float(
-            data.get("loop_watchdog_probe_interval_s")
-            if "loop_watchdog_probe_interval_s" in data
-            else nested_gateway.get("loop_watchdog_probe_interval_s"),
-            DEFAULT_LOOP_WATCHDOG_INTERVAL_S,
-        )
-        loop_watchdog_probe_timeout_s = _coerce_float(
-            data.get("loop_watchdog_probe_timeout_s")
-            if "loop_watchdog_probe_timeout_s" in data
-            else nested_gateway.get("loop_watchdog_probe_timeout_s"),
-            DEFAULT_LOOP_WATCHDOG_TIMEOUT_S,
-        )
-        loop_watchdog_max_strikes = _coerce_int(
-            data.get("loop_watchdog_max_strikes")
-            if "loop_watchdog_max_strikes" in data
-            else nested_gateway.get("loop_watchdog_max_strikes"),
-            DEFAULT_LOOP_WATCHDOG_MAX_STRIKES,
-        )
-        if (
-            not math.isfinite(loop_watchdog_probe_interval_s)
-            or loop_watchdog_probe_interval_s < 1.0
-            or loop_watchdog_probe_interval_s > 3600.0
-        ):
-            loop_watchdog_probe_interval_s = DEFAULT_LOOP_WATCHDOG_INTERVAL_S
-        if (
-            not math.isfinite(loop_watchdog_probe_timeout_s)
-            or loop_watchdog_probe_timeout_s < 1.0
-            or loop_watchdog_probe_timeout_s > 600.0
-        ):
-            loop_watchdog_probe_timeout_s = DEFAULT_LOOP_WATCHDOG_TIMEOUT_S
-        if loop_watchdog_max_strikes < 1 or loop_watchdog_max_strikes > 1000:
-            loop_watchdog_max_strikes = DEFAULT_LOOP_WATCHDOG_MAX_STRIKES
-        if multiplex_profiles is None and isinstance(nested_gateway, dict):
-            # Also honor gateway.multiplex_profiles written by
-            # ``hermes config set gateway.multiplex_profiles true``.
+
+        # Multiplexing is a genuine 3-tier chain: env > config.yaml > default False. The
+        # GATEWAY_MULTIPLEX_PROFILES operator override wins when set to a recognized value
+        # (hosted deployments stamp it on the container so the single multiplexed gateway the
+        # connector depends on is forced on at every boot regardless of the image's config.yaml);
+        # a blank or unrecognized env value falls through to config — a provisioned-but-
+        # unpopulated Fly secret must not shadow a config.yaml opt-in. Config side: the
+        # top-level VALUE wins when not None, else ``gateway.multiplex_profiles`` (written by
+        # ``hermes config set gateway.multiplex_profiles true``).
+        multiplex_profiles = data.get("multiplex_profiles")
+        if multiplex_profiles is None:
             multiplex_profiles = nested_gateway.get("multiplex_profiles")
-        # Operator override: GATEWAY_MULTIPLEX_PROFILES wins over config.yaml when
-        # set to a recognized value. Hosted deployments (Nous Portal / Fly) stamp
-        # it on the container so the single multiplexed gateway — which the
-        # connector now depends on for per-profile relay routing — is forced on at
-        # every boot regardless of the image's config.yaml, while self-hosted
-        # users keep setting gateway.multiplex_profiles in config.yaml. A blank or
-        # unrecognized env value falls through to config (the empty-secret trap:
-        # a provisioned-but-unpopulated Fly secret must not shadow config), so
-        # this is a genuine 3-tier chain: env > config.yaml > default False.
         env_multiplex = _env_multiplex_profiles_override()
         if env_multiplex is not None:
             multiplex_profiles = env_multiplex
-        if "max_concurrent_sessions" in data:
-            max_concurrent_raw = data.get("max_concurrent_sessions")
-            max_concurrent_key = "max_concurrent_sessions"
-        else:
-            max_concurrent_raw = nested_gateway.get("max_concurrent_sessions")
-            max_concurrent_key = "gateway.max_concurrent_sessions"
+
         max_concurrent_sessions = _coerce_optional_positive_int(
-            max_concurrent_raw,
-            max_concurrent_key,
-        )
-        unauthorized_dm_behavior = _normalize_unauthorized_dm_behavior(
-            data.get("unauthorized_dm_behavior"),
-            "pair",
+            pick("max_concurrent_sessions"), key_label("max_concurrent_sessions")
         )
 
         try:
-            session_store_max_age_days = int(data.get("session_store_max_age_days", 90))
-            session_store_max_age_days = max(session_store_max_age_days, 0)
+            session_store_max_age_days = max(int(data.get("session_store_max_age_days", 90)), 0)
         except (TypeError, ValueError):
             session_store_max_age_days = 90
 
@@ -1322,31 +1159,36 @@ class GatewayConfig:
 
         return cls(
             platforms=platforms,
-            default_reset_policy=default_policy,
-            reset_by_type=reset_by_type,
+            default_reset_policy=SessionResetPolicy.from_dict(data["default_reset_policy"])
+            if "default_reset_policy" in data
+            else SessionResetPolicy(),
+            reset_by_type={
+                type_name: SessionResetPolicy.from_dict(policy_data)
+                for type_name, policy_data in _coerce_dict(data.get("reset_by_type", {})).items()
+            },
             reset_by_platform=reset_by_platform,
             reset_triggers=data.get("reset_triggers", ["/new", "/reset"]),
-            quick_commands=quick_commands,
-            sessions_dir=sessions_dir,
+            quick_commands=_coerce_dict(data.get("quick_commands", {})),
+            sessions_dir=Path(data["sessions_dir"]) if "sessions_dir" in data else get_hermes_home() / "sessions",
             write_sessions_json=_coerce_bool(data.get("write_sessions_json"), True),
             always_log_local=_coerce_bool(data.get("always_log_local"), True),
-            filter_silence_narration=_coerce_bool(
-                data.get("filter_silence_narration"), True
-            ),
+            filter_silence_narration=_coerce_bool(data.get("filter_silence_narration"), True),
             stt_enabled=_coerce_bool(stt_enabled, True),
             stt_echo_transcripts=_coerce_bool(stt_echo_transcripts, True),
-            group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
-            thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
+            group_sessions_per_user=_coerce_bool(data.get("group_sessions_per_user"), True),
+            thread_sessions_per_user=_coerce_bool(data.get("thread_sessions_per_user"), False),
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
-            multiplex_profile_allowlist=multiplex_profile_allowlist,
+            multiplex_profile_allowlist=pick("multiplex_profile_allowlist"),
             room_link_url=room_link_url,
             systemd_watchdog_seconds=systemd_watchdog_seconds,
-            loop_watchdog=loop_watchdog,
-            loop_watchdog_probe_interval_s=loop_watchdog_probe_interval_s,
-            loop_watchdog_probe_timeout_s=loop_watchdog_probe_timeout_s,
-            loop_watchdog_max_strikes=loop_watchdog_max_strikes,
+            loop_watchdog=_coerce_bool(pick("loop_watchdog"), True),
+            loop_watchdog_probe_interval_s=probe_interval,
+            loop_watchdog_probe_timeout_s=probe_timeout,
+            loop_watchdog_max_strikes=max_strikes,
             max_concurrent_sessions=max_concurrent_sessions,
-            unauthorized_dm_behavior=unauthorized_dm_behavior,
+            unauthorized_dm_behavior=_normalize_choice(
+                data.get("unauthorized_dm_behavior"), {"pair", "ignore"}, "pair"
+            ),
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
             profile_routes=profile_routes,
@@ -1362,8 +1204,9 @@ class GatewayConfig:
         if platform:
             platform_cfg = self.platforms.get(platform)
             if platform_cfg and "unauthorized_dm_behavior" in platform_cfg.extra:
-                return _normalize_unauthorized_dm_behavior(
+                return _normalize_choice(
                     platform_cfg.extra.get("unauthorized_dm_behavior"),
+                    {"pair", "ignore"},
                     self.unauthorized_dm_behavior,
                 )
             if platform == Platform.EMAIL:
@@ -1375,9 +1218,8 @@ class GatewayConfig:
         if platform:
             platform_cfg = self.platforms.get(platform)
             if platform_cfg and "notice_delivery" in platform_cfg.extra:
-                return _normalize_notice_delivery(
-                    platform_cfg.extra.get("notice_delivery"),
-                    "public",
+                return _normalize_choice(
+                    platform_cfg.extra.get("notice_delivery"), {"public", "private"}, "public"
                 )
         return "public"
 
@@ -1392,515 +1234,12 @@ def load_gateway_config() -> GatewayConfig:
     3. ~/.hermes/gateway.json (legacy — provides defaults under config.yaml)
     4. Built-in defaults
     """
+    from gateway import config_loader
+
     _home = get_hermes_home()
-    gw_data: dict = {}
-
-    # Legacy fallback: gateway.json provides the base layer.
-    # config.yaml keys always win when both specify the same setting.
-    gateway_json_path = _home / "gateway.json"
-    if gateway_json_path.exists():
-        try:
-            with open(gateway_json_path, "r", encoding="utf-8") as f:
-                gw_data = json.load(f) or {}
-            logger.info(
-                "Loaded legacy %s — consider moving settings to config.yaml",
-                gateway_json_path,
-            )
-        except Exception as e:
-            logger.warning("Failed to load %s: %s", gateway_json_path, e)
-
-    # Primary source: config.yaml
+    gw_data = config_loader.load_legacy_gateway_json(_home)
     try:
-        import yaml
-        config_yaml_path = _home / "config.yaml"
-        if config_yaml_path.exists():
-            with open(config_yaml_path, encoding="utf-8") as f:
-                yaml_cfg = yaml.safe_load(f) or {}
-
-            # Managed scope: overlay administrator-pinned values so the gateway
-            # honors them too. This loader builds its own dict instead of going
-            # through hermes_cli.config.load_config, so without this a managed
-            # session_reset / quick_commands / stt / model would be ignored by
-            # the messaging gateway. Fail-open via the shared helper.
-            from hermes_cli import managed_scope
-            yaml_cfg = managed_scope.apply_managed_overlay(yaml_cfg)
-
-            # Shared nested-fallback source: settings meant to be top-level
-            # keys are also accepted when a user nests them under `gateway:`
-            # (e.g. via `hermes config set gateway.<key> ...`, which naturally
-            # produces that shape). Every key below mirrors the precedent
-            # already established for gateway.multiplex_profiles/streaming/
-            # write_sessions_json: top-level wins, nested gateway.* falls back.
-            gateway_section = yaml_cfg.get("gateway")
-
-            # Map config.yaml keys → GatewayConfig.from_dict() schema.
-            # Each key overwrites whatever gateway.json may have set.
-            # Precedence contract: key-presence at the TOP LEVEL wins; the
-            # nested gateway.* form is consulted only when the top-level key
-            # is absent (not merely falsy/mistyped), so a present-but-empty
-            # top-level value is never silently replaced by the nested one.
-            sr = yaml_cfg.get("session_reset")
-            if "session_reset" not in yaml_cfg and isinstance(gateway_section, dict):
-                sr = gateway_section.get("session_reset")
-            if sr and isinstance(sr, dict):
-                gw_data["default_reset_policy"] = sr
-
-            qc = yaml_cfg.get("quick_commands")
-            if qc is None and isinstance(gateway_section, dict):
-                qc = gateway_section.get("quick_commands")
-            if qc is not None:
-                if isinstance(qc, dict):
-                    gw_data["quick_commands"] = qc
-                else:
-                    logger.warning(
-                        "Ignoring invalid quick_commands in config.yaml "
-                        "(expected mapping, got %s)",
-                        type(qc).__name__,
-                    )
-
-            stt_cfg = yaml_cfg.get("stt")
-            if "stt" not in yaml_cfg and isinstance(gateway_section, dict):
-                stt_cfg = gateway_section.get("stt")
-            if isinstance(stt_cfg, dict):
-                gw_data["stt"] = stt_cfg
-            if "stt_echo_transcripts" in yaml_cfg:
-                gw_data["stt_echo_transcripts"] = yaml_cfg["stt_echo_transcripts"]
-            elif isinstance(gateway_section, dict) and "stt_echo_transcripts" in gateway_section:
-                gw_data["stt_echo_transcripts"] = gateway_section["stt_echo_transcripts"]
-
-            gateway_cfg = yaml_cfg.get("gateway")
-
-            if "group_sessions_per_user" in yaml_cfg:
-                gw_data["group_sessions_per_user"] = yaml_cfg["group_sessions_per_user"]
-            elif isinstance(gateway_section, dict) and "group_sessions_per_user" in gateway_section:
-                gw_data["group_sessions_per_user"] = gateway_section["group_sessions_per_user"]
-
-            if "thread_sessions_per_user" in yaml_cfg:
-                gw_data["thread_sessions_per_user"] = yaml_cfg["thread_sessions_per_user"]
-            elif isinstance(gateway_section, dict) and "thread_sessions_per_user" in gateway_section:
-                gw_data["thread_sessions_per_user"] = gateway_section["thread_sessions_per_user"]
-
-            # Multiplexing flag: accept both the top-level key and the nested
-            # gateway.multiplex_profiles form (written by
-            # ``hermes config set gateway.multiplex_profiles true``).
-            if "multiplex_profiles" in yaml_cfg:
-                gw_data["multiplex_profiles"] = yaml_cfg["multiplex_profiles"]
-
-            if "multiplex_profile_allowlist" in yaml_cfg:
-                gw_data["multiplex_profile_allowlist"] = yaml_cfg[
-                    "multiplex_profile_allowlist"
-                ]
-            elif (
-                isinstance(gateway_section, dict)
-                and "multiplex_profile_allowlist" in gateway_section
-            ):
-                gw_data["multiplex_profile_allowlist"] = gateway_section[
-                    "multiplex_profile_allowlist"
-                ]
-
-            if "room_link_url" in yaml_cfg:
-                gw_data["room_link_url"] = yaml_cfg["room_link_url"]
-            elif isinstance(gateway_section, dict) and "room_link_url" in gateway_section:
-                gw_data["room_link_url"] = gateway_section["room_link_url"]
-
-            # Profile-based routing rules: accept either top-level
-            # ``profile_routes`` or the nested ``gateway.profile_routes`` form
-            # (matching the multiplex_profiles parity above).
-            _pr = yaml_cfg.get("profile_routes")
-            if _pr is None and isinstance(gateway_section, dict):
-                _pr = gateway_section.get("profile_routes")
-            if isinstance(_pr, list):
-                gw_data["profile_routes"] = _pr
-
-            if isinstance(gateway_section, dict):
-                if "multiplex_profiles" in gateway_section and "multiplex_profiles" not in gw_data:
-                    # gateway.multiplex_profiles written by `hermes config set gateway.multiplex_profiles true`
-                    gw_data["multiplex_profiles"] = gateway_section["multiplex_profiles"]
-                if "max_concurrent_sessions" in gateway_section:
-                    gw_data["max_concurrent_sessions"] = gateway_section["max_concurrent_sessions"]
-                if "systemd_watchdog_seconds" in gateway_section:
-                    gw_data["systemd_watchdog_seconds"] = gateway_section[
-                        "systemd_watchdog_seconds"
-                    ]
-
-            if "max_concurrent_sessions" in yaml_cfg:
-                gw_data["max_concurrent_sessions"] = yaml_cfg["max_concurrent_sessions"]
-
-            streaming_cfg = yaml_cfg.get("streaming")
-            if not isinstance(streaming_cfg, dict) and isinstance(gateway_section, dict):
-                # Fall back to nested gateway.streaming written by
-                # ``hermes config set gateway.streaming.*``
-                streaming_cfg = gateway_section.get("streaming")
-            if isinstance(streaming_cfg, dict):
-                gw_data["streaming"] = streaming_cfg
-
-            if "reset_triggers" in yaml_cfg:
-                gw_data["reset_triggers"] = yaml_cfg["reset_triggers"]
-            elif isinstance(gateway_section, dict) and "reset_triggers" in gateway_section:
-                gw_data["reset_triggers"] = gateway_section["reset_triggers"]
-
-            if "always_log_local" in yaml_cfg:
-                gw_data["always_log_local"] = yaml_cfg["always_log_local"]
-            elif isinstance(gateway_section, dict) and "always_log_local" in gateway_section:
-                gw_data["always_log_local"] = gateway_section["always_log_local"]
-
-            # write_sessions_json: top-level wins; nested gateway.* fallback
-            # (matches the gateway.streaming precedence pattern).
-            if "write_sessions_json" in yaml_cfg:
-                gw_data["write_sessions_json"] = yaml_cfg["write_sessions_json"]
-            elif isinstance(gateway_section, dict) and "write_sessions_json" in gateway_section:
-                gw_data["write_sessions_json"] = gateway_section["write_sessions_json"]
-
-            # Loop-liveness watchdog toggle + tuning knobs: top-level wins;
-            # nested gateway.* fallback. GatewayConfig.from_dict has its own
-            # nested fallback, but this loader builds gw_data FLAT and never
-            # forwards the yaml `gateway:` section — without this bridge the
-            # documented keys (including the pre-existing loop_watchdog bool)
-            # were silently ignored on the real gateway startup path.
-            for _wd_key in (
-                "loop_watchdog",
-                "loop_watchdog_probe_interval_s",
-                "loop_watchdog_probe_timeout_s",
-                "loop_watchdog_max_strikes",
-            ):
-                if _wd_key in yaml_cfg:
-                    gw_data[_wd_key] = yaml_cfg[_wd_key]
-                elif isinstance(gateway_section, dict) and _wd_key in gateway_section:
-                    gw_data[_wd_key] = gateway_section[_wd_key]
-
-            if "filter_silence_narration" in yaml_cfg:
-                gw_data["filter_silence_narration"] = yaml_cfg[
-                    "filter_silence_narration"
-                ]
-            elif isinstance(gateway_section, dict) and "filter_silence_narration" in gateway_section:
-                gw_data["filter_silence_narration"] = gateway_section[
-                    "filter_silence_narration"
-                ]
-
-            if "unauthorized_dm_behavior" in yaml_cfg:
-                gw_data["unauthorized_dm_behavior"] = _normalize_unauthorized_dm_behavior(
-                    yaml_cfg.get("unauthorized_dm_behavior"),
-                    "pair",
-                )
-            elif isinstance(gateway_section, dict) and "unauthorized_dm_behavior" in gateway_section:
-                gw_data["unauthorized_dm_behavior"] = _normalize_unauthorized_dm_behavior(
-                    gateway_section.get("unauthorized_dm_behavior"),
-                    "pair",
-                )
-
-            # Merge platform config into gw_data so runtime-only settings under
-            # ``gateway.platforms`` are loaded the same way as top-level
-            # ``platforms``. Merge nested first so top-level config keeps
-            # precedence, matching the existing gateway.streaming fallback.
-            gateway_platforms = gateway_cfg.get("platforms") if isinstance(gateway_cfg, dict) else None
-            platforms_data = gw_data.setdefault("platforms", {})
-            if not isinstance(platforms_data, dict):
-                platforms_data = {}
-                gw_data["platforms"] = platforms_data
-
-            def _merge_platform_map(source_platforms: Any) -> None:
-                if not isinstance(source_platforms, dict):
-                    return
-                for plat_name, plat_block in source_platforms.items():
-                    if not isinstance(plat_block, dict):
-                        continue
-                    existing = platforms_data.get(plat_name, {})
-                    if not isinstance(existing, dict):
-                        existing = {}
-                    # Deep-merge extra dicts so gateway.json defaults survive
-                    merged_extra = {**existing.get("extra", {}), **plat_block.get("extra", {})}
-                    if "enabled" in plat_block:
-                        merged_extra["_enabled_explicit"] = True
-                    merged = {**existing, **plat_block}
-                    if merged_extra:
-                        merged["extra"] = merged_extra
-                    platforms_data[plat_name] = merged
-
-            _merge_platform_map(gateway_platforms)
-            _merge_platform_map(yaml_cfg.get("platforms"))
-
-            # Also merge platform configs placed directly under ``gateway.*``
-            # (e.g. ``gateway.api_server``) so subsections are discovered the
-            # same way ``gateway.streaming`` is handled elsewhere.  Iterate
-            # all ``gateway:*`` keys and merge only those that match a known
-            # platform value, skipping reserved keys like ``platforms``.
-            if isinstance(gateway_cfg, dict):
-                _nested_platforms: dict = {}
-                for _k, _v in gateway_cfg.items():
-                    if _k == "platforms":
-                        continue
-                    try:
-                        Platform(_k)
-                    except (ValueError, AttributeError):
-                        continue
-                    if isinstance(_v, dict):
-                        _nested_platforms[_k] = _v
-                if _nested_platforms:
-                    _merge_platform_map(_nested_platforms)
-
-            # Bridge api_server-specific keys (port, key, host, cors_origins,
-            # model_name) into extra so PlatformConfig.from_dict preserves
-            # them — adapting what _apply_env_overrides does for env vars to
-            # the YAML path.  Users writing ``gateway.api_server.port: 8642``
-            # expect these to end up in the platform's extra dict.
-            _api_plat = platforms_data.get("api_server")
-            if isinstance(_api_plat, dict):
-                _api_extra = _api_plat.get("extra")
-                if not isinstance(_api_extra, dict):
-                    _api_extra = {}
-                    _api_plat["extra"] = _api_extra
-                for _bridge_key in ("port", "key", "host", "cors_origins", "model_name"):
-                    if _bridge_key in _api_plat and _bridge_key not in _api_extra:
-                        _api_extra[_bridge_key] = _api_plat.pop(_bridge_key)
-
-            if platforms_data:
-                gw_data["platforms"] = platforms_data
-            # Iterate built-in platforms plus any registered plugin platforms
-            # so plugin authors get the same shared-key bridging (#24836).
-            try:
-                from hermes_cli.plugins import discover_plugins
-                discover_plugins()  # idempotent
-                from gateway.platform_registry import platform_registry as _pr
-            except Exception as e:
-                logger.debug("plugin discovery skipped: %s", e)
-                _pr = None
-
-            _shared_loop_targets: list = list(Platform)
-            if _pr is not None:
-                for _entry in _pr.plugin_entries():
-                    try:
-                        _plat = Platform(_entry.name)
-                    except (ValueError, KeyError):
-                        continue
-                    if _plat not in _shared_loop_targets:
-                        _shared_loop_targets.append(_plat)
-
-            for plat in _shared_loop_targets:
-                if plat == Platform.LOCAL:
-                    continue
-                platform_cfg = yaml_cfg.get(plat.value)
-                _cfg_toplevel = isinstance(platform_cfg, dict)
-                # Fall back to the platform's block under ``platforms`` /
-                # ``gateway.platforms`` so shared-key bridging (allow_from,
-                # require_mention, free_response_channels, …) still runs when
-                # the user configured the platform only under those nested paths
-                # and not via a top-level block.  Mirrors the identical fallback
-                # already applied to the apply_yaml_config_fn dispatch below
-                # (#44f3e51).
-                # Note: ``enabled`` is only written to plat_data from a
-                # top-level block (``_cfg_toplevel``); for nested-only configs
-                # ``_merge_platform_map`` already merged it with the correct
-                # precedence, so re-applying it here would overwrite that.
-                if not _cfg_toplevel:
-                    for _src in (gateway_platforms, yaml_cfg.get("platforms")):
-                        if isinstance(_src, dict):
-                            _candidate = _src.get(plat.value)
-                            if isinstance(_candidate, dict):
-                                platform_cfg = _candidate
-                                break
-                if not isinstance(platform_cfg, dict):
-                    continue
-                # Collect bridgeable keys from this platform section
-                bridged = {}
-                if "unauthorized_dm_behavior" in platform_cfg:
-                    bridged["unauthorized_dm_behavior"] = _normalize_unauthorized_dm_behavior(
-                        platform_cfg.get("unauthorized_dm_behavior"),
-                        gw_data.get("unauthorized_dm_behavior", "pair"),
-                    )
-                if "notice_delivery" in platform_cfg:
-                    bridged["notice_delivery"] = _normalize_notice_delivery(
-                        platform_cfg.get("notice_delivery"),
-                        "public",
-                    )
-                if "reply_prefix" in platform_cfg:
-                    bridged["reply_prefix"] = platform_cfg["reply_prefix"]
-                if "reply_in_thread" in platform_cfg:
-                    bridged["reply_in_thread"] = platform_cfg["reply_in_thread"]
-                if "cron_continuable_surface" in platform_cfg:
-                    bridged["cron_continuable_surface"] = platform_cfg["cron_continuable_surface"]
-                if "require_mention" in platform_cfg:
-                    bridged["require_mention"] = platform_cfg["require_mention"]
-                if "send_read_receipts" in platform_cfg:
-                    bridged["send_read_receipts"] = platform_cfg["send_read_receipts"]
-                if plat == Platform.TELEGRAM and "allowed_chats" in platform_cfg:
-                    bridged["allowed_chats"] = platform_cfg["allowed_chats"]
-                if plat == Platform.TELEGRAM and "group_allowed_chats" in platform_cfg:
-                    bridged["group_allowed_chats"] = platform_cfg["group_allowed_chats"]
-                if plat == Platform.TELEGRAM and "allowed_topics" in platform_cfg:
-                    bridged["allowed_topics"] = platform_cfg["allowed_topics"]
-                if "free_response_channels" in platform_cfg:
-                    bridged["free_response_channels"] = platform_cfg["free_response_channels"]
-                if "mention_patterns" in platform_cfg:
-                    bridged["mention_patterns"] = platform_cfg["mention_patterns"]
-                if "exclusive_bot_mentions" in platform_cfg:
-                    bridged["exclusive_bot_mentions"] = platform_cfg["exclusive_bot_mentions"]
-                if plat == Platform.TELEGRAM and "observe_unmentioned_group_messages" in platform_cfg:
-                    bridged["observe_unmentioned_group_messages"] = platform_cfg["observe_unmentioned_group_messages"]
-                if "dm_policy" in platform_cfg:
-                    bridged["dm_policy"] = platform_cfg["dm_policy"]
-                if "allow_from" in platform_cfg:
-                    bridged["allow_from"] = platform_cfg["allow_from"]
-                if "allow_admin_from" in platform_cfg:
-                    bridged["allow_admin_from"] = platform_cfg["allow_admin_from"]
-                if "user_allowed_commands" in platform_cfg:
-                    bridged["user_allowed_commands"] = platform_cfg["user_allowed_commands"]
-                if "group_policy" in platform_cfg:
-                    bridged["group_policy"] = platform_cfg["group_policy"]
-                if "group_allow_from" in platform_cfg:
-                    bridged["group_allow_from"] = platform_cfg["group_allow_from"]
-                if "group_allow_admin_from" in platform_cfg:
-                    bridged["group_allow_admin_from"] = platform_cfg["group_allow_admin_from"]
-                if "group_user_allowed_commands" in platform_cfg:
-                    bridged["group_user_allowed_commands"] = platform_cfg["group_user_allowed_commands"]
-                if plat in {Platform.DISCORD, Platform.SLACK} and "channel_skill_bindings" in platform_cfg:
-                    bridged["channel_skill_bindings"] = platform_cfg["channel_skill_bindings"]
-                if "channel_prompts" in platform_cfg:
-                    channel_prompts = platform_cfg["channel_prompts"]
-                    if isinstance(channel_prompts, dict):
-                        bridged["channel_prompts"] = {str(k): v for k, v in channel_prompts.items()}
-                    else:
-                        bridged["channel_prompts"] = channel_prompts
-                if "gateway_restart_notification" in platform_cfg:
-                    bridged["gateway_restart_notification"] = platform_cfg["gateway_restart_notification"]
-                if "typing_indicator" in platform_cfg:
-                    bridged["typing_indicator"] = platform_cfg["typing_indicator"]
-                if "typing_status_text" in platform_cfg:
-                    bridged["typing_status_text"] = platform_cfg["typing_status_text"]
-                # Bridge top-level port/host/secret into extra for platforms
-                # whose adapters read these from config.extra (webhook,
-                # msgraph_webhook, api_server).  Without this, YAML like:
-                #   platforms:
-                #     webhook:
-                #       enabled: true
-                #       port: 8649
-                # silently falls back to the hardcoded DEFAULT_PORT because
-                # PlatformConfig.from_dict only extracts ``extra`` from the
-                # ``extra:`` sub-key, not from the top level.
-                if plat in {Platform.WEBHOOK, Platform.MSGRAPH_WEBHOOK}:
-                    for _bridge_key in ("port", "host", "secret"):
-                        if _bridge_key in platform_cfg and _bridge_key not in platform_cfg.get("extra", {}):
-                            bridged[_bridge_key] = platform_cfg[_bridge_key]
-                if plat == Platform.API_SERVER:
-                    for _bridge_key in ("port", "host"):
-                        if _bridge_key in platform_cfg and _bridge_key not in platform_cfg.get("extra", {}):
-                            bridged[_bridge_key] = platform_cfg[_bridge_key]
-                has_channel_overrides = "channel_overrides" in platform_cfg
-                if has_channel_overrides:
-                    raw_overrides = platform_cfg.get("channel_overrides")
-                    if isinstance(raw_overrides, dict):
-                        plat_data, _extra = _ensure_platform_extra_dict(
-                            platforms_data, plat.value
-                        )
-                        plat_data["channel_overrides"] = {
-                            str(cid): ov_data
-                            for cid, ov_data in raw_overrides.items()
-                            if isinstance(ov_data, dict)
-                        }
-                enabled_was_explicit = _cfg_toplevel and "enabled" in platform_cfg
-                if not bridged and not enabled_was_explicit and not has_channel_overrides:
-                    continue
-                plat_data, extra = _ensure_platform_extra_dict(platforms_data, plat.value)
-                if enabled_was_explicit:
-                    plat_data["enabled"] = platform_cfg["enabled"]
-                    # Mark the explicit enable/disable so the registry-driven
-                    # plugin-enable pass in _apply_env_overrides honors an
-                    # explicit ``enabled: false`` for migrated plugin platforms
-                    # (slack, telegram, matrix, dingtalk, whatsapp, feishu …)
-                    # instead of re-enabling them on token/SDK presence. #41112.
-                    extra["_enabled_explicit"] = True
-                extra.update(bridged)
-
-            # Plugin-owned YAML→env config bridges (#24836).  See
-            # ``PlatformEntry.apply_yaml_config_fn`` for the hook contract.
-            # Order: shared-key loop (above) → this dispatch → legacy hardcoded
-            # blocks (below; no-op when a hook already set their env var) →
-            # ``_apply_env_overrides()`` after ``GatewayConfig.from_dict``.
-            if _pr is not None:
-                for entry in _pr.all_entries():
-                    if entry.apply_yaml_config_fn is None:
-                        continue
-                    platform_cfg = yaml_cfg.get(entry.name)
-                    # Fall back to the platform's block under ``platforms`` /
-                    # ``gateway.platforms`` so adapter hooks still run when the
-                    # user configured the platform only under those nested paths
-                    # (e.g. ``platforms.discord.extra.allow_from``) and not via a
-                    # top-level ``discord:`` block.
-                    if not isinstance(platform_cfg, dict):
-                        for _src in (gateway_platforms, yaml_cfg.get("platforms")):
-                            if isinstance(_src, dict):
-                                _candidate = _src.get(entry.name)
-                                if isinstance(_candidate, dict):
-                                    platform_cfg = _candidate
-                                    break
-                    if not isinstance(platform_cfg, dict):
-                        continue
-                    try:
-                        seeded = entry.apply_yaml_config_fn(yaml_cfg, platform_cfg)
-                    except Exception as e:
-                        logger.debug(
-                            "apply_yaml_config_fn for %s raised: %s",
-                            entry.name, e,
-                        )
-                        continue
-                    if not isinstance(seeded, dict) or not seeded:
-                        continue
-                    _, extra = _ensure_platform_extra_dict(platforms_data, entry.name)
-                    extra.update(seeded)
-
-            # Slack settings → env vars: migrated to the slack plugin's
-            # ``apply_yaml_config_fn`` hook (see plugins/platforms/slack/
-            # adapter.py::_apply_yaml_config), dispatched in the
-            # ``apply_yaml_config_fn`` loop above. #41112 / #3823.
-
-            # Bridge top-level require_mention to Telegram when the telegram: section
-            # does not already provide one.  Users often write "require_mention: true"
-            # at the top level alongside group_sessions_per_user, expecting it to work
-            # the same way (#3979).
-            _tl_require_mention = yaml_cfg.get("require_mention")
-            if _tl_require_mention is not None:
-                _tg_section = yaml_cfg.get("telegram") or {}
-                if "require_mention" not in _tg_section:
-                    _tg_plat = platforms_data.setdefault(Platform.TELEGRAM.value, {})
-                    _tg_extra = _tg_plat.setdefault("extra", {})
-                    _tg_extra.setdefault("require_mention", _tl_require_mention)
-                    # Also bridge to the TELEGRAM_REQUIRE_MENTION env var that the
-                    # adapter reads at runtime.  This used to live in the telegram_cfg
-                    # block in core; it stays in core because it keys off the TOP-LEVEL
-                    # require_mention (not a telegram: block), so the telegram plugin's
-                    # apply_yaml_config_fn hook — which only runs when a telegram config
-                    # block exists — can't cover the no-telegram-block case (#3979).
-                    if not os.getenv("TELEGRAM_REQUIRE_MENTION"):
-                        os.environ["TELEGRAM_REQUIRE_MENTION"] = str(_tl_require_mention).lower()
-
-            # Telegram settings → env vars / extra: migrated to the telegram
-            # plugin's apply_yaml_config_fn hook
-            # (plugins/platforms/telegram/adapter.py). #41112 / #3823.
-
-            # WhatsApp settings → env vars: migrated to the whatsapp plugin's
-            # apply_yaml_config_fn hook (plugins/platforms/whatsapp/adapter.py).
-            # #41112 / #3823.
-
-            # Signal settings → env vars (env vars take precedence)
-            signal_cfg = yaml_cfg.get("signal", {})
-            if isinstance(signal_cfg, dict):
-                if "require_mention" in signal_cfg and not os.getenv("SIGNAL_REQUIRE_MENTION"):
-                    os.environ["SIGNAL_REQUIRE_MENTION"] = str(signal_cfg["require_mention"]).lower()
-
-            # DingTalk settings → env vars: migrated to the dingtalk plugin's
-            # apply_yaml_config_fn hook (plugins/platforms/dingtalk/adapter.py).
-            # #41112 / #3823.
-
-            # Mattermost config bridge moved into plugins/platforms/mattermost/
-            # adapter.py::_apply_yaml_config — see #25443 (apply_yaml_config_fn).
-
-            # Matrix settings → env vars: migrated to the matrix plugin's
-            # apply_yaml_config_fn hook (plugins/platforms/matrix/adapter.py).
-            # #41112 / #3823.
-
-            # Feishu settings → env vars: migrated to the feishu plugin's
-            # apply_yaml_config_fn hook (plugins/platforms/feishu/adapter.py).
-            # #41112 / #3823.
-
+        config_loader.load_yaml_layer(_home, gw_data)
     except Exception as e:
         logger.warning(
             "Failed to process config.yaml — falling back to .env / gateway.json values. "
@@ -1910,13 +1249,8 @@ def load_gateway_config() -> GatewayConfig:
         )
 
     config = GatewayConfig.from_dict(gw_data)
-
-    # Override with environment variables
     _apply_env_overrides(config)
-    
-    # --- Validate loaded values ---
     _validate_gateway_config(config)
-
     return config
 
 
@@ -1943,11 +1277,10 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
 
     # Warn about empty bot tokens — platforms that loaded an empty string
     # won't connect and the cause can be confusing without a log line.
-    _token_env_names = PLATFORM_TOKEN_ENV_NAMES
     for platform, pconfig in config.platforms.items():
         if not pconfig.enabled:
             continue
-        env_name = _token_env_names.get(platform)
+        env_name = PLATFORM_TOKEN_ENV_NAMES.get(platform)
         if env_name and pconfig.token is not None and not pconfig.token.strip():
             logger.warning(
                 "%s is enabled but %s is empty. "
@@ -1962,723 +1295,25 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
     try:
         from hermes_cli.auth import has_usable_secret
     except ImportError:
-        has_usable_secret = None  # type: ignore[assignment]
-
-    if has_usable_secret is not None:
-        for platform, pconfig in config.platforms.items():
-            if not pconfig.enabled:
-                continue
-            env_name = _token_env_names.get(platform)
-            if not env_name:
-                continue
-            token = pconfig.token
-            if token and token.strip() and not has_usable_secret(token, min_length=4):
-                logger.error(
-                    "%s is enabled but %s is set to a placeholder value ('%s'). "
-                    "Set a real bot token before starting the gateway. "
-                    "The adapter will NOT be started.",
-                    platform.value, env_name, token.strip()[:6] + "...",
-                )
-                pconfig.enabled = False
-
-
-# Platforms for which the "explicitly disabled in config.yaml, but credentials
-# are present in the environment" WARNING has already been emitted in this
-# process. The gateway reloads its config on every turn (and other surfaces
-# call load_gateway_config() repeatedly), so the notice is one-time per
-# platform per process — loud once at startup, never a per-turn drumbeat.
-_EXPLICIT_DISABLE_WARNED: set = set()
-
-
-# Env var(s) whose presence drives each platform's env-enable branch, for the
-# explicit-disable WARNING below. Kept next to the branches that read them.
-_ENV_ENABLE_CREDENTIALS: dict = {
-    Platform.TELEGRAM: ("TELEGRAM_BOT_TOKEN",),
-    Platform.DISCORD: ("DISCORD_BOT_TOKEN",),
-    Platform.SLACK: ("SLACK_BOT_TOKEN",),
-    Platform.WHATSAPP_CLOUD: ("WHATSAPP_CLOUD_PHONE_NUMBER_ID", "WHATSAPP_CLOUD_ACCESS_TOKEN"),
-    Platform.SIGNAL: ("SIGNAL_HTTP_URL",),
-    Platform.MATTERMOST: ("MATTERMOST_TOKEN",),
-    Platform.MATRIX: ("MATRIX_ACCESS_TOKEN", "MATRIX_PASSWORD"),
-    Platform.HOMEASSISTANT: ("HASS_TOKEN",),
-    Platform.EMAIL: ("EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_IMAP_HOST", "EMAIL_SMTP_HOST"),
-    Platform.SMS: ("TWILIO_ACCOUNT_SID",),
-    Platform.DINGTALK: ("DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET"),
-    Platform.FEISHU: ("FEISHU_APP_ID", "FEISHU_APP_SECRET"),
-    Platform.WECOM: ("WECOM_BOT_ID", "WECOM_SECRET"),
-    Platform.WECOM_CALLBACK: ("WECOM_CALLBACK_CORP_ID", "WECOM_CALLBACK_CORP_SECRET"),
-    Platform.WEIXIN: ("WEIXIN_TOKEN", "WEIXIN_ACCOUNT_ID"),
-    Platform.BLUEBUBBLES: ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD"),
-    Platform.QQBOT: ("QQ_APP_ID", "QQ_CLIENT_SECRET"),
-    Platform.YUANBAO: ("YUANBAO_APP_ID", "YUANBAO_APP_SECRET"),
-    Platform.RELAY: ("GATEWAY_RELAY_URL",),
-}
-
-
-def _warn_explicit_disable_beats_env(platform: Platform) -> None:
-    """One-time WARNING: ``platforms.<x>.enabled: false`` wins over env creds.
-
-    Until #48820 the credential-presence branches force-enabled twelve
-    platforms regardless of an explicit ``enabled: false`` in config.yaml, so
-    users who relied on "creds in .env = platform on" would see it go dark
-    after the fix with no explanation. Name the platform, the config key that
-    is winning, and the env var(s) that used to override it.
-    """
-    if platform in _EXPLICIT_DISABLE_WARNED:
         return
-    _EXPLICIT_DISABLE_WARNED.add(platform)
-    names = _ENV_ENABLE_CREDENTIALS.get(platform) or ()
-    present = [n for n in names if (os.environ.get(n) or "").strip()]
-    creds = ", ".join(present or names) or "its credentials"
-    logger.warning(
-        "Platform '%s' is explicitly disabled by platforms.%s.enabled: false in "
-        "config.yaml, so the credentials found in the environment (%s) will NOT "
-        "start its adapter. Environment credentials no longer override an "
-        "explicit disable. Remove the key or set platforms.%s.enabled: true to "
-        "turn it back on.",
-        platform.value, platform.value, creds, platform.value,
-    )
 
-def _csv_list(value: str) -> List[str]:
-    return [part.strip() for part in value.split(",") if part.strip()]
-
-
-def _env_extras(extra: Dict[str, Any], spec) -> None:
-    """``extra[key] = fn(value)`` for each ``(key, env[, fn])`` whose env value is truthy."""
-    for key, env, *fn in spec:
-        value = _getenv_str(env)
-        if value:
-            extra[key] = fn[0](value) if fn else value
-
-
-def _env_extras_stripped(extra: Dict[str, Any], spec) -> None:
-    """Like :func:`_env_extras` but the env value is stripped BEFORE the truthiness check."""
-    for key, env, *fn in spec:
-        value = _getenv_str(env).strip()
-        if value:
-            extra[key] = fn[0](value) if fn else value
-
-
-def _env_int_extra(extra: Dict[str, Any], key: str, env: str) -> None:
-    """Set an int extra from env; a non-integer value is silently ignored."""
-    raw = _getenv_str(env)
-    if raw:
-        with contextlib.suppress(ValueError):
-            extra[key] = int(raw)
-
-
-def _env_home_channel(
-    config: "GatewayConfig",
-    platform: Platform,
-    env_base: str,
-    *,
-    strip: bool = False,
-) -> None:
-    """Set ``home_channel`` from ``<env_base>`` (+``_NAME``/``_THREAD_ID``) when the platform is configured."""
-    chat_id = _getenv_str(env_base)
-    if strip:
-        chat_id = chat_id.strip()
-    if chat_id and platform in config.platforms:
-        config.platforms[platform].home_channel = HomeChannel(
-            platform=platform,
-            chat_id=chat_id,
-            name=_getenv_str(f"{env_base}_NAME", "Home"),
-            thread_id=_getenv_str(f"{env_base}_THREAD_ID") or None,
-        )
-
-
-def _env_reply_mode(config: "GatewayConfig", platform: Platform, env: str) -> None:
-    mode = _getenv_str(env, "").lower()
-    if mode in {"off", "first", "all"}:
-        config.platforms.setdefault(platform, PlatformConfig()).reply_to_mode = mode
-
-
-def _enable_port_bound_from_env(config: "GatewayConfig", platform: Platform) -> PlatformConfig:
-    """Enable a port-binding platform (api_server/webhook) unless config.yaml explicitly disabled it.
-
-    In multiplex mode a secondary profile pins ``platforms.<x>.enabled: false`` so it shares the
-    default profile's listener instead of binding its own port, yet still inherits the process env;
-    without this guard the env presence would force-enable the listener and trip MultiplexConfigError.
-    POPs the ``_enabled_explicit`` marker: these branches are terminal (no later registry pass).
-    """
-    platform_config = config.platforms.setdefault(platform, PlatformConfig())
-    explicit = platform_config.extra.pop("_enabled_explicit", False)
-    if not explicit or platform_config.enabled:
-        platform_config.enabled = True
-    return platform_config
-
-
-def _enable_plugin_platforms_from_env(config: "GatewayConfig") -> None:
-    """Registry-driven enable for plugin platforms (built-ins have explicit blocks in the caller).
-
-    A plugin platform is enabled when its credentials are configured (``is_connected``) and its deps
-    are present (passive ``check_fn``) or installable on demand (``ensure_deps_fn`` — run later by
-    ``create_adapter()``, never here: the active installer used to be wired as ``check_fn`` and this
-    sweep pip-installed SDKs on every ``load_gateway_config()`` call, boot-looping the desktop app).
-    ``is_connected`` MUST gate enablement: ``check_fn`` alone (\"is the SDK importable?\") would enable
-    platforms the user never configured and the gateway would retry-connect forever with no token.
-    """
-    try:
-        from hermes_cli.plugins import discover_plugins
-        discover_plugins()  # idempotent
-        from gateway.platform_registry import platform_registry
-        for entry in platform_registry.plugin_entries():
-            try:
-                platform = Platform(entry.name)
-            except Exception as e:
-                logger.debug("unknown platform name %r: %s", entry.name, e)
-                continue
-            existing_cfg = config.platforms.get(platform)
-            # Never re-enable a platform the user explicitly disabled (marker set by load_gateway_config).
-            if (
-                existing_cfg is not None
-                and not existing_cfg.enabled
-                and bool((existing_cfg.extra or {}).get("_enabled_explicit", False))
-            ):
-                continue
-            # Seed candidate extras so plugins whose ``is_connected`` reads ``config.extra`` (Google Chat)
-            # see the same state they will after enablement.
-            seed_for_probe = None
-            if entry.env_enablement_fn is not None:
-                try:
-                    seed_for_probe = entry.env_enablement_fn()
-                except Exception as e:
-                    logger.debug(
-                        "env_enablement_fn for %s raised: %s", entry.name, e
-                    )
-                    seed_for_probe = None
-
-            # Only consult is_connected for platforms not already enabled by YAML/env (keep that decision).
-            if existing_cfg is None or not existing_cfg.enabled:
-                if entry.is_connected is not None:
-                    try:
-                        # Probe with ``enabled=True``: we ask "would this be configured if enabled?" —
-                        # some ``is_connected`` short-circuit on ``config.enabled`` being False.
-                        if existing_cfg is not None:
-                            probe_cfg = existing_cfg
-                            if not probe_cfg.enabled:
-                                probe_cfg = PlatformConfig(
-                                    enabled=True,
-                                    extra=dict(probe_cfg.extra or {}),
-                                )
-                        else:
-                            probe_cfg = PlatformConfig(enabled=True)
-                        if isinstance(seed_for_probe, dict) and seed_for_probe:
-                            # Transient view; never mutate ``existing_cfg`` for the probe.
-                            probe_extra = dict(getattr(probe_cfg, "extra", {}) or {})
-                            for k, v in seed_for_probe.items():
-                                if k == "home_channel":
-                                    continue
-                                probe_extra.setdefault(k, v)
-                            probe_cfg = PlatformConfig(
-                                enabled=True,
-                                extra=probe_extra,
-                            )
-                        configured = bool(entry.is_connected(probe_cfg))
-                    except Exception as exc:
-                        logger.debug(
-                            "is_connected for %s raised: %s — skipping enablement",
-                            entry.name, exc,
-                        )
-                        configured = False
-                    if not configured:
-                        logger.debug(
-                            "Plugin platform '%s' available but not configured "
-                            "(is_connected returned False) — skipping enable",
-                            entry.name,
-                        )
-                        continue
-            # Verify dependencies LAST — only for platforms already enabled or past the credential gate.
-            try:
-                deps_ok = bool(entry.check_fn())
-            except Exception as e:
-                logger.debug("check_fn for %s raised: %s", entry.name, e)
-                deps_ok = False
-            if not deps_ok and entry.ensure_deps_fn is None:
-                continue
-            if platform not in config.platforms:
-                config.platforms[platform] = PlatformConfig()
-            config.platforms[platform].enabled = True
-            # Commit the env-seeded extras (reuse the probe result; don't call env_enablement_fn twice).
-            if isinstance(seed_for_probe, dict) and seed_for_probe:
-                seed = dict(seed_for_probe)
-                home = seed.pop("home_channel", None)
-                config.platforms[platform].extra.update(seed)
-                if isinstance(home, dict) and home.get("chat_id"):
-                    config.platforms[platform].home_channel = HomeChannel(
-                        platform=platform,
-                        chat_id=str(home["chat_id"]),
-                        name=str(home.get("name") or "Home"),
-                        thread_id=(
-                            str(home["thread_id"])
-                            if home.get("thread_id")
-                            else None
-                        ),
-                    )
-    except Exception as e:
-        logger.debug("Plugin platform enable pass failed: %s", e)
+    for platform, pconfig in config.platforms.items():
+        env_name = PLATFORM_TOKEN_ENV_NAMES.get(platform)
+        token = pconfig.token
+        if not (pconfig.enabled and env_name and token and token.strip()):
+            continue
+        if not has_usable_secret(token, min_length=4):
+            logger.error(
+                "%s is enabled but %s is set to a placeholder value ('%s'). "
+                "Set a real bot token before starting the gateway. "
+                "The adapter will NOT be started.",
+                platform.value, env_name, token.strip()[:6] + "...",
+            )
+            pconfig.enabled = False
 
 
 def _apply_env_overrides(config: GatewayConfig) -> None:
-    """Apply environment variable overrides to config."""
-    getenv = _getenv_str
-    getenv_int = _getenv_int
+    """Apply environment variable overrides to config (see ``gateway.config_env``)."""
+    from gateway.config_env import _apply_env_overrides as _impl
 
-    def _enable_from_env(platform: Platform) -> PlatformConfig:
-        if platform not in config.platforms:
-            config.platforms[platform] = PlatformConfig(enabled=True)
-            return config.platforms[platform]
-
-        platform_config = config.platforms[platform]
-        # READ (don't pop) the explicit-enable marker: the registry-driven plugin-enable pass later
-        # also needs it to avoid re-enabling a platform the user explicitly disabled. The flag is
-        # cleared once for all platforms at the end of _apply_env_overrides.
-        enabled_was_explicit = bool(platform_config.extra.get("_enabled_explicit", False))
-        if not platform_config.enabled:
-            if enabled_was_explicit:
-                # Credentials are present (that is why we are here) but the user said no in config.yaml.
-                _warn_explicit_disable_beats_env(platform)
-            else:
-                platform_config.enabled = True
-        return platform_config
-
-    # Telegram
-    telegram_token = getenv("TELEGRAM_BOT_TOKEN")
-    if telegram_token:
-        _enable_from_env(Platform.TELEGRAM).token = telegram_token
-    _env_reply_mode(config, Platform.TELEGRAM, "TELEGRAM_REPLY_TO_MODE")
-    telegram_fallback_ips = getenv("TELEGRAM_FALLBACK_IPS", "")
-    if telegram_fallback_ips:
-        config.platforms.setdefault(Platform.TELEGRAM, PlatformConfig()).extra["fallback_ips"] = (
-            _csv_list(telegram_fallback_ips)
-        )
-    _env_home_channel(config, Platform.TELEGRAM, "TELEGRAM_HOME_CHANNEL")
-
-    # Discord
-    discord_token = getenv("DISCORD_BOT_TOKEN")
-    if discord_token:
-        _enable_from_env(Platform.DISCORD).token = discord_token
-    _env_home_channel(config, Platform.DISCORD, "DISCORD_HOME_CHANNEL")
-    _env_reply_mode(config, Platform.DISCORD, "DISCORD_REPLY_TO_MODE")
-
-    # WhatsApp (typically uses different auth mechanism)
-    whatsapp_enabled = is_truthy_value(getenv("WHATSAPP_ENABLED", ""))
-    whatsapp_disabled_explicitly = getenv("WHATSAPP_ENABLED", "").lower() in {"false", "0", "no"}
-    if Platform.WHATSAPP in config.platforms:
-        # YAML config exists — respect explicit disable; otherwise keep whatever the YAML set.
-        wa_cfg = config.platforms[Platform.WHATSAPP]
-        if whatsapp_disabled_explicitly:
-            wa_cfg.enabled = False
-        elif whatsapp_enabled:
-            wa_cfg.enabled = True
-    elif whatsapp_enabled:
-        config.platforms[Platform.WHATSAPP] = PlatformConfig(enabled=True)
-    _env_home_channel(config, Platform.WHATSAPP, "WHATSAPP_HOME_CHANNEL")
-
-    # WhatsApp Cloud API (official Business Platform via Meta). Distinct from the Baileys bridge;
-    # both adapters can run in parallel against different phone numbers.
-    whatsapp_cloud_phone_id = getenv("WHATSAPP_CLOUD_PHONE_NUMBER_ID")
-    whatsapp_cloud_token = getenv("WHATSAPP_CLOUD_ACCESS_TOKEN")
-    if whatsapp_cloud_phone_id and whatsapp_cloud_token:
-        extra = _enable_from_env(Platform.WHATSAPP_CLOUD).extra
-        extra.update({
-            "phone_number_id": whatsapp_cloud_phone_id,
-            "access_token": whatsapp_cloud_token,
-        })
-        _env_extras(extra, (
-            ("app_id", "WHATSAPP_CLOUD_APP_ID"),
-            ("app_secret", "WHATSAPP_CLOUD_APP_SECRET"),
-            ("waba_id", "WHATSAPP_CLOUD_WABA_ID"),
-            ("verify_token", "WHATSAPP_CLOUD_VERIFY_TOKEN"),  # Meta hub.verify_token shared secret
-            ("webhook_host", "WHATSAPP_CLOUD_WEBHOOK_HOST"),
-        ))
-        _env_int_extra(extra, "webhook_port", "WHATSAPP_CLOUD_WEBHOOK_PORT")
-        _env_extras(extra, (
-            ("webhook_path", "WHATSAPP_CLOUD_WEBHOOK_PATH"),
-            ("api_version", "WHATSAPP_CLOUD_API_VERSION"),
-        ))
-    _env_home_channel(config, Platform.WHATSAPP_CLOUD, "WHATSAPP_CLOUD_HOME_CHANNEL")
-
-    # Slack
-    slack_token = getenv("SLACK_BOT_TOKEN")
-    if slack_token:
-        if Platform.SLACK not in config.platforms:
-            # No yaml config for Slack — env-only setup, enable it
-            config.platforms[Platform.SLACK] = PlatformConfig()
-            config.platforms[Platform.SLACK].enabled = True
-        else:
-            slack_config = config.platforms[Platform.SLACK]
-            # READ (don't pop) the explicit-enable marker; see _enable_from_env.
-            enabled_was_explicit = bool(slack_config.extra.get("_enabled_explicit", False))
-            if not slack_config.enabled and not enabled_was_explicit:
-                # Top-level Slack settings such as channel prompts must not turn an env-token setup
-                # into a disabled platform; only an explicit enabled: false should.
-                slack_config.enabled = True
-            elif not slack_config.enabled:
-                _warn_explicit_disable_beats_env(Platform.SLACK)
-        # Token is stored even when yaml disables the adapter so Slack-sending skills can use it.
-        config.platforms[Platform.SLACK].token = slack_token
-    slack_home = getenv("SLACK_HOME_CHANNEL")
-    if slack_home:
-        slack_config = config.platforms.setdefault(
-            Platform.SLACK,
-            PlatformConfig(enabled=False),
-        )
-        existing_home = slack_config.home_channel
-        same_home = existing_home is not None and existing_home.chat_id == slack_home
-        slack_config.home_channel = HomeChannel(
-            platform=Platform.SLACK,
-            chat_id=slack_home,
-            name=getenv("SLACK_HOME_CHANNEL_NAME", ""),
-            thread_id=getenv("SLACK_HOME_CHANNEL_THREAD_ID") or None,
-            user_id=existing_home.user_id if existing_home and same_home else None,
-            scope_id=existing_home.scope_id if existing_home and same_home else None,
-        )
-
-    # Signal
-    signal_url = getenv("SIGNAL_HTTP_URL")
-    signal_account = getenv("SIGNAL_ACCOUNT")
-    if signal_url and signal_account:
-        _enable_from_env(Platform.SIGNAL).extra.update({
-            "http_url": signal_url,
-            "account": signal_account,
-            "ignore_stories": is_truthy_value(getenv("SIGNAL_IGNORE_STORIES", "true")),
-        })
-    _env_home_channel(config, Platform.SIGNAL, "SIGNAL_HOME_CHANNEL")
-
-    # Mattermost
-    mattermost_token = getenv("MATTERMOST_TOKEN")
-    if mattermost_token:
-        mattermost_url = getenv("MATTERMOST_URL", "")
-        if not mattermost_url:
-            logger.warning("MATTERMOST_TOKEN set but MATTERMOST_URL is missing")
-        mattermost_config = _enable_from_env(Platform.MATTERMOST)
-        mattermost_config.token = mattermost_token
-        mattermost_config.extra["url"] = mattermost_url
-    _env_home_channel(config, Platform.MATTERMOST, "MATTERMOST_HOME_CHANNEL")
-
-    # Matrix
-    matrix_token = getenv("MATRIX_ACCESS_TOKEN")
-    matrix_homeserver = getenv("MATRIX_HOMESERVER", "")
-    if matrix_token or getenv("MATRIX_PASSWORD"):
-        if not matrix_homeserver:
-            logger.warning("MATRIX_ACCESS_TOKEN/MATRIX_PASSWORD set but MATRIX_HOMESERVER is missing")
-        matrix_config = _enable_from_env(Platform.MATRIX)
-        if matrix_token:
-            matrix_config.token = matrix_token
-        matrix_config.extra["homeserver"] = matrix_homeserver
-        _env_extras(matrix_config.extra, (
-            ("user_id", "MATRIX_USER_ID"),
-            ("password", "MATRIX_PASSWORD"),
-        ))
-        matrix_e2ee_mode = getenv("MATRIX_E2EE_MODE", "").strip().lower()
-        matrix_config.extra["encryption"] = (
-            matrix_e2ee_mode in ("required", "require", "optional", "prefer", "preferred")
-            or is_truthy_value(getenv("MATRIX_ENCRYPTION", ""))
-        )
-        if matrix_e2ee_mode:
-            matrix_config.extra["e2ee_mode"] = matrix_e2ee_mode
-        _env_extras(matrix_config.extra, (("device_id", "MATRIX_DEVICE_ID"),))
-    _env_home_channel(config, Platform.MATRIX, "MATRIX_HOME_ROOM")
-
-    # Home Assistant
-    hass_token = getenv("HASS_TOKEN")
-    if hass_token:
-        hass_config = _enable_from_env(Platform.HOMEASSISTANT)
-        hass_config.token = hass_token
-        _env_extras(hass_config.extra, (("url", "HASS_URL"),))
-
-    # Email
-    email_addr = getenv("EMAIL_ADDRESS")
-    email_pwd = getenv("EMAIL_PASSWORD")
-    email_imap = getenv("EMAIL_IMAP_HOST")
-    email_smtp = getenv("EMAIL_SMTP_HOST")
-    if all([email_addr, email_pwd, email_imap, email_smtp]):
-        _enable_from_env(Platform.EMAIL).extra.update({
-            "address": email_addr,
-            "imap_host": email_imap,
-            "smtp_host": email_smtp,
-        })
-    _env_home_channel(config, Platform.EMAIL, "EMAIL_HOME_ADDRESS")
-
-    # SMS (Twilio)
-    twilio_sid = getenv("TWILIO_ACCOUNT_SID")
-    if twilio_sid:
-        _enable_from_env(Platform.SMS).api_key = getenv("TWILIO_AUTH_TOKEN", "")
-    _env_home_channel(config, Platform.SMS, "SMS_HOME_CHANNEL")
-
-    # API Server. Require a usable key: API_SERVER_ENABLED alone would load an unauthenticated
-    # platform whose adapter refuses to start at connect() anyway, leaving the reconnect watcher
-    # spinning forever. Same strength bar as the startup guard (has_usable_secret, min_length=16).
-    api_server_key = getenv("API_SERVER_KEY", "")
-    if _has_usable_api_server_key(api_server_key):
-        extra = _enable_port_bound_from_env(config, Platform.API_SERVER).extra
-        if api_server_key:
-            extra["key"] = api_server_key
-        api_server_cors_origins = getenv("API_SERVER_CORS_ORIGINS", "")
-        if api_server_cors_origins:
-            origins = _csv_list(api_server_cors_origins)
-            if origins:
-                extra["cors_origins"] = origins
-        _env_int_extra(extra, "port", "API_SERVER_PORT")
-        _env_extras(extra, (
-            ("host", "API_SERVER_HOST"),
-            ("model_name", "API_SERVER_MODEL_NAME"),
-        ))
-
-    # Webhook platform
-    if is_truthy_value(getenv("WEBHOOK_ENABLED", "")):
-        extra = _enable_port_bound_from_env(config, Platform.WEBHOOK).extra
-        _env_int_extra(extra, "port", "WEBHOOK_PORT")
-        _env_extras(extra, (("secret", "WEBHOOK_SECRET"),))
-
-    # Microsoft Graph webhook platform
-    msgraph_webhook_enabled = is_truthy_value(getenv("MSGRAPH_WEBHOOK_ENABLED", ""))
-    msgraph_webhook_port = getenv("MSGRAPH_WEBHOOK_PORT")
-    msgraph_webhook_client_state = getenv("MSGRAPH_WEBHOOK_CLIENT_STATE", "")
-    msgraph_webhook_resources = getenv("MSGRAPH_WEBHOOK_ACCEPTED_RESOURCES", "")
-    msgraph_webhook_allowed_cidrs = getenv("MSGRAPH_WEBHOOK_ALLOWED_SOURCE_CIDRS", "")
-    if (
-        msgraph_webhook_enabled
-        or Platform.MSGRAPH_WEBHOOK in config.platforms
-        or msgraph_webhook_port
-        or msgraph_webhook_client_state
-        or msgraph_webhook_resources
-        or msgraph_webhook_allowed_cidrs
-    ):
-        msgraph_cfg = config.platforms.setdefault(Platform.MSGRAPH_WEBHOOK, PlatformConfig())
-        if msgraph_webhook_enabled:
-            # Same explicit-disable guard as the webhook branch, but READ (don't pop) the marker:
-            # the relay-exclusive pass below still consults it; the end-of-function scrub removes it.
-            if not msgraph_cfg.extra.get("_enabled_explicit", False) or msgraph_cfg.enabled:
-                msgraph_cfg.enabled = True
-        _env_int_extra(msgraph_cfg.extra, "port", "MSGRAPH_WEBHOOK_PORT")
-        if msgraph_webhook_client_state:
-            msgraph_cfg.extra["client_state"] = msgraph_webhook_client_state
-        for key, raw in (
-            ("accepted_resources", msgraph_webhook_resources),
-            ("allowed_source_cidrs", msgraph_webhook_allowed_cidrs),
-        ):
-            if raw:
-                items = _csv_list(raw)
-                if items:
-                    msgraph_cfg.extra[key] = items
-
-    # DingTalk
-    dingtalk_client_id = getenv("DINGTALK_CLIENT_ID")
-    dingtalk_client_secret = getenv("DINGTALK_CLIENT_SECRET")
-    if dingtalk_client_id and dingtalk_client_secret:
-        _enable_from_env(Platform.DINGTALK).extra.update({
-            "client_id": dingtalk_client_id,
-            "client_secret": dingtalk_client_secret,
-        })
-        _env_home_channel(config, Platform.DINGTALK, "DINGTALK_HOME_CHANNEL")
-
-    # Feishu / Lark
-    feishu_app_id = getenv("FEISHU_APP_ID")
-    feishu_app_secret = getenv("FEISHU_APP_SECRET")
-    if feishu_app_id and feishu_app_secret:
-        extra = _enable_from_env(Platform.FEISHU).extra
-        extra.update({
-            "app_id": feishu_app_id,
-            "app_secret": feishu_app_secret,
-            "domain": getenv("FEISHU_DOMAIN", "feishu"),
-            "connection_mode": getenv("FEISHU_CONNECTION_MODE", "websocket"),
-        })
-        _env_extras(extra, (
-            ("encrypt_key", "FEISHU_ENCRYPT_KEY"),
-            ("verification_token", "FEISHU_VERIFICATION_TOKEN"),
-        ))
-        _env_home_channel(config, Platform.FEISHU, "FEISHU_HOME_CHANNEL")
-
-    # WeCom (Enterprise WeChat)
-    wecom_bot_id = getenv("WECOM_BOT_ID")
-    wecom_secret = getenv("WECOM_SECRET")
-    if wecom_bot_id and wecom_secret:
-        extra = _enable_from_env(Platform.WECOM).extra
-        extra.update({
-            "bot_id": wecom_bot_id,
-            "secret": wecom_secret,
-        })
-        _env_extras(extra, (("websocket_url", "WECOM_WEBSOCKET_URL"),))
-        _env_home_channel(config, Platform.WECOM, "WECOM_HOME_CHANNEL")
-
-    # WeCom callback mode (self-built apps)
-    wecom_callback_corp_id = getenv("WECOM_CALLBACK_CORP_ID")
-    wecom_callback_corp_secret = getenv("WECOM_CALLBACK_CORP_SECRET")
-    if wecom_callback_corp_id and wecom_callback_corp_secret:
-        _enable_from_env(Platform.WECOM_CALLBACK).extra.update({
-            "corp_id": wecom_callback_corp_id,
-            "corp_secret": wecom_callback_corp_secret,
-            "agent_id": getenv("WECOM_CALLBACK_AGENT_ID", ""),
-            "token": getenv("WECOM_CALLBACK_TOKEN", ""),
-            "encoding_aes_key": getenv("WECOM_CALLBACK_ENCODING_AES_KEY", ""),
-            # No default: an unset WECOM_CALLBACK_HOST leaves extra.host falsy so the adapter's
-            # dual-stack DEFAULT_HOST=None applies (binds IPv4 + IPv6; "0.0.0.0" was IPv4-only).
-            "host": getenv("WECOM_CALLBACK_HOST", ""),
-            "port": getenv_int("WECOM_CALLBACK_PORT", 8645),
-        })
-
-    # Weixin (personal WeChat via iLink Bot API)
-    weixin_token = getenv("WEIXIN_TOKEN")
-    weixin_account_id = getenv("WEIXIN_ACCOUNT_ID")
-    if weixin_token or weixin_account_id:
-        weixin_config = _enable_from_env(Platform.WEIXIN)
-        if weixin_token:
-            weixin_config.token = weixin_token
-        extra = weixin_config.extra
-        if weixin_account_id:
-            extra["account_id"] = weixin_account_id
-        _env_extras_stripped(extra, (
-            ("base_url", "WEIXIN_BASE_URL", lambda v: v.rstrip("/")),
-            ("cdn_base_url", "WEIXIN_CDN_BASE_URL", lambda v: v.rstrip("/")),
-            ("dm_policy", "WEIXIN_DM_POLICY", str.lower),
-            ("group_policy", "WEIXIN_GROUP_POLICY", str.lower),
-            ("allow_from", "WEIXIN_ALLOWED_USERS"),
-            ("group_allow_from", "WEIXIN_GROUP_ALLOWED_USERS"),
-            ("split_multiline_messages", "WEIXIN_SPLIT_MULTILINE_MESSAGES"),
-        ))
-        _env_home_channel(config, Platform.WEIXIN, "WEIXIN_HOME_CHANNEL", strip=True)
-
-    # BlueBubbles (iMessage)
-    bluebubbles_server_url = getenv("BLUEBUBBLES_SERVER_URL")
-    bluebubbles_password = getenv("BLUEBUBBLES_PASSWORD")
-    if bluebubbles_server_url and bluebubbles_password:
-        extra = _enable_from_env(Platform.BLUEBUBBLES).extra
-        extra.update({
-            "server_url": bluebubbles_server_url.rstrip("/"),
-            "password": bluebubbles_password,
-            "webhook_host": getenv("BLUEBUBBLES_WEBHOOK_HOST", "127.0.0.1"),
-            "webhook_port": getenv_int("BLUEBUBBLES_WEBHOOK_PORT", 8645),
-            "webhook_path": getenv("BLUEBUBBLES_WEBHOOK_PATH", "/bluebubbles-webhook"),
-            "send_read_receipts": is_truthy_value(getenv("BLUEBUBBLES_SEND_READ_RECEIPTS", "true")),
-        })
-        bluebubbles_require_mention = getenv("BLUEBUBBLES_REQUIRE_MENTION")
-        if bluebubbles_require_mention is not None:
-            extra["require_mention"] = bluebubbles_require_mention.lower() in {"true", "1", "yes", "on"}
-        bluebubbles_mention_patterns = getenv("BLUEBUBBLES_MENTION_PATTERNS")
-        if bluebubbles_mention_patterns:
-            try:
-                extra["mention_patterns"] = json.loads(bluebubbles_mention_patterns)
-            except Exception:
-                extra["mention_patterns"] = _csv_list(bluebubbles_mention_patterns.replace("\n", ","))
-    _env_home_channel(config, Platform.BLUEBUBBLES, "BLUEBUBBLES_HOME_CHANNEL")
-
-    # QQ (Official Bot API v2)
-    qq_app_id = getenv("QQ_APP_ID")
-    qq_client_secret = getenv("QQ_CLIENT_SECRET")
-    if qq_app_id or qq_client_secret:
-        extra = _enable_from_env(Platform.QQBOT).extra
-        if qq_app_id:
-            extra["app_id"] = qq_app_id
-        if qq_client_secret:
-            extra["client_secret"] = qq_client_secret
-        _env_extras_stripped(extra, (
-            ("allow_from", "QQ_ALLOWED_USERS"),
-            ("group_allow_from", "QQ_GROUP_ALLOWED_USERS"),
-        ))
-        qq_home = getenv("QQBOT_HOME_CHANNEL", "").strip()
-        qq_home_name_env = "QQBOT_HOME_CHANNEL_NAME"
-        if not qq_home:
-            # Back-compat: accept the pre-rename name and log a one-time warning.
-            legacy_home = getenv("QQ_HOME_CHANNEL", "").strip()
-            if legacy_home:
-                qq_home = legacy_home
-                qq_home_name_env = "QQ_HOME_CHANNEL_NAME"
-                logging.getLogger(__name__).warning(
-                    "QQ_HOME_CHANNEL is deprecated; rename to QQBOT_HOME_CHANNEL "
-                    "in your .env for consistency with the platform key."
-                )
-        if qq_home:
-            config.platforms[Platform.QQBOT].home_channel = HomeChannel(
-                platform=Platform.QQBOT,
-                chat_id=qq_home,
-                name=getenv("QQBOT_HOME_CHANNEL_NAME") or getenv(qq_home_name_env, "Home"),
-                thread_id=(
-                    getenv("QQBOT_HOME_CHANNEL_THREAD_ID")
-                    or getenv("QQ_HOME_CHANNEL_THREAD_ID")
-                    or None
-                ),
-            )
-
-    # Yuanbao — YUANBAO_APP_ID preferred
-    yuanbao_app_id = getenv("YUANBAO_APP_ID") or getenv("YUANBAO_APP_KEY")
-    yuanbao_app_secret = getenv("YUANBAO_APP_SECRET")
-    if yuanbao_app_id and yuanbao_app_secret:
-        extra = _enable_from_env(Platform.YUANBAO).extra
-        extra["app_id"] = yuanbao_app_id
-        extra["app_secret"] = yuanbao_app_secret
-        _env_extras(extra, (
-            ("bot_id", "YUANBAO_BOT_ID"),
-            ("ws_url", "YUANBAO_WS_URL"),
-            ("api_domain", "YUANBAO_API_DOMAIN"),
-            ("route_env", "YUANBAO_ROUTE_ENV"),
-        ))
-        _env_home_channel(config, Platform.YUANBAO, "YUANBAO_HOME_CHANNEL")
-        _env_extras(extra, (
-            ("dm_policy", "YUANBAO_DM_POLICY", lambda v: v.strip().lower()),
-            ("dm_allow_from", "YUANBAO_DM_ALLOW_FROM"),
-            ("group_policy", "YUANBAO_GROUP_POLICY", lambda v: v.strip().lower()),
-            ("group_allow_from", "YUANBAO_GROUP_ALLOW_FROM"),
-        ))
-
-    # Session settings
-    for env, attr in (("SESSION_IDLE_MINUTES", "idle_minutes"), ("SESSION_RESET_HOUR", "at_hour")):
-        raw = getenv(env)
-        if raw:
-            with contextlib.suppress(ValueError):
-                setattr(config.default_reset_policy, attr, int(raw))
-
-    _enable_plugin_platforms_from_env(config)
-
-    # Relay (generic connector-fronted platform, EXPERIMENTAL). Enabled by GATEWAY_RELAY_URL (env)
-    # or gateway.relay_url (config.yaml). The adapter dials OUT to the connector (no inbound port),
-    # so it only needs Platform.RELAY present+enabled for start_gateway()'s connect loop. The
-    # connected-checker keys on extra["relay_url"], so mirror the URL into extra here.
-    relay_url_env = getenv("GATEWAY_RELAY_URL", "").strip()
-    relay_url_yaml = ""
-    existing_relay = config.platforms.get(Platform.RELAY)
-    if existing_relay is not None:
-        relay_url_yaml = str(existing_relay.extra.get("relay_url") or "").strip()
-    relay_url_val = relay_url_env or relay_url_yaml
-    if relay_url_val:
-        _enable_from_env(Platform.RELAY).extra["relay_url"] = relay_url_val.rstrip("/")
-
-    # Relay-exclusive: a GATEWAY_RELAY_URL env stamp marks a connector-fronted deployment where the
-    # connector owns every platform connection; a directly-connected adapter in the same process
-    # would be a second unmanaged ingress (duplicate deliveries, split sessions, a live socket that
-    # disarms scale-to-zero). So the env stamp disables all other messaging platforms — even ones
-    # explicitly enabled in config.yaml. Non-messaging surfaces (local, api_server, webhook — same
-    # exclusion set as the scale-to-zero arm gate) are untouched; relay via gateway.relay_url only
-    # keeps the old additive behavior. Opt-out GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true is likewise
-    # a deploy-stamp env var read through the profile-scope-aware getenv.
-    allow_direct = is_truthy_value(
-        getenv("GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS", "")
-    )
-    if relay_url_env and not allow_direct:
-        non_messaging = {Platform.LOCAL, Platform.API_SERVER, Platform.WEBHOOK}
-        for platform, platform_config in config.platforms.items():
-            if platform is Platform.RELAY or platform in non_messaging:
-                continue
-            if not platform_config.enabled:
-                continue
-            if platform_config.extra.get("_enabled_explicit"):
-                logger.warning(
-                    "Relay connector is configured via GATEWAY_RELAY_URL; "
-                    "disabling directly-connected platform '%s' even though "
-                    "it is explicitly enabled in this profile's configuration. "
-                    "All messaging goes through the connector on this "
-                    "deployment. Set GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true "
-                    "to keep direct platforms alongside the relay.",
-                    platform.value,
-                )
-            else:
-                logger.info(
-                    "Relay connector is configured via GATEWAY_RELAY_URL; "
-                    "disabling directly-connected platform '%s'.",
-                    platform.value,
-                )
-            platform_config.enabled = False
-
-    for platform_config in config.platforms.values():
-        platform_config.extra.pop("_enabled_explicit", None)
+    _impl(config)
