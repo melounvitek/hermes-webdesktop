@@ -2955,86 +2955,52 @@ def _refresh_nous_recommended_model(
     return None
 
 
-def _read_main_model() -> str:
-    """Read the active main model: process-local runtime override first, then config.yaml model.default.
+def _read_main_field(field: str, *, readonly: bool, lower: bool = False) -> str:
+    """Main ``model.<field>``: process-local runtime override (``set_runtime_main``) first, then config.yaml.
 
-    The override (``set_runtime_main``) wins so tools gating on "the active main
-    model" see the live CLI/gateway runtime, not the persisted default.
+    The override wins so tools gating on "the active main model" see the live
+    CLI/gateway runtime, not the persisted default. ``readonly`` picks
+    ``load_config_readonly`` (model/provider) vs ``load_config`` (api_key/base_url).
     """
-    override = _runtime_main_value("model")
+    override = _runtime_main_value(field)
     if isinstance(override, str) and override.strip():
-        return override.strip()
+        value = override.strip()
+        return value.lower() if lower else value
     try:
-        from hermes_cli.config import load_config_readonly
-        cfg = load_config_readonly()
+        from hermes_cli import config as _cfg_mod
+
+        cfg = (_cfg_mod.load_config_readonly if readonly else _cfg_mod.load_config)()
         model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, str) and model_cfg.strip():
+        if field == "model" and isinstance(model_cfg, str) and model_cfg.strip():
             return model_cfg.strip()
         if isinstance(model_cfg, dict):
-            default = model_cfg.get("default", "")
-            if isinstance(default, str) and default.strip():
-                return default.strip()
+            value = model_cfg.get("default" if field == "model" else field, "")
+            if isinstance(value, str) and value.strip():
+                value = value.strip()
+                return value.lower() if lower else value
     except Exception:
         pass
     return ""
+
+
+def _read_main_model() -> str:
+    """Active main model (runtime override, else config.yaml ``model.default``), or ""."""
+    return _read_main_field("model", readonly=True)
 
 
 def _read_main_provider() -> str:
     """Lowercase main provider id (runtime override first, then config.yaml), or ""."""
-    override = _runtime_main_value("provider")
-    if isinstance(override, str) and override.strip():
-        return override.strip().lower()
-    try:
-        from hermes_cli.config import load_config_readonly
-        cfg = load_config_readonly()
-        model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, dict):
-            provider = model_cfg.get("provider", "")
-            if isinstance(provider, str) and provider.strip():
-                return provider.strip().lower()
-    except Exception:
-        pass
-    return ""
+    return _read_main_field("provider", readonly=True, lower=True)
 
 
 def _read_main_api_key() -> str:
-    """Main model API key: runtime override first, then config.yaml ``model.api_key``.
-
-    Lets ``custom`` aux tasks with a base_url but empty api_key inherit the
-    main credentials instead of ``no-key-required``.
-    """
-    override = _runtime_main_value("api_key")
-    if isinstance(override, str) and override.strip():
-        return override.strip()
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
-        model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, dict):
-            key = model_cfg.get("api_key", "")
-            if isinstance(key, str) and key.strip():
-                return key.strip()
-    except Exception:
-        pass
-    return ""
+    """Main model API key; lets ``custom`` aux tasks with a base_url but empty api_key inherit main creds."""
+    return _read_main_field("api_key", readonly=False)
 
 
 def _read_main_base_url() -> str:
     """Main model base_url: runtime override first, then config.yaml."""
-    override = _runtime_main_value("base_url")
-    if isinstance(override, str) and override.strip():
-        return override.strip()
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
-        model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, dict):
-            base = model_cfg.get("base_url", "")
-            if isinstance(base, str) and base.strip():
-                return base.strip()
-    except Exception:
-        pass
-    return ""
+    return _read_main_field("base_url", readonly=False)
 
 
 def _resolve_moa_aggregator(preset_name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -3108,21 +3074,25 @@ _RELAY_AUX_CALL_CONTEXT: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
 )
 
 
+def _new_relay_aux_call_context(args: tuple, kwargs: dict) -> Dict[str, Any]:
+    task = args[0] if args else kwargs.get("task")
+    return {
+        "task": str(task or "unknown"),
+        "request_id": f"aux-{uuid.uuid4().hex}",
+        "attempt_count": 0,
+        "provider": "",
+        "model": "",
+        "response_model": None,
+        "api_mode": "chat_completions",
+    }
+
+
 def _relay_auxiliary_call(callback):
     """Give every physical retry in one auxiliary call a shared Relay identity."""
 
     @functools.wraps(callback)
     def wrapped(*args, **kwargs):
-        task = args[0] if args else kwargs.get("task")
-        token = _RELAY_AUX_CALL_CONTEXT.set({
-            "task": str(task or "unknown"),
-            "request_id": f"aux-{uuid.uuid4().hex}",
-            "attempt_count": 0,
-            "provider": "",
-            "model": "",
-            "response_model": None,
-            "api_mode": "chat_completions",
-        })
+        token = _RELAY_AUX_CALL_CONTEXT.set(_new_relay_aux_call_context(args, kwargs))
         try:
             return callback(*args, **kwargs)
         except BaseException:
@@ -3139,16 +3109,7 @@ def _relay_auxiliary_call_async(callback):
 
     @functools.wraps(callback)
     async def wrapped(*args, **kwargs):
-        task = args[0] if args else kwargs.get("task")
-        token = _RELAY_AUX_CALL_CONTEXT.set({
-            "task": str(task or "unknown"),
-            "request_id": f"aux-{uuid.uuid4().hex}",
-            "attempt_count": 0,
-            "provider": "",
-            "model": "",
-            "response_model": None,
-            "api_mode": "chat_completions",
-        })
+        token = _RELAY_AUX_CALL_CONTEXT.set(_new_relay_aux_call_context(args, kwargs))
         try:
             return await callback(*args, **kwargs)
         except BaseException:
