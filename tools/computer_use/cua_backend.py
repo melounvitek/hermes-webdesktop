@@ -28,42 +28,23 @@ from typing import Any, Dict, List, Optional
 from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.computer_use.backend import ActionResult, ComputerUseBackend
 from tools.computer_use.cua_backend_capture import (  # noqa: F401
-    _CaptureMixin,
-    _linux_x11_active_window_id,
-    _select_capture_target,
+    _CaptureMixin, _linux_x11_active_window_id, _select_capture_target,
 )
 from tools.computer_use.cua_backend_daemon import (  # noqa: F401
-    _EmbeddedCuaDaemon,
-    _embedded_daemon_spawn_command,
-    _resolve_cua_driver_app_path,
+    _EmbeddedCuaDaemon, _embedded_daemon_spawn_command, _resolve_cua_driver_app_path,
     _validate_cua_driver_app_signature,
 )
 from tools.computer_use.cua_backend_driver import (  # noqa: F401
-    _CUA_DRIVER_ARGS,
-    _CUA_DRIVER_CMD_ENV,
-    _cua_driver_supports_no_overlay,
-    _mcp_args_with_overlay_flag,
-    _resolve_mcp_invocation,
-    _wsl_windows_path_to_posix,
-    cua_driver_binary_available,
-    cua_driver_install_hint,
-    cua_driver_runtime_contract_status,
-    cua_driver_update_check,
-    cua_driver_update_nudge,
-    resolve_cua_driver_cmd,
+    _CUA_DRIVER_ARGS, _CUA_DRIVER_CMD_ENV, _cua_driver_supports_no_overlay,
+    _mcp_args_with_overlay_flag, _resolve_mcp_invocation, _wsl_windows_path_to_posix,
+    cua_driver_binary_available, cua_driver_install_hint, cua_driver_runtime_contract_status,
+    cua_driver_update_check, cua_driver_update_nudge, resolve_cua_driver_cmd,
 )
 from tools.computer_use.cua_backend_input import _InputMixin
 from tools.computer_use.cua_backend_parse import (  # noqa: F401
-    _action_result_from,
-    _extract_tool_result,
-    _image_dimensions_from_bytes,
-    _ingest_windows,
-    _is_placeholder_id,
-    _parse_elements_from_structured,
-    _parse_elements_from_tree,
-    _parse_key_combo,
-    _parse_xprop_net_active_window,
-    _windows_from_tool_result,
+    _action_result_from, _extract_tool_result, _image_dimensions_from_bytes, _ingest_windows,
+    _is_placeholder_id, _parse_elements_from_structured, _parse_elements_from_tree,
+    _parse_key_combo, _parse_xprop_net_active_window, _windows_from_tool_result,
 )
 from tools.computer_use.cua_backend_session import _AsyncBridge, _CuaDriverSession  # noqa: F401
 
