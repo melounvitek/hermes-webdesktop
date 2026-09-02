@@ -126,15 +126,13 @@ class SessionPortabilityMixin:
 
     def list_cron_job_runs(self, job_id: str, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
         """List the run sessions produced by a single cron job, newest first.
-
         Cron runs are flat sessions with id ``cron_{job_id}_{timestamp}``; they
         never compress or branch, so this skips ``list_sessions_rich``'s
         compression-chain CTE / leading-wildcard ``id_query`` path (which
         seeds from EVERY ``source='cron'`` row). Instead a ``[prefix,
         prefix_hi)`` index range scan on id filtered to ``source='cron'``, so
         work scales with the requested window. Returns the
-        ``list_sessions_rich`` row shape (``preview`` + ``last_active``).
-        """
+        ``list_sessions_rich`` row shape (``preview`` + ``last_active``)."""
         prefix = f"cron_{job_id}_"
         # Half-open upper bound: bump the final byte so the range covers exactly
         # the ids starting with ``prefix``.
@@ -249,8 +247,7 @@ class SessionPortabilityMixin:
         (never deleted) with ``end_reason='adopted_by_profile'`` — deliberately
         NOT in the recoverable set, so resurrection cannot undo an adoption.
         Returns the ``import_sessions`` dict plus ``adopted`` and
-        ``donor_retired`` (True only when EVERY segment's retirement applied).
-        """
+        ``donor_retired`` (True only when EVERY segment's retirement applied)."""
         payload = donor_db.export_session_lineage(session_id)
         if not payload:
             return {
@@ -298,14 +295,12 @@ class SessionPortabilityMixin:
 
     def _retire_donor_segment(self, donor_db: Any, seg_id: str) -> bool:
         """Archive one adopted donor segment; False when skipped or failed.
-
         TOCTOU close-out: the divergence guard used EXPORT-TIME counts; re-read
         both stores right before stamping so donor growth never lands behind a
         non-recoverable archive (equal-count CONTENT divergence is accepted —
         bytes stay in the donor either way, only reachability differs). A
         retirement failure must not fail the adoption (a later resume retries
-        idempotently), but never claims success it didn't have.
-        """
+        idempotently), but never claims success it didn't have."""
         try:
             donor_now = len(donor_db.get_messages(seg_id))
             local_now = len(self.get_messages(seg_id))
@@ -538,7 +533,6 @@ class SessionPortabilityMixin:
 
     def import_sessions(self, sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Import sessions exported by :meth:`export_session` or ``export_all``.
-
         Existing ids are skipped. A child keeps its parent only when the parent
         exists or is in the same payload; otherwise it is detached so partial
         imports pass FK validation. Gateway routing, handoff, rewind and other
@@ -548,8 +542,7 @@ class SessionPortabilityMixin:
         Activity contract: export INCLUDES ``last_activity_*`` (durable row
         fields) but import RESETS them to NULL — resurrecting a stale
         "working ..." label would fabricate activity the watchdog and listings
-        act on. Intentional asymmetry, pinned by regression test.
-        """
+        act on. Intentional asymmetry, pinned by regression test."""
         if not isinstance(sessions, list):
             raise ValueError("sessions must be a list")
         if len(sessions) > self._IMPORT_MAX_SESSIONS:

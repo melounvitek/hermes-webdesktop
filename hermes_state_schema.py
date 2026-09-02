@@ -128,7 +128,6 @@ def _q(ident: str) -> str:
 
 def schema_read_probe_statements() -> tuple:
     """SELECT statements that fail iff a live store is behind SCHEMA_SQL.
-
     Read-only opens skip ``_reconcile_columns()`` by design (no DDL against
     another profile's live DB), so healing callers (``_open_session_db_at_path``
     in the web server) run these probes after a read-only open: a missing
@@ -137,8 +136,7 @@ def schema_read_probe_statements() -> tuple:
     within days); ``LIMIT 0`` so zero rows are read. Column references are
     table-qualified: an unqualified double-quoted identifier that fails to
     resolve silently degrades to a string literal (SQLite misfeature), which
-    would make the probe pass on exactly the stale store it exists to catch.
-    """
+    would make the probe pass on exactly the stale store it exists to catch."""
     global _READ_PROBE_STATEMENTS
     if _READ_PROBE_STATEMENTS is None:
         tables = SessionSchemaMixin._parse_schema_columns(SCHEMA_SQL)
@@ -154,13 +152,11 @@ class SessionSchemaMixin:
 
     def _dedupe_legacy_system_prompts(self, cursor: sqlite3.Cursor) -> None:
         """Move inline prompt snapshots into the shared content-addressed table.
-
         Contention-safe: any ``OperationalError`` mid-loop returns instead of
         raising. Partial migration is safe — the legacy ``system_prompt``
         column stays a read fallback and the next schema init resumes.
         Propagating the error aborted schema init, left the version below
-        25, and re-entered this migration on every open (gateway crash loop).
-        """
+        25, and re-entered this migration on every open (gateway crash loop)."""
         try:
             rows = cursor.execute(
                 "SELECT id, system_prompt FROM sessions WHERE system_prompt IS NOT NULL"
@@ -226,13 +222,11 @@ class SessionSchemaMixin:
 
     def _migrate_broad_fts_update_triggers(self, cursor: sqlite3.Cursor) -> int:
         """Replace broad AFTER UPDATE FTS triggers with AFTER UPDATE OF variants.
-
         ``CREATE TRIGGER IF NOT EXISTS`` never replaces an existing broad
         trigger, so it would keep firing on every messages row touch. Drop
         still-broad UPDATE triggers and re-apply the current DDL. No FTS
         rebuild: correctness was already gated by WHEN clauses; OF only skips
-        unnecessary trigger evaluation. Returns the number dropped.
-        """
+        unnecessary trigger evaluation. Returns the number dropped."""
         # CJK is v23-only. Decide the layout before selecting destructive
         # candidates so the legacy branch never drops a trigger it won't recreate.
         legacy_layout = self._db_has_legacy_inline_fts(cursor)
@@ -336,8 +330,7 @@ class SessionSchemaMixin:
         Invalid UTF-8 in FTS content surfaces as a bare UnicodeDecodeError on
         some builds and as OperationalError("Could not decode to UTF-8 ...") on
         others; both are caught so the probe never raises into writable-init /
-        recovery flows. Anything else (malformed schema, corrupt vtable) re-raises.
-        """
+        recovery flows. Anything else (malformed schema, corrupt vtable) re-raises."""
         try:
             cursor.execute(f"SELECT * FROM {table_name} LIMIT 0")
             return True
@@ -371,8 +364,7 @@ class SessionSchemaMixin:
 
         After ``_FTS_HOLDER_ESCALATE_ATTEMPTS`` deferrals spanning
         ``_FTS_HOLDER_ESCALATE_SECONDS``, provably inactive orphan Desktop
-        backends are reaped and the holders re-checked.
-        """
+        backends are reaped and the holders re-checked."""
         now = time.time()
         record = None
         try:
@@ -436,12 +428,10 @@ class SessionSchemaMixin:
 
     def _recover_stale_fts(self, cursor: sqlite3.Cursor, *, legacy: bool, timeout_seconds=None) -> bool:
         """Atomically rebuild stale base/trigram indexes and resume syncing.
-
         *timeout_seconds* bounds the cross-process admission wait; None uses
         the full startup budget, ``0`` is the non-blocking in-process retry.
         Fails closed: foreign holders or a lost admission race leave the
-        breadcrumb set and defer to a later retry.
-        """
+        breadcrumb set and defer to a later retry."""
         foreign_holders = self._foreign_state_db_holders()
         if foreign_holders and self._defer_stale_fts_for_holders(cursor, foreign_holders):
             return False
@@ -504,10 +494,8 @@ class SessionSchemaMixin:
 
     def _recover_stale_fts_locked(self, cursor: sqlite3.Cursor, *, legacy: bool) -> bool:
         """Body of :meth:`_recover_stale_fts`; caller holds rebuild authority.
-
         One write transaction closes the dangerous gap: no canonical writer
-        can slip between the full rebuild and trigger restoration.
-        """
+        can slip between the full rebuild and trigger restoration."""
         try:
             trigram_status = self._fts_table_probe(cursor, "messages_fts_trigram")
         except (sqlite3.DatabaseError, UnicodeDecodeError):
@@ -592,14 +580,12 @@ class SessionSchemaMixin:
     @staticmethod
     def _parse_schema_columns(schema_sql: str) -> Dict[str, Dict[str, str]]:
         """Expected columns per table, parsed from SCHEMA_SQL.
-
         Executes the DDL in an in-memory SQLite database and reads PRAGMA
         table_info, so SQLite handles every syntax edge case (no regex).
         The result is memoized on disk keyed by a hash of the DDL (~85ms per
         startup otherwise; a pure function of the DDL text). Only the
         reference-side parse is cached — diffing the LIVE database still runs
-        every startup. A corrupt or stale cache degrades to recomputation.
-        """
+        every startup. A corrupt or stale cache degrades to recomputation."""
         cache_path = None
         schema_hash = hashlib.sha256(schema_sql.encode("utf-8")).hexdigest()
         try:
@@ -656,10 +642,8 @@ class SessionSchemaMixin:
 
     def _reconcile_columns(self, cursor: sqlite3.Cursor) -> None:
         """ADD every SCHEMA_SQL column missing from the live tables.
-
         Beets/sqlite-utils pattern: SCHEMA_SQL is the single source of truth;
-        column additions are declarative and need no version-gated migration.
-        """
+        column additions are declarative and need no version-gated migration."""
         expected = self._parse_schema_columns(SCHEMA_SQL)
         for table_name, declared_cols in expected.items():
             try:
@@ -706,14 +690,12 @@ class SessionSchemaMixin:
 
     def _heal_gateway_routing_pk(self, cursor: sqlite3.Cursor) -> None:
         """Rebuild ``gateway_routing`` when its PRIMARY KEY predates scoping.
-
         Early builds used ``session_key TEXT PRIMARY KEY``; the reconciler ADDs
         ``scope`` but SQLite cannot ALTER a PK, so the composite key never
         lands and every routing write fails (ON CONFLICT mismatch / UNIQUE
         violation across scopes) with per-save warning spam. Rebuild once,
         preserving rows; on a cross-scope session_key collision the newest
-        row wins.
-        """
+        row wins."""
         pk_cols = self._live_pk_columns(cursor, "gateway_routing")
         if pk_cols is None or pk_cols == ["scope", "session_key"]:
             return
@@ -743,7 +725,6 @@ class SessionSchemaMixin:
 
     def _heal_session_model_usage_pk(self, cursor: sqlite3.Cursor) -> None:
         """Rebuild ``session_model_usage`` when its PRIMARY KEY lacks ``task``.
-
         Installs already at v22+ when ``task`` landed carry the 5-column PK;
         the reconciler ADDs ``task`` as a bare nullable but SQLite cannot
         ALTER a PK, and the version-gated v22 rebuild is unreachable there.
@@ -755,8 +736,7 @@ class SessionSchemaMixin:
         violations, so an orphaned usage row (partial prune while accounting
         was broken) would abort the whole rebuild. PRAGMA foreign_keys is a
         no-op inside a transaction — fine here, _init_schema runs on an
-        isolation_level=None connection with no transaction open.
-        """
+        isolation_level=None connection with no transaction open."""
         pk_cols = self._live_pk_columns(cursor, "session_model_usage")
         if pk_cols is None or "task" in pk_cols:
             return
@@ -802,12 +782,10 @@ class SessionSchemaMixin:
 
     def _init_schema(self):
         """Create tables and FTS if missing, reconcile columns, run data migrations.
-
         SCHEMA_SQL is the single source of truth: column additions are
         declarative via _reconcile_columns(), so reordered migrations can
         never skip a column. schema_version remains for data migrations
-        (row transforms) that cannot be expressed declaratively.
-        """
+        (row transforms) that cannot be expressed declaratively."""
         # Startup-watchdog progress lease: on multi-GB state.db files the
         # reconciliation + data migrations are I/O-bound (near-zero CPU), which
         # the watchdog's CPU fallback would misread as a parked deadlock. Single
@@ -1051,14 +1029,12 @@ class SessionSchemaMixin:
 
     def _init_fts(self, cursor: sqlite3.Cursor) -> None:
         """Create/repair the FTS objects on an FTS5-capable runtime.
-
         The DDL runs even when the vtable exists so CREATE TRIGGER IF NOT
         EXISTS repairs trigger-only degradation from a no-FTS5 runtime.
         OPT-IN v23 boundary: a legacy v22 inline install must keep its inline
         schema + triggers (the v23 external-content DDL would create the
         trigram source VIEW and leave a mixed state), so it gets the legacy
-        DDL only; fresh/opted-in DBs get v23.
-        """
+        DDL only; fresh/opted-in DBs get v23."""
         legacy_fts = self._db_has_legacy_inline_fts(cursor)
         if self._fts_stale:
             if self._recover_stale_fts(cursor, legacy=legacy_fts):

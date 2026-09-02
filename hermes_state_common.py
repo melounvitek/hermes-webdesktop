@@ -33,8 +33,7 @@ _PREVIEW_MAX_CHARS = 60
 def escape_like(text: str) -> str:
     """Escape LIKE wildcards (``%``, ``_``) so derived text matches literally;
     pair with ``ESCAPE '\\'``.  ``_`` is common in branch names, titles and
-    paths, and a documented substring/prefix match must not silently widen.
-    """
+    paths, and a documented substring/prefix match must not silently widen."""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
@@ -205,8 +204,7 @@ def _legacy_reset_child_sql(alias: str, reasons_sql: str) -> str:
     """Pre-marker reset-continuation heuristic: child rides its parent's exact
     non-empty routing key and the parent ended at a reset boundary.  Shared by
     ``_RESET_CHILD_SQL`` and ``reopen_session()``'s marker-stamping UPDATE so
-    the two cannot drift; ``reasons_sql`` is a literal or placeholder list.
-    """
+    the two cannot drift; ``reasons_sql`` is a literal or placeholder list."""
     return (
         f"EXISTS (SELECT 1 FROM sessions p"
         f"            WHERE p.id = {alias}.parent_session_id"
@@ -904,7 +902,6 @@ def _reopen_lock(lock_path, handle):
 
 def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, description):
     """Bounded POSIX flock acquire with orphaned-holder staleness break.
-
     Returns ``(acquired, handle)``; *handle* may have been re-opened and the
     caller closes whichever comes back.  *acquired* is True, False (a holder
     kept the lock past the deadline), or None (non-contention ``OSError``,
@@ -918,8 +915,7 @@ def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, descript
     is unlinked and retaken on a fresh inode; the orphan's flock stays on the
     old inode blocking nobody.  Every successful acquire verifies its inode
     still names *lock_path*, so a racer that locked a dead inode retries
-    instead of running alongside the breaker.  Indeterminate liveness defers.
-    """
+    instead of running alongside the breaker.  Indeterminate liveness defers."""
     import fcntl
 
     deadline = time.monotonic() + timeout_seconds
@@ -1023,15 +1019,13 @@ def _acquire_msvcrt_lock(lock_path, handle, timeout):
 @contextlib.contextmanager
 def fts_rebuild_admission(db_path, *, timeout_seconds=None):
     """Serialize full structural FTS rebuilds on *db_path* across processes.
-
     Yields True when this process holds the authority, False when the bounded
     acquire timed out or the lock file could not be opened.  On False the
     caller must NOT rebuild (fail closed); the stale breadcrumb guarantees a
     retry.  ``db_path`` None (in-memory DB) yields True.
 
     Opportunistic in-process retries pass ``timeout_seconds=0`` so a live
-    holder never stalls a long-lived writer; the orphan break still applies.
-    """
+    holder never stalls a long-lived writer; the orphan break still applies."""
     if db_path is None:
         yield True
         return

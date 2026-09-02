@@ -89,10 +89,8 @@ def _search_filter_clauses(
     exclude_sources: Optional[List[str]], role_filter: Optional[List[str]],
 ) -> None:
     """Append the visibility/source/role predicates every search route shares.
-
     Live rows (active=1) AND compaction-archived rows (compacted=1) are
-    discoverable; only rewind/undo rows (active=0, compacted=0) are hidden.
-    """
+    discoverable; only rewind/undo rows (active=0, compacted=0) are hidden."""
     if not include_inactive:
         where.append("(m.active = 1 OR m.compacted = 1)")
     if source_filter is not None:
@@ -129,12 +127,10 @@ class SessionSearchMixin:
 
     def _try_incremental_merge_fts(self) -> None:
         """Run one bounded FTS5 merge pass without failing the completed write.
-
         The canonical write is already committed: no maintenance failure (even
         the bare SystemError CPython's sqlite3 layer can raise under
         cross-thread errmsg scrambling) may make the caller replay an
-        ambiguous, possibly-durable write.
-        """
+        ambiguous, possibly-durable write."""
         if not self._fts_enabled:
             return
         try:
@@ -188,13 +184,11 @@ class SessionSearchMixin:
 
     def _fts_rebuild_finish(self) -> None:
         """Finalize the deferred rebuild: boundary sweep + clear markers.
-
         The sweep is cheap insurance against a write that slipped through the
         migration-boundary instant (between high_water capture and trigger
         activation). The trigram half is gated on ``_trigram_available``:
         without the tokenizer/table an unconditional INSERT raises ``no such
-        table`` and aborts the whole rebuild (and optimize_fts_storage()).
-        """
+        table`` and aborts the whole rebuild (and optimize_fts_storage())."""
         sweeps = [self._BOUNDARY_SWEEP_SQL.format(table="messages_fts", extra="")]
         if self._trigram_available:
             sweeps.append(self._BOUNDARY_SWEEP_SQL.format(table="messages_fts_trigram", extra="AND m.role <> 'tool' "))
@@ -292,8 +286,7 @@ class SessionSearchMixin:
         FTS5 machinery is involved. Integer single-column-key tables drain with
         a high-water marker so each chunk's scan is bounded (restarting the
         scan was O(n²)); compound-key tables cannot use a scalar high-water and
-        keep the chunked ``LIMIT`` delete — they are small by construction.
-        """
+        keep the chunked ``LIMIT`` delete — they are small by construction."""
         with self._lock:
             trash = [
                 r[0] for r in self._conn.execute(
@@ -396,13 +389,11 @@ class SessionSearchMixin:
 
     def _reset_fts_index_to_empty(self, conn) -> None:
         """Truncate the v23 external-content tables via FTS5 ``'delete-all'``.
-
         A plain DELETE is O(rows) on external-content FTS5 and corrupts the
         index when indexed rows diverged from ``messages`` — exactly the shape
         this repair handles. The backfill worker replays its id range with no
         anti-join, so a replay from zero is only safe once the index is known
-        empty; this is how a partially indexed DB gets there.
-        """
+        empty; this is how a partially indexed DB gets there."""
         for tbl in ("messages_fts", "messages_fts_trigram"):
             try:
                 conn.execute(f"INSERT INTO {tbl}({tbl}) VALUES('delete-all')")
@@ -483,8 +474,7 @@ class SessionSearchMixin:
         Markers are written in the same BEGIN IMMEDIATE as the demote, BEFORE
         the empty v23 schema is created (``executescript`` implicitly COMMITs
         and cannot run inside that transaction), closing the crash window
-        where trash + empty v23 tables exist with no backfill claim.
-        """
+        where trash + empty v23 tables exist with no backfill claim."""
         def _stage(conn):
             self._drop_fts_triggers(conn)
             conn.execute("DROP VIEW IF EXISTS messages_fts_trigram_src")
@@ -737,8 +727,7 @@ class SessionSearchMixin:
         standalone compaction handoffs are role='user' rows with NO
         display_kind — invisible to SQL — so fetch with headroom and drop them
         in the decode loop; otherwise ``/undo N`` pairs an in-memory count that
-        excludes handoffs with a DB pick that includes them.
-        """
+        excludes handoffs with a DB pick that includes them."""
         active_clause = "" if include_inactive else " AND active = 1"
         display_clause = " AND (display_kind IS NULL OR display_kind = '')"
         fetch_limit = int(limit) * 2 + 5
@@ -943,8 +932,7 @@ class SessionSearchMixin:
         corruption-class ``DatabaseError`` there detaches the derived indexes
         (``_enter_fts_fail_open``) and answers from canonical rows — a live
         search never performs the unbounded rebuild. Non-FTS corruption, or
-        any ``DatabaseError`` without *fail_open*, propagates.
-        """
+        any ``DatabaseError`` without *fail_open*, propagates."""
         sql, params = self._fts_match_sql(table, match_query, order_by_sql, **kwargs)
         try:
             return [dict(row) for row in self._read_all(sql, params)]
@@ -1149,8 +1137,7 @@ class SessionSearchMixin:
         Rewound rows (``active=0, compacted=0``) are excluded by default;
         compaction-archived rows (``compacted=1``) ARE included so the
         pre-compaction transcript stays discoverable. ``include_inactive``
-        searches every row.
-        """
+        searches every row."""
         result_fields = self._search_message_fields(fields)
         if not query or not query.strip():
             return []
@@ -1224,8 +1211,7 @@ class SessionSearchMixin:
         index stores bigrams for runs >=2, so a single-char term only matches
         isolated chars — LIKE is broader). Then trigram (>=3 CJK chars per
         token), then a LIKE substring scan with one clause per non-operator
-        token so "广西 OR 桂林 OR 漓江" matches each term independently.
-        """
+        token so "广西 OR 桂林 OR 漓江" matches each term independently."""
         raw_query = query.strip('"').strip()
         match_query = _quote_fts_tokens(raw_query)
         if self._fts_cjk_available and not wants_tool_rows and not self._has_lone_cjk_run(raw_query):
@@ -1320,11 +1306,9 @@ class SessionSearchMixin:
 
     def optimize_fts(self) -> int:
         """Merge fragmented FTS5 segments into one per index (``'optimize'``).
-
         Pure maintenance: changes neither results nor ``snippet()`` output,
         only layout and speed; complementary to VACUUM, which then returns
-        the freed pages. Skips absent tables. Returns the number optimized.
-        """
+        the freed pages. Skips absent tables. Returns the number optimized."""
         optimized = 0
         with self._lock:
             for tbl in self._FTS_TABLES:
@@ -1369,7 +1353,6 @@ class SessionSearchMixin:
 
     def _merge_fts_incrementally(self, *, max_pages: int, max_commands: Optional[int] = None) -> int:
         """Run bounded FTS5 ``'merge'`` commands against each present index.
-
         A positive merge rank stops after ~that many output pages, so each
         command holds the write lock for milliseconds regardless of index size
         (``'optimize'`` takes 9-18 s per index on a 10 GB DB, exhausting a
@@ -1381,8 +1364,7 @@ class SessionSearchMixin:
         command's own INSERT is 1 change). Each command is its own implicit
         transaction, so competing processes interleave mid-pass. Missing tables
         are valid variants (optimize_fts_storage drops + backfills them live)
-        and are skipped; other SQLite errors propagate. Returns commands executed.
-        """
+        and are skipped; other SQLite errors propagate. Returns commands executed."""
         if isinstance(max_pages, bool) or not isinstance(max_pages, int):
             raise TypeError("max_pages must be an integer")
         if max_pages <= 0:
