@@ -1,31 +1,23 @@
 """Fold an agent-as-provider's own activity back into Hermes' turn state.
 
-Most providers are models: they ask Hermes to run a tool and Hermes runs it, so
-the transcript and the loop's counters see every tool iteration. Some providers
-are *agents* — an ACP CLI reached through a client shim, or the codex
-app-server, which takes an analogous path in ``agent/codex_runtime.py``. They
-execute their own read/edit/execute tools inside their own session, and by the
-time Hermes sees the response that work is already done.
+Some providers are *agents* (an ACP CLI behind a client shim; the codex
+app-server takes an analogous path in ``agent/codex_runtime.py``): they run
+their own tools inside their own session, so by the time Hermes sees the
+response that work is done. Those calls must never come back as pending
+``tool_calls`` (Hermes would re-run finished work), but two subsystems go blind
+if they are merely summarised into ``reasoning``:
 
-Those calls must never come back as pending ``tool_calls`` — Hermes would re-run
-finished work. But two subsystems go blind if they are merely summarised into
-the ``reasoning`` field:
+* the **self-improvement loop**, which replays ``messages`` to distil memories
+  and skills;
+* the **skill-review nudge**, whose ``_iters_since_skill`` counter only moves on
+  Hermes tool iterations.
 
-* the **self-improvement loop**, which distils memories and skills by replaying
-  ``messages`` — a one-line activity feed teaches it nothing;
-* the **skill-review nudge**, whose counter (``_iters_since_skill``) only moves
-  on Hermes tool iterations, of which there are none.
-
-So the provider client hands both back on the completion object and this helper
-applies them: ``hermes_projected_messages`` (already-completed
-``assistant(tool_calls=[…])`` + ``tool(result)`` history rows) and
-``hermes_provider_tool_iterations`` (how many tool iterations happened inside
-the provider). Clients that set neither are unaffected, which is every ordinary
-OpenAI-compatible provider.
-
-The splice is append-only and rows go through ``append_message`` like every
-other live-transcript append, so they carry a timestamp and persist the same way
-the codex projection path's rows do.
+So the client hands both back on the completion object —
+``hermes_projected_messages`` (completed ``assistant(tool_calls=[…])`` +
+``tool(result)`` rows) and ``hermes_provider_tool_iterations`` — and this helper
+applies them. Ordinary OpenAI-compatible clients set neither and are unaffected.
+The splice is append-only through ``append_message`` so rows carry a timestamp
+and persist like any other live-transcript append.
 """
 
 from __future__ import annotations
@@ -59,9 +51,8 @@ def splice_provider_projection(
             getattr(agent, "provider", "?"),
         )
 
-    raw_iters = getattr(response, "hermes_provider_tool_iterations", 0)
     try:
-        iterations = int(raw_iters or 0)
+        iterations = int(getattr(response, "hermes_provider_tool_iterations", 0) or 0)
     except (TypeError, ValueError):
         iterations = 0
     if iterations > 0:

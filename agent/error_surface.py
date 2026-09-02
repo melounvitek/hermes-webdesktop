@@ -1,29 +1,20 @@
 """Structured error-surface descriptors for UI clients (Desktop/TUI).
 
-Maps the internal failure taxonomy (``agent.error_classifier.FailoverReason``
-values carried in turn results as ``failure_reason``, or raw exceptions from
-the turn dispatcher) onto a small, stable wire descriptor:
+Maps the internal failure taxonomy (``FailoverReason`` values carried in turn
+results as ``failure_reason``, or raw exceptions from the turn dispatcher)
+onto a small, stable wire descriptor::
 
     {"layer": <ui layer>, "code": <specific code>, "retryable": <bool>}
 
-The *layer* names which part of the stack failed, so clients can say
-"Provider error" / "Gateway error" instead of toasting an opaque string and
-leaving the user to guess whether the model, the gateway, or the app froze:
+Layers (wire values): provider (model API rejected/failed the call), endpoint
+(user-configured custom/local endpoint transport failure), streaming (SSE
+dropped mid-turn), auth, billing (fallback signal; clients usually have a
+richer ``billing_block``), gateway (local runtime errored), disk (disk full /
+persistence failure).
 
-    provider   — the model/provider API rejected or failed the call
-    endpoint   — a user-configured custom/local endpoint failed (transport)
-    streaming  — the provider's SSE/stream connection dropped mid-turn
-    auth       — authentication/authorization failed
-    billing    — credits/quota wall (clients usually have a richer
-                 billing_block descriptor; this is the fallback signal)
-    gateway    — the local gateway/agent runtime itself errored
-    runtime    — agent initialization / local environment failure
-    disk       — local disk full / persistence failure
-
-This module is intentionally dependency-light and NEVER raises: surfacing
-diagnostics must not be able to break the error path it describes. Clients
-treat the descriptor as advisory — an absent or partial descriptor falls
-back to today's string-sniffing behavior (older backends keep working).
+Dependency-light and NEVER raises: surfacing diagnostics must not break the
+error path it describes. Descriptors are advisory — clients fall back to
+string sniffing when absent or partial.
 """
 
 from __future__ import annotations
@@ -33,19 +24,16 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# UI layers (wire values — stable contract with desktop/TUI clients).
 LAYER_PROVIDER = "provider"
 LAYER_ENDPOINT = "endpoint"
 LAYER_STREAMING = "streaming"
 LAYER_AUTH = "auth"
 LAYER_BILLING = "billing"
 LAYER_GATEWAY = "gateway"
-LAYER_RUNTIME = "runtime"
 LAYER_DISK = "disk"
 
-# failure_reason (FailoverReason.value) → UI layer. Reasons not listed fall
-# back to LAYER_PROVIDER: every FailoverReason is produced by classifying a
-# provider API call, so "the provider call failed" is the honest default.
+# failure_reason → UI layer. Unlisted reasons fall back to LAYER_PROVIDER:
+# every FailoverReason comes from classifying a provider call.
 _REASON_TO_LAYER = {
     "auth": LAYER_AUTH,
     "auth_permanent": LAYER_AUTH,
@@ -53,75 +41,34 @@ _REASON_TO_LAYER = {
     "billing_unverified": LAYER_BILLING,
 }
 
-# Transport-ish reasons: the failure is between us and the base_url, not a
-# verdict the provider returned. On a custom/local endpoint these point at
-# the user's endpoint config, so they surface as LAYER_ENDPOINT there.
-_TRANSPORT_REASONS = {
-    "timeout",
-    "ssl_cert_verification",
-}
+# Failures between us and the base_url (not a provider verdict); on a
+# custom/local endpoint they point at the user's endpoint config.
+_TRANSPORT_REASONS = {"timeout", "ssl_cert_verification"}
 
-# Reasons that are deterministic for the request — a bare "Retry" repeats the
-# same failure, so clients shouldn't lead with it. Fallback only: results
-# from current backends carry the classifier's own verdict in
-# ``failure_retryable`` and never consult this set. Kept in sync with
-# ``classify_api_error``'s retryable=False verdicts.
+# Deterministic for the request — a bare "Retry" repeats the failure. Fallback
+# only: current backends stamp the classifier's verdict in ``failure_retryable``.
+# Kept in sync with ``classify_api_error``'s retryable=False verdicts.
 _NON_RETRYABLE_REASONS = {
-    "auth",
-    "auth_permanent",
-    "billing",
-    "billing_unverified",
-    "content_policy_blocked",
-    "provider_policy_blocked",
-    "model_not_found",
-    "format_error",
-    "ssl_cert_verification",
+    "auth", "auth_permanent", "billing", "billing_unverified", "content_policy_blocked",
+    "provider_policy_blocked", "model_not_found", "format_error", "ssl_cert_verification",
 }
 
-# Providers whose base_url is user-supplied rather than a known vendor —
-# transport failures against these are endpoint-config problems.
-_CUSTOM_ENDPOINT_PROVIDERS = {
-    "custom",
-    "local",
-    "llama.cpp",
-    "llamacpp",
-    "ollama",
-    "lmstudio",
-    "vllm",
-}
+# Providers whose base_url is user-supplied rather than a known vendor.
+_CUSTOM_ENDPOINT_PROVIDERS = {"custom", "local", "llama.cpp", "llamacpp", "ollama", "lmstudio", "vllm"}
 
-# Message fragments that mark a mid-stream connection drop. Deliberately
-# narrow: these strings come from our own retry-exhaustion summaries and the
-# OpenAI SDK's stream-abort errors.
+# Mid-stream drop markers. Deliberately narrow: our own retry-exhaustion
+# summaries plus the OpenAI SDK's stream-abort errors.
 _STREAM_DROP_FRAGMENTS = (
-    "stream connection",
-    "peer closed connection",
-    "incomplete chunked read",
-    "connection broken",
-    "stream ended prematurely",
-    "sse",
-    "mid-stream",
+    "stream connection", "peer closed connection", "incomplete chunked read",
+    "connection broken", "stream ended prematurely", "sse", "mid-stream",
 )
 
-# Exception modules that indicate the failure came from an API/transport call
-# (vs. a bug in our own dispatcher code, which is a gateway-layer failure).
-# Covers every SDK family our provider adapters raise from: OpenAI-compatible
-# (openai/httpx/httpcore), Anthropic, Bedrock (botocore/boto3), Google
-# (google.*/grpc), plus raw transports (requests/aiohttp/ssl/socket/urllib).
+# Exception top-level modules that mean "API/transport call failed" (vs. a bug
+# in our dispatcher = gateway layer): every SDK family our adapters raise from
+# plus raw transports.
 _API_EXC_MODULE_PREFIXES = (
-    "openai",
-    "httpx",
-    "httpcore",
-    "anthropic",
-    "botocore",
-    "boto3",
-    "google",
-    "grpc",
-    "requests",
-    "aiohttp",
-    "ssl",
-    "socket",
-    "urllib",
+    "openai", "httpx", "httpcore", "anthropic", "botocore", "boto3", "google",
+    "grpc", "requests", "aiohttp", "ssl", "socket", "urllib",
 )
 
 
@@ -135,17 +82,10 @@ def _looks_like_stream_drop(message: str) -> bool:
     return any(fragment in msg for fragment in _STREAM_DROP_FRAGMENTS)
 
 
-def _surface(
-    layer: str,
-    code: str,
-    retryable: bool,
-    provider: str = "",
-    model: str = "",
-) -> dict:
+def _surface(layer: str, code: str, retryable: bool, provider: str = "", model: str = "") -> dict:
     out = {"layer": layer, "code": code, "retryable": bool(retryable)}
-    # The failing session's identity, captured at classification time so
-    # clients report the model/provider that actually failed — not whatever
-    # the foreground composer points at when a button is clicked later.
+    # Identity captured at classification time, so clients report the session
+    # that actually failed — not whatever the composer points at later.
     if provider:
         out["provider"] = provider
     if model:
@@ -153,14 +93,20 @@ def _surface(
     return out
 
 
-def build_error_surface_from_result(
-    result: Any, provider: str = "", model: str = ""
-) -> Optional[dict]:
+def _disk_full(candidate: Any) -> bool:
+    try:
+        from hermes_state import is_disk_full_error
+
+        return bool(is_disk_full_error(candidate))
+    except Exception:  # pragma: no cover - defensive import guard
+        return False
+
+
+def build_error_surface_from_result(result: Any, provider: str = "", model: str = "") -> Optional[dict]:
     """Descriptor for a returned-error turn result (``failed=True`` dicts).
 
-    Reads the ``failure_reason`` the conversation loop already stamps
-    (a ``FailoverReason.value``) plus the error text, and maps them onto a
-    UI layer. Returns None when the result carries no failure signal.
+    Uses the stamped ``failure_reason`` plus error text. None when the result
+    carries no failure signal.
     """
     try:
         if not isinstance(result, dict):
@@ -171,14 +117,9 @@ def build_error_surface_from_result(
             return None
 
         # Disk-full wins outright: the fix (free space) is unrelated to the
-        # provider stack, and hermes_state owns the pattern list.
-        try:
-            from hermes_state import is_disk_full_error
-
-            if error_text and is_disk_full_error(error_text):
-                return _surface(LAYER_DISK, "disk_full", False, provider, model)
-        except Exception:  # pragma: no cover - defensive import guard
-            pass
+        # provider stack; hermes_state owns the pattern list.
+        if error_text and _disk_full(error_text):
+            return _surface(LAYER_DISK, "disk_full", False, provider, model)
 
         if result.get("billing_block") or reason in ("billing", "billing_unverified"):
             return _surface(LAYER_BILLING, reason or "billing", False, provider, model)
@@ -197,9 +138,8 @@ def build_error_surface_from_result(
                 layer = LAYER_STREAMING
             else:
                 layer = LAYER_PROVIDER
-        # Prefer the classifier's own retry verdict when the result carries it
-        # (conversation_loop stamps ``failure_retryable`` next to
-        # ``failure_reason``); the reason-set fallback covers older results.
+        # Prefer the classifier's own verdict (``failure_retryable``); the
+        # reason-set fallback covers older results.
         retryable = result.get("failure_retryable")
         if not isinstance(retryable, bool):
             retryable = reason not in _NON_RETRYABLE_REASONS
@@ -209,31 +149,20 @@ def build_error_surface_from_result(
         return None
 
 
-def build_error_surface_from_exception(
-    exc: BaseException, provider: str = "", model: str = ""
-) -> Optional[dict]:
+def build_error_surface_from_exception(exc: BaseException, provider: str = "", model: str = "") -> Optional[dict]:
     """Descriptor for an exception that escaped the turn dispatcher.
 
-    API/transport exceptions are classified through the real
-    ``classify_api_error`` pipeline (same taxonomy as the retry loop);
-    anything else is a gateway-layer failure — a bug or environment problem
-    in our own dispatcher, not a provider verdict.
+    API/transport exceptions go through ``classify_api_error`` (same taxonomy
+    as the retry loop); anything else is a gateway-layer failure.
     """
     try:
         message = str(exc) or type(exc).__name__
 
-        try:
-            from hermes_state import is_disk_full_error
-
-            if is_disk_full_error(exc):
-                return _surface(LAYER_DISK, "disk_full", False, provider, model)
-        except Exception:  # pragma: no cover - defensive import guard
-            pass
+        if _disk_full(exc):
+            return _surface(LAYER_DISK, "disk_full", False, provider, model)
 
         exc_module = type(exc).__module__ or ""
-        api_like = exc_module.split(".")[0] in _API_EXC_MODULE_PREFIXES or hasattr(
-            exc, "status_code"
-        )
+        api_like = exc_module.split(".")[0] in _API_EXC_MODULE_PREFIXES or hasattr(exc, "status_code")
 
         if not api_like or not isinstance(exc, Exception):
             return _surface(LAYER_GATEWAY, type(exc).__name__, True, provider, model)
@@ -241,15 +170,8 @@ def build_error_surface_from_exception(
         from agent.error_classifier import classify_api_error
 
         classified = classify_api_error(exc, provider=provider, model=model)
-        reason = classified.reason.value
-
-        synthetic = {
-            "error": classified.message or message,
-            "failure_reason": reason,
-        }
-        surface = build_error_surface_from_result(
-            synthetic, provider=provider, model=model
-        )
+        synthetic = {"error": classified.message or message, "failure_reason": classified.reason.value}
+        surface = build_error_surface_from_result(synthetic, provider=provider, model=model)
         if surface is not None:
             surface["retryable"] = bool(classified.retryable)
         return surface
