@@ -13,7 +13,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Coroutine
+from typing import Any, Coroutine, Optional
 from tools.mcp_tool_common import _core
 
 logger = logging.getLogger("tools.mcp_tool")
@@ -168,6 +168,13 @@ def _wrap_with_dashboard_oauth_flow(coro):
     return _scoped()
 
 
+def _running_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """The MCP loop when it is up, else None (read under ``_lock``)."""
+    with _core._lock:
+        loop = _core._mcp_loop
+    return loop if loop is not None and loop.is_running() else None
+
+
 def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
     """Schedule a coroutine on the MCP loop and block until done.
 
@@ -178,9 +185,8 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
     from tools.interrupt import is_interrupted
     from agent.async_utils import safe_schedule_threadsafe
 
-    with _core._lock:
-        loop = _core._mcp_loop
-    if loop is None or not loop.is_running():
+    loop = _running_loop()
+    if loop is None:
         if asyncio.iscoroutine(coro_or_factory):
             coro_or_factory.close()
         raise RuntimeError("MCP event loop is not running")
@@ -240,11 +246,7 @@ def _signal_reconnect(server: Any) -> bool:
     if event is None:
         return False
     loop = _core._mcp_loop
-    if (
-        isinstance(event, asyncio.Event)
-        and loop is not None
-        and loop.is_running()
-    ):
+    if isinstance(event, asyncio.Event) and loop is not None and loop.is_running():
         loop.call_soon_threadsafe(event.set)
     else:
         event.set()
@@ -307,7 +309,6 @@ def _signal_reconnect_and_wait(
     loop = _core._mcp_loop
     if loop is None or not loop.is_running():
         return False
-
     old_session = getattr(srv, "session", None)
 
     def _request_reconnect() -> None:

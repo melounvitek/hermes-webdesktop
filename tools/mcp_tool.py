@@ -127,6 +127,7 @@ from tools.mcp_tool_transport import MCPServerTransportMixin
 from tools.mcp_tool_server_run import MCPServerRunMixin
 from tools.mcp_tool_health import MCPServerHealthMixin
 from tools.mcp_tool_loop import (  # noqa: F401 -- re-exported for callers and test patches
+    _running_loop,
     _LockCookie, _acquire_lock_on_fh, _try_acquire_mcp_discovery_lock,
     _mcp_loop_exception_handler, _wrap_with_home_override,
     _wrap_with_dashboard_oauth_flow, _run_on_mcp_loop, _signal_reconnect,

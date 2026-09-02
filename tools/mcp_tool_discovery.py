@@ -81,9 +81,8 @@ def _request_lazy_reconnect(server_name: str, server: _core.MCPServerTask) -> bo
     if not server._is_recycled_stdio():
         return False
 
-    with _core._lock:
-        loop = _core._mcp_loop
-    if loop is None or not loop.is_running():
+    loop = _core._running_loop()
+    if loop is None:
         return False
 
     def _wake() -> None:
