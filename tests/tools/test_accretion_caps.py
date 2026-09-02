@@ -30,8 +30,9 @@ class TestReadTrackerCaps:
     def test_read_history_capped(self, monkeypatch):
         """read_history set is bounded by _READ_HISTORY_CAP."""
         from tools import file_tools as ft
+        from tools import file_tools_read_tracking as rt
 
-        monkeypatch.setattr(ft, "_READ_HISTORY_CAP", 10)
+        monkeypatch.setattr(rt, "_READ_HISTORY_CAP", 10)
         task_data = {
             "last_key": None,
             "consecutive": 0,
@@ -46,10 +47,11 @@ class TestReadTrackerCaps:
     def test_live_cap_applied_after_read_add(self, tmp_path, monkeypatch):
         """Live read_file path enforces caps."""
         from tools import file_tools as ft
+        from tools import file_tools_read_tracking as rt
 
-        monkeypatch.setattr(ft, "_READ_HISTORY_CAP", 3)
-        monkeypatch.setattr(ft, "_DEDUP_CAP", 3)
-        monkeypatch.setattr(ft, "_READ_TIMESTAMPS_CAP", 3)
+        monkeypatch.setattr(rt, "_READ_HISTORY_CAP", 3)
+        monkeypatch.setattr(rt, "_DEDUP_CAP", 3)
+        monkeypatch.setattr(rt, "_READ_TIMESTAMPS_CAP", 3)
 
         # Create 10 distinct files and read each once.
         for i in range(10):

@@ -308,7 +308,7 @@ class SearchMixin:
         existing, missing = [], []
         for p in parts:
             expanded = self._expand_path(p)
-            (existing if self._path_exists(expanded) else missing).append(expanded)
+            (existing if "exists" in self._path_exists_probe(expanded) else missing).append(expanded)
         if not existing:
             return None
 

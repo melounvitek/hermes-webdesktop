@@ -45,10 +45,10 @@ logger = logging.getLogger(__name__)
 
 # Allowlist: "namespace.backend" -> pip specs matching the pyproject extra.
 # Pins are exact (no ranges, security posture); bump here AND in pyproject.
-# Shared patched floors (prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/
-# GHSA-mq44-7p77-q5h7; CVE-2026-48710 BadHost) — keep in sync with pyproject.
-_AIOHTTP_PIN = "aiohttp==3.14.3"
-_STARLETTE_PIN = "starlette==1.3.1"
+# Shared patched floors, spelled out as literals in every feature because
+# tests/test_packaging_metadata.py checks them by AST: aiohttp==3.14.3 (prior
+# CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7) and
+# starlette==1.3.1 (CVE-2026-48710 BadHost) — keep in sync with pyproject.
 
 LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # ─── Inference providers ───────────────────────────────────────────────
@@ -140,19 +140,19 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "platform.discord": (
         "discord.py[voice]==2.7.1",
         "brotlicffi==1.2.0.1",
-        _AIOHTTP_PIN,
+        "aiohttp==3.14.3",
     ),
     "platform.slack": (
         "slack-bolt==1.30.0",
         "slack-sdk==3.43.0",
-        _AIOHTTP_PIN,
+        "aiohttp==3.14.3",
     ),
     "platform.matrix": (
         "mautrix[encryption]==0.21.1",
         "aiosqlite==0.22.1",
         "asyncpg==0.31.0",
         "aiohttp-socks==0.11.0",
-        _AIOHTTP_PIN,
+        "aiohttp==3.14.3",
     ),
     "platform.dingtalk": (
         "dingtalk-stream==0.24.3",
@@ -166,7 +166,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # WeCom callback adapter parses untrusted XML POST bodies -> defusedxml.
     "platform.wecom_callback": ("defusedxml==0.7.1",),
     # Teams pulls a heavy tree (msal, dependency-injector); also the `teams` extra.
-    "platform.teams": ("microsoft-teams-apps==2.0.13.4", _AIOHTTP_PIN),
+    "platform.teams": ("microsoft-teams-apps==2.0.13.4", "aiohttp==3.14.3"),
 
     # ─── Terminal backends ─────────────────────────────────────────────────
     "terminal.modal": ("modal==1.3.4",),
@@ -191,7 +191,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "tool.dashboard": (
         "fastapi==0.133.1",
         "uvicorn[standard]==0.41.0",
-        _STARLETTE_PIN,
+        "starlette==1.3.1",
         "python-multipart==0.0.32",  # FastAPI UploadFile/Form streaming uploads
     ),
     # Pillow and firecrawl-anydoc are CORE deps; these entries are the self-heal
@@ -204,7 +204,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "tool.computer_use": (
         "mcp==2.0.0",
         "httpx2==2.7.0",  # mcp 2.x HTTP stack — sync with pyproject [computer-use]
-        _STARLETTE_PIN,
+        "starlette==1.3.1",
     ),
     # huggingface-hub is SHARED with transformers (>=1.5.0,<2 via Hindsight) and
     # active_features() marks it active on mere presence, so `hermes update`
