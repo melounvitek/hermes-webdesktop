@@ -2114,49 +2114,32 @@ def _fetch_anthropic_models(
         try:
             data = _do_request(headers)
         except urllib.error.HTTPError as http_err:
-            # Reactive recovery for OAuth subscriptions that reject the 1M
-            # context beta with 400 "long context beta is not yet available
-            # for this subscription". Retry once without the beta; re-raise
+            # Reactive recovery for OAuth subscriptions that 400 the 1M context beta ("long context
+            # beta is not yet available for this subscription"): retry once without it; re-raise
             # anything else so the outer except logs it.
-            if (
-                is_oauth
-                and http_err.code == 400
-            ):
-                try:
-                    body_text = http_err.read().decode(errors="ignore").lower()
-                except Exception:
-                    body_text = ""
-                if "long context beta" in body_text and "not yet available" in body_text:
-                    headers["anthropic-beta"] = ",".join(
-                        [b for b in _COMMON_BETAS if b != _CONTEXT_1M_BETA]
-                        + list(_OAUTH_ONLY_BETAS)
-                    )
-                    data = _do_request(headers)
-                else:
-                    raise
-            else:
+            if not (is_oauth and http_err.code == 400):
                 raise
+            try:
+                body_text = http_err.read().decode(errors="ignore").lower()
+            except Exception:
+                body_text = ""
+            if not ("long context beta" in body_text and "not yet available" in body_text):
+                raise
+            headers["anthropic-beta"] = ",".join(
+                [b for b in _COMMON_BETAS if b != _CONTEXT_1M_BETA] + list(_OAUTH_ONLY_BETAS)
+            )
+            data = _do_request(headers)
         models = [m["id"] for m in data.get("data", []) if m.get("id")]
-        # Sort: latest/largest first (opus > sonnet > haiku, higher version first)
-        return sorted(models, key=lambda m: (
-            "opus" not in m,      # opus first
-            "sonnet" not in m,    # then sonnet
-            "haiku" not in m,     # then haiku
-            m,                    # alphabetical within tier
-        ))
+        # opus, then sonnet, then haiku; alphabetical within tier.
+        return sorted(models, key=lambda m: ("opus" not in m, "sonnet" not in m, "haiku" not in m, m))
     except Exception as e:
         logger.debug("Failed to fetch Anthropic models: %s", e)
         return None
 
 
 def _payload_items(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict):
-        data = payload.get("data", [])
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-    return []
+    data = payload.get("data", []) if isinstance(payload, dict) else payload
+    return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
 
 
 def copilot_default_headers(*, is_agent_turn: bool = True) -> dict[str, str]:
@@ -2247,10 +2230,7 @@ def fetch_github_model_catalog(
 
     attempts: list[dict[str, str]] = []
     if api_key:
-        attempts.append({
-            **copilot_default_headers(),
-            "Authorization": f"Bearer {api_key}",
-        })
+        attempts.append({**copilot_default_headers(), "Authorization": f"Bearer {api_key}"})
     attempts.append(copilot_default_headers())
 
     for headers in attempts:
@@ -2293,32 +2273,20 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
     """
     global _copilot_context_cache, _copilot_context_cache_time
 
-    # Serve from cache if fresh
     if _copilot_context_cache and (time.time() - _copilot_context_cache_time < _COPILOT_CONTEXT_CACHE_TTL):
-        if model_id in _copilot_context_cache:
-            return _copilot_context_cache[model_id]
-        # Cache is fresh but model not in it — don't re-fetch
-        return None
+        return _copilot_context_cache.get(model_id)  # fresh cache: a miss does not re-fetch
 
-    # Fetch and populate cache
     catalog = fetch_github_model_catalog(api_key=api_key)
     if not catalog:
         return None
-
     cache: dict[str, int] = {}
     for item in catalog:
         mid = str(item.get("id") or "").strip()
-        if not mid:
-            continue
-        caps = item.get("capabilities") or {}
-        limits = caps.get("limits") or {}
-        max_prompt = limits.get("max_prompt_tokens")
-        if isinstance(max_prompt, int) and max_prompt > 0:
+        max_prompt = ((item.get("capabilities") or {}).get("limits") or {}).get("max_prompt_tokens")
+        if mid and isinstance(max_prompt, int) and max_prompt > 0:
             cache[mid] = max_prompt
-
     _copilot_context_cache = cache
     _copilot_context_cache_time = time.time()
-
     return cache.get(model_id)
 
 
@@ -2344,13 +2312,7 @@ def _copilot_catalog_ids(
 ) -> set[str]:
     if catalog is None and api_key:
         catalog = fetch_github_model_catalog(api_key=api_key)
-    if not catalog:
-        return set()
-    return {
-        str(item.get("id") or "").strip()
-        for item in catalog
-        if str(item.get("id") or "").strip()
-    }
+    return {mid for item in (catalog or []) if (mid := str(item.get("id") or "").strip())}
 
 
 def normalize_copilot_model_id(
@@ -2371,12 +2333,7 @@ def normalize_copilot_model_id(
     candidates = [raw]
     if "/" in raw:
         candidates.append(raw.split("/", 1)[1].strip())
-
-    if raw.endswith("-mini"):
-        candidates.append(raw[:-5])
-    if raw.endswith("-nano"):
-        candidates.append(raw[:-5])
-    if raw.endswith("-chat"):
+    if raw.endswith(("-mini", "-nano", "-chat")):
         candidates.append(raw[:-5])
 
     seen: set[str] = set()
@@ -2430,24 +2387,14 @@ def copilot_model_api_mode(
     Uses the model ID pattern (matching opencode's approach) as the primary signal. Falls back to
     the catalog's ``supported_endpoints`` only for models not covered by the pattern check.
     """
-    # Fetch the catalog once so normalize + endpoint check share it
-    # (avoids two redundant network calls for non-GPT-5 models).
-    if catalog is None and api_key:
+    if catalog is None and api_key:  # fetch once so normalize + endpoint check share it
         catalog = fetch_github_model_catalog(api_key=api_key)
-
     normalized = normalize_copilot_model_id(model_id, catalog=catalog, api_key=api_key)
-    if not normalized:
-        return "chat_completions"
-
-    # Primary: model ID pattern (matches opencode's shouldUseCopilotResponsesApi)
-    if _should_use_copilot_responses_api(normalized):
+    if normalized and _should_use_copilot_responses_api(normalized):
         return "codex_responses"
-
-    # Copilot's Claude models are exposed through its OpenAI-compatible chat
-    # endpoint, not through Hermes' native Anthropic adapter. The live catalog may
-    # advertise /v1/messages, but the Copilot token/header scheme is handled by
-    # the OpenAI client path; selecting anthropic_messages would send the wrong
-    # auth/wire shape. Keep non-GPT Copilot slots on chat_completions.
+    # Copilot's Claude models go through its OpenAI-compatible chat endpoint, not Hermes' native
+    # Anthropic adapter: the catalog may advertise /v1/messages, but the Copilot token/header
+    # scheme lives in the OpenAI client path, so anthropic_messages would send the wrong wire shape.
     return "chat_completions"
 
 
@@ -2460,16 +2407,10 @@ def azure_foundry_model_api_mode(model_name: Optional[str]) -> Optional[str]:
     raw = str(model_name or "").strip().lower()
     if not raw:
         return None
-    # Strip any vendor/ prefix a user may have copied from OpenRouter / Copilot.
-    if "/" in raw:
-        raw = raw.rsplit("/", 1)[-1]
-    # gpt-5-mini speaks chat completions on Copilot but Azure Foundry deploys
-    # the full gpt-5 family uniformly on Responses API — don't carve an
-    # exception here.
-    for prefix in _AZURE_FOUNDRY_RESPONSES_PREFIXES:
-        if raw.startswith(prefix):
-            return "codex_responses"
-    return None
+    # Strip any vendor/ prefix copied from OpenRouter / Copilot. Unlike Copilot, Azure Foundry
+    # deploys the whole gpt-5 family (incl. gpt-5-mini) on Responses — no exception carved here.
+    raw = raw.rsplit("/", 1)[-1]
+    return "codex_responses" if raw.startswith(tuple(_AZURE_FOUNDRY_RESPONSES_PREFIXES)) else None
 
 
 def opencode_provider_family(provider_id: Optional[str]) -> Optional[str]:
@@ -2484,13 +2425,7 @@ def opencode_provider_family(provider_id: Optional[str]) -> Optional[str]:
     canonical = normalize_provider(provider_id)
     if canonical in {"opencode-zen", "opencode-go", "opencode-free"}:
         return canonical
-    if raw.startswith("opencode-free"):
-        return "opencode-free"
-    if raw.startswith("opencode-go"):
-        return "opencode-go"
-    if raw.startswith("opencode-zen"):
-        return "opencode-zen"
-    return None
+    return next((f for f in ("opencode-free", "opencode-go", "opencode-zen") if raw.startswith(f)), None)
 
 
 def normalize_opencode_model_id(provider_id: Optional[str], model_id: Optional[str]) -> str:
@@ -2652,60 +2587,33 @@ def opencode_zen_free_runtime(provider_id: Optional[str], model_id: Optional[str
     }
 
 
-def opencode_model_api_mode(provider_id: Optional[str], model_id: Optional[str]) -> str:
-    """Determine the API mode for an OpenCode Zen / Go model.
+# Per-family (model-id prefix → api_mode) routing from OpenCode's published Zen/Go endpoint
+# tables, checked in order. GPT/Codex/Grok and Muse Spark use /v1/responses (Muse Spark 503s on
+# chat/completions); Claude (Zen) and MiniMax (Go) use /v1/messages, as do Qwen models on both
+# relays; everything else falls through to /v1/chat/completions.
+_OPENCODE_API_MODE_PREFIXES: dict[str, tuple[tuple[tuple[str, ...], str], ...]] = {
+    "opencode-go": (
+        (("gpt-", "grok-", "muse-spark"), "codex_responses"),
+        (("minimax-", "qwen"), "anthropic_messages"),
+    ),
+    "opencode-zen": (
+        (("claude-",), "anthropic_messages"),
+        (("gpt-", "grok-", "muse-spark"), "codex_responses"),
+        (("qwen",), "anthropic_messages"),
+    ),
+}
 
-    OpenCode routes models behind different surfaces per its Zen/Go docs: GPT/Codex/Grok and
-    Muse Spark use ``/v1/responses`` (Muse Spark 503s on chat/completions); Claude and Qwen on
-    Zen and MiniMax/Qwen on Go use ``/v1/messages``; everything else uses
-    ``/v1/chat/completions``.
-    """
+
+def opencode_model_api_mode(provider_id: Optional[str], model_id: Optional[str]) -> str:
+    """Determine the API mode for an OpenCode Zen / Go model (see ``_OPENCODE_API_MODE_PREFIXES``)."""
     family = opencode_provider_family(provider_id)
-    # opencode-free is Zen-hosted (the free tier lives on the Zen relay),
-    # so it shares Zen's per-model endpoint routing.
-    if family == "opencode-free":
+    if family == "opencode-free":  # the free tier lives on the Zen relay → Zen's routing
         family = "opencode-zen"
     normalized = normalize_opencode_model_id(provider_id, model_id).lower()
-    if not normalized:
-        return "chat_completions"
-
-    if family == "opencode-go":
-        if normalized.startswith("gpt-") or normalized.startswith("grok-"):
-            # GPT and Grok models on Go (gpt-5.6-luna, grok-4.5) are served
-            # via /v1/responses per the published Go endpoint table, same as
-            # GPT/Grok on Zen: https://opencode.ai/docs/go/#endpoints
-            return "codex_responses"
-        if normalized.startswith("muse-spark"):
-            # Muse Spark (standard + contributor) is Responses-only on Go.
-            # /v1/chat/completions returns HTTP 503 with an empty assistant
-            # message; /v1/responses completes. See opencode.ai/docs/go.
-            return "codex_responses"
-        if normalized.startswith("minimax-"):
-            return "anthropic_messages"
-        if normalized.startswith("qwen"):
-            # All Qwen models on Go (qwen3.7-max, qwen3.7-plus, qwen3.6-plus)
-            # are served via /v1/messages per the published Go endpoint table.
-            return "anthropic_messages"
-        return "chat_completions"
-
-    if family == "opencode-zen":
-        if normalized.startswith("claude-"):
-            return "anthropic_messages"
-        if normalized.startswith("gpt-") or normalized.startswith("grok-"):
-            # GPT-5/Codex and all Grok models on Zen (grok-4.6, grok-4.5,
-            # grok-build-0.1) are served via /v1/responses per the Zen
-            # endpoint table.
-            return "codex_responses"
-        if normalized.startswith("muse-spark"):
-            # Standard Muse Spark on Zen is served via /v1/responses:
-            # https://opencode.ai/docs/zen/#endpoints
-            return "codex_responses"
-        if normalized.startswith("qwen"):
-            # Qwen models on Zen moved to /v1/messages per the published
-            # Zen endpoint table.
-            return "anthropic_messages"
-        return "chat_completions"
-
+    if normalized:
+        for prefixes, mode in _OPENCODE_API_MODE_PREFIXES.get(family or "", ()):
+            if normalized.startswith(prefixes):
+                return mode
     return "chat_completions"
 
 
@@ -2727,10 +2635,8 @@ def normalize_opencode_base_url(
     if opencode_provider_family(provider_id) is None:
         return url
 
-    import re as _re
-
     if api_mode == "anthropic_messages":
-        return _re.sub(r"/v1$", "", url)
+        return re.sub(r"/v1$", "", url)
 
     # chat_completions / codex_responses: ensure the /v1 suffix is present on
     # official opencode.ai hosts (heals a persisted anthropic-stripped URL).
@@ -2756,34 +2662,21 @@ def github_model_reasoning_efforts(
     if not normalized:
         return []
 
-    catalog_entry = None
-    if catalog is not None:
-        catalog_entry = next((item for item in catalog if item.get("id") == normalized), None)
-    elif api_key:
-        fetched_catalog = fetch_github_model_catalog(api_key=api_key)
-        if fetched_catalog:
-            catalog_entry = next((item for item in fetched_catalog if item.get("id") == normalized), None)
+    if catalog is None and api_key:
+        catalog = fetch_github_model_catalog(api_key=api_key)
+    catalog_entry = next((item for item in catalog if item.get("id") == normalized), None) if catalog else None
 
     if catalog_entry is not None:
         capabilities = catalog_entry.get("capabilities")
         if isinstance(capabilities, dict):
+            # Structured catalog: the advertised list is authoritative (empty when absent).
             supports = capabilities.get("supports")
-            if isinstance(supports, dict):
-                efforts = supports.get("reasoning_effort")
-                if isinstance(efforts, list):
-                    normalized_efforts = [
-                        str(effort).strip().lower()
-                        for effort in efforts
-                        if str(effort).strip()
-                    ]
-                    return list(dict.fromkeys(normalized_efforts))
+            efforts = supports.get("reasoning_effort") if isinstance(supports, dict) else None
+            if isinstance(efforts, list):
+                return list(dict.fromkeys(e for effort in efforts if (e := str(effort).strip().lower())))
             return []
-        legacy_capabilities = {
-            str(capability).strip().lower()
-            for capability in catalog_entry.get("capabilities", [])
-            if str(capability).strip()
-        }
-        if "reasoning" not in legacy_capabilities:
+        # Legacy list-shaped capabilities: only a "reasoning" tag unlocks the pattern defaults.
+        if "reasoning" not in {str(c).strip().lower() for c in catalog_entry.get("capabilities", [])}:
             return []
 
     return _github_reasoning_efforts_for_model_id(str(model_id or normalized))
