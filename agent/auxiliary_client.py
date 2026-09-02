@@ -1988,11 +1988,41 @@ class _CodexCompletionsAdapter:
         )
 
 
-class _CodexChatShim:
-    """Wraps the adapter to provide client.chat.completions.create()."""
+class _ChatShim:
+    """Exposes ``client.chat.completions.create()`` over a sync or async adapter."""
 
-    def __init__(self, adapter: _CodexCompletionsAdapter):
+    def __init__(self, adapter: Any):
         self.completions = adapter
+
+
+class _AsyncCompletionsAdapter:
+    """Async adapter: runs the sync adapter's ``create`` via asyncio.to_thread()."""
+
+    def __init__(self, sync_adapter: Any):
+        self._sync = sync_adapter
+
+    async def create(self, **kwargs) -> Any:
+        import asyncio
+        return await asyncio.to_thread(self._sync.create, **kwargs)
+
+
+class _AsyncAuxiliaryClientBase:
+    """Async-compatible wrapper matching AsyncOpenAI.chat.completions.create().
+
+    Mirrors ``_real_client`` (when the sync wrapper has one) so cache eviction by
+    leaf OpenAI client drops this async entry too; otherwise it keeps reusing a
+    closed transport.
+    """
+
+    def __init__(self, sync_wrapper: Any):
+        self.chat = _ChatShim(_AsyncCompletionsAdapter(sync_wrapper.chat.completions))
+        self.api_key = sync_wrapper.api_key
+        self.base_url = sync_wrapper.base_url
+        if hasattr(sync_wrapper, "_real_client"):
+            self._real_client = sync_wrapper._real_client
+
+
+_AsyncAnthropicCompletionsAdapter = _AsyncCompletionsAdapter  # imported by tests
 
 
 class CodexAuxiliaryClient:
@@ -2003,8 +2033,7 @@ class CodexAuxiliaryClient:
 
     def __init__(self, real_client: OpenAI, model: str):
         self._real_client = real_client
-        adapter = _CodexCompletionsAdapter(real_client, model)
-        self.chat = _CodexChatShim(adapter)
+        self.chat = _ChatShim(_CodexCompletionsAdapter(real_client, model))
         self.api_key = real_client.api_key
         self.base_url = real_client.base_url
 
@@ -2012,34 +2041,8 @@ class CodexAuxiliaryClient:
         self._real_client.close()
 
 
-class _AsyncCodexCompletionsAdapter:
-    """Async Codex adapter: wraps the sync adapter via asyncio.to_thread()."""
-
-    def __init__(self, sync_adapter: _CodexCompletionsAdapter):
-        self._sync = sync_adapter
-
-    async def create(self, **kwargs) -> Any:
-        import asyncio
-        return await asyncio.to_thread(self._sync.create, **kwargs)
-
-
-class _AsyncCodexChatShim:
-    def __init__(self, adapter: _AsyncCodexCompletionsAdapter):
-        self.completions = adapter
-
-
-class AsyncCodexAuxiliaryClient:
-    """Async-compatible wrapper matching AsyncOpenAI.chat.completions.create()."""
-
-    def __init__(self, sync_wrapper: "CodexAuxiliaryClient"):
-        sync_adapter = sync_wrapper.chat.completions
-        async_adapter = _AsyncCodexCompletionsAdapter(sync_adapter)
-        self.chat = _AsyncCodexChatShim(async_adapter)
-        self.api_key = sync_wrapper.api_key
-        self.base_url = sync_wrapper.base_url
-        # Mirror _real_client so cache eviction by leaf OpenAI client drops this
-        # async entry too; otherwise it keeps reusing a closed transport.
-        self._real_client = sync_wrapper._real_client
+class AsyncCodexAuxiliaryClient(_AsyncAuxiliaryClientBase):
+    pass
 
 
 def _translate_anthropic_response_format(
@@ -2236,20 +2239,14 @@ class _AnthropicCompletionsAdapter:
         )
 
 
-class _AnthropicChatShim:
-    def __init__(self, adapter: _AnthropicCompletionsAdapter):
-        self.completions = adapter
-
-
 class AnthropicAuxiliaryClient:
     """OpenAI-client-compatible wrapper over a native Anthropic client."""
 
     def __init__(self, real_client: Any, model: str, api_key: str, base_url: str, is_oauth: bool = False):
         self._real_client = real_client
-        adapter = _AnthropicCompletionsAdapter(
+        self.chat = _ChatShim(_AnthropicCompletionsAdapter(
             real_client, model, is_oauth=is_oauth, base_url=base_url,
-        )
-        self.chat = _AnthropicChatShim(adapter)
+        ))
         self.api_key = api_key
         self.base_url = base_url
 
@@ -2259,29 +2256,8 @@ class AnthropicAuxiliaryClient:
             close_fn()
 
 
-class _AsyncAnthropicCompletionsAdapter:
-    def __init__(self, sync_adapter: _AnthropicCompletionsAdapter):
-        self._sync = sync_adapter
-
-    async def create(self, **kwargs) -> Any:
-        import asyncio
-        return await asyncio.to_thread(self._sync.create, **kwargs)
-
-
-class _AsyncAnthropicChatShim:
-    def __init__(self, adapter: _AsyncAnthropicCompletionsAdapter):
-        self.completions = adapter
-
-
-class AsyncAnthropicAuxiliaryClient:
-    def __init__(self, sync_wrapper: "AnthropicAuxiliaryClient"):
-        sync_adapter = sync_wrapper.chat.completions
-        async_adapter = _AsyncAnthropicCompletionsAdapter(sync_adapter)
-        self.chat = _AsyncAnthropicChatShim(async_adapter)
-        self.api_key = sync_wrapper.api_key
-        self.base_url = sync_wrapper.base_url
-        # See AsyncCodexAuxiliaryClient: mirror _real_client for cache eviction.
-        self._real_client = sync_wrapper._real_client
+class AsyncAnthropicAuxiliaryClient(_AsyncAuxiliaryClientBase):
+    pass
 
 
 class _BedrockCompletionsAdapter:
@@ -2336,19 +2312,13 @@ class _BedrockCompletionsAdapter:
         return response
 
 
-class _BedrockChatShim:
-    def __init__(self, adapter: "_BedrockCompletionsAdapter"):
-        self.completions = adapter
-
-
 class BedrockAuxiliaryClient:
     """OpenAI-client-compatible wrapper over AWS Bedrock Converse API."""
 
     def __init__(self, region: str, model: str):
         self._region = region
         self._model = model
-        adapter = _BedrockCompletionsAdapter(region, model)
-        self.chat = _BedrockChatShim(adapter)
+        self.chat = _ChatShim(_BedrockCompletionsAdapter(region, model))
         self.api_key = "aws-sdk"
         self.base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
 
@@ -2356,27 +2326,8 @@ class BedrockAuxiliaryClient:
         pass
 
 
-class _AsyncBedrockCompletionsAdapter:
-    def __init__(self, sync_adapter: _BedrockCompletionsAdapter):
-        self._sync = sync_adapter
-
-    async def create(self, **kwargs) -> Any:
-        import asyncio
-        return await asyncio.to_thread(self._sync.create, **kwargs)
-
-
-class _AsyncBedrockChatShim:
-    def __init__(self, adapter: _AsyncBedrockCompletionsAdapter):
-        self.completions = adapter
-
-
-class AsyncBedrockAuxiliaryClient:
-    def __init__(self, sync_wrapper: "BedrockAuxiliaryClient"):
-        sync_adapter = sync_wrapper.chat.completions
-        async_adapter = _AsyncBedrockCompletionsAdapter(sync_adapter)
-        self.chat = _AsyncBedrockChatShim(async_adapter)
-        self.api_key = sync_wrapper.api_key
-        self.base_url = sync_wrapper.base_url
+class AsyncBedrockAuxiliaryClient(_AsyncAuxiliaryClientBase):
+    pass
 
 
 def _endpoint_speaks_anthropic_messages(base_url: str) -> bool:
