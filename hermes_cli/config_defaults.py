@@ -22,9 +22,7 @@ DEFAULT_CONFIG = {
     },
     # Soft file-descriptor limit for long-running Hermes server processes.
     # Clamped to the OS hard limit; 0/false/null disables the adjustment.
-    "runtime": {
-        "nofile_soft_limit": 4096,
-    },
+    "runtime": {"nofile_soft_limit": 4096},
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.
     # None/0 = unbounded.
     "max_concurrent_sessions": None,
@@ -404,10 +402,7 @@ DEFAULT_CONFIG = {
         # values (typo, NaN, Inf, non-positive poll) warn and fall back to
         # the default instead of crashing startup or silently disabling the
         # watchdog. See agent/turn_liveness.py.
-        "turn_liveness": {
-            "timeout_s": 600.0,
-            "poll_s": 15.0,
-        },
+        "turn_liveness": {"timeout_s": 600.0, "poll_s": 15.0},
     },
 
     "terminal": {
@@ -694,10 +689,7 @@ DEFAULT_CONFIG = {
         # Local API registration additionally requires the API server bearer
         # key. developer_mode gates the privileged capabilities
         # (browser_cdp / browser_evaluate) — never negotiable without it.
-        "extension_control": {
-            "enabled": False,
-            "developer_mode": False,
-        },
+        "extension_control": {"enabled": False, "developer_mode": False},
     },
 
     # Filesystem checkpoints — automatic snapshots before destructive file ops.
@@ -812,11 +804,7 @@ DEFAULT_CONFIG = {
     #                    being clamped (default 2000).
     # - max_line_length: per-line cap applied when read_file emits a
     #                    line-numbered view (default 2000 chars).
-    "tool_output": {
-        "max_bytes": 50_000,
-        "max_lines": 2000,
-        "max_line_length": 2000,
-    },
+    "tool_output": {"max_bytes": 50000, "max_lines": 2000, "max_line_length": 2000},
 
     # Tool loop guardrails nudge models when they repeat failed or
     # non-progressing tool calls. Soft warnings are always-on by default;
@@ -828,11 +816,7 @@ DEFAULT_CONFIG = {
         # is present to /stop a model that ignores loop warnings); interactive
         # cli/tui/desktop/acp stay warning-only unless hard_stop_enabled.
         "non_interactive_hard_stop_enabled": True,
-        "warn_after": {
-            "exact_failure": 2,
-            "same_tool_failure": 3,
-            "idempotent_no_progress": 2,
-        },
+        "warn_after": {"exact_failure": 2, "same_tool_failure": 3, "idempotent_no_progress": 2},
         "hard_stop_after": {
             "exact_failure": 5,
             "same_tool_failure": 8,
@@ -1089,9 +1073,7 @@ DEFAULT_CONFIG = {
     # cache_ttl: "5m" or "1h" (Anthropic-supported tiers). Other non-falsy
     # values are silently ignored. Falsy values (false, null, "off",
     # "disabled", "no", "none") disable prompt caching entirely.
-    "prompt_caching": {
-        "cache_ttl": "5m",
-    },
+    "prompt_caching": {"cache_ttl": "5m"},
 
     # OpenRouter-specific settings.
     # response_cache: enable OpenRouter response caching (X-OpenRouter-Cache header).
@@ -1108,11 +1090,7 @@ DEFAULT_CONFIG = {
     #   pick the strongest available coder (router's documented default
     #   when the plugins block is omitted).
     #   See: https://openrouter.ai/docs/guides/routing/routers/pareto-router
-    "openrouter": {
-        "response_cache": True,
-        "response_cache_ttl": 300,
-        "min_coding_score": 0.65,
-    },
+    "openrouter": {"response_cache": True, "response_cache_ttl": 300, "min_coding_score": 0.65},
 
     # AWS Bedrock provider configuration.
     # Only used when model.provider is "bedrock".
@@ -1829,10 +1807,7 @@ DEFAULT_CONFIG = {
         # disabled. ``scope`` is the capability label attached to the verified
         # principal; ``min_secret_chars`` is the entropy bar (url-safe-b64
         # chars; 43 ~= 256 bits).
-        "drain_auth": {
-            "scope": "drain",
-            "min_secret_chars": 43,
-        },
+        "drain_auth": {"scope": "drain", "min_secret_chars": 43},
         # Public URL override (env: ``HERMES_DASHBOARD_PUBLIC_URL``).
         # When set, this is the complete authority — scheme + host +
         # optional path prefix (e.g. ``https://example.com/hermes``) —
@@ -1914,10 +1889,7 @@ DEFAULT_CONFIG = {
             "model": "voxtral-mini-tts-2603",
             "voice_id": "c69964a6-ab8b-4f8a-9465-ec0925096ec8",  # Paul - Neutral
         },
-        "minimax": {
-            "model": "speech-02-hd",
-            "voice_id": "English_expressive_narrator",
-        },
+        "minimax": {"model": "speech-02-hd", "voice_id": "English_expressive_narrator"},
         "kittentts": {
             "model": "KittenML/kitten-tts-nano-0.8-int8",  # nano 25MB; micro 41MB; mini 80MB
             "voice": "Jasper",
@@ -2074,11 +2046,7 @@ DEFAULT_CONFIG = {
         },
     },
     
-    "human_delay": {
-        "mode": "off",
-        "min_ms": 800,
-        "max_ms": 2500,
-    },
+    "human_delay": {"mode": "off", "min_ms": 800, "max_ms": 2500},
     
     # Context engine -- controls how the context window is managed when
     # approaching the model's token limit.
@@ -2724,10 +2692,7 @@ DEFAULT_CONFIG = {
         # denies unless transport_fallback is explicitly set to "builtin".
         # This is presentation only: plugins cannot detect, suppress, or
         # auto-approve commands outside a correlated human response.
-        "approval": {
-            "transport": "builtin",
-            "transport_fallback": "deny",
-        },
+        "approval": {"transport": "builtin", "transport_fallback": "deny"},
         # Writes to agent-instruction files (AGENTS.md/CLAUDE.md/SOUL.md/
         # .cursorrules, project-local .hermes config) always require human
         # approval — even under auto-approve/yolo. Extra patterns are
@@ -2738,11 +2703,7 @@ DEFAULT_CONFIG = {
         "tirith_path": "tirith",
         "tirith_timeout": 5,
         "tirith_fail_open": True,
-        "website_blocklist": {
-            "enabled": False,
-            "domains": [],
-            "shared_files": [],
-        },
+        "website_blocklist": {"enabled": False, "domains": [], "shared_files": []},
         # Acknowledged supply-chain security advisories. Each entry is the
         # ID of an advisory the user has read and acted on (uninstalled the
         # compromised package, rotated credentials). Acked advisories no
@@ -3223,13 +3184,7 @@ DEFAULT_CONFIG = {
         # OTLP destination. headers_env maps header names to ENVIRONMENT
         # VARIABLE NAMES (never secret values); values are read from the
         # environment at export time.
-        "export": {
-            "otlp": {
-                "enabled": False,
-                "endpoint": "",
-                "headers_env": {},
-            },
-        },
+        "export": {"otlp": {"enabled": False, "endpoint": "", "headers_env": {}}},
     },
 
     # Gateway settings — control how messaging platforms (Telegram, Discord,
@@ -3309,9 +3264,7 @@ DEFAULT_CONFIG = {
         # it wakes on the connector's wakeUrl poke. This is the idle TIMEOUT only
         # — whether the feature is enabled at all is the Labs toggle, never a
         # config key (decisions.md D2/D11). 0/negative falls back to the default.
-        "scale_to_zero": {
-            "idle_timeout_minutes": 2,
-        },
+        "scale_to_zero": {"idle_timeout_minutes": 2},
 
         # Auto-resume restart-loop breaker (#30719, defense-3). When the
         # gateway is killed mid-turn (SIGTERM) and revived by a supervisor
@@ -3334,11 +3287,7 @@ DEFAULT_CONFIG = {
         # #81642 (stall -> ~90s liveness-watchdog hard-exit -> respawn ->
         # auto-resume replays the same session), which also makes
         # `hermes update` hang because it can never drain the gateway.
-        "restart_loop_guard": {
-            "max_restarts": 3,
-            "window_seconds": 60,
-            "max_gap_seconds": 300,
-        },
+        "restart_loop_guard": {"max_restarts": 3, "window_seconds": 60, "max_gap_seconds": 300},
 
         # Portable respawn-storm circuit breaker (complements
         # ``restart_loop_guard`` above). Counts gateway (re)starts in a sliding
@@ -3348,10 +3297,7 @@ DEFAULT_CONFIG = {
         # ``max_starts <= 0`` disables the breaker. The env vars
         # ``HERMES_GATEWAY_MAX_STARTS`` / ``HERMES_GATEWAY_START_WINDOW_S``
         # override these defaults for escape-hatch use.
-        "respawn_storm": {
-            "max_starts": 5,
-            "window_seconds": 120,
-        },
+        "respawn_storm": {"max_starts": 5, "window_seconds": 120},
 
         # Inject a human-readable timestamp prefix (e.g.
         # "[Tue 2026-04-28 13:40:53 CEST]") onto user messages IN THE MODEL'S
@@ -3360,9 +3306,7 @@ DEFAULT_CONFIG = {
         # Persisted transcripts always stay clean (the timestamp is stored as
         # message metadata regardless of this toggle), so turning it on later
         # surfaces send-times for past messages too.
-        "message_timestamps": {
-            "enabled": False,
-        },
+        "message_timestamps": {"enabled": False},
 
         # Maximum bytes for an inbound image / audio / video payload the
         # gateway will buffer into memory and cache to disk. Inbound media is
@@ -3810,10 +3754,7 @@ DEFAULT_CONFIG = {
             # material under ~/.hermes/cache/. If a later startup cannot reach
             # Bitwarden due to NETWORK/TIMEOUT, Hermes may use this encrypted
             # cache for up to max_stale_seconds. Auth failures do not fall back.
-            "encrypted_cache": {
-                "enabled": False,
-                "max_stale_seconds": 0,
-            },
+            "encrypted_cache": {"enabled": False, "max_stale_seconds": 0},
             # When True, BSM values overwrite existing env vars.  Default
             # True because the point of using BSM is centralized rotation —
             # if .env had the final say, rotating in Bitwarden wouldn't
@@ -4108,1183 +4049,467 @@ DEFAULT_CONFIG = {
     "_config_version": 40,
 }
 
+
+def _env(description, prompt, **keys):
+    """One OPTIONAL_ENV_VARS entry; keyword order is preserved as dict key order."""
+    return {"description": description, "prompt": prompt, **keys}
+
 # Optional environment variables that enhance functionality
 OPTIONAL_ENV_VARS = {
     # ── Provider (handled in provider selection, not shown in checklists) ──
-    "NOUS_BASE_URL": {
-        "description": "Nous Portal base URL override",
-        "prompt": "Nous Portal base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "OPENROUTER_API_KEY": {
-        "description": "OpenRouter API key (for vision, web scraping helpers, and MoA)",
-        "prompt": "OpenRouter API key",
-        "url": "https://openrouter.ai/keys",
-        "password": True,
-        "tools": ["vision_analyze"],
-        "category": "provider",
-        "advanced": True,
-    },
-    "GOOGLE_API_KEY": {
-        "description": "Google AI Studio API key (also recognized as GEMINI_API_KEY)",
-        "prompt": "Google AI Studio API key",
-        "url": "https://aistudio.google.com/app/apikey",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "GEMINI_API_KEY": {
-        "description": "Google AI Studio API key (alias for GOOGLE_API_KEY)",
-        "prompt": "Gemini API key",
-        "url": "https://aistudio.google.com/app/apikey",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "GEMINI_BASE_URL": {
-        "description": "Google AI Studio base URL override",
-        "prompt": "Gemini base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "VERTEX_CREDENTIALS_PATH": {
-        "description": "Path to a Google Cloud service account JSON for Vertex AI (Gemini). "
-                       "Vertex uses OAuth2, not a static API key — this points at the "
-                       "credentials Hermes mints short-lived tokens from. Falls back to "
-                       "GOOGLE_APPLICATION_CREDENTIALS, then to ADC (gcloud auth "
-                       "application-default login). Set project/region under vertex: in config.yaml.",
-        "prompt": "Vertex service account JSON path (leave empty to use ADC / GOOGLE_APPLICATION_CREDENTIALS)",
-        "url": "https://cloud.google.com/iam/docs/keys-create-delete",
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "XAI_API_KEY": {
-        "description": "xAI API key",
-        "prompt": "xAI API key",
-        "url": "https://console.x.ai/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "XAI_BASE_URL": {
-        "description": "xAI base URL override",
-        "prompt": "xAI base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "NVIDIA_API_KEY": {
-        "description": "NVIDIA NIM API key (build.nvidia.com or local NIM endpoint)",
-        "prompt": "NVIDIA NIM API key",
-        "url": "https://build.nvidia.com/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "NVIDIA_BASE_URL": {
-        "description": "NVIDIA NIM base URL override (e.g. http://localhost:8000/v1 for local NIM)",
-        "prompt": "NVIDIA NIM base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "LM_API_KEY": {
-        "description": "LM Studio bearer token for auth-enabled local servers",
-        "prompt": "LM Studio API key / bearer token",
-        "url": None,
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "LM_BASE_URL": {
-        "description": "LM Studio base URL override",
-        "prompt": "LM Studio base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "GLM_API_KEY": {
-        "description": "Z.AI / GLM API key (also recognized as ZAI_API_KEY / Z_AI_API_KEY)",
-        "prompt": "Z.AI / GLM API key",
-        "url": "https://z.ai/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "ZAI_API_KEY": {
-        "description": "Z.AI API key (alias for GLM_API_KEY)",
-        "prompt": "Z.AI API key",
-        "url": "https://z.ai/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "Z_AI_API_KEY": {
-        "description": "Z.AI API key (alias for GLM_API_KEY)",
-        "prompt": "Z.AI API key",
-        "url": "https://z.ai/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "GLM_BASE_URL": {
-        "description": "Z.AI / GLM base URL override",
-        "prompt": "Z.AI / GLM base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "KIMI_API_KEY": {
-        "description": "Kimi / Moonshot API key",
-        "prompt": "Kimi API key",
-        "url": "https://platform.moonshot.cn/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "KIMI_BASE_URL": {
-        "description": "Kimi / Moonshot base URL override",
-        "prompt": "Kimi base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "KIMI_CN_API_KEY": {
-        "description": "Kimi / Moonshot China API key",
-        "prompt": "Kimi (China) API key",
-        "url": "https://platform.moonshot.cn/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "STEPFUN_API_KEY": {
-        "description": "StepFun Step Plan API key",
-        "prompt": "StepFun Step Plan API key",
-        "url": "https://platform.stepfun.com/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "STEPFUN_BASE_URL": {
-        "description": "StepFun Step Plan base URL override",
-        "prompt": "StepFun Step Plan base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "ARCEEAI_API_KEY": {
-        "description": "Arcee AI API key",
-        "prompt": "Arcee AI API key",
-        "url": "https://chat.arcee.ai/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "ARCEE_BASE_URL": {
-        "description": "Arcee AI base URL override",
-        "prompt": "Arcee base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "GMI_API_KEY": {
-        "description": "GMI Cloud API key",
-        "prompt": "GMI Cloud API key",
-        "url": "https://www.gmicloud.ai/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "GMI_BASE_URL": {
-        "description": "GMI Cloud base URL override",
-        "prompt": "GMI Cloud base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "ACTUAL_API_KEY": {
-        "description": "Actual Computer inference key (ac_...)",
-        "prompt": "Actual Computer inference key",
-        "url": "https://actual.inc/user/keys",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "ACTUAL_BASE_URL": {
-        "description": "Actual Computer base URL override (set to http://127.0.0.1:8080 for the local offline daemon)",
-        "prompt": "Actual Computer base URL (leave empty for hosted relay)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "FIREWORKS_API_KEY": {
-        "description": "Fireworks AI API key",
-        "prompt": "Fireworks AI API key",
-        "url": "https://app.fireworks.ai/settings/users/api-keys",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "MINIMAX_API_KEY": {
-        "description": "MiniMax API key (international)",
-        "prompt": "MiniMax API key",
-        "url": "https://www.minimax.io/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "MINIMAX_BASE_URL": {
-        "description": "MiniMax base URL override",
-        "prompt": "MiniMax base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "MINIMAX_CN_API_KEY": {
-        "description": "MiniMax API key (China endpoint)",
-        "prompt": "MiniMax (China) API key",
-        "url": "https://www.minimaxi.com/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "MINIMAX_CN_BASE_URL": {
-        "description": "MiniMax (China) base URL override",
-        "prompt": "MiniMax (China) base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "DEEPSEEK_API_KEY": {
-        "description": "DeepSeek API key for direct DeepSeek access",
-        "prompt": "DeepSeek API Key",
-        "url": "https://platform.deepseek.com/api_keys",
-        "password": True,
-        "category": "provider",
-    },
-    "DEEPSEEK_BASE_URL": {
-        "description": "Custom DeepSeek API base URL (advanced)",
-        "prompt": "DeepSeek Base URL",
-        "url": "",
-        "password": False,
-        "category": "provider",
-    },
-    "DASHSCOPE_API_KEY": {
-        "description": "Alibaba Cloud DashScope API key (Qwen + multi-provider models)",
-        "prompt": "DashScope API Key",
-        "url": "https://modelstudio.console.alibabacloud.com/",
-        "password": True,
-        "category": "provider",
-    },
-    "DASHSCOPE_BASE_URL": {
-        "description": "Custom DashScope base URL (default: coding-intl OpenAI-compat endpoint)",
-        "prompt": "DashScope Base URL",
-        "url": "",
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "HERMES_QWEN_BASE_URL": {
-        "description": "Qwen Portal base URL override (default: https://portal.qwen.ai/v1)",
-        "prompt": "Qwen Portal base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "OPENCODE_ZEN_API_KEY": {
-        "description": "OpenCode Zen API key (pay-as-you-go access to curated models)",
-        "prompt": "OpenCode Zen API key",
-        "url": "https://opencode.ai/auth",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "COMMANDCODE_API_KEY": {
-        "description": "CommandCode API key (GOAT/Pro/Max/Provider plans — 30+ models via one key)",
-        "prompt": "CommandCode API key",
-        "url": "https://commandcode.ai/studio/",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "OPENCODE_ZEN_BASE_URL": {
-        "description": "OpenCode Zen base URL override",
-        "prompt": "OpenCode Zen base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "OPENCODE_GO_API_KEY": {
-        "description": "OpenCode Go API key ($10/month subscription for open models)",
-        "prompt": "OpenCode Go API key",
-        "url": "https://opencode.ai/auth",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "OPENCODE_GO_BASE_URL": {
-        "description": "OpenCode Go base URL override",
-        "prompt": "OpenCode Go base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "HF_TOKEN": {
-        "description": "Hugging Face token for Inference Providers (20+ open models via router.huggingface.co)",
-        "prompt": "Hugging Face Token",
-        "url": "https://huggingface.co/settings/tokens",
-        "password": True,
-        "category": "provider",
-    },
-    "HF_BASE_URL": {
-        "description": "Hugging Face Inference Providers base URL override",
-        "prompt": "HF base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "OLLAMA_API_KEY": {
-        "description": "Ollama Cloud API key (ollama.com — cloud-hosted open models)",
-        "prompt": "Ollama Cloud API key",
-        "url": "https://ollama.com/settings",
-        "password": True,
-        "category": "provider",
-        "advanced": True,
-    },
-    "OLLAMA_BASE_URL": {
-        "description": "Ollama Cloud base URL override (default: https://ollama.com/v1)",
-        "prompt": "Ollama base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "XIAOMI_API_KEY": {
-        "description": "Xiaomi MiMo API key for MiMo models (mimo-v2.5-pro, mimo-v2.5, mimo-v2-pro, mimo-v2-omni, mimo-v2-flash)",
-        "prompt": "Xiaomi MiMo API Key",
-        "url": "https://platform.xiaomimimo.com",
-        "password": True,
-        "category": "provider",
-    },
-    "XIAOMI_BASE_URL": {
-        "description": "Xiaomi MiMo base URL override (default: https://api.xiaomimimo.com/v1)",
-        "prompt": "Xiaomi base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "UPSTAGE_API_KEY": {
-        "description": "Upstage API key for Solar LLM models",
-        "prompt": "Upstage API Key",
-        "url": "https://console.upstage.ai/api-keys",
-        "password": True,
-        "category": "provider",
-    },
-    "UPSTAGE_BASE_URL": {
-        "description": "Upstage base URL override (default: https://api.upstage.ai/v1)",
-        "prompt": "Upstage base URL (leave empty for default)",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "AWS_REGION": {
-        "description": "AWS region for Bedrock API calls (e.g. us-east-1, eu-central-1)",
-        "prompt": "AWS Region",
-        "url": "https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html",
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "AWS_PROFILE": {
-        "description": "AWS named profile for Bedrock authentication (from ~/.aws/credentials)",
-        "prompt": "AWS Profile",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
-    "AZURE_FOUNDRY_API_KEY": {
-        "description": "Azure Foundry API key for custom Azure endpoints",
-        "prompt": "Azure Foundry API Key",
-        "url": "https://ai.azure.com/",
-        "password": True,
-        "category": "provider",
-    },
-    "AZURE_FOUNDRY_BASE_URL": {
-        "description": "Azure Foundry base URL (set via 'hermes model' for endpoint-specific config)",
-        "prompt": "Azure Foundry base URL",
-        "url": None,
-        "password": False,
-        "category": "provider",
-        "advanced": True,
-    },
+    "NOUS_BASE_URL": _env("Nous Portal base URL override", "Nous Portal base URL (leave empty for default)",
+        url=None, password=False, category="provider", advanced=True),
+    "OPENROUTER_API_KEY": _env("OpenRouter API key (for vision, web scraping helpers, and MoA)",
+        "OpenRouter API key", url="https://openrouter.ai/keys", password=True, tools=["vision_analyze"],
+        category="provider", advanced=True),
+    "GOOGLE_API_KEY": _env("Google AI Studio API key (also recognized as GEMINI_API_KEY)",
+        "Google AI Studio API key", url="https://aistudio.google.com/app/apikey", password=True,
+        category="provider", advanced=True),
+    "GEMINI_API_KEY": _env("Google AI Studio API key (alias for GOOGLE_API_KEY)", "Gemini API key",
+        url="https://aistudio.google.com/app/apikey", password=True, category="provider", advanced=True),
+    "GEMINI_BASE_URL": _env("Google AI Studio base URL override", "Gemini base URL (leave empty for default)",
+        url=None, password=False, category="provider", advanced=True),
+    "VERTEX_CREDENTIALS_PATH": _env(
+        "Path to a Google Cloud service account JSON for Vertex AI (Gemini). Vertex uses OAuth2, not a "
+        "static API key — this points at the credentials Hermes mints short-lived tokens from. Falls back "
+        "to GOOGLE_APPLICATION_CREDENTIALS, then to ADC (gcloud auth application-default login). Set "
+        "project/region under vertex: in config.yaml.",
+        "Vertex service account JSON path (leave empty to use ADC / GOOGLE_APPLICATION_CREDENTIALS)",
+        url="https://cloud.google.com/iam/docs/keys-create-delete", password=False, category="provider",
+        advanced=True),
+    "XAI_API_KEY": _env("xAI API key", "xAI API key", url="https://console.x.ai/", password=True,
+        category="provider", advanced=True),
+    "XAI_BASE_URL": _env("xAI base URL override", "xAI base URL (leave empty for default)", url=None,
+        password=False, category="provider", advanced=True),
+    "NVIDIA_API_KEY": _env("NVIDIA NIM API key (build.nvidia.com or local NIM endpoint)",
+        "NVIDIA NIM API key", url="https://build.nvidia.com/", password=True, category="provider",
+        advanced=True),
+    "NVIDIA_BASE_URL": _env("NVIDIA NIM base URL override (e.g. http://localhost:8000/v1 for local NIM)",
+        "NVIDIA NIM base URL (leave empty for default)", url=None, password=False, category="provider",
+        advanced=True),
+    "LM_API_KEY": _env("LM Studio bearer token for auth-enabled local servers",
+        "LM Studio API key / bearer token", url=None, password=True, category="provider", advanced=True),
+    "LM_BASE_URL": _env("LM Studio base URL override", "LM Studio base URL (leave empty for default)",
+        url=None, password=False, category="provider", advanced=True),
+    "GLM_API_KEY": _env("Z.AI / GLM API key (also recognized as ZAI_API_KEY / Z_AI_API_KEY)",
+        "Z.AI / GLM API key", url="https://z.ai/", password=True, category="provider", advanced=True),
+    "ZAI_API_KEY": _env("Z.AI API key (alias for GLM_API_KEY)", "Z.AI API key", url="https://z.ai/",
+        password=True, category="provider", advanced=True),
+    "Z_AI_API_KEY": _env("Z.AI API key (alias for GLM_API_KEY)", "Z.AI API key", url="https://z.ai/",
+        password=True, category="provider", advanced=True),
+    "GLM_BASE_URL": _env("Z.AI / GLM base URL override", "Z.AI / GLM base URL (leave empty for default)",
+        url=None, password=False, category="provider", advanced=True),
+    "KIMI_API_KEY": _env("Kimi / Moonshot API key", "Kimi API key", url="https://platform.moonshot.cn/",
+        password=True, category="provider", advanced=True),
+    "KIMI_BASE_URL": _env("Kimi / Moonshot base URL override", "Kimi base URL (leave empty for default)",
+        url=None, password=False, category="provider", advanced=True),
+    "KIMI_CN_API_KEY": _env("Kimi / Moonshot China API key", "Kimi (China) API key",
+        url="https://platform.moonshot.cn/", password=True, category="provider", advanced=True),
+    "STEPFUN_API_KEY": _env("StepFun Step Plan API key", "StepFun Step Plan API key",
+        url="https://platform.stepfun.com/", password=True, category="provider", advanced=True),
+    "STEPFUN_BASE_URL": _env("StepFun Step Plan base URL override",
+        "StepFun Step Plan base URL (leave empty for default)", url=None, password=False, category="provider",
+        advanced=True),
+    "ARCEEAI_API_KEY": _env("Arcee AI API key", "Arcee AI API key", url="https://chat.arcee.ai/",
+        password=True, category="provider", advanced=True),
+    "ARCEE_BASE_URL": _env("Arcee AI base URL override", "Arcee base URL (leave empty for default)", url=None,
+        password=False, category="provider", advanced=True),
+    "GMI_API_KEY": _env("GMI Cloud API key", "GMI Cloud API key", url="https://www.gmicloud.ai/",
+        password=True, category="provider", advanced=True),
+    "GMI_BASE_URL": _env("GMI Cloud base URL override", "GMI Cloud base URL (leave empty for default)",
+        url=None, password=False, category="provider", advanced=True),
+    "ACTUAL_API_KEY": _env("Actual Computer inference key (ac_...)", "Actual Computer inference key",
+        url="https://actual.inc/user/keys", password=True, category="provider", advanced=True),
+    "ACTUAL_BASE_URL": _env(
+        "Actual Computer base URL override (set to http://127.0.0.1:8080 for the local offline daemon)",
+        "Actual Computer base URL (leave empty for hosted relay)", url=None, password=False,
+        category="provider", advanced=True),
+    "FIREWORKS_API_KEY": _env("Fireworks AI API key", "Fireworks AI API key",
+        url="https://app.fireworks.ai/settings/users/api-keys", password=True, category="provider",
+        advanced=True),
+    "MINIMAX_API_KEY": _env("MiniMax API key (international)", "MiniMax API key",
+        url="https://www.minimax.io/", password=True, category="provider", advanced=True),
+    "MINIMAX_BASE_URL": _env("MiniMax base URL override", "MiniMax base URL (leave empty for default)",
+        url=None, password=False, category="provider", advanced=True),
+    "MINIMAX_CN_API_KEY": _env("MiniMax API key (China endpoint)", "MiniMax (China) API key",
+        url="https://www.minimaxi.com/", password=True, category="provider", advanced=True),
+    "MINIMAX_CN_BASE_URL": _env("MiniMax (China) base URL override",
+        "MiniMax (China) base URL (leave empty for default)", url=None, password=False, category="provider",
+        advanced=True),
+    "DEEPSEEK_API_KEY": _env("DeepSeek API key for direct DeepSeek access", "DeepSeek API Key",
+        url="https://platform.deepseek.com/api_keys", password=True, category="provider"),
+    "DEEPSEEK_BASE_URL": _env("Custom DeepSeek API base URL (advanced)", "DeepSeek Base URL", url="",
+        password=False, category="provider"),
+    "DASHSCOPE_API_KEY": _env("Alibaba Cloud DashScope API key (Qwen + multi-provider models)",
+        "DashScope API Key", url="https://modelstudio.console.alibabacloud.com/", password=True,
+        category="provider"),
+    "DASHSCOPE_BASE_URL": _env("Custom DashScope base URL (default: coding-intl OpenAI-compat endpoint)",
+        "DashScope Base URL", url="", password=False, category="provider", advanced=True),
+    "HERMES_QWEN_BASE_URL": _env("Qwen Portal base URL override (default: https://portal.qwen.ai/v1)",
+        "Qwen Portal base URL (leave empty for default)", url=None, password=False, category="provider",
+        advanced=True),
+    "OPENCODE_ZEN_API_KEY": _env("OpenCode Zen API key (pay-as-you-go access to curated models)",
+        "OpenCode Zen API key", url="https://opencode.ai/auth", password=True, category="provider",
+        advanced=True),
+    "COMMANDCODE_API_KEY": _env("CommandCode API key (GOAT/Pro/Max/Provider plans — 30+ models via one key)",
+        "CommandCode API key", url="https://commandcode.ai/studio/", password=True, category="provider",
+        advanced=True),
+    "OPENCODE_ZEN_BASE_URL": _env("OpenCode Zen base URL override",
+        "OpenCode Zen base URL (leave empty for default)", url=None, password=False, category="provider",
+        advanced=True),
+    "OPENCODE_GO_API_KEY": _env("OpenCode Go API key ($10/month subscription for open models)",
+        "OpenCode Go API key", url="https://opencode.ai/auth", password=True, category="provider",
+        advanced=True),
+    "OPENCODE_GO_BASE_URL": _env("OpenCode Go base URL override",
+        "OpenCode Go base URL (leave empty for default)", url=None, password=False, category="provider",
+        advanced=True),
+    "HF_TOKEN": _env("Hugging Face token for Inference Providers (20+ open models via router.huggingface.co)",
+        "Hugging Face Token", url="https://huggingface.co/settings/tokens", password=True,
+        category="provider"),
+    "HF_BASE_URL": _env("Hugging Face Inference Providers base URL override",
+        "HF base URL (leave empty for default)", url=None, password=False, category="provider",
+        advanced=True),
+    "OLLAMA_API_KEY": _env("Ollama Cloud API key (ollama.com — cloud-hosted open models)",
+        "Ollama Cloud API key", url="https://ollama.com/settings", password=True, category="provider",
+        advanced=True),
+    "OLLAMA_BASE_URL": _env("Ollama Cloud base URL override (default: https://ollama.com/v1)",
+        "Ollama base URL (leave empty for default)", url=None, password=False, category="provider",
+        advanced=True),
+    "XIAOMI_API_KEY": _env(
+        "Xiaomi MiMo API key for MiMo models (mimo-v2.5-pro, mimo-v2.5, mimo-v2-pro, mimo-v2-omni, "
+        "mimo-v2-flash)", "Xiaomi MiMo API Key", url="https://platform.xiaomimimo.com", password=True,
+        category="provider"),
+    "XIAOMI_BASE_URL": _env("Xiaomi MiMo base URL override (default: https://api.xiaomimimo.com/v1)",
+        "Xiaomi base URL (leave empty for default)", url=None, password=False, category="provider",
+        advanced=True),
+    "UPSTAGE_API_KEY": _env("Upstage API key for Solar LLM models", "Upstage API Key",
+        url="https://console.upstage.ai/api-keys", password=True, category="provider"),
+    "UPSTAGE_BASE_URL": _env("Upstage base URL override (default: https://api.upstage.ai/v1)",
+        "Upstage base URL (leave empty for default)", url=None, password=False, category="provider",
+        advanced=True),
+    "AWS_REGION": _env("AWS region for Bedrock API calls (e.g. us-east-1, eu-central-1)", "AWS Region",
+        url="https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html", password=False,
+        category="provider", advanced=True),
+    "AWS_PROFILE": _env("AWS named profile for Bedrock authentication (from ~/.aws/credentials)",
+        "AWS Profile", url=None, password=False, category="provider", advanced=True),
+    "AZURE_FOUNDRY_API_KEY": _env("Azure Foundry API key for custom Azure endpoints", "Azure Foundry API Key",
+        url="https://ai.azure.com/", password=True, category="provider"),
+    "AZURE_FOUNDRY_BASE_URL": _env(
+        "Azure Foundry base URL (set via 'hermes model' for endpoint-specific config)",
+        "Azure Foundry base URL", url=None, password=False, category="provider", advanced=True),
     # ── Tool API keys ──
-    "EXA_API_KEY": {
-        "description": "Exa API key for AI-native web search and contents",
-        "prompt": "Exa API key",
-        "url": "https://exa.ai/",
-        "tools": ["web_search", "web_extract"],
-        "password": True,
-        "category": "tool",
-    },
-    "PARALLEL_API_KEY": {
-        "description": "Parallel API key for AI-native web search and extract",
-        "prompt": "Parallel API key",
-        "url": "https://parallel.ai/",
-        "tools": ["web_search", "web_extract"],
-        "password": True,
-        "category": "tool",
-    },
-    "FIRECRAWL_API_KEY": {
-        "description": "Firecrawl API key for web search and scraping",
-        "prompt": "Firecrawl API key",
-        "url": "https://firecrawl.dev/",
-        "tools": ["web_search", "web_extract"],
-        "password": True,
-        "category": "tool",
-    },
-    "FIRECRAWL_API_URL": {
-        "description": "Firecrawl API URL for self-hosted instances (optional)",
-        "prompt": "Firecrawl API URL (leave empty for cloud)",
-        "url": None,
-        "password": False,
-        "category": "tool",
-        "advanced": True,
-    },
-    "FIRECRAWL_GATEWAY_URL": {
-        "description": "Exact Firecrawl tool-gateway origin override for Nous Subscribers only (optional)",
-        "prompt": "Firecrawl gateway URL (leave empty to derive from domain)",
-        "url": None,
-        "password": False,
-        "category": "tool",
-        "advanced": True,
-    },
-    "TOOL_GATEWAY_DOMAIN": {
-        "description": "Shared tool-gateway domain suffix for Nous Subscribers only, used to derive vendor hosts, e.g. nousresearch.com -> firecrawl-gateway.nousresearch.com",
-        "prompt": "Tool-gateway domain suffix",
-        "url": None,
-        "password": False,
-        "category": "tool",
-        "advanced": True,
-    },
-    "TOOL_GATEWAY_SCHEME": {
-        "description": "Shared tool-gateway URL scheme for Nous Subscribers only, used to derive vendor hosts (`https` by default, set `http` for local gateway testing)",
-        "prompt": "Tool-gateway URL scheme",
-        "url": None,
-        "password": False,
-        "category": "tool",
-        "advanced": True,
-    },
-    "TOOL_GATEWAY_USER_TOKEN": {
-        "description": "Explicit Nous Subscriber access token for tool-gateway requests (optional; otherwise read from the Hermes auth store)",
-        "prompt": "Tool-gateway user token",
-        "url": None,
-        "password": True,
-        "category": "tool",
-        "advanced": True,
-    },
-    "TAVILY_API_KEY": {
-        "description": "Tavily API key for AI-native web search and extract (optional — keyless works when Tavily is selected)",
-        "prompt": "Tavily API key",
-        "url": "https://app.tavily.com/home",
-        "tools": ["web_search", "web_extract"],
-        "password": True,
-        "category": "tool",
-    },
-    "KEENABLE_API_KEY": {
-        "description": "Keenable API key for fast independent-index web search and page fetch (optional — keyless free tier works without it)",
-        "prompt": "Keenable API key",
-        "url": "https://keenable.ai",
-        "tools": ["web_search", "web_extract"],
-        "password": True,
-        "category": "tool",
-    },
-    "SEARXNG_URL": {
-        "description": "URL of your SearXNG instance for free self-hosted web search",
-        "prompt": "SearXNG URL (e.g. http://localhost:8080)",
-        "url": "https://searxng.github.io/searxng/",
-        "tools": ["web_search"],
-        "password": False,
-        "category": "tool",
-    },
-    "BRAVE_SEARCH_API_KEY": {
-        "description": "Brave Search API subscription token (free tier: 2,000 queries/mo)",
-        "prompt": "Brave Search subscription token",
-        "url": "https://brave.com/search/api/",
-        "tools": ["web_search"],
-        "password": True,
-        "category": "tool",
-    },
-    "BROWSERBASE_API_KEY": {
-        "description": "Browserbase API key for cloud browser (optional — local browser works without this)",
-        "prompt": "Browserbase API key",
-        "url": "https://browserbase.com/",
-        "tools": ["browser_navigate", "browser_click"],
-        "password": True,
-        "category": "tool",
-    },
-    "BROWSERBASE_PROJECT_ID": {
-        "description": "Browserbase project ID (optional — only needed for cloud browser)",
-        "prompt": "Browserbase project ID",
-        "url": "https://browserbase.com/",
-        "tools": ["browser_navigate", "browser_click"],
-        "password": False,
-        "category": "tool",
-    },
-    "BROWSER_USE_API_KEY": {
-        "description": "Browser Use API key for cloud browser (optional — local browser works without this)",
-        "prompt": "Browser Use API key",
-        "url": "https://browser-use.com/",
-        "tools": ["browser_navigate", "browser_click"],
-        "password": True,
-        "category": "tool",
-    },
-    "FIRECRAWL_BROWSER_TTL": {
-        "description": "Firecrawl browser session TTL in seconds (optional, default 300)",
-        "prompt": "Browser session TTL (seconds)",
-        "tools": ["browser_navigate", "browser_click"],
-        "password": False,
-        "category": "tool",
-    },
-    "AGENT_BROWSER_ENGINE": {
-        "description": "Local browser engine: auto (default Chrome), lightpanda (faster, no screenshots; Browser Use mode spawns lightpanda serve), chrome",
-        "prompt": "Browser engine (auto/lightpanda/chrome)",
-        "url": "https://lightpanda.io/docs/run-locally/installation/one-liner",
-        "tools": ["browser_exec", "browser_navigate", "browser_snapshot", "browser_click", "browser_vision"],
-        "password": False,
-        "category": "tool",
-        "advanced": True,
-    },
-    "CAMOFOX_URL": {
-        "description": "Camofox browser server URL for local anti-detection browsing (e.g. http://localhost:9377)",
-        "prompt": "Camofox server URL",
-        "url": "https://github.com/jo-inc/camofox-browser",
-        "tools": ["browser_navigate", "browser_click"],
-        "password": False,
-        "category": "tool",
-    },
-    "CAMOFOX_API_KEY": {
-        "description": "Optional bearer token sent as Authorization header to a remote/authenticated Camofox server",
-        "prompt": "Camofox API key",
-        "url": "https://github.com/jo-inc/camofox-browser",
-        "tools": ["browser_navigate", "browser_click"],
-        "password": True,
-        "category": "tool",
-        "advanced": True,
-    },
-    "FAL_KEY": {
-        "description": "FAL API key for image and video generation",
-        "prompt": "FAL API key",
-        "url": "https://fal.ai/",
-        "tools": ["image_generate", "video_generate"],
-        "password": True,
-        "category": "tool",
-    },
-    "KREA_API_KEY": {
-        "description": "Krea API key for Krea 2 image generation (Medium + Large)",
-        "prompt": "Krea API key",
-        "url": "https://www.krea.ai/settings/api-tokens",
-        "tools": ["image_generate"],
-        "password": True,
-        "category": "tool",
-    },
-    "VOICE_TOOLS_OPENAI_KEY": {
-        "description": "OpenAI API key for voice transcription (Whisper) and OpenAI TTS",
-        "prompt": "OpenAI API Key (for Whisper STT + TTS)",
-        "url": "https://platform.openai.com/api-keys",
-        "tools": ["voice_transcription", "openai_tts"],
-        "password": True,
-        "category": "tool",
-    },
-    "ELEVENLABS_API_KEY": {
-        "description": "ElevenLabs API key for premium text-to-speech voices and Scribe transcription",
-        "prompt": "ElevenLabs API key",
-        "url": "https://elevenlabs.io/",
-        "tools": ["elevenlabs_tts", "voice_transcription"],
-        "password": True,
-        "category": "tool",
-    },
-    "MISTRAL_API_KEY": {
-        "description": "Mistral API key for Voxtral TTS and transcription (STT)",
-        "prompt": "Mistral API key",
-        "url": "https://console.mistral.ai/",
-        "password": True,
-        "category": "tool",
-    },
-    "PORCUPINE_ACCESS_KEY": {
-        "description": "Picovoice access key for the Porcupine 'Hey Hermes' wake word engine (optional; openWakeWord is the free default)",
-        "prompt": "Picovoice access key",
-        "url": "https://console.picovoice.ai/",
-        "password": True,
-        "category": "tool",
-    },
-    "GITHUB_TOKEN": {
-        "description": "GitHub token for Skills Hub (higher API rate limits, skill publish)",
-        "prompt": "GitHub Token",
-        "url": "https://github.com/settings/tokens",
-        "password": True,
-        "category": "tool",
-    },
+    "EXA_API_KEY": _env("Exa API key for AI-native web search and contents", "Exa API key",
+        url="https://exa.ai/", tools=["web_search", "web_extract"], password=True, category="tool"),
+    "PARALLEL_API_KEY": _env("Parallel API key for AI-native web search and extract", "Parallel API key",
+        url="https://parallel.ai/", tools=["web_search", "web_extract"], password=True, category="tool"),
+    "FIRECRAWL_API_KEY": _env("Firecrawl API key for web search and scraping", "Firecrawl API key",
+        url="https://firecrawl.dev/", tools=["web_search", "web_extract"], password=True, category="tool"),
+    "FIRECRAWL_API_URL": _env("Firecrawl API URL for self-hosted instances (optional)",
+        "Firecrawl API URL (leave empty for cloud)", url=None, password=False, category="tool",
+        advanced=True),
+    "FIRECRAWL_GATEWAY_URL": _env(
+        "Exact Firecrawl tool-gateway origin override for Nous Subscribers only (optional)",
+        "Firecrawl gateway URL (leave empty to derive from domain)", url=None, password=False,
+        category="tool", advanced=True),
+    "TOOL_GATEWAY_DOMAIN": _env(
+        "Shared tool-gateway domain suffix for Nous Subscribers only, used to derive vendor hosts, e.g. "
+        "nousresearch.com -> firecrawl-gateway.nousresearch.com", "Tool-gateway domain suffix", url=None,
+        password=False, category="tool", advanced=True),
+    "TOOL_GATEWAY_SCHEME": _env(
+        "Shared tool-gateway URL scheme for Nous Subscribers only, used to derive vendor hosts (`https` by "
+        "default, set `http` for local gateway testing)", "Tool-gateway URL scheme", url=None, password=False,
+        category="tool", advanced=True),
+    "TOOL_GATEWAY_USER_TOKEN": _env(
+        "Explicit Nous Subscriber access token for tool-gateway requests (optional; otherwise read from "
+        "the Hermes auth store)", "Tool-gateway user token", url=None, password=True, category="tool",
+        advanced=True),
+    "TAVILY_API_KEY": _env(
+        "Tavily API key for AI-native web search and extract (optional — keyless works when Tavily is "
+        "selected)", "Tavily API key", url="https://app.tavily.com/home", tools=["web_search", "web_extract"],
+        password=True, category="tool"),
+    "KEENABLE_API_KEY": _env(
+        "Keenable API key for fast independent-index web search and page fetch (optional — keyless free "
+        "tier works without it)", "Keenable API key", url="https://keenable.ai",
+        tools=["web_search", "web_extract"], password=True, category="tool"),
+    "SEARXNG_URL": _env("URL of your SearXNG instance for free self-hosted web search",
+        "SearXNG URL (e.g. http://localhost:8080)", url="https://searxng.github.io/searxng/",
+        tools=["web_search"], password=False, category="tool"),
+    "BRAVE_SEARCH_API_KEY": _env("Brave Search API subscription token (free tier: 2,000 queries/mo)",
+        "Brave Search subscription token", url="https://brave.com/search/api/", tools=["web_search"],
+        password=True, category="tool"),
+    "BROWSERBASE_API_KEY": _env(
+        "Browserbase API key for cloud browser (optional — local browser works without this)",
+        "Browserbase API key", url="https://browserbase.com/", tools=["browser_navigate", "browser_click"],
+        password=True, category="tool"),
+    "BROWSERBASE_PROJECT_ID": _env("Browserbase project ID (optional — only needed for cloud browser)",
+        "Browserbase project ID", url="https://browserbase.com/", tools=["browser_navigate", "browser_click"],
+        password=False, category="tool"),
+    "BROWSER_USE_API_KEY": _env(
+        "Browser Use API key for cloud browser (optional — local browser works without this)",
+        "Browser Use API key", url="https://browser-use.com/", tools=["browser_navigate", "browser_click"],
+        password=True, category="tool"),
+    "FIRECRAWL_BROWSER_TTL": _env("Firecrawl browser session TTL in seconds (optional, default 300)",
+        "Browser session TTL (seconds)", tools=["browser_navigate", "browser_click"], password=False,
+        category="tool"),
+    "AGENT_BROWSER_ENGINE": _env(
+        "Local browser engine: auto (default Chrome), lightpanda (faster, no screenshots; Browser Use mode "
+        "spawns lightpanda serve), chrome", "Browser engine (auto/lightpanda/chrome)",
+        url="https://lightpanda.io/docs/run-locally/installation/one-liner",
+        tools=["browser_exec", "browser_navigate", "browser_snapshot", "browser_click", "browser_vision"],
+        password=False, category="tool", advanced=True),
+    "CAMOFOX_URL": _env(
+        "Camofox browser server URL for local anti-detection browsing (e.g. http://localhost:9377)",
+        "Camofox server URL", url="https://github.com/jo-inc/camofox-browser",
+        tools=["browser_navigate", "browser_click"], password=False, category="tool"),
+    "CAMOFOX_API_KEY": _env(
+        "Optional bearer token sent as Authorization header to a remote/authenticated Camofox server",
+        "Camofox API key", url="https://github.com/jo-inc/camofox-browser",
+        tools=["browser_navigate", "browser_click"], password=True, category="tool", advanced=True),
+    "FAL_KEY": _env("FAL API key for image and video generation", "FAL API key", url="https://fal.ai/",
+        tools=["image_generate", "video_generate"], password=True, category="tool"),
+    "KREA_API_KEY": _env("Krea API key for Krea 2 image generation (Medium + Large)", "Krea API key",
+        url="https://www.krea.ai/settings/api-tokens", tools=["image_generate"], password=True,
+        category="tool"),
+    "VOICE_TOOLS_OPENAI_KEY": _env("OpenAI API key for voice transcription (Whisper) and OpenAI TTS",
+        "OpenAI API Key (for Whisper STT + TTS)", url="https://platform.openai.com/api-keys",
+        tools=["voice_transcription", "openai_tts"], password=True, category="tool"),
+    "ELEVENLABS_API_KEY": _env(
+        "ElevenLabs API key for premium text-to-speech voices and Scribe transcription", "ElevenLabs API key",
+        url="https://elevenlabs.io/", tools=["elevenlabs_tts", "voice_transcription"], password=True,
+        category="tool"),
+    "MISTRAL_API_KEY": _env("Mistral API key for Voxtral TTS and transcription (STT)", "Mistral API key",
+        url="https://console.mistral.ai/", password=True, category="tool"),
+    "PORCUPINE_ACCESS_KEY": _env(
+        "Picovoice access key for the Porcupine 'Hey Hermes' wake word engine (optional; openWakeWord is "
+        "the free default)", "Picovoice access key", url="https://console.picovoice.ai/", password=True,
+        category="tool"),
+    "GITHUB_TOKEN": _env("GitHub token for Skills Hub (higher API rate limits, skill publish)",
+        "GitHub Token", url="https://github.com/settings/tokens", password=True, category="tool"),
 
     # ── Bundled skills (opt-in: only needed if the user uses that skill) ──
     # These use category="skill" (distinct from "tool") so the sandbox
     # env blocklist in tools/environments/local.py does NOT rewrite them —
     # skills legitimately need these passed through to curl via
     # tools/env_passthrough.py when the user's skill calls out.
-    "NOTION_API_KEY": {
-        "description": "Notion integration token (used by the `notion` skill)",
-        "prompt": "Notion API key",
-        "url": "https://www.notion.so/my-integrations",
-        "password": True,
-        "category": "skill",
-        "advanced": True,
-    },
-    "LINEAR_API_KEY": {
-        "description": "Linear personal API key (used by the `linear` skill)",
-        "prompt": "Linear API key",
-        "url": "https://linear.app/settings/account/security",
-        "password": True,
-        "category": "skill",
-        "advanced": True,
-    },
-    "AIRTABLE_API_KEY": {
-        "description": "Airtable personal access token (used by the `airtable` skill)",
-        "prompt": "Airtable API key",
-        "url": "https://airtable.com/create/tokens",
-        "password": True,
-        "category": "skill",
-        "advanced": True,
-    },
-    "TENOR_API_KEY": {
-        "description": "Tenor API key for GIF search (used by the `gif-search` skill)",
-        "prompt": "Tenor API key",
-        "url": "https://developers.google.com/tenor/guides/quickstart",
-        "password": True,
-        "category": "skill",
-        "advanced": True,
-    },
+    "NOTION_API_KEY": _env("Notion integration token (used by the `notion` skill)", "Notion API key",
+        url="https://www.notion.so/my-integrations", password=True, category="skill", advanced=True),
+    "LINEAR_API_KEY": _env("Linear personal API key (used by the `linear` skill)", "Linear API key",
+        url="https://linear.app/settings/account/security", password=True, category="skill", advanced=True),
+    "AIRTABLE_API_KEY": _env("Airtable personal access token (used by the `airtable` skill)",
+        "Airtable API key", url="https://airtable.com/create/tokens", password=True, category="skill",
+        advanced=True),
+    "TENOR_API_KEY": _env("Tenor API key for GIF search (used by the `gif-search` skill)", "Tenor API key",
+        url="https://developers.google.com/tenor/guides/quickstart", password=True, category="skill",
+        advanced=True),
 
     # ── Honcho ──
-    "HONCHO_API_KEY": {
-        "description": "Honcho API key for AI-native persistent memory",
-        "prompt": "Honcho API key",
-        "url": "https://app.honcho.dev",
-        "tools": ["honcho_context"],
-        "password": True,
-        "category": "tool",
-    },
-    "HONCHO_BASE_URL": {
-        "description": "Base URL for self-hosted Honcho instances (no API key needed)",
-        "prompt": "Honcho base URL (e.g. http://localhost:8000)",
-        "category": "tool",
-    },
+    "HONCHO_API_KEY": _env("Honcho API key for AI-native persistent memory", "Honcho API key",
+        url="https://app.honcho.dev", tools=["honcho_context"], password=True, category="tool"),
+    "HONCHO_BASE_URL": _env("Base URL for self-hosted Honcho instances (no API key needed)",
+        "Honcho base URL (e.g. http://localhost:8000)", category="tool"),
 
     # ── Hindsight ──
-    "HINDSIGHT_API_KEY": {
-        "description": "Hindsight API key for graph-aware persistent memory",
-        "prompt": "Hindsight API key",
-        "url": "https://hindsight.vectorize.io",
-        "tools": ["hindsight_recall"],
-        "password": True,
-        "category": "tool",
-    },
-    "HINDSIGHT_API_URL": {
-        "description": "Base URL for the Hindsight API (default: https://api.hindsight.vectorize.io)",
-        "prompt": "Hindsight API URL",
-        "category": "tool",
-        "advanced": True,
-    },
+    "HINDSIGHT_API_KEY": _env("Hindsight API key for graph-aware persistent memory", "Hindsight API key",
+        url="https://hindsight.vectorize.io", tools=["hindsight_recall"], password=True, category="tool"),
+    "HINDSIGHT_API_URL": _env("Base URL for the Hindsight API (default: https://api.hindsight.vectorize.io)",
+        "Hindsight API URL", category="tool", advanced=True),
 
     # ── Supermemory ──
-    "SUPERMEMORY_API_KEY": {
-        "description": "Supermemory API key for conversation-scoped persistent memory",
-        "prompt": "Supermemory API key",
-        "url": "https://supermemory.ai",
-        "tools": ["supermemory_search"],
-        "password": True,
-        "category": "tool",
-    },
+    "SUPERMEMORY_API_KEY": _env("Supermemory API key for conversation-scoped persistent memory",
+        "Supermemory API key", url="https://supermemory.ai", tools=["supermemory_search"], password=True,
+        category="tool"),
 
     # ── Mem0 ──
-    "MEM0_API_KEY": {
-        "description": "Mem0 Platform API key for semantic persistent memory",
-        "prompt": "Mem0 API key",
-        "url": "https://app.mem0.ai",
-        "tools": ["mem0_search"],
-        "password": True,
-        "category": "tool",
-    },
+    "MEM0_API_KEY": _env("Mem0 Platform API key for semantic persistent memory", "Mem0 API key",
+        url="https://app.mem0.ai", tools=["mem0_search"], password=True, category="tool"),
 
     # ── RetainDB ──
-    "RETAINDB_API_KEY": {
-        "description": "RetainDB API key for persistent memory",
-        "prompt": "RetainDB API key",
-        "url": "https://retaindb.com",
-        "tools": ["retaindb_search"],
-        "password": True,
-        "category": "tool",
-    },
-    "RETAINDB_BASE_URL": {
-        "description": "Base URL for self-hosted RetainDB instances (default: https://api.retaindb.com)",
-        "prompt": "RetainDB base URL",
-        "category": "tool",
-        "advanced": True,
-    },
+    "RETAINDB_API_KEY": _env("RetainDB API key for persistent memory", "RetainDB API key",
+        url="https://retaindb.com", tools=["retaindb_search"], password=True, category="tool"),
+    "RETAINDB_BASE_URL": _env(
+        "Base URL for self-hosted RetainDB instances (default: https://api.retaindb.com)",
+        "RetainDB base URL", category="tool", advanced=True),
 
     # ── ByteRover ──
-    "BRV_API_KEY": {
-        "description": "ByteRover API key (optional, for cloud sync — local-first by default)",
-        "prompt": "ByteRover API key",
-        "url": "https://app.byterover.dev",
-        "tools": ["brv_query"],
-        "password": True,
-        "category": "tool",
-    },
+    "BRV_API_KEY": _env("ByteRover API key (optional, for cloud sync — local-first by default)",
+        "ByteRover API key", url="https://app.byterover.dev", tools=["brv_query"], password=True,
+        category="tool"),
 
     # ── OpenViking ──
-    "OPENVIKING_API_KEY": {
-        "description": "OpenViking API key (leave blank for local dev mode)",
-        "prompt": "OpenViking API key",
-        "tools": ["viking_search"],
-        "password": True,
-        "category": "tool",
-    },
-    "OPENVIKING_ENDPOINT": {
-        "description": "OpenViking server URL (default: http://127.0.0.1:1933)",
-        "prompt": "OpenViking endpoint",
-        "category": "tool",
-        "advanced": True,
-    },
+    "OPENVIKING_API_KEY": _env("OpenViking API key (leave blank for local dev mode)", "OpenViking API key",
+        tools=["viking_search"], password=True, category="tool"),
+    "OPENVIKING_ENDPOINT": _env("OpenViking server URL (default: http://127.0.0.1:1933)",
+        "OpenViking endpoint", category="tool", advanced=True),
 
     # ── Langfuse observability ──
-    "HERMES_LANGFUSE_PUBLIC_KEY": {
-        "description": "Langfuse project public key (pk-lf-...)",
-        "prompt": "Langfuse public key",
-        "url": "https://cloud.langfuse.com",
-        "password": False,
-        "category": "tool",
-    },
-    "HERMES_LANGFUSE_SECRET_KEY": {
-        "description": "Langfuse project secret key (sk-lf-...)",
-        "prompt": "Langfuse secret key",
-        "url": "https://cloud.langfuse.com",
-        "password": True,
-        "category": "tool",
-    },
-    "HERMES_LANGFUSE_BASE_URL": {
-        "description": "Langfuse server URL (default: https://cloud.langfuse.com)",
-        "prompt": "Langfuse server URL (leave empty for cloud.langfuse.com)",
-        "url": None,
-        "password": False,
-        "category": "tool",
-        "advanced": True,
-    },
+    "HERMES_LANGFUSE_PUBLIC_KEY": _env("Langfuse project public key (pk-lf-...)", "Langfuse public key",
+        url="https://cloud.langfuse.com", password=False, category="tool"),
+    "HERMES_LANGFUSE_SECRET_KEY": _env("Langfuse project secret key (sk-lf-...)", "Langfuse secret key",
+        url="https://cloud.langfuse.com", password=True, category="tool"),
+    "HERMES_LANGFUSE_BASE_URL": _env("Langfuse server URL (default: https://cloud.langfuse.com)",
+        "Langfuse server URL (leave empty for cloud.langfuse.com)", url=None, password=False, category="tool",
+        advanced=True),
 
     # ── Messaging platforms ──
-    "TELEGRAM_BOT_TOKEN": {
-        "description": "Complete Telegram bot token created by @BotFather (numeric bot ID followed by a colon and secret)",
-        "prompt": "Telegram bot token",
-        "url": "https://t.me/BotFather",
-        "password": True,
-        "category": "messaging",
-    },
-    "TELEGRAM_ALLOWED_USERS": {
-        "description": "Optional comma-separated numeric Telegram user IDs allowed immediately; leave blank to approve new users through DM pairing",
-        "prompt": "Allowed Telegram user IDs (comma-separated)",
-        "url": "https://t.me/userinfobot",
-        "password": False,
-        "category": "messaging",
-    },
-    "TELEGRAM_PROXY": {
-        "description": "Proxy URL for Telegram connections (overrides HTTPS_PROXY). Supports http://, https://, socks5://",
-        "prompt": "Telegram proxy URL (optional)",
-        "password": False,
-        "category": "messaging",
-    },
-    "DISCORD_BOT_TOKEN": {
-        "description": "Discord bot token from Developer Portal",
-        "prompt": "Discord bot token",
-        "url": "https://discord.com/developers/applications",
-        "password": True,
-        "category": "messaging",
-    },
-    "DISCORD_ALLOWED_USERS": {
-        "description": "Comma-separated Discord user IDs allowed to use the bot",
-        "prompt": "Allowed Discord user IDs (comma-separated)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "DISCORD_REPLY_TO_MODE": {
-        "description": "Discord reply threading mode: 'off' (no reply references), 'first' (reply on first message only, default), 'all' (reply on every chunk)",
-        "prompt": "Discord reply mode (off/first/all)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "SLACK_BOT_TOKEN": {
-        "description": "Slack bot token (xoxb-). Get from OAuth & Permissions after installing your app. "
-                       "Required scopes: chat:write, app_mentions:read, channels:history, groups:history, "
-                       "im:history, im:read, im:write, mpim:history, mpim:read, users:read, files:read, files:write",
-        "prompt": "Slack Bot Token (xoxb-...)",
-        "help": "In your Slack app, add the required bot scopes, install the app to the workspace, then copy OAuth & Permissions > Bot User OAuth Token.",
-        "url": "https://api.slack.com/apps",
-        "password": True,
-        "category": "messaging",
-    },
-    "SLACK_APP_TOKEN": {
-        "description": "Slack app-level token (xapp-) for Socket Mode. Get from Basic Information → "
-                       "App-Level Tokens. Also ensure Event Subscriptions include: message.im, "
-                       "message.channels, message.groups, message.mpim, app_mention",
-        "prompt": "Slack App Token (xapp-...)",
-        "help": "In your Slack app, enable Socket Mode, then create Basic Information > App-Level Tokens with the connections:write scope.",
-        "url": "https://api.slack.com/apps",
-        "password": True,
-        "category": "messaging",
-    },
-    "SLACK_ALLOWED_USERS": {
-        "description": "Comma-separated Slack member IDs allowed to use Hermes, e.g. U01ABC2DEF3. Without this, Slack may connect but deny messages by default.",
-        "prompt": "Allowed Slack member IDs",
-        "help": "In Slack, open your profile, choose More or the three-dot menu, then Copy member ID. Add multiple IDs comma-separated.",
-        "url": "https://api.slack.com/apps",
-        "password": False,
-        "category": "messaging",
-    },
-    "MATTERMOST_URL": {
-        "description": "Mattermost server URL (e.g. https://mm.example.com)",
-        "prompt": "Mattermost server URL",
-        "url": "https://mattermost.com/deploy/",
-        "password": False,
-        "category": "messaging",
-    },
-    "MATTERMOST_TOKEN": {
-        "description": "Mattermost bot token or personal access token",
-        "prompt": "Mattermost bot token",
-        "url": None,
-        "password": True,
-        "category": "messaging",
-    },
-    "MATTERMOST_ALLOWED_USERS": {
-        "description": "Comma-separated Mattermost user IDs allowed to use the bot",
-        "prompt": "Allowed Mattermost user IDs (comma-separated)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "MATTERMOST_REQUIRE_MENTION": {
-        "description": "Require @mention in Mattermost channels (default: true). Set to false to respond to all messages.",
-        "prompt": "Require @mention in channels",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "MATTERMOST_FREE_RESPONSE_CHANNELS": {
-        "description": "Comma-separated Mattermost channel IDs where bot responds without @mention",
-        "prompt": "Free-response channel IDs (comma-separated)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "MATRIX_HOMESERVER": {
-        "description": "Matrix homeserver URL (e.g. https://matrix.example.org)",
-        "prompt": "Matrix homeserver URL",
-        "url": "https://matrix.org/ecosystem/servers/",
-        "password": False,
-        "category": "messaging",
-    },
-    "MATRIX_ACCESS_TOKEN": {
-        "description": "Matrix access token (preferred over password login)",
-        "prompt": "Matrix access token",
-        "url": None,
-        "password": True,
-        "category": "messaging",
-    },
-    "MATRIX_USER_ID": {
-        "description": "Matrix user ID (e.g. @hermes:example.org)",
-        "prompt": "Matrix user ID (@user:server)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "MATRIX_ALLOWED_USERS": {
-        "description": "Comma-separated Matrix user IDs allowed to use the bot (@user:server format)",
-        "prompt": "Allowed Matrix user IDs (comma-separated)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "MATRIX_REQUIRE_MENTION": {
-        "description": "Require @mention in Matrix rooms (default: true). Set to false to respond to all messages.",
-        "prompt": "Require @mention in rooms (true/false)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "MATRIX_FREE_RESPONSE_ROOMS": {
-        "description": "Comma-separated Matrix room IDs where bot responds without @mention",
-        "prompt": "Free-response room IDs (comma-separated)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "MATRIX_AUTO_THREAD": {
-        "description": "Auto-create threads for messages in Matrix rooms (default: true)",
-        "prompt": "Auto-create threads in rooms (true/false)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "MATRIX_DM_AUTO_THREAD": {
-        "description": "Auto-create threads for DM messages in Matrix (default: false)",
-        "prompt": "Auto-create threads in DMs (true/false)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "MATRIX_DEVICE_ID": {
-        "description": "Stable Matrix device ID for E2EE persistence across restarts (e.g. HERMES_BOT)",
-        "prompt": "Matrix device ID (stable across restarts)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "MATRIX_RECOVERY_KEY": {
-        "description": "Matrix recovery key for cross-signing verification after device key rotation (from Element: Settings → Security → Recovery Key)",
-        "prompt": "Matrix recovery key",
-        "url": None,
-        "password": True,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "BLUEBUBBLES_SERVER_URL": {
-        "description": "BlueBubbles server URL for iMessage integration (e.g. http://192.168.1.10:1234)",
-        "prompt": "BlueBubbles server URL",
-        "url": "https://bluebubbles.app/",
-        "password": False,
-        "category": "messaging",
-    },
-    "BLUEBUBBLES_PASSWORD": {
-        "description": "BlueBubbles server password (from BlueBubbles Server → Settings → API)",
-        "prompt": "BlueBubbles server password",
-        "url": None,
-        "password": True,
-        "category": "messaging",
-    },
-    "BLUEBUBBLES_ALLOWED_USERS": {
-        "description": "Comma-separated iMessage addresses (email or phone) allowed to use the bot",
-        "prompt": "Allowed iMessage addresses (comma-separated)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "BLUEBUBBLES_ALLOW_ALL_USERS": {
-        "description": "Allow all BlueBubbles users without allowlist",
-        "prompt": "Allow All BlueBubbles Users",
-        "category": "messaging",
-    },
-    "QQ_APP_ID": {
-        "description": "QQ Bot App ID from QQ Open Platform (q.qq.com)",
-        "prompt": "QQ App ID",
-        "url": "https://q.qq.com",
-        "category": "messaging",
-    },
-    "QQ_CLIENT_SECRET": {
-        "description": "QQ Bot Client Secret from QQ Open Platform",
-        "prompt": "QQ Client Secret",
-        "password": True,
-        "category": "messaging",
-    },
-    "QQ_ALLOWED_USERS": {
-        "description": "Comma-separated QQ user IDs allowed to use the bot",
-        "prompt": "QQ Allowed Users",
-        "category": "messaging",
-    },
-    "QQ_GROUP_ALLOWED_USERS": {
-        "description": "Comma-separated QQ group IDs allowed to interact with the bot",
-        "prompt": "QQ Group Allowed Users",
-        "category": "messaging",
-    },
-    "QQ_ALLOW_ALL_USERS": {
-        "description": "Allow all QQ users without an allowlist (true/false)",
-        "prompt": "Allow All QQ Users",
-        "category": "messaging",
-    },
-    "QQBOT_HOME_CHANNEL": {
-        "description": "Default QQ channel/group for cron delivery and notifications",
-        "prompt": "QQ Home Channel",
-        "category": "messaging",
-    },
-    "QQBOT_HOME_CHANNEL_NAME": {
-        "description": "Display name for the QQ home channel",
-        "prompt": "QQ Home Channel Name",
-        "category": "messaging",
-    },
-    "QQ_SANDBOX": {
-        "description": "Enable QQ sandbox mode for development testing (true/false)",
-        "prompt": "QQ Sandbox Mode",
-        "category": "messaging",
-    },
-    "IRC_SERVER": {
-        "description": "IRC server hostname (e.g. irc.libera.chat)",
-        "prompt": "IRC server",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "IRC_CHANNEL": {
-        "description": "IRC channel to join (e.g. #hermes)",
-        "prompt": "IRC channel",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "IRC_NICKNAME": {
-        "description": "Bot nickname on IRC (default: hermes-bot)",
-        "prompt": "IRC nickname",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "IRC_SERVER_PASSWORD": {
-        "description": "IRC server password (if required)",
-        "prompt": "IRC server password",
-        "url": None,
-        "password": True,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "IRC_NICKSERV_PASSWORD": {
-        "description": "NickServ password for nick identification",
-        "prompt": "NickServ password",
-        "url": None,
-        "password": True,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "GATEWAY_ALLOW_ALL_USERS": {
-        "description": "Allow all users to interact with messaging bots (true/false). Default: false.",
-        "prompt": "Allow all users (true/false)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "API_SERVER_ENABLED": {
-        "description": "Enable the OpenAI-compatible API server (true/false). Allows frontends like Open WebUI, LobeChat, etc. to connect.",
-        "prompt": "Enable API server (true/false)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "API_SERVER_KEY": {
-        "description": "Bearer token for API server authentication. Required whenever the API server is enabled; server refuses to start without it.",
-        "prompt": "API server auth key",
-        "url": None,
-        "password": True,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "API_SERVER_PORT": {
-        "description": "Port for the API server (default: 8642).",
-        "prompt": "API server port",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "API_SERVER_HOST": {
-        "description": "Host/bind address for the API server (default: 127.0.0.1). API_SERVER_KEY is still required even on loopback binds.",
-        "prompt": "API server host",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "API_SERVER_MODEL_NAME": {
-        "description": "Model name advertised on /v1/models. Defaults to the profile name (or 'hermes-agent' for the default profile). Useful for multi-user setups with OpenWebUI.",
-        "prompt": "API server model name",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "GATEWAY_PROXY_URL": {
-        "description": "URL of a remote Hermes API server to forward messages to (proxy mode). When set, the gateway handles platform I/O only — all agent work is delegated to the remote server. Use for Docker E2EE containers that relay to a host agent. Also configurable via gateway.proxy_url in config.yaml.",
-        "prompt": "Remote Hermes API server URL (e.g. http://192.168.1.100:8642)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "GATEWAY_PROXY_KEY": {
-        "description": "Bearer token for authenticating with the remote Hermes API server (proxy mode). Must match the API_SERVER_KEY on the remote host.",
-        "prompt": "Remote API server auth key",
-        "url": None,
-        "password": True,
-        "category": "messaging",
-        "advanced": True,
-    },
-    "WEBHOOK_ENABLED": {
-        "description": "Enable the webhook platform adapter for receiving events from GitHub, GitLab, etc.",
-        "prompt": "Enable webhooks (true/false)",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "WEBHOOK_PORT": {
-        "description": "Port for the webhook HTTP server (default: 8644).",
-        "prompt": "Webhook port",
-        "url": None,
-        "password": False,
-        "category": "messaging",
-    },
-    "WEBHOOK_SECRET": {
-        "description": "Global HMAC secret for webhook signature validation (overridable per route in config.yaml).",
-        "prompt": "Webhook secret",
-        "url": None,
-        "password": True,
-        "category": "messaging",
-    },
+    "TELEGRAM_BOT_TOKEN": _env(
+        "Complete Telegram bot token created by @BotFather (numeric bot ID followed by a colon and secret)",
+        "Telegram bot token", url="https://t.me/BotFather", password=True, category="messaging"),
+    "TELEGRAM_ALLOWED_USERS": _env(
+        "Optional comma-separated numeric Telegram user IDs allowed immediately; leave blank to approve "
+        "new users through DM pairing", "Allowed Telegram user IDs (comma-separated)",
+        url="https://t.me/userinfobot", password=False, category="messaging"),
+    "TELEGRAM_PROXY": _env(
+        "Proxy URL for Telegram connections (overrides HTTPS_PROXY). Supports http://, https://, socks5://",
+        "Telegram proxy URL (optional)", password=False, category="messaging"),
+    "DISCORD_BOT_TOKEN": _env("Discord bot token from Developer Portal", "Discord bot token",
+        url="https://discord.com/developers/applications", password=True, category="messaging"),
+    "DISCORD_ALLOWED_USERS": _env("Comma-separated Discord user IDs allowed to use the bot",
+        "Allowed Discord user IDs (comma-separated)", url=None, password=False, category="messaging"),
+    "DISCORD_REPLY_TO_MODE": _env(
+        "Discord reply threading mode: 'off' (no reply references), 'first' (reply on first message only, "
+        "default), 'all' (reply on every chunk)", "Discord reply mode (off/first/all)", url=None,
+        password=False, category="messaging"),
+    "SLACK_BOT_TOKEN": _env(
+        "Slack bot token (xoxb-). Get from OAuth & Permissions after installing your app. Required scopes: "
+        "chat:write, app_mentions:read, channels:history, groups:history, im:history, im:read, im:write, "
+        "mpim:history, mpim:read, users:read, files:read, files:write", "Slack Bot Token (xoxb-...)",
+        help="In your Slack app, add the required bot scopes, install the app to the workspace, then copy OAuth & Permissions > Bot User OAuth Token.",
+        url="https://api.slack.com/apps", password=True, category="messaging"),
+    "SLACK_APP_TOKEN": _env(
+        "Slack app-level token (xapp-) for Socket Mode. Get from Basic Information → App-Level Tokens. "
+        "Also ensure Event Subscriptions include: message.im, message.channels, message.groups, "
+        "message.mpim, app_mention", "Slack App Token (xapp-...)",
+        help="In your Slack app, enable Socket Mode, then create Basic Information > App-Level Tokens with the connections:write scope.",
+        url="https://api.slack.com/apps", password=True, category="messaging"),
+    "SLACK_ALLOWED_USERS": _env(
+        "Comma-separated Slack member IDs allowed to use Hermes, e.g. U01ABC2DEF3. Without this, Slack may "
+        "connect but deny messages by default.", "Allowed Slack member IDs",
+        help="In Slack, open your profile, choose More or the three-dot menu, then Copy member ID. Add multiple IDs comma-separated.",
+        url="https://api.slack.com/apps", password=False, category="messaging"),
+    "MATTERMOST_URL": _env("Mattermost server URL (e.g. https://mm.example.com)", "Mattermost server URL",
+        url="https://mattermost.com/deploy/", password=False, category="messaging"),
+    "MATTERMOST_TOKEN": _env("Mattermost bot token or personal access token", "Mattermost bot token",
+        url=None, password=True, category="messaging"),
+    "MATTERMOST_ALLOWED_USERS": _env("Comma-separated Mattermost user IDs allowed to use the bot",
+        "Allowed Mattermost user IDs (comma-separated)", url=None, password=False, category="messaging"),
+    "MATTERMOST_REQUIRE_MENTION": _env(
+        "Require @mention in Mattermost channels (default: true). Set to false to respond to all messages.",
+        "Require @mention in channels", url=None, password=False, category="messaging"),
+    "MATTERMOST_FREE_RESPONSE_CHANNELS": _env(
+        "Comma-separated Mattermost channel IDs where bot responds without @mention",
+        "Free-response channel IDs (comma-separated)", url=None, password=False, category="messaging"),
+    "MATRIX_HOMESERVER": _env("Matrix homeserver URL (e.g. https://matrix.example.org)",
+        "Matrix homeserver URL", url="https://matrix.org/ecosystem/servers/", password=False,
+        category="messaging"),
+    "MATRIX_ACCESS_TOKEN": _env("Matrix access token (preferred over password login)", "Matrix access token",
+        url=None, password=True, category="messaging"),
+    "MATRIX_USER_ID": _env("Matrix user ID (e.g. @hermes:example.org)", "Matrix user ID (@user:server)",
+        url=None, password=False, category="messaging"),
+    "MATRIX_ALLOWED_USERS": _env(
+        "Comma-separated Matrix user IDs allowed to use the bot (@user:server format)",
+        "Allowed Matrix user IDs (comma-separated)", url=None, password=False, category="messaging"),
+    "MATRIX_REQUIRE_MENTION": _env(
+        "Require @mention in Matrix rooms (default: true). Set to false to respond to all messages.",
+        "Require @mention in rooms (true/false)", url=None, password=False, category="messaging",
+        advanced=True),
+    "MATRIX_FREE_RESPONSE_ROOMS": _env("Comma-separated Matrix room IDs where bot responds without @mention",
+        "Free-response room IDs (comma-separated)", url=None, password=False, category="messaging",
+        advanced=True),
+    "MATRIX_AUTO_THREAD": _env("Auto-create threads for messages in Matrix rooms (default: true)",
+        "Auto-create threads in rooms (true/false)", url=None, password=False, category="messaging",
+        advanced=True),
+    "MATRIX_DM_AUTO_THREAD": _env("Auto-create threads for DM messages in Matrix (default: false)",
+        "Auto-create threads in DMs (true/false)", url=None, password=False, category="messaging",
+        advanced=True),
+    "MATRIX_DEVICE_ID": _env("Stable Matrix device ID for E2EE persistence across restarts (e.g. HERMES_BOT)",
+        "Matrix device ID (stable across restarts)", url=None, password=False, category="messaging",
+        advanced=True),
+    "MATRIX_RECOVERY_KEY": _env(
+        "Matrix recovery key for cross-signing verification after device key rotation (from Element: "
+        "Settings → Security → Recovery Key)", "Matrix recovery key", url=None, password=True,
+        category="messaging", advanced=True),
+    "BLUEBUBBLES_SERVER_URL": _env(
+        "BlueBubbles server URL for iMessage integration (e.g. http://192.168.1.10:1234)",
+        "BlueBubbles server URL", url="https://bluebubbles.app/", password=False, category="messaging"),
+    "BLUEBUBBLES_PASSWORD": _env("BlueBubbles server password (from BlueBubbles Server → Settings → API)",
+        "BlueBubbles server password", url=None, password=True, category="messaging"),
+    "BLUEBUBBLES_ALLOWED_USERS": _env(
+        "Comma-separated iMessage addresses (email or phone) allowed to use the bot",
+        "Allowed iMessage addresses (comma-separated)", url=None, password=False, category="messaging"),
+    "BLUEBUBBLES_ALLOW_ALL_USERS": _env("Allow all BlueBubbles users without allowlist",
+        "Allow All BlueBubbles Users", category="messaging"),
+    "QQ_APP_ID": _env("QQ Bot App ID from QQ Open Platform (q.qq.com)", "QQ App ID", url="https://q.qq.com",
+        category="messaging"),
+    "QQ_CLIENT_SECRET": _env("QQ Bot Client Secret from QQ Open Platform", "QQ Client Secret", password=True,
+        category="messaging"),
+    "QQ_ALLOWED_USERS": _env("Comma-separated QQ user IDs allowed to use the bot", "QQ Allowed Users",
+        category="messaging"),
+    "QQ_GROUP_ALLOWED_USERS": _env("Comma-separated QQ group IDs allowed to interact with the bot",
+        "QQ Group Allowed Users", category="messaging"),
+    "QQ_ALLOW_ALL_USERS": _env("Allow all QQ users without an allowlist (true/false)", "Allow All QQ Users",
+        category="messaging"),
+    "QQBOT_HOME_CHANNEL": _env("Default QQ channel/group for cron delivery and notifications",
+        "QQ Home Channel", category="messaging"),
+    "QQBOT_HOME_CHANNEL_NAME": _env("Display name for the QQ home channel", "QQ Home Channel Name",
+        category="messaging"),
+    "QQ_SANDBOX": _env("Enable QQ sandbox mode for development testing (true/false)", "QQ Sandbox Mode",
+        category="messaging"),
+    "IRC_SERVER": _env("IRC server hostname (e.g. irc.libera.chat)", "IRC server", url=None, password=False,
+        category="messaging"),
+    "IRC_CHANNEL": _env("IRC channel to join (e.g. #hermes)", "IRC channel", url=None, password=False,
+        category="messaging"),
+    "IRC_NICKNAME": _env("Bot nickname on IRC (default: hermes-bot)", "IRC nickname", url=None,
+        password=False, category="messaging"),
+    "IRC_SERVER_PASSWORD": _env("IRC server password (if required)", "IRC server password", url=None,
+        password=True, category="messaging", advanced=True),
+    "IRC_NICKSERV_PASSWORD": _env("NickServ password for nick identification", "NickServ password", url=None,
+        password=True, category="messaging", advanced=True),
+    "GATEWAY_ALLOW_ALL_USERS": _env(
+        "Allow all users to interact with messaging bots (true/false). Default: false.",
+        "Allow all users (true/false)", url=None, password=False, category="messaging", advanced=True),
+    "API_SERVER_ENABLED": _env(
+        "Enable the OpenAI-compatible API server (true/false). Allows frontends like Open WebUI, LobeChat, "
+        "etc. to connect.", "Enable API server (true/false)", url=None, password=False, category="messaging",
+        advanced=True),
+    "API_SERVER_KEY": _env(
+        "Bearer token for API server authentication. Required whenever the API server is enabled; server "
+        "refuses to start without it.", "API server auth key", url=None, password=True, category="messaging",
+        advanced=True),
+    "API_SERVER_PORT": _env("Port for the API server (default: 8642).", "API server port", url=None,
+        password=False, category="messaging", advanced=True),
+    "API_SERVER_HOST": _env(
+        "Host/bind address for the API server (default: 127.0.0.1). API_SERVER_KEY is still required even "
+        "on loopback binds.", "API server host", url=None, password=False, category="messaging",
+        advanced=True),
+    "API_SERVER_MODEL_NAME": _env(
+        "Model name advertised on /v1/models. Defaults to the profile name (or 'hermes-agent' for the "
+        "default profile). Useful for multi-user setups with OpenWebUI.", "API server model name", url=None,
+        password=False, category="messaging", advanced=True),
+    "GATEWAY_PROXY_URL": _env(
+        "URL of a remote Hermes API server to forward messages to (proxy mode). When set, the gateway "
+        "handles platform I/O only — all agent work is delegated to the remote server. Use for Docker E2EE "
+        "containers that relay to a host agent. Also configurable via gateway.proxy_url in config.yaml.",
+        "Remote Hermes API server URL (e.g. http://192.168.1.100:8642)", url=None, password=False,
+        category="messaging", advanced=True),
+    "GATEWAY_PROXY_KEY": _env(
+        "Bearer token for authenticating with the remote Hermes API server (proxy mode). Must match the "
+        "API_SERVER_KEY on the remote host.", "Remote API server auth key", url=None, password=True,
+        category="messaging", advanced=True),
+    "WEBHOOK_ENABLED": _env(
+        "Enable the webhook platform adapter for receiving events from GitHub, GitLab, etc.",
+        "Enable webhooks (true/false)", url=None, password=False, category="messaging"),
+    "WEBHOOK_PORT": _env("Port for the webhook HTTP server (default: 8644).", "Webhook port", url=None,
+        password=False, category="messaging"),
+    "WEBHOOK_SECRET": _env(
+        "Global HMAC secret for webhook signature validation (overridable per route in config.yaml).",
+        "Webhook secret", url=None, password=True, category="messaging"),
 
     # ── Agent settings ──
     # NOTE: MESSAGING_CWD was removed here — use terminal.cwd in config.yaml
     # instead.  The gateway reads TERMINAL_CWD (bridged from terminal.cwd).
-    "SUDO_PASSWORD": {
-        "description": "Sudo password for terminal commands requiring root access; set to an explicit empty string to try empty without prompting",
-        "prompt": "Sudo password",
-        "url": None,
-        "password": True,
-        "category": "setting",
-    },
+    "SUDO_PASSWORD": _env(
+        "Sudo password for terminal commands requiring root access; set to an explicit empty string to try "
+        "empty without prompting", "Sudo password", url=None, password=True, category="setting"),
     # HERMES_TOOL_PROGRESS_MODE is deprecated — tool progress is configured via
     # display.tool_progress in config.yaml (off|new|all|verbose|log). The
     # gateway still falls back to HERMES_TOOL_PROGRESS_MODE for backward
@@ -5294,18 +4519,10 @@ OPTIONAL_ENV_VARS = {
     # checklists) and deprecated knobs shouldn't be offered there. The boolean
     # HERMES_TOOL_PROGRESS is fully unsupported since the v12 config support
     # floor retired its only consumer (the v3→4 migration).
-    "HERMES_PREFILL_MESSAGES_FILE": {
-        "description": "Path to JSON file with ephemeral prefill messages for few-shot priming",
-        "prompt": "Prefill messages file path",
-        "url": None,
-        "password": False,
-        "category": "setting",
-    },
-    "HERMES_EPHEMERAL_SYSTEM_PROMPT": {
-        "description": "Ephemeral system prompt injected at API-call time (never persisted to sessions)",
-        "prompt": "Ephemeral system prompt",
-        "url": None,
-        "password": False,
-        "category": "setting",
-    },
+    "HERMES_PREFILL_MESSAGES_FILE": _env(
+        "Path to JSON file with ephemeral prefill messages for few-shot priming",
+        "Prefill messages file path", url=None, password=False, category="setting"),
+    "HERMES_EPHEMERAL_SYSTEM_PROMPT": _env(
+        "Ephemeral system prompt injected at API-call time (never persisted to sessions)",
+        "Ephemeral system prompt", url=None, password=False, category="setting"),
 }
