@@ -1,8 +1,5 @@
-"""Microsoft Foundry provider profile.
-
-Azure Foundry exposes an OpenAI-compatible endpoint; users supply their own
-base URL at setup since endpoints are per-resource.
-"""
+"""Microsoft Foundry provider profile: OpenAI-compatible, per-resource base URL
+supplied by the user at setup."""
 
 from providers import register_provider
 from providers.base import ProviderProfile

@@ -15,11 +15,7 @@ class AnthropicProfile(ProviderProfile):
     """Native Anthropic — uses x-api-key header, not Bearer."""
 
     def fetch_models(
-        self,
-        *,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        timeout: float = 8.0,
+        self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
         """Anthropic uses x-api-key header and anthropic-version."""
         if not api_key:
@@ -31,11 +27,7 @@ class AnthropicProfile(ProviderProfile):
             req.add_header("Accept", "application/json")
             with open_credentialed_url(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
-            return [
-                m["id"]
-                for m in data.get("data", [])
-                if isinstance(m, dict) and "id" in m
-            ]
+            return [m["id"] for m in data.get("data", []) if isinstance(m, dict) and "id" in m]
         except Exception as exc:
             logger.debug("fetch_models(anthropic): %s", exc)
             return None

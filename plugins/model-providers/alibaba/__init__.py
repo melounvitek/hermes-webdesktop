@@ -1,19 +1,8 @@
-"""Alibaba Cloud DashScope provider profiles.
+"""Alibaba Cloud DashScope provider profiles (intl + CN, plus the Model Studio
+Token Plan flat-token tier with its own key/endpoints — one module per vendor).
 
-DashScope has region-split endpoints with the same key type:
-  - ``alibaba``    → dashscope-intl.aliyuncs.com (international)
-  - ``alibaba-cn`` → dashscope.aliyuncs.com (mainland China)
-
-The Model Studio Token Plan (flat-token tier of the SAME vendor/service,
-same OpenAI-compatible protocol, its own key + endpoints) registers here
-too rather than as a new plugin directory — one module per vendor, matching
-how the kimi module carries both of its endpoint variants:
-  - ``alibaba-token-plan``    → token-plan.ap-southeast-1.maas.aliyuncs.com
-  - ``alibaba-token-plan-cn`` → token-plan.cn-beijing.maas.aliyuncs.com
-
-Profile names match the models.dev catalog keys exactly
-(``alibaba`` / ``alibaba-cn``) so model metadata lines up and
-``model.provider: alibaba-cn`` resolves at runtime (#73265).
+Profile names match models.dev catalog keys exactly so model metadata lines up
+and ``model.provider: alibaba-cn`` resolves at runtime.
 """
 
 from providers import register_provider
