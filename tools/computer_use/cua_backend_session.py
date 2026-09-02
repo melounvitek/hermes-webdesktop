@@ -156,20 +156,17 @@ def _cli_result(parsed: Any, shot_file: Optional[str]) -> Dict[str, Any]:
     # Logical failures may be reported in-band even when the subprocess exits 0 — fail closed.
     is_error = parsed.get("isError") is True or parsed.get("is_error") is True
     shot = parsed.get("screenshot_png_b64")
-    if not shot:
-        # Screenshot was routed to a file (ours or the daemon's choice).
-        fpath = parsed.get("screenshot_file_path") or shot_file
-        if fpath and os.path.exists(fpath):
-            try:
-                with open(fpath, "rb") as fh:
-                    shot = base64.b64encode(fh.read()).decode("ascii")
-            except Exception as e:
-                logger.debug("cua-driver CLI fallback: failed reading %s: %s", fpath, e)
-    data: Any = None
-    tree = parsed.get("tree_markdown")
-    if tree is not None:
-        ec = parsed.get("element_count")
-        data = f"{ec} elements\n{tree}" if ec is not None else tree
+    # Otherwise the screenshot was routed to a file (ours or the daemon's choice).
+    fpath = parsed.get("screenshot_file_path") or shot_file
+    if not shot and fpath and os.path.exists(fpath):
+        try:
+            with open(fpath, "rb") as fh:
+                shot = base64.b64encode(fh.read()).decode("ascii")
+        except Exception as e:
+            logger.debug("cua-driver CLI fallback: failed reading %s: %s", fpath, e)
+    data: Any = parsed.get("tree_markdown")
+    if data is not None and parsed.get("element_count") is not None:
+        data = f"{parsed['element_count']} elements\n{data}"
     return {"data": data, "images": [shot] if shot else [], "structuredContent": parsed, "isError": is_error}
 
 
@@ -183,20 +180,17 @@ class _CuaDriverSession:
     task). Tool calls run in short-lived tasks touching only the session object.
     """
 
-    # Handshake calls issued BY start()/stop() themselves — must not trigger
-    # the auto-restart guard in call_tool, or start() would recurse.
+    # Handshake calls issued BY start()/stop() — exempt from call_tool's auto-restart
+    # guard, or start() would recurse.
     _LIFECYCLE_CALLS = frozenset({"start_session", "end_session"})
-
-    # Safe to replay after a broken transport: no side effect or idempotent.
-    # Mutations stay out — a lost response does not prove they failed.
+    # Idempotent reads, safe to replay after a broken transport. Mutations stay out:
+    # a lost response does not prove they failed.
     _TRANSPORT_REPLAY_SAFE_TOOLS = frozenset({
         "get_cursor_position", "get_displays", "get_screen_size",
         "get_window_state", "list_apps", "list_windows",
     })
-
-    # Set when an MCP call timed out: a timed-out session is wedged for later
-    # calls, so it is recreated before the next non-lifecycle call_tool.
-    # Class-level default so tests that bypass __init__ see a healthy session.
+    # A timed-out MCP session is wedged for later calls, so it is recreated before the
+    # next non-lifecycle call_tool. Class-level default: tests that bypass __init__ see healthy.
     _timeout_suspect = False
 
     def __init__(self, bridge: _AsyncBridge, embedded_daemon: Optional[Any] = None) -> None:
@@ -215,8 +209,7 @@ class _CuaDriverSession:
         self._shutdown_event: Optional[asyncio.Event] = None  # created on bridge loop
         self._lifecycle_future = None  # concurrent.futures.Future
         self._setup_error: Optional[BaseException] = None
-        # Stable identity declared via start_session; revives an ended-session
-        # rejection without re-entrant call_tool.
+        # Declared via start_session; revives an ended-session rejection non-re-entrantly.
         self._declared_session_id: Optional[str] = None
         self._transport_generation = 0
         self._transport_reset_callback: Optional[Any] = None
@@ -224,6 +217,11 @@ class _CuaDriverSession:
     def _require_started(self) -> None:
         if not self._started:
             raise RuntimeError("cua-driver session not started")
+
+    def _reset_capability_state(self) -> None:
+        self._capabilities = {}
+        self._tool_schemas = {}
+        self._capability_version = ""
 
     async def _lifecycle_coro(self) -> None:
         """Long-lived owner of the stdio MCP contexts: open, signal ready,
@@ -281,9 +279,7 @@ class _CuaDriverSession:
     async def _populate_capabilities(self, session: Any) -> None:
         """Cache per-tool capability sets, input schemas and capability_version from
         tools/list. Soft prerequisite: on failure the map stays empty (capability False)."""
-        self._capabilities = {}
-        self._tool_schemas = {}
-        self._capability_version = ""
+        self._reset_capability_state()
         try:
             tools_list = await session.list_tools()
             for tool in getattr(tools_list, "tools", []) or []:
@@ -356,17 +352,14 @@ class _CuaDriverSession:
 
     def _stop_lifecycle_locked(self) -> None:
         self._signal_shutdown_locked()
-        fut = self._lifecycle_future
-        if fut is None:
-            return
+        fut, self._lifecycle_future = self._lifecycle_future, None
         try:
-            fut.result(timeout=5.0)
+            if fut is not None:
+                fut.result(timeout=5.0)
         except concurrent.futures.TimeoutError:
             logger.warning("cua-driver session shutdown timed out (5s)")
         except Exception as e:
             logger.warning("cua-driver shutdown error: %s", e)
-        finally:
-            self._lifecycle_future = None
 
     def _signal_shutdown_locked(self) -> None:
         """Set the asyncio shutdown event from the caller's thread."""
@@ -386,9 +379,8 @@ class _CuaDriverSession:
     # ── Capability detection ─────────────────────────────────────────
     def supports_capability(self, capability: str, tool: Optional[str] = None) -> bool:
         """Driver advertises *capability* for *tool* (or ANY tool). False before start."""
-        if tool is not None:
-            return capability in self._capabilities.get(tool, set())
-        return any(capability in caps for caps in self._capabilities.values())
+        caps = [self._capabilities.get(tool, set())] if tool is not None else self._capabilities.values()
+        return any(capability in c for c in caps)
 
     def _has_tool(self, name: str) -> bool:
         """``tools/list`` advertised *name*. Routes capture() (PNG capture moved into
@@ -418,13 +410,12 @@ class _CuaDriverSession:
         """Flatten a logical MCP error into text for narrow classification."""
         chunks: List[str] = []
         for value in (result.get("data"), result.get("structuredContent")):
-            if isinstance(value, str):
-                chunks.append(value)
-            elif value is not None:
-                try:
-                    chunks.append(json.dumps(value, sort_keys=True))
-                except (TypeError, ValueError):
-                    chunks.append(str(value))
+            if value is None:
+                continue
+            try:
+                chunks.append(value if isinstance(value, str) else json.dumps(value, sort_keys=True))
+            except (TypeError, ValueError):
+                chunks.append(str(value))
         return "\n".join(chunks)
 
     @classmethod
@@ -499,10 +490,7 @@ class _CuaDriverSession:
             except Exception as e:
                 logger.debug("cua-driver session cleanup before reconnect failed: %s", e)
         self._started = False
-        # Stale capability state is repopulated from scratch by the next start.
-        self._capabilities = {}
-        self._tool_schemas = {}
-        self._capability_version = ""
+        self._reset_capability_state()  # repopulated from scratch by the next start
         self._start_lifecycle_locked()
         self._started = True
 
@@ -520,17 +508,14 @@ class _CuaDriverSession:
             fd, shot_file = _tempfile.mkstemp(prefix="cua_shot_", suffix=".png")
             os.close(fd)
             call_args["screenshot_out_file"] = shot_file
-
         driver_command = _cb.resolve_cua_driver_cmd()
         if not driver_command:
             raise RuntimeError(_cb.cua_driver_install_hint())
-        child_env = _cb.cua_driver_child_env()
-        socket_args: List[str] = []
-        embedded_daemon = getattr(self, "_embedded_daemon", None)
-        if embedded_daemon is not None:
-            driver_command = embedded_daemon.proxy_invocation()[0]
-            child_env = embedded_daemon.child_env()
-            socket_args = ["--socket", embedded_daemon.socket_path]
+        child_env, socket_args = _cb.cua_driver_child_env(), []
+        daemon = getattr(self, "_embedded_daemon", None)
+        if daemon is not None:
+            driver_command, child_env = daemon.proxy_invocation()[0], daemon.child_env()
+            socket_args = ["--socket", daemon.socket_path]
         return [driver_command, "call", name, json.dumps(call_args), *socket_args], child_env, shot_file
 
     def _call_tool_via_cli(self, name: str, args: Dict[str, Any], timeout: float) -> Dict[str, Any]:
