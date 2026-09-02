@@ -25,9 +25,8 @@ from hermes_cli.toolset_scope import (
 logger = logging.getLogger(__name__)
 
 
-# Platforms already warned about an all-invalid platform_toolsets list, so the
-# runtime check in _get_platform_tools warns once per platform instead of on
-# every tool resolution for a persistently-corrupt config (#38798).
+# Platforms already warned about an all-invalid platform_toolsets list: warn once per platform,
+# not on every tool resolution for a persistently-corrupt config.
 _warned_invalid_platform_toolsets: Set[str] = set()
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
@@ -147,9 +146,7 @@ from hermes_cli.tools_config_providers import (  # noqa: F401 — re-exported fo
 
 # ─── Toolset Registry ─────────────────────────────────────────────────────────
 
-# Toolsets shown in the configurator, grouped for display.
-# Each entry: (toolset_name, label, description)
-# These map to keys in toolsets.py TOOLSETS dict.
+# Toolsets shown in the configurator: (toolset key in toolsets.py TOOLSETS, label, description).
 CONFIGURABLE_TOOLSETS = [
     ("web",             "🔍 Web Search & Scraping",    "web_search, web_extract"),
     ("browser",         "🌐 Browser Automation",       "navigate, click, type, scroll"),
@@ -195,39 +192,25 @@ def gui_toolset_label(label: str) -> str:
     return text
 
 
-# Toolsets that are OFF by default for new installs.
-# They're still in _HERMES_CORE_TOOLS (available at runtime if enabled),
-# but the setup checklist won't pre-select them for first-time users.
-#
-# Video gen is off by default — it's a niche, paid, slow feature. Users
-# who want it opt in via `hermes tools` → Video Generation, which walks
-# them through provider + model selection.
-#
-# X search is off by default for users without xAI credentials, but
-# auto-enables when SuperGrok OAuth tokens are stored OR XAI_API_KEY is
-# set — mirroring the HASS_TOKEN → homeassistant auto-enable below. The
-# `hermes tools` → X (Twitter) Search setup walks users through credential
-# setup. The tool's check_fn means the schema still won't appear to the
-# model if the credential later goes missing or expires.
+# OFF by default for new installs (still in _HERMES_CORE_TOOLS; the checklist just won't pre-select
+# them). video_gen is niche/paid/slow. x_search auto-enables when xAI credentials exist (SuperGrok
+# OAuth or XAI_API_KEY), mirroring HASS_TOKEN → homeassistant; its check_fn still hides the schema
+# if the credential later expires.
 _DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search", "a2a"}
 
 
-# Config-only capabilities: they appear in `hermes tools` for provider/API-key
-# configuration (TOOL_CATEGORIES) but are NOT model toolsets — they ship zero
-# tool schemas and their on/off switch lives in their own config section
-# (e.g. ``stt.enabled``), not ``platform_toolsets``. Excluded from the
-# per-platform enable/disable checklist; configured via the "Reconfigure an
-# existing tool" flow and the GUI provider matrix instead.
+# Config-only capabilities: in `hermes tools` for provider/API-key setup (TOOL_CATEGORIES) but NOT
+# model toolsets — zero schemas, on/off switch in their own section (``stt.enabled``), not
+# ``platform_toolsets``. Excluded from the per-platform checklist; configured via "Reconfigure an
+# existing tool" and the GUI provider matrix.
 _CONFIG_ONLY_TOOLSETS = {"stt"}
 
 
 def _xai_credentials_present() -> bool:
-    """Cheap, side-effect-free check for usable xAI credentials.
+    """Cheap, offline check for usable xAI credentials (auth store + env only).
 
-    Does NOT hit the network — only inspects the local auth store and environment. The tool's
-    runtime ``check_fn`` still gates schema registration if creds later expire or get revoked. Also
-    reused by ``provider_readiness_status`` for ``post_setup: "xai_grok"`` picker rows (xAI TTS,
-    Grok OAuth x_search).
+    The tool's runtime ``check_fn`` still gates schema registration if creds later expire. Also used
+    by ``provider_readiness_status`` for ``post_setup: "xai_grok"`` rows.
     """
     try:
         from hermes_cli.auth import _read_xai_oauth_tokens
@@ -260,11 +243,10 @@ def _homeassistant_credentials_present() -> bool:
         return False
 
 def _toolset_configuration_platform(ts_key: str, default: str = "cli") -> str:
-    """Return the platform a platform-less configuration UI should target.
+    """Platform a platform-less configuration UI should target.
 
-    Most configurable toolsets retain the historical desktop/CLI target. A toolset restricted away
-    from that platform must instead be configured on one of its supported platforms; otherwise the
-    shared save helper correctly drops it and the UI reports a successful no-op.
+    A toolset restricted away from the default (CLI) must be configured on one of its supported
+    platforms; otherwise the save helper correctly drops it and the UI reports a successful no-op.
     """
     allowed = _TOOLSET_PLATFORM_RESTRICTIONS.get(ts_key)
     if not allowed or default in allowed:
@@ -273,12 +255,8 @@ def _toolset_configuration_platform(ts_key: str, default: str = "cli") -> str:
 
 
 def _get_effective_configurable_toolsets():
-    """Return CONFIGURABLE_TOOLSETS + any plugin-provided toolsets.
-
-    Plugin toolsets are appended at the end so they appear after the built-in toolsets in the TUI
-    checklist. A plugin whose toolset key already appears in ``CONFIGURABLE_TOOLSETS`` is skipped —
-    bundled plugins (e.g.
-    """
+    """CONFIGURABLE_TOOLSETS + plugin toolsets (appended, so they render after built-ins; a plugin
+    whose key is already built-in is skipped)."""
     result = list(CONFIGURABLE_TOOLSETS)
     seen = {ts_key for ts_key, _, _ in result}
     try:
@@ -297,28 +275,19 @@ def _get_effective_configurable_toolsets():
 def _get_plugin_toolset_keys() -> set:
     """Return the set of toolset keys provided by plugins."""
     try:
+        # Non-blocking on the CLI startup path: while background discovery is still importing,
+        # this serves last launch's persisted key set instead of joining the discovery thread.
         from hermes_cli.plugins import get_plugin_toolset_keys_nowait
-        # Non-blocking on the CLI startup path: while background plugin
-        # discovery is still importing modules, this serves last launch's
-        # persisted key set (used only to exclude plugin toolsets from
-        # composite expansion) instead of joining the discovery thread.
         return get_plugin_toolset_keys_nowait()
     except Exception:
         return set()
 
 
 def _checklist_toolset_keys(platform: str) -> Set[str]:
-    """Return the toolset keys the ``hermes tools`` checklist actually offers for ``platform``.
-
-    This mirrors exactly what ``_prompt_toolset_checklist`` renders:
-    ``_get_effective_configurable_toolsets()`` (built-in + plugin toolsets), filtered by
-    ``_toolset_allowed_for_platform``. The checklist's returned selection can therefore only ever be
-    a subset of this universe.
-
-    Non-configurable toolsets that ``_get_platform_tools`` resolves at read time — ``kanban`` and
-    other check_fn-gated toolsets, recovered platform composites, MCP server names — are NOT in this
-    set because the checklist never shows them.
-    """
+    """Toolset keys the ``hermes tools`` checklist offers for ``platform`` (mirrors
+    ``_prompt_toolset_checklist``). Non-configurable toolsets ``_get_platform_tools`` resolves at
+    read time (``kanban``, recovered composites, MCP names) are NOT here — the checklist never
+    shows them."""
     return {
         ts_key
         for ts_key, _, _ in _get_effective_configurable_toolsets()
@@ -326,9 +295,8 @@ def _checklist_toolset_keys(platform: str) -> Set[str]:
         and ts_key not in _CONFIG_ONLY_TOOLSETS
     }
 
-# Platform display config — derived from the canonical registry so every
-# module shares the same data.  Kept as dict-of-dicts for backward
-# compatibility with existing ``PLATFORMS[key]["label"]`` access patterns.
+# Platform display config derived from the canonical registry; dict-of-dicts for the existing
+# ``PLATFORMS[key]["label"]`` access pattern.
 from hermes_cli.platforms import PLATFORMS as _PLATFORMS_REGISTRY
 
 PLATFORMS = {
@@ -363,9 +331,8 @@ def _toolset_label(ts_key: str) -> str:
 
 
 # ─── Tool Categories (provider-aware configuration) ──────────────────────────
-# Maps toolset keys to their provider options. When a toolset is newly enabled,
-# we use this to show provider selection and prompt for the right API keys.
-# Toolsets not in this map either need no config or use the simple fallback.
+# toolset key -> provider options shown when the toolset is newly enabled. Toolsets not in this
+# map either need no config or use the TOOLSET_ENV_REQUIREMENTS fallback.
 
 TOOL_CATEGORIES = {
     "tts": {
@@ -639,16 +606,10 @@ TOOL_CATEGORIES = {
     },
 }
 
-# Simple env-var requirements for toolsets NOT in TOOL_CATEGORIES.
-# Used as a fallback for toolsets that just need an API key.
-#
-# `vision` is listed here only so it registers as a *configurable* toolset
-# (the value gates the reconfigure menu + the "[no API key]" suffix). Its
-# actual setup runs through `_configure_vision_backend()` — a full
-# provider+model picker like `hermes model` — NOT this single-key prompt, so
-# users are never forced onto OpenRouter. `_toolset_has_keys("vision")`
-# resolves via `resolve_vision_provider_client()`, so the tuple below is never
-# prompted or read for vision; it's purely a presence marker.
+# Env-var fallback for toolsets NOT in TOOL_CATEGORIES. `vision` is listed only as a presence marker
+# (registers it as configurable: reconfigure menu + "[no API key]" suffix); its setup runs through
+# `_configure_vision_backend()` (full provider+model picker, never forcing OpenRouter) and
+# `_toolset_has_keys("vision")` resolves via `resolve_vision_provider_client()`.
 TOOLSET_ENV_REQUIREMENTS = {
     "vision":     [("OPENROUTER_API_KEY",   "https://openrouter.ai/keys")],
 }
@@ -668,26 +629,14 @@ _PLATFORM_ENABLE_ENV_VARS = (
 
 def _get_enabled_platforms() -> List[str]:
     """Return platform keys that are configured (have tokens or are CLI)."""
-    return ["cli"] + [
-        platform
-        for platform, env_var in _PLATFORM_ENABLE_ENV_VARS
-        if get_env_value(env_var)
-    ]
+    return ["cli"] + [platform for platform, env_var in _PLATFORM_ENABLE_ENV_VARS if get_env_value(env_var)]
 
 
 def _platform_toolset_summary(config: dict, platforms: Optional[List[str]] = None) -> Dict[str, Set[str]]:
-    """Return a summary of enabled toolsets per platform.
-
-    When ``platforms`` is None, this uses ``_get_enabled_platforms`` to auto-detect platforms. Tests
-    can pass an explicit list to avoid relying on environment variables.
-    """
+    """Enabled toolsets per platform (``platforms`` defaults to ``_get_enabled_platforms()``)."""
     if platforms is None:
         platforms = _get_enabled_platforms()
-
-    summary: Dict[str, Set[str]] = {}
-    for pkey in platforms:
-        summary[pkey] = _get_platform_tools(config, pkey)
-    return summary
+    return {pkey: _get_platform_tools(config, pkey) for pkey in platforms}
 
 
 def _parse_enabled_flag(value, default: bool = True) -> bool:
@@ -723,9 +672,7 @@ def enabled_mcp_server_names(config: dict) -> Set[str]:
         and _parse_enabled_flag(server_cfg.get("enabled", True), default=True)
     }
     try:
-        from hermes_cli.plugins import (
-            get_portable_mcp_server_names_nowait,
-        )
+        from hermes_cli.plugins import get_portable_mcp_server_names_nowait
 
         portable = get_portable_mcp_server_names_nowait()
         # Native config wins on a name collision (mirrors _load_mcp_config).
@@ -753,27 +700,16 @@ def _exempt_explicit_platform_native(
             default_off.discard(ts)
 
 
-#: Toolsets young enough that absence from a saved ``platform_toolsets`` list
-#: means "never offered" rather than "declined".
+#: Toolsets young enough that absence from a saved ``platform_toolsets`` list means "never offered"
+#: rather than "declined". Saving ``hermes tools`` freezes a platform's composite into an explicit
+#: list that nothing ever adds to, so a toolset shipped later stays off forever for picker users
+#: while ``[hermes-cli]`` users inherit it; listing it here restores parity.
 #:
-#: Saving ``hermes tools`` (or one toggle in the desktop Toolsets UI) replaces
-#: a platform's composite with a frozen explicit list, and nothing ever adds to
-#: that list — so a toolset shipped afterwards stays off forever for anyone who
-#: has touched the picker, while everyone still on ``[hermes-cli]`` inherits it
-#: on upgrade. Listing it here restores that parity.
-#:
-#: MUST ship in the same release as the toolset it names, and be emptied in the
-#: next one. The inference only holds while no released build has put the
-#: toolset on a checklist: once one has, a user who unchecks it writes a config
-#: byte-identical to one saved before the toolset existed (the record below is
-#: only written from that point on), and this rule turns their opt-out back on.
-#: Landing late — or leaving an entry here for a second release — converts a
-#: back-fill into a stuck checkbox.
-#:
-#: A ``check_fn``-gated toolset costs nothing here for users who cannot call
-#: it: an enabled toolset still ships zero schemas when its check fails — the
-#: same split Home Assistant uses. Probing a remote service from this path
-#: would put a network call on every CLI start, gateway session and cron tick.
+#: MUST ship in the same release as the toolset and be emptied in the next: once a released build
+#: has put the toolset on a checklist, an unchecking user writes a config byte-identical to one
+#: saved before it existed and this rule would turn their opt-out back on (stuck checkbox).
+#: A ``check_fn``-gated toolset costs nothing here (zero schemas when its check fails); never probe
+#: a remote service from this path — it runs on every CLI start, gateway session and cron tick.
 _RECENTLY_SHIPPED_TOOLSETS: frozenset = frozenset()
 
 
@@ -800,8 +736,7 @@ def _enable_recently_shipped_toolsets(
             continue
         if not _toolset_allowed_for_platform(ts_key, platform):
             continue
-        # Parity is the whole justification, so only enable the toolset where
-        # staying on the composite would have enabled it anyway. Deliberately
+        # Only enable where staying on the composite would have enabled it anyway; deliberately
         # narrow composites (hermes-acp, hermes-webhook) stay narrow.
         ts_tools = set(resolve_toolset(ts_key, include_registry=False))
         if composite_tools is None:
@@ -815,8 +750,8 @@ def _configurable_subset_of(tool_names: Set[str], platform: str) -> Set[str]:
     """Configurable toolsets whose STATIC membership is contained in ``tool_names``.
 
     Compares ``resolve_toolset(ts, include_registry=False)``: a tool registered into a toolset at
-    runtime (e.g. delegate_cli -> delegation, desktop-only read_terminal -> terminal) that the
-    composite never listed must not drop the whole toolset (issue #49622).
+    runtime (delegate_cli -> delegation, desktop-only read_terminal -> terminal) that the composite
+    never listed must not drop the whole toolset.
     """
     from toolsets import resolve_toolset
 
@@ -833,22 +768,97 @@ def _configurable_subset_of(tool_names: Set[str], platform: str) -> Set[str]:
 def _default_off_toolsets(platform: str, explicitly_configured: bool) -> Set[str]:
     """Toolsets to strip from an implicit (composite-derived) enable set for ``platform``.
 
-    Legacy safety: a platform whose own name matches a default-off toolset (``homeassistant``)
-    keeps that toolset on first install — except platform-restricted toolsets, which stay opt-in
-    even on their own platform (``discord`` + ``discord`` stays OFF). Home Assistant is runtime-
-    gated by its check_fn (needs HASS_TOKEN), so a configured token is an explicit opt-in and must
-    not be stripped here — otherwise HA silently vanished from platforms like cron that resolve
-    without a saved toolset list (regression after #14798).
+    A platform whose own name is a default-off toolset (``homeassistant``) keeps it on first install,
+    except platform-restricted toolsets, which stay opt-in even on their own platform (``discord`` on
+    discord stays OFF). A configured HASS_TOKEN is an explicit opt-in (the check_fn gates at runtime)
+    and must not be stripped, or HA silently vanishes from platforms like cron that resolve without
+    a saved list.
     """
     default_off = set(_DEFAULT_OFF_TOOLSETS)
     if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
         default_off.remove(platform)
     if "homeassistant" in default_off and _homeassistant_credentials_present():
         default_off.remove("homeassistant")
-    _exempt_explicit_platform_native(
-        default_off, platform, explicitly_configured=explicitly_configured
-    )
+    _exempt_explicit_platform_native(default_off, platform, explicitly_configured=explicitly_configured)
     return default_off
+
+
+def _configurable_keys() -> Set[str]:
+    return {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
+
+
+def _platform_default_keys() -> Set[str]:
+    return {p["default_toolset"] for p in PLATFORMS.values()}
+
+
+def _explicit_toolsets(
+    toolset_names: List[str], explicit_known_keys: Set[str], config: dict, platform: str,
+    explicitly_configured: bool,
+) -> Set[str]:
+    """Enabled set when the saved list names configurable/plugin keys directly.
+
+    Direct membership avoids the subset-inference bug where composites like ``hermes-cli`` (all
+    _HERMES_CORE_TOOLS) made disabled toolsets re-appear. A mixed list (``[hermes-cli, spotify]``
+    after enabling Spotify via ``hermes tools``) still expands the composite, otherwise sessions
+    keep only the opt-ins and lose every native tool; _DEFAULT_OFF_TOOLSETS applies to that
+    implicit expansion only — anything explicitly listed survives.
+    """
+    from toolsets import resolve_toolset, TOOLSETS
+
+    enabled = {
+        ts for ts in toolset_names
+        if ts in explicit_known_keys and _toolset_allowed_for_platform(ts, platform)
+    }
+    composite_tools: Set[str] = set()
+    for ts_name in toolset_names:
+        if ts_name not in explicit_known_keys and ts_name in TOOLSETS:
+            composite_tools.update(resolve_toolset(ts_name))
+    if composite_tools:
+        enabled |= _configurable_subset_of(composite_tools, platform) - _default_off_toolsets(
+            platform, explicitly_configured
+        )
+    _enable_recently_shipped_toolsets(enabled, config, platform)
+    return enabled
+
+
+def _composite_toolsets(toolset_names: List[str], platform: str, explicitly_configured: bool) -> Set[str]:
+    """Enabled set inferred from composite names (``hermes-cli``) by reverse-mapping tool names.
+
+    ``x_search`` is its own one-tool toolset the composite does NOT include, so the subset loop
+    never picks it up; inject it when xAI credentials exist (mirroring HASS_TOKEN → homeassistant)
+    and carve it out of the default-off subtraction. Only runs while no explicit list is saved —
+    once saved, that list is authoritative.
+    """
+    from toolsets import resolve_toolset
+
+    all_tool_names: Set[str] = set()
+    for ts_name in toolset_names:
+        all_tool_names.update(resolve_toolset(ts_name))
+    enabled = _configurable_subset_of(all_tool_names, platform)
+    default_off = _default_off_toolsets(platform, explicitly_configured)
+    if _toolset_allowed_for_platform("x_search", platform) and _xai_credentials_present():
+        enabled.add("x_search")
+        default_off.discard("x_search")
+    return enabled - default_off
+
+
+def _enabled_plugin_toolsets(config: dict, platform: str, toolset_names: List[str], plugin_ts_keys: Set[str]) -> Set[str]:
+    """Plugin toolsets: on by default unless in _DEFAULT_OFF_TOOLSETS (e.g. bundled spotify — opt-in
+    so we don't ship 7 schemas to non-users) or "known" for this platform (``known_plugin_toolsets``
+    is written on every ``hermes tools`` save) and absent from the saved list."""
+    known_for_platform = set((config.get("known_plugin_toolsets", {}) or {}).get(platform, []) or [])
+    return {
+        pts for pts in plugin_ts_keys
+        if pts in toolset_names or (pts not in _DEFAULT_OFF_TOOLSETS and pts not in known_for_platform)
+    }
+
+
+def _context_engine_active(config: dict) -> bool:
+    context_cfg = config.get("context") or {}
+    if not isinstance(context_cfg, dict):
+        context_cfg = {}
+    name = str(context_cfg.get("engine") or "compressor").strip().lower()
+    return bool(name) and name != "compressor"
 
 
 def _get_platform_tools(
@@ -858,129 +868,42 @@ def _get_platform_tools(
     include_default_mcp_servers: bool = True,
 ) -> Set[str]:
     """Resolve which individual toolset names are enabled for a platform."""
-    from toolsets import resolve_toolset, TOOLSETS
-
     platform_toolsets = config.get("platform_toolsets") or {}
     toolset_names = platform_toolsets.get(platform)
-    # Track whether the user explicitly saved a toolset list for this platform
-    # (vs. falling back to the platform default). An explicit composite (e.g.
-    # ``hermes-discord``) is an opt-in to the platform's native default-off
-    # toolsets — see _exempt_explicit_platform_native (#35527).
+    # An explicitly saved list (even a composite like ``hermes-discord``) is an opt-in to the
+    # platform's native default-off toolsets — see _exempt_explicit_platform_native.
     explicitly_configured = isinstance(toolset_names, list)
-
     if not explicitly_configured:
         toolset_names = [_platform_default_toolset(platform)]
-
-    # YAML may parse bare numeric names (e.g. ``12306:``) as int.
-    # Normalise to str so downstream sorted() never mixes types.
+    # YAML may parse bare numeric names (``12306:``) as int; normalise so sorted() never mixes types.
     toolset_names = [str(ts) for ts in toolset_names]
 
-    configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
+    configurable_keys = _configurable_keys()
     plugin_ts_keys = _get_plugin_toolset_keys()
-    platform_default_keys = {p["default_toolset"] for p in PLATFORMS.values()}
-    # Plugin-provided toolsets are first-class on a platform-toolsets list —
-    # explicit config like ``[hermes-cli, a2a]`` must survive filtering just
-    # like a built-in configurable toolset would. See issue #81163.
+    platform_default_keys = _platform_default_keys()
+    # Plugin toolsets are first-class on a saved list: ``[hermes-cli, a2a]`` must survive filtering.
     explicit_known_keys = configurable_keys | plugin_ts_keys
 
-    # If the saved list contains any configurable keys directly, the user
-    # has explicitly configured this platform — use direct membership.
-    # This avoids the subset-inference bug where composite toolsets like
-    # "hermes-cli" (which include all _HERMES_CORE_TOOLS) cause disabled
-    # toolsets to re-appear as enabled.
-    has_explicit_config = any(ts in explicit_known_keys for ts in toolset_names)
-
-    if has_explicit_config:
-        enabled_toolsets = {
-            ts for ts in toolset_names
-            if ts in explicit_known_keys and _toolset_allowed_for_platform(ts, platform)
-        }
-        # Mixed config: composite toolset alongside configurables (e.g.
-        # ``[hermes-cli, spotify]`` after enabling Spotify via ``hermes
-        # tools``). Without expansion the composite name is silently dropped,
-        # leaving sessions with only the configurable opt-ins and no native
-        # tools. Mirror the else-branch's subset inference, but apply
-        # _DEFAULT_OFF_TOOLSETS only to the implicit expansion — anything the
-        # user explicitly listed (e.g. ``spotify``) must survive.
-        composite_tools = set()
-        for ts_name in toolset_names:
-            if ts_name not in explicit_known_keys and ts_name in TOOLSETS:
-                composite_tools.update(resolve_toolset(ts_name))
-
-        if composite_tools:
-            enabled_toolsets |= _configurable_subset_of(composite_tools, platform) - _default_off_toolsets(
-                platform, explicitly_configured
-            )
-
-        _enable_recently_shipped_toolsets(enabled_toolsets, config, platform)
-    else:
-        # No explicit config — fall back to resolving composite toolset names
-        # (e.g. "hermes-cli") to individual tool names and reverse-mapping.
-        all_tool_names = set()
-        for ts_name in toolset_names:
-            all_tool_names.update(resolve_toolset(ts_name))
-        enabled_toolsets = _configurable_subset_of(all_tool_names, platform)
-
-        # Auto-enable ``x_search`` when xAI credentials are configured.
-        # Unlike ``homeassistant`` (whose ``ha_*`` tools live inside the
-        # platform composite and thus pass the subset check above),
-        # ``x_search`` is its own one-tool toolset that the composite does
-        # NOT include, so the subset loop never picks it up. Inject it
-        # directly here, mirroring the HASS_TOKEN → ``homeassistant`` rule
-        # below: once you have working creds, you don't have to also click
-        # through ``hermes tools`` to flip the toolset on. Only fires when
-        # the user has not yet saved an explicit toolset list — once they
-        # do, the saved list is authoritative.
-        x_search_auto_enabled = (
-            _toolset_allowed_for_platform("x_search", platform)
-            and _xai_credentials_present()
+    if any(ts in explicit_known_keys for ts in toolset_names):
+        enabled_toolsets = _explicit_toolsets(
+            toolset_names, explicit_known_keys, config, platform, explicitly_configured
         )
-        if x_search_auto_enabled:
-            enabled_toolsets.add("x_search")
+    else:
+        enabled_toolsets = _composite_toolsets(toolset_names, platform, explicitly_configured)
 
-        default_off = _default_off_toolsets(platform, explicitly_configured)
-        # Symmetric carve-out for x_search auto-enable (see the inject
-        # block above). Without this, the default_off subtraction would
-        # strip the entry we just added.
-        if x_search_auto_enabled:
-            default_off.discard("x_search")
-        enabled_toolsets -= default_off
-
-    _recover_platform_native_toolsets(enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys)
-
-    # Plugin toolsets: enabled by default unless explicitly disabled, or
-    # unless the toolset is in _DEFAULT_OFF_TOOLSETS (e.g. spotify —
-    # shipped as a bundled plugin but user must opt in via `hermes tools`
-    # so we don't ship 7 Spotify tool schemas to users who don't use it).
-    # A plugin toolset is "known" for a platform once `hermes tools`
-    # has been saved for that platform (tracked via known_plugin_toolsets).
-    # Unknown plugins default to enabled; known-but-absent = disabled.
+    _recover_platform_native_toolsets(
+        enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys
+    )
     if plugin_ts_keys:
-        known_map = config.get("known_plugin_toolsets", {}) or {}
-        known_for_platform = set(known_map.get(platform, []) or [])
-        for pts in plugin_ts_keys:
-            if pts in toolset_names or (
-                pts not in _DEFAULT_OFF_TOOLSETS and pts not in known_for_platform
-            ):
-                enabled_toolsets.add(pts)
+        enabled_toolsets |= _enabled_plugin_toolsets(config, platform, toolset_names, plugin_ts_keys)
 
-    # Context-engine tools are runtime-provided by the active engine, so they
-    # are not part of any static platform composite. When a non-default engine
-    # is selected, keep its recovery/status tools available even after a user
-    # saves an explicit platform toolset list. Preserve the explicit empty-list
-    # contract: selecting no configurable tools means no context-engine tools
-    # either unless the user adds ``context_engine`` manually later.
-    context_cfg = config.get("context") or {}
-    if not isinstance(context_cfg, dict):
-        context_cfg = {}
-    context_engine_name = str(context_cfg.get("engine") or "compressor").strip().lower()
-    if context_engine_name and context_engine_name != "compressor" and not (
-        explicitly_configured and not toolset_names
-    ):
+    # Context-engine tools are runtime-provided, not in any static composite: keep them for a
+    # non-default engine even after an explicit save. An explicit EMPTY list means no
+    # context-engine tools either, unless the user adds ``context_engine`` by hand.
+    if _context_engine_active(config) and not (explicitly_configured and not toolset_names):
         enabled_toolsets.add("context_engine")
 
-    # Preserve any explicit non-configurable toolset entries (for example,
-    # custom toolsets or MCP server names saved in platform_toolsets).
+    # Explicit non-configurable entries (custom toolsets, MCP server names) pass through.
     explicit_passthrough = {
         ts for ts in toolset_names
         if ts not in explicit_known_keys and ts not in platform_default_keys
@@ -989,14 +912,10 @@ def _get_platform_tools(
         config, toolset_names, explicit_passthrough, include_default_mcp_servers
     )
 
-    # Honor agent.disabled_toolsets from config.yaml — allows users to
-    # globally suppress specific toolsets (e.g. "memory") across all
-    # platforms without per-platform toolset configuration.  This runs
-    # last so it overrides everything above.  The value may arrive as a
-    # JSON-array string (e.g. "['memory']") from `hermes config set` or a
-    # JSON-mode editor save; parse it so the list is not silently dead (#86661).
-    agent_cfg = config.get("agent") or {}
-    disabled_toolsets = agent_cfg.get("disabled_toolsets") or []
+    # agent.disabled_toolsets is a global suppression list and runs LAST so it overrides everything
+    # above. It may arrive as a JSON-array string ("['memory']") from `hermes config set` or a
+    # JSON-mode editor save; parse it so the list is not silently dead.
+    disabled_toolsets = (config.get("agent") or {}).get("disabled_toolsets") or []
     if disabled_toolsets:
         from agent.skill_utils import parse_config_string_list
 
@@ -1006,7 +925,6 @@ def _get_platform_tools(
 
     if explicitly_configured and toolset_names:
         _warn_all_invalid_platform_toolsets(platform, platform_toolsets[platform])
-
     return enabled_toolsets
 
 
@@ -1030,13 +948,12 @@ def _recover_platform_native_toolsets(enabled_toolsets: Set[str], platform: str,
     skip = skip | {k for k in TOOLSETS if k.startswith("hermes-")}
     skip |= set(_DEFAULT_OFF_TOOLSETS) - {platform}
     for ts_key, ts_def in TOOLSETS.items():
-        # Posture toolsets (e.g. ``coding``) are session-level selections made
-        # by agent/coding_context.py — not per-platform capabilities to recover.
+        # Posture toolsets (``coding``) are session-level selections made by agent/coding_context.py,
+        # not per-platform capabilities to recover.
         if ts_key in skip or ts_def.get("includes") or ts_def.get("posture"):
             continue
-        # Static membership (see #49622): a registry-added tool absent from the
-        # platform composite must not block recovery of a non-configurable
-        # toolset whose authored tools the composite does list.
+        # Static membership: a registry-added tool absent from the platform composite must not
+        # block recovery of a non-configurable toolset whose authored tools the composite lists.
         ts_tools = set(resolve_toolset(ts_key, include_registry=False))
         if not ts_tools or not ts_tools.issubset(platform_tool_universe):
             continue
@@ -1070,7 +987,7 @@ def _merge_mcp_servers(
 
 
 def _warn_all_invalid_platform_toolsets(platform: str, explicit: list) -> None:
-    """#38798: warn once when an explicitly configured platform has only invalid toolset names.
+    """Warn once when an explicitly configured platform has only invalid toolset names.
 
     A migration or hand-edit that left ``hermes`` instead of ``hermes-cli`` makes resolve_toolset()
     return [] for every entry and the platform silently ends up with no native tools. Surface it
@@ -1098,74 +1015,46 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     """Save the selected toolset keys for a platform to config."""
     config.setdefault("platform_toolsets", {})
 
-    # Drop platform-scoped toolsets that don't apply here.  Prevents the
-    # "Configure all platforms" checklist (or a hand-edited config.yaml)
-    # from turning on, say, the `discord` toolset for Telegram.
-    enabled_toolset_keys = {
-        ts for ts in enabled_toolset_keys
-        if _toolset_allowed_for_platform(ts, platform)
-    }
+    # Drop platform-scoped toolsets that don't apply here, so the "Configure all platforms"
+    # checklist (or a hand-edited config.yaml) can't turn on `discord` for Telegram.
+    enabled_toolset_keys = {ts for ts in enabled_toolset_keys if _toolset_allowed_for_platform(ts, platform)}
 
-    # Get the set of all configurable toolset keys (built-in + plugin)
-    configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
     plugin_keys = _get_plugin_toolset_keys()
-    configurable_keys |= plugin_keys
+    configurable_keys = _configurable_keys() | plugin_keys
+    # Platform defaults (hermes-cli, ...) resolve to ALL tools; preserving one would silently
+    # override the user's unchecked selections on the next read.
+    platform_default_keys = _platform_default_keys()
 
-    # Also exclude platform default toolsets (hermes-cli, hermes-telegram, etc.)
-    # These are "super" toolsets that resolve to ALL tools, so preserving them
-    # would silently override the user's unchecked selections on the next read.
-    platform_default_keys = {p["default_toolset"] for p in PLATFORMS.values()}
-
-    # Get existing toolsets for this platform
     existing_toolsets = cfg_get(config, "platform_toolsets", platform, default=[])
     if not isinstance(existing_toolsets, list):
         existing_toolsets = []
-    existing_toolsets = [str(ts) for ts in existing_toolsets]
-
-    # Preserve any entries that are NOT configurable toolsets and NOT platform
-    # defaults (i.e. only MCP server names should be preserved)
+    # Preserve only entries that are neither configurable nor platform defaults (MCP server names).
     preserved_entries = {
-        entry for entry in existing_toolsets
-        if entry not in configurable_keys and entry not in platform_default_keys
+        str(entry) for entry in existing_toolsets
+        if str(entry) not in configurable_keys and str(entry) not in platform_default_keys
     }
-    # Opening `hermes tools` is the user's opt-in to reconfigure tools, so treat
-    # saving from the picker as consent to clear the "no_mcp" sentinel. The
-    # picker has no checkbox for no_mcp, so without this users who once set it
-    # by hand could never re-enable MCP servers through the UI.
+    # Saving from the picker is consent to clear the "no_mcp" sentinel: the picker has no checkbox
+    # for it, so users who once set it by hand could otherwise never re-enable MCP via the UI.
     preserved_entries.discard("no_mcp")
 
-    # Merge preserved entries with new enabled toolsets
     config["platform_toolsets"][platform] = sorted(enabled_toolset_keys | preserved_entries)
 
-    # Track which plugin toolsets are "known" for this platform so we can
-    # distinguish "new plugin, default enabled" from "user disabled it".
-    # _cfg_section normalizes a present-but-null key ("known_plugin_toolsets:"
-    # in config.yaml parses to None) that setdefault alone would not replace.
+    # Record which plugin toolsets this platform "knows" (distinguishes "new plugin, default
+    # enabled" from "user disabled it"). _cfg_section normalizes a present-but-null key that
+    # setdefault alone would not replace.
     if plugin_keys:
         _cfg_section(config, "known_plugin_toolsets")[platform] = sorted(plugin_keys)
 
-    # Same record for builtin toolsets: which ones this platform's checklist
-    # has actually put in front of the user. Without it, a toolset the user
-    # unchecks here is indistinguishable from one that shipped after they
-    # saved, and _enable_recently_shipped_toolsets would turn it straight back
-    # on. Recorded from the full catalog, since that is what the picker showed.
-    _cfg_section(config, "known_builtin_toolsets")[platform] = sorted(
-        ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS
-    )
+    # Same record for builtin toolsets the checklist actually offered; without it an unchecked
+    # toolset is indistinguishable from one shipped after the save and
+    # _enable_recently_shipped_toolsets would turn it straight back on.
+    _cfg_section(config, "known_builtin_toolsets")[platform] = sorted(_configurable_keys())
 
-    # Reconcile with agent.disabled_toolsets. _get_platform_tools() applies
-    # that list as a final override AFTER reading platform_toolsets.<platform>,
-    # so a toolset listed there stays permanently OFF no matter what this
-    # function writes — the toggle "saves" but silently can't ever take
-    # effect. Blank Slate installs pre-populate this list with ~27 toolsets,
-    # making most of the desktop Toolsets UI unusable for re-enabling
-    # anything (issue #49995).
-    #
-    # Only toolsets the user just explicitly enabled FOR THIS PLATFORM are
-    # cleared from the global disabled list — toolsets the user did not
-    # touch (still unchecked) or that remain disabled on other platforms
-    # are left alone, so agent.disabled_toolsets keeps working as a
-    # cross-platform suppression list for anything not actively re-enabled.
+    # Reconcile with agent.disabled_toolsets, which _get_platform_tools applies as a final override:
+    # a toolset listed there stays OFF no matter what this function writes (Blank Slate installs
+    # pre-populate ~27 entries, making the desktop Toolsets UI unable to re-enable anything). Only
+    # toolsets the user just explicitly enabled FOR THIS PLATFORM are cleared, so the list keeps
+    # working as a cross-platform suppression list for everything else.
     agent_cfg = config.get("agent")
     newly_enabled = enabled_toolset_keys - preserved_entries
     if isinstance(agent_cfg, dict) and agent_cfg.get("disabled_toolsets") and newly_enabled:
@@ -1206,27 +1095,19 @@ def _toolset_has_keys(
 
     if ts_key in {"web", "image_gen", "video_gen", "tts", "stt", "browser"}:
         if features is None:
-            features = get_nous_subscription_features(
-                config, force_fresh=force_fresh
-            )
+            features = get_nous_subscription_features(config, force_fresh=force_fresh)
         feature = features.features.get(ts_key)
         if feature and (feature.available or feature.managed_by_nous):
             return True
 
-    # Check TOOL_CATEGORIES first (provider-aware). A no-key provider
-    # (Local Browser, Edge TTS) counts as configured.
+    # Provider-aware categories first: a no-key provider (Local Browser, Edge TTS) counts as configured.
     cat = TOOL_CATEGORIES.get(ts_key)
     if cat:
         return any(
             _provider_env_ready(provider)
             for provider in _visible_providers(cat, config, force_fresh=force_fresh, features=features)
         )
-
-    # Fallback to simple requirements
-    requirements = TOOLSET_ENV_REQUIREMENTS.get(ts_key, [])
-    if not requirements:
-        return True
-    return all(get_env_value(var) for var, _ in requirements)
+    return all(get_env_value(var) for var, _ in TOOLSET_ENV_REQUIREMENTS.get(ts_key, []))
 
 
 # ─── Menu Helpers ─────────────────────────────────────────────────────────────
