@@ -2444,11 +2444,49 @@ def cmd_whatsapp_cloud(args):
     return run_whatsapp_cloud_setup()
 
 
-def cmd_setup(args):
-    """Interactive setup wizard."""
-    from hermes_cli.setup import run_setup_wizard
+def _forward_command(name: str, module: str, attr: str, *, forward_return: bool = False, doc: str = ""):
+    """A ``hermes <cmd>`` handler that hands ``args`` to ``<module>.<attr>``.
 
-    run_setup_wizard(args)
+    The import happens at CALL time so ``hermes --version`` and the other fast
+    paths never pay for it, and ``patch("<module>.<attr>")`` keeps intercepting.
+    ``forward_return`` surfaces the handler's return code to ``main()``; the
+    default swallows it (only kanban/project ever propagated theirs).
+    """
+
+    def _cmd(args):
+        import importlib
+
+        result = getattr(importlib.import_module(module), attr)(args)
+        return result if forward_return else None
+
+    _cmd.__name__ = _cmd.__qualname__ = name
+    _cmd.__doc__ = doc or None
+    return _cmd
+
+
+cmd_setup = _forward_command("cmd_setup", "hermes_cli.setup", "run_setup_wizard", doc='Interactive setup wizard.')
+cmd_login = _forward_command("cmd_login", "hermes_cli.auth", "login_command", doc='Authenticate Hermes CLI with a provider.')
+cmd_logout = _forward_command("cmd_logout", "hermes_cli.auth", "logout_command", doc='Clear provider authentication.')
+cmd_auth = _forward_command("cmd_auth", "hermes_cli.auth_commands", "auth_command", doc='Manage pooled credentials.')
+cmd_status = _forward_command("cmd_status", "hermes_cli.status", "show_status", doc='Show status of all components.')
+cmd_cron = _forward_command("cmd_cron", "hermes_cli.cron", "cron_command", doc='Cron job management.')
+cmd_webhook = _forward_command("cmd_webhook", "hermes_cli.webhook", "webhook_command", doc='Webhook subscription management.')
+cmd_kanban = _forward_command("cmd_kanban", "hermes_cli.kanban", "kanban_command", forward_return=True, doc='Multi-profile collaboration board.')
+cmd_project = _forward_command("cmd_project", "hermes_cli.projects_cmd", "projects_command", forward_return=True, doc='Manage projects (named, multi-folder workspaces).')
+cmd_hooks = _forward_command("cmd_hooks", "hermes_cli.hooks", "hooks_command", doc='Shell-hook inspection and management.')
+cmd_doctor = _forward_command("cmd_doctor", "hermes_cli.doctor", "run_doctor", doc='Check configuration and dependencies.')
+cmd_dump = _forward_command("cmd_dump", "hermes_cli.dump", "run_dump", doc='Dump setup summary for support/debugging.')
+cmd_debug = _forward_command("cmd_debug", "hermes_cli.debug", "run_debug", doc='Debug tools (share report, etc.).')
+cmd_skin = _forward_command("cmd_skin", "hermes_cli.skin_cmd", "skin_command", doc='Skin management (list / use / set).')
+cmd_import = _forward_command("cmd_import", "hermes_cli.backup", "run_import", doc='Restore a Hermes backup from a zip file.')
+cmd_dashboard_register = _forward_command("cmd_dashboard_register", "hermes_cli.dashboard_register", "cmd_dashboard_register", doc='Register a self-hosted dashboard OAuth client with Nous Portal.')
+cmd_gateway_enroll = _forward_command("cmd_gateway_enroll", "hermes_cli.gateway_enroll", "cmd_gateway_enroll", doc='Enroll a self-hosted gateway with a relay connector.')
+cmd_prompt_size = _forward_command("cmd_prompt_size", "hermes_cli.prompt_size", "cmd_prompt_size", doc='Show a byte/char breakdown of the system prompt + tool schemas.')
+cmd_pairing = _forward_command("cmd_pairing", "hermes_cli.pairing", "pairing_command")
+cmd_plugins = _forward_command("cmd_plugins", "hermes_cli.plugins_cmd", "plugins_command")
+cmd_mcp = _forward_command("cmd_mcp", "hermes_cli.mcp_config", "mcp_command")
+cmd_claw = _forward_command("cmd_claw", "hermes_cli.claw", "claw_command")
+cmd_import_agent = _forward_command("cmd_import_agent", "hermes_cli.agent_import", "import_agent_command")
 
 
 def cmd_model(args):
@@ -2907,41 +2945,6 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def cmd_login(args):
-    """Authenticate Hermes CLI with a provider."""
-    from hermes_cli.auth import login_command
-
-    login_command(args)
-
-
-def cmd_logout(args):
-    """Clear provider authentication."""
-    from hermes_cli.auth import logout_command
-
-    logout_command(args)
-
-
-def cmd_auth(args):
-    """Manage pooled credentials."""
-    from hermes_cli.auth_commands import auth_command
-
-    auth_command(args)
-
-
-def cmd_status(args):
-    """Show status of all components."""
-    from hermes_cli.status import show_status
-
-    show_status(args)
-
-
-def cmd_cron(args):
-    """Cron job management."""
-    from hermes_cli.cron import cron_command
-
-    cron_command(args)
-
-
 def cmd_sync(args):
     """Skill Sync — personal sync across devices, plus sharing with your org."""
     import json as _json
@@ -3137,13 +3140,6 @@ def cmd_sync(args):
     return 0
 
 
-def cmd_webhook(args):
-    """Webhook subscription management."""
-    from hermes_cli.webhook import webhook_command
-
-    webhook_command(args)
-
-
 def cmd_slack(args):
     """Slack integration helpers.
 
@@ -3178,34 +3174,6 @@ def cmd_slack(args):
     return 1
 
 
-def cmd_kanban(args):
-    """Multi-profile collaboration board."""
-    from hermes_cli.kanban import kanban_command
-
-    return kanban_command(args)
-
-
-def cmd_project(args):
-    """Manage projects (named, multi-folder workspaces)."""
-    from hermes_cli.projects_cmd import projects_command
-
-    return projects_command(args)
-
-
-def cmd_hooks(args):
-    """Shell-hook inspection and management."""
-    from hermes_cli.hooks import hooks_command
-
-    hooks_command(args)
-
-
-def cmd_doctor(args):
-    """Check configuration and dependencies."""
-    from hermes_cli.doctor import run_doctor
-
-    run_doctor(args)
-
-
 def cmd_verify(args):
     """Detect a project's run recipe and smoke-test it."""
     from hermes_cli.verify_cmd import run_verify_command
@@ -3236,20 +3204,6 @@ def cmd_approvals(args):
     return status
 
 
-def cmd_dump(args):
-    """Dump setup summary for support/debugging."""
-    from hermes_cli.dump import run_dump
-
-    run_dump(args)
-
-
-def cmd_debug(args):
-    """Debug tools (share report, etc.)."""
-    from hermes_cli.debug import run_debug
-
-    run_debug(args)
-
-
 def cmd_config(args):
     """Configuration management."""
     from hermes_cli.config import config_command
@@ -3266,13 +3220,6 @@ def cmd_config(args):
         sys.exit(1)
 
 
-def cmd_skin(args):
-    """Skin management (list / use / set)."""
-    from hermes_cli.skin_cmd import skin_command
-
-    skin_command(args)
-
-
 def cmd_backup(args):
     """Back up Hermes home directory to a zip file."""
     if getattr(args, "quick", False):
@@ -3283,13 +3230,6 @@ def cmd_backup(args):
         from hermes_cli.backup import run_backup
 
         run_backup(args)
-
-
-def cmd_import(args):
-    """Restore a Hermes backup from a zip file."""
-    from hermes_cli.backup import run_import
-
-    run_import(args)
 
 
 def _print_version_info(*, check_updates: bool = True) -> None:
@@ -3872,20 +3812,6 @@ def cmd_dashboard(args):
     )
 
 
-def cmd_dashboard_register(args):
-    """Register a self-hosted dashboard OAuth client with Nous Portal."""
-    from hermes_cli.dashboard_register import cmd_dashboard_register as _impl
-
-    _impl(args)
-
-
-def cmd_gateway_enroll(args):
-    """Enroll a self-hosted gateway with a relay connector."""
-    from hermes_cli.gateway_enroll import cmd_gateway_enroll as _impl
-
-    _impl(args)
-
-
 def cmd_completion(args, parser=None):
     """Print shell completion script."""
     from hermes_cli.completion import generate_bash, generate_zsh, generate_fish
@@ -3897,13 +3823,6 @@ def cmd_completion(args, parser=None):
         print(generate_fish(parser))
     else:
         print(generate_bash(parser))
-
-
-def cmd_prompt_size(args):
-    """Show a byte/char breakdown of the system prompt + tool schemas."""
-    from hermes_cli.prompt_size import cmd_prompt_size as _impl
-
-    _impl(args)
 
 
 def cmd_logs(args):
@@ -4730,30 +4649,6 @@ def _cmd_skills_trust(args):
         print(f"No project skills found yet — add them under {subdirs}.")
 
 
-def cmd_pairing(args):
-    from hermes_cli.pairing import pairing_command
-
-    pairing_command(args)
-
-
-def cmd_plugins(args):
-    from hermes_cli.plugins_cmd import plugins_command
-
-    plugins_command(args)
-
-
-def cmd_mcp(args):
-    from hermes_cli.mcp_config import mcp_command
-
-    mcp_command(args)
-
-
-def cmd_claw(args):
-    from hermes_cli.claw import claw_command
-
-    claw_command(args)
-
-
 def _advertise_agent_env() -> None:
     """Advertise the agent harness to child processes.
 
@@ -4996,11 +4891,6 @@ def _default_to_chat(args) -> None:
         args.command = "chat"
     _set_chat_arg_defaults(args)
     cmd_chat(args)
-
-
-def cmd_import_agent(args):
-    from hermes_cli.agent_import import import_agent_command
-    import_agent_command(args)
 
 
 def main():
