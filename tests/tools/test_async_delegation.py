@@ -854,10 +854,10 @@ def _patch_delegation_cfg(monkeypatch, model="upstage/solar-pro-4", provider="op
     """Pin the delegation config the notice renderer reads (adapts the
     #97667 tests to the shipped implementation, which reads the configured
     model from config rather than the event's model field)."""
-    import tools.process_registry as _pr
+    import tools.process_registry_notifications as _prn
 
     monkeypatch.setattr(
-        _pr, "_delegation_config", lambda: {"model": model, "provider": provider}
+        _prn, "_delegation_config", lambda: {"model": model, "provider": provider}
     )
 
 

@@ -1,14 +1,10 @@
-"""Structured-output schema helpers for delegate_task (T1-24).
+"""Structured-output schema helpers for delegate_task.
 
-Optional per-task ``output_schema`` (a JSON Schema object): the child is
-told about the contract via an OUTPUT CONTRACT block appended to its
-context, the parent validates the child's final answer with jsonschema,
-and on failure sends exactly ONE bounded retry turn carrying the
-validation errors verbatim (per llm-structured-output-schema-design:
-max 1 retry, exact errors, no schema re-paste).
-
-Pattern from: github/copilot-cli ctx.agent(prompt, {schema}) — PATTERN
-ONLY, zero code/prompt text copied (proprietary).
+Optional per-task ``output_schema`` (a JSON Schema object): the child gets an
+OUTPUT CONTRACT block appended to its context, the parent validates the final
+answer with jsonschema, and on failure sends exactly ONE bounded retry turn
+carrying the validation errors verbatim (max 1 retry — more retries make
+frontier models drop fields that were right the first time; no schema re-paste).
 """
 
 from __future__ import annotations
@@ -19,17 +15,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Exactly one retry turn — bounded by design. More retries make frontier
-# models drop fields that were right the first time.
-MAX_SCHEMA_RETRIES = 1
-
 _CONTRACT_HEADER = "OUTPUT CONTRACT (machine-validated)"
 
 
 def coerce_output_schema(raw: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Validate a model/caller-supplied output_schema value.
 
-    Returns ``(schema, None)`` when usable, ``(None, error)`` when not.
+    Returns ``(schema, None)`` when usable, ``(None, error)`` when not;
     ``None`` input passes through as ``(None, None)`` (no schema requested).
     """
     if raw is None:
@@ -44,16 +36,13 @@ def coerce_output_schema(raw: Any) -> Tuple[Optional[Dict[str, Any]], Optional[s
             return None, "output_schema must be a JSON Schema object."
         raw = parsed
     if not isinstance(raw, dict):
-        return None, (
-            f"output_schema must be a JSON Schema object, got {type(raw).__name__}."
-        )
+        return None, f"output_schema must be a JSON Schema object, got {type(raw).__name__}."
     try:
         from jsonschema.validators import validator_for  # type: ignore[import-untyped]
 
         validator_for(raw).check_schema(raw)
     except ImportError:
-        # jsonschema is a hard dependency in practice; degrade to accepting
-        # the dict as-is so delegation still works without it.
+        # Degrade to accepting the dict as-is so delegation still works without jsonschema.
         logger.debug("jsonschema unavailable; skipping output_schema meta-validation")
     except Exception as exc:
         return None, f"output_schema is not a valid JSON Schema: {exc}"
@@ -78,12 +67,9 @@ def append_output_contract(context: Optional[str], schema: Dict[str, Any]) -> st
 
 
 def extract_json_candidate(text: str) -> str:
-    """Best-effort extraction of a JSON payload from model output.
-
-    Strips markdown code fences and leading/trailing prose around the
-    outermost ``{...}`` / ``[...]`` span. Returns the (possibly unchanged)
-    candidate string; parsing errors are reported by validate_output.
-    """
+    """Strip markdown fences and prose around the outermost ``{...}``/``[...]``
+    span. Returns the (possibly unchanged) candidate; parse errors are
+    reported by validate_output."""
     raw = (text or "").strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[-1]
@@ -102,13 +88,11 @@ def extract_json_candidate(text: str) -> str:
     return raw
 
 
-def validate_output(
-    text: str, schema: Dict[str, Any]
-) -> Tuple[bool, List[str]]:
+def validate_output(text: str, schema: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """Validate a child's final answer against ``schema``.
 
-    Returns ``(True, [])`` on success or ``(False, errors)`` where errors
-    are human-readable strings suitable for the retry turn.
+    Returns ``(True, [])`` or ``(False, errors)`` with human-readable strings
+    suitable for the retry turn.
     """
     candidate = extract_json_candidate(text or "")
     if not candidate.strip():
@@ -124,23 +108,16 @@ def validate_output(
         return True, []
     validator = validator_for(schema)(schema)
     errors = sorted(validator.iter_errors(parsed), key=lambda e: list(e.absolute_path))
-    if not errors:
-        return True, []
-    rendered: List[str] = []
-    for err in errors[:10]:  # bound error volume for the retry prompt
-        path = "$" + "".join(
-            f"[{p}]" if isinstance(p, int) else f".{p}" for p in err.absolute_path
-        )
-        rendered.append(f"{path}: {err.message}")
-    return False, rendered
+    rendered = [  # bound error volume for the retry prompt
+        "$" + "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in err.absolute_path) + f": {err.message}"
+        for err in errors[:10]
+    ]
+    return not rendered, rendered
 
 
 def build_retry_message(errors: List[str]) -> str:
-    """Build the single bounded retry turn sent to the child.
-
-    Carries the validation errors verbatim; deliberately does NOT
-    re-paste the schema (the child already has it in its context).
-    """
+    """Single bounded retry turn: errors verbatim, deliberately NOT re-pasting
+    the schema (the child already has it in its context)."""
     error_block = "\n".join(f"- {e}" for e in errors)
     return (
         "Your previous final response was rejected by the output contract "
