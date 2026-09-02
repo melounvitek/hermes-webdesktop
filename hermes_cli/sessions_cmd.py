@@ -11,17 +11,18 @@ byte-identical. A symtable/AST closure check found exactly two free variables:
   threaded as a keyword parameter via ``functools.partial`` at the
   ``set_defaults(func=...)`` wiring site in ``main()``.
 
-Helpers that stay in ``hermes_cli.main`` (``get_hermes_home``,
-``_relative_time``, ``_session_browse_picker``, ``_size_delta_label``) are
-delegated through call-time wrappers below so existing test monkeypatches on
-``hermes_cli.main.<name>`` keep reaching this code path, and so imports stay
-one-way (main.py imports this module; the reverse happens only lazily at call
-time — no import cycle).
+``get_hermes_home`` stays in ``hermes_cli.main`` and is delegated through a
+call-time wrapper so existing test monkeypatches on ``hermes_cli.main.<name>``
+keep reaching this code path, and so imports stay one-way (main.py imports this
+module lazily; the reverse happens only at call time — no import cycle).
+``_relative_time`` / ``_session_browse_picker`` / ``_size_delta_label`` live
+here and are re-exported by ``hermes_cli.main``.
 """
 
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 def _m():
@@ -35,16 +36,404 @@ def get_hermes_home():
     return _m().get_hermes_home()
 
 
-def _relative_time(ts):
-    return _m()._relative_time(ts)
+def _relative_time(ts) -> str:
+    """Format a timestamp as relative time (e.g., '2h ago', 'yesterday').
+
+    Thin wrapper kept for backward compatibility; the implementation lives
+    in :mod:`hermes_cli.timefmt` so lightweight consumers don't have to
+    import the whole CLI surface.
+    """
+    from hermes_cli.timefmt import relative_time
+
+    return relative_time(ts)
 
 
-def _session_browse_picker(sessions, session_db=None):
-    return _m()._session_browse_picker(sessions, session_db=session_db)
+def _session_status_tag(status: Optional[str]) -> str:
+    """Short fixed-width tag for a session lifecycle status."""
+    return {
+        "complete": "done",
+        "interrupted": "intr",
+        "error": "err",
+        "empty": "empty",
+    }.get(status or "", "-")
 
 
-def _size_delta_label(saved_mb):
-    return _m()._size_delta_label(saved_mb)
+def _annotate_session_statuses(sessions: list, session_db) -> None:
+    """Attach a ``_status`` key to each session row (best-effort, cheap).
+
+    Uses ``SessionDB.session_lifecycle_statuses`` — one indexed last-message
+    lookup per listed session, never a transcript scan. On any failure the
+    rows simply stay untagged and the picker renders '-' for status.
+    """
+    if session_db is None or not sessions:
+        return
+    try:
+        statuses = session_db.session_lifecycle_statuses(
+            [s.get("id") for s in sessions]
+        )
+    except Exception:
+        return
+    for s in sessions:
+        s["_status"] = statuses.get(s.get("id"), "")
+
+
+def _session_browse_picker(sessions: list, session_db=None) -> Optional[str]:
+    """Interactive curses-based session browser with live search filtering.
+
+    Shows lifecycle status (done / intr / err / empty) and message count per
+    session when *session_db* is provided. With a live *session_db*, pressing
+    ``d`` on a row (while the search filter is empty) prompts y/n and deletes
+    the session via ``SessionDB.delete_session``.
+
+    Returns the selected session ID, or None if cancelled.
+    """
+    if not sessions:
+        print("No sessions found.")
+        return None
+
+    _annotate_session_statuses(sessions, session_db)
+
+    def _delete_session(session_id: str) -> bool:
+        if session_db is None:
+            return False
+        try:
+            sessions_dir = get_hermes_home() / "sessions"
+        except Exception:
+            sessions_dir = None
+        try:
+            return bool(
+                session_db.delete_session(session_id, sessions_dir=sessions_dir)
+            )
+        except Exception:
+            return False
+
+    # Try curses-based picker first
+    try:
+        import curses
+
+        result_holder = [None]
+
+        # Layout: [arrow 3] [title/preview flexible] [status 5] [msgs 5]
+        #         [active 12] [src 6] [id 18]
+        _FIXED_COLS = 3 + 5 + 2 + 5 + 2 + 12 + 6 + 18 + 6
+
+        def _format_row(s, max_x):
+            """Format a session row for display."""
+            title = (s.get("title") or "").strip()
+            preview = (s.get("preview") or "").strip()
+            source = s.get("source", "")[:6]
+            last_active = _relative_time(s.get("last_active"))
+            sid = s["id"][:18]
+            status = _session_status_tag(s.get("_status"))
+            msgs = s.get("message_count")
+            msgs_str = str(msgs) if isinstance(msgs, int) else "-"
+
+            name_width = max(20, max_x - _FIXED_COLS)
+
+            if title:
+                name = title[:name_width]
+            elif preview:
+                name = preview[:name_width]
+            else:
+                name = sid
+
+            return (
+                f"{name:<{name_width}}  {status:<5}  {msgs_str:>5}  "
+                f"{last_active:<10}  {source:<5} {sid}"
+            )
+
+        def _match(s, query):
+            """Check if a session matches the search query (case-insensitive)."""
+            q = query.lower()
+            return (
+                q in (s.get("title") or "").lower()
+                or q in (s.get("preview") or "").lower()
+                or q in s.get("id", "").lower()
+                or q in (s.get("source") or "").lower()
+            )
+
+        def _curses_browse(stdscr):
+            curses.curs_set(0)
+            if curses.has_colors():
+                curses.start_color()
+                curses.use_default_colors()
+                curses.init_pair(1, curses.COLOR_GREEN, -1)  # selected
+                curses.init_pair(2, curses.COLOR_YELLOW, -1)  # header
+                curses.init_pair(3, curses.COLOR_CYAN, -1)  # search
+                curses.init_pair(4, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)  # dim
+                curses.init_pair(5, curses.COLOR_RED, -1)  # error/delete
+
+            cursor = 0
+            scroll_offset = 0
+            search_text = ""
+            confirm_delete = None  # session dict pending y/n confirmation
+            flash = ""  # one-frame notice (e.g. "deleted <title>")
+            filtered = list(sessions)
+
+            def _status_attr(status):
+                if not curses.has_colors():
+                    return curses.A_NORMAL
+                return {
+                    "complete": curses.color_pair(1),
+                    "interrupted": curses.color_pair(2),
+                    "error": curses.color_pair(5),
+                    "empty": curses.color_pair(4),
+                }.get(status or "", curses.A_NORMAL)
+
+            while True:
+                stdscr.clear()
+                max_y, max_x = stdscr.getmaxyx()
+                if max_y < 5 or max_x < 40:
+                    # Terminal too small
+                    try:
+                        stdscr.addstr(0, 0, "Terminal too small")
+                    except curses.error:
+                        pass
+                    stdscr.refresh()
+                    stdscr.getch()
+                    return
+
+                # Header line
+                if search_text:
+                    header = f"  Browse sessions — filter: {search_text}█"
+                    header_attr = curses.A_BOLD
+                    if curses.has_colors():
+                        header_attr |= curses.color_pair(3)
+                else:
+                    header = (
+                        "  Browse sessions — ↑↓ navigate  Enter select"
+                        "  Type to filter  Esc quit"
+                    )
+                    header_attr = curses.A_BOLD
+                    if curses.has_colors():
+                        header_attr |= curses.color_pair(2)
+                try:
+                    stdscr.addnstr(0, 0, header, max_x - 1, header_attr)
+                except curses.error:
+                    pass
+
+                # Column header line
+                name_width = max(20, max_x - _FIXED_COLS)
+                col_header = (
+                    f"   {'Title / Preview':<{name_width}}  {'Stat':<5}  "
+                    f"{'Msgs':>5}  {'Active':<10}  {'Src':<5} {'ID'}"
+                )
+                try:
+                    dim_attr = (
+                        curses.color_pair(4) if curses.has_colors() else curses.A_DIM
+                    )
+                    stdscr.addnstr(1, 0, col_header, max_x - 1, dim_attr)
+                except curses.error:
+                    pass
+
+                # Compute visible area
+                visible_rows = max_y - 4  # header + col header + blank + footer
+                visible_rows = max(visible_rows, 1)
+
+                # Clamp cursor and scroll
+                if not filtered:
+                    try:
+                        msg = "  No sessions match the filter."
+                        stdscr.addnstr(3, 0, msg, max_x - 1, curses.A_DIM)
+                    except curses.error:
+                        pass
+                else:
+                    if cursor >= len(filtered):
+                        cursor = len(filtered) - 1
+                    cursor = max(cursor, 0)
+                    if cursor < scroll_offset:
+                        scroll_offset = cursor
+                    elif cursor >= scroll_offset + visible_rows:
+                        scroll_offset = cursor - visible_rows + 1
+
+                    for draw_i, i in enumerate(
+                        range(
+                            scroll_offset,
+                            min(len(filtered), scroll_offset + visible_rows),
+                        )
+                    ):
+                        y = draw_i + 3
+                        if y >= max_y - 1:
+                            break
+                        s = filtered[i]
+                        arrow = " → " if i == cursor else "   "
+                        row = arrow + _format_row(s, max_x - 3)
+                        attr = curses.A_NORMAL
+                        if i == cursor:
+                            attr = curses.A_BOLD
+                            if curses.has_colors():
+                                attr |= curses.color_pair(1)
+                        try:
+                            stdscr.addnstr(y, 0, row, max_x - 1, attr)
+                            if i != cursor:
+                                # Recolor the status tag column in place.
+                                status = s.get("_status")
+                                tag = _session_status_tag(status)
+                                tag_x = 3 + max(20, (max_x - 3) - _FIXED_COLS) + 2
+                                if tag_x + 5 < max_x - 1:
+                                    stdscr.addnstr(
+                                        y, tag_x, f"{tag:<5}", 5, _status_attr(status)
+                                    )
+                        except curses.error:
+                            pass
+
+                # Footer
+                footer_y = max_y - 1
+                footer_attr = (
+                    curses.color_pair(4) if curses.has_colors() else curses.A_DIM
+                )
+                if confirm_delete is not None:
+                    label = (
+                        (confirm_delete.get("title") or "").strip()
+                        or (confirm_delete.get("preview") or "").strip()
+                        or confirm_delete["id"]
+                    )
+                    if len(label) > 40:
+                        label = label[:37] + "..."
+                    footer = f"  Delete session '{label}'? [y/N]"
+                    footer_attr = curses.A_BOLD
+                    if curses.has_colors():
+                        footer_attr |= curses.color_pair(5)
+                elif flash:
+                    footer = f"  {flash}"
+                    flash = ""
+                else:
+                    if filtered:
+                        footer = f"  {cursor + 1}/{len(filtered)} sessions"
+                        if len(filtered) < len(sessions):
+                            footer += f" (filtered from {len(sessions)})"
+                    else:
+                        footer = f"  0/{len(sessions)} sessions"
+                    if session_db is not None and not search_text:
+                        footer += "   d delete"
+                try:
+                    stdscr.addnstr(footer_y, 0, footer, max_x - 1, footer_attr)
+                except curses.error:
+                    pass
+
+                stdscr.refresh()
+                key = stdscr.getch()
+
+                if confirm_delete is not None:
+                    # y/n confirmation mode — only an explicit 'y' deletes.
+                    target = confirm_delete
+                    confirm_delete = None
+                    if key in {ord("y"), ord("Y")}:
+                        if _delete_session(target["id"]):
+                            sessions[:] = [
+                                s for s in sessions if s["id"] != target["id"]
+                            ]
+                            filtered = (
+                                [s for s in sessions if _match(s, search_text)]
+                                if search_text
+                                else list(sessions)
+                            )
+                            flash = "Deleted."
+                            if not sessions:
+                                return
+                        else:
+                            flash = "Delete failed."
+                    continue
+
+                if key in {curses.KEY_UP,}:
+                    if filtered:
+                        cursor = (cursor - 1) % len(filtered)
+                elif key in {curses.KEY_DOWN,}:
+                    if filtered:
+                        cursor = (cursor + 1) % len(filtered)
+                elif key in {curses.KEY_ENTER, 10, 13}:
+                    if filtered:
+                        result_holder[0] = filtered[cursor]["id"]
+                    return
+                elif key == 27:  # Esc
+                    if search_text:
+                        # First Esc clears the search
+                        search_text = ""
+                        filtered = list(sessions)
+                        cursor = 0
+                        scroll_offset = 0
+                    else:
+                        # Second Esc exits
+                        return
+                elif key in {curses.KEY_BACKSPACE, 127, 8}:
+                    if search_text:
+                        search_text = search_text[:-1]
+                        if search_text:
+                            filtered = [s for s in sessions if _match(s, search_text)]
+                        else:
+                            filtered = list(sessions)
+                        cursor = 0
+                        scroll_offset = 0
+                elif key == ord("q") and not search_text:
+                    return
+                elif (
+                    key == ord("d")
+                    and not search_text
+                    and session_db is not None
+                    and filtered
+                ):
+                    # 'd' only acts as delete when the filter is empty —
+                    # while a search is active it types into the query below.
+                    confirm_delete = filtered[cursor]
+                elif 32 <= key <= 126:
+                    # Printable character → add to search filter
+                    search_text += chr(key)
+                    filtered = [s for s in sessions if _match(s, search_text)]
+                    cursor = 0
+                    scroll_offset = 0
+
+        curses.wrapper(_curses_browse)
+        return result_holder[0]
+
+    except Exception:
+        pass
+
+    # Fallback: numbered list (Windows without curses, etc.). Shows the same
+    # status/message-count columns but has no delete support.
+    print("\n  Browse sessions  (enter number to resume, q to cancel)\n")
+    for i, s in enumerate(sessions):
+        title = (s.get("title") or "").strip()
+        preview = (s.get("preview") or "").strip()
+        label = title or preview or s["id"]
+        if len(label) > 50:
+            label = label[:47] + "..."
+        last_active = _relative_time(s.get("last_active"))
+        src = s.get("source", "")[:6]
+        status = _session_status_tag(s.get("_status"))
+        msgs = s.get("message_count")
+        msgs_str = str(msgs) if isinstance(msgs, int) else "-"
+        print(
+            f"  {i + 1:>3}. {label:<50}  {status:<5}  {msgs_str:>5}  "
+            f"{last_active:<10}  {src}"
+        )
+
+    while True:
+        try:
+            val = input(f"\n  Select [1-{len(sessions)}]: ").strip()
+            if not val or val.lower() in {"q", "quit", "exit"}:
+                return None
+            idx = int(val) - 1
+            if 0 <= idx < len(sessions):
+                return sessions[idx]["id"]
+            print(f"  Invalid selection. Enter 1-{len(sessions)} or q to cancel.")
+        except ValueError:
+            print("  Invalid input. Enter a number or q to cancel.")
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return None
+
+
+def _size_delta_label(saved_mb: float) -> str:
+    """Human label for a before/after database size delta, in MB.
+
+    A negative delta means the file GREW — concurrent session writes during a
+    long optimize can outweigh what the rebuild freed. Printing
+    "reclaimed -163.0 MB" for that reads as data loss, so say "grew by"
+    instead.
+    """
+    if saved_mb >= 0:
+        return f"reclaimed {saved_mb:.1f} MB"
+    return f"grew by {-saved_mb:.1f} MB"
 
 
 def _confirm_prompt(prompt: str) -> bool:

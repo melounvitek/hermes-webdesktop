@@ -402,50 +402,9 @@ def _suppress_mouse_residue_early() -> None:
 _suppress_mouse_residue_early()
 
 
-def _is_termux_startup_environment_fast() -> bool:
-    """Tiny Termux check for pre-import startup shortcuts."""
-    return _startup_fast.is_termux_env()
-
-
-def _is_termux_fast_version_argv(argv: list[str]) -> bool:
-    return _startup_fast.is_termux_fast_version_argv(argv)
-
-
-def _is_global_fast_version_argv(argv: list[str]) -> bool:
-    return _startup_fast.is_global_fast_version_argv(argv)
-
-
-def _is_container_startup_environment_fast() -> bool:
-    return _startup_fast.is_container_startup_environment()
-
-
-def _active_profile_may_override_home_fast(hermes_root: str) -> bool:
-    return _startup_fast.active_profile_may_override_home(hermes_root)
-
-
-def _container_mode_may_be_active_fast() -> bool:
-    return _startup_fast.container_mode_may_be_active()
-
-
-def _read_openai_version_fast() -> str | None:
-    """Read OpenAI SDK version without importing ``importlib.metadata``."""
-    return _startup_fast.read_openai_version()
-
-
-def _print_fast_version_info() -> None:
-    _startup_fast.print_fast_version_info()
-
-
 def _try_ultrafast_version() -> bool:
     """Handle ``hermes --version`` before config/logging imports."""
     return _startup_fast.try_fast_version()
-
-
-def _try_termux_ultrafast_version() -> bool:
-    """Backward-compatible test hook for the Termux startup fast path."""
-    if not _is_termux_startup_environment_fast():
-        return False
-    return _try_ultrafast_version()
 
 
 _ensure_project_root_on_path_fast()
@@ -467,9 +426,6 @@ from pathlib import Path
 from typing import Optional
 
 
-import functools as _functools
-
-from hermes_cli.subcommands._shared import add_accept_hooks_flag as _add_accept_hooks_flag
 from hermes_cli.subcommands.cron import build_cron_parser
 from hermes_cli.subcommands.sync import build_sync_parser
 from hermes_cli.subcommands.gateway import build_gateway_parser
@@ -477,7 +433,7 @@ from hermes_cli.subcommands.profile import build_profile_parser
 from hermes_cli.subcommands.model import build_model_parser
 from hermes_cli.subcommands.setup import build_setup_parser
 
-from hermes_cli.subcommands.whatsapp import build_whatsapp_parser
+from hermes_cli.subcommands.whatsapp import build_whatsapp_parser, build_whatsapp_cloud_parser
 from hermes_cli.subcommands.slack import build_slack_parser
 from hermes_cli.subcommands.login import build_login_parser
 from hermes_cli.subcommands.logout import build_logout_parser
@@ -514,6 +470,21 @@ from hermes_cli.subcommands.pairing import build_pairing_parser
 from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.claw import build_claw_parser
+from hermes_cli.subcommands.moa import build_moa_parser
+from hermes_cli.subcommands.fallback import build_fallback_parser
+from hermes_cli.subcommands.worktree import build_worktree_parser
+from hermes_cli.subcommands.browser import build_browser_parser
+from hermes_cli.subcommands.secrets import build_secrets_parser
+from hermes_cli.subcommands.egress import build_egress_parser
+from hermes_cli.subcommands.migrate import build_migrate_parser
+from hermes_cli.subcommands.checkpoints import build_checkpoints_parser
+from hermes_cli.subcommands.bundles import build_bundles_parser
+from hermes_cli.subcommands.curator import build_curator_parser
+from hermes_cli.subcommands.pets import build_pets_parser
+from hermes_cli.subcommands.journey import build_journey_parser
+from hermes_cli.subcommands.computer_use import build_computer_use_parser
+from hermes_cli.subcommands.sessions import build_sessions_parser
+from hermes_cli.subcommands.completion import build_completion_parser
 
 
 def _require_tty(command_name: str) -> None:
@@ -1042,18 +1013,6 @@ def _termux_should_prefetch_update_check() -> bool:
     return os.environ.get("HERMES_TERMUX_PREFETCH_UPDATES") == "1"
 
 
-def _relative_time(ts) -> str:
-    """Format a timestamp as relative time (e.g., '2h ago', 'yesterday').
-
-    Thin wrapper kept for backward compatibility; the implementation lives
-    in :mod:`hermes_cli.timefmt` so lightweight consumers don't have to
-    import the whole CLI surface.
-    """
-    from hermes_cli.timefmt import relative_time
-
-    return relative_time(ts)
-
-
 def _has_any_provider_configured(*, strict_profile_scope: bool = False) -> bool:
     """Check if at least one inference provider is usable.
 
@@ -1292,381 +1251,6 @@ def _confirm_startup_expensive_model_override(args) -> None:
     if reply not in {"y", "yes"}:
         sys.stderr.write("Model override cancelled.\n")
         raise SystemExit(1)
-
-
-def _session_status_tag(status: Optional[str]) -> str:
-    """Short fixed-width tag for a session lifecycle status."""
-    return {
-        "complete": "done",
-        "interrupted": "intr",
-        "error": "err",
-        "empty": "empty",
-    }.get(status or "", "-")
-
-
-def _annotate_session_statuses(sessions: list, session_db) -> None:
-    """Attach a ``_status`` key to each session row (best-effort, cheap).
-
-    Uses ``SessionDB.session_lifecycle_statuses`` — one indexed last-message
-    lookup per listed session, never a transcript scan. On any failure the
-    rows simply stay untagged and the picker renders '-' for status.
-    """
-    if session_db is None or not sessions:
-        return
-    try:
-        statuses = session_db.session_lifecycle_statuses(
-            [s.get("id") for s in sessions]
-        )
-    except Exception:
-        return
-    for s in sessions:
-        s["_status"] = statuses.get(s.get("id"), "")
-
-
-def _session_browse_picker(sessions: list, session_db=None) -> Optional[str]:
-    """Interactive curses-based session browser with live search filtering.
-
-    Shows lifecycle status (done / intr / err / empty) and message count per
-    session when *session_db* is provided. With a live *session_db*, pressing
-    ``d`` on a row (while the search filter is empty) prompts y/n and deletes
-    the session via ``SessionDB.delete_session``.
-
-    Returns the selected session ID, or None if cancelled.
-    """
-    if not sessions:
-        print("No sessions found.")
-        return None
-
-    _annotate_session_statuses(sessions, session_db)
-
-    def _delete_session(session_id: str) -> bool:
-        if session_db is None:
-            return False
-        try:
-            sessions_dir = get_hermes_home() / "sessions"
-        except Exception:
-            sessions_dir = None
-        try:
-            return bool(
-                session_db.delete_session(session_id, sessions_dir=sessions_dir)
-            )
-        except Exception:
-            return False
-
-    # Try curses-based picker first
-    try:
-        import curses
-
-        result_holder = [None]
-
-        # Layout: [arrow 3] [title/preview flexible] [status 5] [msgs 5]
-        #         [active 12] [src 6] [id 18]
-        _FIXED_COLS = 3 + 5 + 2 + 5 + 2 + 12 + 6 + 18 + 6
-
-        def _format_row(s, max_x):
-            """Format a session row for display."""
-            title = (s.get("title") or "").strip()
-            preview = (s.get("preview") or "").strip()
-            source = s.get("source", "")[:6]
-            last_active = _relative_time(s.get("last_active"))
-            sid = s["id"][:18]
-            status = _session_status_tag(s.get("_status"))
-            msgs = s.get("message_count")
-            msgs_str = str(msgs) if isinstance(msgs, int) else "-"
-
-            name_width = max(20, max_x - _FIXED_COLS)
-
-            if title:
-                name = title[:name_width]
-            elif preview:
-                name = preview[:name_width]
-            else:
-                name = sid
-
-            return (
-                f"{name:<{name_width}}  {status:<5}  {msgs_str:>5}  "
-                f"{last_active:<10}  {source:<5} {sid}"
-            )
-
-        def _match(s, query):
-            """Check if a session matches the search query (case-insensitive)."""
-            q = query.lower()
-            return (
-                q in (s.get("title") or "").lower()
-                or q in (s.get("preview") or "").lower()
-                or q in s.get("id", "").lower()
-                or q in (s.get("source") or "").lower()
-            )
-
-        def _curses_browse(stdscr):
-            curses.curs_set(0)
-            if curses.has_colors():
-                curses.start_color()
-                curses.use_default_colors()
-                curses.init_pair(1, curses.COLOR_GREEN, -1)  # selected
-                curses.init_pair(2, curses.COLOR_YELLOW, -1)  # header
-                curses.init_pair(3, curses.COLOR_CYAN, -1)  # search
-                curses.init_pair(4, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)  # dim
-                curses.init_pair(5, curses.COLOR_RED, -1)  # error/delete
-
-            cursor = 0
-            scroll_offset = 0
-            search_text = ""
-            confirm_delete = None  # session dict pending y/n confirmation
-            flash = ""  # one-frame notice (e.g. "deleted <title>")
-            filtered = list(sessions)
-
-            def _status_attr(status):
-                if not curses.has_colors():
-                    return curses.A_NORMAL
-                return {
-                    "complete": curses.color_pair(1),
-                    "interrupted": curses.color_pair(2),
-                    "error": curses.color_pair(5),
-                    "empty": curses.color_pair(4),
-                }.get(status or "", curses.A_NORMAL)
-
-            while True:
-                stdscr.clear()
-                max_y, max_x = stdscr.getmaxyx()
-                if max_y < 5 or max_x < 40:
-                    # Terminal too small
-                    try:
-                        stdscr.addstr(0, 0, "Terminal too small")
-                    except curses.error:
-                        pass
-                    stdscr.refresh()
-                    stdscr.getch()
-                    return
-
-                # Header line
-                if search_text:
-                    header = f"  Browse sessions — filter: {search_text}█"
-                    header_attr = curses.A_BOLD
-                    if curses.has_colors():
-                        header_attr |= curses.color_pair(3)
-                else:
-                    header = (
-                        "  Browse sessions — ↑↓ navigate  Enter select"
-                        "  Type to filter  Esc quit"
-                    )
-                    header_attr = curses.A_BOLD
-                    if curses.has_colors():
-                        header_attr |= curses.color_pair(2)
-                try:
-                    stdscr.addnstr(0, 0, header, max_x - 1, header_attr)
-                except curses.error:
-                    pass
-
-                # Column header line
-                name_width = max(20, max_x - _FIXED_COLS)
-                col_header = (
-                    f"   {'Title / Preview':<{name_width}}  {'Stat':<5}  "
-                    f"{'Msgs':>5}  {'Active':<10}  {'Src':<5} {'ID'}"
-                )
-                try:
-                    dim_attr = (
-                        curses.color_pair(4) if curses.has_colors() else curses.A_DIM
-                    )
-                    stdscr.addnstr(1, 0, col_header, max_x - 1, dim_attr)
-                except curses.error:
-                    pass
-
-                # Compute visible area
-                visible_rows = max_y - 4  # header + col header + blank + footer
-                visible_rows = max(visible_rows, 1)
-
-                # Clamp cursor and scroll
-                if not filtered:
-                    try:
-                        msg = "  No sessions match the filter."
-                        stdscr.addnstr(3, 0, msg, max_x - 1, curses.A_DIM)
-                    except curses.error:
-                        pass
-                else:
-                    if cursor >= len(filtered):
-                        cursor = len(filtered) - 1
-                    cursor = max(cursor, 0)
-                    if cursor < scroll_offset:
-                        scroll_offset = cursor
-                    elif cursor >= scroll_offset + visible_rows:
-                        scroll_offset = cursor - visible_rows + 1
-
-                    for draw_i, i in enumerate(
-                        range(
-                            scroll_offset,
-                            min(len(filtered), scroll_offset + visible_rows),
-                        )
-                    ):
-                        y = draw_i + 3
-                        if y >= max_y - 1:
-                            break
-                        s = filtered[i]
-                        arrow = " → " if i == cursor else "   "
-                        row = arrow + _format_row(s, max_x - 3)
-                        attr = curses.A_NORMAL
-                        if i == cursor:
-                            attr = curses.A_BOLD
-                            if curses.has_colors():
-                                attr |= curses.color_pair(1)
-                        try:
-                            stdscr.addnstr(y, 0, row, max_x - 1, attr)
-                            if i != cursor:
-                                # Recolor the status tag column in place.
-                                status = s.get("_status")
-                                tag = _session_status_tag(status)
-                                tag_x = 3 + max(20, (max_x - 3) - _FIXED_COLS) + 2
-                                if tag_x + 5 < max_x - 1:
-                                    stdscr.addnstr(
-                                        y, tag_x, f"{tag:<5}", 5, _status_attr(status)
-                                    )
-                        except curses.error:
-                            pass
-
-                # Footer
-                footer_y = max_y - 1
-                footer_attr = (
-                    curses.color_pair(4) if curses.has_colors() else curses.A_DIM
-                )
-                if confirm_delete is not None:
-                    label = (
-                        (confirm_delete.get("title") or "").strip()
-                        or (confirm_delete.get("preview") or "").strip()
-                        or confirm_delete["id"]
-                    )
-                    if len(label) > 40:
-                        label = label[:37] + "..."
-                    footer = f"  Delete session '{label}'? [y/N]"
-                    footer_attr = curses.A_BOLD
-                    if curses.has_colors():
-                        footer_attr |= curses.color_pair(5)
-                elif flash:
-                    footer = f"  {flash}"
-                    flash = ""
-                else:
-                    if filtered:
-                        footer = f"  {cursor + 1}/{len(filtered)} sessions"
-                        if len(filtered) < len(sessions):
-                            footer += f" (filtered from {len(sessions)})"
-                    else:
-                        footer = f"  0/{len(sessions)} sessions"
-                    if session_db is not None and not search_text:
-                        footer += "   d delete"
-                try:
-                    stdscr.addnstr(footer_y, 0, footer, max_x - 1, footer_attr)
-                except curses.error:
-                    pass
-
-                stdscr.refresh()
-                key = stdscr.getch()
-
-                if confirm_delete is not None:
-                    # y/n confirmation mode — only an explicit 'y' deletes.
-                    target = confirm_delete
-                    confirm_delete = None
-                    if key in {ord("y"), ord("Y")}:
-                        if _delete_session(target["id"]):
-                            sessions[:] = [
-                                s for s in sessions if s["id"] != target["id"]
-                            ]
-                            filtered = (
-                                [s for s in sessions if _match(s, search_text)]
-                                if search_text
-                                else list(sessions)
-                            )
-                            flash = "Deleted."
-                            if not sessions:
-                                return
-                        else:
-                            flash = "Delete failed."
-                    continue
-
-                if key in {curses.KEY_UP,}:
-                    if filtered:
-                        cursor = (cursor - 1) % len(filtered)
-                elif key in {curses.KEY_DOWN,}:
-                    if filtered:
-                        cursor = (cursor + 1) % len(filtered)
-                elif key in {curses.KEY_ENTER, 10, 13}:
-                    if filtered:
-                        result_holder[0] = filtered[cursor]["id"]
-                    return
-                elif key == 27:  # Esc
-                    if search_text:
-                        # First Esc clears the search
-                        search_text = ""
-                        filtered = list(sessions)
-                        cursor = 0
-                        scroll_offset = 0
-                    else:
-                        # Second Esc exits
-                        return
-                elif key in {curses.KEY_BACKSPACE, 127, 8}:
-                    if search_text:
-                        search_text = search_text[:-1]
-                        if search_text:
-                            filtered = [s for s in sessions if _match(s, search_text)]
-                        else:
-                            filtered = list(sessions)
-                        cursor = 0
-                        scroll_offset = 0
-                elif key == ord("q") and not search_text:
-                    return
-                elif (
-                    key == ord("d")
-                    and not search_text
-                    and session_db is not None
-                    and filtered
-                ):
-                    # 'd' only acts as delete when the filter is empty —
-                    # while a search is active it types into the query below.
-                    confirm_delete = filtered[cursor]
-                elif 32 <= key <= 126:
-                    # Printable character → add to search filter
-                    search_text += chr(key)
-                    filtered = [s for s in sessions if _match(s, search_text)]
-                    cursor = 0
-                    scroll_offset = 0
-
-        curses.wrapper(_curses_browse)
-        return result_holder[0]
-
-    except Exception:
-        pass
-
-    # Fallback: numbered list (Windows without curses, etc.). Shows the same
-    # status/message-count columns but has no delete support.
-    print("\n  Browse sessions  (enter number to resume, q to cancel)\n")
-    for i, s in enumerate(sessions):
-        title = (s.get("title") or "").strip()
-        preview = (s.get("preview") or "").strip()
-        label = title or preview or s["id"]
-        if len(label) > 50:
-            label = label[:47] + "..."
-        last_active = _relative_time(s.get("last_active"))
-        src = s.get("source", "")[:6]
-        status = _session_status_tag(s.get("_status"))
-        msgs = s.get("message_count")
-        msgs_str = str(msgs) if isinstance(msgs, int) else "-"
-        print(
-            f"  {i + 1:>3}. {label:<50}  {status:<5}  {msgs_str:>5}  "
-            f"{last_active:<10}  {src}"
-        )
-
-    while True:
-        try:
-            val = input(f"\n  Select [1-{len(sessions)}]: ").strip()
-            if not val or val.lower() in {"q", "quit", "exit"}:
-                return None
-            idx = int(val) - 1
-            if 0 <= idx < len(sessions):
-                return sessions[idx]["id"]
-            print(f"  Invalid selection. Enter 1-{len(sessions)} or q to cancel.")
-        except ValueError:
-            print("  Invalid input. Enter a number or q to cancel.")
-        except (KeyboardInterrupt, EOFError):
-            print()
-            return None
 
 
 def _resolve_workspace_key() -> Optional[str]:
@@ -3858,6 +3442,39 @@ def _is_profile_api_key_provider(provider_id: str) -> bool:
         return False
 
 
+# Provider id -> flow(config, current_model, args). Lambdas resolve the
+# _model_flow_* names at call time so test monkeypatches on hermes_cli.main
+# keep intercepting. Custom-slug providers (always ``custom:*``),
+# remove-custom and the generic API-key set are the fallthrough branches in
+# select_provider_and_model.
+_PROVIDER_MODEL_FLOWS = {
+    "openrouter": lambda c, m, a: _model_flow_openrouter(c, m),
+    "moa": lambda c, m, a: _model_flow_moa(c, m),
+    "ai-gateway": lambda c, m, a: _model_flow_ai_gateway(c, m),
+    "nous": lambda c, m, a: _model_flow_nous(c, m, args=a),
+    "openai-codex": lambda c, m, a: _model_flow_openai_codex(c, m),
+    "xai-oauth": lambda c, m, a: _model_flow_xai_oauth(c, m, args=a),
+    "qwen-oauth": lambda c, m, a: _model_flow_qwen_oauth(c, m),
+    "minimax-oauth": lambda c, m, a: _model_flow_minimax_oauth(c, m, args=a),
+    "copilot-acp": lambda c, m, a: _model_flow_copilot_acp(c, m),
+    "copilot": lambda c, m, a: _model_flow_copilot(c, m),
+    "custom": lambda c, m, a: _model_flow_custom(c),
+    "anthropic": lambda c, m, a: _model_flow_anthropic(c, m),
+    "kimi-coding": lambda c, m, a: _model_flow_kimi(c, m),
+    "stepfun": lambda c, m, a: _model_flow_stepfun(c, m),
+    "bedrock": lambda c, m, a: _model_flow_bedrock(c, m),
+    "vertex": lambda c, m, a: _model_flow_vertex(c, m),
+    "azure-foundry": lambda c, m, a: _model_flow_azure_foundry(c, m),
+}
+
+_GENERIC_API_KEY_PROVIDERS = frozenset({
+    "openai-api", "gemini", "deepseek", "xai", "zai", "kimi-coding-cn",
+    "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go",
+    "opencode-free", "alibaba", "huggingface", "xiaomi", "arcee", "gmi",
+    "nvidia", "ollama-cloud", "tencent-tokenhub", "tencent-tokenplan", "lmstudio",
+})
+
+
 def select_provider_and_model(args=None):
     """Core provider selection + model picking logic.
 
@@ -4226,29 +3843,12 @@ def select_provider_and_model(args=None):
         _aux_config_menu()
         return
 
-    # Step 2: Provider-specific setup + model selection
-    if selected_provider == "openrouter":
-        _model_flow_openrouter(config, current_model)
-    elif selected_provider == "moa":
-        _model_flow_moa(config, current_model)
-    elif selected_provider == "ai-gateway":
-        _model_flow_ai_gateway(config, current_model)
-    elif selected_provider == "nous":
-        _model_flow_nous(config, current_model, args=args)
-    elif selected_provider == "openai-codex":
-        _model_flow_openai_codex(config, current_model)
-    elif selected_provider == "xai-oauth":
-        _model_flow_xai_oauth(config, current_model, args=args)
-    elif selected_provider == "qwen-oauth":
-        _model_flow_qwen_oauth(config, current_model)
-    elif selected_provider == "minimax-oauth":
-        _model_flow_minimax_oauth(config, current_model, args=args)
-    elif selected_provider == "copilot-acp":
-        _model_flow_copilot_acp(config, current_model)
-    elif selected_provider == "copilot":
-        _model_flow_copilot(config, current_model)
-    elif selected_provider == "custom":
-        _model_flow_custom(config)
+    # Step 2: Provider-specific setup + model selection.
+    # Flows are looked up by name at call time (globals()) so test
+    # monkeypatches on hermes_cli.main._model_flow_* keep intercepting.
+    flow = _PROVIDER_MODEL_FLOWS.get(selected_provider)
+    if flow is not None:
+        flow(config, current_model, args)
     elif (
         selected_provider.startswith("custom:")
         or selected_provider in _custom_provider_map
@@ -4263,42 +3863,10 @@ def select_provider_and_model(args=None):
         _model_flow_named_custom(config, provider_info)
     elif selected_provider == "remove-custom":
         _remove_custom_provider(config)
-    elif selected_provider == "anthropic":
-        _model_flow_anthropic(config, current_model)
-    elif selected_provider == "kimi-coding":
-        _model_flow_kimi(config, current_model)
-    elif selected_provider == "stepfun":
-        _model_flow_stepfun(config, current_model)
-    elif selected_provider == "bedrock":
-        _model_flow_bedrock(config, current_model)
-    elif selected_provider == "vertex":
-        _model_flow_vertex(config, current_model)
-    elif selected_provider == "azure-foundry":
-        _model_flow_azure_foundry(config, current_model)
-    elif selected_provider in {
-        "openai-api",
-        "gemini",
-        "deepseek",
-        "xai",
-        "zai",
-        "kimi-coding-cn",
-        "minimax",
-        "minimax-cn",
-        "kilocode",
-        "opencode-zen",
-        "opencode-go",
-        "opencode-free",
-        "alibaba",
-        "huggingface",
-        "xiaomi",
-        "arcee",
-        "gmi",
-        "nvidia",
-        "ollama-cloud",
-        "tencent-tokenhub",
-        "tencent-tokenplan",
-        "lmstudio",
-    } or _is_profile_api_key_provider(selected_provider):
+    elif (
+        selected_provider in _GENERIC_API_KEY_PROVIDERS
+        or _is_profile_api_key_provider(selected_provider)
+    ):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
     # ── Post-switch cleanup: clear stale OPENAI_BASE_URL ──────────────
@@ -5131,6 +4699,11 @@ _LAZY_MODEL_EXPORTS = ("_PROVIDER_MODELS",)
 _LAZY_COMMAND_EXPORTS = {
     "hermes_cli.sessions_cmd": (
         "cmd_sessions",
+        "_annotate_session_statuses",
+        "_relative_time",
+        "_session_browse_picker",
+        "_session_status_tag",
+        "_size_delta_label",
     ),
     "hermes_cli.dashboard_procs": (
         "_detect_concurrent_hermes_instances",
@@ -5141,7 +4714,6 @@ _LAZY_COMMAND_EXPORTS = {
     "hermes_cli.update_cmd": (
         "_abort_dependency_sync_if_self_locked",
         "_add_upstream_remote",
-        "_apply_pending_fleet_restart_catchup",
         "_atomic_replace_dir",
         "_capture_active_lazy_features",
         "_capture_active_tool_dependencies",
@@ -5164,7 +4736,6 @@ _LAZY_COMMAND_EXPORTS = {
         "_discard_stashed_changes",
         "_park_stashed_changes",
         "_ensure_acp_launcher",
-        "_ensure_fhs_path_guard",
         "_ensure_uv_for_termux",
         "_finish_dashboard_update_cleanup",
         "_fleet_probe_expected_runtimes",
@@ -5175,7 +4746,6 @@ _LAZY_COMMAND_EXPORTS = {
         "_format_time_ago",
         "_gateway_service_matches_profile",
         "_gateway_recovery_partition",
-        "_gateway_restart_recovery_profiles",
         "_handoff_reapable_backend_pids",
         "_ledger_reapable_backend_pids",
         "_purge_stale_hermes_modules",
@@ -5185,7 +4755,6 @@ _LAZY_COMMAND_EXPORTS = {
         "_has_upstream_remote",
         "_install_psutil_android_compat",
         "_invalidate_update_cache",
-        "_is_android_python",
         "_is_fork",
         "_leftover_pausable_gateway_pids",
         "_ledger_manual_serve_holders",
@@ -5193,9 +4762,7 @@ _LAZY_COMMAND_EXPORTS = {
         "_serve_relaunch_commands",
         "_log_only_write",
         "_mark_skip_upstream_prompt",
-        "_npm_bin_exists",
         "_npm_lockfile_changed",
-        "_npm_manifest_paths",
         "_npm_manifests_digest",
         "_ORPHAN_RESCUE_REF_MAX_AGE_DAYS",
         "_ORPHAN_RESCUE_REFS_TO_KEEP",
@@ -5205,10 +4772,8 @@ _LAZY_COMMAND_EXPORTS = {
         "_print_curator_first_run_notice",
         "_prune_orphan_rescue_refs",
         "_print_curator_recent_run_notice",
-        "_print_fts_optimize_available_notice",
         "_print_parked_branch_kept_notice",
         "_print_parked_branch_skip_warning",
-        "_print_stash_cleanup_guidance",
         "_print_update_completion",
         "_record_npm_lockfile_hash",
         "_refresh_active_lazy_features",
@@ -5217,8 +4782,6 @@ _LAZY_COMMAND_EXPORTS = {
         "_refresh_windows_gateway_launchers",
         "_recover_gateway_restart_after_abort",
         "_reload_updated_runtime_modules",
-        "_resolve_pre_update_backup_mode",
-        "_resolve_stash_selector",
         "_restart_phase_failure_is_incomplete",
         "_restore_active_tool_dependencies",
         "_restore_stashed_changes",
@@ -5228,11 +4791,9 @@ _LAZY_COMMAND_EXPORTS = {
         "_run_pre_update_backup",
         "_service_unit_supports_graceful_sigusr1_restart",
         "_should_skip_upstream_prompt",
-        "_stash_apply_failed_only_on_existing_untracked",
         "_stash_local_changes_if_needed",
         "_stop_process_trees",
         "_surviving_gateway_pids_after_failed_restart",
-        "_sync_fork_with_upstream",
         "_sync_with_upstream_if_needed",
         "_update_node_dependencies",
         "_update_via_zip",
@@ -5249,17 +4810,11 @@ _LAZY_COMMAND_EXPORTS = {
         "_web_build_toolchain_ready",
         "_web_toolchain_roots",
         "_write_fleet_restart_pending_marker",
-        "_write_lazy_refresh_incomplete_marker",
         "_write_marker_file",
         "_write_update_incomplete_marker",
-        "_write_update_planned_stop_marker",
         "_UPDATE_RUNTIME_RELOAD_MODULES",
         "_UPDATE_CRITICAL_FILES",
         "_UPDATE_CRITICAL_MODULES",
-        "OFFICIAL_REPO_URLS",
-        "OFFICIAL_REPO_URL",
-        "SKIP_UPSTREAM_PROMPT_FILE",
-        "_PRE_UPDATE_SNAPSHOT_KEEP",
         "_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE",
     ),
 }
@@ -5316,21 +4871,6 @@ def __getattr__(name):
         globals()[name] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def _current_reasoning_effort(config) -> str:
-    agent_cfg = config.get("agent")
-    if isinstance(agent_cfg, dict):
-        return str(agent_cfg.get("reasoning_effort") or "").strip().lower()
-    return ""
-
-
-def _set_reasoning_effort(config, effort: str) -> None:
-    agent_cfg = config.get("agent")
-    if not isinstance(agent_cfg, dict):
-        agent_cfg = {}
-        config["agent"] = agent_cfg
-    agent_cfg["reasoning_effort"] = effort
 
 
 def _prompt_reasoning_effort_selection(efforts, current_effort=""):
@@ -8518,6 +8058,166 @@ def _register_linux_desktop_entry() -> None:
         print(f"⚠ Could not install the desktop launcher entry: {exc}")
 
 
+def _build_desktop_app(desktop_dir: Path, *, source_mode: bool, npm: str, env: dict) -> Optional[Path]:
+    """npm-install + build the desktop app; stage-and-swap the packaged tree.
+
+    Returns the freshly installed packaged executable (non-source mode) or
+    None (source mode builds ``dist/`` in place). Exits the process on any
+    unrecoverable build failure, leaving the previous packaged app untouched.
+    """
+    from hermes_constants import with_hermes_node_path
+
+    print("→ Installing desktop workspace dependencies...")
+    # Put the Hermes-managed Node on PATH so npm's child scripts (which
+    # shell out to bare `node`, e.g. electron-winstaller's
+    # select-7z-arch.js) resolve it even when the parent PATH is
+    # stripped — the desktop updater chain (Desktop → hermes-setup →
+    # hermes update) loses shell PATH customizations. Wrapping the
+    # NixOS build env keeps its PYTHON hint while restoring managed Node
+    # ahead of a bare PATH (same idiom as the `hermes update` path).
+    nixos_env = with_hermes_node_path(_nixos_build_env())
+    install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False, env=nixos_env)
+    if install_result.returncode != 0:
+        if not _electron_pkg_staged_missing_dist(PROJECT_ROOT):
+            print("✗ Desktop dependency install failed")
+            print(f"  Run manually:  cd {PROJECT_ROOT} && npm ci")
+            sys.exit(install_result.returncode or 1)
+        repaired = _try_redownload_electron_dist(PROJECT_ROOT, env)
+        if repaired:
+            print("  ⚠ Dependency install failed with a missing Electron dist; "
+                  "repopulated it and continuing.")
+        else:
+            print("  ⚠ Dependency install failed with a missing Electron dist; "
+                  "continuing to the build so electron-builder can attempt "
+                  "the Electron fetch itself.")
+
+    build_label = "source build" if source_mode else "packaged app"
+    print(f"→ Building desktop {build_label}...")
+    build_script = "build" if source_mode else "pack"
+    if _force_adhoc_macos_signing(env, source_mode=source_mode):
+        print("  → No Developer ID configured; ad-hoc signing this local rebuild "
+              "(CSC_IDENTITY_AUTO_DISCOVERY=false)")
+    npm_build_env = _npm_lifecycle_env(env)
+    # Stage-and-swap (#86443): electron-builder packs IN PLACE and
+    # before-pack.mjs wipes release/<unpacked> first, so a pack that
+    # fails afterwards used to leave the user with NO app. Build into
+    # a fresh staging output dir instead; the live release/ tree is
+    # only replaced — by rename — after the staged result verifies.
+    staging_dir: Optional[Path] = None
+    build_cmd = [npm, "run", build_script]
+    if not source_mode:
+        staging_dir = _desktop_staging_dir(desktop_dir)
+        build_cmd += ["--", f"-c.directories.output={staging_dir}"]
+        # A running desktop instance launched from release/win-unpacked
+        # holds Hermes.exe locked on Windows, so the pack can't replace
+        # it ("Access is denied" / ERR_ELECTRON_BUILDER_CANNOT_EXECUTE).
+        # Stop it first so the rebuild — including the installer's
+        # headless --update rebuild — succeeds instead of failing cryptically.
+        stopped = _stop_desktop_processes_locking_build(desktop_dir)
+        if stopped:
+            print(f"  ⚠ Stopped running desktop app to free the build output (pid {', '.join(map(str, stopped))})")
+
+    def _staged_exe() -> Optional[Path]:
+        return _desktop_packaged_executable_in(staging_dir) if staging_dir else None
+
+    build_result = subprocess.run(
+        build_cmd, cwd=desktop_dir, env=npm_build_env, check=False
+    )
+    if (
+        build_result.returncode != 0
+        and not source_mode
+        and _staged_exe() is None
+    ):
+        # Corrupt cached Electron zip → partial unpack → ENOENT on rename.
+        # stdlib zipfile won't catch the common concat-junk case, so purge
+        # and retry once; @electron/get SHASUM is the real gate.
+        #
+        # Gate on a MISSING packaged executable: that is the signature of
+        # the corrupt-download class this recovery exists for. A late
+        # failure such as macOS code signing leaves the executable in
+        # place — redownloading Electron can't repair it, so the purge +
+        # retry would only add another slow, identical failure (#40187).
+        purged: list[Path] = []
+        restored = False
+        if not _electron_dist_ok(PROJECT_ROOT):
+            purged = _purge_electron_build_cache(desktop_dir, release_dir=staging_dir)
+            restored = _redownload_electron_dist(PROJECT_ROOT, env)
+        if restored:
+            print("  ⚠ Desktop build failed; refreshed the Electron download and retrying once...")
+            for p in purged:
+                print(f"    - {p}")
+            # The purge can't remove a win-unpacked tree whose Hermes.exe
+            # is still locked by a running instance; stop it before retry.
+            _stop_desktop_processes_locking_build(desktop_dir)
+            build_result = subprocess.run(
+                build_cmd, cwd=desktop_dir, env=npm_build_env, check=False
+            )
+    if (
+        build_result.returncode != 0
+        and not source_mode
+        and not env.get("ELECTRON_MIRROR")
+        and _staged_exe() is None
+    ):
+        print("  ⚠ Desktop build still failing; the Electron download from "
+              "GitHub looks blocked. Re-downloading via a public mirror "
+              "(npmmirror.com)... (set ELECTRON_MIRROR to use another mirror)")
+        mirror = _ELECTRON_FALLBACK_MIRROR
+        mirror_env = dict(npm_build_env)
+        mirror_env["ELECTRON_MIRROR"] = mirror
+        if not _electron_dist_ok(PROJECT_ROOT):
+            _redownload_electron_dist(PROJECT_ROOT, env, mirror=mirror)
+        _stop_desktop_processes_locking_build(desktop_dir)
+        build_result = subprocess.run(build_cmd, cwd=desktop_dir, env=mirror_env, check=False)
+    if build_result.returncode != 0:
+        print("✗ Desktop GUI build failed")
+        if staging_dir is not None:
+            _discard_desktop_staging(staging_dir)
+            if _desktop_packaged_executable(desktop_dir) is not None:
+                print("  ↩ The previous desktop app was left untouched and still works.")
+        print(f"  Run manually:  cd apps/desktop && npm run {build_script}")
+        if sys.platform == "win32":
+            print("  If this says \"Access is denied\" on Hermes.exe, close any")
+            print("  running Hermes desktop window and retry.")
+        print("  If the log shows Electron download retries, rebuild via a mirror:")
+        print("    ELECTRON_MIRROR=<mirror-base-url> hermes desktop --force-build")
+        sys.exit(build_result.returncode or 1)
+    if not source_mode:
+        assert staging_dir is not None
+        staged_executable = _staged_exe()
+        # Locally-built apps are ad-hoc signed; make them relaunchable after
+        # an in-place self-update (otherwise macOS reports "Hermes is
+        # damaged"). No-op on non-macOS and on real-identity builds.
+        # Signs the STAGED bundle so the live app is never half-signed.
+        _desktop_macos_relaunchable_fixup(desktop_dir, release_dir=staging_dir)
+
+        # Windows integrity gate (#69179): never declare the rebuild a
+        # success on a Hermes.exe Windows cannot load (truncated PE from
+        # a corrupt cached Electron zip, wrong-arch tree, interrupted
+        # rcedit rewrite). Verified on the STAGED exe: a failure here
+        # simply discards the staging dir — the live app was never
+        # touched — and fails loudly so the updater's retry-once
+        # rebuilds from a fresh Electron download.
+        verified_executable, rolled_back = _ensure_desktop_exe_launchable(
+            desktop_dir, staged_executable
+        )
+        if staged_executable is None or rolled_back or verified_executable is None:
+            _discard_desktop_staging(staging_dir)
+            if staged_executable is None:
+                print(f"✗ Desktop build produced no launchable app in {staging_dir}")
+            print("  ↩ The previous desktop app was left untouched and still works.")
+            sys.exit(1)
+        # Verified: swap the staged tree over the live one (rename).
+        packaged_executable = _swap_staged_desktop_app(desktop_dir, staging_dir)
+        if packaged_executable is None:
+            print(f"✗ Could not install the rebuilt desktop app into {desktop_dir / 'release'}")
+            print("  ↩ The previous desktop app was left untouched and still works.")
+            sys.exit(1)
+
+    # Build succeeded — write the stamp so next run can skip
+    _write_desktop_build_stamp(PROJECT_ROOT, source_mode=source_mode)
+    return packaged_executable if not source_mode else None
+
+
 def cmd_gui(args: argparse.Namespace):
     """Build and launch the native Electron desktop GUI."""
     desktop_dir = PROJECT_ROOT / "apps" / "desktop"
@@ -8629,154 +8329,9 @@ def cmd_gui(args: argparse.Namespace):
             build_label = "source build" if source_mode else "packaged app"
             print(f"✓ Desktop {build_label} is up to date (content stamp matches)")
         else:
-            print("→ Installing desktop workspace dependencies...")
-            # Put the Hermes-managed Node on PATH so npm's child scripts (which
-            # shell out to bare `node`, e.g. electron-winstaller's
-            # select-7z-arch.js) resolve it even when the parent PATH is
-            # stripped — the desktop updater chain (Desktop → hermes-setup →
-            # hermes update) loses shell PATH customizations. Wrapping the
-            # NixOS build env keeps its PYTHON hint while restoring managed Node
-            # ahead of a bare PATH (same idiom as the `hermes update` path).
-            nixos_env = with_hermes_node_path(_nixos_build_env())
-            install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False, env=nixos_env)
-            if install_result.returncode != 0:
-                if not _electron_pkg_staged_missing_dist(PROJECT_ROOT):
-                    print("✗ Desktop dependency install failed")
-                    print(f"  Run manually:  cd {PROJECT_ROOT} && npm ci")
-                    sys.exit(install_result.returncode or 1)
-                repaired = _try_redownload_electron_dist(PROJECT_ROOT, env)
-                if repaired:
-                    print("  ⚠ Dependency install failed with a missing Electron dist; "
-                          "repopulated it and continuing.")
-                else:
-                    print("  ⚠ Dependency install failed with a missing Electron dist; "
-                          "continuing to the build so electron-builder can attempt "
-                          "the Electron fetch itself.")
-
-            build_label = "source build" if source_mode else "packaged app"
-            print(f"→ Building desktop {build_label}...")
-            build_script = "build" if source_mode else "pack"
-            if _force_adhoc_macos_signing(env, source_mode=source_mode):
-                print("  → No Developer ID configured; ad-hoc signing this local rebuild "
-                      "(CSC_IDENTITY_AUTO_DISCOVERY=false)")
-            npm_build_env = _npm_lifecycle_env(env)
-            # Stage-and-swap (#86443): electron-builder packs IN PLACE and
-            # before-pack.mjs wipes release/<unpacked> first, so a pack that
-            # fails afterwards used to leave the user with NO app. Build into
-            # a fresh staging output dir instead; the live release/ tree is
-            # only replaced — by rename — after the staged result verifies.
-            staging_dir: Optional[Path] = None
-            build_cmd = [npm, "run", build_script]
+            built = _build_desktop_app(desktop_dir, source_mode=source_mode, npm=npm, env=env)
             if not source_mode:
-                staging_dir = _desktop_staging_dir(desktop_dir)
-                build_cmd += ["--", f"-c.directories.output={staging_dir}"]
-                # A running desktop instance launched from release/win-unpacked
-                # holds Hermes.exe locked on Windows, so the pack can't replace
-                # it ("Access is denied" / ERR_ELECTRON_BUILDER_CANNOT_EXECUTE).
-                # Stop it first so the rebuild — including the installer's
-                # headless --update rebuild — succeeds instead of failing cryptically.
-                stopped = _stop_desktop_processes_locking_build(desktop_dir)
-                if stopped:
-                    print(f"  ⚠ Stopped running desktop app to free the build output (pid {', '.join(map(str, stopped))})")
-
-            def _staged_exe() -> Optional[Path]:
-                return _desktop_packaged_executable_in(staging_dir) if staging_dir else None
-
-            build_result = subprocess.run(
-                build_cmd, cwd=desktop_dir, env=npm_build_env, check=False
-            )
-            if (
-                build_result.returncode != 0
-                and not source_mode
-                and _staged_exe() is None
-            ):
-                # Corrupt cached Electron zip → partial unpack → ENOENT on rename.
-                # stdlib zipfile won't catch the common concat-junk case, so purge
-                # and retry once; @electron/get SHASUM is the real gate.
-                #
-                # Gate on a MISSING packaged executable: that is the signature of
-                # the corrupt-download class this recovery exists for. A late
-                # failure such as macOS code signing leaves the executable in
-                # place — redownloading Electron can't repair it, so the purge +
-                # retry would only add another slow, identical failure (#40187).
-                purged: list[Path] = []
-                restored = False
-                if not _electron_dist_ok(PROJECT_ROOT):
-                    purged = _purge_electron_build_cache(desktop_dir, release_dir=staging_dir)
-                    restored = _redownload_electron_dist(PROJECT_ROOT, env)
-                if restored:
-                    print("  ⚠ Desktop build failed; refreshed the Electron download and retrying once...")
-                    for p in purged:
-                        print(f"    - {p}")
-                    # The purge can't remove a win-unpacked tree whose Hermes.exe
-                    # is still locked by a running instance; stop it before retry.
-                    _stop_desktop_processes_locking_build(desktop_dir)
-                    build_result = subprocess.run(
-                        build_cmd, cwd=desktop_dir, env=npm_build_env, check=False
-                    )
-            if (
-                build_result.returncode != 0
-                and not source_mode
-                and not env.get("ELECTRON_MIRROR")
-                and _staged_exe() is None
-            ):
-                print("  ⚠ Desktop build still failing; the Electron download from "
-                      "GitHub looks blocked. Re-downloading via a public mirror "
-                      "(npmmirror.com)... (set ELECTRON_MIRROR to use another mirror)")
-                mirror = _ELECTRON_FALLBACK_MIRROR
-                mirror_env = dict(npm_build_env)
-                mirror_env["ELECTRON_MIRROR"] = mirror
-                if not _electron_dist_ok(PROJECT_ROOT):
-                    _redownload_electron_dist(PROJECT_ROOT, env, mirror=mirror)
-                _stop_desktop_processes_locking_build(desktop_dir)
-                build_result = subprocess.run(build_cmd, cwd=desktop_dir, env=mirror_env, check=False)
-            if build_result.returncode != 0:
-                print("✗ Desktop GUI build failed")
-                if staging_dir is not None:
-                    _discard_desktop_staging(staging_dir)
-                    if _desktop_packaged_executable(desktop_dir) is not None:
-                        print("  ↩ The previous desktop app was left untouched and still works.")
-                print(f"  Run manually:  cd apps/desktop && npm run {build_script}")
-                if sys.platform == "win32":
-                    print("  If this says \"Access is denied\" on Hermes.exe, close any")
-                    print("  running Hermes desktop window and retry.")
-                print("  If the log shows Electron download retries, rebuild via a mirror:")
-                print("    ELECTRON_MIRROR=<mirror-base-url> hermes desktop --force-build")
-                sys.exit(build_result.returncode or 1)
-            if not source_mode:
-                assert staging_dir is not None
-                staged_executable = _staged_exe()
-                # Locally-built apps are ad-hoc signed; make them relaunchable after
-                # an in-place self-update (otherwise macOS reports "Hermes is
-                # damaged"). No-op on non-macOS and on real-identity builds.
-                # Signs the STAGED bundle so the live app is never half-signed.
-                _desktop_macos_relaunchable_fixup(desktop_dir, release_dir=staging_dir)
-
-                # Windows integrity gate (#69179): never declare the rebuild a
-                # success on a Hermes.exe Windows cannot load (truncated PE from
-                # a corrupt cached Electron zip, wrong-arch tree, interrupted
-                # rcedit rewrite). Verified on the STAGED exe: a failure here
-                # simply discards the staging dir — the live app was never
-                # touched — and fails loudly so the updater's retry-once
-                # rebuilds from a fresh Electron download.
-                verified_executable, rolled_back = _ensure_desktop_exe_launchable(
-                    desktop_dir, staged_executable
-                )
-                if staged_executable is None or rolled_back or verified_executable is None:
-                    _discard_desktop_staging(staging_dir)
-                    if staged_executable is None:
-                        print(f"✗ Desktop build produced no launchable app in {staging_dir}")
-                    print("  ↩ The previous desktop app was left untouched and still works.")
-                    sys.exit(1)
-                # Verified: swap the staged tree over the live one (rename).
-                packaged_executable = _swap_staged_desktop_app(desktop_dir, staging_dir)
-                if packaged_executable is None:
-                    print(f"✗ Could not install the rebuilt desktop app into {desktop_dir / 'release'}")
-                    print("  ↩ The previous desktop app was left untouched and still works.")
-                    sys.exit(1)
-
-            # Build succeeded — write the stamp so next run can skip
-            _write_desktop_build_stamp(PROJECT_ROOT, source_mode=source_mode)
+                packaged_executable = built
 
     # Linux: register the app in the desktop launcher, so Hermes shows up
     # in the application menu with its icon. Best-effort and idempotent.
@@ -11010,19 +10565,6 @@ def _resolve_update_branch(args) -> str:
     return (getattr(args, "branch", None) or "main").strip() or "main"
 
 
-def _size_delta_label(saved_mb: float) -> str:
-    """Human label for a before/after database size delta, in MB.
-
-    A negative delta means the file GREW — concurrent session writes during a
-    long optimize can outweigh what the rebuild freed. Printing
-    "reclaimed -163.0 MB" for that reads as data loss, so say "grew by"
-    instead.
-    """
-    if saved_mb >= 0:
-        return f"reclaimed {saved_mb:.1f} MB"
-    return f"grew by {-saved_mb:.1f} MB"
-
-
 def cmd_update(args):
     """Update Hermes Agent to the latest version.
 
@@ -11252,679 +10794,9 @@ def _coalesce_session_name_args(argv: list) -> list:
     return result
 
 
-def cmd_profile(args):
-    """Profile management — create, delete, list, switch, alias."""
-    from hermes_cli.profiles import (
-        list_profiles,
-        create_profile,
-        delete_profile,
-        seed_profile_skills,
-        set_active_profile,
-        get_active_profile_name,
-        check_alias_collision,
-        create_wrapper_script,
-        remove_wrapper_script,
-        _is_wrapper_dir_in_path,
-        _get_wrapper_dir,
-    )
-    from hermes_constants import display_hermes_home
-
-    action = getattr(args, "profile_action", None)
-
-    if action is None:
-        # Bare `hermes profile` — show current profile status
-        from hermes_cli.profiles import format_profile_label
-
-        profile_name = get_active_profile_name()
-        dhh = display_hermes_home()
-
-        profiles = list_profiles()
-        current = next(
-            (
-                p
-                for p in profiles
-                if p.name == profile_name
-                or (profile_name == "default" and p.is_default)
-            ),
-            None,
-        )
-        label = format_profile_label(
-            profile_name, current.display_name if current else ""
-        )
-        print(f"\nActive profile: {label}")
-        print(f"Path:           {dhh}")
-
-        if current is not None:
-            p = current
-            if p.model:
-                print(
-                    f"Model:          {p.model}"
-                    + (f" ({p.provider})" if p.provider else "")
-                )
-            print(
-                f"Gateway:        {'running' if p.gateway_running else 'stopped'}"
-            )
-            print(f"Skills:         {p.skill_count} installed")
-            if p.alias_path:
-                alias_display = p.alias_name or p.name
-                print(f"Alias:          {alias_display} → hermes -p {p.name}")
-        print()
-        return
-
-    if action == "list":
-        from hermes_cli.profiles import format_profile_label
-
-        profiles = list_profiles()
-        active = get_active_profile_name()
-
-        if not profiles:
-            print("No profiles found.")
-            return
-
-        # Header
-        print(
-            f"\n {'Profile':<16} {'Model':<28} {'Gateway':<12} "
-            f"{'Alias':<12} {'Distribution'}"
-        )
-        print(
-            f" {'─' * 15}    {'─' * 27}    {'─' * 11}    "
-            f"{'─' * 11}    {'─' * 20}"
-        )
-
-        for p in profiles:
-            marker = (
-                " ◆"
-                if (p.name == active or (active == "default" and p.is_default))
-                else "  "
-            )
-            name = format_profile_label(p.name, p.display_name)
-            model = (p.model or "—")[:26]
-            gw = "running" if p.gateway_running else "stopped"
-            alias = (p.alias_name or p.name) if p.alias_path else "—"
-            if p.is_default:
-                alias = "—"
-            if p.distribution_name:
-                dist = f"{p.distribution_name}@{p.distribution_version or '?'}"
-                dist = dist[:30]
-            else:
-                dist = "—"
-            print(f"{marker}{name:<15} {model:<28} {gw:<12} {alias:<12} {dist}")
-        print()
-
-    elif action == "use":
-        name = args.profile_name
-        try:
-            set_active_profile(name)
-            if name == "default":
-                print("Switched to: default (~/.hermes)")
-            else:
-                print(f"Switched to: {name}")
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-
-    elif action == "create":
-        name = args.profile_name
-        clone = getattr(args, "clone", False)
-        clone_all = getattr(args, "clone_all", False)
-        no_alias = getattr(args, "no_alias", False)
-        no_skills = getattr(args, "no_skills", False)
-
-        try:
-            clone_from = getattr(args, "clone_from", None)
-            clone_config = clone or clone_from is not None
-
-            profile_dir = create_profile(
-                name=name,
-                clone_from=clone_from,
-                clone_all=clone_all,
-                clone_config=clone_config,
-                no_alias=no_alias,
-                no_skills=no_skills,
-                description=getattr(args, "description", None),
-            )
-            print(f"\nProfile '{name}' created at {profile_dir}")
-
-            if clone_config or clone_all:
-                source_label = (
-                    getattr(args, "clone_from", None) or get_active_profile_name()
-                )
-                if clone_all:
-                    print(
-                        f"Full copy from {source_label} "
-                        "(excluding session history, backups, and snapshots)."
-                    )
-                else:
-                    print(
-                        f"Cloned config, .env, SOUL.md, and skills from {source_label}."
-                    )
-
-            # Auto-clone Honcho config for the new profile (only with clone operations)
-            if clone_config or clone_all:
-                try:
-                    from plugins.memory.honcho.cli import clone_honcho_for_profile
-
-                    if clone_honcho_for_profile(name):
-                        print(f"Honcho config cloned (peer: {name})")
-                except Exception:
-                    pass  # Honcho plugin not installed or not configured
-
-            # Seed bundled skills for fresh profiles only. Clone operations
-            # already copied the source profile's skills, including any
-            # user-installed or intentionally removed skills.
-            if not (clone_config or clone_all):
-                result = seed_profile_skills(profile_dir)
-                if result and result.get("skipped_opt_out"):
-                    print(
-                        "No bundled skills seeded (--no-skills). "
-                        "Delete .no-bundled-skills in the profile to opt back in."
-                    )
-                elif result:
-                    copied = len(result.get("copied", []))
-                    print(f"{copied} bundled skills synced.")
-                else:
-                    print(
-                        "⚠ Skills could not be seeded. Run `{} update` to retry.".format(
-                            name
-                        )
-                    )
-
-            # Create wrapper alias
-            if not no_alias:
-                collision = check_alias_collision(name)
-                if collision:
-                    print(f"\n⚠ Cannot create alias '{name}' — {collision}")
-                    print(
-                        f"  Choose a custom alias:  hermes profile alias {name} --name <custom>"
-                    )
-                    print(f"  Or access via flag:     hermes -p {name} chat")
-                else:
-                    wrapper_path = create_wrapper_script(name)
-                    if wrapper_path:
-                        print(f"Wrapper created: {wrapper_path}")
-                        if not _is_wrapper_dir_in_path():
-                            print(f"\n⚠ {_get_wrapper_dir()} is not in your PATH.")
-                            print(
-                                "  Add to your shell config (~/.bashrc or ~/.zshrc):"
-                            )
-                            print('    export PATH="$HOME/.local/bin:$PATH"')
-
-            # Profile dir for display
-            try:
-                profile_dir_display = "~/" + profile_dir.relative_to(Path.home()).as_posix()
-            except ValueError:
-                profile_dir_display = str(profile_dir)
-
-            # Next steps
-            print("\nNext steps:")
-            print(f"  {name} setup              Configure API keys and model")
-            print(f"  {name} chat               Start chatting")
-            print(f"  {name} gateway start      Start the messaging gateway")
-            if clone or clone_all:
-                print(f"\n  Edit {profile_dir_display}/.env for different API keys")
-                print(f"  Edit {profile_dir_display}/SOUL.md for different personality")
-            else:
-                print(
-                    f"\n  ⚠ This profile has no API keys yet. Run '{name} setup' first,"
-                )
-                print("    or it will inherit keys from your shell environment.")
-                print(f"  Edit {profile_dir_display}/SOUL.md to customize personality")
-            print()
-
-        except (ValueError, FileExistsError, FileNotFoundError) as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-
-    elif action == "delete":
-        name = args.profile_name
-        yes = getattr(args, "yes", False)
-        try:
-            delete_profile(name, yes=yes)
-        except (ValueError, FileNotFoundError) as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-
-    elif action == "describe":
-        # Read or write a profile's description. The description is
-        # consumed by the kanban decomposer to route tasks based on
-        # role instead of name alone.
-        from hermes_cli import profiles as _profiles_mod
-
-        all_flag = bool(getattr(args, "all_missing", False))
-        auto_flag = bool(getattr(args, "auto", False))
-        overwrite_flag = bool(getattr(args, "overwrite", False))
-        text_value = getattr(args, "text", None)
-        name = getattr(args, "profile_name", None)
-
-        if all_flag and not auto_flag:
-            print("profile describe: --all requires --auto", file=sys.stderr)
-            sys.exit(2)
-        if all_flag and (text_value or name):
-            print(
-                "profile describe: --all is mutually exclusive with a profile name / --text",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        if not all_flag and not name:
-            print("profile describe: profile name is required (or --all --auto)", file=sys.stderr)
-            sys.exit(2)
-        if text_value and auto_flag:
-            print(
-                "profile describe: --text is mutually exclusive with --auto",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-
-        # Show current description if no operation requested.
-        if name and not text_value and not auto_flag:
-            try:
-                if _profiles_mod.normalize_profile_name(name) == "default":
-                    from hermes_constants import get_hermes_home as _hh
-                    profile_dir = Path(_hh())
-                else:
-                    profile_dir = _profiles_mod.get_profile_dir(name)
-            except Exception as exc:
-                print(f"Error: {exc}", file=sys.stderr)
-                sys.exit(1)
-            if not profile_dir.is_dir():
-                print(f"Error: profile '{name}' not found", file=sys.stderr)
-                sys.exit(1)
-            meta = _profiles_mod.read_profile_meta(profile_dir)
-            desc = meta.get("description") or ""
-            if not desc:
-                print(f"(no description set for '{name}')")
-            else:
-                tag = "[auto] " if meta.get("description_auto") else ""
-                print(f"{tag}{desc}")
-            sys.exit(0)
-
-        # --text path: just write the user-authored description.
-        if text_value:
-            try:
-                if _profiles_mod.normalize_profile_name(name) == "default":
-                    from hermes_constants import get_hermes_home as _hh
-                    profile_dir = Path(_hh())
-                else:
-                    profile_dir = _profiles_mod.get_profile_dir(name)
-                _profiles_mod.write_profile_meta(
-                    profile_dir,
-                    description=text_value,
-                    description_auto=False,
-                )
-                print(f"Description updated for '{name}'.")
-            except Exception as exc:
-                print(f"Error: {exc}", file=sys.stderr)
-                sys.exit(1)
-            sys.exit(0)
-
-        # --auto path: invoke the LLM describer.
-        from hermes_cli import profile_describer as _pd
-
-        if all_flag:
-            targets = _pd.list_describable_profiles(missing_only=True)
-            if not targets:
-                print("All profiles already have descriptions.")
-                sys.exit(0)
-        else:
-            targets = [name]
-
-        ok_count = 0
-        fail_count = 0
-        for tgt in targets:
-            outcome = _pd.describe_profile(tgt, overwrite=overwrite_flag)
-            if outcome.ok:
-                ok_count += 1
-                print(f"Described '{outcome.profile_name}': {outcome.description}")
-            else:
-                fail_count += 1
-                print(
-                    f"profile describe {outcome.profile_name}: {outcome.reason}",
-                    file=sys.stderr,
-                )
-        if not all_flag:
-            sys.exit(0 if ok_count == 1 else 1)
-        sys.exit(0 if ok_count > 0 else 1)
-
-    elif action == "show":
-        name = args.profile_name
-        from hermes_cli.profiles import (
-            get_profile_dir,
-            profile_exists,
-            _read_config_model,
-            _check_gateway_running,
-            _served_by_running_multiplexer,
-            _count_skills,
-            _read_distribution_meta,
-            _get_wrapper_dir,
-            find_alias_for_profile,
-            format_profile_label,
-            read_profile_meta,
-        )
-
-        if not profile_exists(name):
-            print(f"Error: Profile '{name}' does not exist.")
-            sys.exit(1)
-        profile_dir = get_profile_dir(name)
-        model, provider = _read_config_model(profile_dir)
-        gw = _check_gateway_running(profile_dir) or _served_by_running_multiplexer(name)
-        skills = _count_skills(profile_dir)
-        dist_name, dist_version, dist_source = _read_distribution_meta(profile_dir)
-        alias_name = find_alias_for_profile(name)
-        display = read_profile_meta(profile_dir).get("display_name", "")
-
-        print(f"\nProfile: {format_profile_label(name, display)}")
-        print(f"Path:    {profile_dir}")
-        if model:
-            print(f"Model:   {model}" + (f" ({provider})" if provider else ""))
-        print(f"Gateway: {'running' if gw else 'stopped'}")
-        print(f"Skills:  {skills}")
-        print(
-            f".env:    {'exists' if (profile_dir / '.env').exists() else 'not configured'}"
-        )
-        print(
-            f"SOUL.md: {'exists' if (profile_dir / 'SOUL.md').exists() else 'not configured'}"
-        )
-        if dist_name:
-            print(f"Distribution: {dist_name}@{dist_version or '?'}")
-            if dist_source:
-                print(f"Installed from: {dist_source}")
-            print(f"  (run `hermes profile info {name}` for full manifest)")
-        if alias_name:
-            is_windows = sys.platform == "win32"
-            wrapper = _get_wrapper_dir() / (f"{alias_name}.bat" if is_windows else alias_name)
-            print(f"Alias:   {alias_name} → hermes -p {name}  ({wrapper})")
-        print()
-
-    elif action == "alias":
-        name = args.profile_name
-        remove = getattr(args, "remove", False)
-        custom_name = getattr(args, "alias_name", None)
-
-        from hermes_cli.profiles import profile_exists, validate_alias_name
-
-        if not profile_exists(name):
-            print(f"Error: Profile '{name}' does not exist.")
-            sys.exit(1)
-
-        alias_name = custom_name or name
-
-        try:
-            validate_alias_name(alias_name)
-        except ValueError as exc:
-            print(f"Error: {exc}")
-            sys.exit(1)
-
-        if remove:
-            if remove_wrapper_script(alias_name):
-                print(f"✓ Removed alias '{alias_name}'")
-            else:
-                print(f"No alias '{alias_name}' found to remove.")
-        else:
-            collision = check_alias_collision(alias_name)
-            if collision:
-                print(f"Error: {collision}")
-                sys.exit(1)
-            wrapper_path = create_wrapper_script(
-                alias_name, target=name if custom_name else None
-            )
-            if wrapper_path:
-                print(f"✓ Alias created: {wrapper_path}")
-                if not _is_wrapper_dir_in_path():
-                    print(f"⚠ {_get_wrapper_dir()} is not in your PATH.")
-
-    elif action == "rename":
-        from hermes_cli.profiles import normalize_profile_name, rename_profile
-
-        try:
-            new_dir = rename_profile(args.old_name, args.new_name)
-            if normalize_profile_name(args.old_name) != "default":
-                print(f"\nProfile renamed: {args.old_name} → {args.new_name}")
-                print(f"Path: {new_dir}\n")
-        except (ValueError, FileExistsError, FileNotFoundError) as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-
-    elif action == "export":
-        from hermes_cli.profiles import export_profile, get_profile_export_path
-
-        name = args.profile_name
-        try:
-            output = args.output or str(get_profile_export_path(name))
-            result_path = export_profile(name, output)
-            print(f"✓ Exported '{name}' to {result_path}")
-        except (ValueError, FileNotFoundError, OSError) as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-
-    elif action == "import":
-        from hermes_cli.profiles import import_profile
-
-        try:
-            profile_dir = import_profile(
-                args.archive, name=getattr(args, "import_name", None)
-            )
-            name = profile_dir.name
-            print(f"✓ Imported profile '{name}' at {profile_dir}")
-
-            # Offer to create alias
-            collision = check_alias_collision(name)
-            if not collision:
-                wrapper_path = create_wrapper_script(name)
-                if wrapper_path:
-                    print(f"  Wrapper created: {wrapper_path}")
-            print()
-        except (ValueError, FileExistsError, FileNotFoundError) as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-
-    elif action == "install":
-        import tempfile
-        from hermes_cli.profile_distribution import (
-            plan_install,
-            install_distribution,
-            DistributionError,
-        )
-
-        try:
-            # Preview: stage the distribution into a scratch dir, show the
-            # manifest, then do the real install.  The double-stage avoids
-            # any side-effects if the user declines.
-            with tempfile.TemporaryDirectory(prefix="hermes_dist_preview_") as tmp:
-                plan = plan_install(
-                    args.source,
-                    Path(tmp),
-                    override_name=getattr(args, "install_name", None),
-                )
-                _render_distribution_plan(plan)
-
-                if not getattr(args, "yes", False):
-                    try:
-                        answer = input("\nProceed with install? [y/N] ").strip().lower()
-                    except (EOFError, KeyboardInterrupt):
-                        answer = ""
-                    if answer not in {"y", "yes"}:
-                        print("Install cancelled.")
-                        return
-
-            plan = install_distribution(
-                args.source,
-                name=getattr(args, "install_name", None),
-                force=getattr(args, "force", False),
-                create_alias=getattr(args, "alias", False),
-            )
-            print(f"\n✓ Installed '{plan.manifest.name}' v{plan.manifest.version}")
-            print(f"  Profile path: {plan.target_dir}")
-            if plan.manifest.env_requires:
-                print(
-                    f"  Next: copy .env.EXAMPLE to .env and fill in required keys:\n"
-                    f"    {plan.target_dir}/.env.EXAMPLE"
-                )
-            if plan.has_cron:
-                print(
-                    "  Cron jobs were included but are NOT scheduled automatically.\n"
-                    f"  Review them with:  hermes -p {plan.manifest.name} cron list"
-                )
-            print(f"\n  Use with:      hermes -p {plan.manifest.name} chat")
-        except (DistributionError, ValueError) as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-
-    elif action == "update":
-        from hermes_cli.profile_distribution import (
-            update_distribution,
-            read_manifest,
-            DistributionError,
-        )
-        from hermes_cli.profiles import get_profile_dir, normalize_profile_name
-
-        name = args.profile_name
-        try:
-            canon = normalize_profile_name(name)
-            current = read_manifest(get_profile_dir(canon))
-            if current is None:
-                print(
-                    f"Error: Profile '{canon}' is not a distribution (no distribution.yaml). "
-                    "Only profiles installed via `hermes profile install` can be updated."
-                )
-                sys.exit(1)
-
-            force_config = getattr(args, "force_config", False)
-            if not getattr(args, "yes", False):
-                print(f"\nUpdate '{canon}' from: {current.source or '(no source)'}")
-                print(f"  Currently at version {current.version}")
-                if force_config:
-                    print("  --force-config set: config.yaml WILL be overwritten.")
-                else:
-                    print("  config.yaml will be preserved (pass --force-config to overwrite).")
-                print("  User data (memories, sessions, auth, .env) will NOT be touched.")
-                try:
-                    answer = input("\nProceed? [y/N] ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    answer = ""
-                if answer not in {"y", "yes"}:
-                    print("Update cancelled.")
-                    return
-
-            plan = update_distribution(canon, force_config=force_config)
-            print(f"\n✓ Updated '{plan.manifest.name}' → v{plan.manifest.version}")
-            if plan.has_cron:
-                print(
-                    "  Cron files were refreshed.  Review with:  "
-                    f"hermes -p {plan.manifest.name} cron list"
-                )
-        except (DistributionError, ValueError) as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-
-    elif action == "info":
-        from hermes_cli.profile_distribution import describe_distribution, DistributionError
-
-        try:
-            data = describe_distribution(args.profile_name)
-        except (DistributionError, ValueError) as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-        if not data:
-            print(
-                f"Profile '{args.profile_name}' is not a distribution "
-                "(no distribution.yaml)."
-            )
-            return
-        print(f"\nDistribution: {data.get('name')}")
-        print(f"Version:      {data.get('version', '?')}")
-        if data.get("description"):
-            print(f"Description:  {data['description']}")
-        if data.get("author"):
-            print(f"Author:       {data['author']}")
-        if data.get("license"):
-            print(f"License:      {data['license']}")
-        if data.get("hermes_requires"):
-            print(f"Requires:     Hermes {data['hermes_requires']}")
-        if data.get("source"):
-            print(f"Source:       {data['source']}")
-        if data.get("installed_at"):
-            print(f"Installed:    {data['installed_at']}")
-        env_reqs = data.get("env_requires") or []
-        if env_reqs:
-            print("\nEnvironment variables:")
-            for er in env_reqs:
-                tag = "required" if er.get("required", True) else "optional"
-                line = f"  {er['name']} ({tag})"
-                if er.get("description"):
-                    line += f" — {er['description']}"
-                print(line)
-                if er.get("default") is not None:
-                    print(f"      default: {er['default']}")
-        print()
+from hermes_cli.profile_cmd import cmd_profile, _render_distribution_plan  # noqa: E402,F401  (re-export)
 
 
-def _render_distribution_plan(plan) -> None:
-    """Print a human-readable summary of a pending distribution install."""
-    from hermes_cli.profile_distribution import MANIFEST_FILENAME
-    mf = plan.manifest
-    print(f"\nDistribution: {mf.name} v{mf.version}")
-    if mf.description:
-        print(f"  {mf.description}")
-    if mf.author:
-        print(f"  Author:   {mf.author}")
-    if mf.hermes_requires:
-        print(f"  Requires: Hermes {mf.hermes_requires}")
-    print(f"  Source:   {plan.provenance}")
-    print(f"  Target:   {plan.target_dir}")
-    if plan.existing:
-        # Distinguish "updating an existing distribution" (well-understood
-        # semantics — dist-owned overwritten, config preserved, user data
-        # untouched) from "overwriting a hand-built plain profile" (same
-        # mechanics but the user didn't sign up for this when they created
-        # the profile manually).
-        existing_is_distribution = (plan.target_dir / MANIFEST_FILENAME).is_file()
-        if existing_is_distribution:
-            print("  (profile exists — will overwrite distribution-owned files only)")
-        else:
-            print(
-                "  ⚠ Profile exists but is NOT a distribution.  Installing here will\n"
-                "    overwrite its SOUL.md, skills/, cron/, and mcp.json.\n"
-                "    Your memories, sessions, auth.json, and .env will be preserved,\n"
-                "    but any hand-edits to distribution-owned files will be lost."
-            )
-    if mf.env_requires:
-        print("\n  Env vars:")
-        for er in mf.env_requires:
-            tag = "required" if er.required else "optional"
-            # Check both the current shell environment and the target profile's
-            # .env file so we don't nag about keys the user already has set up.
-            already = os.environ.get(er.name) is not None
-            if not already and plan.target_dir.is_dir():
-                env_path = plan.target_dir / ".env"
-                if env_path.is_file():
-                    try:
-                        # .env is written as UTF-8 everywhere in the codebase,
-                        # but a Notepad-edited file can carry a BOM — read as
-                        # utf-8-sig so the first key isn't hidden behind
-                        # U+FEFF (#62617).
-                        for raw in env_path.read_text(encoding="utf-8-sig").splitlines():
-                            line = raw.strip()
-                            if not line or line.startswith("#"):
-                                continue
-                            key = line.split("=", 1)[0].strip()
-                            if key == er.name:
-                                already = True
-                                break
-                    except (OSError, UnicodeDecodeError):
-                        # UnicodeDecodeError is a ValueError, not an OSError, so
-                        # the old guard let a mis-encoded .env abort the whole
-                        # install preview. Skip the pre-check instead.
-                        pass
-            status = "✓ set" if already else ("needs setting" if er.required else "—")
-            line = f"    • {er.name} ({tag}, {status})"
-            if er.description:
-                line += f" — {er.description}"
-            print(line)
-    if plan.has_cron:
-        print(
-            "\n  ⚠ This distribution ships cron jobs.  They will NOT run "
-            "automatically — review and enable manually."
-        )
 
 
 def _report_dashboard_status() -> int:
@@ -12643,22 +11515,6 @@ def cmd_console(args):
     return run_console_repl()
 
 
-def _build_provider_choices() -> list[str]:
-    """Build the --provider choices list from CANONICAL_PROVIDERS + 'auto'."""
-    try:
-        from hermes_cli.models import CANONICAL_PROVIDERS as _cp
-        return ["auto"] + [p.slug for p in _cp]
-    except Exception:
-        # Fallback: static list guarantees the CLI always works
-        return [
-            "auto", "openrouter", "nous", "openai-codex", "xai-oauth", "copilot-acp", "copilot",
-            "anthropic", "gemini", "vertex", "xai", "bedrock", "azure-foundry",
-            "ollama-cloud", "huggingface", "zai", "kimi-coding", "kimi-coding-cn",
-            "stepfun", "minimax", "minimax-cn", "kilocode", "novita", "xiaomi", "arcee",
-            "nvidia", "deepseek", "alibaba", "qwen-oauth", "opencode-zen", "opencode-go",
-        ]
-
-
 # Top-level subcommands that argparse knows about WITHOUT running plugin
 # discovery.  Used to short-circuit eager plugin imports (which can take
 # 500ms+ pulling in google.cloud.pubsub_v1, aiohttp, grpc, etc.) when the
@@ -12953,6 +11809,7 @@ def _guard_noninteractive_user_config(args) -> None:
 
 
 def _set_chat_arg_defaults(args) -> None:
+    """Fill the chat-parser attrs cmd_chat reads when chat was not parsed."""
     for attr, default in [
         ("query", None),
         ("model", None),
@@ -12965,6 +11822,22 @@ def _set_chat_arg_defaults(args) -> None:
     ]:
         if not hasattr(args, attr):
             setattr(args, attr, default)
+
+
+def _run_oneshot_from_args(args) -> None:
+    """Top-level --oneshot / -z: single-shot mode, stdout = final response only.
+
+    Bypasses cli.py entirely; _run_and_exit_oneshot never returns.
+    """
+    _confirm_startup_expensive_model_override(args)
+    _run_and_exit_oneshot(
+        args.oneshot,
+        model=getattr(args, "model", None),
+        provider=getattr(args, "provider", None),
+        toolsets=getattr(args, "toolsets", None),
+        skills=getattr(args, "skills", None),
+        usage_file=getattr(args, "usage_file", None),
+    )
 
 
 def _try_fast_serve_launch() -> bool:
@@ -13065,15 +11938,7 @@ def _try_fast_chat_launch() -> bool:
     _prepare_agent_startup(args)
 
     if getattr(args, "oneshot", None):
-        _confirm_startup_expensive_model_override(args)
-        _run_and_exit_oneshot(
-            args.oneshot,
-            model=getattr(args, "model", None),
-            provider=getattr(args, "provider", None),
-            toolsets=getattr(args, "toolsets", None),
-            skills=getattr(args, "skills", None),
-            usage_file=getattr(args, "usage_file", None),
-        )
+        _run_oneshot_from_args(args)
 
     if (args.resume or args.continue_last) and args.command is None:
         args.command = "chat"
@@ -13099,7 +11964,7 @@ def _try_termux_fast_cli_launch() -> bool:
     if _wants_tui_early(argv):
         return False
 
-    if _is_termux_fast_version_argv(argv):
+    if _startup_fast.is_termux_fast_version_argv(argv):
         _print_version_info(check_updates=True)
         return True
 
@@ -13123,15 +11988,7 @@ def _try_termux_fast_cli_launch() -> bool:
 
     if getattr(args, "oneshot", None):
         _prepare_agent_startup(args)
-        _confirm_startup_expensive_model_override(args)
-        _run_and_exit_oneshot(
-            args.oneshot,
-            model=getattr(args, "model", None),
-            provider=getattr(args, "provider", None),
-            toolsets=getattr(args, "toolsets", None),
-            skills=getattr(args, "skills", None),
-            usage_file=getattr(args, "usage_file", None),
-        )
+        _run_oneshot_from_args(args)
 
     if (args.resume or args.continue_last) and args.command is None:
         args.command = "chat"
@@ -13495,6 +12352,238 @@ def _advertise_agent_env() -> None:
     os.environ.setdefault("HERMES_AGENT", "true")
 
 
+def _attach_plugin_cli_command(subparsers, cmd_info) -> None:
+    """Register one plugin-provided top-level command from its descriptor."""
+    plugin_parser = subparsers.add_parser(
+        cmd_info["name"],
+        help=cmd_info["help"],
+        description=cmd_info.get("description", ""),
+        formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
+    )
+    cmd_info["setup_fn"](plugin_parser)
+    if cmd_info.get("handler_fn") is not None:
+        plugin_parser.set_defaults(func=cmd_info["handler_fn"])
+
+
+def _register_plugin_cli_commands(subparsers) -> None:
+    """Plugin CLI commands — dynamically registered by memory/general plugins.
+
+    Plugins provide a register_cli(subparser) function that builds their own
+    argparse tree; no hardcoded plugin commands in main.py. Skipped when the
+    invocation already targets a known built-in subcommand (``hermes --help``,
+    ``hermes logs``, ...) — eagerly importing every bundled plugin module
+    (google.cloud.pubsub_v1, aiohttp, grpc, PIL …) costs 500-650ms.
+    """
+    if not _plugin_cli_discovery_needed():
+        return
+    try:
+        from plugins.memory import discover_plugin_cli_commands
+        from hermes_cli.plugins import discover_plugins, get_plugin_manager
+
+        seen_plugin_commands = set()
+        for cmd_info in discover_plugin_cli_commands():
+            _attach_plugin_cli_command(subparsers, cmd_info)
+            seen_plugin_commands.add(cmd_info["name"])
+
+        discover_plugins()
+        # A bundled platform whose top-level CLI command is the one being
+        # invoked is still only a deferred entry at this point; import it
+        # so its register_cli_command side effect runs before we read
+        # _cli_commands (issue #54678).
+        _resolve_deferred_platform_cli_command(_first_positional_argv())
+        for cmd_info in get_plugin_manager()._cli_commands.values():
+            if cmd_info["name"] not in seen_plugin_commands:
+                _attach_plugin_cli_command(subparsers, cmd_info)
+    except Exception as _exc:
+        logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
+
+
+def _build_cli_parser():
+    """Build the full ``hermes`` argparse tree. Returns ``(parser, subparsers)``.
+
+    Registration ORDER is the order subcommands appear in ``hermes --help``;
+    keep it stable. Each group lives in ``hermes_cli/subcommands/<group>.py``
+    (handlers injected so those modules never import main) or exposes its own
+    ``register_cli``/``build_parser`` from a sibling module.
+    """
+    from hermes_cli._parser import build_top_level_parser
+
+    parser, subparsers, chat_parser = build_top_level_parser()
+    chat_parser.set_defaults(func=cmd_chat)
+
+    build_model_parser(subparsers, cmd_model=cmd_model)
+    build_moa_parser(subparsers)
+    build_fallback_parser(subparsers)
+    build_worktree_parser(subparsers)
+    build_browser_parser(subparsers)
+    build_secrets_parser(subparsers)
+    # OUTBOUND iron-proxy egress firewall; ``hermes proxy`` (gateway group) is
+    # the separate INBOUND OAuth-aggregator reverse proxy.
+    build_egress_parser(subparsers)
+    build_migrate_parser(subparsers)
+    build_gateway_parser(
+        subparsers, cmd_gateway=cmd_gateway, cmd_proxy=cmd_proxy, cmd_gateway_enroll=cmd_gateway_enroll
+    )
+
+    # LSP is optional infrastructure — never let a registration failure
+    # break the CLI overall.
+    try:
+        from agent.lsp.cli import register_subparser as _lsp_register
+        _lsp_register(subparsers)
+    except Exception as _lsp_err:  # noqa: BLE001
+        logger.debug("LSP CLI registration failed: %s", _lsp_err)
+
+    build_setup_parser(subparsers, cmd_setup=cmd_setup)
+    build_whatsapp_parser(subparsers, cmd_whatsapp=cmd_whatsapp)
+    build_whatsapp_cloud_parser(subparsers, cmd_whatsapp_cloud=cmd_whatsapp_cloud)
+    build_slack_parser(subparsers, cmd_slack=cmd_slack)
+
+    # send command — pipe shell-script output to any configured platform
+    from hermes_cli.send_cmd import register_send_subparser
+    register_send_subparser(subparsers)
+
+    build_login_parser(subparsers, cmd_login=cmd_login)
+    build_logout_parser(subparsers, cmd_logout=cmd_logout)
+    build_auth_parser(subparsers, cmd_auth=cmd_auth)
+    build_status_parser(subparsers, cmd_status=cmd_status)
+    build_pause_parser(subparsers)
+    build_cron_parser(subparsers, cmd_cron=cmd_cron)
+    build_sync_parser(subparsers, cmd_sync=cmd_sync)
+    build_webhook_parser(subparsers, cmd_webhook=cmd_webhook)
+
+    # peer command — bot-to-bot DMs across machines (peer Hermes gateways)
+    from hermes_cli.subcommands.peer import build_peer_parser
+    build_peer_parser(subparsers)
+
+    # portal command — Nous Portal status + Tool Gateway routing
+    from hermes_cli.portal_cli import add_parser as _add_portal_parser
+    _add_portal_parser(subparsers)
+
+    # kanban command — multi-profile collaboration board
+    from hermes_cli.kanban import build_parser as _build_kanban_parser
+    _build_kanban_parser(subparsers).set_defaults(func=cmd_kanban)
+
+    # project command — named, multi-folder workspaces
+    from hermes_cli.projects_cmd import build_parser as _build_project_parser
+    _build_project_parser(subparsers).set_defaults(func=cmd_project)
+
+    build_hooks_parser(subparsers, cmd_hooks=cmd_hooks)
+    build_doctor_parser(subparsers, cmd_doctor=cmd_doctor)
+    build_verify_parser(subparsers, cmd_verify=cmd_verify)
+    build_security_parser(subparsers, cmd_security=cmd_security)
+    build_approvals_parser(subparsers, cmd_approvals=cmd_approvals)
+    build_dump_parser(subparsers, cmd_dump=cmd_dump)
+    build_debug_parser(subparsers, cmd_debug=cmd_debug)
+    build_backup_parser(subparsers, cmd_backup=cmd_backup)
+    build_checkpoints_parser(subparsers)
+    build_import_cmd_parser(subparsers, cmd_import=cmd_import)
+    build_import_agent_parser(subparsers, cmd_import_agent=cmd_import_agent)
+    build_config_parser(subparsers, cmd_config=cmd_config)
+    build_skin_parser(subparsers, cmd_skin=cmd_skin)
+    build_console_parser(subparsers, cmd_console=cmd_console)
+    build_pairing_parser(subparsers, cmd_pairing=cmd_pairing)
+    build_skills_parser(subparsers, cmd_skills=cmd_skills)
+    build_bundles_parser(subparsers)
+    build_plugins_parser(subparsers, cmd_plugins=cmd_plugins)
+
+    _register_plugin_cli_commands(subparsers)
+
+    build_curator_parser(subparsers)
+    build_pets_parser(subparsers)
+    build_journey_parser(subparsers)
+    build_memory_parser(subparsers, cmd_memory=cmd_memory)
+    build_tools_parser(subparsers, cmd_tools=cmd_tools)
+    build_computer_use_parser(subparsers)
+    build_mcp_parser(subparsers, cmd_mcp=cmd_mcp)
+    # Lazy indirection: sessions_cmd is only imported when the subcommand
+    # runs, and monkeypatches on hermes_cli.main.cmd_sessions keep working.
+    build_sessions_parser(subparsers, cmd_sessions=lambda a, **kw: _self().cmd_sessions(a, **kw))
+    build_insights_parser(subparsers, cmd_insights=cmd_insights)
+    build_monitoring_parser(subparsers, cmd_monitoring=cmd_monitoring)
+    build_claw_parser(subparsers, cmd_claw=cmd_claw)
+    # NOTE: the `hermes version` subcommand was removed — `hermes --version`
+    # / `-V` now carries the full output including update status.
+    build_update_parser(subparsers, cmd_update=cmd_update)
+    build_uninstall_parser(subparsers, cmd_uninstall=cmd_uninstall)
+    build_acp_parser(subparsers, cmd_acp=cmd_acp)
+    build_profile_parser(subparsers, cmd_profile=cmd_profile)
+    build_completion_parser(subparsers, cmd_completion=cmd_completion, parser=parser)
+    build_dashboard_parser(
+        subparsers,
+        cmd_dashboard=cmd_dashboard,
+        cmd_dashboard_register=cmd_dashboard_register,
+    )
+    # desktop (a.k.a. gui): the canonical name is "desktop"; "gui" is kept as
+    # a deprecated alias for one release. The Hermes-Setup.exe success screen
+    # tells users to run `hermes desktop`, so that name must be the one shown
+    # in --help (argparse promotes the primary name; aliases stay hidden).
+    build_gui_parser(subparsers, cmd_gui=cmd_gui)
+    build_logs_parser(subparsers, cmd_logs=cmd_logs)
+    build_prompt_size_parser(subparsers, cmd_prompt_size=cmd_prompt_size)
+    return parser, subparsers
+
+
+def _parse_cli_args(parser, subparsers, argv):
+    """Parse ``argv`` with the bpo-9338 subparser-routing workaround.
+
+    argv is first pre-processed so unquoted multi-word session names after
+    -c / -r merge into one token (``hermes -c Pokemon Agent Dev`` →
+    ``hermes -c 'Pokemon Agent Dev'``).
+
+    On some Python versions (notably <3.11), argparse fails to route
+    subcommand tokens when the parent parser has nargs='?' optional arguments
+    (--continue): "unrecognized arguments: model" even though 'model' is a
+    registered subcommand. Fix: when argv contains a token matching a known
+    subcommand, set subparsers.required=True to force deterministic routing.
+    If that fails (e.g. 'hermes -c model' where 'model' is consumed as the
+    session name for --continue), fall back to the default behaviour.
+    """
+    import io as _io
+
+    _processed_argv = _coalesce_session_name_args(argv)
+    _known_cmds = (
+        set(subparsers.choices.keys()) if hasattr(subparsers, "choices") else set()
+    )
+    _has_cmd_token = any(
+        t in _known_cmds for t in _processed_argv if not t.startswith("-")
+    )
+    if not _has_cmd_token:
+        subparsers.required = False
+        return parser.parse_args(_processed_argv)
+
+    subparsers.required = True
+    _saved_stderr = sys.stderr
+    try:
+        sys.stderr = _io.StringIO()
+        args = parser.parse_args(_processed_argv)
+        sys.stderr = _saved_stderr
+    except SystemExit as exc:
+        sys.stderr = _saved_stderr
+        # Help/version flags (exit code 0) already printed output —
+        # re-raise immediately to avoid a second parse_args printing
+        # the same help text again (#10230).
+        if exc.code == 0:
+            raise
+        # Subcommand name was consumed as a flag value (e.g. -c model).
+        # Fall back to optional subparsers so argparse handles it normally.
+        subparsers.required = False
+        args = parser.parse_args(_processed_argv)
+    return args
+
+
+def _default_to_chat(args) -> None:
+    """No subcommand given: run chat (top-level --resume/--continue is a chat shortcut)."""
+    if args.resume or args.continue_last:
+        args.command = "chat"
+    _set_chat_arg_defaults(args)
+    cmd_chat(args)
+
+
+def cmd_import_agent(args):
+    from hermes_cli.agent_import import import_agent_command
+    import_agent_command(args)
+
+
 def main():
     """Main entry point for hermes CLI."""
     # Cosmetic: make the process show up as 'hermes' instead of 'python3.11'
@@ -13560,1487 +12649,8 @@ def main():
     if _try_fast_chat_launch():
         return
 
-    from hermes_cli._parser import build_top_level_parser
+    parser, subparsers = _build_cli_parser()
 
-    parser, subparsers, chat_parser = build_top_level_parser()
-    chat_parser.set_defaults(func=cmd_chat)
-
-    # =========================================================================
-    # model command  (parser built in hermes_cli/subcommands/model.py)
-    # =========================================================================
-    build_model_parser(subparsers, cmd_model=cmd_model)
-
-    from hermes_cli.moa_cmd import cmd_moa
-
-    moa_parser = subparsers.add_parser(
-        "moa",
-        help="Configure Mixture of Agents provider/model slots",
-        description="Configure the provider/model set used by /moa <prompt>.",
-    )
-    moa_subparsers = moa_parser.add_subparsers(dest="moa_command")
-    moa_subparsers.add_parser("list", aliases=["ls"], help="Show current MoA model slots")
-    moa_configure = moa_subparsers.add_parser("configure", aliases=["config"], help="Interactively pick MoA models")
-    moa_configure.add_argument("name", nargs="?", help="Preset name to create or update")
-    moa_delete = moa_subparsers.add_parser("delete", aliases=["rm"], help="Delete a MoA preset")
-    moa_delete.add_argument("name", help="Preset name to delete")
-    moa_parser.set_defaults(func=cmd_moa)
-
-    # =========================================================================
-    # fallback command — manage the fallback provider chain
-    # =========================================================================
-    from hermes_cli.fallback_cmd import cmd_fallback
-
-    fallback_parser = subparsers.add_parser(
-        "fallback",
-        help="Manage fallback providers (tried when the primary model fails)",
-        description=(
-            "Manage the fallback provider chain.  Fallback providers are tried "
-            "in order when the primary model fails with rate-limit, overload, or "
-            "connection errors.  See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/features/fallback-providers"
-        ),
-    )
-    fallback_subparsers = fallback_parser.add_subparsers(dest="fallback_command")
-    fallback_subparsers.add_parser(
-        "list",
-        aliases=["ls"],
-        help="Show the current fallback chain (default when no subcommand)",
-    )
-    fallback_subparsers.add_parser(
-        "add",
-        help="Pick a provider + model (same picker as `hermes model`) and append to the chain",
-    )
-    fallback_subparsers.add_parser(
-        "remove",
-        aliases=["rm"],
-        help="Pick an entry to delete from the chain",
-    )
-    fallback_subparsers.add_parser(
-        "clear",
-        help="Remove all fallback entries",
-    )
-    fallback_parser.set_defaults(func=cmd_fallback)
-
-    # =========================================================================
-    # worktree command — audit/reclaim accumulated git worktrees + branches
-    # =========================================================================
-    worktree_parser = subparsers.add_parser(
-        "worktree",
-        help="Audit and reclaim accumulated git worktrees and merged branches",
-        description=(
-            "Attended reclaim for the .worktrees/ directory hermes -w sessions "
-            "accumulate. Never deletes uncommitted tracked changes, unique "
-            "unpushed commits, or in-use trees; untracked-only scratch is "
-            "archived to ~/.hermes/archive/worktree-prune/ before removal. See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/cli#worktree-cleanup"
-        ),
-    )
-    worktree_subparsers = worktree_parser.add_subparsers(dest="worktree_action")
-    worktree_list = worktree_subparsers.add_parser(
-        "list",
-        aliases=["ls", "audit"],
-        help="Classify every tree: age, size, verdict, reason (default action)",
-    )
-    worktree_list.add_argument("--repo", help="Repo root (default: current repo)")
-    worktree_prune = worktree_subparsers.add_parser(
-        "prune",
-        help="Remove safe trees and delete fully-merged local branches",
-    )
-    worktree_prune.add_argument("--repo", help="Repo root (default: current repo)")
-    worktree_prune.add_argument(
-        "--dry-run", action="store_true",
-        help="Show the plan without changing anything",
-    )
-    worktree_prune.add_argument(
-        "--trees-only", action="store_true",
-        help="Only remove worktrees; leave local branches alone",
-    )
-    worktree_prune.add_argument(
-        "--branches-only", action="store_true",
-        help="Only delete merged local branches; leave worktrees alone",
-    )
-
-    def _dispatch_worktree(_args):
-        from hermes_cli.worktree_cmd import cmd_worktree
-
-        # argparse aliases set dest to the literal typed string ("ls"/"audit").
-        action = getattr(_args, "worktree_action", None)
-        if action in ("ls", "audit"):
-            _args.worktree_action = "list"
-        return cmd_worktree(_args)
-
-    worktree_parser.set_defaults(func=_dispatch_worktree)
-
-
-    # =========================================================================
-    # browser command — real-profile helpers (agent-invoked, user-approved)
-    # =========================================================================
-    browser_parser = subparsers.add_parser(
-        "browser",
-        help="Real-profile browsing helpers (close a browser locking its profile)",
-        description=(
-            "Helpers for real-profile browsing (browser.use_real_profile). "
-            "close-profile terminates the browser process tree holding your "
-            "default profile so Hermes can copy it — DESTRUCTIVE (unsaved tabs "
-            "in that browser are lost). The agent runs this only after you "
-            "approve closing the browser."
-        ),
-    )
-    browser_subparsers = browser_parser.add_subparsers(dest="browser_action")
-    browser_close = browser_subparsers.add_parser(
-        "close-profile",
-        help="Close the browser locking your real profile (asks nothing — "
-             "run only with the user's explicit OK; loses unsaved tabs)",
-    )
-    browser_close.add_argument(
-        "--browser",
-        help="Override detected default browser (chrome/edge/brave/brave-origin/chromium)",
-    )
-
-    def _dispatch_browser(_args):
-        from hermes_cli.browser_connect import (
-            UNSUPPORTED_CHANNEL,
-            close_browser_holding_profile,
-            detect_default_chromium,
-            real_profile_data_dir,
-        )
-
-        action = getattr(_args, "browser_action", None)
-        if action != "close-profile":
-            browser_parser.print_help()
-            return 2
-        browser = getattr(_args, "browser", None) or detect_default_chromium()
-        if not browser or browser == UNSUPPORTED_CHANNEL:
-            print("✗ No supported Chromium default browser detected.", file=sys.stderr)
-            return 1
-        src = real_profile_data_dir(browser)
-        if not src:
-            print(f"✗ Could not resolve the {browser} profile directory.", file=sys.stderr)
-            return 1
-        closed, msg = close_browser_holding_profile(src)
-        if closed:
-            print(f"✓ {msg}")
-            return 0
-        print(f"✗ {msg}", file=sys.stderr)
-        return 1
-
-    browser_parser.set_defaults(func=_dispatch_browser)
-
-
-    # =========================================================================
-    # secrets command — external secret managers (Bitwarden, 1Password)
-    # =========================================================================
-    secrets_parser = subparsers.add_parser(
-        "secrets",
-        help="Manage external secret sources (Bitwarden, 1Password)",
-        description=(
-            "Pull API keys from an external secret manager at process startup "
-            "instead of storing them in ~/.hermes/.env.  Supports Bitwarden "
-            "Secrets Manager and 1Password.  See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/"
-        ),
-    )
-    secrets_subparsers = secrets_parser.add_subparsers(dest="secrets_command")
-
-    secrets_bw = secrets_subparsers.add_parser(
-        "bitwarden",
-        aliases=["bw"],
-        help="Bitwarden Secrets Manager integration",
-    )
-
-    secrets_op = secrets_subparsers.add_parser(
-        "onepassword",
-        aliases=["op", "1password"],
-        help="1Password (op:// references) integration",
-    )
-
-    # Lazy-import secrets_cli: the module imports agent.secret_sources.bitwarden
-    # which loads cryptography._rust.pyd.  On Windows this maps the native
-    # extension into the updater process, causing the self-lock preflight to
-    # defer (#86781).  secrets_cli defers its backend import to first use
-    # (module-level __getattr__ + handler-level _load_bw()), so register_cli
-    # at parse time only wires argparse structure with no crypto cost.
-    from hermes_cli import secrets_cli as _secrets_cli
-    from hermes_cli import onepassword_secrets_cli as _op_secrets_cli
-
-    _secrets_cli.register_cli(secrets_bw)
-    _op_secrets_cli.register_cli(secrets_op)
-
-    def _dispatch_secrets(args):  # noqa: ANN001
-        sub = getattr(args, "secrets_command", None)
-        if sub is None:
-            secrets_parser.print_help()
-            return 0
-        return args.func(args)
-
-    secrets_parser.set_defaults(func=_dispatch_secrets)
-
-    # =========================================================================
-    # egress command — iron-proxy outbound credential-injection firewall
-    # =========================================================================
-    # NOTE: this is the OUTBOUND egress firewall (ironsh/iron-proxy).
-    # `hermes proxy` (defined elsewhere in this file) is a separate INBOUND
-    # OAuth-aggregator reverse proxy.  Different direction, different purpose.
-    egress_parser = subparsers.add_parser(
-        "egress",
-        help="Manage the iron-proxy egress credential-injection firewall",
-        description=(
-            "Manage iron-proxy, the optional TLS-intercepting egress firewall "
-            "that swaps proxy tokens for real API credentials before outbound "
-            "requests leave a sandbox.  Disabled by default.  See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/egress/iron-proxy"
-        ),
-    )
-
-    from hermes_cli import proxy_cli as _proxy_cli
-    _proxy_cli.register_cli(egress_parser)
-
-    def _dispatch_egress(args):  # noqa: ANN001
-        # The egress subparser uses dest='egress_command' to stay disjoint
-        # from the inbound OAuth ``hermes proxy`` subparser (dest='proxy_command').
-        sub = getattr(args, "egress_command", None)
-        if sub is not None and hasattr(args, "func") and args.func is not _dispatch_egress:
-            return args.func(args)
-        egress_parser.print_help()
-        return 0
-
-    egress_parser.set_defaults(func=_dispatch_egress)
-
-    # =========================================================================
-    # migrate command
-    # =========================================================================
-    from hermes_cli.migrate import cmd_migrate, cmd_migrate_xai
-
-    migrate_parser = subparsers.add_parser(
-        "migrate",
-        help="Migrate configuration for retired models or deprecated settings",
-        description=(
-            "Diagnose and (optionally) rewrite the active config.yaml to "
-            "replace references to retired models or deprecated settings."
-        ),
-    )
-    migrate_subparsers = migrate_parser.add_subparsers(dest="migrate_type")
-
-    migrate_xai = migrate_subparsers.add_parser(
-        "xai",
-        help="Migrate xAI models scheduled for retirement on May 15, 2026",
-        description=(
-            "Scan config.yaml for references to xAI models retiring on "
-            "May 15, 2026 and, with --apply, rewrite them in-place to the "
-            "official replacements per the xAI migration guide. The original "
-            "config.yaml is backed up before any rewrite."
-        ),
-    )
-    migrate_xai.add_argument(
-        "--apply",
-        action="store_true",
-        help="Rewrite config.yaml in-place (default: dry-run, no writes)",
-    )
-    migrate_xai.add_argument(
-        "--no-backup",
-        action="store_true",
-        help="Skip the timestamped backup of config.yaml when applying",
-    )
-    migrate_xai.set_defaults(func=cmd_migrate_xai)
-    migrate_parser.set_defaults(func=cmd_migrate)
-
-    # =========================================================================
-    # gateway + proxy commands  (parsers built in hermes_cli/subcommands/gateway.py)
-    # =========================================================================
-    build_gateway_parser(
-        subparsers, cmd_gateway=cmd_gateway, cmd_proxy=cmd_proxy, cmd_gateway_enroll=cmd_gateway_enroll
-    )
-
-    # =========================================================================
-    # lsp command
-    # =========================================================================
-    try:
-        from agent.lsp.cli import register_subparser as _lsp_register
-        _lsp_register(subparsers)
-    except Exception as _lsp_err:  # noqa: BLE001
-        # LSP is optional infrastructure — never let a registration
-        # failure break the CLI overall.
-        logger.debug("LSP CLI registration failed: %s", _lsp_err)
-
-    # =========================================================================
-    # setup command  (parser built in hermes_cli/subcommands/setup.py)
-    # =========================================================================
-    build_setup_parser(subparsers, cmd_setup=cmd_setup)
-
-
-    # =========================================================================
-    # whatsapp command  (parser built in hermes_cli/subcommands/whatsapp.py)
-    # =========================================================================
-    build_whatsapp_parser(subparsers, cmd_whatsapp=cmd_whatsapp)
-
-    # =========================================================================
-    # whatsapp-cloud command (official Meta Cloud API; complement to Baileys)
-    # =========================================================================
-    whatsapp_cloud_parser = subparsers.add_parser(
-        "whatsapp-cloud",
-        help="Set up WhatsApp Business Cloud API integration",
-        description=(
-            "Configure the official Meta WhatsApp Business Cloud API "
-            "adapter (Business account required, public webhook URL "
-            "required). Distinct from `hermes whatsapp` which sets up "
-            "the Baileys bridge for personal accounts."
-        ),
-    )
-    whatsapp_cloud_parser.set_defaults(func=cmd_whatsapp_cloud)
-
-    # =========================================================================
-    # slack command  (parser built in hermes_cli/subcommands/slack.py)
-    # =========================================================================
-    build_slack_parser(subparsers, cmd_slack=cmd_slack)
-
-    # =========================================================================
-    # send command — pipe shell-script output to any configured platform
-    # =========================================================================
-    from hermes_cli.send_cmd import register_send_subparser
-    register_send_subparser(subparsers)
-
-    # =========================================================================
-    # login command  (parser built in hermes_cli/subcommands/login.py)
-    # =========================================================================
-    build_login_parser(subparsers, cmd_login=cmd_login)
-
-    # =========================================================================
-    # logout command  (parser built in hermes_cli/subcommands/logout.py)
-    # =========================================================================
-    build_logout_parser(subparsers, cmd_logout=cmd_logout)
-
-    # =========================================================================
-    # auth command  (parser built in hermes_cli/subcommands/auth.py)
-    # =========================================================================
-    build_auth_parser(subparsers, cmd_auth=cmd_auth)
-
-    # =========================================================================
-    # status command  (parser built in hermes_cli/subcommands/status.py)
-    # =========================================================================
-    build_status_parser(subparsers, cmd_status=cmd_status)
-
-    # =========================================================================
-    # pause / resume commands  (parser built in hermes_cli/subcommands/pause.py)
-    # =========================================================================
-    build_pause_parser(subparsers)
-
-    # =========================================================================
-    # cron command  (parser built in hermes_cli/subcommands/cron.py)
-    # =========================================================================
-    build_cron_parser(subparsers, cmd_cron=cmd_cron)
-    build_sync_parser(subparsers, cmd_sync=cmd_sync)
-
-    # =========================================================================
-    # webhook command  (parser built in hermes_cli/subcommands/webhook.py)
-    # =========================================================================
-    build_webhook_parser(subparsers, cmd_webhook=cmd_webhook)
-
-    # =========================================================================
-    # peer command — bot-to-bot DMs across machines (peer Hermes gateways)
-    # =========================================================================
-    from hermes_cli.subcommands.peer import build_peer_parser
-
-    build_peer_parser(subparsers)
-
-    # =========================================================================
-    # portal command — Nous Portal status + Tool Gateway routing
-    # =========================================================================
-    from hermes_cli.portal_cli import add_parser as _add_portal_parser
-    _add_portal_parser(subparsers)
-
-    # =========================================================================
-    # kanban command — multi-profile collaboration board
-    # =========================================================================
-    from hermes_cli.kanban import build_parser as _build_kanban_parser
-
-    kanban_parser = _build_kanban_parser(subparsers)
-    kanban_parser.set_defaults(func=cmd_kanban)
-
-    # =========================================================================
-    # project command — named, multi-folder workspaces
-    # =========================================================================
-    from hermes_cli.projects_cmd import build_parser as _build_project_parser
-
-    project_parser = _build_project_parser(subparsers)
-    project_parser.set_defaults(func=cmd_project)
-
-    # =========================================================================
-    # hooks command — shell-hook inspection and management
-    # =========================================================================
-    # hooks command  (parser built in hermes_cli/subcommands/hooks.py)
-    # =========================================================================
-    build_hooks_parser(subparsers, cmd_hooks=cmd_hooks)
-
-    # =========================================================================
-    # doctor command  (parser built in hermes_cli/subcommands/doctor.py)
-    # =========================================================================
-    build_doctor_parser(subparsers, cmd_doctor=cmd_doctor)
-
-    # =========================================================================
-    # verify command  (parser built in hermes_cli/subcommands/verify.py)
-    # =========================================================================
-    build_verify_parser(subparsers, cmd_verify=cmd_verify)
-
-    # =========================================================================
-    # security command — on-demand supply-chain audit
-    # =========================================================================
-    # security command  (parser built in hermes_cli/subcommands/security.py)
-    # =========================================================================
-    build_security_parser(subparsers, cmd_security=cmd_security)
-
-    # =========================================================================
-    # approvals command  (parser built in hermes_cli/subcommands/approvals.py)
-    # =========================================================================
-    build_approvals_parser(subparsers, cmd_approvals=cmd_approvals)
-
-    # =========================================================================
-    # dump command  (parser built in hermes_cli/subcommands/dump.py)
-    # =========================================================================
-    build_dump_parser(subparsers, cmd_dump=cmd_dump)
-
-    # =========================================================================
-    # debug command  (parser built in hermes_cli/subcommands/debug.py)
-    # =========================================================================
-    build_debug_parser(subparsers, cmd_debug=cmd_debug)
-
-    # =========================================================================
-    # backup command  (parser built in hermes_cli/subcommands/backup.py)
-    # =========================================================================
-    build_backup_parser(subparsers, cmd_backup=cmd_backup)
-
-    # =========================================================================
-    # checkpoints command
-    # =========================================================================
-    checkpoints_parser = subparsers.add_parser(
-        "checkpoints",
-        help="Inspect / prune / clear ~/.hermes/checkpoints/",
-        description="Manage the filesystem checkpoint store — the shadow git "
-        "repo hermes uses to snapshot working directories before "
-        "write_file/patch/terminal calls. Lets you see how much "
-        "space checkpoints occupy, force a prune, or wipe the base.",
-    )
-    from hermes_cli.checkpoints import register_cli as _register_checkpoints_cli
-    _register_checkpoints_cli(checkpoints_parser)
-
-    # =========================================================================
-    # import command  (parser built in hermes_cli/subcommands/import_cmd.py)
-    # =========================================================================
-    build_import_cmd_parser(subparsers, cmd_import=cmd_import)
-
-    # =========================================================================
-    # import-agent command  (parser: hermes_cli/subcommands/import_agent.py)
-    # =========================================================================
-    def cmd_import_agent(args):
-        from hermes_cli.agent_import import import_agent_command
-        import_agent_command(args)
-
-    build_import_agent_parser(subparsers, cmd_import_agent=cmd_import_agent)
-
-    # =========================================================================
-    # config command  (parser built in hermes_cli/subcommands/config.py)
-    # =========================================================================
-    build_config_parser(subparsers, cmd_config=cmd_config)
-
-    # =========================================================================
-    # skin command  (parser built in hermes_cli/subcommands/skin.py)
-    # =========================================================================
-    build_skin_parser(subparsers, cmd_skin=cmd_skin)
-
-    # =========================================================================
-    # console command  (parser built in hermes_cli/subcommands/console.py)
-    # =========================================================================
-    build_console_parser(subparsers, cmd_console=cmd_console)
-
-    # =========================================================================
-    # pairing command  (parser built in hermes_cli/subcommands/pairing.py)
-    # =========================================================================
-    build_pairing_parser(subparsers, cmd_pairing=cmd_pairing)
-
-    # =========================================================================
-    # skills command  (parser built in hermes_cli/subcommands/skills.py)
-    # =========================================================================
-    build_skills_parser(subparsers, cmd_skills=cmd_skills)
-
-    # =========================================================================
-    # bundles command — skill bundles (alias /<name> for multiple skills)
-    # =========================================================================
-    bundles_parser = subparsers.add_parser(
-        "bundles",
-        help="Create, list, and manage skill bundles (aliases for multiple skills)",
-        description=(
-            "Skill bundles let you load several skills under one slash "
-            "command. `/<bundle>` from the CLI or gateway loads every "
-            "referenced skill at once."
-        ),
-    )
-    from hermes_cli.bundles import register_cli as _bundles_register, bundles_command
-    _bundles_register(bundles_parser)
-    bundles_parser.set_defaults(func=bundles_command)
-
-    # =========================================================================
-    # plugins command  (parser built in hermes_cli/subcommands/plugins.py)
-    # =========================================================================
-    build_plugins_parser(subparsers, cmd_plugins=cmd_plugins)
-
-    # =========================================================================
-    # Plugin CLI commands — dynamically registered by memory/general plugins.
-    # Plugins provide a register_cli(subparser) function that builds their
-    # own argparse tree.  No hardcoded plugin commands in main.py.
-    #
-    # Skipped when the invocation is already targeting a known built-in
-    # subcommand — ``hermes --help``, ``hermes logs``,
-    # etc.  This avoids eagerly importing every bundled plugin module
-    # (google.cloud.pubsub_v1, aiohttp, grpc, PIL …) which costs
-    # 500-650ms on typical installs.
-    # =========================================================================
-    if _plugin_cli_discovery_needed():
-        try:
-            from plugins.memory import discover_plugin_cli_commands
-            from hermes_cli.plugins import discover_plugins, get_plugin_manager
-
-            seen_plugin_commands = set()
-            for cmd_info in discover_plugin_cli_commands():
-                plugin_parser = subparsers.add_parser(
-                    cmd_info["name"],
-                    help=cmd_info["help"],
-                    description=cmd_info.get("description", ""),
-                    formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
-                )
-                cmd_info["setup_fn"](plugin_parser)
-                if cmd_info.get("handler_fn") is not None:
-                    plugin_parser.set_defaults(func=cmd_info["handler_fn"])
-                seen_plugin_commands.add(cmd_info["name"])
-
-            discover_plugins()
-            # A bundled platform whose top-level CLI command is the one being
-            # invoked is still only a deferred entry at this point; import it
-            # so its register_cli_command side effect runs before we read
-            # _cli_commands (issue #54678).
-            _resolve_deferred_platform_cli_command(_first_positional_argv())
-            for cmd_info in get_plugin_manager()._cli_commands.values():
-                if cmd_info["name"] in seen_plugin_commands:
-                    continue
-                plugin_parser = subparsers.add_parser(
-                    cmd_info["name"],
-                    help=cmd_info["help"],
-                    description=cmd_info.get("description", ""),
-                    formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
-                )
-                cmd_info["setup_fn"](plugin_parser)
-                if cmd_info.get("handler_fn") is not None:
-                    plugin_parser.set_defaults(func=cmd_info["handler_fn"])
-        except Exception as _exc:
-            logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
-
-    # =========================================================================
-    # curator command — background skill maintenance
-    # =========================================================================
-    curator_parser = subparsers.add_parser(
-        "curator",
-        help="Background skill maintenance (curator) — status, run, pause, pin",
-        description=(
-            "The curator is an auxiliary-model background task that "
-            "periodically reviews agent-created skills, prunes stale ones, "
-            "consolidates overlaps, and archives obsolete skills. "
-            "Bundled and hub-installed skills are never touched. "
-            "Archives are recoverable; auto-deletion never happens."
-        ),
-    )
-    try:
-        from hermes_cli.curator import register_cli as _register_curator_cli
-
-        _register_curator_cli(curator_parser)
-    except Exception as _exc:
-        logging.getLogger(__name__).debug("curator CLI wiring failed: %s", _exc)
-
-    # =========================================================================
-    # pets command — petdex animated mascots (CLI / TUI / desktop display)
-    # =========================================================================
-    pets_parser = subparsers.add_parser(
-        "pets",
-        help="Browse, install, and select petdex animated pets",
-        description=(
-            "Petdex (https://github.com/crafter-station/petdex) is a public "
-            "gallery of animated sprite pets for coding agents. Install one "
-            "and Hermes shows it reacting to agent activity across the CLI, "
-            "TUI, and desktop app."
-        ),
-    )
-    try:
-        from hermes_cli.pets import register_cli as _register_pets_cli
-
-        _register_pets_cli(pets_parser)
-    except Exception as _exc:
-        logging.getLogger(__name__).debug("pets CLI wiring failed: %s", _exc)
-
-    # =========================================================================
-    # journey command — learned skills + memories over time, in the terminal
-    # =========================================================================
-    journey_parser = subparsers.add_parser(
-        "journey",
-        aliases=["learning", "memory-graph"],
-        help="Timeline of learned skills + memories over time",
-        description=(
-            "A terminal rendition of the desktop Star Map / Memory Graph: a "
-            "timeline bar chart of learned skills and memories over time "
-            "(oldest at top, newest at bottom) plus a playable constellation "
-            "scrubber. Mirrors the TUI `/journey` overlay and the desktop panel."
-        ),
-    )
-    try:
-        from hermes_cli.journey import register_cli as _register_journey_cli
-
-        _register_journey_cli(journey_parser)
-    except Exception as _exc:
-        logging.getLogger(__name__).debug("journey CLI wiring failed: %s", _exc)
-
-    # =========================================================================
-    # memory command  (parser built in hermes_cli/subcommands/memory.py)
-    # =========================================================================
-    build_memory_parser(subparsers, cmd_memory=cmd_memory)
-
-    # =========================================================================
-    # tools command  (parser built in hermes_cli/subcommands/tools.py)
-    # =========================================================================
-    build_tools_parser(subparsers, cmd_tools=cmd_tools)
-
-    # =========================================================================
-    # computer-use command — manage Computer Use (cua-driver)
-    # =========================================================================
-    computer_use_parser = subparsers.add_parser(
-        "computer-use",
-        help="Manage the Computer Use (cua-driver) backend (macOS/Windows/Linux)",
-        description=(
-            "Install or check the cua-driver binary used by the\n"
-            "`computer_use` toolset. Supported on macOS, Windows, and\n"
-            "Linux.\n\n"
-            "Use `hermes computer-use install` to fetch and run the\n"
-            "upstream cua-driver installer. This is equivalent to the\n"
-            "post-setup hook that `hermes tools` runs when you first\n"
-            "enable the Computer Use toolset, and is a stable target\n"
-            "for re-running the install if it didn't fire (e.g. when\n"
-            "toggling the toolset on a returning-user setup).\n\n"
-            "Use `hermes computer-use doctor` to run cua-driver's\n"
-            "`health_report` MCP tool and surface its check matrix\n"
-            "(TCC, bundle identity, version, platform support, ...)\n"
-            "in human-readable form."
-        ),
-    )
-    computer_use_sub = computer_use_parser.add_subparsers(dest="computer_use_action")
-
-    computer_use_install = computer_use_sub.add_parser(
-        "install",
-        help="Install or repair the cua-driver binary (macOS/Windows/Linux)",
-    )
-    computer_use_install.add_argument(
-        "--upgrade",
-        action="store_true",
-        help=(
-            "Re-run the upstream installer even if cua-driver is already on "
-            "PATH. The upstream install.sh always pulls the latest release, "
-            "so this performs an in-place upgrade."
-        ),
-    )
-    computer_use_sub.add_parser(
-        "status",
-        help="Print whether cua-driver is installed and on PATH",
-    )
-    computer_use_doctor = computer_use_sub.add_parser(
-        "doctor",
-        help="Run cua-driver `health_report` and surface the check matrix",
-        description=(
-            "Drive cua-driver's stable `health_report` MCP tool and render\n"
-            "its check matrix (TCC permissions, bundle identity, version,\n"
-            "platform support, screenshot probe, …) as human-readable\n"
-            "output. cua-driver owns the health model; this command stays\n"
-            "thin so new checks added upstream surface here without code\n"
-            "changes. Exits 0 when overall=ok, 1 when degraded/failed, 2\n"
-            "when the binary is missing or unreachable."
-        ),
-    )
-    computer_use_doctor.add_argument(
-        "--include",
-        action="append",
-        default=[],
-        metavar="CHECK",
-        help=(
-            "Run only the listed checks. Repeat for multiple "
-            "(e.g. --include tcc_accessibility --include bundle_identity). "
-            "Unknown names are reported by cua-driver."
-        ),
-    )
-    computer_use_doctor.add_argument(
-        "--skip",
-        action="append",
-        default=[],
-        metavar="CHECK",
-        help="Skip the listed checks. Repeat for multiple. Wins over --include.",
-    )
-    computer_use_doctor.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit the raw structured payload as JSON (same shape as `tools/call`).",
-    )
-    computer_use_perms = computer_use_sub.add_parser(
-        "permissions",
-        help="Check or grant macOS Accessibility + Screen Recording (macOS)",
-        description=(
-            "Computer Use drives the Mac through cua-driver, whose TCC grants\n"
-            "attach to cua-driver's own identity (com.trycua.driver) — not the\n"
-            "terminal or the Hermes app. `status` reports the driver's grant\n"
-            "state; `grant` launches CuaDriver via LaunchServices so the macOS\n"
-            "permission dialog is attributed to the process that does the work."
-        ),
-    )
-    computer_use_perms_sub = computer_use_perms.add_subparsers(
-        dest="computer_use_perms_action"
-    )
-    computer_use_perms_status = computer_use_perms_sub.add_parser(
-        "status",
-        help="Report Accessibility + Screen Recording grant state (read-only)",
-    )
-    computer_use_perms_status.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit the normalized permission payload as JSON.",
-    )
-    computer_use_perms_sub.add_parser(
-        "grant",
-        help="Request the grants (opens the dialog attributed to CuaDriver)",
-    )
-    def cmd_computer_use(args):
-        action = getattr(args, "computer_use_action", None)
-        if action == "install":
-            from hermes_cli.tools_config import (
-                _cua_driver_contract_status,
-                install_cua_driver,
-            )
-            if not install_cua_driver(upgrade=bool(getattr(args, "upgrade", False))):
-                return 1
-            return 0 if _cua_driver_contract_status().get("ready") else 1
-        if action == "status":
-            import os as _os
-            import subprocess
-            from hermes_cli.tools_config import _cua_driver_contract_status
-            from tools.computer_use.cua_backend import (
-                cua_driver_update_check,
-                resolve_cua_driver_cmd,
-            )
-            # Must match the runtime resolver: Desktop/TUI processes can omit
-            # ~/.local/bin even though the official installer put the driver there.
-            path = resolve_cua_driver_cmd()
-            override = _os.environ.get("HERMES_CUA_DRIVER_CMD", "").strip()
-            if path:
-                version = ""
-                try:
-                    from hermes_cli.tools_config import _cua_driver_env
-                    version = subprocess.run(
-                        [path, "--version"],
-                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
-                        env=_cua_driver_env(),
-                    ).stdout.strip()
-                except Exception:
-                    pass
-                from hermes_cli.tools_config import _cua_version_summary
-                version = _cua_version_summary(version)
-                # Name the override here too. Without it the operator is told
-                # to repair an install that `hermes computer-use install` will
-                # (correctly) refuse to touch, with nothing pointing at the
-                # env var that actually selected the binary.
-                origin = " [custom binary from HERMES_CUA_DRIVER_CMD]" if override else ""
-                if version:
-                    print(f"cua-driver: installed at {path}{origin} ({version})")
-                else:
-                    print(f"cua-driver: installed at {path}{origin}")
-                contract = _cua_driver_contract_status(path)
-                if not contract.get("ready"):
-                    print(
-                        "  ⚠ Repair required: "
-                        + (contract.get("reason") or "runtime contract is incomplete")
-                    )
-                    if override:
-                        print(
-                            "    Update the binary selected by HERMES_CUA_DRIVER_CMD, or unset "
-                            "the override and run: hermes computer-use install --upgrade"
-                        )
-                    else:
-                        print("    Run: hermes computer-use install")
-                    return 1
-                try:
-                    st = cua_driver_update_check()
-                    if st and st.get("update_available"):
-                        latest = st.get("latest_version") or "?"
-                        print(f"  ⬆ Update available: cua-driver {latest}.")
-                        print("    Run: hermes computer-use install --upgrade")
-                    elif st:
-                        print("  ✓ Up to date.")
-                    else:
-                        # Older driver (no check-update verb) or offline.
-                        print("  Refresh to latest: hermes computer-use install --upgrade")
-                except Exception:
-                    print("  Refresh to latest: hermes computer-use install --upgrade")
-                return 0
-            print("cua-driver: not installed")
-            print("  Run: hermes computer-use install")
-            return 1
-        if action == "doctor":
-            from tools.computer_use.doctor import run_doctor
-            code = run_doctor(
-                include=list(getattr(args, "include", []) or []),
-                skip=list(getattr(args, "skip", []) or []),
-                json_output=bool(getattr(args, "json", False)),
-            )
-            sys.exit(code)
-        if action == "permissions":
-            perms_action = getattr(args, "computer_use_perms_action", None)
-            if perms_action == "grant":
-                from tools.computer_use.permissions import request_permissions_grant
-                sys.exit(request_permissions_grant())
-            if perms_action == "status":
-                import json as _json
-                from tools.computer_use.permissions import computer_use_status
-                st = computer_use_status()
-                if bool(getattr(args, "json", False)):
-                    print(_json.dumps(st, indent=2, sort_keys=True))
-                    sys.exit(0 if st["ready"] else 1)
-                if not st["platform_supported"]:
-                    print(f"Computer Use is not supported on {st['platform']}.")
-                    sys.exit(1)
-                if not st["installed"]:
-                    print("cua-driver: not installed. Run: hermes computer-use install")
-                    sys.exit(1)
-                glyph = lambda v: "✅" if v is True else ("❌" if v is False else "•")  # noqa: E731
-                print(f"cua-driver: {st['version'] or 'installed'} ({st['platform']})")
-                if st["can_grant"]:  # macOS TCC permissions
-                    print(f"  {glyph(st['accessibility'])} Accessibility")
-                    print(f"  {glyph(st['screen_recording'])} Screen Recording")
-                    if not st["ready"]:
-                        print("  Grant: hermes computer-use permissions grant")
-                else:  # no TCC model — readiness is driver health
-                    print(f"  {glyph(st['ready'])} driver health (no permission toggles on {st['platform']})")
-                for c in st["checks"]:
-                    if c["status"] != "ok":
-                        print(f"  ⚠ {c['label']}: {c['message']}")
-                if st["error"]:
-                    print(f"  ⚠ {st['error']}")
-                sys.exit(0 if st["ready"] else 1)
-            computer_use_perms.print_help()
-            return
-        # No subcommand → show help
-        computer_use_parser.print_help()
-
-    computer_use_parser.set_defaults(func=cmd_computer_use)
-    # =========================================================================
-    # mcp command  (parser built in hermes_cli/subcommands/mcp.py)
-    # =========================================================================
-    build_mcp_parser(subparsers, cmd_mcp=cmd_mcp)
-
-    # =========================================================================
-    # sessions command
-    # =========================================================================
-    sessions_parser = subparsers.add_parser(
-        "sessions",
-        help="Manage session history (list, rename, export, prune, delete)",
-        description="View and manage the SQLite session store",
-    )
-    sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_action")
-
-    sessions_list = sessions_subparsers.add_parser("list", help="List recent sessions")
-    sessions_list.add_argument(
-        "--source", help="Filter by source (cli, telegram, discord, etc.)"
-    )
-    sessions_list.add_argument(
-        "--limit", type=int, default=20, help="Max sessions to show"
-    )
-    sessions_list.add_argument(
-        "--workspace",
-        metavar="NEEDLE",
-        help="Only sessions in one workspace: a git repo root or project dir "
-        "(matched by path substring or basename).",
-    )
-
-    def _add_session_filter_args(p, default_older_help):
-        p.add_argument(
-            "--older-than",
-            metavar="AGE",
-            help=default_older_help,
-        )
-        p.add_argument(
-            "--newer-than",
-            metavar="AGE",
-            help="Only match sessions active within the last AGE "
-            "(e.g. '5h', '2d') or after an ISO timestamp",
-        )
-        p.add_argument(
-            "--before",
-            metavar="TIME",
-            help="Only match sessions started before TIME "
-            "(duration ago like '5h', or ISO timestamp like '2026-07-05 14:30')",
-        )
-        p.add_argument(
-            "--after",
-            metavar="TIME",
-            help="Only match sessions started at/after TIME "
-            "(duration ago like '5h', or ISO timestamp)",
-        )
-        p.add_argument("--source", help="Only match sessions from this source")
-        p.add_argument(
-            "--title", help="Only match sessions whose title contains this substring"
-        )
-        p.add_argument(
-            "--end-reason", help="Only match sessions with this end reason"
-        )
-        p.add_argument(
-            "--cwd", help="Only match sessions whose working directory is under this path"
-        )
-        p.add_argument(
-            "--min-messages", type=int, help="Only match sessions with >= N messages"
-        )
-        p.add_argument(
-            "--max-messages", type=int, help="Only match sessions with <= N messages"
-        )
-        p.add_argument(
-            "--model",
-            help="Only match sessions whose model name contains this substring "
-            "(e.g. 'sonnet', 'gpt-5', 'hermes')",
-        )
-        p.add_argument(
-            "--provider",
-            help="Only match sessions billed through this provider "
-            "(e.g. openrouter, anthropic, nous)",
-        )
-        p.add_argument(
-            "--user", help="Only match sessions from this user ID"
-        )
-        p.add_argument(
-            "--chat-id", help="Only match sessions from this chat/channel ID"
-        )
-        p.add_argument(
-            "--chat-type",
-            help="Only match sessions with this chat type (e.g. dm, group)",
-        )
-        p.add_argument(
-            "--branch",
-            help="Only match sessions whose git branch contains this substring",
-        )
-        p.add_argument(
-            "--min-tokens", type=int,
-            help="Only match sessions with >= N total tokens (input+output)",
-        )
-        p.add_argument(
-            "--max-tokens", type=int,
-            help="Only match sessions with <= N total tokens (input+output)",
-        )
-        p.add_argument(
-            "--min-cost", type=float,
-            help="Only match sessions costing >= N USD (actual or estimated)",
-        )
-        p.add_argument(
-            "--max-cost", type=float,
-            help="Only match sessions costing <= N USD (actual or estimated)",
-        )
-        p.add_argument(
-            "--min-tool-calls", type=int,
-            help="Only match sessions with >= N tool calls",
-        )
-        p.add_argument(
-            "--max-tool-calls", type=int,
-            help="Only match sessions with <= N tool calls",
-        )
-        p.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="List matching sessions without changing anything",
-        )
-        p.add_argument(
-            "--yes", "-y", action="store_true", help="Skip confirmation"
-        )
-
-    sessions_export = sessions_subparsers.add_parser(
-        "export", help="Export sessions to JSONL, Markdown, or QMD"
-    )
-    sessions_export.add_argument(
-        "output",
-        nargs="?",
-        help=(
-            "Output path. JSONL: file path (use - for stdout, required). "
-            "md/qmd: output directory (default: <hermes home>/session-exports)"
-        ),
-    )
-    sessions_export.add_argument(
-        "--format",
-        choices=["jsonl", "md", "qmd", "html", "trace"],
-        default="jsonl",
-        help=(
-            "Export format (default: jsonl). 'trace' emits Claude Code JSONL "
-            "for the Hugging Face Agent Trace Viewer"
-        ),
-    )
-    sessions_export.add_argument(
-        "--upload",
-        action="store_true",
-        help=(
-            "trace only: upload to your Hugging Face traces dataset instead "
-            "of writing a local file (needs HF_TOKEN)"
-        ),
-    )
-    sessions_export.add_argument(
-        "--public",
-        action="store_true",
-        help="trace --upload only: create/update a public dataset instead of private",
-    )
-    sessions_export.add_argument(
-        "--no-redact",
-        action="store_true",
-        help=(
-            "trace only: skip the forced secret redaction; "
-            "only use after manual review"
-        ),
-    )
-    sessions_export.add_argument(
-        "--only",
-        choices=["user-prompts"],
-        help=(
-            "Export only a filtered view (user-prompts: one prompt record "
-            "per line for jsonl, headed sections for md)"
-        ),
-    )
-    sessions_export.add_argument(
-        "--session-id", help="Session ID or unique prefix to export"
-    )
-    _add_session_filter_args(
-        sessions_export,
-        "Only export sessions older than AGE (duration like '5h'/'2d', "
-        "bare number of days, or an ISO timestamp)",
-    )
-    sessions_export.add_argument(
-        "--redact",
-        action="store_true",
-        help="Redact secrets (API keys, tokens, credentials) from exported content",
-    )
-    sessions_export.add_argument(
-        "--lineage",
-        choices=["single", "logical"],
-        default="single",
-        help="md/qmd only: export one row or its compression lineage",
-    )
-    sessions_export.add_argument(
-        "--delete-after-verified",
-        action="store_true",
-        help="md/qmd only: after verified single-session export, delete that session (needs --yes)",
-    )
-    sessions_export.add_argument(
-        "--force",
-        action="store_true",
-        help="md/qmd only: overwrite an existing export file",
-    )
-
-    sessions_delete = sessions_subparsers.add_parser(
-        "delete", help="Delete a specific session"
-    )
-    sessions_delete.add_argument("session_id", help="Session ID to delete")
-    sessions_delete.add_argument(
-        "--yes", "-y", action="store_true", help="Skip confirmation"
-    )
-
-    sessions_prune = sessions_subparsers.add_parser(
-        "prune",
-        help="Delete old sessions (filterable by time window, source, title, ...)",
-    )
-    _add_session_filter_args(
-        sessions_prune,
-        "Delete sessions older than AGE — days if bare number, or a duration "
-        "like '5h'/'2d'/'1w', or an ISO timestamp (bare prune with no filters "
-        "defaults to 90 days; any filter matches all ages)",
-    )
-    sessions_prune.add_argument(
-        "--include-archived",
-        action="store_true",
-        help="Also delete archived sessions (excluded by default)",
-    )
-    sessions_prune.add_argument(
-        "--include-pinned",
-        action="store_true",
-        help="Also delete pinned sessions (excluded by default — pin is a keep flag)",
-    )
-    sessions_prune.add_argument(
-        "--never-active",
-        action="store_true",
-        help=(
-            "Instead of ended sessions, delete keyed gateway rows that were "
-            "opened and never used (no messages, tokens, tool calls or title) "
-            "and are older than AGE (default 30 days). Ordinary prune can "
-            "never reach these — it only ever selects ended sessions"
-        ),
-    )
-
-    sessions_archive = sessions_subparsers.add_parser(
-        "archive",
-        help="Bulk-archive (soft-hide) sessions matching filters — no deletion",
-    )
-    _add_session_filter_args(
-        sessions_archive,
-        "Only archive sessions older than AGE (duration like '5h'/'2d', "
-        "bare number of days, or ISO timestamp)",
-    )
-
-    sessions_subparsers.add_parser(
-        "optimize",
-        help="Reclaim disk space: merge FTS5 segments + VACUUM (no data change)",
-    )
-
-    sessions_clean_markers = sessions_subparsers.add_parser(
-        "clean-markers",
-        help="Permanently clear stale tool-call marker content left by sessions from before #78148",
-        description=(
-            "Before the #78148 fix, a local tool-call template could persist a "
-            "bare bracketed marker (e.g. \"[memory]\") as an assistant turn's "
-            "content instead of real text. This is already repaired in memory "
-            "on every session load, so running this is optional — it rewrites "
-            "the affected rows once, in place, so long-lived sessions stop "
-            "re-scanning/re-repairing the same rows on every resume. Only the "
-            "content column is touched; tool_calls and every other column on "
-            "the row are left untouched."
-        ),
-    )
-    sessions_clean_markers.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=False,
-        help="Report the affected row count without writing",
-    )
-    sessions_clean_markers.add_argument(
-        "--no-backup",
-        action="store_true",
-        default=False,
-        help="Skip the timestamped state.db backup taken before writing (not recommended)",
-    )
-
-    sessions_optimize_storage = sessions_subparsers.add_parser(
-        "optimize-storage",
-        help="Migrate the search index to the compact v23 layout (reclaims disk on large DBs)",
-        description=(
-            "Rebuild the full-text search index in the compact v23 "
-            "external-content layout. On large databases this reclaims a "
-            "large fraction of state.db (the old layout stored duplicate "
-            "copies of every message and indexed tool output). Runs "
-            "foreground with a progress bar, throttles so a running gateway "
-            "stays responsive, and VACUUMs at the end. Safe to interrupt and "
-            "re-run — it resumes where it left off. No conversation data is "
-            "changed; only the search index is rebuilt."
-        ),
-    )
-    sessions_optimize_storage.add_argument(
-        "--no-vacuum",
-        action="store_true",
-        default=False,
-        help="Skip the final VACUUM (index is rebuilt but freed pages aren't returned to the OS until a later VACUUM)",
-    )
-    sessions_optimize_storage.add_argument(
-        "--yes", "-y",
-        action="store_true",
-        default=False,
-        help="Skip the disk-space confirmation prompt",
-    )
-
-    sessions_repair = sessions_subparsers.add_parser(
-        "repair",
-        help="Repair a malformed state.db schema so hidden sessions reappear",
-        description=(
-            "Recover a state.db whose schema is malformed (e.g. 'table "
-            "messages_fts already exists'), which makes Desktop/Dashboard show "
-            "no sessions. A backup is made first; sessions and messages are "
-            "preserved and the FTS search index is rebuilt if needed."
-        ),
-    )
-    sessions_repair.add_argument(
-        "--check-only",
-        action="store_true",
-        help="Only report whether the database opens cleanly; do not modify it",
-    )
-    sessions_repair.add_argument(
-        "--no-backup",
-        action="store_true",
-        help="Skip the timestamped backup copy (not recommended)",
-    )
-
-    sessions_repair_routing = sessions_subparsers.add_parser(
-        "repair-routing",
-        help="Re-stamp gateway sessions that lost their routing identity",
-        description=(
-            "Find gateway conversations stranded in session rows whose "
-            "routing identity (session_key/chat_id/origin) was never "
-            "written — the damage a corrupt state.db write path leaves "
-            "behind (#82616). Such a row is invisible to restart recovery, "
-            "so the chat resumes an older session instead. Re-stamps each "
-            "orphan from the keyed predecessor it continues, and only when "
-            "that predecessor is unambiguous. Reports without touching the "
-            "database unless --apply is given."
-        ),
-    )
-    sessions_repair_routing.add_argument(
-        "--apply",
-        action="store_true",
-        help="Perform the adoptions (default: report only)",
-    )
-    sessions_repair_routing.add_argument(
-        "--max-gap-seconds",
-        type=float,
-        default=None,
-        help=(
-            "Window between a keyed predecessor's last activity and an "
-            "orphan's start for them to count as the same conversation "
-            "(default: 900)"
-        ),
-    )
-
-    sessions_recover = sessions_subparsers.add_parser(
-        "recover",
-        help="Rebuild canonical session data into a separate clean database",
-        description=(
-            "Offline, non-destructive recovery for a damaged state.db. The "
-            "source database and its WAL/SHM/rollback-journal sidecars are "
-            "copied before SQLite opens anything. Canonical rows are rebuilt "
-            "into a new output database; derived search indexes are recreated "
-            "and the active database is never replaced automatically."
-        ),
-    )
-    sessions_recover.add_argument(
-        "--source",
-        type=Path,
-        required=True,
-        help="Source state.db or preserved backup to inspect/recover",
-    )
-    sessions_recover.add_argument(
-        "--output",
-        type=Path,
-        help="New recovery database path (required unless --inspect-only)",
-    )
-    sessions_recover.add_argument(
-        "--inspect-only",
-        action="store_true",
-        help="Only report canonical table readability; do not create an output database",
-    )
-    sessions_recover.add_argument(
-        "--work-dir",
-        type=Path,
-        help="Existing directory for the disposable source copy (defaults beside the output)",
-    )
-    sessions_recover.add_argument(
-        "--chunk-size",
-        type=int,
-        default=1000,
-        help="Rows committed per recovery batch (default: 1000)",
-    )
-    sessions_recover.add_argument(
-        "--allow-partial",
-        action="store_true",
-        help=(
-            "Best-effort salvage across damaged row ranges; the output remains "
-            "separate and every skipped range is recorded"
-        ),
-    )
-    sessions_recover.add_argument(
-        "--report",
-        type=Path,
-        help="JSON report path (defaults to <output>.recovery.json)",
-    )
-
-    sessions_subparsers.add_parser("stats", help="Show session store statistics")
-
-    sessions_rename = sessions_subparsers.add_parser(
-        "rename", help="Set or change a session's title"
-    )
-    sessions_rename.add_argument("session_id", help="Session ID to rename")
-    sessions_rename.add_argument("title", nargs="+", help="New title for the session")
-
-    sessions_pin = sessions_subparsers.add_parser(
-        "pin",
-        help="Pin session(s) — durable keep flag, exempt from auto-archive",
-        description=(
-            "Set the durable 'keep' flag on one or more sessions. Pinned "
-            "sessions are exempt from the sessions.auto_archive stale sweep "
-            "and always appear in listings. The same flag drives the Desktop "
-            "sidebar's Pinned section — pin from either surface, both see it."
-        ),
-    )
-    sessions_pin.add_argument(
-        "session_ids", nargs="+", help="Session ID(s) or unique prefix(es) to pin"
-    )
-
-    sessions_unpin = sessions_subparsers.add_parser(
-        "unpin", help="Remove the pin (durable keep flag) from session(s)"
-    )
-    sessions_unpin.add_argument(
-        "session_ids", nargs="+", help="Session ID(s) or unique prefix(es) to unpin"
-    )
-
-    sessions_pinned = sessions_subparsers.add_parser(
-        "pinned", help="List pinned sessions"
-    )
-    sessions_pinned.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit machine-readable JSON (for backup/restore scripting)",
-    )
-
-    sessions_retitle = sessions_subparsers.add_parser(
-        "retitle-skills",
-        help="Re-title sessions whose auto-title came from a /skill's own text",
-        description=(
-            "Sessions opened with a /skill were auto-titled from the expanded "
-            "message, which embeds the whole skill body — so the title "
-            "describes the SKILL, not the request. This regenerates those "
-            "titles from what the user actually typed. Lists what it would "
-            "change unless --apply is passed."
-        ),
-    )
-    sessions_retitle.add_argument(
-        "--apply",
-        action="store_true",
-        help="Write the new titles (default: dry run)",
-    )
-    sessions_retitle.add_argument(
-        "--limit",
-        type=int,
-        default=200,
-        help="Maximum sessions to examine (default: 200)",
-    )
-
-    sessions_browse = sessions_subparsers.add_parser(
-        "browse",
-        help="Interactive session picker — browse, search, and resume sessions",
-    )
-    sessions_browse.add_argument(
-        "--source", help="Filter by source (cli, telegram, discord, etc.)"
-    )
-    sessions_browse.add_argument(
-        "--limit", type=int, default=500, help="Max sessions to load (default: 500)"
-    )
-
-    sessions_import = sessions_subparsers.add_parser(
-        "import",
-        help="Import a Claude Code or Codex CLI session into Hermes",
-        description=(
-            "Pull a conversation started in Claude Code (~/.claude/projects) "
-            "or Codex CLI (~/.codex/sessions) into the Hermes session store "
-            "so it can be resumed with 'hermes --resume <id>'. The foreign "
-            "files are only read, never modified."
-        ),
-    )
-    sessions_import.add_argument(
-        "--from",
-        dest="from_source",
-        choices=["claude", "codex"],
-        help="Which tool to import from (default: pick across both)",
-    )
-    sessions_import.add_argument(
-        "path",
-        nargs="?",
-        help="Path to a specific session JSONL file (skips the picker)",
-    )
-
-
-    # cmd_sessions lives in hermes_cli/sessions_cmd.py (main.py decomposition).
-    # sessions_parser is threaded in via functools.partial because the
-    # fallthrough branch calls sessions_parser.print_help() (formerly a
-    # closure capture of this main()-local). The indirection through _self()
-    # keeps the sessions_cmd import lazy until the subcommand actually runs
-    # and lets monkeypatches on hermes_cli.main.cmd_sessions keep working.
-    def _dispatch_sessions(_args, *, sessions_parser=sessions_parser):
-        return _self().cmd_sessions(_args, sessions_parser=sessions_parser)
-
-    sessions_parser.set_defaults(func=_dispatch_sessions)
-
-    # =========================================================================
-    # insights command  (parser built in hermes_cli/subcommands/insights.py)
-    # =========================================================================
-    build_insights_parser(subparsers, cmd_insights=cmd_insights)
-    build_monitoring_parser(subparsers, cmd_monitoring=cmd_monitoring)
-
-    # =========================================================================
-    # claw command  (parser built in hermes_cli/subcommands/claw.py)
-    # =========================================================================
-    build_claw_parser(subparsers, cmd_claw=cmd_claw)
-
-    # NOTE: the `hermes version` subcommand was removed — `hermes --version`
-    # / `-V` now carries the full output including update status.
-
-    # =========================================================================
-    # update command  (parser built in hermes_cli/subcommands/update.py)
-    # =========================================================================
-    build_update_parser(subparsers, cmd_update=cmd_update)
-
-    # =========================================================================
-    # uninstall command  (parser built in hermes_cli/subcommands/uninstall.py)
-    # =========================================================================
-    build_uninstall_parser(subparsers, cmd_uninstall=cmd_uninstall)
-
-    # =========================================================================
-    # acp command  (parser built in hermes_cli/subcommands/acp.py)
-    # =========================================================================
-    build_acp_parser(subparsers, cmd_acp=cmd_acp)
-
-    # =========================================================================
-    # profile command  (parser built in hermes_cli/subcommands/profile.py)
-    # =========================================================================
-    build_profile_parser(subparsers, cmd_profile=cmd_profile)
-
-    # =========================================================================
-    # completion command
-    # =========================================================================
-    completion_parser = subparsers.add_parser(
-        "completion",
-        help="Print shell completion script (bash, zsh, or fish)",
-    )
-    completion_parser.add_argument(
-        "shell",
-        nargs="?",
-        default="bash",
-        choices=["bash", "zsh", "fish"],
-        help="Shell type (default: bash)",
-    )
-    completion_parser.set_defaults(func=lambda args: cmd_completion(args, parser))
-
-    # =========================================================================
-    # dashboard command  (parser built in hermes_cli/subcommands/dashboard.py)
-    # =========================================================================
-    build_dashboard_parser(
-        subparsers,
-        cmd_dashboard=cmd_dashboard,
-        cmd_dashboard_register=cmd_dashboard_register,
-    )
-
-
-    # =========================================================================
-    # desktop (a.k.a. gui) command
-    #
-    # The canonical name is "desktop"; "gui" is kept as a deprecated alias
-    # for one release. The Hermes-Setup.exe success screen tells users to
-    # run `hermes desktop` from a terminal, so the canonical name needs
-    # to be the one that appears in --help (argparse promotes the primary
-    # name; aliases stay hidden).
-    # =========================================================================
-    # gui command  (parser built in hermes_cli/subcommands/gui.py)
-    # =========================================================================
-    build_gui_parser(subparsers, cmd_gui=cmd_gui)
-
-    # =========================================================================
-    # logs command  (parser built in hermes_cli/subcommands/logs.py)
-    # =========================================================================
-    build_logs_parser(subparsers, cmd_logs=cmd_logs)
-
-    # =========================================================================
-    # prompt-size command  (parser built in hermes_cli/subcommands/prompt_size.py)
-    # =========================================================================
-    build_prompt_size_parser(subparsers, cmd_prompt_size=cmd_prompt_size)
-
-    # =========================================================================
-    # Parse and execute
-    # =========================================================================
-    # Pre-process argv so unquoted multi-word session names after -c / -r
-    # are merged into a single token before argparse sees them.
-    # e.g. ``hermes -c Pokemon Agent Dev`` → ``hermes -c 'Pokemon Agent Dev'``
     # ── Container-aware routing ────────────────────────────────────────
     # When NixOS container mode is active, route ALL subcommands into
     # the managed container.  This MUST run before parse_args() so that
@@ -15055,50 +12665,8 @@ def main():
         # and raises OSError on failure (which propagates as a traceback).
         sys.exit(1)
 
-    _processed_argv = _coalesce_session_name_args(sys.argv[1:])
+    args = _parse_cli_args(parser, subparsers, sys.argv[1:])
 
-    # ── Defensive subparser routing (bpo-9338 workaround) ───────────
-    # On some Python versions (notably <3.11), argparse fails to route
-    # subcommand tokens when the parent parser has nargs='?' optional
-    # arguments (--continue).  The symptom: "unrecognized arguments: model"
-    # even though 'model' is a registered subcommand.
-    #
-    # Fix: when argv contains a token matching a known subcommand, set
-    # subparsers.required=True to force deterministic routing.  If that
-    # fails (e.g. 'hermes -c model' where 'model' is consumed as the
-    # session name for --continue), fall back to the default behaviour.
-    import io as _io
-
-    _known_cmds = (
-        set(subparsers.choices.keys()) if hasattr(subparsers, "choices") else set()
-    )
-    _has_cmd_token = any(
-        t in _known_cmds for t in _processed_argv if not t.startswith("-")
-    )
-
-    if _has_cmd_token:
-        subparsers.required = True
-        _saved_stderr = sys.stderr
-        try:
-            sys.stderr = _io.StringIO()
-            args = parser.parse_args(_processed_argv)
-            sys.stderr = _saved_stderr
-        except SystemExit as exc:
-            sys.stderr = _saved_stderr
-            # Help/version flags (exit code 0) already printed output —
-            # re-raise immediately to avoid a second parse_args printing
-            # the same help text again (#10230).
-            if exc.code == 0:
-                raise
-            # Subcommand name was consumed as a flag value (e.g. -c model).
-            # Fall back to optional subparsers so argparse handles it normally.
-            subparsers.required = False
-            args = parser.parse_args(_processed_argv)
-    else:
-        subparsers.required = False
-        args = parser.parse_args(_processed_argv)
-
-    # Handle --version flag
     if args.version:
         cmd_version(args)
         return
@@ -15119,50 +12687,12 @@ def main():
     # trigger consent prompts for hooks the user is still inspecting.
     _prepare_agent_startup(args)
 
-    # Handle top-level --oneshot / -z: single-shot mode, stdout = final
-    # response only, nothing else. Bypasses cli.py entirely.
     if getattr(args, "oneshot", None):
-        _confirm_startup_expensive_model_override(args)
-        _run_and_exit_oneshot(
-            args.oneshot,
-            model=getattr(args, "model", None),
-            provider=getattr(args, "provider", None),
-            toolsets=getattr(args, "toolsets", None),
-            skills=getattr(args, "skills", None),
-            usage_file=getattr(args, "usage_file", None),
-        )
+        _run_oneshot_from_args(args)
 
-    # Handle top-level --resume / --continue as shortcut to chat
-    if (args.resume or args.continue_last) and args.command is None:
-        args.command = "chat"
-        for attr, default in [
-            ("query", None),
-            ("model", None),
-            ("provider", None),
-            ("toolsets", None),
-            ("verbose", None),
-            ("worktree", False),
-        ]:
-            if not hasattr(args, attr):
-                setattr(args, attr, default)
-        cmd_chat(args)
-        return
-
-    # Default to chat if no command specified
+    # No subcommand (optionally with top-level --resume / --continue) → chat.
     if args.command is None:
-        for attr, default in [
-            ("query", None),
-            ("model", None),
-            ("provider", None),
-            ("toolsets", None),
-            ("verbose", None),
-            ("resume", None),
-            ("continue_last", None),
-            ("worktree", False),
-        ]:
-            if not hasattr(args, attr):
-                setattr(args, attr, default)
-        cmd_chat(args)
+        _default_to_chat(args)
         return
 
     # Execute the command.  Propagate the handler's return code as the
