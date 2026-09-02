@@ -1,8 +1,11 @@
 """
 Hermes Agent — Web UI server.
 
-Provides a FastAPI backend serving the Vite/React frontend and REST API
-endpoints for managing configuration, environment variables, and sessions.
+FastAPI app construction for the dashboard: lifespan, auth/host middleware,
+router mounting (``hermes_cli.web_routers``) and ``start_server``.  Route
+handlers live in ``web_routers/``; the helpers they call live in the sibling
+``web_server_<concern>`` modules and are re-imported here so
+``web_server.<name>`` stays the single late-binding seam tests monkeypatch.
 
 Usage:
     python -m hermes_cli.main web          # Start on http://127.0.0.1:9119
@@ -884,12 +887,14 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
     path = request.url.path
     is_mcp_oauth_callback = path.startswith("/api/mcp/oauth/callback/")
-    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not is_mcp_oauth_callback:
-        if not _has_valid_session_token(request) and not _has_valid_query_token(request, path):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Unauthorized"},
-            )
+    if (
+        path.startswith("/api/")
+        and path not in _PUBLIC_API_PATHS
+        and not is_mcp_oauth_callback
+        and not _has_valid_session_token(request)
+        and not _has_valid_query_token(request, path)
+    ):
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     return await call_next(request)
 
 
@@ -1844,11 +1849,11 @@ _dashboard_plugins_cache: Optional[list] = None
 
 def _get_dashboard_plugins(force_rescan: bool = False) -> list:
     global _dashboard_plugins_cache
-    if _dashboard_plugins_cache is None or force_rescan:
+    stale = _dashboard_plugins_cache is None or force_rescan or any(
+        not Path(p["_dir"]).is_dir() for p in _dashboard_plugins_cache
+    )
+    if stale:
         _dashboard_plugins_cache = _discover_dashboard_plugins()
-    elif _dashboard_plugins_cache:
-        if any(not Path(p["_dir"]).is_dir() for p in _dashboard_plugins_cache):
-            _dashboard_plugins_cache = _discover_dashboard_plugins()
     return _dashboard_plugins_cache
 
 
