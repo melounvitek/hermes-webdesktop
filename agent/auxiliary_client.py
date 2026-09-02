@@ -30,7 +30,6 @@ fall through to the next provider in the chain.
 
 import contextlib
 import contextvars
-import copy
 import functools
 import hashlib
 import inspect
@@ -5517,21 +5516,6 @@ def _try_main_fallback_chain(
     return None, None, ""
 
 
-def _resolve_single_provider(
-    provider: str,
-    model: Optional[str] = None,
-    base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
-) -> Optional[Any]:
-    """Resolve a single fallback_chain provider entry to an OpenAI client via resolve_provider_client."""
-    client, resolved_model = resolve_provider_client(
-        provider=provider,
-        model=model,
-        explicit_base_url=base_url,
-        explicit_api_key=api_key,
-    )
-    return client
-
 def _resolve_auto_route(
     main_runtime: Optional[Dict[str, Any]] = None,
     task: Optional[str] = None,
@@ -6627,23 +6611,6 @@ def get_text_auxiliary_client(
     return resolve_provider_client(
         provider,
         model=model,
-        explicit_base_url=base_url,
-        explicit_api_key=api_key,
-        api_mode=api_mode,
-        main_runtime=main_runtime,
-    )
-
-
-def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Dict[str, Any]] = None):
-    """Return (async_client, model_slug); Codex yields an AsyncCodexAuxiliaryClient wrapper.
-
-    Returns (None, None) when no provider is available.
-    """
-    provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
-    return resolve_provider_client(
-        provider,
-        model=model,
-        async_mode=True,
         explicit_base_url=base_url,
         explicit_api_key=api_key,
         api_mode=api_mode,
@@ -8317,19 +8284,6 @@ def _client_streams_internally(client: Any) -> bool:
         AnthropicAuxiliaryClient,
         BedrockAuxiliaryClient,
     ))
-
-
-def _is_streaming_rejected_error(exc: Exception) -> bool:
-    """Provider explicitly refused a streamed chat.completions request."""
-    err = str(exc).lower()
-    if "stream_options" in err:
-        return True
-    return "stream" in err and (
-        "not supported" in err
-        or "unsupported" in err
-        or "not allowed" in err
-        or "disabled" in err
-    )
 
 
 _MANAGED_LOCAL_STATE_TTL_S = 15.0

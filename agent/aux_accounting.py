@@ -63,11 +63,6 @@ def reset_accounting_context(token) -> None:
         _accounting.set(None)
 
 
-def get_accounting_context() -> Optional[tuple]:
-    """Return ``(session_db, session_id)`` for the active turn, or ``None``."""
-    return _accounting.get()
-
-
 def record_aux_usage(
     response: Any,
     task: Optional[str],
