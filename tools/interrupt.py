@@ -1,12 +1,10 @@
 """Per-thread interrupt signaling for all tools.
 
-Provides thread-scoped interrupt tracking so that interrupting one agent
-session does not kill tools running in other sessions.  This is critical
-in the gateway where multiple agents run concurrently in the same process.
-
-The agent stores its execution thread ID at the start of run_conversation()
-and passes it to set_interrupt()/clear_interrupt().  Tools call
-is_interrupted() which checks the CURRENT thread — no argument needed.
+Thread-scoped interrupt tracking so that interrupting one agent session does
+not kill tools running in other sessions — critical in the gateway where
+multiple agents run concurrently in one process.  The agent stores its
+execution thread ID at the start of run_conversation() and passes it to
+set_interrupt(); tools call is_interrupted(), which checks the CURRENT thread.
 
 Usage in tools:
     from tools.interrupt import is_interrupted
@@ -21,19 +19,17 @@ import threading
 logger = logging.getLogger(__name__)
 
 # Opt-in debug tracing — pairs with HERMES_DEBUG_INTERRUPT in
-# tools/environments/base.py.  Enables per-call logging of set/check so the
-# caller thread, target thread, and current state are visible when
-# diagnosing "interrupt signaled but tool never saw it" reports.
+# tools/environments/base.py.  Logs caller thread, target thread, and current
+# state per set/check for "interrupt signaled but tool never saw it" reports.
 _DEBUG_INTERRUPT = bool(os.getenv("HERMES_DEBUG_INTERRUPT"))
 
 if _DEBUG_INTERRUPT:
-    # AIAgent's quiet_mode path forces `tools` logger to ERROR on CLI startup.
-    # Force our own logger back to INFO so the trace is visible in agent.log.
+    # AIAgent's quiet_mode path forces the `tools` logger to ERROR on CLI
+    # startup; force ours back to INFO so the trace is visible in agent.log.
     logger.setLevel(logging.INFO)
 
-# Set of thread idents that have been interrupted, plus an optional
-# user-safe cause for each signal. The cause deliberately does not contain an
-# incoming user's message text.
+# Interrupted thread idents, plus an optional user-safe cause per signal.  The
+# cause deliberately never contains an incoming user's message text.
 _interrupted_threads: set[int] = set()
 _interrupt_reasons: dict[int, str] = {}
 _lock = threading.Lock()
@@ -45,14 +41,9 @@ def set_interrupt(
     *,
     reason: str | None = None,
 ) -> None:
-    """Set or clear interrupt for a specific thread.
-
-    Args:
-        active: True to signal interrupt, False to clear it.
-        thread_id: Target thread ident.  When None, targets the
-                   current thread (backward compat for CLI/tests).
-        reason: Optional user-safe cause for the interrupt.
-    """
+    """Set (``active=True``) or clear the interrupt for *thread_id*, defaulting
+    to the current thread (backward compat for CLI/tests).  ``reason`` is an
+    optional user-safe cause."""
     tid = thread_id if thread_id is not None else threading.current_thread().ident
     with _lock:
         if active:
@@ -74,20 +65,16 @@ def set_interrupt(
 
 
 def is_interrupted() -> bool:
-    """Check if an interrupt has been requested for the current thread.
-
-    Safe to call from any thread — each thread only sees its own
-    interrupt state.
-    """
+    """Check if an interrupt has been requested for the current thread."""
     return is_thread_interrupted(threading.current_thread().ident)
 
 
 def is_thread_interrupted(thread_id: int | None) -> bool:
-    """Check whether *thread_id* has an interrupt bit set.
+    """Check whether *thread_id* has an interrupt bit set (``None`` never is).
 
     Used when a wait is moved onto a deadline worker (``run_bounded_sync``)
     so ``/stop`` targeting the original tool-worker tid still kills the
-    subprocess (#94285). ``None`` is never interrupted.
+    subprocess.
     """
     if thread_id is None:
         return False
@@ -114,16 +101,14 @@ def clear_current_thread_interrupt() -> None:
     the executor's poll loop.  Call this directly, never via the
     _interrupt_event proxy (its .clear() binds to whatever thread runs it).
     """
-    set_interrupt(False)  # thread_id=None -> current thread (see set_interrupt)
+    set_interrupt(False)  # thread_id=None -> current thread
 
 
 # ---------------------------------------------------------------------------
-# Backward-compatible _interrupt_event proxy
+# Backward-compatible _interrupt_event proxy: legacy call sites
+# (code_execution_tool, process_registry, tests) import it and call
+# .is_set() / .set() / .clear(); the shim maps those to the per-thread API.
 # ---------------------------------------------------------------------------
-# Some legacy call sites (code_execution_tool, process_registry, tests)
-# import _interrupt_event directly and call .is_set() / .set() / .clear().
-# This shim maps those calls to the per-thread functions above so existing
-# code keeps working while the underlying mechanism is thread-scoped.
 
 class _ThreadAwareEventProxy:
     """Drop-in proxy that maps threading.Event methods to per-thread state."""

@@ -1,18 +1,13 @@
 """Shared interpreter-shutdown detection.
 
-Single home for the "is the Python interpreter finalizing?" predicate used
-by every subsystem whose background threads can outlive process teardown
-(cron delivery, concurrent tool submission, the conversation loop's retry
-path, background review forks).
-
-Once finalization starts, ``concurrent.futures`` refuses new work with
-``RuntimeError: cannot schedule new futures after interpreter shutdown`` and
-asyncio's default executor is gone — *any* further attempt to schedule work
-(an API retry, a thread-pool submit, ``asyncio.run``) is doomed and only
-produces noise: stray ``❌`` prints after the TUI exited, tracebacks in
-``errors.log``, and futile retry loops that burn iterations against a dying
-process (#55924, #58720, and the CLI-exit retry spam this module was
-extracted for).
+Single home for the "is the Python interpreter finalizing?" predicate used by
+every subsystem whose background threads can outlive process teardown (cron
+delivery, concurrent tool submission, the conversation loop's retry path,
+background review forks).  Once finalization starts, ``concurrent.futures``
+refuses new work and asyncio's default executor is gone — any further attempt
+to schedule work (an API retry, a pool submit, ``asyncio.run``) is doomed and
+only produces noise: stray ``❌`` prints after the TUI exited, tracebacks in
+``errors.log``, and futile retry loops against a dying process.
 
 CPython emits two message variants depending on the failing site:
 
@@ -22,15 +17,10 @@ CPython emits two message variants depending on the failing site:
 - ``cannot schedule new futures after shutdown`` — a plain
   ``ThreadPoolExecutor`` whose ``shutdown()`` ran.
 
-The common short prefix catches both. Matching the second variant is safe
+The common short prefix catches both.  Matching the second variant is safe
 for shutdown detection at every current call site: the pools involved are
 either module-global daemons or ``with``-scoped locals that cannot be shut
 down mid-use by anything except interpreter finalization.
-
-Historically this predicate existed at three sites, each fixed
-independently as its own incident — ``cron/scheduler.py`` (#55924/#58720),
-``agent/tool_executor.py``, and nothing at all in the conversation loop's
-outer retry handler (the CLI-exit spam). One predicate, all sites.
 """
 
 from __future__ import annotations
