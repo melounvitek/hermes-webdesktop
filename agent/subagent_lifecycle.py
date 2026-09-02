@@ -1,8 +1,7 @@
 """Public, plugin-safe lifecycle API for delegated Hermes subagents.
 
-This module deliberately exposes immutable contracts, not ``AIAgent`` objects.
-It is the supported boundary for plugins that need to supervise fresh child
-sessions; plugins must obtain it from ``PluginContext.subagent_lifecycle``.
+Exposes immutable contracts, not ``AIAgent`` objects; plugins obtain it via
+``PluginContext.subagent_lifecycle``.
 """
 
 from __future__ import annotations
@@ -157,9 +156,7 @@ class _Registry:
 
 
 _REGISTRY = _Registry()
-# Daemon worker pool: a wedged/abandoned child must never block interpreter
-# exit at atexit-join time (same rationale as _run_single_child's timeout
-# executor and the async-delegation registry pool).
+# Daemon pool: a wedged/abandoned child must never block interpreter exit.
 from tools.daemon_pool import DaemonThreadPoolExecutor as _DaemonExecutor
 
 _EXECUTOR = _DaemonExecutor(max_workers=8, thread_name_prefix="hermes-lifecycle")
@@ -184,12 +181,52 @@ def get_active_subagent_parent() -> Any:
     return _ACTIVE_PARENT_AGENT.get()
 
 
+def _opt_str(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _finite_number(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+
+
+# Per-field shape check applied to a (possibly deserialized) handle before trusting it.
+_HANDLE_FIELD_CHECKS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
+    ("contract_version", lambda v: type(v) is int and v == PUBLIC_CONTRACT_VERSION),
+    ("subagent_id", lambda v: isinstance(v, str) and bool(v)),
+    ("parent_session_id", _opt_str),
+    ("correlation_id", _opt_str),
+    ("created_at", _finite_number),
+    ("provider", _opt_str),
+    ("model", _opt_str),
+    ("role", lambda v: isinstance(v, str)),
+    ("depth", lambda v: type(v) is int),
+    ("capability", lambda v: isinstance(v, str)),
+)
+
+
+# Launch-request fields the public contract deliberately rejects: (predicate, error).
+_UNSUPPORTED_REQUEST_FIELDS: tuple[tuple[Callable[[SubagentLaunchRequest], bool], str], ...] = (
+    (lambda r: r.timeout_seconds is not None,
+     "Per-launch timeout is not supported; configure delegation timeout explicitly."),
+    (lambda r: r.working_directory is not None,
+     "working_directory is not supported because Hermes delegates use isolated task environments."),
+    (lambda r: bool(r.blocked_tools),
+     "Per-tool blocking is not supported; use allowed_toolsets. Hermes always blocks unsafe child tools."),
+)
+
+
+def _handle_is_well_formed(handle: Any) -> bool:
+    return isinstance(handle, SubagentHandle) and all(
+        check(getattr(handle, field)) for field, check in _HANDLE_FIELD_CHECKS
+    )
+
+
 class SubagentLifecycleService:
     """Stable public service returned by :attr:`PluginContext.subagent_lifecycle`.
 
-    Running children are in-process only.  Completed results remain available
-    until process exit; ``reconnect`` accurately reports that a serialized
-    handle cannot reconnect after a restart instead of launching work again.
+    Running children are in-process only. Completed results remain available
+    until process exit; ``reconnect`` reports that a serialized handle cannot
+    reconnect after a restart instead of launching work again.
     """
 
     def __init__(self, parent_agent_resolver: Callable[[], Any]) -> None:
@@ -198,37 +235,26 @@ class SubagentLifecycleService:
     def launch(self, request: SubagentLaunchRequest) -> SubagentHandle:
         parent = self._parent_agent_resolver()
         if parent is None:
-            raise SubagentLifecycleError(
-                "No active Hermes parent session is available."
-            )
+            raise SubagentLifecycleError("No active Hermes parent session is available.")
         self._validate_request(request, parent)
         parent_session_id = str(getattr(parent, "session_id", "") or "") or None
         if request.parent_session_id and request.parent_session_id != parent_session_id:
-            raise SubagentLifecycleError(
-                "parent_session_id does not match the active session."
-            )
+            raise SubagentLifecycleError("parent_session_id does not match the active session.")
         correlation_key = (parent_session_id, request.correlation_id or "")
         with _REGISTRY.lock:
             self._cleanup_locked()
             if request.correlation_id and correlation_key in _REGISTRY.correlations:
-                raise SubagentLifecycleError(
-                    "Duplicate correlation_id for this parent session."
-                )
+                raise SubagentLifecycleError("Duplicate correlation_id for this parent session.")
 
-        # Delegate construction remains internal so plugin code never imports
-        # private delegation helpers or manipulates the active-child registry.
-        from tools.delegate_tool import (
-            _build_child_preserving_parent_tools,
-            DEFAULT_MAX_ITERATIONS,
-        )
+        # Delegate construction stays internal so plugin code never imports
+        # private delegation helpers or touches the active-child registry.
+        from tools.delegate_tool import _build_child_preserving_parent_tools, DEFAULT_MAX_ITERATIONS
 
         child = _build_child_preserving_parent_tools(
             task_index=0,
             goal=request.goal,
             context=request.context,
-            toolsets=list(request.allowed_toolsets)
-            if request.allowed_toolsets
-            else None,
+            toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
             model=request.model,
             max_iterations=DEFAULT_MAX_ITERATIONS,
             task_count=1,
@@ -262,20 +288,14 @@ class SubagentLifecycleService:
     def status(self, handle: SubagentHandle) -> SubagentStatus:
         record = self._record(handle)
         if record is None:
-            return SubagentStatus(
-                handle, SubagentState.UNKNOWN, time.time(), "UNKNOWN_HANDLE"
-            )
+            return SubagentStatus(handle, SubagentState.UNKNOWN, time.time(), "UNKNOWN_HANDLE")
         with _REGISTRY.lock:
             return SubagentStatus(record.handle, record.state, record.updated_at)
 
-    def wait(
-        self, handle: SubagentHandle, *, timeout_seconds: Optional[float] = None
-    ) -> SubagentTerminalState:
+    def wait(self, handle: SubagentHandle, *, timeout_seconds: Optional[float] = None) -> SubagentTerminalState:
         record = self._record(handle)
         if record is None:
-            return SubagentTerminalState(
-                handle, SubagentState.UNKNOWN, True, diagnostic="UNKNOWN_HANDLE"
-            )
+            return SubagentTerminalState(handle, SubagentState.UNKNOWN, True, diagnostic="UNKNOWN_HANDLE")
         future = record.future
         if future is not None:
             try:
@@ -285,9 +305,7 @@ class SubagentLifecycleService:
             except Exception:
                 pass
         with _REGISTRY.lock:
-            return SubagentTerminalState(
-                record.handle, record.state, record.result is not None
-            )
+            return SubagentTerminalState(record.handle, record.state, record.result is not None)
 
     def cancel(self, handle: SubagentHandle, *, reason: str) -> SubagentCancelResult:
         record = self._record(handle)
@@ -295,16 +313,13 @@ class SubagentLifecycleService:
             return SubagentCancelResult(False, unknown_handle=True)
         with _REGISTRY.lock:
             if record.result is not None:
-                return SubagentCancelResult(
-                    False, already_terminal=True, state=record.state
-                )
+                return SubagentCancelResult(False, already_terminal=True, state=record.state)
             agent = record.agent
             record.state = SubagentState.CANCEL_REQUESTED
             record.updated_at = time.time()
+        unsupported = SubagentCancelResult(False, unsupported=True, state=SubagentState.CANCEL_REQUESTED)
         if agent is None:
-            return SubagentCancelResult(
-                False, unsupported=True, state=SubagentState.CANCEL_REQUESTED
-            )
+            return unsupported
         try:
             accepted = request_hard_interrupt(
                 agent,
@@ -312,74 +327,32 @@ class SubagentLifecycleService:
                 tool_reason="subagent cancellation requested",
             )
         except Exception:
-            return SubagentCancelResult(
-                False, unsupported=True, state=SubagentState.CANCEL_REQUESTED
-            )
+            accepted = False
         if not accepted:
-            return SubagentCancelResult(
-                False, unsupported=True, state=SubagentState.CANCEL_REQUESTED
-            )
+            return unsupported
         return SubagentCancelResult(True, state=SubagentState.CANCEL_REQUESTED)
 
     def result(self, handle: SubagentHandle) -> SubagentResult:
         record = self._record(handle)
         if record is None:
-            return SubagentResult(
-                handle,
-                SubagentState.UNKNOWN,
-                False,
-                error_classification="UNKNOWN_HANDLE",
-            )
+            return SubagentResult(handle, SubagentState.UNKNOWN, False, error_classification="UNKNOWN_HANDLE")
         with _REGISTRY.lock:
             if record.result is not None:
                 return record.result
-            return SubagentResult(
-                record.handle, record.state, False, error_classification="NOT_READY"
-            )
+            return SubagentResult(record.handle, record.state, False, error_classification="NOT_READY")
 
     def reconnect(self, handle: SubagentHandle) -> SubagentReconnectResult:
         record = self._record(handle)
         if record is None:
-            return SubagentReconnectResult(
-                False, SubagentState.UNKNOWN, "RECONNECT_UNAVAILABLE"
-            )
+            return SubagentReconnectResult(False, SubagentState.UNKNOWN, "RECONNECT_UNAVAILABLE")
         with _REGISTRY.lock:
             return SubagentReconnectResult(True, record.state)
 
     def _record(self, handle: SubagentHandle) -> Optional[_Record]:
-        if (
-            not isinstance(handle, SubagentHandle)
-            or type(handle.contract_version) is not int
-            or handle.contract_version != PUBLIC_CONTRACT_VERSION
-        ):
+        if not _handle_is_well_formed(handle):
             return None
-        if (
-            not isinstance(handle.subagent_id, str)
-            or not handle.subagent_id
-            or (
-                handle.parent_session_id is not None
-                and not isinstance(handle.parent_session_id, str)
-            )
-            or (
-                handle.correlation_id is not None
-                and not isinstance(handle.correlation_id, str)
-            )
-            or isinstance(handle.created_at, bool)
-            or not isinstance(handle.created_at, (int, float))
-            or not math.isfinite(handle.created_at)
-            or (handle.provider is not None and not isinstance(handle.provider, str))
-            or (handle.model is not None and not isinstance(handle.model, str))
-            or not isinstance(handle.role, str)
-            or type(handle.depth) is not int
-            or not isinstance(handle.capability, str)
-        ):
-            return None
-        if not hmac.compare_digest(
-            handle.capability,
-            self._capability(
-                handle.subagent_id, handle.parent_session_id, handle.created_at
-            ),
-        ):
+        expected = self._capability(handle.subagent_id, handle.parent_session_id, handle.created_at)
+        if not hmac.compare_digest(handle.capability, expected):
             return None
         parent = self._parent_agent_resolver()
         active_parent_id = str(getattr(parent, "session_id", "") or "") or None
@@ -403,8 +376,7 @@ class SubagentLifecycleService:
             record = _REGISTRY.records.pop(subagent_id)
             if record.handle.correlation_id:
                 _REGISTRY.correlations.pop(
-                    (record.handle.parent_session_id, record.handle.correlation_id),
-                    None,
+                    (record.handle.parent_session_id, record.handle.correlation_id), None
                 )
 
     def _run(self, record: _Record, goal: str, parent: Any) -> None:
@@ -417,60 +389,34 @@ class SubagentLifecycleService:
             from tools.delegate_tool import _run_child_lifecycle
 
             raw = _run_child_lifecycle(0, goal, record.agent, parent)
-            status = (
-                str(raw.get("status", "error")) if isinstance(raw, dict) else "error"
-            )
-            if status == "completed":
-                state = SubagentState.SUCCEEDED
-            elif status == "interrupted":
-                state = (
-                    SubagentState.CANCELLED
-                    if record.state == SubagentState.CANCEL_REQUESTED
-                    else SubagentState.INTERRUPTED
-                )
+            is_dict = isinstance(raw, dict)
+            if not is_dict:
+                raw = {}
+            status = str(raw.get("status", "error"))
+            if status == "interrupted":
+                cancelled = record.state == SubagentState.CANCEL_REQUESTED
+                state = SubagentState.CANCELLED if cancelled else SubagentState.INTERRUPTED
             else:
-                state = SubagentState.FAILED
-            summary = raw.get("summary") if isinstance(raw, dict) else None
-            summary = str(summary)[:_MAX_RESULT_CHARS] if summary is not None else None
-            error = raw.get("error") if isinstance(raw, dict) else None
-            result = SubagentResult(
-                record.handle,
-                state,
-                True,
-                summary=summary,
-                completed_at=time.time(),
-                started_at=record.started_at,
-                error_classification=None
-                if state == SubagentState.SUCCEEDED
-                else status.upper(),
+                state = SubagentState.SUCCEEDED if status == "completed" else SubagentState.FAILED
+            summary = raw.get("summary")
+            error = raw.get("error")
+            fields: dict[str, Any] = dict(
+                summary=str(summary)[:_MAX_RESULT_CHARS] if summary is not None else None,
+                error_classification=None if state == SubagentState.SUCCEEDED else status.upper(),
                 error_message=str(error)[:_MAX_RESULT_CHARS] if error else None,
-                usage_metadata={"api_calls": raw.get("api_calls", 0)}
-                if isinstance(raw, dict)
-                else {},
-                tool_execution_summary={
-                    "duration_seconds": raw.get("duration_seconds", 0)
-                }
-                if isinstance(raw, dict)
-                else {},
+                usage_metadata={"api_calls": raw.get("api_calls", 0)} if is_dict else {},
+                tool_execution_summary={"duration_seconds": raw.get("duration_seconds", 0)} if is_dict else {},
             )
         except Exception as exc:
-            result = SubagentResult(
-                record.handle,
-                SubagentState.FAILED,
-                True,
-                started_at=record.started_at,
-                completed_at=time.time(),
-                error_classification=type(exc).__name__,
-                error_message=str(exc)[:_MAX_RESULT_CHARS],
-            )
+            state = SubagentState.FAILED
+            fields = dict(error_classification=type(exc).__name__, error_message=str(exc)[:_MAX_RESULT_CHARS])
+        result = SubagentResult(
+            record.handle, state, True, started_at=record.started_at, completed_at=time.time(), **fields
+        )
         payload = dataclasses.asdict(result)
         payload.pop("result_hash", None)
-        result = dataclasses.replace(
-            result,
-            result_hash=hashlib.sha256(
-                json.dumps(payload, sort_keys=True, default=str).encode()
-            ).hexdigest(),
-        )
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+        result = dataclasses.replace(result, result_hash=digest)
         with _REGISTRY.lock:
             record.agent = None
             record.result = result
@@ -479,9 +425,7 @@ class SubagentLifecycleService:
             record.updated_at = result.completed_at or time.time()
 
     @staticmethod
-    def _capability(
-        subagent_id: str, parent_session_id: Optional[str], created_at: float
-    ) -> str:
+    def _capability(subagent_id: str, parent_session_id: Optional[str], created_at: float) -> str:
         value = f"{subagent_id}|{parent_session_id or ''}|{created_at:.6f}".encode()
         return hmac.new(_SECRET, value, hashlib.sha256).hexdigest()
 
@@ -493,34 +437,18 @@ class SubagentLifecycleService:
             or not request.goal.strip()
             or len(request.goal) > _MAX_GOAL_CHARS
         ):
-            raise SubagentLifecycleError(
-                "goal must be a non-empty string of at most 16000 characters."
-            )
+            raise SubagentLifecycleError("goal must be a non-empty string of at most 16000 characters.")
         if request.context is not None and (
-            not isinstance(request.context, str)
-            or len(request.context) > _MAX_CONTEXT_CHARS
+            not isinstance(request.context, str) or len(request.context) > _MAX_CONTEXT_CHARS
         ):
-            raise SubagentLifecycleError(
-                "context must be a string of at most 32000 characters."
-            )
+            raise SubagentLifecycleError("context must be a string of at most 32000 characters.")
         if request.role not in {"leaf", "orchestrator"}:
             raise SubagentLifecycleError("role must be 'leaf' or 'orchestrator'.")
-        if request.timeout_seconds is not None:
-            raise SubagentLifecycleError(
-                "Per-launch timeout is not supported; configure delegation timeout explicitly."
-            )
-        if request.working_directory is not None:
-            raise SubagentLifecycleError(
-                "working_directory is not supported because Hermes delegates use isolated task environments."
-            )
-        if request.blocked_tools:
-            raise SubagentLifecycleError(
-                "Per-tool blocking is not supported; use allowed_toolsets. Hermes always blocks unsafe child tools."
-            )
+        for rejected, message in _UNSUPPORTED_REQUEST_FIELDS:
+            if rejected(request):
+                raise SubagentLifecycleError(message)
         try:
-            metadata_bytes = len(
-                json.dumps(dict(request.metadata), sort_keys=True).encode()
-            )
+            metadata_bytes = len(json.dumps(dict(request.metadata), sort_keys=True).encode())
         except (TypeError, ValueError) as exc:
             raise SubagentLifecycleError("metadata must be JSON-serializable.") from exc
         if metadata_bytes > _MAX_METADATA_BYTES:
@@ -530,13 +458,7 @@ class SubagentLifecycleService:
 
             unknown = set(request.allowed_toolsets) - set(TOOLSETS)
             if unknown:
-                raise SubagentLifecycleError(
-                    f"Unknown toolsets: {', '.join(sorted(unknown))}."
-                )
+                raise SubagentLifecycleError(f"Unknown toolsets: {', '.join(sorted(unknown))}.")
             enabled = getattr(parent, "enabled_toolsets", None)
-            if enabled is not None and not set(request.allowed_toolsets).issubset(
-                set(enabled)
-            ):
-                raise SubagentLifecycleError(
-                    "Requested toolsets would broaden parent permissions."
-                )
+            if enabled is not None and not set(request.allowed_toolsets).issubset(set(enabled)):
+                raise SubagentLifecycleError("Requested toolsets would broaden parent permissions.")

@@ -1,19 +1,11 @@
 """Thread-scoped stdout/stderr silencing for background worker threads.
 
-``contextlib.redirect_stdout``/``redirect_stderr`` reassign the *process-global*
-``sys.stdout``/``sys.stderr``.  When a daemon worker thread (e.g. the background
-memory/skill review) wraps its whole body in those context managers, every other
-thread in the process — including a gateway's asyncio event-loop thread driving a
-Telegram long-poll — sees ``sys.stdout``/``sys.stderr`` pointing at ``devnull``
-for the full duration.  Any bare ``print`` / ``sys.stderr.write`` from those other
-threads is silently lost during that window (see issue #55769 / #55925).
-
-This module installs a thin proxy as ``sys.stdout``/``sys.stderr`` that routes
-writes per-thread: threads registered as "silenced" go to a sink; every other
-thread passes through to the *original* stream.  The proxy is installed once,
-idempotently, and is never uninstalled (uninstalling would race other threads
-mid-write), so the only observable effect for unregistered threads is one extra
-attribute lookup per write.
+``contextlib.redirect_stdout`` reassigns the *process-global* stream, so a
+daemon worker silencing itself also silences every other thread (gateway
+event loop included) for the duration. This module installs a per-thread
+routing proxy as ``sys.stdout``/``sys.stderr``: silenced threads write to a
+sink, everyone else passes through to the original stream. Installed once,
+idempotently, and never uninstalled (that would race other threads mid-write).
 """
 
 from __future__ import annotations
@@ -27,12 +19,10 @@ from typing import Iterator, TextIO
 __all__ = ["thread_scoped_silence"]
 
 _install_lock = threading.Lock()
-# Maps the proxy we installed for a given attribute ("stdout"/"stderr") so we
-# never double-wrap and so we can recover the original stream.
+# Proxy installed per attribute ("stdout"/"stderr"): never double-wrap.
 _installed: dict[str, "_ThreadRoutingStream"] = {}
-# One process-lifetime sink per stream. Temporary process-global redirects can
-# displace and later restore a routing proxy; they must not allocate another
-# permanent /dev/null descriptor every time that happens.
+# One process-lifetime sink per stream: global redirects that displace and
+# restore a proxy must not leak a new /dev/null descriptor each time.
 _sinks: dict[str, TextIO] = {}
 _routing_states: dict[str, "_RoutingState"] = {}
 
@@ -47,14 +37,8 @@ class _RoutingState:
 
 
 class _ThreadRoutingStream:
-    """A ``sys.stdout``/``sys.stderr`` stand-in that routes writes per-thread.
-
-    Threads whose ident is in ``_silenced`` write to ``_sink``; all other
-    threads write to ``_passthrough`` (the original stream captured at install
-    time).  Attribute access for anything other than the methods we override
-    is delegated to the *current* target so things like ``.encoding`` /
-    ``.fileno()`` behave like the underlying stream for the calling thread.
-    """
+    """``sys.stdout``/``sys.stderr`` stand-in routing writes per calling thread;
+    unknown attributes delegate to the current thread's target."""
 
     def __init__(self, passthrough: TextIO, state: _RoutingState) -> None:
         self._passthrough = passthrough
@@ -65,7 +49,6 @@ class _ThreadRoutingStream:
             return self._state.sink
         return self._passthrough
 
-    # --- registration -----------------------------------------------------
     def silence(self, ident: int) -> None:
         with self._state.lock:
             self._state.silenced[ident] = self._state.silenced.get(ident, 0) + 1
@@ -78,7 +61,6 @@ class _ThreadRoutingStream:
             else:
                 self._state.silenced.pop(ident, None)
 
-    # --- file-like surface ------------------------------------------------
     def write(self, data):  # type: ignore[no-untyped-def]
         try:
             return self._target().write(data)
@@ -108,8 +90,6 @@ class _ThreadRoutingStream:
         return self._target().fileno()
 
     def __getattr__(self, name):  # type: ignore[no-untyped-def]
-        # Delegate everything we don't override (encoding, buffer, mode, ...)
-        # to the calling thread's current target.
         return getattr(self._target(), name)
 
 
@@ -119,17 +99,15 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> "_ThreadRoutingStream":
         proxy = _installed.get(attr)
         current = getattr(sys, attr, None)
         if isinstance(current, _ThreadRoutingStream):
-            # A redirect context can restore an older routing proxy after a
-            # temporary replacement. Adopt it instead of wrapping it and
-            # growing an unbounded proxy chain.
+            # A redirect context may restore an older proxy; adopt it rather
+            # than wrapping it into an unbounded chain.
             _installed[attr] = current
             _routing_states[attr] = current._state
             return current
         if proxy is not None and current is proxy:
             return proxy
-        # Capture whatever is currently bound as the passthrough. If a prior
-        # global redirect_stdout is active, route non-silenced threads to that
-        # stream to preserve the old behavior.
+        # Route non-silenced threads to whatever is currently bound (an active
+        # global redirect keeps its old behavior).
         passthrough = current if current is not None else passthrough
         sink = _sinks.get(attr)
         if sink is None or sink.closed:
@@ -147,12 +125,7 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> "_ThreadRoutingStream":
 
 @contextlib.contextmanager
 def thread_scoped_silence() -> Iterator[None]:
-    """Silence ``stdout``/``stderr`` for the *current thread only*.
-
-    Other threads keep writing to the real streams.  Use this around a worker
-    thread's body instead of ``contextlib.redirect_stdout(devnull)`` when the
-    process is multi-threaded and another thread must keep its console output.
-    """
+    """Silence ``stdout``/``stderr`` for the *current thread only*."""
     ident = threading.get_ident()
     out_proxy = _ensure_installed("stdout", sys.__stdout__ or sys.stdout)
     err_proxy = _ensure_installed("stderr", sys.__stderr__ or sys.stderr)

@@ -1,24 +1,12 @@
 """Shared one-off LLM requests for non-conversational helpers.
 
-A "one-shot" is a single, stateless model call that runs *outside* any
-conversation: it never touches a session's history, never breaks prompt
-caching, and returns plain text. UI surfaces use it for small generative
-chores — a commit message from a diff, a rename suggestion, a summary —
-where spinning up an agent turn would be wrong (it would pollute the thread)
-and hand-rolling an LLM call at every call site would be worse.
-
-Two ways to call it:
-
-  * ``run_oneshot(instructions=..., user_input=...)`` — caller supplies the
-    full prompt.
-  * ``run_oneshot(template="commit_message", variables={...})`` — caller
-    names a registered template and passes its variables; the template owns
-    the prompt engineering so it stays consistent across CLI/TUI/desktop.
-
-Model selection rides the same auxiliary plumbing as title generation
-(:func:`agent.auxiliary_client.call_llm`): pass ``main_runtime`` to inherit
-the live session's provider/model, otherwise the configured ``task`` (default
-``title_generation``) resolves a cheap/fast backend.
+A "one-shot" is a single stateless model call outside any conversation: it
+never touches session history or prompt caching and returns plain text (commit
+messages, rename suggestions, summaries). Call with explicit
+``instructions``/``user_input`` or a registered ``template`` + ``variables`` so
+prompt engineering stays consistent across CLI/TUI/desktop. Model selection
+rides :func:`agent.auxiliary_client.call_llm`: ``main_runtime`` inherits the
+live session's provider/model, else ``task`` resolves a cheap backend.
 """
 
 import logging
@@ -28,7 +16,6 @@ from agent.auxiliary_client import call_llm, extract_content_or_reasoning
 
 logger = logging.getLogger(__name__)
 
-# A template turns a variables dict into a (instructions, user_input) pair.
 # Templates are plain callables (not str.format) so diff/code payloads with
 # literal "{" / "}" pass through untouched.
 PromptTemplate = Callable[[Dict[str, Any]], Tuple[str, str]]
@@ -69,9 +56,9 @@ def _commit_message_template(variables: Dict[str, Any]) -> Tuple[str, str]:
         )
     parts.append("Diff to describe:\n" + (diff or "(no textual diff available)"))
 
-    # "Regenerate" must yield something new even on models that decode greedily
-    # / pin temperature server-side. A trailing nonce isn't enough, so we hand
-    # back the previous message and require a genuinely different one.
+    # "Regenerate" must yield something new even on greedy/server-pinned
+    # temperature models; a nonce isn't enough, so hand back the previous
+    # message and require a genuinely different one.
     avoid = _truncate(str(variables.get("avoid") or "").strip(), 1000)
     if avoid:
         parts.append(
@@ -84,19 +71,14 @@ def _commit_message_template(variables: Dict[str, Any]) -> Tuple[str, str]:
     return _COMMIT_INSTRUCTIONS, "\n\n".join(parts)
 
 
-# Registry of named templates. Add an entry here to give a new surface a
-# consistent, reusable prompt without teaching every caller the prompt text.
+# Registry of named templates; add an entry to give a new surface a reusable prompt.
 PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
     "commit_message": _commit_message_template,
 }
 
 
 def render_template(name: str, variables: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
-    """Resolve a registered template into (instructions, user_input).
-
-    Raises KeyError if the template name is unknown so callers fail loudly
-    instead of silently sending an empty prompt.
-    """
+    """Resolve a registered template into (instructions, user_input); KeyError if unknown."""
     template = PROMPT_TEMPLATES.get(name)
     if template is None:
         raise KeyError(f"unknown one-shot template: {name}")
@@ -115,14 +97,10 @@ def run_oneshot(
     timeout: float = 60.0,
     main_runtime: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Run a single stateless LLM request and return its text.
+    """Run a single stateless LLM request and return its text (fence-stripped).
 
-    Provide either a registered ``template`` (+ ``variables``) or an explicit
-    ``instructions`` / ``user_input`` pair. Returns the model's text answer,
-    stripped of surrounding whitespace and any wrapping code fence.
-
-    Raises RuntimeError when no LLM provider is configured (surfaced from
-    :func:`call_llm`) and KeyError for an unknown template name.
+    Raises RuntimeError when no provider is configured (from :func:`call_llm`),
+    KeyError for an unknown template, ValueError when the prompt is empty.
     """
     if template:
         instructions, user_input = render_template(template, variables)
