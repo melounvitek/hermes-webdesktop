@@ -1,9 +1,7 @@
-"""Dependency sync after ``hermes update``: venv health/ownership preflight, editable reinstall, lazy-feature refresh, npm/Desktop rebuilds, self-lock deferral.
+"""Post-``hermes update`` dependency sync: venv preflight, editable reinstall, lazy refresh, npm/Desktop rebuilds, self-lock deferral.
 
-Split out of ``hermes_cli/update_cmd.py``; every moved name is re-imported there, so
-``hermes_cli.update_cmd.<name>`` keeps resolving (and monkeypatching) as before.
-Origin-internal helpers are imported lazily inside each function (no import cycle;
-test patches on ``hermes_cli.update_cmd.<name>`` stay effective).
+Split out of ``update_cmd.py``; names are re-imported there so ``hermes_cli.update_cmd.<name>``
+still resolves/monkeypatches. Origin helpers are imported lazily per function (no cycle; patches hold).
 """
 
 import logging
@@ -21,8 +19,7 @@ from hermes_constants import venv_python_path
 logger = logging.getLogger("hermes_cli.update_cmd")
 
 
-# Files that define the editable install. A pull that touches none of them
-# cannot have invalidated it.
+# Files defining the editable install; a pull touching none of them cannot invalidate it.
 _INSTALL_DEFINING_FILES = (
     "pyproject.toml",
     "setup.py",
@@ -35,20 +32,11 @@ _INSTALL_DEFINING_FILES = (
 def _editable_install_is_current(git_cmd, cwd, pre_pull_sha: str | None) -> bool:
     """True when the pulled commits cannot have invalidated the editable install.
 
-    ``uv pip install -e .`` reinstalls unconditionally and rewrites the
-    console-script shims every time. On Windows that rewrite is the only
-    reason the running ``hermes.exe`` must be quarantined, and a lost
-    quarantine race is the whole ``os error 32`` family — so skip the
-    reinstall when it provably cannot change anything.
-
-    Safe because Hermes pins its editable finder to a *static* module list
-    (``[tool.setuptools] py-modules`` + ``packages.find.include``): only a
-    new top-level module/package can stale it, and that needs a
-    ``pyproject.toml`` diff (as do dependencies and ``[project.scripts]``).
-    New submodules under an already-mapped package need no reinstall.
-
-    Fails closed: an unresolvable pre-pull SHA (shallow checkout, ZIP swap)
-    or a failed ``git diff`` returns False and the install runs as before.
+    ``uv pip install -e .`` always rewrites console-script shims; on Windows that rewrite is
+    why ``hermes.exe`` must be quarantined (lost race = ``os error 32``), so skip it when it
+    provably changes nothing. Safe because the editable finder uses a *static* module list:
+    only a new top-level module/package (needing a ``pyproject.toml`` diff, like deps and
+    scripts) can stale it. Fails closed: unresolvable pre-pull SHA or failed diff -> False.
     """
     if not pre_pull_sha:
         return False
@@ -68,10 +56,8 @@ def _editable_install_is_current(git_cmd, cwd, pre_pull_sha: str | None) -> bool
     return not result.stdout.strip()
 
 
-# Modules imported on every agent startup. Unlike _UPDATE_CRITICAL_FILES (which
-# is only parsed), these are actually *imported* so that cross-module breakage
-# is caught — a file can be syntactically perfect and still fail to import
-# because a name it pulls from a sibling module no longer exists.
+# Modules imported on every startup. Unlike _UPDATE_CRITICAL_FILES (only parsed) these are
+# *imported*, catching cross-module breakage (a name pulled from a sibling no longer exists).
 _UPDATE_CRITICAL_MODULES = (
     "hermes_cli.main",
     "run_agent",
@@ -83,23 +69,14 @@ _UPDATE_CRITICAL_MODULES = (
 def _critical_module_import_failures(
     root, *, report_runtime_errors: bool = False
 ) -> dict[str, tuple[str, str]]:
-    """Import each module in ``_UPDATE_CRITICAL_MODULES`` in a subprocess.
+    """Import each ``_UPDATE_CRITICAL_MODULES`` entry in a subprocess; return failures in probe order.
 
-    ``_validate_critical_files_syntax`` only *parses*, so a partially-updated
-    tree (new ``agent/``, old ``tools/``) parses fine yet dies at startup
-    with ``ImportError: cannot import name ...``. That skew is reachable on
-    the Windows ZIP-update path, whose copy loop replaces top-level entries
-    one at a time in ``os.listdir`` order.
-
-    Runs in a subprocess (~0.4s) so the half-updated tree's import-time side
-    effects don't pollute the updater's ``sys.modules``. Uses the project
-    venv's interpreter when present (like ``_venv_core_imports_healthy``):
-    ``hermes update`` may be driven by a different Python than the install's.
-
-    Returns every failing module in probe order. Generic import-time
-    exceptions are tolerated by default (they can depend on local config);
-    ``report_runtime_errors=True`` exposes them so a caller can compare two
-    states of the same checkout without one failure masking another.
+    Syntax validation only *parses*, so a partially-updated tree (reachable via the Windows
+    ZIP copy loop) parses yet dies with ``ImportError: cannot import name``. A subprocess
+    keeps the half-updated tree's import side effects out of the updater's ``sys.modules``;
+    uses the venv interpreter when present since ``hermes update`` may run under another Python.
+    Generic import-time exceptions are tolerated by default (may depend on local config);
+    ``report_runtime_errors=True`` exposes them so two checkout states can be compared.
     """
     from hermes_cli.update_cmd import _UPDATE_CRITICAL_MODULES, _m
     from hermes_constants import FIRST_PARTY_MODULE_ROOTS
@@ -114,10 +91,8 @@ def _critical_module_import_failures(
         "    try:\n"
         "        importlib.import_module(name)\n"
         "    except ModuleNotFoundError as exc:\n"
-        # A missing *third-party* module means dependencies aren't installed
-        # yet, not a skewed checkout. Only our own packages count as breakage.
-        # The root set is injected from hermes_constants so this can't drift
-        # from the hint the user is shown (they disagreed once already).
+        # A missing *third-party* module means deps aren't installed, not a skewed checkout;
+        # only our own packages count. Roots come from hermes_constants so the user hint can't drift.
         "        missing = (getattr(exc, 'name', '') or '').split('.')[0]\n"
         "        if missing in %r or missing.startswith('hermes_') or %r:\n"
         "            failures.append((name, type(exc).__name__, str(exc)))\n"
@@ -222,10 +197,7 @@ def _npm_bin_exists(bin_dir: Path, name: str) -> bool:
 
 def _web_build_toolchain_ready(*roots: Path) -> bool:
     """True when ``tsc`` and ``vite`` shims are reachable from any of *roots*.
-
-    Callers must pass every root the build would search; checking only one
-    reports a healthy tree as broken.
-    """
+    Callers must pass every root the build would search, or a healthy tree reads as broken."""
     bin_dirs = [
         bin_dir
         for bin_dir in (root / "node_modules" / ".bin" for root in roots)
@@ -238,12 +210,8 @@ def _web_build_toolchain_ready(*roots: Path) -> bool:
 
 
 def _web_toolchain_roots(web_dir: Path) -> tuple[Path, ...]:
-    """Roots whose ``node_modules/.bin`` can satisfy the web build.
-
-    ``npm run build`` prepends ``node_modules/.bin`` for the package and each
-    of its ancestors, so shims hoisted to the workspace root and shims nested
-    under a package that owns its lockfile (#42973) are equally valid.
-    """
+    """Roots whose ``node_modules/.bin`` can satisfy the web build: ``npm run build`` searches the
+    package and each ancestor, so hoisted and package-local shims are equally valid."""
     return (web_dir, web_dir.parent)
 
 
@@ -271,12 +239,8 @@ def _upgrade_pip_before_lazy_refresh(
     *,
     env: dict[str, str] | None = None,
 ) -> None:
-    """Upgrade pip before lazy-backend refreshes.
-
-    Older pip (e.g. 24.0 on Python 3.11) can fail setuptools-backed source
-    builds during lazy installs and leave a partially-written venv (#57828).
-    Never raises.
-    """
+    """Upgrade pip before lazy refreshes: older pip can fail setuptools source builds and
+    leave a partially-written venv. Never raises."""
     from hermes_cli.update_cmd import _m
     try:
         _m()._run_package_only_install(
@@ -315,13 +279,8 @@ def _restore_active_tool_dependencies(
     *,
     env: dict[str, str] | None = None,
 ) -> None:
-    """Restore allowlisted ``hermes tools`` dependencies into a rebuilt venv.
-
-    The dependency names came from a pre-rebuild import probe and are resolved
-    through a static package allowlist. Never raises: a failed optional tool
-    must not block the core update, but the user must be told what stayed
-    unavailable.
-    """
+    """Restore allowlisted ``hermes tools`` dependencies (from a pre-rebuild probe) into a rebuilt venv.
+    Never raises: a failed optional tool must not block the update, but must be reported."""
     from hermes_cli.update_cmd import _m
     if not dependencies:
         return
@@ -356,8 +315,7 @@ def _restore_active_tool_dependencies(
                 if probe.returncode == 0:
                     continue
             except (subprocess.SubprocessError, OSError):
-                # An indeterminate probe is safer to repair than to treat as
-                # proof that a pre-rebuild dependency survived.
+                # Indeterminate probe: safer to repair than assume it survived.
                 pass
         missing.append((name, install_args))
 
@@ -376,8 +334,7 @@ def _restore_active_tool_dependencies(
             )
             restored.append(name)
         except Exception as exc:
-            # Best-effort optional tooling: surface failures without aborting
-            # the core update.
+            # Best-effort: surface failures without aborting the update.
             failed.append((name, str(exc)))
 
     if restored:
@@ -394,18 +351,12 @@ def _refresh_active_lazy_features(
     env: dict[str, str] | None = None,
     features: list[str] | None = None,
 ) -> bool:
-    """Refresh lazy-installed backends after a code update.
+    """Refresh previously-activated lazy backends (cold ones untouched) after a code update.
 
-    ``uv pip install -e .[all]`` never touches ``tools/lazy_deps.py`` backends,
-    so a bumped :data:`LAZY_DEPS` pin (CVE, transitive fix) would otherwise
-    leave already-activated backends stale forever. Reinstalls only the
-    features the user previously activated; cold backends stay untouched.
-
-    Returns True when the venv is safe to use (refresh succeeded, nothing
-    active, or post-failure import repair succeeded); False when a failed
-    lazy install left broken core imports that repair could not fix (#57828).
-
-    Never raises. A failure here must not block the rest of the update.
+    The core install never touches ``lazy_deps`` backends, so a bumped :data:`LAZY_DEPS` pin
+    would otherwise leave them stale forever. Returns True when the venv is safe to use
+    (refreshed, nothing active, or import repair succeeded); False when a failed lazy install
+    left broken core imports repair couldn't fix. Never raises.
     """
     from hermes_cli.update_cmd import _m
     try:
@@ -436,8 +387,7 @@ def _refresh_active_lazy_features(
         else:
             results = lazy_deps.restore_features(active)
     except Exception as exc:
-        # refresh_active_features is documented as never-raise, but defend
-        # the update flow against future regressions.
+        # refresh_active_features is never-raise by contract; defend anyway.
         print(f"  ⚠ Lazy refresh failed unexpectedly: {exc}")
         results = {}
         unexpected_failure = True
@@ -452,8 +402,7 @@ def _refresh_active_lazy_features(
     if current:
         print(f"  ✓ {len(current)} already current")
     if skipped:
-        # Most common reason: security.allow_lazy_installs=false. Show one
-        # line so the user knows why; not an error.
+        # Usually security.allow_lazy_installs=false; informational, not an error.
         names = ", ".join(f for f, _ in skipped)
         reason = skipped[0][1].split(": ", 1)[-1]
         print(f"  · {len(skipped)} skipped ({reason}): {names}")
@@ -463,7 +412,6 @@ def _refresh_active_lazy_features(
 
     for feature, status in failed:
         reason = status.split(": ", 1)[-1]
-        # Clip noisy pip stderr to keep update output legible.
         if len(reason) > 200:
             reason = reason[:200] + "..."
         print(f"  ⚠ {feature} failed to refresh: {reason}")
@@ -472,9 +420,8 @@ def _refresh_active_lazy_features(
         print("  ⚠ Lazy refresh failed; rerun `hermes update` once resolved.")
         return False
 
-    # Immediate import-based recovery — metadata-only verifiers miss the case
-    # where DISTRIBUTION-INFO remains but import files were wiped (#57828).
-    # Unavailable probes are indeterminate, not healthy — keep the lazy marker.
+    # Import-based recovery: metadata-only verifiers miss dist-info intact but import files
+    # wiped. Unavailable probes are indeterminate, not healthy — keep the lazy marker.
     status = _m()._repair_venv_via_import_probes(install_cmd_prefix, env=env)
     if status == "repaired":
         print(
@@ -495,15 +442,11 @@ def _refresh_active_lazy_features(
 
 
 def _refresh_active_memory_provider_dependencies() -> None:
-    """Refresh pip dependencies for the configured external memory provider.
+    """Refresh pip deps for the configured external memory provider.
 
-    Provider bridge packages are declared in each provider's ``plugin.yaml``
-    (plus mode extras like Hindsight's ``hindsight-all``), not in Hermes'
-    extras or ``LAZY_DEPS``, so the core reinstall can strip or downgrade
-    them (#53272, #70636). Re-run the ACTIVE provider's install after the
-    core install and lazy refresh so its writes to shared packages land last.
-
-    Never raises. A failure here must not block the rest of the update.
+    Bridge packages live in each provider's ``plugin.yaml``, not Hermes extras or ``LAZY_DEPS``,
+    so the core reinstall can strip/downgrade them; re-run the ACTIVE provider's install after
+    core install and lazy refresh so its writes land last. Never raises.
     """
     try:
         from hermes_cli.config import load_config
@@ -521,7 +464,7 @@ def _refresh_active_memory_provider_dependencies() -> None:
                 return
             provider = str(memory_cfg.get("provider") or "").strip()
 
-    # "default" / empty is the built-in file-backed store — no pip deps.
+    # "default"/empty is the built-in file store — no pip deps.
     if not provider or provider in {"default", "builtin", "none"}:
         return
 
@@ -550,15 +493,9 @@ def _install_psutil_android_compat(
     *,
     env: dict[str, str] | None = None,
 ) -> None:
-    """Install psutil on Android by patching upstream platform detection.
-
-    psutil's setup gates Linux sources behind ``sys.platform.startswith('linux')``;
-    Termux reports ``'android'``, so setup aborts although the Linux source path
-    compiles fine. Only the extracted build tree for this attempt is patched.
-
-    Stopgap: remove (together with the standalone installer's use of the same
-    helper) once https://github.com/giampaolo/psutil/pull/2762 ships.
-    """
+    """Install psutil on Android by patching its platform detection: setup gates Linux sources on
+    ``sys.platform.startswith('linux')`` but Termux reports ``'android'`` though the Linux path
+    compiles fine. Only this attempt's build tree is patched. Stopgap until psutil PR 2762 ships."""
     from hermes_cli.update_cmd import _m
     import tempfile
     import urllib.request
@@ -577,12 +514,8 @@ def _install_psutil_android_compat(
 
 
 def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
-    """Best-effort uv bootstrap on Termux for faster update installs.
-
-    The official uv installer may not work on Termux (glibc vs bionic). Prefer
-    a uv already on PATH (``pkg install uv``); otherwise fall back to a
-    wheel-only ``pip install uv`` so the Rust crate is never source-built.
-    """
+    """Best-effort uv bootstrap on Termux (official installer may fail: glibc vs bionic). Prefer a
+    PATH uv; else wheel-only ``pip install uv`` so the Rust crate is never source-built."""
     from hermes_cli.update_cmd import _m
     from hermes_cli.managed_uv import resolve_uv
 
@@ -591,9 +524,8 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
         return existing
     if not _m()._is_termux_env():
         return None
-    # A Termux-packaged uv lands on PATH but not in the managed bin dir, so
-    # resolve_uv() misses it. Use it before pip, which has no Android wheel and
-    # would otherwise build uv from source on a low-memory device.
+    # Termux-packaged uv is on PATH but not the managed bin dir, so resolve_uv() misses it;
+    # prefer it over pip, which has no Android wheel and would source-build on a small device.
     system_uv = shutil.which("uv")
     if system_uv:
         return system_uv
@@ -614,17 +546,11 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
 def _npm_manifest_paths() -> tuple[Path, ...]:
     """Manifests whose changes must defeat the update-skip.
 
-    The lockfile alone is not a sufficient key: a dev can edit a package.json
-    (root or workspace) without running npm, and `hermes update` is exactly
-    the step expected to sync node_modules (`npm install` fallback in
-    _run_npm_install_deterministic).
-
-    Workspaces come from the root package.json's `workspaces` globs so a new
-    workspace can never escape the key. Every workspace manifest counts —
-    desktop included, though the install names only ui-tui and web — because
-    the single lockfile spans the whole workspace graph. Falls back to root
-    manifests only if package.json is unreadable (never skips more than main
-    would have installed).
+    The lockfile alone isn't enough: a package.json can be edited without running npm, and
+    `hermes update` is the step expected to sync node_modules. Workspaces come from the root
+    `workspaces` globs so a new one can't escape the key; every workspace manifest counts
+    (desktop too) because the single lockfile spans the whole graph. Falls back to root
+    manifests only if package.json is unreadable.
     """
     from hermes_cli.update_cmd import _m
     root_pkg = _m().PROJECT_ROOT / "package.json"
@@ -646,10 +572,7 @@ def _npm_manifest_paths() -> tuple[Path, ...]:
 
 
 def _npm_manifests_digest() -> str | None:
-    """Combined sha256 over the lockfile + all workspace package.json files.
-
-    Returns None when the lockfile is missing (never skip then).
-    """
+    """Combined sha256 over lockfile + all workspace package.json; None when lockfile missing (never skip)."""
     from hermes_cli.update_cmd import _m
     if not (_m().PROJECT_ROOT / "package-lock.json").exists():
         return None
@@ -668,12 +591,10 @@ def _npm_lockfile_changed(hermes_root: Path) -> bool:
     current = _npm_manifests_digest()
     if current is None:
         return True
-    # Also check that node_modules exists; a matching hash with missing
-    # node_modules means the cache was recorded by another checkout.
+    # Matching hash but no node_modules: cache was recorded by another checkout.
     if not (_m().PROJECT_ROOT / "node_modules").is_dir():
         return True
-    # A matching hash must NOT skip the reinstall when the web build toolchain
-    # never landed, or every later update rebuilds against a half-installed tree.
+    # Never skip when the web toolchain never landed, or later updates build on a half-installed tree.
     web_dir = _m().PROJECT_ROOT / "web"
     if (web_dir / "package.json").is_file() and not _web_build_toolchain_ready(
         *_web_toolchain_roots(web_dir)
@@ -712,14 +633,12 @@ def _repair_node_deps_on_current_checkout(
     completion_message: str = "✓ Already up to date!",
     had_desktop_app_before_update: bool = False,
 ) -> bool:
-    """Repair Node deps on the ``commit_count == 0`` path (#77211).
+    """Repair Node deps on the ``commit_count == 0`` path.
 
-    A current checkout does not imply healthy Node deps: a failed npm install
-    (EBADENGINE, network timeout, interrupt) says "re-run hermes update", but
-    the early return never reached the Node refresh. ``_update_node_dependencies``
-    self-gates on the lockfile hash, recorded only after a SUCCESSFUL install
-    (and re-tripped when node_modules or the web toolchain is missing), so this
-    is a cheap no-op on healthy installs and a real repair after a failed one.
+    A current checkout doesn't imply healthy Node deps (a failed npm install says "re-run
+    hermes update" but the early return skipped the refresh). ``_update_node_dependencies``
+    self-gates on the hash recorded only after a SUCCESSFUL install, so this is a cheap
+    no-op when healthy and a real repair otherwise.
     """
     from hermes_cli.update_cmd import (
         _check_and_apply_config_migration,
@@ -735,24 +654,20 @@ def _repair_node_deps_on_current_checkout(
             "⚠ Checkout is current, but Node.js dependencies could not be repaired."
         )
         return False
-    # Pair the refresh with the web build like every other
-    # _update_node_dependencies call site; it staleness-checks internally,
-    # so this is a no-op when nothing changed.
+    # Pair with the web build like every other call site; it staleness-checks internally.
     _m()._build_web_ui(_m().PROJECT_ROOT / "web")
     _check_and_apply_config_migration(
         assume_yes=assume_yes,
         gateway_mode=gateway_mode,
         pre_update_snapshot_id=pre_update_snapshot_id,
     )
-    # A current checkout can still owe a Desktop rebuild (#97343) — e.g. the
-    # Windows hand-off child never reaches the commits-pulled rebuild — leaving
-    # a stale app behind a successful-looking update. Self-gates on the build stamp.
+    # A current checkout can still owe a Desktop rebuild (e.g. the Windows hand-off child
+    # never reaches the commits-pulled rebuild). Self-gates on the build stamp.
     if not _rebuild_desktop_after_update(
         _m().PROJECT_ROOT / "apps" / "desktop",
         had_desktop_app_before_update=had_desktop_app_before_update,
     ):
-        # _rebuild_desktop_after_update already printed the retry hint; withhold
-        # success rather than claiming the update finished (#88251).
+        # Retry hint already printed; withhold success rather than claim completion.
         print_completion(
             "⚠ Update partially complete — the desktop app was not rebuilt "
             "and is still on the previous build."
@@ -762,21 +677,16 @@ def _repair_node_deps_on_current_checkout(
 
 
 def _update_node_dependencies() -> list[str]:
-    """Refresh Node deps for the ui-tui and web workspaces.
-
-    Returns the list of labels whose npm install failed (empty on success),
-    so the caller can treat a Node refresh failure as a partial update rather
-    than silently reporting ``Update complete!`` (#30271).
-    """
+    """Refresh Node deps for ui-tui and web. Returns labels whose npm install failed (empty on
+    success) so the caller reports a partial update instead of ``Update complete!``."""
     from hermes_cli.update_cmd import _m
     if not (_m().PROJECT_ROOT / "package.json").exists():
         return []
 
     npm = _m()._resolve_node_runtime_npm()
     if not npm:
-        # If the only npm reachable inside this WSL shell is the Windows one,
-        # flag it loudly: silently skipping leaves ui-tui deps stale while the
-        # rest of the update proceeds, and running it would corrupt the tree.
+        # Only a Windows npm reachable from WSL: flag loudly — skipping silently leaves
+        # deps stale, running it would corrupt the tree.
         from hermes_constants import is_wsl
 
         path_npm = shutil.which("npm")
@@ -796,13 +706,11 @@ def _update_node_dependencies() -> list[str]:
 
     from hermes_constants import get_default_hermes_root
 
-    # node_modules is shared by every profile on this checkout, so keep one
-    # per-checkout cache under the shared root instead of one per profile.
+    # node_modules is shared by every profile on this checkout: one per-checkout cache.
     shared_hermes_root = get_default_hermes_root()
 
-    # Best-effort npx cache warm for agent-browser (#43564), before the
-    # lockfile-unchanged early return (the common case). Can block ~11s on a
-    # cold cache — print first so it doesn't look like a hang.
+    # Best-effort npx cache warm before the lockfile-unchanged early return. Can block
+    # ~11s on a cold cache — print first so it doesn't look like a hang.
     print("→ Warming npx cache for agent-browser...")
     try:
         from tools.browser_tool import warm_agent_browser_npx_cache
@@ -814,12 +722,9 @@ def _update_node_dependencies() -> list[str]:
         logger.info("npm lockfile unchanged, skipping npm install")
         return []
 
-    # Root package.json has no dependencies of its own (#43564: agent-browser
-    # resolves via `npx` at runtime, @streamdown/math moved to apps/desktop),
-    # so a workspace-scoped install prunes nothing root-only. apps/desktop is
-    # deliberately never named: its Electron devDependency has a ~200MB
-    # postinstall download, so desktop deps install on demand
-    # (see _desktop_build_needed).
+    # Root package.json has no deps of its own, so a workspace-scoped install prunes nothing
+    # root-only. apps/desktop is deliberately never named: its Electron devDependency has a
+    # ~200MB postinstall, so desktop deps install on demand (see _desktop_build_needed).
     print("→ Updating Node.js dependencies...")
 
     def _partial_update_failure(*labels: str) -> list[str]:
@@ -832,10 +737,8 @@ def _update_node_dependencies() -> list[str]:
     install_args = [
         "--no-fund", "--no-audit", "--prefer-offline", "--progress=false",
         "--workspace", "ui-tui", "--workspace", "web",
-        # Root's own devDependencies (the shared ESLint flat config every
-        # workspace imports) would otherwise be pruned by this scoped install
-        # and have nowhere else to live. apps/desktop is still excluded since
-        # it is never named above.
+        # Root devDependencies (shared ESLint config) would otherwise be pruned by the
+        # scoped install; apps/desktop stays excluded since it is never named above.
         "--include-workspace-root",
     ]
 
@@ -843,10 +746,8 @@ def _update_node_dependencies() -> list[str]:
 
     nixos_env = with_hermes_node_path(_m()._nixos_build_env())
 
-    # capture_output=False is deliberate (#18840): optional postinstall scripts
-    # print download progress, and capturing it makes a long download look
-    # hung. The npm-deprecation noise comes from the desktop build (captured
-    # to update.log), not this step.
+    # capture_output=False is deliberate: postinstall scripts print download progress and
+    # capturing makes a long download look hung.
     result = _m()._run_npm_install_deterministic(
         npm,
         _m().PROJECT_ROOT,
@@ -869,26 +770,18 @@ def _update_node_dependencies() -> list[str]:
 
 
 def _venv_core_imports_healthy() -> tuple[bool, str]:
-    """Probe the project venv for the core imports the backend needs to boot.
+    """Probe the venv (in ITS interpreter — updater may run under another Python) for core imports.
 
-    Runs inside the venv interpreter (NOT this process — ``hermes update`` may
-    run under a different Python). Catches a half-updated venv: checkout
-    current but a dependency sync failed or was killed partway (e.g. Windows
-    access-denied on a loaded .pyd). Without it, a current checkout prints
-    "Already up to date!" and never re-syncs, so the install stays broken.
-
-    Returns ``(healthy, detail)``. Never raises; unknown states report
-    healthy so a probe failure can't force needless reinstalls.
+    Catches a half-updated venv where the checkout is current but a dependency sync died
+    partway; otherwise "Already up to date!" never re-syncs. Returns ``(healthy, detail)``.
+    Never raises; unknown states report healthy so a probe failure can't force reinstalls.
     """
     from hermes_cli.update_cmd import _m
     venv_dir = _m().PROJECT_ROOT / "venv"
     venv_python = venv_python_path(venv_dir, windows=_m()._is_windows())
     if not venv_python.exists():
-        # No venv interpreter. Normal for a dev checkout (report healthy to
-        # avoid forced reinstalls), but on a MANAGED install (bootstrap stamp
-        # or `.update-incomplete` present) the venv IS the install — its
-        # absence means a repair was interrupted after the old venv was moved
-        # aside, and "Already up to date!" would be a lie.
+        # No venv: normal for a dev checkout (healthy), but on a MANAGED install (bootstrap
+        # stamp or `.update-incomplete`) the venv IS the install — absence means an interrupted repair.
         managed_markers = (
             _m().PROJECT_ROOT / ".hermes-bootstrap-complete",
             _m()._update_marker_path(),
@@ -897,9 +790,8 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
             return False, f"venv python missing ({venv_python})"
         return True, ""
 
-    # Core web/serve imports plus their newest transitive deps. Import (not
-    # just metadata) — a package can have intact dist-info but a missing
-    # module after an interrupted uninstall/install cycle.
+    # Import (not just metadata): dist-info can be intact with modules missing after an
+    # interrupted uninstall/install.
     check = (
         "import importlib\n"
         "mods = ['fastapi', 'uvicorn', 'pydantic', 'openai', 'yaml']\n"
@@ -923,7 +815,7 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
 
     missing = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
     if result.returncode != 0 and not missing:
-        # Interpreter itself is broken (e.g. deleted stdlib) — that IS unhealthy.
+        # Interpreter itself is broken — that IS unhealthy.
         detail = (result.stderr or "").strip().splitlines()
         return False, detail[0] if detail else "venv python failed to run"
     if missing:
@@ -931,23 +823,12 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
     return True, ""
 
 
-# Native-extension modules that pin files inside the venv once imported. If
-# the updater itself has one loaded, Windows blocks REPLACE on the mapped
-# ``.pyd``/``.dll`` and the sync dies with ``os error 5`` between uninstall
-# and reinstall, stranding the venv half-updated (#83569). ``cryptography``
-# is the canonical case; PyYAML's ``_yaml`` is loaded by every CLI process.
-# Kept as defence-in-depth against future eager imports, but the guard must
-# be HONEST (#86735/#86780/#86781: a preflight firing on every run, before
-# the fetch, re-bricked the flow it protected). Two honesty gates:
-#
-# 1. Fire only when the sync would actually REWRITE the loaded distribution
-#    (``_dependency_sync_would_rewrite``); a satisfied pin means uv/pip
-#    never touch the mapped ``.pyd``.
-# 2. Run AFTER the code swap, right before the venv rewrite — so gate 1
-#    compares against the NEW pyproject and a deferral leaves the user on
-#    new code with only the dependency install pending for the next launch's
-#    marker recovery.
-#
+# Native extensions that pin venv files once imported: if the updater holds one, Windows blocks
+# REPLACE on the mapped ``.pyd`` and the sync dies with ``os error 5`` mid-reinstall. PyYAML's
+# ``_yaml`` is loaded by every CLI process, so the guard must be HONEST (an always-firing
+# preflight bricked the flow it protected): (1) fire only when the sync would actually
+# REWRITE the dist (``_dependency_sync_would_rewrite``); (2) run AFTER the code swap, right
+# before the venv rewrite, so a deferral leaves new code with only the install pending.
 # Keys are ``sys.modules`` prefixes; values are ``(display name, PyPI dist)``.
 _SELF_LOCKING_NATIVE_MODULES: dict[str, tuple[str, str]] = {
     "cryptography.hazmat.bindings._rust": ("cryptography (_rust.pyd)", "cryptography"),
@@ -956,17 +837,10 @@ _SELF_LOCKING_NATIVE_MODULES: dict[str, tuple[str, str]] = {
 
 
 def _dependency_sync_would_rewrite(dist_name: str) -> bool | None:
-    """Whether ``uv pip install -e .[all]`` would replace *dist_name*'s files.
-
-    Compares the installed version against every applicable requirement in
-    the on-disk ``pyproject.toml`` (base deps plus all extras). ``False`` —
-    every pin satisfied, a mapped extension is NOT at risk; ``True`` — some
-    pin unsatisfied or dist missing; ``None`` — undeterminable.
-
-    Never raises. Callers treat ``None`` as fail-OPEN (no deferral): PyYAML
-    is loaded by every process, so deferring on uncertainty would recreate
-    the #86735 always-firing loop.
-    """
+    """Whether the ``.[all]`` install would replace *dist_name*'s files, judged against every
+    applicable pin in on-disk ``pyproject.toml`` (base + extras). False: all pins satisfied;
+    True: pin unsatisfied or dist missing; None: undeterminable. Never raises. Callers treat
+    None as fail-OPEN — PyYAML is in every process, so deferring on uncertainty always fires."""
     from hermes_cli.update_cmd import _m
     try:
         from importlib import metadata as _ilmd
@@ -1005,24 +879,16 @@ def _dependency_sync_would_rewrite(dist_name: str) -> bool | None:
                 return True
         if saw_pin:
             return False
-        # Not pinned anywhere in pyproject: the resolver may still move it
-        # as a transitive — we cannot cheaply predict that, so stay honest
-        # about the uncertainty.
+        # Not pinned in pyproject: the resolver may still move it as a transitive — unknown.
         return None
     except Exception:
         return None
 
 
 def _detect_self_loaded_native_modules() -> list[str]:
-    """Native venv extensions loaded into THIS process that the sync would rewrite.
-
-    Returns display names (empty off Windows — POSIX lets a running process
-    keep using an unlinked inode, so self-locking is a Windows-only hazard).
-    A loaded module whose installed version already satisfies the on-disk
-    pyproject pins is NOT reported: the dependency sync will not touch its
-    files, so there is no swap at risk (#86735 — the always-firing variant
-    of this preflight bricked every Windows update).  Never raises.
-    """
+    """Display names of native venv extensions loaded into THIS process that the sync would rewrite.
+    Empty off Windows (POSIX keeps an unlinked inode usable). Modules whose installed version
+    already satisfies the pins are NOT reported — no swap at risk. Never raises."""
     from hermes_cli.update_cmd import _m
     if not _m()._is_windows():
         return []
@@ -1030,12 +896,9 @@ def _detect_self_loaded_native_modules() -> list[str]:
     for prefix, (display, dist) in _SELF_LOCKING_NATIVE_MODULES.items():
         if prefix not in sys.modules:
             continue
-        # Defer ONLY on a CONFIRMED pending rewrite; "unknown" must fail OPEN,
-        # since PyYAML is loaded in every CLI process and treating unknown as
-        # at-risk recreated the always-firing loop (#86735). A missed deferral
-        # only yields the pre-existing mid-sync os error 5, which marker
-        # recovery already handles — far less harmful than an update that
-        # can never run.
+        # Defer ONLY on a CONFIRMED rewrite; unknown fails OPEN (PyYAML is in every process, so
+        # unknown-as-at-risk always fires). A missed deferral only yields the mid-sync os error 5
+        # that marker recovery already handles — far less harmful than an update that never runs.
         if _m()._dependency_sync_would_rewrite(dist) is not True:
             continue
         found.append(display)
@@ -1043,18 +906,11 @@ def _detect_self_loaded_native_modules() -> list[str]:
 
 
 def _abort_dependency_sync_if_self_locked(gateway_resume=None) -> None:
-    """Defer the venv rewrite when THIS process holds something it must replace.
-
-    Runs after the code swap, right before the venv rewrite, so a deferral
-    leaves the user on NEW code with only the dependency install pending.
-    No-op when nothing at-risk is held. Two hazards with different recoveries:
-
-    - A mapped native extension (``.pyd``): exit 2 and let the next launch's
-      marker recovery finish the install before importing anything heavy.
-    - The ``hermes.exe`` shim we were launched from (#88838, #89599): every
-      future launch is also the shim, so the marker would defer forever.
-      Hand the install to a child under the venv interpreter and exit.
-    """
+    """Defer the venv rewrite when THIS process holds something it must replace (runs after the
+    code swap, so a deferral leaves NEW code with only the install pending). Two hazards:
+    a mapped ``.pyd`` -> exit 2, next launch's marker recovery finishes; the ``hermes.exe`` shim
+    we run from -> every launch is the shim so the marker would defer forever: hand the
+    install to a child under the venv interpreter and exit 0."""
     from hermes_cli.update_cmd import _m
     locked = _m()._detect_self_loaded_native_modules()
     if locked:
@@ -1070,14 +926,9 @@ def _abort_dependency_sync_if_self_locked(gateway_resume=None) -> None:
 
 
 def _defer_update_for_self_lock(loaded: list[str]) -> None:
-    """Bail out before the dependency sync when the updater holds a lock.
-
-    The install cannot win this race from inside the locked process — even
-    killing threads would not unmap the image — so defer it: drop the
-    update-incomplete marker (next launch's fresh process completes the
-    install before importing anything heavy), explain, and exit 2 like the
-    other preflight refusals.
-    """
+    """Bail out before the sync when the updater holds a lock: the install can't win from inside
+    the locked process (killing threads won't unmap the image), so drop the update-incomplete
+    marker (next fresh launch completes it), explain, and let the caller exit 2."""
     from hermes_cli.update_cmd import _m
     print("✗ This updater process has already loaded native venv modules that")
     print("  the dependency sync must replace:")
@@ -1103,18 +954,12 @@ def _desktop_app_present(desktop_dir: Path) -> bool:
 def _rebuild_desktop_after_update(
     desktop_dir: Path, *, had_desktop_app_before_update: bool
 ) -> bool:
-    """Rebuild an installed Desktop app when its source or artifact changed.
-
-    Returns ``False`` only when a rebuild was attempted and failed, so the
-    caller can withhold ``✓ Update complete!`` and (in gateway mode) write
-    a failing ``.update_exit_code`` (#88251). Every other outcome — nothing
-    to rebuild, up to date, build succeeded, Desktop never installed —
-    returns ``True``.
-    """
+    """Rebuild an installed Desktop app when its source or artifact changed. Returns ``False``
+    only when a rebuild was attempted and failed (caller withholds ``✓ Update complete!`` and
+    writes a failing ``.update_exit_code`` in gateway mode); every other outcome is ``True``."""
     from hermes_cli.update_cmd import _m
-    # The release tree is ignored by git and can disappear during an update.
-    # Its pre-update presence is enough to restore it; do not make people who
-    # have never used Desktop pay for an Electron build.
+    # The release tree is git-ignored and can vanish mid-update; pre-update presence suffices.
+    # Never make people who never used Desktop pay for an Electron build.
     has_desktop_app = had_desktop_app_before_update or _desktop_app_present(desktop_dir)
     if not (
         (desktop_dir / "package.json").exists()
@@ -1124,11 +969,9 @@ def _rebuild_desktop_after_update(
         return True
 
     print("→ Checking if desktop app needs rebuilding...")
-    # Consult the content-hash stamp IN-PROCESS first: the spawned
-    # `hermes desktop --build-only` re-imports the whole CLI stack (~1-3 s)
-    # just to reach the same _m()._desktop_build_needed check. The update path
-    # never passes --source, so mirror source_mode=False. Any pre-check error
-    # falls through to the subprocess.
+    # Check the content-hash stamp IN-PROCESS first (the subprocess spends ~1-3 s importing the
+    # CLI to reach the same check). Update never passes --source, so source_mode=False.
+    # Any pre-check error falls through to the subprocess.
     skip_desktop_build = False
     try:
         skip_desktop_build = not _m()._desktop_build_needed(
@@ -1141,14 +984,9 @@ def _rebuild_desktop_after_update(
         return True
 
     desktop_build_cmd = [sys.executable, "-m", "hermes_cli.main", "desktop", "--build-only"]
-    # Capture the (very loud) Electron/vite build output into update.log. On
-    # a nonzero exit, retry once (covers a still-settling rebuild window), then
-    # surface the captured tail so the failure is debuggable.
-    #
-    # Put the Hermes-managed Node on PATH: inside the desktop updater chain
-    # (Desktop → hermes-setup → hermes update) shell PATH customizations are
-    # lost, so a bare-PATH child fails with `node: not found` before cmd_gui
-    # can self-heal.
+    # Capture the loud build output into update.log; retry once on failure (still-settling
+    # rebuild window), then surface the tail. Put Hermes-managed Node on PATH: the desktop
+    # updater chain loses shell PATH customizations, so a bare-PATH child hits `node: not found`.
     from hermes_constants import with_hermes_node_path
 
     build_env = with_hermes_node_path()
@@ -1173,11 +1011,8 @@ def _rebuild_desktop_after_update(
 
 
 def _path_uid(path) -> Optional[int]:
-    """Owner uid of ``path`` via ``os.stat`` — ``None`` when unreadable.
-
-    Separate seam so tests can simulate root-owned files without chown
-    (which needs root). Never raises.
-    """
+    """Owner uid of ``path`` (``None`` when unreadable). Separate seam so tests can simulate
+    root-owned files without chown. Never raises."""
     try:
         return os.stat(path, follow_symlinks=False).st_uid
     except OSError:
@@ -1185,22 +1020,15 @@ def _path_uid(path) -> Optional[int]:
 
 
 def _venv_foreign_owned_paths(venv_root, limit: int = 5) -> list:
-    """Bounded scan for venv entries not owned by the current user (#83529).
+    """Bounded scan for venv entries not owned by the current user; returns up to ``limit``
+    ``(path_str, uid)`` tuples.
 
-    A venv ever touched by ``sudo pip`` / ``sudo hermes`` contains root-owned
-    files (classically ``*.dist-info/INSTALLER``); a later normal ``hermes
-    update`` then dies mid-mutation inside ``uv pip install -e .`` with
-    ``venv/bin/hermes`` already deleted — the CLI is bricked. Same philosophy
-    as the contended-venv gate (#87331): never mutate a venv we cannot safely mutate.
-
-    Deliberately BOUNDED (no full recursion): the venv root, direct entries of
-    ``venv/bin``, top-level entries of the first ``lib/python*/site-packages``,
-    and direct children of each ``*.dist-info`` there; ~2000 stat calls max,
-    at most ``limit`` paths returned. POSIX-only: ``[]`` on Windows and as
-    root. Swallows every per-entry ``OSError`` and returns ``[]`` on any
-    structural surprise — must NEVER raise or add noticeable latency.
-
-    Returns ``(path_str, uid)`` tuples, at most ``limit`` long.
+    A venv touched by ``sudo pip``/``sudo hermes`` has root-owned files, and a later normal
+    update dies mid-mutation with ``venv/bin/hermes`` already deleted — never mutate a venv we
+    can't safely mutate. Deliberately BOUNDED (venv root, ``venv/bin``, top-level of first
+    site-packages, children of each ``*.dist-info``; ~2000 stats max). POSIX-only: ``[]`` on
+    Windows and as root. Swallows per-entry ``OSError``; ``[]`` on any structural surprise —
+    must NEVER raise or add noticeable latency.
     """
     from hermes_cli.update_cmd import _path_uid
     try:
@@ -1255,20 +1083,14 @@ def _venv_foreign_owned_paths(venv_root, limit: int = 5) -> list:
 
         return foreign[:limit]
     except Exception:
-        # Preflight is advisory: any structural surprise means "no verdict",
-        # never a crashed or blocked update.
+        # Advisory preflight: structural surprise = "no verdict", never a blocked update.
         return []
 
 
 def _refuse_update_if_venv_foreign_owned(project_root) -> None:
-    """Refuse-before-mutate ownership gate for the dependency install (#83529).
-
-    Runs after the code pull and immediately before the first venv mutation:
-    foreign-owned venv files would make ``uv pip install -e .`` die
-    mid-mutation and brick the install, so refuse up front with the exact
-    recovery command while the venv is intact. No subprocess calls here —
-    update tests mock ``subprocess.run`` with sequenced side effects.
-    """
+    """Refuse-before-mutate ownership gate, run after the pull and before the first venv mutation:
+    foreign-owned files would brick the install mid-mutation, so refuse with the recovery command
+    while the venv is intact. No subprocess calls — tests mock ``subprocess.run`` with sequenced effects."""
     foreign = _venv_foreign_owned_paths(Path(project_root) / "venv")
     if not foreign:
         return
@@ -1293,13 +1115,9 @@ def _sync_python_dependencies_after_pull(
     active_tool_dependencies,
     _windows_gateway_resume,
 ):
-    """Reinstall Python dependencies for the freshly pulled checkout.
-
-    Order matters: ownership preflight -> self-lock deferral -> core-install
-    marker -> ``.[all]`` (uv or pip) -> bytecode sweep -> lazy-feature and
-    tool-dependency refresh (own marker) -> memory-provider bridge deps ->
-    critical-import probe (warn only; stale-bytecode self-heals next launch).
-    """
+    """Reinstall Python deps for the pulled checkout. Order matters: ownership preflight ->
+    self-lock deferral -> core marker -> ``.[all]`` -> bytecode sweep -> lazy/tool refresh (own
+    marker) -> memory-provider deps -> critical-import probe (warn only; stale bytecode self-heals)."""
     from hermes_cli.update_cmd import (
         _m,
         _sweep_bytecode_after_update,
@@ -1308,18 +1126,11 @@ def _sync_python_dependencies_after_pull(
         _write_update_incomplete_marker,
     )
     _refuse_update_if_venv_foreign_owned(_m().PROJECT_ROOT)
-    #
-    # Self-lock deferral (relocated preflight — #86735): if THIS process
-    # holds a native extension the sync must rewrite, defer NOW — after
-    # the code swap, so only the dependency install is pending and the
-    # next fresh launch completes it via the marker.
+    # Self-lock deferral: if THIS process holds a native extension the sync must rewrite, defer
+    # NOW (after the code swap) so only the install is pending for the next launch's marker.
     _m()._abort_dependency_sync_if_self_locked(_windows_gateway_resume)
-    #
-    # Drop the core-install breadcrumb BEFORE touching the venv. If the
-    # install is killed mid-flight (Ctrl-C, terminal close, WSL OOM), the
-    # marker survives and the next ``hermes`` launch finishes the install
-    # via ``_recover_from_interrupted_install``. Cleared after the core
-    # ``.[all]`` install completes — lazy refresh uses a separate marker.
+    # Drop the core-install breadcrumb BEFORE touching the venv so a killed install is finished
+    # by the next launch (``_recover_from_interrupted_install``). Lazy refresh uses its own marker.
     _write_update_incomplete_marker()
     deps_current = _editable_install_is_current(
         git_cmd, _m().PROJECT_ROOT, pre_pull_sha
@@ -1330,7 +1141,7 @@ def _sync_python_dependencies_after_pull(
         print("→ Updating Python dependencies...")
     from hermes_cli.managed_uv import ensure_uv, update_managed_uv
 
-    # Keep managed uv current — runs `uv self update` if we already have one.
+    # `uv self update` if we already have a managed uv.
     update_managed_uv()
 
     uv_bin = ensure_uv()
@@ -1341,9 +1152,7 @@ def _sync_python_dependencies_after_pull(
     install_group = "all"
 
     if uv_bin:
-        # Use official managed_python_env() isolation so third-party
-        # UV_PYTHON_INSTALL_DIR (e.g. WorkBuddy) cannot hijack uv; then
-        # point VIRTUAL_ENV at this install's venv.
+        # managed_python_env() isolation so a third-party UV_PYTHON_INSTALL_DIR can't hijack uv.
         from hermes_cli.managed_uv import managed_python_env
 
         uv_env = managed_python_env()
@@ -1377,36 +1186,27 @@ def _sync_python_dependencies_after_pull(
     lazy_env = uv_env if uv_bin else None
 
     if deps_current:
-        # The verification normally runs inside the install we just
-        # skipped. Run it here so a wrong skip self-heals into a real
-        # install (both verifiers reinstall what they find missing)
-        # instead of leaving a venv nobody checked.
+        # Verification normally runs inside the skipped install; run it here so a wrong skip
+        # self-heals (both verifiers reinstall what they find missing).
         _m()._verify_core_dependencies_installed(
             install_prefix, env=lazy_env, group=install_group
         )
         _m()._verify_console_scripts_installed(install_prefix, env=lazy_env)
 
-    # Core ``.[all]`` install finished. Clear the generic core breadcrumb
-    # before the lazy-refresh phase — that phase uses its own marker so a
-    # later lazy failure cannot be "healed" by clearing the core marker
-    # based on a narrow 7-package import probe (#58004 review).
+    # Clear the core breadcrumb before lazy refresh, which uses its own marker so a lazy
+    # failure can't be "healed" by a narrow core import probe.
     _m()._clear_update_incomplete_marker()
 
-    # The update process is still the old Python interpreter process. Run
-    # one final cache/module refresh immediately before lazy backend
-    # refresh, which imports newly-pulled modules that may depend on fresh
-    # symbols in hermes_constants or lazy_deps. The dependency install
-    # above may also have regenerated bytecode from build-cache copies —
-    # this second sweep catches those stragglers (#60242, #65240).
+    # Still the old interpreter process: refresh caches/modules before lazy refresh imports
+    # newly-pulled modules. The install may have regenerated bytecode from build-cache
+    # copies — this second sweep catches those stragglers.
     _sweep_bytecode_after_update(branch)
     _m()._reload_updated_runtime_modules()
 
-    # Upgrade pip before lazy refreshes — stale pip can fail source builds
-    # and leave partially-written packages (#57828).
+    # Stale pip can fail source builds and leave partially-written packages.
     _write_lazy_refresh_incomplete_marker()
     _m()._upgrade_pip_before_lazy_refresh(install_prefix, env=lazy_env)
 
-    # Lazy refresh can corrupt the venv when a backend install fails.
     # Clear the lazy marker only when refresh/repair is confirmed healthy.
     lazy_ok = _m()._refresh_active_lazy_features(
         install_prefix,
@@ -1427,15 +1227,11 @@ def _sync_python_dependencies_after_pull(
         env=lazy_env,
     )
 
-    # Heal the active memory provider's bridge packages last — the core
-    # reinstall + lazy refresh above may have stripped or downgraded
-    # plugin.yaml-declared deps that aren't in extras (#53272, #70636).
+    # Heal memory-provider bridge packages last — the steps above may have stripped them.
     _m()._refresh_active_memory_provider_dependencies()
 
-    # All transient-ImportError sources have run, so a module that still
-    # won't import is real breakage. Warn only — never roll back: `cannot
-    # import name X` is also the stale-bytecode signature (#6207, #60242),
-    # which _sweep_stale_bytecode_if_checkout_changed() self-heals next launch.
+    # Remaining import failures are real breakage. Warn only — never roll back: `cannot import
+    # name X` is also the stale-bytecode signature, which self-heals next launch.
     import_ok, failing_module, import_error = _validate_critical_modules_import(
         _m().PROJECT_ROOT
     )

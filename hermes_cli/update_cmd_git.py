@@ -1,9 +1,8 @@
 """Git plumbing for ``hermes update``: fork/upstream sync, trampoline-git detection, lockfile/EOL churn cleanup, orphan rescue refs, parked-branch assessment, fetch-failure classification.
 
-Split out of ``hermes_cli/update_cmd.py``; every moved name is re-imported there, so
-``hermes_cli.update_cmd.<name>`` keeps resolving (and monkeypatching) as before.
-Origin-internal helpers are imported lazily inside each function (no import cycle;
-test patches on ``hermes_cli.update_cmd.<name>`` stay effective).
+Split out of ``update_cmd.py``, which re-imports every name so ``hermes_cli.update_cmd.<name>``
+still resolves/monkeypatches. Origin helpers are imported lazily per function (no cycle;
+test patches on ``update_cmd`` stay effective).
 """
 
 import logging
@@ -30,20 +29,12 @@ def _prune_orphan_rescue_refs(
     keep=_ORPHAN_RESCUE_REFS_TO_KEEP,
     max_age_days=_ORPHAN_RESCUE_REF_MAX_AGE_DAYS,
 ) -> None:
-    """Expire old orphan rescue refs so backups stay bounded.
+    """Expire old orphan rescue refs (``refs/hermes-update-backups/orphan-<branch>-<ts>-<sha>``).
 
-    Each orphan-history divergence (#87694) parks the pre-reset HEAD under
-    ``refs/hermes-update-backups/orphan-<branch>-<ts>-<sha>``. A rescue ref
-    pins its objects against ``git gc`` — in the incident shape a full
-    working-tree snapshot, potentially multi-GB — so a repeatedly corrupted
-    install would grow ``.git`` without bound.
-
-    Two limits, both enforced on every orphan incident: keep only the
-    ``keep`` most-recent refs, and drop any older than ``max_age_days`` per
-    the ``YYYYMMDD-HHMMSS`` stamp in the ref name (unparseable names are left
-    alone). Names sort chronologically, so ``for-each-ref`` order is creation
-    order. Disk is reclaimed on the next ``git gc``. Best-effort: never
-    blocks the update.
+    Each ref pins a possibly multi-GB snapshot against ``git gc``, so a repeatedly corrupted
+    install would grow ``.git`` unbounded. Keep the ``keep`` newest AND drop any older than
+    ``max_age_days`` by the ``YYYYMMDD-HHMMSS`` stamp (unparseable names left alone); names
+    sort chronologically so ``for-each-ref`` order is creation order. Best-effort, never blocks.
     """
     from hermes_cli.update_cmd import _git_run
     try:
@@ -57,8 +48,6 @@ def _prune_orphan_rescue_refs(
             return
         refs = [line.strip() for line in list_result.stdout.splitlines() if line.strip()]
         stale = set(refs[:-keep] if keep > 0 else refs)
-        # Age expiry: ref names embed a UTC YYYYMMDD-HHMMSS timestamp right
-        # after the branch segment; anything older than max_age_days goes.
         if max_age_days > 0:
             from datetime import timedelta, timezone
 
@@ -81,11 +70,9 @@ def _prune_orphan_rescue_refs(
 
 
 def _branch_head_label(git_cmd=None, cwd=None) -> str | None:
-    """``"<branch> @ <short-sha>"`` for the checkout, or None when unknown.
+    """``"<branch> @ <short-sha>"`` for the checkout, or None when unknown. Never raises.
 
-    Appended to update summary lines so branch drift is visible (2026-08-17
-    incident: a checkout parked on a stale feature branch got "✓ Update
-    complete!" with nothing saying WHERE it sat). Never raises.
+    Appended to summary lines so a checkout parked on a stale branch is visible.
     """
     from hermes_cli.update_cmd import _m
     try:
@@ -122,27 +109,14 @@ def _branch_head_suffix(git_cmd=None, cwd=None) -> str:
 def _assess_parked_branch_switch(
     git_cmd: list[str], cwd: Path, current_branch: str, target_branch: str
 ) -> tuple[bool, str]:
-    """Decide whether it is safe to auto-switch a parked feature branch back
-    to the update target.
+    """Decide whether a parked feature branch may be auto-switched back to the update target.
 
-    Live incident (2026-08-17): the checkout sat on a stale feature branch;
-    ``hermes update`` autostashed, ran post-update steps and printed
-    "✓ Code updated!" while the running code stayed days behind main.
-
-    - (True, "") — tree + index clean AND every parked commit is already in
-      ``origin/<target_branch>`` (``git cherry`` reports no ``+`` lines).
-    - (True, "unmerged:<count>") — tree clean but the branch has commits not
-      in the target. Switching is safe (``git checkout`` never discards
-      committed work) but the caller must print a LOUD notice naming the
-      branch and count. Non-interactive callers (desktop button, gateway
-      /update, cron) rely on this: they can't resolve a skip, so a clean
-      checkout must always reach the target.
-    - (False, <reason>) — dirty tree, git errors, or the
-      ``updates.auto_switch_parked_branch: false`` opt-out; caller must NOT
-      touch the branch. A dirty tree is the genuinely unsafe case: uncommitted
-      work riding an autostash across branches is how the incident started.
-
-    Block reasons: "disabled", "dirty", "unverifiable".
+    - (True, "") — tree clean and every parked commit is in ``origin/<target>`` (no ``git cherry +``).
+    - (True, "unmerged:<n>") — tree clean but commits not in target; switching is safe (checkout
+      keeps committed work) but caller must print a LOUD notice. Non-interactive callers
+      (desktop, gateway /update, cron) can't resolve a skip, so a clean checkout must reach target.
+    - (False, "disabled"|"dirty"|"unverifiable") — caller must NOT touch the branch. Dirty is
+      the genuinely unsafe case: uncommitted work riding an autostash across branches.
     """
     from hermes_cli.update_cmd import _git_run
     try:
@@ -154,8 +128,7 @@ def _assess_parked_branch_switch(
         ):
             return False, "disabled"
     except Exception as exc:
-        # A config read failure must not disable the guard's safety checks —
-        # fall through to them with the default (auto-switch allowed).
+        # Config read failure must not disable the safety checks; fall through with default.
         logger.debug("Could not read updates.auto_switch_parked_branch: %s", exc)
 
     status = _git_run(git_cmd, ["status", "--porcelain"], cwd)
@@ -171,9 +144,7 @@ def _assess_parked_branch_switch(
         line for line in cherry.stdout.splitlines() if line.startswith("+")
     ]
     if unmerged:
-        # Clean tree: switching is safe (checkout keeps the commits on the
-        # branch). The reason string tells the caller to print the loud
-        # "branch kept with N unmerged commit(s)" notice.
+        # Safe (checkout keeps commits); reason tells caller to print the loud notice.
         return True, f"unmerged:{len(unmerged)}"
     return True, ""
 
@@ -185,8 +156,7 @@ def _print_parked_branch_skip_warning(
     target_branch: str,
     reason: str,
 ) -> None:
-    """LOUD block explaining why the code update was skipped on a parked
-    branch, with the behind-count and the exact commands to resolve."""
+    """LOUD block: why the update was skipped on a parked branch, behind-count, fix commands."""
     from hermes_cli.update_cmd import _git_run
     behind = None
     try:
@@ -230,12 +200,10 @@ def _print_parked_branch_skip_warning(
 def _print_parked_branch_kept_notice(
     current_branch: str, target_branch: str, unmerged_count: str
 ) -> None:
-    """LOUD notice printed when a clean parked branch with unmerged commits
-    is auto-switched back to the update target.
+    """LOUD notice when a clean parked branch with unmerged commits is auto-switched.
 
-    Non-interactive callers can't resolve a skip, so a clean checkout always
-    proceeds — but the unmerged work must be impossible to miss. The commits
-    stay on the branch (``git checkout`` never discards committed work).
+    Non-interactive callers can't resolve a skip, so we proceed — but the unmerged work
+    (still safe on its branch) must be impossible to miss.
     """
     bar = "=" * 68
     print()
@@ -284,7 +252,6 @@ def _is_fork(origin_url: Optional[str]) -> bool:
     """Check if the origin remote points to a fork (not the official repo)."""
     if not origin_url:
         return False
-    # Normalize URL for comparison (strip trailing .git if present)
     normalized = origin_url.rstrip("/")
     if normalized.endswith(".git"):
         normalized = normalized[:-4]
@@ -347,10 +314,7 @@ def _mark_skip_upstream_prompt():
 
 
 def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
-    """Attempt to push updated main to origin (sync fork).
-
-    Returns True if push succeeded, False otherwise.
-    """
+    """Push updated main to origin (sync fork); True on success."""
     from hermes_cli.update_cmd import _git_run
     try:
         result = _git_run(git_cmd, ["push", "origin", "main", "--force-with-lease"], cwd, network=True)
@@ -366,15 +330,11 @@ def _sync_with_upstream_if_needed(
     assume_yes: bool = False,
     input_fn=None,
 ) -> bool:
-    """Check if fork is behind upstream and fast-forward if safe.
+    """Offer to add ``upstream``, compare origin/main vs upstream/main, ff-pull when strictly
+    behind, then push origin.
 
-    Offers to add the ``upstream`` remote, compares origin/main with
-    upstream/main, pulls when strictly behind, then tries to push origin.
-
-    Returns True only when origin/main was actually verified against
-    upstream/main; False when the check never happened (prompt declined,
-    remote add/fetch/compare failed) so the caller never reports "up to date"
-    on an origin-only comparison (#97052).
+    Returns True only when origin/main was actually verified against upstream/main; False when
+    the check never happened, so the caller never reports "up to date" on an origin-only compare.
     """
     from hermes_cli.update_cmd import (
         _add_upstream_remote,
@@ -398,8 +358,7 @@ def _sync_with_upstream_if_needed(
         if assume_yes or (
             input_fn is None and not (sys.stdin.isatty() and sys.stdout.isatty())
         ):
-            # --yes means "don't block", not "mutate my git remotes". Skip
-            # without persisting the decline so interactive runs still get asked.
+            # --yes means "don't block", not "mutate my remotes"; don't persist the decline.
             print("  Skipping upstream setup (non-interactive run).")
             print(
                 "  Add it later with: git remote add upstream https://github.com/NousResearch/hermes-agent.git"
@@ -440,8 +399,7 @@ def _sync_with_upstream_if_needed(
             _mark_skip_upstream_prompt()
             return False
 
-    # Fetch only upstream/main: a bare fetch drags in thousands of
-    # auto-generated branches.
+    # Only upstream/main: a bare fetch drags in thousands of auto-generated branches.
     print()
     print("→ Fetching upstream...")
     try:
@@ -456,7 +414,6 @@ def _sync_with_upstream_if_needed(
         print("  ✗ Failed to fetch upstream. Skipping upstream sync.")
         return False
 
-    # Compare origin/main with upstream/main
     origin_ahead = _count_commits_between(git_cmd, cwd, "upstream/main", "origin/main")
     upstream_ahead = _count_commits_between(
         git_cmd, cwd, "origin/main", "upstream/main"
@@ -466,7 +423,6 @@ def _sync_with_upstream_if_needed(
         print("  ✗ Could not compare branches. Skipping upstream sync.")
         return False
 
-    # If origin/main has commits not on upstream, don't trample
     if origin_ahead > 0:
         print()
         print(f"ℹ Your fork has {origin_ahead} commit(s) not on upstream.")
@@ -479,7 +435,6 @@ def _sync_with_upstream_if_needed(
         print("  ✓ Fork is up to date with upstream")
         return True
 
-    # origin/main is strictly behind upstream/main (can fast-forward)
     print()
     print(f"→ Fork is {upstream_ahead} commit(s) behind upstream")
     print("→ Pulling from upstream...")
@@ -511,13 +466,10 @@ def _sync_with_upstream_if_needed(
 
 
 def _classify_fetch_failure(stderr: str) -> str:
-    """Map git-fetch stderr to a one-line, user-facing diagnosis.
+    """Map git-fetch stderr to a one-line diagnosis (caller also prints the raw first line).
 
-    Order matters: curl reports HTTP failures as ``unable to access '<url>':
-    The requested URL returned error: 429``, so the rate-limit/outage checks
-    must run BEFORE the generic "unable to access" network check. The caller
-    always prints the first raw stderr line too — this adds guidance, it
-    never replaces the wire error.
+    Order matters: curl reports HTTP errors as ``unable to access '<url>': ... error: 429``,
+    so rate-limit/outage checks must run BEFORE the generic "unable to access" check.
     """
 
     def _has_http_code(*codes: str) -> bool:
@@ -539,9 +491,8 @@ def _classify_fetch_failure(stderr: str) -> str:
     if "Could not resolve host" in stderr or "unable to access" in stderr:
         return "✗ Network error — cannot reach the remote repository."
     if "could not read Username" in stderr or "terminal prompts disabled" in stderr:
-        # Anonymous fetch of a public repo got HTTP 401. GitHub does this
-        # during outages (and for renamed/private repos) — it is not a
-        # credentials problem on the user's side.
+        # Anonymous fetch got HTTP 401: GitHub does this during outages (and for
+        # renamed/private repos) — not a user credentials problem.
         return (
             "✗ GitHub rejected the anonymous fetch (asked for a login) — this"
             " usually means a GitHub outage; try again in a few minutes"
@@ -562,13 +513,11 @@ def _print_fetch_failure(stderr: str) -> None:
 
 
 def _git_is_trampoline(git_cmd: list) -> bool:
-    """Whether *git_cmd* resolves to a Git-for-Windows trampoline launcher.
+    """Whether *git_cmd* is a broken Git-for-Windows trampoline shim.
 
-    Git for Windows ships ~46KB shims (``bin\\git.exe``, ``cmd\\git.exe``) that
-    re-exec ``mingw64\\libexec\\git-core\\git.exe``. When the shim cannot find
-    git-core, every git call dies with the launcher's guard message — a broken
-    PATH entry, not a network/filesystem problem (#87876). Never raises;
-    unknown states report False so a probe failure can't block an update.
+    The ~46KB ``bin\\git.exe``/``cmd\\git.exe`` shims re-exec git-core; when they can't find
+    it every call dies with the launcher's guard message (a PATH problem, not network).
+    Never raises; unknown states report False so a probe failure can't block an update.
     """
     try:
         result = subprocess.run(
@@ -584,14 +533,8 @@ def _git_is_trampoline(git_cmd: list) -> bool:
 
 
 def _portable_git_candidates() -> list:
-    """PortableGit candidate paths: shared root first, then profile home.
-
-    The Hermes-managed PortableGit tree lives under the SHARED root
-    (``<root>/git/...``), not the profile-scoped HERMES_HOME
-    (``<root>/profiles/<name>``), so a profile-scoped ``hermes update`` must
-    look there (monerostar review, #87876). The profile-home candidate is
-    kept as a fallback for custom layouts that place it there.
-    """
+    """PortableGit candidates: shared root first (where the managed tree actually lives,
+    not the profile-scoped HERMES_HOME), then profile home as a fallback for custom layouts."""
     from hermes_cli.update_cmd import get_default_hermes_root, get_hermes_home
     candidates = []
     try:
@@ -605,15 +548,9 @@ def _portable_git_candidates() -> list:
 
 
 def _locate_real_git() -> Optional[Path]:
-    """Find a real Git-for-Windows binary that is not a broken trampoline.
-
-    The ~46KB ``bin\\git.exe`` / ``cmd\\git.exe`` shims fail to re-exec
-    git-core while ``mingw64\\libexec\\git-core\\git.exe`` (≈4.4MB) works
-    directly (#87876). Check standard Git for Windows locations plus the
-    Hermes-managed PortableGit; accept the first candidate that runs without
-    the trampoline guard. None when nothing suits — callers keep the broken
-    command and let the fetch-failure ZIP fallback handle it.
-    """
+    """Find a real Git-for-Windows ``git-core/git.exe`` (standard locations + managed PortableGit)
+    that runs without the trampoline guard. None when nothing suits — callers keep the broken
+    command and let the fetch-failure ZIP fallback handle it."""
     candidates = [
         Path(r"C:\Program Files\Git\mingw64\libexec\git-core\git.exe"),
         Path(r"C:\Program Files (x86)\Git\mingw64\libexec\git-core\git.exe"),
@@ -638,14 +575,9 @@ def _locate_real_git() -> Optional[Path]:
 
 
 def _ensure_non_trampoline_git(git_cmd: list) -> list:
-    """Swap a broken Git-for-Windows trampoline for a real git binary.
-
-    Runs right after the git command is built. If ``git`` is a broken
-    trampoline, rebuild the command around the real binary so fetch/pull/
-    checkout keep working instead of degrading to the ZIP fallback; if none is
-    found, leave the command untouched (the fetch-failure handler falls back to
-    ZIP on Windows). No-op off Windows and when git is healthy.
-    """
+    """Swap a broken Git-for-Windows trampoline for a real git binary so fetch/pull/checkout
+    keep working; if none is found leave the command untouched (fetch-failure handler falls
+    back to ZIP). No-op off Windows and when git is healthy."""
     from hermes_cli.update_cmd import _locate_real_git
     if sys.platform != "win32":
         return git_cmd
@@ -666,13 +598,9 @@ def _ensure_non_trampoline_git(git_cmd: list) -> list:
 
 
 def _discard_lockfile_churn(git_cmd, repo_root):
-    """Restore tracked ``package-lock.json`` files that npm dirtied locally.
-
-    npm rewrites lockfiles non-deterministically at install/build time. On a
-    managed install those diffs are never intentional, so we discard them so
-    ``hermes update`` sees a clean tree instead of autostashing every run.
-    Best-effort; only ever touches files named ``package-lock.json``.
-    """
+    """Restore ``package-lock.json`` files npm rewrote non-deterministically, so the update
+    sees a clean tree instead of autostashing every run. Only touches lockfiles whose
+    package.json is NOT also dirty. Best-effort."""
     from hermes_cli.update_cmd import _git_run
     try:
         diff = _git_run(git_cmd, ["diff", "--name-only"], repo_root)
@@ -694,29 +622,21 @@ def _discard_lockfile_churn(git_cmd, repo_root):
         _git_run(git_cmd, ["checkout", "--", *dirty], repo_root)
         print(f"→ Discarded npm lockfile churn ({len(dirty)} file(s))")
     except Exception:
-        # Never let lockfile cleanup block an update.
         pass
 
 
 def _normalize_managed_eol(git_cmd, repo_root):
     """Take a managed checkout off ``core.autocrlf=true`` without leaving it dirty.
 
-    Git for Windows ships ``core.autocrlf=true`` system-wide, which turns this
-    repo's LF files CRLF in the working tree and breaks ``git checkout`` on
-    update ("Your local changes would be overwritten"); ``install.ps1`` pins
-    ``core.autocrlf=false`` on the managed clone (#67730). Older checkouts never
-    got the pin and the bootstrap installer reuses its build-pinned
-    ``install.ps1`` forever, so ``hermes update`` is the only path that can fix them.
-
-    The pin and the cleanup are one operation: under ``autocrlf=true`` a CRLF
-    tree reads clean, so pinning alone would expose every text file as
-    modified and hand the update a whole-tree autostash. The pin is written
-    only after the tree is verified clean under it; a checkout we cannot fully
-    normalize is left as it was. Best-effort: never blocks an update.
+    Git for Windows sets ``autocrlf=true`` system-wide, turning LF files CRLF and breaking
+    ``git checkout`` on update; install.ps1 pins ``false`` but older checkouts never got it
+    and only ``hermes update`` can fix them. Pin and cleanup are one operation: under
+    ``autocrlf=true`` a CRLF tree reads clean, so pinning alone would expose every file as
+    modified (whole-tree autostash). Pin only after the tree verifies clean under it; a
+    checkout we can't fully normalize is left as-is. Best-effort.
     """
     from hermes_cli.update_cmd import _git_run
-    # -c, not config: evaluate the tree as it WOULD look pinned, without
-    # persisting anything we might not be able to follow through on.
+    # -c, not config: evaluate the tree as it WOULD look pinned, persisting nothing.
     probe = git_cmd + ["-c", "core.autocrlf=false"]
 
     def _dirty(*extra):
@@ -731,11 +651,8 @@ def _normalize_managed_eol(git_cmd, repo_root):
         return {p for p in out.stdout.split("\0") if p}
 
     def _real_dirty():
-        # Files with a *content* change once CRLF differences are ignored.
-        # ``diff --name-only --ignore-cr-at-eol`` still LISTS CR-only files
-        # (names come from blob/stat differences before the CR filter), so use
-        # ``--numstat``, which honors the filter: a CR-only file produces no
-        # record. Parse the paths out of numstat.
+        # Files with a *content* change ignoring CRLF. ``--name-only --ignore-cr-at-eol``
+        # still LISTS CR-only files; ``--numstat`` honors the filter (no record for them).
         out = subprocess.run(
             probe + ["-c", "core.quotepath=false",
                      "diff", "--numstat", "--ignore-cr-at-eol"],
@@ -749,8 +666,7 @@ def _normalize_managed_eol(git_cmd, repo_root):
         for line in out.stdout.splitlines():
             if not line.strip():
                 continue
-            # Format: "<added>\t<deleted>\t<path>". Rename detection is off in
-            # plain diff, so there is exactly one path field per record.
+            # "<added>\t<deleted>\t<path>"; rename detection off, so exactly one path.
             parts = line.split("\t", 2)
             if len(parts) == 3 and parts[2]:
                 paths.add(parts[2])
@@ -764,8 +680,7 @@ def _normalize_managed_eol(git_cmd, repo_root):
 
     try:
         effective = _git_run(git_cmd, ["config", "--get", "core.autocrlf"], repo_root)
-        # Only "true" rewrites LF to CRLF on checkout. Unset, false, and input
-        # all leave the working tree alone, so there is nothing to repair.
+        # Only "true" rewrites LF->CRLF; unset/false/input leave the tree alone.
         if effective.stdout.strip().lower() != "true":
             return
 
@@ -773,8 +688,7 @@ def _normalize_managed_eol(git_cmd, repo_root):
         if eol_only is None:
             return
         if eol_only:
-            # Pathspec over stdin, not argv: a fully renormalized checkout is
-            # thousands of paths, well past the Windows command-line limit.
+            # Pathspec via stdin: thousands of paths exceed the Windows argv limit.
             subprocess.run(
                 probe
                 + ["checkout", "--pathspec-from-file=-", "--pathspec-file-nul", "--"],
@@ -785,8 +699,7 @@ def _normalize_managed_eol(git_cmd, repo_root):
                 check=False,
             )
             if _eol_only():
-                # Still dirty — persisting the pin here would only surface churn
-                # we failed to clear. Leave the checkout as we found it.
+                # Still dirty: pinning would only surface churn we failed to clear.
                 return
             print(f"→ Normalized line-ending churn ({len(eol_only)} file(s))")
 
@@ -797,5 +710,4 @@ def _normalize_managed_eol(git_cmd, repo_root):
             check=False,
         )
     except Exception:
-        # Never let line-ending cleanup block an update.
         pass

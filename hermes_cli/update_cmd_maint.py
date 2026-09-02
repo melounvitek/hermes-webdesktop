@@ -1,9 +1,8 @@
 """Post-update maintenance for ``hermes update``: pre-update backup snapshot, state-db verify/restore, curator/FTS notices, FHS path guard, completion summary, stale-module purge.
 
-Split out of ``hermes_cli/update_cmd.py``; every moved name is re-imported there, so
-``hermes_cli.update_cmd.<name>`` keeps resolving (and monkeypatching) as before.
-Origin-internal helpers are imported lazily inside each function (no import cycle;
-test patches on ``hermes_cli.update_cmd.<name>`` stay effective).
+Split out of ``update_cmd.py``, which re-imports every name so ``hermes_cli.update_cmd.<name>``
+still resolves/monkeypatches. Origin helpers are imported lazily per function (no cycle;
+test patches on ``update_cmd`` stay effective).
 """
 
 import logging
@@ -27,10 +26,8 @@ _UPDATE_RUNTIME_RELOAD_MODULES = (
 )
 
 
-#: Package prefixes whose cached modules become stale the moment the checkout
-#: changes under this process. Purged (not reloaded) by
-#: ``_purge_stale_hermes_modules`` so any LATER import chain resolves against
-#: fresh on-disk source only.
+#: Package prefixes whose cached modules go stale when the checkout changes under this
+#: process; purged (not reloaded) so any LATER import chain resolves against fresh source.
 _STALE_PURGE_PREFIXES = (
     "hermes_cli",
     "gateway",
@@ -40,10 +37,8 @@ _STALE_PURGE_PREFIXES = (
 )
 
 
-#: Modules that must survive the purge: they are (or are referenced by) the
-#: code currently EXECUTING the update, so evicting them buys nothing — the
-#: running frames keep their module objects alive regardless — and reloading
-#: them mid-flight is the one genuinely unsafe move.
+#: Modules EXECUTING the update survive the purge: evicting them buys nothing (running frames
+#: keep them alive) and reloading them mid-flight is the one genuinely unsafe move.
 _STALE_PURGE_PROTECTED = frozenset(
     {
         "hermes_cli",
@@ -59,24 +54,12 @@ _STALE_PURGE_PROTECTED = frozenset(
 
 
 def _purge_stale_hermes_modules() -> None:
-    """Evict every cached Hermes module after the checkout changed in-place.
+    """Evict every cached Hermes module after the checkout changed in-place. Never raises.
 
-    ``hermes update`` keeps running in the pre-pull Python process; the
-    gateway-restart phase then does function-level imports of NEW source
-    inside an OLD ``sys.modules`` world. As soon as new source references a
-    symbol added to an already-cached module, the import dies (2026-08-20:
-    fresh ``hermes_cli.gateway`` imported ``line_input`` from a stale cached
-    ``cli_output`` → restart phase aborted, gateway kept serving old code).
-
-    ``_UPDATE_RUNTIME_RELOAD_MODULES`` fixed this per-symptom; this is the
-    class fix: drop EVERY cached module under the Hermes package prefixes so
-    later lazy imports rebuild a self-consistent graph from the new checkout.
-    Purging only removes the ``sys.modules`` entry — module objects held by
-    running frames stay alive and functional. Only genuinely executing modules
-    are exempt, because reload-in-place (not purge) is what can pull code out
-    from under a running frame.
-
-    Best-effort: never raises.
+    The update runs in the pre-pull process; later phases lazily import NEW source into an OLD
+    ``sys.modules`` world and die when new code references a symbol missing from a cached
+    module. Purging (unlike reload) only drops the ``sys.modules`` entry — running frames keep
+    their module objects — so later imports rebuild a self-consistent graph from the new tree.
     """
     from hermes_cli.update_cmd import _m
     try:
@@ -91,8 +74,7 @@ def _purge_stale_hermes_modules() -> None:
                 continue
             root = name.split(".", 1)[0]
             if root not in _STALE_PURGE_PREFIXES:
-                # Prefix-string match caught an unrelated package
-                # (e.g. ``gateway_foo``) — leave it alone.
+                # startswith() also matches unrelated packages like ``gateway_foo``.
                 continue
             if _m().sys.modules.pop(name, None) is not None:
                 purged.append(name)
@@ -105,12 +87,8 @@ def _purge_stale_hermes_modules() -> None:
 
 
 def _reload_updated_runtime_modules() -> None:
-    """Reload update-sensitive modules after the checkout changes in-place.
-
-    ``hermes update`` runs in the pre-pull process, so cached modules can
-    expose old symbols despite new source on disk. Refresh the small set used
-    by lazy-backend refresh before that step imports newly-updated code paths.
-    """
+    """Reload the modules used by lazy-backend refresh: the pre-pull process's cached modules
+    can expose old symbols despite new source on disk."""
     from hermes_cli.update_cmd import _m
     try:
         import importlib
@@ -129,14 +107,9 @@ def _reload_updated_runtime_modules() -> None:
 
 
 def _print_curator_first_run_notice() -> None:
-    """Print a short heads-up about the skill curator after `hermes update`.
-
-    Only fires when the curator is enabled AND has no recorded run yet, which
-    is exactly the window where the gateway ticker used to fire Curator
-    against a fresh skill library immediately after an update. We defer the
-    first real pass by one ``interval_hours``; this notice tells the user how
-    to preview or disable before then. Silent on steady state.
-    """
+    """Curator heads-up after update. Fires only when enabled AND never run — the window where
+    the first pass (deferred one ``interval_hours``) is pending, so the user can preview or
+    disable it first. Silent on steady state."""
     try:
         from agent import curator
     except Exception:
@@ -148,7 +121,6 @@ def _print_curator_first_run_notice() -> None:
     except Exception:
         return
     if state.get("last_run_at"):
-        # Curator has run before (real or already seeded) — no notice needed.
         return
     try:
         hours = curator.get_interval_hours()
@@ -170,14 +142,9 @@ def _print_curator_first_run_notice() -> None:
 
 
 def _print_fts_optimize_available_notice() -> None:
-    """Advertise the opt-in v23 search-index optimization after `hermes update`.
+    """Advertise the opt-in v23 FTS optimization when state.db is still on the legacy layout.
 
-    Only fires when the current profile's state.db is still on the legacy
-    (pre-v23) inline FTS layout. Leads with the reclaimable-space figure and
-    points at the exact command. Honors ``sessions.fts_optimize_notice``:
-    ``advise`` (default) prints an advisory notice, ``require`` prints a
-    firmer required-upgrade notice, ``off`` suppresses it. Silent for
-    fresh/already-optimized installs.
+    ``sessions.fts_optimize_notice``: ``advise`` (default), ``require`` (firmer), ``off``.
     """
     mode = "advise"
     try:
@@ -205,21 +172,20 @@ def _print_fts_optimize_available_notice() -> None:
         size_gb = db_path.stat().st_size / (1024 ** 3)
     except OSError:
         return
-    # Skip the notice for trivially small DBs — the win isn't worth the nag.
+    # Small DBs: the win isn't worth the nag.
     if size_gb < 0.5:
         return
     db = None
     interrupted = False
     try:
         db = SessionDB(db_path=db_path, read_only=True)
-        # read_only opens skip schema init, so probe the layout directly.
+        # read_only opens skip schema init; probe the layout directly.
         row = db._conn.execute(
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'messages_fts'"
         ).fetchone()
-        # An interrupted `optimize-storage` run: the table is already the
-        # v23 shape, but backfill markers / demoted trash tables remain.
-        # Offer the command again — re-running resumes and finishes it.
+        # Interrupted optimize-storage: v23 table shape but backfill markers / trash
+        # tables remain. Re-running resumes it, so offer the command again.
         interrupted = bool(
             db._conn.execute(
                 "SELECT 1 FROM state_meta "
@@ -244,7 +210,6 @@ def _print_fts_optimize_available_notice() -> None:
                 pass
     sql = (row[0] if row else "") or ""
     if not sql or ("tool_name" in sql and not interrupted):
-        # v23 layout already present (fresh/optimized) — nothing to offer.
         return
 
     if interrupted:
@@ -258,7 +223,6 @@ def _print_fts_optimize_available_notice() -> None:
         print("    hermes sessions optimize-storage")
         return
 
-    # Concrete size framing — lead with the savings the user cares about.
     est_reclaim = size_gb * 0.6
     print()
     if mode == "require":
@@ -284,14 +248,8 @@ def _print_fts_optimize_available_notice() -> None:
 
 
 def _print_curator_recent_run_notice() -> None:
-    """Print the most recent curator run summary, exactly once.
-
-    The curator runs in the background, so users only notice consolidations
-    by stumbling into a rename; ``hermes update`` is a high-attention surface
-    to show the rename map. Show-once: stamps ``last_run_summary_shown_at``
-    after printing. Silent when the curator never ran, the summary was already
-    shown, or it has no rename info (no archives).
-    """
+    """Print the latest background curator run summary (rename map) once, stamping
+    ``last_run_summary_shown_at``. Silent when never run, already shown, or no rename info."""
     try:
         from agent import curator
     except Exception:
@@ -312,10 +270,8 @@ def _print_curator_recent_run_notice() -> None:
     if not summary:
         return
 
-    # Only a multi-line summary (rename map appended) is worth showing; a
-    # bare "auto: no changes; llm: no change" isn't.
+    # Only a multi-line summary (rename map) is worth showing; still stamp it shown.
     if "\n" not in summary:
-        # Still stamp it shown so we don't reconsider it on every update.
         try:
             state["last_run_summary_shown_at"] = last_run_at
             curator.save_state(state)
@@ -333,7 +289,6 @@ def _print_curator_recent_run_notice() -> None:
         "View anytime: hermes curator status)"
     )
 
-    # Stamp shown so we don't repeat on the next update.
     try:
         state["last_run_summary_shown_at"] = last_run_at
         curator.save_state(state)
@@ -362,18 +317,10 @@ def _format_time_ago(iso_ts: str) -> str:
 
 
 def _reload_process_scan_modules() -> None:
-    """Force-reload the process-scan modules from disk after an update.
-
-    ``_finish_dashboard_update_cleanup`` runs in the PRE-update process, but
-    ``_scan_dashboard_processes`` lazily imports from ``_subprocess_compat``;
-    a symbol the update added (``bounded_probe_run``, #87134) is missing from
-    the cached OLD module and the cleanup crashes with ImportError after the
-    code update already succeeded. Reload dependency-first so
-    ``dashboard_procs`` binds against the fresh ``_subprocess_compat``.
-
-    Called from the cleanup entry point (not only ``_reload_config_modules``)
-    so EVERY caller — git path, Windows ZIP fallback, future ones — is covered.
-    """
+    """Reload the process-scan modules, dependency-first, so ``dashboard_procs`` binds against a
+    fresh ``_subprocess_compat``: cleanup runs in the PRE-update process and a symbol the update
+    added would otherwise ImportError after the code update succeeded. Called from the cleanup
+    entry point so every caller (git path, ZIP fallback) is covered."""
     import importlib
 
     importlib.invalidate_caches()
@@ -386,8 +333,7 @@ def _reload_process_scan_modules() -> None:
             try:
                 importlib.reload(mod)
             except Exception as exc:
-                # warning, not debug: a failed reload here surfaces seconds
-                # later as an ImportError in the same process — leave a trail.
+                # warning, not debug: a failed reload surfaces as ImportError seconds later.
                 logger.warning(
                     "Could not reload %s for post-update cleanup: %s",
                     mod_name,
@@ -400,10 +346,8 @@ def _finish_dashboard_update_cleanup(
 ) -> None:
     """Refresh managed dashboards or stop stale manual ones after an update.
 
-    *already_restarted_units* forwards the systemd unit names (no
-    ``.service`` suffix) that the fleet-restart loop already restarted
-    directly, so a Serve-only install's freshly restarted process isn't
-    found and restarted a second time here (review on #83595).
+    *already_restarted_units*: systemd unit names (no ``.service``) the fleet-restart loop
+    already restarted, so a Serve-only install isn't restarted a second time here.
     """
     from hermes_cli.update_cmd import _m, _reload_process_scan_modules
     if node_failures:
@@ -412,8 +356,6 @@ def _finish_dashboard_update_cleanup(
         print("    Node.js dependency refresh did not complete.")
         return
 
-    # The scan path lazy-imports symbols from _subprocess_compat; make sure
-    # both modules reflect the freshly-updated source before touching them.
     _reload_process_scan_modules()
 
     stop_result = _m()._kill_stale_dashboard_processes(
@@ -432,10 +374,8 @@ def _finish_dashboard_update_cleanup(
 
 
 def _print_update_completion(message: str) -> None:
-    """Print an update outcome plus, when the dashboard launched this run with
-    an action id, a terminal receipt line the Desktop can match after the
-    dashboard restarts (#47359 / #58764). The outcome line carries the
-    branch + HEAD short-sha so branch drift is visible (2026-08-17 incident)."""
+    """Print the outcome (with branch @ sha so drift is visible) plus, when launched by the
+    dashboard with an action id, a receipt line the Desktop matches after restart."""
     from hermes_cli.update_cmd import _branch_head_suffix
     print(f"{message}{_branch_head_suffix()}")
     action_id = os.environ.get("HERMES_ACTION_ID", "")
@@ -444,12 +384,8 @@ def _print_update_completion(message: str) -> None:
 
 
 def _read_project_version() -> str | None:
-    """Read the ``version`` field from the checkout's pyproject.toml.
-
-    On-disk file, not importlib.metadata: after a pull the installed
-    metadata still describes the OLD version. Returns None on any failure —
-    version reporting is cosmetic and must never break an update.
-    """
+    """``version`` from the checkout's pyproject.toml (not importlib.metadata, which still
+    describes the OLD version after a pull). None on any failure — cosmetic, never breaks."""
     from hermes_cli.update_cmd import _m
     try:
         import tomllib
@@ -462,12 +398,8 @@ def _read_project_version() -> str | None:
 
 
 def _update_complete_message(pre_version: str | None) -> str:
-    """Completion line with the version transition when it is known.
-
-    Ported from PrimeIntellect-ai/prime-agent#630: show ``v0.19.4 → v0.20.0``
-    after a self-update. Plain message when either side is unknown or the
-    version did not change (several commits within one release).
-    """
+    """Completion line with ``vA → vB`` when known; plain when either side is unknown or
+    the version did not change."""
     post_version = _read_project_version()
     if pre_version and post_version and pre_version != post_version:
         return f"✓ Update complete! (v{pre_version} → v{post_version})"
@@ -500,10 +432,8 @@ def _print_verified_update_completion(message: str) -> bool:
         return False
     sqlite_runtime_ok, sqlite_info = _post_update_sqlite_runtime_status()
     if sqlite_info is None:
-        # Grace path: an unprobeable interpreter (no venv in a dev checkout,
-        # probe subprocess unavailable) must not fail an otherwise-successful
-        # update — only a POSITIVE vulnerable probe withholds success
-        # (same contract as _venv_core_imports_healthy's unknown states).
+        # Grace path: an unprobeable interpreter (dev checkout, no probe subprocess) must not
+        # fail the update — only a POSITIVE vulnerable probe withholds success.
         logger.debug("Post-update SQLite runtime probe unavailable; not blocking")
         _print_update_completion(message)
         return True
@@ -524,19 +454,13 @@ def _print_verified_update_completion(message: str) -> bool:
 
 
 def _clear_stale_sqlite_sidecars(db_path: Path) -> None:
-    """Delete the WAL / shared-memory / rollback-journal files next to *db_path*.
+    """Delete -wal/-shm/-journal next to *db_path*, immediately before overwriting it with a
+    snapshot image.
 
-    Call immediately before overwriting a database with a snapshot image.
-    Quick snapshots come from ``sqlite3.backup()`` (``backup._safe_copy_db``),
-    so the image is checkpointed and owns no WAL — which is why
-    ``backup._EXCLUDED_SUFFIXES`` ships no sidecars. Copying the image
-    replaces only the main file, so a ``-wal``/``-shm`` left by the *old*
-    database (crashed writer, undrained second process) is replayed over the
-    fresh image on next open: it passes ``PRAGMA integrity_check`` while
-    serving the old contents, and the first checkpoint makes that permanent.
-
-    Safe here because the sidecars belong to a database the caller has already
-    declared corrupt and is about to discard.
+    Snapshots are checkpointed ``sqlite3.backup()`` images with no WAL; copying replaces only
+    the main file, so a leftover WAL from the OLD database would be replayed over the fresh
+    image on next open (passes integrity_check while serving old contents). Safe because the
+    caller has already declared that database corrupt.
     """
     for suffix in ("-wal", "-shm", "-journal"):
         db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
@@ -548,13 +472,11 @@ def _print_update_summary(
     desktop_build_ok: bool,
     pre_update_version: str | None,
 ) -> bool:
-    """Final update banner. A failed Desktop rebuild is non-fatal for the
-    Python side, but must not print ``✓ Update complete!`` (#88251)."""
+    """Final banner. A failed Desktop rebuild is non-fatal but must not print ``✓ Update complete!``."""
     from hermes_cli.update_cmd import _post_update_sqlite_runtime_status, _update_complete_message
     sqlite_runtime_ok, sqlite_info = _post_update_sqlite_runtime_status()
     if sqlite_info is None:
-        # Grace path: an unprobeable interpreter must not fail the update —
-        # only a POSITIVE vulnerable probe demotes success to partial.
+        # Grace path: only a POSITIVE vulnerable probe demotes success to partial.
         sqlite_runtime_ok = True
     print()
     if node_failures or not desktop_build_ok or not sqlite_runtime_ok:
@@ -591,21 +513,13 @@ def _print_update_summary(
 
 
 def _restore_state_db_from_snapshot(state_path: Path, snap_state: Path) -> bool:
-    """Replace *state_path* with the snapshot image at *snap_state*.
+    """Replace *state_path* with the snapshot image; True when the result passes integrity.
 
-    Shared by the ZIP and git-pull auto-restore paths. Stale sidecars are
-    cleared before the copy so the corrupt database's WAL replay cannot
-    silently overwrite the restored image (:func:`_clear_stale_sqlite_sidecars`).
-
-    Refuses (``False``) while another process — or a live connection in THIS
-    process — holds the database or its sidecars: copying over a live
-    writer's inode desyncs its page cache/WAL index from the file bytes and
-    its next checkpoint clobbers pages (#90950 page-1 clobber). ``None``
-    (scan unavailable) proceeds: gateways are already drained, and refusing
-    on "unknown" would disable auto-restore on every non-Linux host.
-
-    Returns ``True`` when the restored file passes an integrity check. Raises
-    ``OSError`` if the copy itself fails (callers already report it).
+    Stale sidecars are cleared first so the corrupt DB's WAL can't replay over the image.
+    Refuses (False) while another process — or a live connection in THIS process — holds the
+    DB: copying over a live writer's inode desyncs its page cache and its next checkpoint
+    clobbers pages. Holder scan ``None`` proceeds (gateways drained; refusing on unknown would
+    disable auto-restore on non-Linux). Raises OSError if the copy fails.
     """
     from hermes_cli.backup import _foreign_db_holder_pids, verify_sqlite_integrity
     from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
@@ -618,12 +532,9 @@ def _restore_state_db_from_snapshot(state_path: Path, snap_state: Path) -> bool:
             "then restore manually with /snapshot restore."
         )
         return False
-    # The foreign-pid scan excludes THIS process, but an in-process SessionDB
-    # handle is just as live: unlinking -wal/-shm and copy2-ing under it
-    # leaves this process checkpointing through deleted-inode sidecars (the
-    # #90950 split brain, reproduced live via `/proc/self/fd`).
-    # ``offline_file_access`` fails CLOSED on any tracked connection and holds
-    # the lifecycle lock across clear + copy so none can appear mid-swap.
+    # The foreign-pid scan excludes THIS process; an in-process SessionDB handle is just as
+    # live (it would checkpoint through deleted-inode sidecars). offline_file_access fails
+    # CLOSED on any tracked connection and holds the lock across clear + copy.
     try:
         with offline_file_access(state_path, what="restore a snapshot over"):
             _clear_stale_sqlite_sidecars(state_path)
@@ -641,14 +552,8 @@ def _restore_state_db_from_snapshot(state_path: Path, snap_state: Path) -> bool:
 
 
 def _verify_and_restore_one_state_db(home: Path, *, label: str) -> None:
-    """Post-update integrity check + auto-restore for ONE home's state.db.
-
-    Shared by the root-DB and sibling-profile guards (ZIP update path and
-    git-pull path both route here). A corrupt live DB is restored from the
-    most recent valid snapshot under that home's own state-snapshots dir.
-    Never raises: a guard that crashes the update tail would be worse than
-    the corruption it detects.
-    """
+    """Integrity check + auto-restore for ONE home's state.db from its newest valid snapshot.
+    Never raises: a guard that crashes the update tail is worse than what it detects."""
     try:
         from hermes_cli.backup import _quick_snapshot_root, verify_sqlite_integrity
 
@@ -704,13 +609,8 @@ def _verify_and_restore_one_state_db(home: Path, *, label: str) -> None:
 
 
 def _verify_and_restore_state_dbs_post_update() -> None:
-    """Post-update integrity guard for the ROOT state.db AND every sibling
-    profile's state.db (#97994).
-
-    The pre-update snapshot already covers siblings (#66140), but the guard
-    only verified the root DB — a corrupted profile DB was never detected or
-    restored, its sessions silently gone while the root passed.
-    """
+    """Integrity guard for the ROOT state.db AND every sibling profile's (the snapshot covers
+    siblings, so the guard must too or a corrupt profile DB goes undetected)."""
     from hermes_cli.update_cmd import get_hermes_home
     home = get_hermes_home()
     _verify_and_restore_one_state_db(home, label="default home")
@@ -752,17 +652,9 @@ def _print_bundled_skills_sync_report() -> None:
 
 
 def _ensure_fhs_path_guard() -> None:
-    """Ensure /usr/local/bin is on PATH for RHEL-family root non-login shells.
-
-    Mirrors the post-symlink probe in ``scripts/install.sh`` so existing FHS
-    root installs on RHEL/CentOS/Rocky/Alma 8+ get repaired on ``hermes
-    update``. In non-login interactive shells there (su, sudo -s, tmux panes)
-    neither /etc/bashrc nor /root/.bash_profile adds /usr/local/bin, so
-    ``hermes`` prints ``command not found`` despite the symlink.
-
-    Silent no-op on non-Linux, non-root, non-FHS installs, and wherever
-    ``bash -i -c 'command -v hermes'`` already resolves. Idempotent.
-    """
+    """Ensure /usr/local/bin is on PATH for RHEL-family root non-login shells (su, sudo -s,
+    tmux), where neither /etc/bashrc nor .bash_profile adds it. Mirrors install.sh. Idempotent;
+    no-op on non-Linux/non-root/non-FHS or when ``bash -i -c 'command -v hermes'`` resolves."""
     from hermes_cli.update_cmd import _m
     if _m().sys.platform != "linux":
         return
@@ -771,15 +663,13 @@ def _ensure_fhs_path_guard() -> None:
             return
     except AttributeError:
         return
-    # Only act when this is actually an FHS-layout install (command link at
-    # /usr/local/bin/hermes, code at /usr/local/lib/hermes-agent).
+    # Only for FHS-layout installs (link at /usr/local/bin/hermes).
     fhs_link = Path("/usr/local/bin/hermes")
     if not fhs_link.is_symlink() and not fhs_link.exists():
         return
 
-    # Probe a fresh non-login interactive bash the way the user will use it.
-    # ``bash -i -c`` sources ~/.bashrc but NOT ~/.bash_profile or /etc/profile,
-    # which is the exact scenario where RHEL root loses /usr/local/bin.
+    # ``bash -i -c`` sources ~/.bashrc but NOT ~/.bash_profile or /etc/profile — the exact
+    # scenario where RHEL root loses /usr/local/bin.
     home = os.environ.get("HOME") or "/root"
     try:
         probe = subprocess.run(
@@ -815,8 +705,7 @@ def _ensure_fhs_path_guard() -> None:
             existing = cfg.read_text(errors="replace", encoding="utf-8")
         except OSError:
             continue
-        # Idempotency: skip if any uncommented PATH= line already references
-        # /usr/local/bin.  Mirrors the grep pattern used by install.sh.
+        # Idempotency: any uncommented PATH line referencing /usr/local/bin (install.sh grep).
         already_guarded = any(
             "/usr/local/bin" in line
             and "PATH" in line
@@ -838,25 +727,17 @@ def _ensure_fhs_path_guard() -> None:
 
 
 def _ensure_acp_launcher() -> None:
-    r"""Self-heal: install a ``hermes-acp`` launcher next to the ``hermes`` one.
+    r"""Self-heal a ``hermes-acp`` launcher next to ``hermes`` (mirrors install.sh): ACP hosts
+    resolve it on the login-shell PATH but the console script lives in the venv. The shim
+    delegates to the sibling ``hermes acp``, correct for every layout.
 
-    Mirrors the launcher block in ``scripts/install.sh``. ACP hosts (Zed,
-    JetBrains, Buzz Desktop) resolve ``hermes-acp`` on the login-shell PATH,
-    but the console script lives inside the venv, so they report Hermes as
-    not installed. The shim just delegates to the sibling ``hermes`` launcher
-    with the ``acp`` subcommand, which is correct for every install layout.
-
-    No-op on Windows: install.ps1 stages launchers into ``$HermesHome\bin``
-    and puts THAT on PATH — never ``venv\Scripts``, which would shadow the
-    user's ``python`` (#83797); ``ensure_windows_bin_launchers`` re-stages
-    them. Also no-op where ``hermes-acp`` already exists next to ``hermes``.
-    Unwritable dirs (``/usr/local/bin`` as non-root) are skipped. Idempotent.
+    No-op on Windows (install.ps1 stages launchers into ``$HermesHome\bin``, never
+    ``venv\Scripts`` which would shadow the user's python) and where it already exists.
+    Unwritable dirs are skipped. Idempotent.
     """
     from hermes_cli.update_cmd import _m
     if _m().sys.platform == "win32":
-        # Windows launcher staging/repair lives in _install_repair
-        # (ensure_windows_bin_launchers at process start,
-        # migrate_windows_bin_path in this command's tail) — not here.
+        # Windows launcher repair lives in _install_repair, not here.
         return
     for bin_dir in (Path.home() / ".local" / "bin", Path("/usr/local/bin")):
         hermes_cmd = bin_dir / "hermes"
@@ -864,9 +745,7 @@ def _ensure_acp_launcher() -> None:
         try:
             if not (hermes_cmd.is_file() or hermes_cmd.is_symlink()):
                 continue
-            # Already present (console script, earlier shim, or symlink).
-            # is_symlink() catches broken symlinks exists() misses; never
-            # follow-and-overwrite (#21454).
+            # is_symlink() catches broken symlinks exists() misses; never follow-and-overwrite.
             if acp_cmd.exists() or acp_cmd.is_symlink():
                 continue
             shim = (
@@ -886,20 +765,15 @@ def _ensure_acp_launcher() -> None:
 _PRE_UPDATE_SNAPSHOT_KEEP = 1
 
 
-# Per-file cap for the quick snapshot; larger files are skipped with a warning.
-# The snapshot protects small, hard-to-regenerate state (pairing JSONs, cron,
-# config, auth) — not a multi-GB state.db (a 24 GB one cost ~60s and 24 GB/update).
+# Per-file cap for the quick snapshot (larger files skipped with a warning): it protects
+# small hard-to-regenerate state, not a multi-GB state.db (24 GB cost ~60s + 24 GB/update).
 _PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE = 1 << 30  # 1 GiB
 
 
 def _resolve_pre_update_backup_mode(args) -> str:
-    """Resolve the pre-update backup mode: ``"off"``, ``"quick"``, or ``"full"``.
-
-    CLI flags win over config; ``--no-backup`` beats ``--backup``. Config
-    accepts the mode strings plus legacy booleans: ``true`` → ``full``,
-    ``false`` → ``off`` (an explicit opt-out also disables the quick
-    snapshot). Missing key defaults to ``quick``.
-    """
+    """Backup mode ``off``/``quick``/``full``. CLI flags win (``--no-backup`` beats ``--backup``);
+    config accepts mode strings plus legacy booleans (true→full, false→off, which also disables
+    the quick snapshot). Default ``quick``."""
     if getattr(args, "no_backup", False):
         return "off"
     if getattr(args, "backup", False):
@@ -936,21 +810,11 @@ def _resolve_pre_update_backup_mode(args) -> str:
 
 
 def _run_pre_update_backup(args) -> Optional[str]:
-    """Run the pre-update safety backup and return the quick-snapshot id.
+    """Run the pre-update backup; return the quick-snapshot id (None when off/failed). Never raises.
 
-    Gated on ``updates.pre_update_backup``:
-
-    - ``off``   — nothing runs; explicit opt-out is honored fully.
-    - ``quick`` (default) — snapshot of critical small files
-      (``_QUICK_STATE_FILES``) under ``state-snapshots/``; files over 1 GiB
-      are skipped so a bloated state.db can never stall the update (#15733,
-      #34600).
-    - ``full``  — quick snapshot PLUS a zip of HERMES_HOME under ``backups/``
-      (restorable via ``hermes import``; exists because of the #48200 wipe).
-
-    ``--backup`` forces ``full``; ``--no-backup`` forces ``off``. Never raises.
-    Returns the quick-snapshot id (used by the post-update cron-jobs restore),
-    or ``None`` when mode is ``off`` or the snapshot failed.
+    ``off`` — nothing. ``quick`` (default) — snapshot of critical small files under
+    ``state-snapshots/``, files over 1 GiB skipped so a bloated state.db can't stall the update.
+    ``full`` — quick snapshot PLUS a zip of HERMES_HOME under ``backups/`` (``hermes import``).
     """
     from hermes_cli.update_cmd import _record_update_step
     mode = _resolve_pre_update_backup_mode(args)
@@ -959,8 +823,7 @@ def _run_pre_update_backup(args) -> Optional[str]:
         if getattr(args, "no_backup", False):
             print("◆ Pre-update backup: skipped (--no-backup)")
             print()
-        # Config-level off is silent — the user opted out; don't spam them
-        # on every update.
+        # Config-level off is silent: the user opted out.
         return None
 
     snapshot_id = None
@@ -971,9 +834,8 @@ def _run_pre_update_backup(args) -> Optional[str]:
             verify_sqlite_integrity,
         )
 
-        # NOTE: this function later does `from hermes_constants import
-        # get_hermes_home`, which makes the name function-local — the
-        # module-level import is shadowed and unbound here. Alias explicitly.
+        # A later `from hermes_constants import get_hermes_home` in this function makes that
+        # name function-local (unbound here), so alias explicitly.
         from hermes_cli.config import get_hermes_home as _get_home
 
         snapshot_id = create_quick_snapshot(
@@ -982,10 +844,8 @@ def _run_pre_update_backup(args) -> Optional[str]:
             max_file_size=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
         )
 
-        # Verify the live state.db is still intact after the snapshot: a
-        # concurrent process (antivirus, force-killed gateway, Windows filter
-        # driver) can corrupt it at any point, and a silent zeroing would
-        # otherwise proceed to exit 0 — the #68474 symptom.
+        # Verify live state.db after the snapshot: a concurrent process (antivirus, killed
+        # gateway, Windows filter driver) can corrupt it and we'd otherwise exit 0 silently.
         if snapshot_id:
             _src_path = _get_home() / "state.db"
             if _src_path.exists():
@@ -1000,7 +860,6 @@ def _run_pre_update_backup(args) -> Optional[str]:
                     print(
                         f"  ⚠ state.db integrity check FAILED after snapshot: {_msg}"
                     )
-                    # Check if the snapshot itself is valid.
                     _snap_root = _quick_snapshot_root(_get_home())
                     _snap_state = _snap_root / snapshot_id / "state.db"
                     if _snap_state.exists():
@@ -1027,9 +886,8 @@ def _run_pre_update_backup(args) -> Optional[str]:
         if snapshot_id:
             print(f"◆ Pre-update snapshot: {snapshot_id}")
 
-        # #66140: the code swap + fleet restart touch EVERY profile, so
-        # every profile gets the same snapshot (same set, same 1GiB cap,
-        # keep=1) under its own state-snapshots/. Best-effort per profile.
+        # The code swap + fleet restart touch EVERY profile, so each gets the same snapshot
+        # under its own state-snapshots/. Best-effort per profile.
         try:
             from hermes_cli.backup import create_pre_update_snapshots_all_profiles
 
@@ -1051,15 +909,13 @@ def _run_pre_update_backup(args) -> Optional[str]:
                 )
                 import hermes_cli.update_cmd_config as _cfg
 
-                # The reader (_check_and_apply_config_migration) lives in
-                # update_cmd_config; write ITS module global, not ours.
+                # The reader lives in update_cmd_config; write ITS module global, not ours.
                 _cfg._LAST_SIBLING_SNAPSHOTS = _sibling_snaps
         except Exception as _sib_exc:
             logger.debug(
                 "Sibling profile snapshots failed: %s", _sib_exc
             )
     except Exception as exc:
-        # Never let a snapshot failure block an update.
         logger.debug("Pre-update snapshot failed: %s", exc)
 
     if mode != "full":
@@ -1105,12 +961,11 @@ def _run_pre_update_backup(args) -> Optional[str]:
     except OSError:
         size_bytes = 0
 
-    # Human-readable size
     from hermes_cli.sizefmt import format_bytes
 
     size_str = format_bytes(size_bytes)
 
-    # Render path using display_hermes_home so the user sees ~/.hermes/...
+    # display_hermes_home so the user sees ~/.hermes/...
     try:
         from hermes_constants import get_hermes_home, display_hermes_home
 
@@ -1130,9 +985,8 @@ def _run_pre_update_backup(args) -> Optional[str]:
 
 
 def _sweep_bytecode_after_update(branch: str) -> None:
-    """Clear stale ``__pycache__`` (prevents ImportError on gateway restart when new
-    source references names absent from old bytecode), re-stamp the fingerprint
-    and refresh the bootstrap cache scripts."""
+    """Clear stale ``__pycache__`` (else gateway restart ImportErrors on names absent from old
+    bytecode), re-stamp the fingerprint, refresh the bootstrap cache scripts."""
     from hermes_cli.update_cmd import _m
     removed = _m()._clear_bytecode_cache(_m().PROJECT_ROOT)
     if removed:
@@ -1153,23 +1007,17 @@ def _run_post_update_maintenance(
     desktop_build_ok,
     pre_update_version,
 ) -> bool:
-    """Post-pull housekeeping that runs once the code + deps are in place.
-
-    state.db integrity restore, catalog/skills/profile syncs, config
-    migration, the update summary (whose verdict is returned), and the
-    best-effort notices/self-heals (FTS, curator, PATH, launchers, cua-driver).
-    Every step is isolated so none can fail the update.
-    """
+    """Post-pull housekeeping: state.db restore, catalog/skills/profile syncs, config migration,
+    the update summary (verdict returned), and best-effort notices/self-heals. Every step is
+    isolated so none can fail the update."""
     from hermes_cli.update_cmd import (
         _check_and_apply_config_migration,
         _m,
         _print_curator_first_run_notice,
         _print_curator_recent_run_notice,
     )
-    # ── macOS TCC stale-grant notice (#86385) ──────────────────────
-    # Desktop bundles are re-signed each update; grants made to a pre-#73681
-    # binary stay stale (toggle ON, yet macOS re-prompts with no Allow
-    # button). One line tells affected users how to re-grant once.
+    # macOS TCC: Desktop bundles are re-signed each update, so old grants can go stale
+    # (toggle ON, yet macOS re-prompts with no Allow button). Tell users how to re-grant.
     if sys.platform == "darwin" and had_desktop_app_before_update:
         print()
         print(
@@ -1180,8 +1028,7 @@ def _run_post_update_maintenance(
             "fully quit & relaunch once."
         )
 
-    # macOS TCC interpreter anchor (#95596): dylib-complete re-land.
-    # Boot-gated — a failed probe leaves the venv untouched.
+    # macOS TCC interpreter anchor; boot-gated — a failed probe leaves the venv untouched.
     try:
         from hermes_cli.macos_tcc_anchor import ensure_tcc_anchor
 
@@ -1189,17 +1036,13 @@ def _run_post_update_maintenance(
     except Exception:
         logger.debug("macOS TCC anchor refresh skipped", exc_info=True)
 
-    # ── Post-update state.db integrity guard (#68474, #97994) ─────────
-    # Check state.db in the root home AND every profile; restore a corrupted
-    # one from its own pre-update snapshot instead of silently losing sessions.
+    # state.db integrity guard for root home AND every profile; restore from own snapshot.
     try:
         _verify_and_restore_state_dbs_post_update()
     except Exception as exc:
         logger.debug("Post-update state.db integrity check failed: %s", exc)
 
-    # Seed ~/.hermes/cache/model_catalog.json from the just-pulled
-    # website/static/api/model-catalog.json instead of a (bot-gated,
-    # flaky) network fetch. Non-fatal: the picker refreshes on next open.
+    # Seed the model-catalog cache from the checkout instead of a bot-gated, flaky fetch.
     try:
         from hermes_cli.model_catalog import seed_cache_from_checkout
 
@@ -1208,7 +1051,6 @@ def _run_post_update_maintenance(
     except Exception as e:
         logger.debug("Model catalog seed during update failed: %s", e)
 
-    # Sync bundled skills (copies new, updates changed, respects user deletions)
     try:
         print()
         print("→ Syncing bundled skills...")
@@ -1216,11 +1058,8 @@ def _run_post_update_maintenance(
     except Exception as e:
         logger.debug("Skills sync during update failed: %s", e)
 
-    # Sync bundled skills to all profiles (including the active one).
-    # seed_profile_skills() uses subprocess with an explicit HERMES_HOME so
-    # it is not affected by sync_skills()'s module-level HERMES_HOME cache,
-    # which means the active profile is reliably synced regardless of whether
-    # the caller's HERMES_HOME env var points at the default or a named profile.
+    # All profiles incl. the active one: seed_profile_skills() subprocesses with an explicit
+    # HERMES_HOME, so sync_skills()'s module-level HERMES_HOME cache can't skew it.
     try:
         from hermes_cli.profiles import (
             list_profiles,
@@ -1256,9 +1095,8 @@ def _run_post_update_maintenance(
     except Exception:
         pass  # profiles module not available or no profiles
 
-    # Backfill per-profile .env files for profiles created before the
-    # .env-seeding fix (#44792). Copies the default install's .env so
-    # those profiles keep the credentials they were effectively using.
+    # Backfill .env for profiles created before .env seeding (copy the default's) so they
+    # keep the credentials they were effectively using.
     try:
         from hermes_cli.profiles import backfill_profile_envs
 
@@ -1272,7 +1110,6 @@ def _run_post_update_maintenance(
     except Exception:
         pass  # profiles module not available or no profiles
 
-    # Sync Honcho host blocks to all profiles
     try:
         from plugins.memory.honcho.cli import sync_honcho_profiles_quiet
 
@@ -1282,7 +1119,6 @@ def _run_post_update_maintenance(
     except Exception:
         pass  # honcho plugin not installed or not configured
 
-    # Check for config migrations (#91360).
     _check_and_apply_config_migration(
         assume_yes=assume_yes,
         gateway_mode=gateway_mode,
@@ -1295,51 +1131,34 @@ def _run_post_update_maintenance(
         pre_update_version=pre_update_version,
     )
 
-    # v23 search-index notice: the compact layout is opt-in (existing
-    # indexes are untouched), so surface the command and size win here,
-    # only when a legacy index is present.
+    # v23 FTS layout is opt-in (existing indexes untouched); surface the command here.
     try:
         _print_fts_optimize_available_notice()
     except Exception as e:
         logger.debug("FTS optimize notice failed: %s", e)
 
-    # Curator first-run heads-up. Only prints when curator is enabled AND
-    # has never run — i.e. the window where the ticker would otherwise
-    # have fired against a fresh skill library. Kept silent on steady
-    # state so we don't nag.
     try:
         _print_curator_first_run_notice()
     except Exception as e:
         logger.debug("Curator first-run notice failed: %s", e)
 
-    # Latest curator run notice (rename map `old-name → umbrella`),
-    # self-stamped so it shows once per run.
     try:
         _print_curator_recent_run_notice()
     except Exception as e:
         logger.debug("Curator recent-run notice failed: %s", e)
 
-    # Repair RHEL-family root installs where /usr/local/bin isn't on PATH
-    # for non-login interactive shells.  No-op on every other platform.
     try:
         _ensure_fhs_path_guard()
     except Exception as e:
         logger.debug("FHS PATH guard check failed: %s", e)
 
-    # Self-heal the hermes-acp launcher for installs that predate it, so
-    # ACP hosts (Zed, JetBrains, Buzz) can resolve Hermes on PATH without
-    # a reinstall.  No-op on Windows (the launcher migration below owns
-    # that) and when already present.
     try:
         _ensure_acp_launcher()
     except Exception as e:
         logger.debug("hermes-acp launcher self-heal failed: %s", e)
 
-    # Migrate/repair Windows launchers into the managed bin dir. In-checkout
-    # launchers (hermes-agent\bin) were swept by the pre-update autostash
-    # (--include-untracked) and with --keep-stash never restored, so
-    # `hermes` stopped resolving. Updates never run install.ps1, so this is
-    # how existing installs reach the new layout. No-op on POSIX/source checkouts.
+    # Windows launchers into the managed bin dir: in-checkout launchers were swept by the
+    # autostash (--include-untracked) and updates never run install.ps1. No-op on POSIX.
     try:
         from hermes_cli._install_repair import migrate_windows_bin_path
 
@@ -1347,9 +1166,8 @@ def _run_post_update_maintenance(
     except Exception as e:
         logger.debug("Windows bin launcher migration failed: %s", e)
 
-    # Refresh cua-driver (Computer Use) — no-op unless already on PATH.
-    # Tied to ``hermes update`` for a predictable cadence without a
-    # per-launch GitHub API call.
+    # cua-driver refresh, no-op unless on PATH; tied to update for a predictable cadence
+    # without a per-launch GitHub API call.
     try:
         refresh_cua_driver = True
         try:
@@ -1372,12 +1190,9 @@ def _run_post_update_maintenance(
 
             print()
             print("→ Refreshing cua-driver (Computer Use)...")
-            # require_confirmed_update: run the slow silent installer only
-            # when check-update positively reports a newer release; an
-            # indeterminate check keeps the current version (`hermes update`
-            # must stay fast; `computer-use install --upgrade` is the force
-            # path). Windows defers even confirmed updates there because the
-            # installer may need console/UAC consent.
+            # require_confirmed_update: install only when check-update positively reports a
+            # newer release (update must stay fast; `computer-use install --upgrade` forces).
+            # Windows defers even confirmed updates (installer may need console/UAC consent).
             install_cua_driver(
                 upgrade=True,
                 require_confirmed_update=True,

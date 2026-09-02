@@ -26,12 +26,16 @@ loaded, so there is no import cycle).
 import logging
 import os
 import shlex
+import shutil  # noqa: F401  (tests patch update_cmd.shutil.*; split modules resolve it here)
 import subprocess
 import sys
 import time as _time
 from dataclasses import dataclass
 from pathlib import Path
 
+# Both re-exported: the split update_cmd_* modules import them lazily from
+# here so tests that monkeypatch ``update_cmd.get_hermes_home`` stay effective.
+from hermes_cli.config import get_hermes_home  # noqa: F401
 from hermes_constants import get_default_hermes_root, venv_python_path
 
 # Abort recovery lives in its own bounded module (review on #96235). Re-exported
