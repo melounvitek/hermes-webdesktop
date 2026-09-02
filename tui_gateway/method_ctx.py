@@ -107,6 +107,25 @@ def bind_module(module_globals: dict, server, *, skip=()) -> None:
     def _own_fn(v):
         return isinstance(v, types.FunctionType) and v.__module__ == mod_name
 
+    def _rebind_in(v):
+        """Rebind own functions nested in dict/tuple/list constants (dispatch tables)."""
+        if _own_fn(v):
+            return rebind(v, g, seen)
+        if isinstance(v, dict):
+            return {k: _rebind_in(x) for k, x in v.items()}
+        if isinstance(v, (tuple, list)):
+            return type(v)(_rebind_in(x) for x in v)
+        return v
+
+    def _has_own_fn(v):
+        if _own_fn(v):
+            return True
+        if isinstance(v, dict):
+            return any(_has_own_fn(x) for x in v.values())
+        if isinstance(v, (tuple, list)):
+            return any(_has_own_fn(x) for x in v)
+        return False
+
     for name, obj in list(module_globals.items()):
         if name.startswith("__") or name in _PLUMBING or name in skip:
             continue
@@ -116,8 +135,9 @@ def bind_module(module_globals: dict, server, *, skip=()) -> None:
             if obj.__module__ != mod_name:
                 continue
             obj = rebind(obj, g, seen)
-        elif isinstance(obj, dict) and any(_own_fn(v) for v in obj.values()):
-            obj = {k: rebind(v, g, seen) if _own_fn(v) else v for k, v in obj.items()}
+        elif isinstance(obj, (dict, tuple, list)) and _has_own_fn(obj):
+            obj = _rebind_in(obj)
+            module_globals[name] = obj  # keep the split module's own view consistent
         elif isinstance(obj, type):
             if obj.__module__ != mod_name:
                 continue
