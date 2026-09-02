@@ -42,8 +42,10 @@ from agent.turn_context import (
 from agent.turn_retry_state import TurnRetryState
 from agent.turn_usage import record_response_usage
 from agent.turn_overflow import recover_from_overflow
-from agent.turn_truncation import recover_from_truncation
+from agent.turn_truncation import continue_codex_incomplete, recover_from_truncation
 from agent.turn_recovery import (
+    describe_invalid_response,
+    validate_response_shape,
     compute_error_backoff,
     interruptible_backoff_sleep,
     log_api_error_attempt,
@@ -2906,83 +2908,7 @@ def run_conversation(
                     logging.debug(f"API Response received - Model: {resp_model}, Usage: {response.usage if hasattr(response, 'usage') else 'N/A'}")
                 
                 # Validate response shape before proceeding
-                response_invalid = False
-                error_details = []
-                if agent.api_mode == "codex_responses":
-                    _ct_v = agent._get_transport()
-                    if not _ct_v.validate_response(response):
-                        if response is None:
-                            response_invalid = True
-                            error_details.append("response is None")
-                        else:
-                            # Terminal provider failure (e.g. quota exhaustion): treat
-                            # as invalid so the fallback chain triggers.
-                            _codex_resp_status = str(getattr(response, "status", "") or "").strip().lower()
-                            if _codex_resp_status in {"failed", "cancelled"}:
-                                _codex_error_obj = getattr(response, "error", None)
-                                _codex_error_msg = (
-                                    _codex_error_obj.get("message") if isinstance(_codex_error_obj, dict)
-                                    else str(_codex_error_obj) if _codex_error_obj
-                                    else f"Responses API returned status '{_codex_resp_status}'"
-                                )
-                                logger.warning(
-                                    "Codex response status='%s' (error=%s). Routing to fallback. %s",
-                                    _codex_resp_status, _codex_error_msg,
-                                    agent._client_log_context(),
-                                )
-                                response_invalid = True
-                                error_details.append(f"response.status={_codex_resp_status}: {_codex_error_msg}")
-                            else:
-                                # output_text fallback: stream backfill may have failed
-                                # but normalize can still recover from output_text
-                                _out_text = getattr(response, "output_text", None)
-                                _out_text_stripped = _out_text.strip() if isinstance(_out_text, str) else ""
-                                if _out_text_stripped:
-                                    logger.debug(
-                                        "Codex response.output is empty but output_text is present "
-                                        "(%d chars); deferring to normalization.",
-                                        len(_out_text_stripped),
-                                    )
-                                else:
-                                    _resp_status = getattr(response, "status", None)
-                                    _resp_incomplete = getattr(response, "incomplete_details", None)
-                                    logger.warning(
-                                        "Codex response.output is empty after stream backfill "
-                                        "(status=%s, incomplete_details=%s, model=%s). %s",
-                                        _resp_status, _resp_incomplete,
-                                        getattr(response, "model", None),
-                                        f"api_mode={agent.api_mode} provider={agent.provider}",
-                                    )
-                                    response_invalid = True
-                                    error_details.append("response.output is empty")
-                elif agent.api_mode == "anthropic_messages":
-                    _tv = agent._get_transport()
-                    if not _tv.validate_response(response):
-                        response_invalid = True
-                        if response is None:
-                            error_details.append("response is None")
-                        else:
-                            error_details.append("response.content invalid (not a non-empty list)")
-                elif agent.api_mode == "bedrock_converse":
-                    _btv = agent._get_transport()
-                    if not _btv.validate_response(response):
-                        response_invalid = True
-                        if response is None:
-                            error_details.append("response is None")
-                        else:
-                            error_details.append("Bedrock response invalid (no output or choices)")
-                else:
-                    _ctv = agent._get_transport()
-                    if not _ctv.validate_response(response):
-                        response_invalid = True
-                        if response is None:
-                            error_details.append("response is None")
-                        elif not hasattr(response, 'choices'):
-                            error_details.append("response has no 'choices' attribute")
-                        elif response.choices is None:
-                            error_details.append("response.choices is None")
-                        else:
-                            error_details.append("response.choices is empty")
+                response_invalid, error_details = validate_response_shape(agent, response)
 
                 if response_invalid:
                     agent._invoke_api_request_error_hook(
@@ -3023,60 +2949,9 @@ def run_conversation(
                         compression_attempts = 0
                         break
 
-                    # Check for error field in response (some providers include this)
-                    error_msg = "Unknown"
-                    provider_name = "Unknown"
-                    if response and hasattr(response, 'error') and response.error:
-                        error_msg = str(response.error)
-                        # Try to extract provider from error metadata
-                        if hasattr(response.error, 'metadata') and response.error.metadata:
-                            provider_name = response.error.metadata.get('provider_name', 'Unknown')
-                    elif response and hasattr(response, 'message') and response.message:
-                        error_msg = str(response.message)
-                    
-                    # Try to get provider from model field (OpenRouter often returns actual model used)
-                    if provider_name == "Unknown" and response and hasattr(response, 'model') and response.model:
-                        provider_name = f"model={response.model}"
-                    
-                    # Check for x-openrouter-provider or similar metadata
-                    if provider_name == "Unknown" and response:
-                        # Log all response attributes for debugging
-                        resp_attrs = {k: str(v)[:100] for k, v in vars(response).items() if not k.startswith('_')}
-                        if agent.verbose_logging:
-                            logging.debug(f"Response attributes for invalid response: {resp_attrs}")
-                    
-                    # Extract error code from response for contextual diagnostics
-                    _resp_error_code = None
-                    if response and hasattr(response, 'error') and response.error:
-                        _code_raw = getattr(response.error, 'code', None)
-                        if _code_raw is None and isinstance(response.error, dict):
-                            _code_raw = response.error.get('code')
-                        if _code_raw is not None:
-                            try:
-                                _resp_error_code = int(_code_raw)
-                            except (TypeError, ValueError):
-                                pass
-
-                    # Build a human-readable failure hint from the error code
-                    # and response time, instead of always assuming rate limiting.
-                    if _resp_error_code == 524:
-                        _failure_hint = f"upstream provider timed out (Cloudflare 524, {api_duration:.0f}s)"
-                    elif _resp_error_code == 504:
-                        _failure_hint = f"upstream gateway timeout (504, {api_duration:.0f}s)"
-                    elif _resp_error_code == 429:
-                        _failure_hint = "rate limited by upstream provider (429)"
-                    elif _resp_error_code in {500, 502}:
-                        _failure_hint = f"upstream server error ({_resp_error_code}, {api_duration:.0f}s)"
-                    elif _resp_error_code in {503, 529}:
-                        _failure_hint = f"upstream provider overloaded ({_resp_error_code})"
-                    elif _resp_error_code is not None:
-                        _failure_hint = f"upstream error (code {_resp_error_code}, {api_duration:.0f}s)"
-                    elif api_duration < 10:
-                        _failure_hint = f"fast response ({api_duration:.1f}s) — likely rate limited"
-                    elif api_duration > 60:
-                        _failure_hint = f"slow response ({api_duration:.0f}s) — likely upstream timeout"
-                    else:
-                        _failure_hint = f"response time {api_duration:.1f}s"
+                    error_msg, provider_name, _failure_hint = describe_invalid_response(
+                        agent, response, api_duration
+                    )
 
                     agent._buffer_vprint(f"⚠️  Invalid API response (attempt {retry_count}/{max_retries}): {', '.join(error_details)}")
                     agent._buffer_vprint(f"   🏢 Provider: {provider_name}")
@@ -4165,127 +4040,17 @@ def run_conversation(
             agent._incomplete_scratchpad_retries = 0
 
             if agent.api_mode == "codex_responses" and finish_reason == "incomplete":
-                agent._codex_incomplete_retries += 1
-
-                interim_msg = agent._build_assistant_message(assistant_message, finish_reason)
-                interim_has_content = bool((interim_msg.get("content") or "").strip())
-                interim_has_reasoning = bool(interim_msg.get("reasoning", "").strip()) if isinstance(interim_msg.get("reasoning"), str) else False
-                interim_has_codex_reasoning = bool(interim_msg.get("codex_reasoning_items"))
-                interim_has_codex_message_items = bool(interim_msg.get("codex_message_items"))
-
-                if (
-                    interim_has_content
-                    or interim_has_reasoning
-                    or interim_has_codex_reasoning
-                    or interim_has_codex_message_items
-                ):
-                    last_msg = messages[-1] if messages else None
-                    # Dedup on visible content only (content + reasoning): opaque
-                    # provider state drifts per continuation and would defeat dedup
-                    # (#52711).
-                    last_interim_visible = (
-                        agent._interim_assistant_visible_text(last_msg)
-                        if isinstance(last_msg, dict)
-                        else ""
-                    )
-                    current_interim_visible = agent._interim_assistant_visible_text(interim_msg)
-                    if last_interim_visible or current_interim_visible:
-                        same_visible_output = last_interim_visible == current_interim_visible
-                    else:
-                        # Preserve the existing reasoning-only behavior when
-                        # neither response has text eligible for interim delivery.
-                        same_visible_output = (
-                            (last_msg.get("content") or "") == (interim_msg.get("content") or "")
-                            and (last_msg.get("reasoning") or "") == (interim_msg.get("reasoning") or "")
-                        ) if isinstance(last_msg, dict) else False
-                    visible_duplicate = (
-                        isinstance(last_msg, dict)
-                        and last_msg.get("role") == "assistant"
-                        and last_msg.get("finish_reason") == "incomplete"
-                        and same_visible_output
-                    )
-                    if visible_duplicate:
-                        # Update replay state in-place: keep the latest provider payload
-                        # without re-emitting identical user-visible commentary.
-                        for _key in (
-                            "content",
-                            "reasoning",
-                            "reasoning_content",
-                            "reasoning_details",
-                            "codex_reasoning_items",
-                            "codex_message_items",
-                        ):
-                            if _key in interim_msg:
-                                if _key == "codex_reasoning_items":
-                                    # Merge, don't overwrite: the earlier response's
-                                    # native compaction checkpoint is the only copy. See
-                                    # merge_interim_reasoning_items.
-                                    from agent.native_compaction import (
-                                        merge_interim_reasoning_items,
-                                    )
-                                    last_msg[_key] = merge_interim_reasoning_items(
-                                        last_msg.get(_key), interim_msg[_key]
-                                    )
-                                else:
-                                    last_msg[_key] = interim_msg[_key]
-                    else:
-                        append_message(messages, interim_msg)
-                        agent._emit_interim_assistant_message(interim_msg)
-
-                if agent._codex_incomplete_retries < 3:
-                    # If the interim has nothing the Responses converter will replay, a
-                    # bare retry is byte-identical and fails identically; append a
-                    # user-role nudge so the retry differs and asks for the answer.
-                    interim_replayable = (
-                        interim_has_content
-                        or interim_has_codex_reasoning
-                        or interim_has_codex_message_items
-                    )
-                    # Replayable ≠ different: an interim holding only a ``compaction``
-                    # checkpoint in ``codex_reasoning_items`` is replayable yet re-sends
-                    # identically. One bare retry, then always nudge.
-                    if not interim_replayable or agent._codex_incomplete_retries >= 2:
-                        _last_msg = messages[-1] if messages else None
-                        _already_nudged = (
-                            isinstance(_last_msg, dict)
-                            and _last_msg.get("role") == "user"
-                            and _last_msg.get("content") == _CODEX_INCOMPLETE_NUDGE
-                        )
-                        # Alternation guard: the user-role nudge may only follow an
-                        # assistant message; after a too-empty interim it would create
-                        # user→user / tool→user.
-                        _last_is_assistant = (
-                            isinstance(_last_msg, dict)
-                            and _last_msg.get("role") == "assistant"
-                        )
-                        if not _already_nudged and _last_is_assistant:
-                            append_message(messages, {
-                                "role": "user",
-                                "content": _CODEX_INCOMPLETE_NUDGE,
-                            })
-                    if not agent.quiet_mode:
-                        agent._vprint(f"{agent.log_prefix}↻ Codex response incomplete; continuing turn ({agent._codex_incomplete_retries}/3)")
-                    # Show the continuation on the spinner/status line and gateway
-                    # heartbeat; these retries can take minutes and otherwise look like
-                    # infinite thinking (#64434).
-                    agent._emit_wait_notice(
-                        f"↻ model returned reasoning with no final answer — "
-                        f"asking it to continue "
-                        f"({agent._codex_incomplete_retries}/3)"
-                    )
-                    agent._session_messages = messages
-                    continue
-
-                agent._codex_incomplete_retries = 0
-                agent._persist_session(messages, conversation_history)
-                return {
-                    "final_response": "Codex response remained incomplete after 3 continuation attempts",
-                    "messages": messages,
-                    "api_calls": api_call_count,
-                    "completed": False,
-                    "partial": True,
-                    "error": "Codex response remained incomplete after 3 continuation attempts",
-                }
+                _codex_result = continue_codex_incomplete(
+                    agent,
+                    assistant_message,
+                    finish_reason,
+                    messages=messages,
+                    conversation_history=conversation_history,
+                    api_call_count=api_call_count,
+                )
+                if _codex_result is not None:
+                    return _codex_result
+                continue
             elif hasattr(agent, "_codex_incomplete_retries"):
                 agent._codex_incomplete_retries = 0
             

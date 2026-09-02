@@ -476,3 +476,145 @@ def recover_from_truncation(
             "error": "First response truncated due to output length limit"
         })
     return _verdict("fallthrough")
+
+
+def continue_codex_incomplete(
+    agent: Any,
+    assistant_message: Any,
+    finish_reason: str,
+    *,
+    messages: List[Dict[str, Any]],
+    conversation_history: Any,
+    api_call_count: int,
+) -> Optional[Dict[str, Any]]:
+    """Codex Responses ``status=incomplete`` continuation (max 3 per turn).
+
+    Appends the interim assistant message (deduped on visible content only — opaque
+    provider state drifts per continuation, #52711; ``codex_reasoning_items`` are merged,
+    not overwritten, because the earlier response holds the only native-compaction
+    checkpoint) and, when a bare retry would be byte-identical, a user-role nudge — only
+    after an assistant row, to preserve role alternation. Returns ``None`` to continue
+    the turn loop, or the terminal ``partial`` result once retries are exhausted."""
+    from agent.conversation_loop import _CODEX_INCOMPLETE_NUDGE
+
+    agent._codex_incomplete_retries += 1
+
+    interim_msg = agent._build_assistant_message(assistant_message, finish_reason)
+    interim_has_content = bool((interim_msg.get("content") or "").strip())
+    interim_has_reasoning = bool(interim_msg.get("reasoning", "").strip()) if isinstance(interim_msg.get("reasoning"), str) else False
+    interim_has_codex_reasoning = bool(interim_msg.get("codex_reasoning_items"))
+    interim_has_codex_message_items = bool(interim_msg.get("codex_message_items"))
+
+    if (
+        interim_has_content
+        or interim_has_reasoning
+        or interim_has_codex_reasoning
+        or interim_has_codex_message_items
+    ):
+        last_msg = messages[-1] if messages else None
+        # Dedup on visible content only (content + reasoning): opaque
+        # provider state drifts per continuation and would defeat dedup
+        # (#52711).
+        last_interim_visible = (
+            agent._interim_assistant_visible_text(last_msg)
+            if isinstance(last_msg, dict)
+            else ""
+        )
+        current_interim_visible = agent._interim_assistant_visible_text(interim_msg)
+        if last_interim_visible or current_interim_visible:
+            same_visible_output = last_interim_visible == current_interim_visible
+        else:
+            # Preserve the existing reasoning-only behavior when
+            # neither response has text eligible for interim delivery.
+            same_visible_output = (
+                (last_msg.get("content") or "") == (interim_msg.get("content") or "")
+                and (last_msg.get("reasoning") or "") == (interim_msg.get("reasoning") or "")
+            ) if isinstance(last_msg, dict) else False
+        visible_duplicate = (
+            isinstance(last_msg, dict)
+            and last_msg.get("role") == "assistant"
+            and last_msg.get("finish_reason") == "incomplete"
+            and same_visible_output
+        )
+        if visible_duplicate:
+            # Update replay state in-place: keep the latest provider payload
+            # without re-emitting identical user-visible commentary.
+            for _key in (
+                "content",
+                "reasoning",
+                "reasoning_content",
+                "reasoning_details",
+                "codex_reasoning_items",
+                "codex_message_items",
+            ):
+                if _key in interim_msg:
+                    if _key == "codex_reasoning_items":
+                        # Merge, don't overwrite: the earlier response's
+                        # native compaction checkpoint is the only copy. See
+                        # merge_interim_reasoning_items.
+                        from agent.native_compaction import (
+                            merge_interim_reasoning_items,
+                        )
+                        last_msg[_key] = merge_interim_reasoning_items(
+                            last_msg.get(_key), interim_msg[_key]
+                        )
+                    else:
+                        last_msg[_key] = interim_msg[_key]
+        else:
+            append_message(messages, interim_msg)
+            agent._emit_interim_assistant_message(interim_msg)
+
+    if agent._codex_incomplete_retries < 3:
+        # If the interim has nothing the Responses converter will replay, a
+        # bare retry is byte-identical and fails identically; append a
+        # user-role nudge so the retry differs and asks for the answer.
+        interim_replayable = (
+            interim_has_content
+            or interim_has_codex_reasoning
+            or interim_has_codex_message_items
+        )
+        # Replayable ≠ different: an interim holding only a ``compaction``
+        # checkpoint in ``codex_reasoning_items`` is replayable yet re-sends
+        # identically. One bare retry, then always nudge.
+        if not interim_replayable or agent._codex_incomplete_retries >= 2:
+            _last_msg = messages[-1] if messages else None
+            _already_nudged = (
+                isinstance(_last_msg, dict)
+                and _last_msg.get("role") == "user"
+                and _last_msg.get("content") == _CODEX_INCOMPLETE_NUDGE
+            )
+            # Alternation guard: the user-role nudge may only follow an
+            # assistant message; after a too-empty interim it would create
+            # user→user / tool→user.
+            _last_is_assistant = (
+                isinstance(_last_msg, dict)
+                and _last_msg.get("role") == "assistant"
+            )
+            if not _already_nudged and _last_is_assistant:
+                append_message(messages, {
+                    "role": "user",
+                    "content": _CODEX_INCOMPLETE_NUDGE,
+                })
+        if not agent.quiet_mode:
+            agent._vprint(f"{agent.log_prefix}↻ Codex response incomplete; continuing turn ({agent._codex_incomplete_retries}/3)")
+        # Show the continuation on the spinner/status line and gateway
+        # heartbeat; these retries can take minutes and otherwise look like
+        # infinite thinking (#64434).
+        agent._emit_wait_notice(
+            f"↻ model returned reasoning with no final answer — "
+            f"asking it to continue "
+            f"({agent._codex_incomplete_retries}/3)"
+        )
+        agent._session_messages = messages
+        return None
+
+    agent._codex_incomplete_retries = 0
+    agent._persist_session(messages, conversation_history)
+    return {
+        "final_response": "Codex response remained incomplete after 3 continuation attempts",
+        "messages": messages,
+        "api_calls": api_call_count,
+        "completed": False,
+        "partial": True,
+        "error": "Codex response remained incomplete after 3 continuation attempts",
+    }

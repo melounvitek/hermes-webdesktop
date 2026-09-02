@@ -1267,3 +1267,150 @@ def compute_error_backoff(
         api_error,
     )
     return wait_time
+
+
+def validate_response_shape(agent: Any, response: Any) -> Tuple[bool, List[str]]:
+    """Validate the raw provider response per api_mode via the transport's
+    ``validate_response``. Returns ``(response_invalid, error_details)``; a Codex
+    ``failed``/``cancelled`` status (terminal provider failure, e.g. quota exhaustion)
+    is treated as invalid so the fallback chain triggers, while an empty Codex
+    ``output`` with a non-empty ``output_text`` is deferred to normalization."""
+    response_invalid = False
+    error_details = []
+    if agent.api_mode == "codex_responses":
+        _ct_v = agent._get_transport()
+        if not _ct_v.validate_response(response):
+            if response is None:
+                response_invalid = True
+                error_details.append("response is None")
+            else:
+                # Terminal provider failure (e.g. quota exhaustion): treat
+                # as invalid so the fallback chain triggers.
+                _codex_resp_status = str(getattr(response, "status", "") or "").strip().lower()
+                if _codex_resp_status in {"failed", "cancelled"}:
+                    _codex_error_obj = getattr(response, "error", None)
+                    _codex_error_msg = (
+                        _codex_error_obj.get("message") if isinstance(_codex_error_obj, dict)
+                        else str(_codex_error_obj) if _codex_error_obj
+                        else f"Responses API returned status '{_codex_resp_status}'"
+                    )
+                    logger.warning(
+                        "Codex response status='%s' (error=%s). Routing to fallback. %s",
+                        _codex_resp_status, _codex_error_msg,
+                        agent._client_log_context(),
+                    )
+                    response_invalid = True
+                    error_details.append(f"response.status={_codex_resp_status}: {_codex_error_msg}")
+                else:
+                    # output_text fallback: stream backfill may have failed
+                    # but normalize can still recover from output_text
+                    _out_text = getattr(response, "output_text", None)
+                    _out_text_stripped = _out_text.strip() if isinstance(_out_text, str) else ""
+                    if _out_text_stripped:
+                        logger.debug(
+                            "Codex response.output is empty but output_text is present "
+                            "(%d chars); deferring to normalization.",
+                            len(_out_text_stripped),
+                        )
+                    else:
+                        _resp_status = getattr(response, "status", None)
+                        _resp_incomplete = getattr(response, "incomplete_details", None)
+                        logger.warning(
+                            "Codex response.output is empty after stream backfill "
+                            "(status=%s, incomplete_details=%s, model=%s). %s",
+                            _resp_status, _resp_incomplete,
+                            getattr(response, "model", None),
+                            f"api_mode={agent.api_mode} provider={agent.provider}",
+                        )
+                        response_invalid = True
+                        error_details.append("response.output is empty")
+    elif agent.api_mode == "anthropic_messages":
+        _tv = agent._get_transport()
+        if not _tv.validate_response(response):
+            response_invalid = True
+            if response is None:
+                error_details.append("response is None")
+            else:
+                error_details.append("response.content invalid (not a non-empty list)")
+    elif agent.api_mode == "bedrock_converse":
+        _btv = agent._get_transport()
+        if not _btv.validate_response(response):
+            response_invalid = True
+            if response is None:
+                error_details.append("response is None")
+            else:
+                error_details.append("Bedrock response invalid (no output or choices)")
+    else:
+        _ctv = agent._get_transport()
+        if not _ctv.validate_response(response):
+            response_invalid = True
+            if response is None:
+                error_details.append("response is None")
+            elif not hasattr(response, 'choices'):
+                error_details.append("response has no 'choices' attribute")
+            elif response.choices is None:
+                error_details.append("response.choices is None")
+            else:
+                error_details.append("response.choices is empty")
+    return response_invalid, error_details
+
+
+def describe_invalid_response(agent: Any, response: Any, api_duration: float) -> Tuple[str, str, str]:
+    """Diagnostics for an empty/malformed response: ``(error_msg, provider_name,
+    failure_hint)``. The hint is derived from the provider error code (524/504/429/
+    5xx) and the response time, instead of always assuming rate limiting."""
+    # Check for error field in response (some providers include this)
+    error_msg = "Unknown"
+    provider_name = "Unknown"
+    if response and hasattr(response, 'error') and response.error:
+        error_msg = str(response.error)
+        # Try to extract provider from error metadata
+        if hasattr(response.error, 'metadata') and response.error.metadata:
+            provider_name = response.error.metadata.get('provider_name', 'Unknown')
+    elif response and hasattr(response, 'message') and response.message:
+        error_msg = str(response.message)
+
+    # Try to get provider from model field (OpenRouter often returns actual model used)
+    if provider_name == "Unknown" and response and hasattr(response, 'model') and response.model:
+        provider_name = f"model={response.model}"
+
+    # Check for x-openrouter-provider or similar metadata
+    if provider_name == "Unknown" and response:
+        # Log all response attributes for debugging
+        resp_attrs = {k: str(v)[:100] for k, v in vars(response).items() if not k.startswith('_')}
+        if agent.verbose_logging:
+            logging.debug(f"Response attributes for invalid response: {resp_attrs}")
+
+    # Extract error code from response for contextual diagnostics
+    _resp_error_code = None
+    if response and hasattr(response, 'error') and response.error:
+        _code_raw = getattr(response.error, 'code', None)
+        if _code_raw is None and isinstance(response.error, dict):
+            _code_raw = response.error.get('code')
+        if _code_raw is not None:
+            try:
+                _resp_error_code = int(_code_raw)
+            except (TypeError, ValueError):
+                pass
+
+    # Build a human-readable failure hint from the error code
+    # and response time, instead of always assuming rate limiting.
+    if _resp_error_code == 524:
+        _failure_hint = f"upstream provider timed out (Cloudflare 524, {api_duration:.0f}s)"
+    elif _resp_error_code == 504:
+        _failure_hint = f"upstream gateway timeout (504, {api_duration:.0f}s)"
+    elif _resp_error_code == 429:
+        _failure_hint = "rate limited by upstream provider (429)"
+    elif _resp_error_code in {500, 502}:
+        _failure_hint = f"upstream server error ({_resp_error_code}, {api_duration:.0f}s)"
+    elif _resp_error_code in {503, 529}:
+        _failure_hint = f"upstream provider overloaded ({_resp_error_code})"
+    elif _resp_error_code is not None:
+        _failure_hint = f"upstream error (code {_resp_error_code}, {api_duration:.0f}s)"
+    elif api_duration < 10:
+        _failure_hint = f"fast response ({api_duration:.1f}s) — likely rate limited"
+    elif api_duration > 60:
+        _failure_hint = f"slow response ({api_duration:.0f}s) — likely upstream timeout"
+    else:
+        _failure_hint = f"response time {api_duration:.1f}s"
+    return error_msg, provider_name, _failure_hint
