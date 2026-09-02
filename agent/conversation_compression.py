@@ -4068,6 +4068,109 @@ def _finish_compaction_boundary(
     return _compressed_est
 
 
+def _candidate_rejected(
+    agent: Any,
+    compressed: Any,
+    messages: list,
+    messages_before_compression: list,
+    *,
+    attempt_generation: Any,
+    attempt_started_at: float,
+) -> bool:
+    """Reject an unusable compression candidate before any session mutation.
+
+    Order matters: compressor-reported abort, no progress, empty transcript,
+    superseded attempt. Each branch surfaces its own warning/telemetry; the
+    caller releases the lease and returns the input unchanged when True.
+    """
+    # Aborted compression returns input unchanged: surface the error, skip rotation
+    # (no session ended); auto-compress callers detect no-op via equal lengths.
+    if getattr(agent.context_compressor, "_last_compress_aborted", False):
+        _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
+        if getattr(agent, "_last_compression_summary_warning", None) != _err:
+            agent._last_compression_summary_warning = _err
+            agent._emit_warning(
+                f"⚠ Compression aborted: {_err}. "
+                "No messages were dropped — conversation continues unchanged. "
+                "Run /compress to retry, or /new to start a fresh session."
+            )
+        _emit_aborted_attempt_telemetry(
+            agent,
+            attempt_started_at,
+            (
+                getattr(agent.context_compressor, "_last_summary_error", None)
+                and "summary_generation_aborted"
+            ),
+        )
+        return True
+
+    # Compare semantic state, not identity: engines may return an equal copy or
+    # mutate the live list. ``==`` first (subclass __eq__), then marker-insensitive.
+    if compressed == messages_before_compression or (
+        _strip_marker_for_comparison(compressed)
+        == _strip_marker_for_comparison(messages_before_compression)
+    ):
+        if messages != messages_before_compression:
+            messages[:] = copy.deepcopy(messages_before_compression)
+        logger.info(
+            "Compression made no progress (session=%s) — skipping boundary rewrite.",
+            agent.session_id or "none",
+        )
+        # Unchanged output would fail identically next turn; arm structural backoff so
+        # auto-compress stops re-firing each turn (success lifts it, force overrides).
+        try:
+            _no_progress_recorder = getattr(
+                agent.context_compressor, "_record_structural_no_op", None
+            )
+            if callable(_no_progress_recorder):
+                _no_progress_recorder(
+                    "compaction returned the transcript unchanged "
+                    "(no_progress)"
+                )
+        except Exception:
+            logger.debug(
+                "no-progress backoff arm failed", exc_info=True
+            )
+        _emit_aborted_attempt_telemetry(agent, attempt_started_at, "no_progress")
+        return True
+
+    if not compressed:
+        logger.error(
+            "context compression returned an empty transcript; refusing to "
+            "rotate session=%s so the parent remains resumable",
+            agent.session_id or "none",
+        )
+        try:
+            agent._emit_warning(
+                "⚠ Compression returned an empty transcript. "
+                "No session split was performed; conversation continues unchanged."
+            )
+        except Exception:
+            pass
+        return True
+
+    # A newer attempt claiming this compressor supersedes us; discard the late
+    # candidate. Fence poison alone misses a successor that minted its own fence.
+    if not _compressor_attempt_is_current(agent.context_compressor, attempt_generation):
+        logger.warning(
+            "Discarding late compression candidate: attempt generation "
+            "%s was superseded by a newer attempt (current: %s) "
+            "(session=%s).",
+            attempt_generation,
+            getattr(
+                agent.context_compressor,
+                "_compression_attempt_generation",
+                None,
+            ),
+            agent.session_id or "none",
+        )
+        _restore_messages_snapshot(messages, messages_before_compression)
+        agent._last_compaction_in_place = False
+        _emit_aborted_attempt_telemetry(agent, attempt_started_at, "attempt_superseded")
+        return True
+    return False
+
+
 def compress_context(
     agent: Any,
     messages: list,
@@ -4385,102 +4488,15 @@ def compress_context(
             getattr(agent.context_compressor, "_last_feasibility_skip", False)
         )
 
-        # Aborted compression returns input unchanged: surface the error, skip rotation
-        # (no session ended); auto-compress callers detect no-op via equal lengths.
-        if getattr(agent.context_compressor, "_last_compress_aborted", False):
-            try:
-                _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
-                if getattr(agent, "_last_compression_summary_warning", None) != _err:
-                    agent._last_compression_summary_warning = _err
-                    agent._emit_warning(
-                        f"⚠ Compression aborted: {_err}. "
-                        "No messages were dropped — conversation continues unchanged. "
-                        "Run /compress to retry, or /new to start a fresh session."
-                    )
-                _existing_sp = _existing_system_prompt(agent, system_message)
-                _emit_aborted_attempt_telemetry(
-                    agent,
-                    _attempt_started_at,
-                    (
-                        getattr(agent.context_compressor, "_last_summary_error", None)
-                        and "summary_generation_aborted"
-                    ),
-                )
-                return messages, _existing_sp
-            finally:
-                lease.release()
-
-        # Compare semantic state, not identity: engines may return an equal copy or
-        # mutate the live list. ``==`` first (subclass __eq__), then marker-insensitive.
-        if compressed == messages_before_compression or (
-            _strip_marker_for_comparison(compressed)
-            == _strip_marker_for_comparison(messages_before_compression)
+        if _candidate_rejected(
+            agent,
+            compressed,
+            messages,
+            messages_before_compression,
+            attempt_generation=_attempt_generation,
+            attempt_started_at=_attempt_started_at,
         ):
-            if messages != messages_before_compression:
-                messages[:] = copy.deepcopy(messages_before_compression)
-            logger.info(
-                "Compression made no progress (session=%s) — skipping boundary rewrite.",
-                agent.session_id or "none",
-            )
-            # Unchanged output would fail identically next turn; arm structural backoff so
-            # auto-compress stops re-firing each turn (success lifts it, force overrides).
-            try:
-                _no_progress_recorder = getattr(
-                    agent.context_compressor, "_record_structural_no_op", None
-                )
-                if callable(_no_progress_recorder):
-                    _no_progress_recorder(
-                        "compaction returned the transcript unchanged "
-                        "(no_progress)"
-                    )
-            except Exception:
-                logger.debug(
-                    "no-progress backoff arm failed", exc_info=True
-                )
             _existing_sp = _existing_system_prompt(agent, system_message)
-            _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "no_progress")
-            lease.release()
-            return messages, _existing_sp
-
-        if not compressed:
-            logger.error(
-                "context compression returned an empty transcript; refusing to "
-                "rotate session=%s so the parent remains resumable",
-                agent.session_id or "none",
-            )
-            try:
-                agent._emit_warning(
-                    "⚠ Compression returned an empty transcript. "
-                    "No session split was performed; conversation continues unchanged."
-                )
-            except Exception:
-                pass
-            _existing_sp = _existing_system_prompt(agent, system_message)
-            lease.release()
-            return messages, _existing_sp
-
-        # A newer attempt claiming this compressor supersedes us; discard the late
-        # candidate. Fence poison alone misses a successor that minted its own fence.
-        _attempt_superseded = not _compressor_attempt_is_current(
-            agent.context_compressor, _attempt_generation
-        )
-        if _attempt_superseded:
-            logger.warning(
-                "Discarding late compression candidate: attempt generation "
-                "%s was superseded by a newer attempt (current: %s) "
-                "(session=%s).",
-                _attempt_generation,
-                getattr(
-                    agent.context_compressor,
-                    "_compression_attempt_generation",
-                    None,
-                ),
-                agent.session_id or "none",
-            )
-            _restore_messages_snapshot(messages, messages_before_compression)
-            agent._last_compaction_in_place = False
-            _existing_sp = _existing_system_prompt(agent, system_message)
-            _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "attempt_superseded")
             lease.release()
             return messages, _existing_sp
 
