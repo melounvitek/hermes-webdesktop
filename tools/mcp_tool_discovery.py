@@ -115,6 +115,24 @@ def _resolve_server_lazy(name: str, config: dict) -> bool:
     return _core._parse_boolish(config.get("lazy", False), default=False)
 
 
+def _note_connect_failure(name: str, exc: BaseException) -> str:
+    """Record a failed connect (under ``_lock``): error text for status, cooldown stamp."""
+    message = _core._format_connect_error(exc)
+    with _core._lock:
+        _core._server_connecting.discard(name)
+        _core._server_connect_errors[name] = message
+        _core._record_connect_failure(name)
+    return message
+
+
+def _note_connect_success(name: str) -> None:
+    """Clear connecting/error/cooldown state after a successful connect (under ``_lock``)."""
+    with _core._lock:
+        _core._server_connecting.discard(name)
+        _core._server_connect_errors.pop(name, None)
+        _core._clear_connect_failure(name)
+
+
 def _ensure_lazy_server_connected(server_name: str) -> bool:
     """Connect a lazily-registered server on demand (sync; blocks the caller).
 
@@ -146,19 +164,14 @@ def _ensure_lazy_server_connected(server_name: str) -> bool:
     try:
         _core._run_on_mcp_loop(_connect, timeout=float(connect_timeout) + 30.0)
     except BaseException as exc:
-        message = _core._format_connect_error(exc)
-        with _core._lock:
-            _core._server_connecting.discard(server_name)
-            _core._server_connect_errors[server_name] = message
-            _core._record_connect_failure(server_name)
+        message = _note_connect_failure(server_name, exc)
         logger.warning(
             "Lazy MCP connect failed for '%s': %s", server_name, message,
         )
         return False
 
+    _note_connect_success(server_name)
     with _core._lock:
-        _core._server_connecting.discard(server_name)
-        _core._clear_connect_failure(server_name)
         _core._lazy_server_configs.pop(server_name, None)
         stale_fingerprint = _core._lazy_server_fingerprints.pop(server_name, None)
         cached_names = _core._lazy_server_tool_names.pop(server_name, None) or []
@@ -346,11 +359,7 @@ async def _discover_all(new_servers: Dict[str, dict]) -> None:
     for name, result in zip(server_names, results):
         if isinstance(result, BaseException):
             command = new_servers.get(name, {}).get("command")
-            message = _core._format_connect_error(result)
-            with _core._lock:
-                _core._server_connecting.discard(name)
-                _core._server_connect_errors[name] = message
-                _core._record_connect_failure(name)
+            message = _note_connect_failure(name, result)
             logger.warning(
                 "Failed to connect to MCP server '%s'%s: %s",
                 name,
@@ -358,10 +367,7 @@ async def _discover_all(new_servers: Dict[str, dict]) -> None:
                 message,
             )
         else:
-            with _core._lock:
-                _core._server_connecting.discard(name)
-                _core._server_connect_errors.pop(name, None)
-                _core._clear_connect_failure(name)
+            _note_connect_success(name)
 
 
 def _run_discovery_pass(new_servers: Dict[str, dict]) -> None:
