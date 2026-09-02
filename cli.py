@@ -226,7 +226,6 @@ from hermes_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL,
     is_browser_debug_ready,
     manual_chrome_debug_command,
-    try_launch_chrome_debug,
 )
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import base_url_host_matches, base_url_hostname, fast_safe_load
@@ -4955,6 +4954,12 @@ def _looks_like_slash_command(text: str) -> bool:
 
 _skill_commands = None
 _skill_bundles = None
+
+
+def _slash_args(cmd: str) -> str:
+    """Text after the slash-command word, stripped ("" when absent)."""
+    parts = cmd.split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
 
 
 def _ensure_skill_commands() -> dict:
@@ -11113,40 +11118,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         except Exception as e:
             logger.debug("undo: prefill buffer failed: %s", e)
     
-    def _run_curses_picker(self, title: str, items: list[str], default_index: int = 0) -> int | None:
-        """Run curses_single_select via run_in_terminal so prompt_toolkit handles terminal ownership cleanly."""
-        import threading
-        from hermes_cli.curses_ui import curses_single_select
-
-        result = [None]
-
-        def _pick():
-            result[0] = curses_single_select(title, items, default_index=default_index)
-
-        # run_in_terminal requires an asyncio event loop — only exists in the
-        # main prompt_toolkit thread.  If we're in a background thread (e.g.
-        # process_loop), fall back to direct curses call.
-        in_main_thread = threading.current_thread() is threading.main_thread()
-
-        if self._app and in_main_thread:
-            from prompt_toolkit.application import run_in_terminal
-            was_visible = self._status_bar_visible
-            self._status_bar_visible = False
-            self._app.invalidate()
-            try:
-                run_in_terminal(_pick)
-            finally:
-                self._status_bar_visible = was_visible
-                self._app.invalidate()
-        else:
-            _pick()
-
-        return result[0]
-
     def _prompt_text_input(self, prompt_text: str) -> str | None:
         """Prompt for free-text input safely inside or outside prompt_toolkit.
 
-        Mirrors the thread-aware guard in ``_run_curses_picker``: ``run_in_terminal``
+        ``run_in_terminal``
         returns a coroutine that must be awaited by the prompt_toolkit event loop,
         which only exists on the main thread.  Slash commands are dispatched from
         the ``process_loop`` daemon thread (see issue #23185), so calling
@@ -12558,6 +12533,68 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             print(f"    2. Or configure settings in {display_hermes_home()}/config.yaml")
             print()
     
+    # Slash dispatch: canonical command -> (method name, pass cmd_original?).
+    # Commands absent here resolve by convention to ``_handle_<name>_command(cmd)``
+    # (dashes -> underscores). Resolved via getattr at dispatch time so
+    # instance/class-level monkeypatching still works. Handlers return False
+    # to exit the REPL; anything else keeps it alive.
+    _SLASH_DISPATCH: dict[str, tuple[str, bool]] = {
+        "exit": ("_cmd_exit", True),
+        "quit": ("_cmd_exit", True),
+        "help": ("_cmd_help", True),
+        "palette": ("_open_command_palette", False),
+        "whoami": ("_handle_whoami_command", False),
+        "profile": ("_handle_profile_command", False),
+        "toolsets": ("show_toolsets", False),
+        "config": ("show_config", False),
+        "redraw": ("_cmd_redraw", True),
+        "clear": ("_cmd_clear", True),
+        "history": ("show_history", False),
+        "title": ("_cmd_title", True),
+        "new": ("_cmd_new", True),
+        "model": ("_handle_model_switch", True),
+        "codex-runtime": ("_handle_codex_runtime", True),
+        "retry": ("_cmd_retry", True),
+        "prompt": ("_handle_prompt_compose_command", True),
+        "undo": ("_cmd_undo", True),
+        "save": ("save_conversation", True),
+        "skills": ("_cmd_skills", True),
+        "platforms": ("_show_gateway_status", False),
+        "status": ("_show_session_status", False),
+        "context": ("_show_context_breakdown", True),
+        "egress": ("_cmd_egress", True),
+        "statusbar": ("_cmd_statusbar", True),
+        "verbose": ("_toggle_verbose", False),
+        "yolo": ("_toggle_yolo", False),
+        "compress": ("_manual_compress", True),
+        "subscription": ("_show_subscription", False),
+        "topup": ("_show_billing", True),
+        "insights": ("_show_insights", True),
+        "update": ("_cmd_update", True),
+        "version": ("_cmd_version", True),
+        "paste": ("_handle_paste_command", False),
+        "reload": ("_cmd_reload", True),
+        "reload-mcp": ("_confirm_and_reload_mcp", True),
+        "reload-skills": ("_cmd_reload_skills", True),
+        "plugins": ("_cmd_plugins", True),
+        "stop": ("_handle_stop_command", False),
+        "agents": ("_handle_agents_command", False),
+        "bg": ("_handle_background_command", True),
+        "queue": ("_cmd_queue", True),
+        "steer": ("_cmd_steer", True),
+        "moa": ("_cmd_moa", True),
+    }
+
+    @classmethod
+    def _slash_handler(cls, canonical: str) -> tuple[str, bool] | None:
+        """(method name, pass cmd_original?) for a registered command, else None."""
+        entry = cls._SLASH_DISPATCH.get(canonical)
+        if entry is None:
+            name = f"_handle_{canonical.replace('-', '_')}_command"
+            if callable(getattr(cls, name, None)):
+                entry = (name, True)
+        return entry
+
     def process_command(self, command: str) -> bool:
         """
         Process a slash command.
@@ -12585,12 +12622,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # at debug). Never raises, so a broken plugin can't break dispatch.
         if _cmd_def is not None:
             from hermes_cli.plugins import fire_pre_command_hook
-            _rest_parts = cmd_original.split(None, 1)
             fire_pre_command_hook(
                 surface="cli",
                 command=canonical,
                 alias_used=_base_word,
-                args_raw=_rest_parts[1].strip() if len(_rest_parts) > 1 else "",
+                args_raw=_slash_args(cmd_original),
                 session_key=getattr(self, "session_id", None),
                 platform="cli",
             )
@@ -12602,604 +12638,135 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         if canonical not in {"resume", "sessions"}:
             self._pending_resume_sessions = None
 
-        if canonical in {"quit", "exit"}:
-            # Parse --delete flag: /exit --delete also removes the current
-            # session's transcripts + SQLite history. Ported from
-            # google-gemini/gemini-cli#19332.
-            _rest = cmd_original.split(None, 1)
-            _args = (_rest[1] if len(_rest) > 1 else "").strip().lower()
-            if _args in {"--delete", "-d"}:
-                self._delete_session_on_exit = True
-            elif _args:
-                _cprint(f"  {_DIM}✗ Unknown argument: {_escape(_args)}. Use /exit --delete to also remove session history.{_RST}")
-                return True
-            return False
-        elif canonical == "help":
-            _help_parts = cmd_original.split(None, 1)
-            self.show_help(_help_parts[1].strip() if len(_help_parts) > 1 else "")
-        elif canonical == "palette":
-            self._open_command_palette()
-        elif canonical == "whoami":
-            self._handle_whoami_command()
-        elif canonical == "profile":
-            self._handle_profile_command()
-        elif canonical == "tools":
-            self._handle_tools_command(cmd_original)
-        elif canonical == "toolsets":
-            self.show_toolsets()
-        elif canonical == "config":
-            self.show_config()
-        elif canonical == "redraw":
-            # Manual recovery for terminal buffer drift from multiplexer
-            # tab switches, subshell ``clear``, SSH window restores, etc.
-            # See issue #8688 (cmux). Ctrl+L is bound to the same helper.
-            self._force_full_redraw()
-            _cprint(f"  {_DIM}✓ UI redrawn{_RST}")
-        elif canonical == "clear":
-            if self._confirm_destructive_slash(
-                "clear",
-                "This clears the screen and starts a new session.\n"
-                "The current conversation history will be discarded.",
-                cmd_original=cmd_original,
-            ) is None:
-                return True  # confirmation cancelled — command handled, keep REPL alive
-            self.new_session(silent=True)
-            _clear_output_history()
-            # Clear terminal screen.  Inside the TUI, Rich's console.clear()
-            # goes through patch_stdout's StdoutProxy which swallows the
-            # screen-clear escape sequences.  Use prompt_toolkit's output
-            # object directly to actually clear the terminal.
-            if self._app:
-                out = self._app.output
-                out.erase_screen()
-                out.cursor_goto(0, 0)
-                out.flush()
-            else:
-                self.console.clear()
-            # Show fresh banner.  Inside the TUI we must route Rich output
-            # through ChatConsole (which uses prompt_toolkit's native ANSI
-            # renderer) instead of self.console (which writes raw to stdout
-            # and gets mangled by patch_stdout).
-            if self._app:
-                cc = ChatConsole()
-                term_w = shutil.get_terminal_size().columns
-                if self.compact or term_w < 80:
-                    cc.print(_build_compact_banner())
-                else:
-                    tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
-                    cwd = os.getenv("TERMINAL_CWD", os.getcwd())
-                    ctx_len = None
-                    if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
-                        ctx_len = self.agent.context_compressor.context_length
-                    build_welcome_banner(
-                        console=cc,
-                        model=self.model,
-                        cwd=cwd,
-                        tools=tools,
-                        enabled_toolsets=self.enabled_toolsets,
-                        session_id=self.session_id,
-                        context_length=ctx_len,
-                        provider=self.provider,
-                    )
-                _cprint("  ✨ (◕‿◕)✨ Fresh start! Screen cleared and conversation reset.\n")
-                # Show a random tip on new session
-                try:
-                    from hermes_cli.tips import get_random_tip
-                    _tip = get_random_tip()
+        entry = self._slash_handler(canonical)
+        if entry is None:
+            return self._process_unregistered_slash(cmd_original, cmd_lower)
+        method_name, pass_arg = entry
+        handler = getattr(self, method_name)
+        result = handler(cmd_original) if pass_arg else handler()
+        return result is not False
+
+    def _process_unregistered_slash(self, cmd_original: str, cmd_lower: str) -> bool:
+        """Fallthrough for slash input with no built-in handler.
+
+        Precedence (order matters): user quick_commands (exec/alias) ->
+        plugin commands -> skill bundles -> skill commands -> unique-prefix
+        expansion -> unknown-command message. Always returns True unless
+        it re-dispatches through process_command.
+        """
+        # Check for user-defined quick commands (bypass agent loop, no LLM call)
+        base_cmd = cmd_lower.split()[0]
+        skill_commands = _ensure_skill_commands()
+        skill_bundles = get_skill_bundles()
+        quick_commands = self.config.get("quick_commands", {})
+        if base_cmd.lstrip("/") in quick_commands:
+            qcmd = quick_commands[base_cmd.lstrip("/")]
+            if qcmd.get("type") == "exec":
+                import subprocess
+                exec_cmd = qcmd.get("command", "")
+                if exec_cmd:
                     try:
-                        from hermes_cli.skin_engine import get_active_skin
-                        _tip_color = get_active_skin().get_color("banner_dim", "#B8860B")
-                    except Exception:
-                        _tip_color = "#B8860B"
-                    cc.print(f"[dim {_tip_color}]✦ Tip: {_tip}[/]")
-                except Exception:
-                    pass
-            else:
-                self.show_banner()
-                print("  ✨ (◕‿◕)✨ Fresh start! Screen cleared and conversation reset.\n")
-                # Show a random tip on new session
-                try:
-                    from hermes_cli.tips import get_random_tip
-                    _tip = get_random_tip()
-                    try:
-                        from hermes_cli.skin_engine import get_active_skin
-                        _tip_color = get_active_skin().get_color("banner_dim", "#B8860B")
-                    except Exception:
-                        _tip_color = "#B8860B"
-                    self._console_print(f"[dim {_tip_color}]✦ Tip: {_tip}[/]")
-                except Exception:
-                    pass
-        elif canonical == "history":
-            self.show_history()
-        elif canonical == "title":
-            parts = cmd_original.split(maxsplit=1)
-            if len(parts) > 1:
-                raw_title = parts[1].strip()
-                if raw_title:
-                    if self._session_db:
-                        # Sanitize the title early so feedback matches what gets stored
-                        try:
-                            from hermes_state import SessionDB
-                            new_title = SessionDB.sanitize_title(raw_title)
-                        except ValueError as e:
-                            # sanitize_title rejected the input (e.g. too long).
-                            # Print that one reason and stop — don't fall
-                            # through to the "empty after cleanup" branch and
-                            # print a second, contradictory error (SC-05).
-                            _cprint(f"  {e}")
-                            return True
-                        if not new_title:
-                            _cprint("  Title is empty after cleanup. Please use printable characters.")
-                        elif self._session_db.get_session(self.session_id):
-                            # Session exists in DB — set title directly
-                            try:
-                                if self._session_db.set_session_title(self.session_id, new_title):
-                                    self._status_bar_title_checked_at = 0.0
-                                    _cprint(f"  Session title set: {new_title}")
-                                else:
-                                    _cprint("  Session not found in database.")
-                            except ValueError as e:
-                                _cprint(f"  {e}")
-                        else:
-                            # Session not created yet — defer the title
-                            # Check uniqueness proactively with the sanitized title
-                            existing = self._session_db.get_session_by_title(new_title)
-                            if existing:
-                                _cprint(f"  Title '{new_title}' is already in use by session {existing['id']}")
-                            else:
-                                self._pending_title = new_title
-                                _cprint(f"  Session title queued: {new_title} (will be saved on first message)")
-                    else:
-                        from hermes_state import format_session_db_unavailable
-                        _cprint(f"  {format_session_db_unavailable()}")
-                else:
-                    _cprint("  Usage: /title <your session title>")
-            # Show current title and session ID if no argument given
-            elif self._session_db:
-                _cprint(f"  Session ID: {self.session_id}")
-                session = self._session_db.get_session(self.session_id)
-                if session and session.get("title"):
-                    _cprint(f"  Title: {session['title']}")
-                elif self._pending_title:
-                    _cprint(f"  Title (pending): {self._pending_title}")
-                else:
-                    _cprint("  No title set. Usage: /title <your session title>")
-            else:
-                from hermes_state import format_session_db_unavailable
-                _cprint(f"  {format_session_db_unavailable()}")
-        elif canonical == "handoff":
-            if not self._handle_handoff_command(cmd_original):
-                return False
-        elif canonical == "new":
-            # Strip inline-skip tokens (now/--yes/-y) before deriving the title
-            # so "/new now My Session" yields title="My Session" instead of
-            # title="now My Session". See _split_destructive_skip.
-            _new_args, _ = self._split_destructive_skip(cmd_original)
-            title = _new_args.strip() or None
-            if self._confirm_destructive_slash(
-                "new",
-                "This starts a fresh session.\n"
-                "The current conversation history will be discarded.",
-                cmd_original=cmd_original,
-            ) is None:
-                return True  # confirmation cancelled — command handled, keep REPL alive
-            self.new_session(title=title)
-        elif canonical == "resume":
-            self._handle_resume_command(cmd_original)
-        elif canonical == "sessions":
-            self._handle_sessions_command(cmd_original)
-        elif canonical == "model":
-            self._handle_model_switch(cmd_original)
-        elif canonical == "codex-runtime":
-            self._handle_codex_runtime(cmd_original)
-
-        elif canonical == "personality":
-            # Use original case (handler lowercases the personality name itself)
-            self._handle_personality_command(cmd_original)
-        elif canonical == "pet":
-            self._handle_pet_command(cmd_original)
-
-        elif canonical == "hatch":
-            self._handle_hatch_command(cmd_original)
-        elif canonical == "retry":
-            retry_msg = self.retry_last()
-            if retry_msg and hasattr(self, '_pending_input'):
-                # Re-queue the message so process_loop sends it to the agent
-                self._pending_input.put(retry_msg)
-        elif canonical == "prompt":
-            self._handle_prompt_compose_command(cmd_original)
-        elif canonical == "undo":
-            # Parse optional turn count: "/undo" → 1, "/undo 3" → 3.
-            _undo_n = 1
-            _undo_parts = cmd_original.split()
-            if len(_undo_parts) > 1:
-                try:
-                    _undo_n = int(_undo_parts[1])
-                except ValueError:
-                    print(f"(._.) Invalid count {_undo_parts[1]!r} — use /undo or /undo N.")
-                    return True  # bad arg — command handled, keep the REPL alive
-                if _undo_n < 1:
-                    _undo_n = 1
-            # Nothing to undo → say so immediately; don't pop a destructive
-            # confirmation dialog for a guaranteed no-op (SC-06).
-            if not self.conversation_history:
-                print("(._.) No messages to undo.")
-                return True
-            _undo_desc = (
-                "This removes the last user/assistant exchange from history."
-                if _undo_n == 1
-                else f"This removes the last {_undo_n} user turns from history."
-            )
-            if self._confirm_destructive_slash(
-                "undo",
-                _undo_desc,
-                cmd_original=cmd_original,
-            ) is None:
-                return True  # confirmation cancelled — command handled, keep REPL alive
-            self.undo_last(_undo_n)
-        elif canonical == "branch":
-            self._handle_branch_command(cmd_original)
-        elif canonical == "worktree":
-            self._handle_worktree_command(cmd_original)
-        elif canonical == "save":
-            self.save_conversation(cmd_original)
-        elif canonical == "cron":
-            self._handle_cron_command(cmd_original)
-        elif canonical == "suggestions":
-            self._handle_suggestions_command(cmd_original)
-        elif canonical == "blueprint":
-            self._handle_blueprint_command(cmd_original)
-        elif canonical == "curator":
-            self._handle_curator_command(cmd_original)
-        elif canonical == "kanban":
-            self._handle_kanban_command(cmd_original)
-        elif canonical == "skills":
-            with self._busy_command(self._slow_command_status(cmd_original)):
-                self._handle_skills_command(cmd_original)
-        elif canonical == "learn":
-            self._handle_learn_command(cmd_original)
-        elif canonical == "init":
-            self._handle_init_command(cmd_original)
-        elif canonical == "memory":
-            self._handle_memory_command(cmd_original)
-        elif canonical == "platforms":
-            self._show_gateway_status()
-        elif canonical == "status":
-            self._show_session_status()
-        elif canonical == "context":
-            self._show_context_breakdown(cmd_original)
-        elif canonical == "egress":
-            from hermes_cli.slash_exec import CommandContext, execute_command
-
-            self._console_print(
-                execute_command("egress", CommandContext(surface="cli")).text,
-                highlight=False, markup=False,
-            )
-        elif canonical == "statusbar":
-            self._status_bar_visible = not self._status_bar_visible
-            state = "visible" if self._status_bar_visible else "hidden"
-            self._console_print(f"  Status bar {state}")
-        elif canonical == "diff":
-            self._handle_diff_command(cmd_original)
-        elif canonical == "battery":
-            self._handle_battery_command(cmd_original)
-        elif canonical == "timestamps":
-            self._handle_timestamps_command(cmd_original)
-        elif canonical == "verbose":
-            self._toggle_verbose()
-        elif canonical == "focus":
-            self._handle_focus_command(cmd_original)
-        elif canonical == "footer":
-            self._handle_footer_command(cmd_original)
-        elif canonical == "yolo":
-            self._toggle_yolo()
-        elif canonical == "approvals":
-            self._handle_approvals_command(cmd_original)
-        elif canonical == "reasoning":
-            self._handle_reasoning_command(cmd_original)
-        elif canonical == "fast":
-            self._handle_fast_command(cmd_original)
-        elif canonical == "compress":
-            self._manual_compress(cmd_original)
-        elif canonical == "usage":
-            self._handle_usage_command(cmd_original)
-        elif canonical == "subscription":
-            self._show_subscription()
-        elif canonical == "topup":
-            self._show_billing(cmd_original)
-        elif canonical == "insights":
-            self._show_insights(cmd_original)
-        elif canonical == "copy":
-            self._handle_copy_command(cmd_original)
-        elif canonical == "debug":
-            self._handle_debug_command(cmd_original)
-        elif canonical == "update":
-            if self._handle_update_command():
-                return False
-        elif canonical == "version":
-            from hermes_cli.main import _print_version_info
-
-            _print_version_info(check_updates=True)
-        elif canonical == "paste":
-            self._handle_paste_command()
-        elif canonical == "image":
-            self._handle_image_command(cmd_original)
-        elif canonical == "reload":
-            from hermes_cli.config import reload_env
-            count = reload_env()
-            print(f"  Reloaded .env ({count} var(s) updated)")
-        elif canonical == "reload-mcp":
-            # Interactive reload: confirm first (unless the user has opted out).
-            # The auto-reload path (file watcher) calls _reload_mcp directly
-            # without this confirmation.
-            self._confirm_and_reload_mcp(cmd_original)
-        elif canonical == "reload-skills":
-            with self._busy_command(self._slow_command_status(cmd_original)):
-                self._reload_skills()
-        elif canonical == "bundles":
-            self._handle_bundles_command(cmd_original)
-        elif canonical == "browser":
-            self._handle_browser_command(cmd_original)
-        elif canonical == "plugins":
-            try:
-                # Discover from disk (bundled + user), matching `hermes plugins
-                # list` — so installed-but-not-enabled plugins are visible here
-                # too. The plugin manager only knows about *loaded* plugins, so
-                # using it alone made freshly-installed, not-yet-enabled plugins
-                # look like "nothing installed".
-                from hermes_cli.plugins_cmd import (
-                    _discover_all_plugins,
-                    _get_disabled_set,
-                    _get_enabled_set,
-                    _plugin_status,
-                )
-
-                entries = _discover_all_plugins()
-                enabled = _get_enabled_set()
-                disabled = _get_disabled_set()
-
-                # `/plugins` is a quick glance — default to user-installed
-                # plugins (what the user actually added). Bundled provider/
-                # platform plugins are summarized on one line; the full
-                # catalog lives behind `hermes plugins list`.
-                user_entries = [e for e in entries if e[3] != "bundled"]
-                bundled_count = len(entries) - len(user_entries)
-
-                if not user_entries:
-                    print("No user plugins installed.")
-                    print("  Install one: hermes plugins install owner/repo")
-                    print(f"  Or drop a plugin directory into {display_hermes_home()}/plugins/")
-                    if bundled_count:
-                        print(f"  ({bundled_count} bundled plugins available — see: hermes plugins list)")
-                else:
-                    # Loaded-plugin details (tools/hooks/commands counts, errors)
-                    # keyed by name, when available.
-                    loaded: dict = {}
-                    try:
-                        from hermes_cli.plugins import get_plugin_manager
-                        for p in get_plugin_manager().list_plugins():
-                            loaded[p["name"]] = p
-                    except Exception:
-                        loaded = {}
-
-                    print(f"User plugins ({len(user_entries)}):")
-                    for name, version, _desc, source, _dir, key in sorted(user_entries):
-                        state = _plugin_status(name, enabled, disabled, key=key)
-                        glyph = {"enabled": "✓", "disabled": "✗"}.get(state, "○")
-                        ver = f" v{version}" if version else ""
-                        info = loaded.get(name) or {}
-                        bits = []
-                        if info.get("tools"):
-                            bits.append(f"{info['tools']} tools")
-                        if info.get("hooks"):
-                            bits.append(f"{info['hooks']} hooks")
-                        if info.get("commands"):
-                            bits.append(f"{info['commands']} commands")
-                        detail = f" ({', '.join(bits)})" if bits else ""
-                        label = "" if state == "enabled" else f" [{state}]"
-                        error = f" — {info['error']}" if info.get("error") else ""
-                        print(f"  {glyph} {name}{ver}{label}{detail}{error}")
-                    if bundled_count:
-                        print(f"  (+{bundled_count} bundled — see: hermes plugins list)")
-                    print("  Enable/disable: hermes plugins enable/disable <name>")
-            except Exception as e:
-                print(f"Plugin system error: {e}")
-        elif canonical == "rollback":
-            self._handle_rollback_command(cmd_original)
-        elif canonical == "snapshot":
-            self._handle_snapshot_command(cmd_original)
-        elif canonical == "export":
-            self._handle_export_command(cmd_original)
-        elif canonical == "import":
-            self._handle_import_command(cmd_original)
-        elif canonical == "stop":
-            self._handle_stop_command()
-        elif canonical == "agents":
-            self._handle_agents_command()
-        elif canonical == "journey":
-            self._handle_journey_command(cmd_original)
-        elif canonical == "bg":
-            self._handle_background_command(cmd_original)
-        elif canonical == "btw":
-            self._handle_btw_command(cmd_original)
-        elif canonical == "queue":
-            # Extract prompt after "/queue " or "/q "
-            parts = cmd_original.split(None, 1)
-            payload = parts[1].strip() if len(parts) > 1 else ""
-            payload = self._expand_paste_references(payload)
-            if not payload:
-                _cprint("  Usage: /queue <prompt>")
-            else:
-                self._pending_input.put(payload)
-                if self._agent_running:
-                    _cprint(f"  Queued for the next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
-                else:
-                    _cprint(f"  Queued: {payload[:80]}{'...' if len(payload) > 80 else ''}")
-        elif canonical == "steer":
-            # Inject a message after the next tool call without interrupting.
-            # If the agent is actively running, push the text into the agent's
-            # pending_steer slot — the drain hook in _execute_tool_calls_*
-            # will append it to the next tool result's content. If no agent
-            # is running, fall back to queue semantics (same as /queue).
-            parts = cmd_original.split(None, 1)
-            payload = parts[1].strip() if len(parts) > 1 else ""
-            if not payload:
-                _cprint("  Usage: /steer <prompt>")
-            elif self._agent_running and self.agent is not None and hasattr(self.agent, "steer"):
-                try:
-                    accepted = self.agent.steer(payload)
-                except Exception as exc:
-                    _cprint(f"  Steer failed: {exc}")
-                else:
-                    if accepted:
-                        _cprint(f"  ⏩ Steer queued — arrives after the next tool call: {payload[:80]}{'...' if len(payload) > 80 else ''}")
-                    else:
-                        _cprint("  Steer rejected (empty payload).")
-            else:
-                # No active run — treat as a normal next-turn message.
-                self._pending_input.put(payload)
-                _cprint(f"  No agent running; queued as next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
-        elif canonical == "goal":
-            self._handle_goal_command(cmd_original)
-        elif canonical == "heartbeat":
-            self._handle_heartbeat_command(cmd_original)
-        elif canonical == "refine":
-            self._handle_refine_command(cmd_original)
-        elif canonical == "review":
-            self._handle_review_command(cmd_original)
-        elif canonical == "loop":
-            self._handle_loop_command(cmd_original)
-        elif canonical == "plan":
-            self._handle_plan_command(cmd_original)
-        elif canonical == "moa":
-            # /moa is one-shot sugar only: run a single prompt through the
-            # default MoA preset, then restore the prior model. To *switch* to a
-            # MoA preset for the session, pick it from the model picker (MoA
-            # presets surface as a virtual "Mixture of Agents" provider).
-            from hermes_cli.moa_config import (
-                moa_usage,
-                normalize_moa_config,
-            )
-
-            parts = cmd_original.split(None, 1)
-            payload = parts[1].strip() if len(parts) > 1 else ""
-            if not payload:
-                _cprint(f"  {moa_usage()}")
-                return True
-            moa_cfg = self.config.get("moa") if isinstance(self.config, dict) else {}
-            normalized = normalize_moa_config(moa_cfg)
-            preset = normalized["default_preset"]
-            self._pending_moa_restore_model = {
-                "requested_provider": getattr(self, "requested_provider", None),
-                "provider": getattr(self, "provider", None),
-                "model": getattr(self, "model", None),
-                "api_key": getattr(self, "api_key", None),
-                "base_url": getattr(self, "base_url", None),
-                "api_mode": getattr(self, "api_mode", None),
-            }
-            self.requested_provider = "moa"
-            self.provider = "moa"
-            self.model = preset
-            self.api_key = "moa-virtual-provider"
-            self.base_url = "moa://local"
-            self.api_mode = "chat_completions"
-            self.agent = None
-            self._pending_moa_disable_after_turn = True
-            self._pending_agent_seed = payload
-            _cprint(f"  MoA one-shot queued with preset {preset}; previous model will be restored after this turn.")
-        elif canonical == "subgoal":
-            self._handle_subgoal_command(cmd_original)
-        elif canonical == "skin":
-            self._handle_skin_command(cmd_original)
-        elif canonical == "voice":
-            self._handle_voice_command(cmd_original)
-        elif canonical == "wake":
-            self._handle_wake_command(cmd_original)
-        elif canonical == "busy":
-            self._handle_busy_command(cmd_original)
-        elif canonical == "indicator":
-            self._handle_indicator_command(cmd_original)
-        else:
-            # Check for user-defined quick commands (bypass agent loop, no LLM call)
-            base_cmd = cmd_lower.split()[0]
-            skill_commands = _ensure_skill_commands()
-            skill_bundles = get_skill_bundles()
-            quick_commands = self.config.get("quick_commands", {})
-            if base_cmd.lstrip("/") in quick_commands:
-                qcmd = quick_commands[base_cmd.lstrip("/")]
-                if qcmd.get("type") == "exec":
-                    import subprocess
-                    exec_cmd = qcmd.get("command", "")
-                    if exec_cmd:
-                        try:
-                            # shell=True is intentional: quick_commands are user-defined
-                            # shell snippets from config.yaml — not agent/LLM controlled.
-                            # Sanitize env to prevent credential leakage —
-                            # quick commands run in the CLI process which
-                            # has all API keys in os.environ.
-                            from tools.environments.local import build_subprocess_env
-                            sanitized_env = build_subprocess_env()
-                            from hermes_cli._subprocess_compat import windows_hide_flags
-                            result = subprocess.run(
-                                exec_cmd, shell=True, capture_output=True,
-                                text=True, encoding="utf-8", errors="replace", timeout=30, env=sanitized_env,
-                                # No console flash on Windows (#56747).
-                                creationflags=windows_hide_flags(),
-                            )
-                            output = result.stdout.strip() or result.stderr.strip()
-                            if output:
-                                from agent.redact import redact_sensitive_text
-                                output = redact_sensitive_text(output)
-                                self._console_print(_rich_text_from_ansi(output))
-                            else:
-                                self._console_print("[dim]Command returned no output[/]")
-                        except subprocess.TimeoutExpired:
-                            self._console_print("[bold red]Quick command timed out (30s)[/]")
-                        except Exception as e:
-                            self._console_print(f"[bold red]Quick command error: {e}[/]")
-                    else:
-                        self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
-                elif qcmd.get("type") == "alias":
-                    target = qcmd.get("target", "").strip()
-                    if target:
-                        target = target if target.startswith("/") else f"/{target}"
-                        user_args = cmd_original[len(base_cmd):].strip()
-                        aliased_command = f"{target} {user_args}".strip()
-                        return self.process_command(aliased_command)
-                    else:
-                        self._console_print(f"[bold red]Quick command '{base_cmd}' has no target defined[/]")
-                else:
-                    self._console_print(f"[bold red]Quick command '{base_cmd}' has unsupported type (supported: 'exec', 'alias')[/]")
-            # Check for plugin-registered slash commands
-            elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
-                from hermes_cli.plugins import (
-                    get_plugin_command_handler,
-                    resolve_plugin_command_result,
-                )
-                plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
-                if plugin_handler:
-                    user_args = cmd_original[len(base_cmd):].strip()
-                    try:
-                        result = resolve_plugin_command_result(
-                            plugin_handler(user_args)
+                        # shell=True is intentional: quick_commands are user-defined
+                        # shell snippets from config.yaml — not agent/LLM controlled.
+                        # Sanitize env to prevent credential leakage —
+                        # quick commands run in the CLI process which
+                        # has all API keys in os.environ.
+                        from tools.environments.local import build_subprocess_env
+                        sanitized_env = build_subprocess_env()
+                        from hermes_cli._subprocess_compat import windows_hide_flags
+                        result = subprocess.run(
+                            exec_cmd, shell=True, capture_output=True,
+                            text=True, encoding="utf-8", errors="replace", timeout=30, env=sanitized_env,
+                            # No console flash on Windows (#56747).
+                            creationflags=windows_hide_flags(),
                         )
-                        if result:
-                            _cprint(str(result))
+                        output = result.stdout.strip() or result.stderr.strip()
+                        if output:
+                            from agent.redact import redact_sensitive_text
+                            output = redact_sensitive_text(output)
+                            self._console_print(_rich_text_from_ansi(output))
+                        else:
+                            self._console_print("[dim]Command returned no output[/]")
+                    except subprocess.TimeoutExpired:
+                        self._console_print("[bold red]Quick command timed out (30s)[/]")
                     except Exception as e:
-                        _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
-            # Skill bundles take precedence over individual skills — /<bundle>
-            # loads multiple skills at once. Rescans cheaply when files change.
-            elif base_cmd in skill_bundles:
-                user_instruction = cmd_original[len(base_cmd):].strip()
-                bundle_result = build_bundle_invocation_message(
-                    base_cmd, user_instruction, task_id=self.session_id
+                        self._console_print(f"[bold red]Quick command error: {e}[/]")
+                else:
+                    self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
+            elif qcmd.get("type") == "alias":
+                target = qcmd.get("target", "").strip()
+                if target:
+                    target = target if target.startswith("/") else f"/{target}"
+                    user_args = cmd_original[len(base_cmd):].strip()
+                    aliased_command = f"{target} {user_args}".strip()
+                    return self.process_command(aliased_command)
+                else:
+                    self._console_print(f"[bold red]Quick command '{base_cmd}' has no target defined[/]")
+            else:
+                self._console_print(f"[bold red]Quick command '{base_cmd}' has unsupported type (supported: 'exec', 'alias')[/]")
+        # Check for plugin-registered slash commands
+        elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
+            from hermes_cli.plugins import (
+                get_plugin_command_handler,
+                resolve_plugin_command_result,
+            )
+            plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
+            if plugin_handler:
+                user_args = cmd_original[len(base_cmd):].strip()
+                try:
+                    result = resolve_plugin_command_result(
+                        plugin_handler(user_args)
+                    )
+                    if result:
+                        _cprint(str(result))
+                except Exception as e:
+                    _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
+        # Skill bundles take precedence over individual skills — /<bundle>
+        # loads multiple skills at once. Rescans cheaply when files change.
+        elif base_cmd in skill_bundles:
+            user_instruction = cmd_original[len(base_cmd):].strip()
+            bundle_result = build_bundle_invocation_message(
+                base_cmd, user_instruction, task_id=self.session_id
+            )
+            if bundle_result:
+                msg, loaded_names, missing = bundle_result
+                bundle_info = skill_bundles[base_cmd]
+                print(
+                    f"\n⚡ Loading bundle: {bundle_info['name']} "
+                    f"({len(loaded_names)} skills)"
                 )
-                if bundle_result:
-                    msg, loaded_names, missing = bundle_result
-                    bundle_info = skill_bundles[base_cmd]
+                if missing:
+                    ChatConsole().print(
+                        f"[yellow]Skipped missing skills: {', '.join(missing)}[/]"
+                    )
+                if hasattr(self, '_pending_input'):
+                    self._pending_input.put(msg)
+            else:
+                ChatConsole().print(
+                    f"[bold red]Failed to load bundle for {base_cmd}[/]"
+                )
+        # Check for skill slash commands (/gif-search, /axolotl, etc.)
+        elif base_cmd in skill_commands:
+            rest = cmd_original[len(base_cmd):].strip()
+            # Stacked slash-skill invocations: `/skill-a /skill-b do XYZ`
+            # loads every leading skill (up to 5), not just the first.
+            # Inspired by Claude Code v2.1.199.
+            from agent.skill_commands import (
+                build_stacked_skill_invocation_message,
+                split_stacked_skill_commands,
+            )
+            extra_keys, user_instruction = split_stacked_skill_commands(rest)
+            if extra_keys:
+                stacked_result = build_stacked_skill_invocation_message(
+                    [base_cmd, *extra_keys],
+                    user_instruction,
+                    task_id=self.session_id,
+                )
+                if stacked_result:
+                    msg, loaded_names, missing = stacked_result
                     print(
-                        f"\n⚡ Loading bundle: {bundle_info['name']} "
-                        f"({len(loaded_names)} skills)"
+                        f"\n⚡ Loading {len(loaded_names)} stacked skills: "
+                        f"{', '.join(loaded_names)}"
                     )
                     if missing:
                         ChatConsole().print(
@@ -13209,109 +12776,428 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                         self._pending_input.put(msg)
                 else:
                     ChatConsole().print(
-                        f"[bold red]Failed to load bundle for {base_cmd}[/]"
+                        f"[bold red]Failed to load stacked skills for {base_cmd}[/]"
                     )
-            # Check for skill slash commands (/gif-search, /axolotl, etc.)
-            elif base_cmd in skill_commands:
-                rest = cmd_original[len(base_cmd):].strip()
-                # Stacked slash-skill invocations: `/skill-a /skill-b do XYZ`
-                # loads every leading skill (up to 5), not just the first.
-                # Inspired by Claude Code v2.1.199.
-                from agent.skill_commands import (
-                    build_stacked_skill_invocation_message,
-                    split_stacked_skill_commands,
-                )
-                extra_keys, user_instruction = split_stacked_skill_commands(rest)
-                if extra_keys:
-                    stacked_result = build_stacked_skill_invocation_message(
-                        [base_cmd, *extra_keys],
-                        user_instruction,
-                        task_id=self.session_id,
-                    )
-                    if stacked_result:
-                        msg, loaded_names, missing = stacked_result
-                        print(
-                            f"\n⚡ Loading {len(loaded_names)} stacked skills: "
-                            f"{', '.join(loaded_names)}"
-                        )
-                        if missing:
-                            ChatConsole().print(
-                                f"[yellow]Skipped missing skills: {', '.join(missing)}[/]"
-                            )
-                        if hasattr(self, '_pending_input'):
-                            self._pending_input.put(msg)
-                    else:
-                        ChatConsole().print(
-                            f"[bold red]Failed to load stacked skills for {base_cmd}[/]"
-                        )
-                    return True
-                user_instruction = rest
-                msg = build_skill_invocation_message(
-                    base_cmd, user_instruction, task_id=self.session_id
-                )
-                if msg:
-                    skill_name = skill_commands[base_cmd]["name"]
-                    print(f"\n⚡ Loading skill: {skill_name}")
-                    if hasattr(self, '_pending_input'):
-                        self._pending_input.put(msg)
-                else:
-                    ChatConsole().print(f"[bold red]Failed to load skill for {base_cmd}[/]")
+                return True
+            user_instruction = rest
+            msg = build_skill_invocation_message(
+                base_cmd, user_instruction, task_id=self.session_id
+            )
+            if msg:
+                skill_name = skill_commands[base_cmd]["name"]
+                print(f"\n⚡ Loading skill: {skill_name}")
+                if hasattr(self, '_pending_input'):
+                    self._pending_input.put(msg)
             else:
-                # Prefix matching: if input uniquely identifies one command, execute it.
-                # Matches against both built-in COMMANDS and installed skill commands so
-                # that execution-time resolution agrees with tab-completion.
-                from hermes_cli.commands import COMMANDS
-                typed_base = cmd_lower.split()[0]
-                all_known = set(COMMANDS) | set(skill_commands) | set(skill_bundles)
-                matches = [c for c in all_known if c.startswith(typed_base)]
-                if len(matches) > 1:
-                    # Prefer an exact match (typed the full command name)
-                    exact = [c for c in matches if c == typed_base]
-                    if len(exact) == 1:
-                        matches = exact
-                    else:
-                        # Prefer the unique shortest match:
-                        # /qui → /quit (5) wins over /quint-pipeline (15)
-                        min_len = min(len(c) for c in matches)
-                        shortest = [c for c in matches if len(c) == min_len]
-                        if len(shortest) == 1:
-                            matches = shortest
-                if len(matches) == 1:
-                    # Expand the prefix to the full command name, preserving arguments.
-                    # Guard against redispatching the same token to avoid infinite
-                    # recursion when the expanded name still doesn't hit an exact branch
-                    # (e.g. /config with extra args that are not yet handled above).
-                    full_name = matches[0]
-                    if full_name == typed_base:
-                        # Already an exact token — no expansion possible; fall through
-                        _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
-                        _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
-                    else:
-                        remainder = cmd_original.strip()[len(typed_base):]
-                        full_cmd = full_name + remainder
-                        return self.process_command(full_cmd)
-                elif len(matches) > 1:
-                    _cprint(f"{_ACCENT}Ambiguous command: {cmd_lower}{_RST}")
-                    _cprint(f"{_DIM}Did you mean: {', '.join(sorted(matches))}?{_RST}")
+                ChatConsole().print(f"[bold red]Failed to load skill for {base_cmd}[/]")
+        else:
+            # Prefix matching: if input uniquely identifies one command, execute it.
+            # Matches against both built-in COMMANDS and installed skill commands so
+            # that execution-time resolution agrees with tab-completion.
+            from hermes_cli.commands import COMMANDS
+            typed_base = cmd_lower.split()[0]
+            all_known = set(COMMANDS) | set(skill_commands) | set(skill_bundles)
+            matches = [c for c in all_known if c.startswith(typed_base)]
+            if len(matches) > 1:
+                # Prefer an exact match (typed the full command name)
+                exact = [c for c in matches if c == typed_base]
+                if len(exact) == 1:
+                    matches = exact
                 else:
+                    # Prefer the unique shortest match:
+                    # /qui → /quit (5) wins over /quint-pipeline (15)
+                    min_len = min(len(c) for c in matches)
+                    shortest = [c for c in matches if len(c) == min_len]
+                    if len(shortest) == 1:
+                        matches = shortest
+            if len(matches) == 1:
+                # Expand the prefix to the full command name, preserving arguments.
+                # Guard against redispatching the same token to avoid infinite
+                # recursion when the expanded name still doesn't hit an exact branch
+                # (e.g. /config with extra args that are not yet handled above).
+                full_name = matches[0]
+                if full_name == typed_base:
+                    # Already an exact token — no expansion possible; fall through
                     _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
                     _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
-        
+                else:
+                    remainder = cmd_original.strip()[len(typed_base):]
+                    full_cmd = full_name + remainder
+                    return self.process_command(full_cmd)
+            elif len(matches) > 1:
+                _cprint(f"{_ACCENT}Ambiguous command: {cmd_lower}{_RST}")
+                _cprint(f"{_DIM}Did you mean: {', '.join(sorted(matches))}?{_RST}")
+            else:
+                _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
+                _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
         return True
+
+    def _cmd_exit(self, cmd_original: str):
+        # /exit --delete also removes the session's transcripts + SQLite history.
+        _args = _slash_args(cmd_original).lower()
+        if _args in {"--delete", "-d"}:
+            self._delete_session_on_exit = True
+        elif _args:
+            _cprint(f"  {_DIM}✗ Unknown argument: {_escape(_args)}. Use /exit --delete to also remove session history.{_RST}")
+            return True
+        return False
+
+    def _cmd_help(self, cmd_original: str):
+        self.show_help(_slash_args(cmd_original))
+
+    def _cmd_redraw(self, cmd_original: str):
+        # Manual recovery for terminal buffer drift from multiplexer
+        # tab switches, subshell ``clear``, SSH window restores, etc.
+        # See issue #8688 (cmux). Ctrl+L is bound to the same helper.
+        self._force_full_redraw()
+        _cprint(f"  {_DIM}✓ UI redrawn{_RST}")
+
+    def _print_random_tip(self) -> None:
+        """Best-effort discovery tip (startup + /clear); never raises."""
+        try:
+            from hermes_cli.tips import get_random_tip
+            _tip = get_random_tip()
+            try:
+                from hermes_cli.skin_engine import get_active_skin
+                _tip_color = get_active_skin().get_color("banner_dim", "#B8860B")
+            except Exception:
+                _tip_color = "#B8860B"
+            self._console_print(f"[dim {_tip_color}]✦ Tip: {_tip}[/]")
+        except Exception:
+            pass
+
+    def _cmd_clear(self, cmd_original: str):
+        if self._confirm_destructive_slash(
+            "clear",
+            "This clears the screen and starts a new session.\n"
+            "The current conversation history will be discarded.",
+            cmd_original=cmd_original,
+        ) is None:
+            return True  # confirmation cancelled — command handled, keep REPL alive
+        self.new_session(silent=True)
+        _clear_output_history()
+        # Clear terminal screen.  Inside the TUI, Rich's console.clear()
+        # goes through patch_stdout's StdoutProxy which swallows the
+        # screen-clear escape sequences.  Use prompt_toolkit's output
+        # object directly to actually clear the terminal.
+        if self._app:
+            out = self._app.output
+            out.erase_screen()
+            out.cursor_goto(0, 0)
+            out.flush()
+        else:
+            self.console.clear()
+        # Show fresh banner.  Inside the TUI we must route Rich output
+        # through ChatConsole (which uses prompt_toolkit's native ANSI
+        # renderer) instead of self.console (which writes raw to stdout
+        # and gets mangled by patch_stdout).
+        if self._app:
+            cc = ChatConsole()
+            term_w = shutil.get_terminal_size().columns
+            if self.compact or term_w < 80:
+                cc.print(_build_compact_banner())
+            else:
+                tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+                cwd = os.getenv("TERMINAL_CWD", os.getcwd())
+                ctx_len = None
+                if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
+                    ctx_len = self.agent.context_compressor.context_length
+                build_welcome_banner(
+                    console=cc,
+                    model=self.model,
+                    cwd=cwd,
+                    tools=tools,
+                    enabled_toolsets=self.enabled_toolsets,
+                    session_id=self.session_id,
+                    context_length=ctx_len,
+                    provider=self.provider,
+                )
+            _cprint("  ✨ (◕‿◕)✨ Fresh start! Screen cleared and conversation reset.\n")
+            self._print_random_tip()
+        else:
+            self.show_banner()
+            print("  ✨ (◕‿◕)✨ Fresh start! Screen cleared and conversation reset.\n")
+            self._print_random_tip()
+
+    def _cmd_title(self, cmd_original: str):
+        parts = cmd_original.split(maxsplit=1)
+        if len(parts) > 1:
+            raw_title = parts[1].strip()
+            if raw_title:
+                if self._session_db:
+                    # Sanitize the title early so feedback matches what gets stored
+                    try:
+                        from hermes_state import SessionDB
+                        new_title = SessionDB.sanitize_title(raw_title)
+                    except ValueError as e:
+                        # sanitize_title rejected the input (e.g. too long).
+                        # Print that one reason and stop — don't fall
+                        # through to the "empty after cleanup" branch and
+                        # print a second, contradictory error (SC-05).
+                        _cprint(f"  {e}")
+                        return True
+                    if not new_title:
+                        _cprint("  Title is empty after cleanup. Please use printable characters.")
+                    elif self._session_db.get_session(self.session_id):
+                        # Session exists in DB — set title directly
+                        try:
+                            if self._session_db.set_session_title(self.session_id, new_title):
+                                self._status_bar_title_checked_at = 0.0
+                                _cprint(f"  Session title set: {new_title}")
+                            else:
+                                _cprint("  Session not found in database.")
+                        except ValueError as e:
+                            _cprint(f"  {e}")
+                    else:
+                        # Session not created yet — defer the title
+                        # Check uniqueness proactively with the sanitized title
+                        existing = self._session_db.get_session_by_title(new_title)
+                        if existing:
+                            _cprint(f"  Title '{new_title}' is already in use by session {existing['id']}")
+                        else:
+                            self._pending_title = new_title
+                            _cprint(f"  Session title queued: {new_title} (will be saved on first message)")
+                else:
+                    from hermes_state import format_session_db_unavailable
+                    _cprint(f"  {format_session_db_unavailable()}")
+            else:
+                _cprint("  Usage: /title <your session title>")
+        # Show current title and session ID if no argument given
+        elif self._session_db:
+            _cprint(f"  Session ID: {self.session_id}")
+            session = self._session_db.get_session(self.session_id)
+            if session and session.get("title"):
+                _cprint(f"  Title: {session['title']}")
+            elif self._pending_title:
+                _cprint(f"  Title (pending): {self._pending_title}")
+            else:
+                _cprint("  No title set. Usage: /title <your session title>")
+        else:
+            from hermes_state import format_session_db_unavailable
+            _cprint(f"  {format_session_db_unavailable()}")
+
+    def _cmd_new(self, cmd_original: str):
+        # Strip inline-skip tokens (now/--yes/-y) before deriving the title
+        # so "/new now My Session" yields title="My Session" instead of
+        # title="now My Session". See _split_destructive_skip.
+        _new_args, _ = self._split_destructive_skip(cmd_original)
+        title = _new_args.strip() or None
+        if self._confirm_destructive_slash(
+            "new",
+            "This starts a fresh session.\n"
+            "The current conversation history will be discarded.",
+            cmd_original=cmd_original,
+        ) is None:
+            return True  # confirmation cancelled — command handled, keep REPL alive
+        self.new_session(title=title)
+
+    def _cmd_retry(self, cmd_original: str):
+        retry_msg = self.retry_last()
+        if retry_msg and hasattr(self, '_pending_input'):
+            # Re-queue the message so process_loop sends it to the agent
+            self._pending_input.put(retry_msg)
+
+    def _cmd_undo(self, cmd_original: str):
+        # Parse optional turn count: "/undo" → 1, "/undo 3" → 3.
+        _undo_n = 1
+        _undo_parts = cmd_original.split()
+        if len(_undo_parts) > 1:
+            try:
+                _undo_n = int(_undo_parts[1])
+            except ValueError:
+                print(f"(._.) Invalid count {_undo_parts[1]!r} — use /undo or /undo N.")
+                return True  # bad arg — command handled, keep the REPL alive
+            if _undo_n < 1:
+                _undo_n = 1
+        # Nothing to undo → say so immediately; don't pop a destructive
+        # confirmation dialog for a guaranteed no-op (SC-06).
+        if not self.conversation_history:
+            print("(._.) No messages to undo.")
+            return True
+        _undo_desc = (
+            "This removes the last user/assistant exchange from history."
+            if _undo_n == 1
+            else f"This removes the last {_undo_n} user turns from history."
+        )
+        if self._confirm_destructive_slash(
+            "undo",
+            _undo_desc,
+            cmd_original=cmd_original,
+        ) is None:
+            return True  # confirmation cancelled — command handled, keep REPL alive
+        self.undo_last(_undo_n)
+
+    def _cmd_skills(self, cmd_original: str):
+        with self._busy_command(self._slow_command_status(cmd_original)):
+            self._handle_skills_command(cmd_original)
+
+    def _cmd_egress(self, cmd_original: str):
+        from hermes_cli.slash_exec import CommandContext, execute_command
+
+        self._console_print(
+            execute_command("egress", CommandContext(surface="cli")).text,
+            highlight=False, markup=False,
+        )
+
+    def _cmd_statusbar(self, cmd_original: str):
+        self._status_bar_visible = not self._status_bar_visible
+        state = "visible" if self._status_bar_visible else "hidden"
+        self._console_print(f"  Status bar {state}")
+
+    def _cmd_update(self, cmd_original: str) -> bool:
+        # A truthy result means the process is relaunching — leave the REPL.
+        return not self._handle_update_command()
+
+    def _cmd_version(self, cmd_original: str):
+        from hermes_cli.main import _print_version_info
+
+        _print_version_info(check_updates=True)
+
+    def _cmd_reload(self, cmd_original: str):
+        from hermes_cli.config import reload_env
+        count = reload_env()
+        print(f"  Reloaded .env ({count} var(s) updated)")
+
+    def _cmd_reload_skills(self, cmd_original: str):
+        with self._busy_command(self._slow_command_status(cmd_original)):
+            self._reload_skills()
+
+    def _cmd_plugins(self, cmd_original: str):
+        try:
+            # Discover from disk (bundled + user), matching `hermes plugins
+            # list` — so installed-but-not-enabled plugins are visible here
+            # too. The plugin manager only knows about *loaded* plugins, so
+            # using it alone made freshly-installed, not-yet-enabled plugins
+            # look like "nothing installed".
+            from hermes_cli.plugins_cmd import (
+                _discover_all_plugins,
+                _get_disabled_set,
+                _get_enabled_set,
+                _plugin_status,
+            )
+
+            entries = _discover_all_plugins()
+            enabled = _get_enabled_set()
+            disabled = _get_disabled_set()
+
+            # `/plugins` is a quick glance — default to user-installed
+            # plugins (what the user actually added). Bundled provider/
+            # platform plugins are summarized on one line; the full
+            # catalog lives behind `hermes plugins list`.
+            user_entries = [e for e in entries if e[3] != "bundled"]
+            bundled_count = len(entries) - len(user_entries)
+
+            if not user_entries:
+                print("No user plugins installed.")
+                print("  Install one: hermes plugins install owner/repo")
+                print(f"  Or drop a plugin directory into {display_hermes_home()}/plugins/")
+                if bundled_count:
+                    print(f"  ({bundled_count} bundled plugins available — see: hermes plugins list)")
+            else:
+                # Loaded-plugin details (tools/hooks/commands counts, errors)
+                # keyed by name, when available.
+                loaded: dict = {}
+                try:
+                    from hermes_cli.plugins import get_plugin_manager
+                    for p in get_plugin_manager().list_plugins():
+                        loaded[p["name"]] = p
+                except Exception:
+                    loaded = {}
+
+                print(f"User plugins ({len(user_entries)}):")
+                for name, version, _desc, source, _dir, key in sorted(user_entries):
+                    state = _plugin_status(name, enabled, disabled, key=key)
+                    glyph = {"enabled": "✓", "disabled": "✗"}.get(state, "○")
+                    ver = f" v{version}" if version else ""
+                    info = loaded.get(name) or {}
+                    bits = []
+                    if info.get("tools"):
+                        bits.append(f"{info['tools']} tools")
+                    if info.get("hooks"):
+                        bits.append(f"{info['hooks']} hooks")
+                    if info.get("commands"):
+                        bits.append(f"{info['commands']} commands")
+                    detail = f" ({', '.join(bits)})" if bits else ""
+                    label = "" if state == "enabled" else f" [{state}]"
+                    error = f" — {info['error']}" if info.get("error") else ""
+                    print(f"  {glyph} {name}{ver}{label}{detail}{error}")
+                if bundled_count:
+                    print(f"  (+{bundled_count} bundled — see: hermes plugins list)")
+                print("  Enable/disable: hermes plugins enable/disable <name>")
+        except Exception as e:
+            print(f"Plugin system error: {e}")
+
+    def _cmd_queue(self, cmd_original: str):
+        payload = self._expand_paste_references(_slash_args(cmd_original))
+        if not payload:
+            _cprint("  Usage: /queue <prompt>")
+        else:
+            self._pending_input.put(payload)
+            if self._agent_running:
+                _cprint(f"  Queued for the next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
+            else:
+                _cprint(f"  Queued: {payload[:80]}{'...' if len(payload) > 80 else ''}")
+
+    def _cmd_steer(self, cmd_original: str):
+        # Inject a message after the next tool call without interrupting.
+        # If the agent is actively running, push the text into the agent's
+        # pending_steer slot — the drain hook in _execute_tool_calls_*
+        # will append it to the next tool result's content. If no agent
+        # is running, fall back to queue semantics (same as /queue).
+        payload = _slash_args(cmd_original)
+        if not payload:
+            _cprint("  Usage: /steer <prompt>")
+        elif self._agent_running and self.agent is not None and hasattr(self.agent, "steer"):
+            try:
+                accepted = self.agent.steer(payload)
+            except Exception as exc:
+                _cprint(f"  Steer failed: {exc}")
+            else:
+                if accepted:
+                    _cprint(f"  ⏩ Steer queued — arrives after the next tool call: {payload[:80]}{'...' if len(payload) > 80 else ''}")
+                else:
+                    _cprint("  Steer rejected (empty payload).")
+        else:
+            # No active run — treat as a normal next-turn message.
+            self._pending_input.put(payload)
+            _cprint(f"  No agent running; queued as next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
+
+    def _cmd_moa(self, cmd_original: str):
+        # /moa is one-shot sugar only: run a single prompt through the
+        # default MoA preset, then restore the prior model. To *switch* to a
+        # MoA preset for the session, pick it from the model picker (MoA
+        # presets surface as a virtual "Mixture of Agents" provider).
+        from hermes_cli.moa_config import (
+            moa_usage,
+            normalize_moa_config,
+        )
+
+        payload = _slash_args(cmd_original)
+        if not payload:
+            _cprint(f"  {moa_usage()}")
+            return True
+        moa_cfg = self.config.get("moa") if isinstance(self.config, dict) else {}
+        normalized = normalize_moa_config(moa_cfg)
+        preset = normalized["default_preset"]
+        self._pending_moa_restore_model = {
+            "requested_provider": getattr(self, "requested_provider", None),
+            "provider": getattr(self, "provider", None),
+            "model": getattr(self, "model", None),
+            "api_key": getattr(self, "api_key", None),
+            "base_url": getattr(self, "base_url", None),
+            "api_mode": getattr(self, "api_mode", None),
+        }
+        self.requested_provider = "moa"
+        self.provider = "moa"
+        self.model = preset
+        self.api_key = "moa-virtual-provider"
+        self.base_url = "moa://local"
+        self.api_mode = "chat_completions"
+        self.agent = None
+        self._pending_moa_disable_after_turn = True
+        self._pending_agent_seed = payload
+        _cprint(f"  MoA one-shot queued with preset {preset}; previous model will be restored after this turn.")
     
-
-    @staticmethod
-    def _try_launch_chrome_debug(port: int, system: str) -> bool:
-        """Try to launch a Chromium-family browser with remote debugging enabled.
-
-        Uses a dedicated user-data-dir so the debug instance doesn't conflict
-        with an already-running browser using the default profile.
-
-        Returns True if a launch command was executed (doesn't guarantee success).
-        """
-        return try_launch_chrome_debug(port, system)
-
-
 
     # ────────────────────────────────────────────────────────────────
     # /goal — persistent cross-turn goals (Ralph-style loop)
@@ -18350,17 +18236,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     pass  # best-effort — banner will fire again next session
         except Exception:
             pass  # banner is non-critical — never break startup
-        # Show a random tip to help users discover features
-        try:
-            from hermes_cli.tips import get_random_tip
-            _tip = get_random_tip()
-            try:
-                _tip_color = _welcome_skin.get_color("banner_dim", "#B8860B")
-            except Exception:
-                _tip_color = "#B8860B"
-            self._console_print(f"[dim {_tip_color}]✦ Tip: {_tip}[/]")
-        except Exception:
-            pass  # Tips are non-critical — never break startup
+        self._print_random_tip()
 
         # Curator — kick off a background skill-maintenance pass on startup
         # if the schedule says we're due.  Runs in a daemon thread so it
