@@ -1,26 +1,16 @@
 """Upload a Hermes session transcript to Hugging Face as an agent trace.
 
-Hermes stores sessions in its own SQLite store (``hermes_state.SessionDB``),
-so we reconstruct the conversation and emit it in the **Claude Code JSONL**
-shape — one of the three formats the Hugging Face Agent Trace Viewer
-auto-detects (Claude Code / Codex / Pi). No dataset-side preprocessing is
-needed; the Hub tags the dataset ``agent-traces`` and opens it in the viewer.
+The SQLite session (``hermes_state.SessionDB``) is re-emitted in the **Claude
+Code JSONL** shape, one of the formats the HF Agent Trace Viewer auto-detects
+(docs: https://huggingface.co/docs/hub/agent-traces).
 
-Docs: https://huggingface.co/docs/hub/agent-traces
-
-Design notes
-------------
-* **Zero LLM turn.** This is a deterministic export — it never spends a
-  model call. The ``hermes trace upload`` subcommand calls
+* **Zero LLM turn.** Deterministic export; ``hermes trace upload`` calls
   :func:`upload_session_trace` directly.
-* **Private by default.** Traces can contain prompts, tool output, local
-  paths, and secrets. The dataset is created private and every text body
-  is passed through Hermes' secret redactor (``force=True``) unless the
-  caller explicitly opts out with ``redact=False``.
-* **Never raises.** Returns a user-facing status string so command
-  handlers can echo it straight back to the user. Programmatic callers
-  that need the URL can use :func:`build_trace_jsonl` + :func:`_do_upload`
-  directly.
+* **Private by default.** Traces can contain prompts, tool output, local paths and
+  secrets: the dataset is created private and every text body goes through the
+  secret redactor (``force=True``) unless the caller passes ``redact=False``.
+* **Never raises.** Returns a user-facing status string. Programmatic callers
+  wanting the URL use :func:`build_trace_jsonl` + :func:`_do_upload` directly.
 """
 
 from __future__ import annotations
@@ -41,6 +31,15 @@ _REDACTION_BLOCKED_MESSAGE = (
     "still contain credentials or other sensitive data. Fix the redactor or "
     "rerun with --no-redact only after manually reviewing the transcript."
 )
+_NO_TOKEN_MESSAGE = (
+    "Can't upload — no Hugging Face token is available. To set it up:\n"
+    "\n"
+    "1. Create a token with WRITE access at https://huggingface.co/settings/tokens\n"
+    "   (New token -> type \"Write\" -> copy it).\n"
+    "2. Add it to your environment as HF_TOKEN (e.g. in ~/.hermes/.env):\n"
+    "     HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx\n"
+    "3. Run /upload-trace again (or `hermes trace upload`)."
+)
 
 
 class TraceRedactionError(RuntimeError):
@@ -56,12 +55,8 @@ def _now_iso() -> str:
 
 
 def _redact(text: Any, enabled: bool) -> Any:
-    """Redact secrets from a string body when redaction is enabled.
-
-    Non-strings pass through untouched. Uses Hermes' shared redactor with
-    ``force=True`` so an upload always scrubs known secret shapes even if
-    the user disabled log redaction globally.
-    """
+    """Redact secrets from a string body when enabled; non-strings pass through.
+    ``force=True``: an upload always scrubs even if log redaction is disabled."""
     if not enabled or not isinstance(text, str) or not text:
         return text
     try:
@@ -72,29 +67,31 @@ def _redact(text: Any, enabled: bool) -> Any:
         raise TraceRedactionError(_REDACTION_BLOCKED_MESSAGE) from exc
 
 
+def _text_block(text: Any, redact: bool) -> Dict[str, Any]:
+    return {"type": "text", "text": _redact(text, redact)}
+
+
+def _part_to_block(part: Any, redact: bool) -> Dict[str, Any]:
+    if not isinstance(part, dict):
+        return _text_block(str(part), redact)
+    ptype = part.get("type")
+    if ptype == "text":
+        return _text_block(part.get("text", ""), redact)
+    if ptype in ("image_url", "image"):
+        # The viewer renders text turns; don't inline base64 blobs.
+        return {"type": "text", "text": "[image omitted]"}
+    return _text_block(json.dumps(part), redact)
+
+
 def _content_to_blocks(content: Any, redact: bool) -> List[Dict[str, Any]]:
     """Normalize a message ``content`` field into Anthropic content blocks."""
     if content is None:
         return []
     if isinstance(content, str):
-        return [{"type": "text", "text": _redact(content, redact)}]
+        return [_text_block(content, redact)]
     if isinstance(content, list):
-        blocks: List[Dict[str, Any]] = []
-        for part in content:
-            if isinstance(part, dict):
-                ptype = part.get("type")
-                if ptype == "text":
-                    blocks.append({"type": "text", "text": _redact(part.get("text", ""), redact)})
-                elif ptype in ("image_url", "image"):
-                    # Keep a placeholder; the viewer renders text turns and we
-                    # don't want to inline base64 blobs into a trace.
-                    blocks.append({"type": "text", "text": "[image omitted]"})
-                else:
-                    blocks.append({"type": "text", "text": _redact(json.dumps(part), redact)})
-            else:
-                blocks.append({"type": "text", "text": _redact(str(part), redact)})
-        return blocks
-    return [{"type": "text", "text": _redact(json.dumps(content), redact)}]
+        return [_part_to_block(part, redact) for part in content]
+    return [_text_block(json.dumps(content), redact)]
 
 
 def _tool_calls_to_blocks(tool_calls: Any, redact: bool) -> List[Dict[str, Any]]:
@@ -106,17 +103,14 @@ def _tool_calls_to_blocks(tool_calls: Any, redact: bool) -> List[Dict[str, Any]]
         if not isinstance(tc, dict):
             continue
         fn = tc.get("function") or {}
-        name = fn.get("name") or tc.get("name") or "tool"
         raw_args = fn.get("arguments")
         if isinstance(raw_args, str):
             try:
                 parsed = json.loads(raw_args) if raw_args.strip() else {}
             except (json.JSONDecodeError, ValueError):
                 parsed = {"_raw": raw_args}
-        elif isinstance(raw_args, dict):
-            parsed = raw_args
         else:
-            parsed = {}
+            parsed = raw_args if isinstance(raw_args, dict) else {}
         if redact:
             try:
                 parsed = json.loads(_redact(json.dumps(parsed), redact))
@@ -126,10 +120,57 @@ def _tool_calls_to_blocks(tool_calls: Any, redact: bool) -> List[Dict[str, Any]]
         blocks.append({
             "type": "tool_use",
             "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:16]}",
-            "name": name,
+            "name": fn.get("name") or tc.get("name") or "tool",
             "input": parsed,
         })
     return blocks
+
+
+def _git_branch(cwd: str) -> str:
+    if not cwd:
+        return ""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3, cwd=cwd,
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _assistant_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[str, Any]:
+    blocks = _content_to_blocks(msg.get("content"), redact)
+    blocks.extend(_tool_calls_to_blocks(msg.get("tool_calls"), redact))
+    return {"role": "assistant", "model": model or "unknown", "content": blocks or [{"type": "text", "text": ""}]}
+
+
+def _tool_result_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[str, Any]:
+    content = msg.get("content")
+    return {
+        "role": "user",
+        "content": [{
+            "type": "tool_result",
+            "tool_use_id": msg.get("tool_call_id") or msg.get("tool_name") or "tool",
+            "content": _redact(content if isinstance(content, str) else json.dumps(content), redact),
+        }],
+    }
+
+
+def _user_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[str, Any]:
+    content = msg.get("content")
+    return {
+        "role": "user",
+        "content": _redact(content, redact) if isinstance(content, str) else _content_to_blocks(content, redact),
+    }
+
+
+# role -> (Claude Code line type, message builder). Unknown roles render as user.
+_ROLE_RENDERERS: Dict[Any, Tuple[str, Any]] = {
+    "assistant": ("assistant", _assistant_message),
+    "tool": ("user", _tool_result_message),
+}
 
 
 def build_trace_jsonl(
@@ -142,35 +183,23 @@ def build_trace_jsonl(
 ) -> str:
     """Render Hermes conversation messages as Claude Code JSONL text.
 
-    Each non-system message becomes one JSONL line in the Claude Code
-    transcript shape the HF Agent Trace Viewer auto-detects:
-
-    * ``user`` / ``tool`` -> ``{"type": "user", "message": {...}}``
-    * ``assistant``       -> ``{"type": "assistant", "message": {...}}``
-      with ``content`` blocks (text + ``tool_use``).
-
-    Tool results are emitted as user turns carrying a ``tool_result``
-    block keyed by ``tool_call_id`` — the same way Claude Code records
-    them. Turns are linked via ``uuid`` / ``parentUuid``.
+    Each non-system message becomes one line: ``user``/``tool`` -> ``{"type":
+    "user"}``, ``assistant`` -> ``{"type": "assistant"}`` with text + ``tool_use``
+    blocks. Tool results ride on user turns as a ``tool_result`` block keyed by
+    ``tool_call_id``; turns link via ``uuid`` / ``parentUuid``.
     """
     lines: List[str] = []
     parent: Optional[str] = None
     base_ts = _now_iso()
-    git_branch = ""
-    try:
-        import subprocess
-        if cwd:
-            r = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3, cwd=cwd,
-            )
-            if r.returncode == 0:
-                git_branch = r.stdout.strip()
-    except Exception:
-        git_branch = ""
+    git_branch = _git_branch(cwd)
 
-    def _common(turn_uuid: str) -> Dict[str, Any]:
-        return {
+    for msg in messages:
+        role = msg.get("role")
+        if role == "system":
+            continue
+        turn_uuid = str(uuid.uuid4())
+        line_type, render = _ROLE_RENDERERS.get(role, ("user", _user_message))
+        entry = {
             "parentUuid": parent,
             "isSidechain": False,
             "userType": "external",
@@ -180,60 +209,9 @@ def build_trace_jsonl(
             "gitBranch": git_branch,
             "uuid": turn_uuid,
             "timestamp": base_ts,
+            "type": line_type,
+            "message": render(msg, model, redact),
         }
-
-    for msg in messages:
-        role = msg.get("role")
-        if role == "system":
-            continue
-        turn_uuid = str(uuid.uuid4())
-
-        if role == "assistant":
-            blocks = _content_to_blocks(msg.get("content"), redact)
-            blocks.extend(_tool_calls_to_blocks(msg.get("tool_calls"), redact))
-            if not blocks:
-                blocks = [{"type": "text", "text": ""}]
-            entry = _common(turn_uuid)
-            entry["type"] = "assistant"
-            entry["message"] = {
-                "role": "assistant",
-                "model": model or "unknown",
-                "content": blocks,
-            }
-            lines.append(json.dumps(entry, ensure_ascii=False))
-            parent = turn_uuid
-            continue
-
-        if role == "tool":
-            tool_use_id = msg.get("tool_call_id") or msg.get("tool_name") or "tool"
-            result_content = _redact(
-                msg.get("content") if isinstance(msg.get("content"), str)
-                else json.dumps(msg.get("content")),
-                redact,
-            )
-            entry = _common(turn_uuid)
-            entry["type"] = "user"
-            entry["message"] = {
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": result_content,
-                }],
-            }
-            lines.append(json.dumps(entry, ensure_ascii=False))
-            parent = turn_uuid
-            continue
-
-        # Default: user (and any unknown role) -> user turn.
-        content = msg.get("content")
-        if isinstance(content, str):
-            message_content: Any = _redact(content, redact)
-        else:
-            message_content = _content_to_blocks(content, redact)
-        entry = _common(turn_uuid)
-        entry["type"] = "user"
-        entry["message"] = {"role": "user", "content": message_content}
         lines.append(json.dumps(entry, ensure_ascii=False))
         parent = turn_uuid
 
@@ -253,17 +231,6 @@ def _resolve_hf_token() -> Optional[str]:
     return None
 
 
-_NO_TOKEN_MESSAGE = (
-    "Can't upload — no Hugging Face token is available. To set it up:\n"
-    "\n"
-    "1. Create a token with WRITE access at https://huggingface.co/settings/tokens\n"
-    "   (New token -> type \"Write\" -> copy it).\n"
-    "2. Add it to your environment as HF_TOKEN (e.g. in ~/.hermes/.env):\n"
-    "     HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx\n"
-    "3. Run /upload-trace again (or `hermes trace upload`)."
-)
-
-
 def _do_upload(
     jsonl: str,
     *,
@@ -273,15 +240,12 @@ def _do_upload(
     private: bool = True,
 ) -> str:
     """Create (idempotently) the private dataset and push the trace file.
-
-    Returns a user-facing status string. Never raises.
-    """
+    Returns a user-facing status string. Never raises."""
     try:
         from tools import lazy_deps
         lazy_deps.ensure("tool.trace_upload", prompt=False)
     except Exception:
-        # lazy-install unavailable/declined — fall through to the import,
-        # which surfaces the install hint below if the package is missing.
+        # Lazy-install unavailable/declined — the import below surfaces the hint.
         pass
     try:
         from huggingface_hub import HfApi
@@ -302,9 +266,7 @@ def _do_upload(
 
     repo_id = f"{user}/{dataset_name}"
     try:
-        api.create_repo(
-            repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True,
-        )
+        api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
     except Exception as e:
         logger.warning("HF create_repo failed for %s: %s", repo_id, e)
         return f"Could not create/access dataset {repo_id}: {e}"
@@ -326,21 +288,15 @@ def _do_upload(
             f"View in the trace viewer: https://huggingface.co/datasets/{repo_id}")
 
 
-def load_session_messages(
-    session_id: str, db_path=None
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Load a session's conversation + metadata from the SQLite store.
-
-    Returns ``(messages, meta)``. ``meta`` is ``{}`` when the session row is
-    missing (messages may still be present for a live, untitled session).
-    """
+def load_session_messages(session_id: str, db_path=None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Load ``(messages, meta)`` from the SQLite store. ``meta`` is ``{}`` when the
+    session row is missing (messages may still exist for a live, untitled session)."""
     from hermes_state import SessionDB
     db = SessionDB(db_path=db_path) if db_path else SessionDB()
     try:
         resolved = db.resolve_session_id(session_id) or session_id
         meta = db.get_session(resolved) or {}
-        messages = db.get_messages_as_conversation(resolved)
-        return messages, meta
+        return db.get_messages_as_conversation(resolved), meta
     finally:
         try:
             db.close()
@@ -359,12 +315,8 @@ def upload_session_trace(
     db_path=None,
     token: Optional[str] = None,
 ) -> str:
-    """Top-level entry point used by the CLI/gateway/subcommand.
-
-    Loads the session, converts it to Claude Code JSONL, and uploads it to
-    the user's private ``{user}/hermes-traces`` dataset. Returns a
-    user-facing status string and never raises.
-    """
+    """CLI/gateway entry point: load, convert, upload to the user's private
+    ``{user}/hermes-traces`` dataset. Returns a status string, never raises."""
     if not session_id:
         return "No active session to upload."
 
@@ -381,24 +333,13 @@ def upload_session_trace(
     if not messages:
         return "No transcript to upload for this session yet."
 
-    resolved_model = model or meta.get("model") or ""
     try:
         jsonl = build_trace_jsonl(
-            messages,
-            session_id=session_id,
-            model=resolved_model,
-            cwd=cwd,
-            redact=redact,
+            messages, session_id=session_id, model=model or meta.get("model") or "", cwd=cwd, redact=redact,
         )
     except TraceRedactionError:
         return _REDACTION_BLOCKED_MESSAGE
     if not jsonl.strip():
         return "No transcript content to upload for this session."
 
-    return _do_upload(
-        jsonl,
-        token=token,
-        session_id=session_id,
-        dataset_name=dataset_name,
-        private=private,
-    )
+    return _do_upload(jsonl, token=token, session_id=session_id, dataset_name=dataset_name, private=private)
