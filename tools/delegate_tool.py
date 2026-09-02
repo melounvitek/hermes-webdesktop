@@ -47,7 +47,6 @@ from tools.delegate_tool_child_run import (  # noqa: F401
     _dump_subagent_timeout_diagnostic,
     _emit_child_complete,
     _fabricated_entry,
-    _handle_child_wait_failure,
     _lease_child_credential,
     _make_text_relay,
     _merge_late_steer,

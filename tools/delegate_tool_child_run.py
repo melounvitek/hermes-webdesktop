@@ -112,6 +112,72 @@ def _format_thread_stack(frame: Any, indent: str) -> List[str]:
     ]
 
 
+_DIAG_CHILD_ATTRS = (
+    "model", "provider", "api_mode", "base_url", "max_iterations",
+    "quiet_mode", "skip_memory", "skip_context_files", "platform",
+    "_delegate_role", "_delegate_depth",
+)
+
+
+def _diag_sizes(child: Any) -> List[str]:
+    lines: List[str] = ["## Prompt / schema sizes"]
+    try:
+        sys_prompt = getattr(child, "ephemeral_system_prompt", None) or getattr(child, "system_prompt", None) or ""
+        lines.append(f"  system_prompt_bytes: {len(sys_prompt.encode('utf-8')) if isinstance(sys_prompt, str) else 'n/a'}")
+        lines.append(f"  system_prompt_chars: {len(sys_prompt) if isinstance(sys_prompt, str) else 'n/a'}")
+    except Exception as exc:
+        lines.append(f"  system_prompt: <error: {exc}>")
+    try:
+        tools_schema = getattr(child, "tools", None)
+        if tools_schema is not None:
+            lines.append(f"  tool_schema_count: {len(tools_schema)}")
+            lines.append(f"  tool_schema_bytes: {len(json.dumps(tools_schema, default=str).encode('utf-8'))}")
+    except Exception as exc:
+        lines.append(f"  tool_schema: <error: {exc}>")
+    return lines
+
+
+def _diag_threads(worker_thread: Optional[threading.Thread]) -> List[str]:
+    """Worker stack plus all other live threads (bounded to 40): the worker is
+    often parked on a helper thread, so a pre-HTTP wedge is indistinguishable
+    from a slow provider without the full picture."""
+    import sys as _sys
+    import threading as _threading
+
+    lines = ["## Worker thread stack at timeout"]
+    frames = _sys._current_frames()
+    if worker_thread is not None and worker_thread.is_alive():
+        worker_frame = frames.get(worker_thread.ident)
+        lines.extend(
+            _format_thread_stack(worker_frame, "  ") if worker_frame is not None
+            else ["  <worker frame not available>"]
+        )
+    elif worker_thread is None:
+        lines.append("  <no worker thread handle>")
+    else:
+        lines.append("  <worker thread already exited>")
+    lines += ["", "## All thread stacks at timeout"]
+    try:
+        frames = _sys._current_frames()
+        by_ident = {th.ident: th for th in _threading.enumerate() if th.ident}
+        worker_ident = worker_thread.ident if worker_thread else None
+        dumped = 0
+        for ident, frame in frames.items():
+            if ident == worker_ident:
+                continue  # already dumped above
+            if dumped >= 40:
+                lines.append(f"  <{len(frames) - dumped - 1} more threads omitted>")
+                break
+            th = by_ident.get(ident)
+            name = th.name if th else f"ident={ident}"
+            lines.append(f"  --- {name}{' daemon' if (th and th.daemon) else ''} ---")
+            lines.extend(_format_thread_stack(frame, "    "))
+            dumped += 1
+    except Exception as exc:
+        lines.append(f"  <all-thread dump failed: {exc}>")
+    return lines
+
+
 def _dump_subagent_timeout_diagnostic(
     *,
     child: Any,
@@ -130,8 +196,6 @@ def _dump_subagent_timeout_diagnostic(
     try:
         from hermes_constants import get_hermes_home
         import datetime as _dt
-        import sys as _sys
-        import threading as _threading
 
         logs_dir = get_hermes_home() / "logs"
         try:
@@ -159,97 +223,32 @@ def _dump_subagent_timeout_diagnostic(
             "",
             "## Child config",
         ]
-        _w = lines.append
-        for attr in (
-            "model", "provider", "api_mode", "base_url", "max_iterations",
-            "quiet_mode", "skip_memory", "skip_context_files", "platform",
-            "_delegate_role", "_delegate_depth",
-        ):
+        for attr in _DIAG_CHILD_ATTRS:
             try:
-                _w(f"  {attr}: {getattr(child, attr, None)!r}")
+                lines.append(f"  {attr}: {getattr(child, attr, None)!r}")
             except Exception:
-                _w(f"  {attr}: <unreadable>")
-        _w("")
-
-        _w("## Toolsets")
-        _w(f"  enabled_toolsets:  {getattr(child, 'enabled_toolsets', None)!r}")
+                lines.append(f"  {attr}: <unreadable>")
+        lines += ["", "## Toolsets", f"  enabled_toolsets:  {getattr(child, 'enabled_toolsets', None)!r}"]
         tool_names = getattr(child, "valid_tool_names", None)
         if tool_names:
-            _w(f"  loaded tool count: {len(tool_names)}")
+            lines.append(f"  loaded tool count: {len(tool_names)}")
             try:
-                _w(f"  loaded tools:      {sorted(tool_names)}")
+                lines.append(f"  loaded tools:      {sorted(tool_names)}")
             except Exception:
                 pass
-        _w("")
-
-        _w("## Prompt / schema sizes")
+        lines += [""] + _diag_sizes(child) + ["", "## Activity summary"]
         try:
-            sys_prompt = getattr(child, "ephemeral_system_prompt", None) or getattr(child, "system_prompt", None) or ""
-            _w(f"  system_prompt_bytes: {len(sys_prompt.encode('utf-8')) if isinstance(sys_prompt, str) else 'n/a'}")
-            _w(f"  system_prompt_chars: {len(sys_prompt) if isinstance(sys_prompt, str) else 'n/a'}")
+            lines += [f"  {k}: {v!r}" for k, v in child.get_activity_summary().items()]
         except Exception as exc:
-            _w(f"  system_prompt: <error: {exc}>")
-        try:
-            tools_schema = getattr(child, "tools", None)
-            if tools_schema is not None:
-                _w(f"  tool_schema_count: {len(tools_schema)}")
-                _w(f"  tool_schema_bytes: {len(json.dumps(tools_schema, default=str).encode('utf-8'))}")
-        except Exception as exc:
-            _w(f"  tool_schema: <error: {exc}>")
-        _w("")
-
-        _w("## Activity summary")
-        try:
-            for k, v in child.get_activity_summary().items():
-                _w(f"  {k}: {v!r}")
-        except Exception as exc:
-            _w(f"  <get_activity_summary failed: {exc}>")
-        _w("")
-
-        _w("## Worker thread stack at timeout")
-        frames = _sys._current_frames()
-        if worker_thread is not None and worker_thread.is_alive():
-            worker_frame = frames.get(worker_thread.ident)
-            lines.extend(
-                _format_thread_stack(worker_frame, "  ") if worker_frame is not None
-                else ["  <worker frame not available>"]
-            )
-        elif worker_thread is None:
-            _w("  <no worker thread handle>")
-        else:
-            _w("  <worker thread already exited>")
-        _w("")
-
-        # All other live threads (bounded to 40): the worker is often parked on
-        # a helper thread, so a pre-HTTP wedge is indistinguishable from a slow
-        # provider without the full picture.
-        _w("## All thread stacks at timeout")
-        try:
-            frames = _sys._current_frames()
-            by_ident = {th.ident: th for th in _threading.enumerate() if th.ident}
-            worker_ident = worker_thread.ident if worker_thread else None
-            dumped = 0
-            for ident, frame in frames.items():
-                if ident == worker_ident:
-                    continue  # already dumped above
-                if dumped >= 40:
-                    _w(f"  <{len(frames) - dumped - 1} more threads omitted>")
-                    break
-                th = by_ident.get(ident)
-                name = th.name if th else f"ident={ident}"
-                _w(f"  --- {name}{' daemon' if (th and th.daemon) else ''} ---")
-                lines.extend(_format_thread_stack(frame, "    "))
-                dumped += 1
-        except Exception as exc:
-            _w(f"  <all-thread dump failed: {exc}>")
-        _w("")
-
-        _w("## Notes")
-        _w("  This file is written ONLY when a subagent times out with 0 API calls.")
-        _w("  0-API-call timeouts mean the child never reached its first LLM request.")
-        _w("  Common causes: oversized prompt rejected by provider, transport hang,")
-        _w("  credential resolution stuck. See issue #14726 for context.")
-
+            lines.append(f"  <get_activity_summary failed: {exc}>")
+        lines += [""] + _diag_threads(worker_thread) + [
+            "",
+            "## Notes",
+            "  This file is written ONLY when a subagent times out with 0 API calls.",
+            "  0-API-call timeouts mean the child never reached its first LLM request.",
+            "  Common causes: oversized prompt rejected by provider, transport hang,",
+            "  credential resolution stuck. See issue #14726 for context.",
+        ]
         dump_path.write_text("\n".join(lines), encoding="utf-8")
         return str(dump_path)
     except Exception as exc:

@@ -71,40 +71,49 @@ def _get_subagent_approval_callback():
     return _subagent_auto_deny
 
 
+def _knob(key: str, env_var: str, parse, default, warn_invalid):
+    """delegation.<key> > <env_var> > default. A config value that fails ``parse``
+    calls ``warn_invalid(value)`` and yields the default; an env value that fails
+    is silently ignored."""
+    val = _cfg().get(key)
+    if val is not None:
+        try:
+            return parse(val)
+        except (TypeError, ValueError):
+            warn_invalid(val)
+            return default
+    env_val = os.getenv(env_var)
+    if env_val:
+        try:
+            return parse(env_val)
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
 def _get_max_concurrent_children() -> int:
     """delegation.max_concurrent_children > DELEGATION_MAX_CONCURRENT_CHILDREN env > 10.
 
     Floor of 1 is the only bound enforced; there is no ceiling.
     """
-    val = _cfg().get("max_concurrent_children")
-    if val is not None:
-        try:
-            result = max(1, int(val))
-        except (TypeError, ValueError):
+    result = _knob(
+        "max_concurrent_children", "DELEGATION_MAX_CONCURRENT_CHILDREN", lambda v: max(1, int(v)),
+        _DEFAULT_MAX_CONCURRENT_CHILDREN,
+        lambda val: logger.warning(
+            "delegation.max_concurrent_children=%r is not a valid integer; using default %d",
+            val, _DEFAULT_MAX_CONCURRENT_CHILDREN,
+        ),
+    )
+    if result > 10 and _cfg().get("max_concurrent_children") is not None:
+        global _HIGH_CONCURRENCY_WARNED
+        if not _HIGH_CONCURRENCY_WARNED:
+            _HIGH_CONCURRENCY_WARNED = True
             logger.warning(
-                "delegation.max_concurrent_children=%r is not a valid integer; "
-                "using default %d",
-                val,
-                _DEFAULT_MAX_CONCURRENT_CHILDREN,
+                "delegation.max_concurrent_children=%d: each child consumes API tokens "
+                "independently. High values multiply cost linearly.",
+                result,
             )
-            return _DEFAULT_MAX_CONCURRENT_CHILDREN
-        if result > 10:
-            global _HIGH_CONCURRENCY_WARNED
-            if not _HIGH_CONCURRENCY_WARNED:
-                _HIGH_CONCURRENCY_WARNED = True
-                logger.warning(
-                    "delegation.max_concurrent_children=%d: each child consumes API tokens "
-                    "independently. High values multiply cost linearly.",
-                    result,
-                )
-        return result
-    env_val = os.getenv("DELEGATION_MAX_CONCURRENT_CHILDREN")
-    if env_val:
-        try:
-            return max(1, int(env_val))
-        except (TypeError, ValueError):
-            return _DEFAULT_MAX_CONCURRENT_CHILDREN
-    return _DEFAULT_MAX_CONCURRENT_CHILDREN
+    return result
 
 
 def _get_worktree_isolation() -> bool:
@@ -151,23 +160,12 @@ def _get_child_timeout() -> Optional[float]:
     staleness monitor. delegation.child_timeout_seconds > 0 opts in (floor 30 s);
     0 or negative disables. Env fallback: DELEGATION_CHILD_TIMEOUT_SECONDS.
     """
-    val = _cfg().get("child_timeout_seconds")
-    if val is not None:
-        try:
-            return _parse_timeout(val)
-        except (TypeError, ValueError):
-            logger.warning(
-                "delegation.child_timeout_seconds=%r is not a valid number; "
-                "using default (no timeout)",
-                val,
-            )
-    env_val = os.getenv("DELEGATION_CHILD_TIMEOUT_SECONDS")
-    if env_val:
-        try:
-            return _parse_timeout(env_val)
-        except (TypeError, ValueError):
-            pass
-    return DEFAULT_CHILD_TIMEOUT
+    return _knob(
+        "child_timeout_seconds", "DELEGATION_CHILD_TIMEOUT_SECONDS", _parse_timeout, DEFAULT_CHILD_TIMEOUT,
+        lambda val: logger.warning(
+            "delegation.child_timeout_seconds=%r is not a valid number; using default (no timeout)", val,
+        ),
+    )
 
 
 def _get_max_spawn_depth() -> int:
