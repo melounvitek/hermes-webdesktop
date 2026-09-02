@@ -1,23 +1,10 @@
-#!/usr/bin/env python3
 """
 Model Tools Module
 
-Thin orchestration layer over the tool registry. Each tool file in tools/
-self-registers its schema, handler, and metadata via tools.registry.register().
-This module triggers discovery (by importing all tool modules), then provides
-the public API that run_agent.py, cli.py, batch_runner.py, and the RL
-environments consume.
-
-Public API (signatures preserved from the original 2,400-line version):
-    get_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode) -> list
-    handle_function_call(function_name, function_args, task_id, user_task) -> str
-    TOOL_TO_TOOLSET_MAP: dict          (for batch_runner.py)
-    TOOLSET_REQUIREMENTS: dict         (for cli.py, doctor.py)
-    get_all_tool_names() -> list
-    get_toolset_for_tool(name) -> str
-    get_available_toolsets() -> dict
-    check_toolset_requirements() -> dict
-    check_tool_availability(quiet) -> tuple
+Thin orchestration layer over the tool registry: importing this module runs tool
+discovery (each tools/*.py self-registers via tools.registry.register()), then
+exposes get_tool_definitions() (schemas sent to the model, toolset-filtered) and
+handle_function_call() (dispatch with hooks/middleware) plus registry wrappers.
 """
 
 import os
@@ -56,8 +43,7 @@ def suppress_post_tool_call_hook():
     finally:
         _post_tool_call_hook_suppressed.reset(token)
 
-# Tracks platform-bundle names already flagged in disabled_toolsets so the
-# advisory (#33924) is logged once per name, not on every tool recompute.
+# Platform-bundle names already flagged in disabled_toolsets (advisory logged once per name).
 _WARNED_DISABLED_BUNDLES: set = set()
 
 
@@ -84,6 +70,10 @@ def _is_dispatcher_owned_worker() -> bool:
 # =============================================================================
 # Async Bridging  (single source of truth -- used by registry.dispatch too)
 # =============================================================================
+# Loops are persistent (never asyncio.run per call): cached httpx/AsyncOpenAI
+# clients stay bound to a live loop, so their GC cleanup can't hit
+# "Event loop is closed". Main thread shares one loop; worker threads
+# (parallel tool execution) each own a thread-local loop to avoid contention.
 
 _tool_loop = None          # persistent loop for the main (CLI) thread
 _tool_loop_lock = threading.Lock()
@@ -91,13 +81,7 @@ _worker_thread_local = threading.local()  # per-worker-thread persistent loops
 
 
 def _get_tool_loop():
-    """Return a long-lived event loop for running async tool handlers.
-
-    Using a persistent loop (instead of asyncio.run() which creates and
-    *closes* a fresh loop every time) prevents "Event loop is closed"
-    errors that occur when cached httpx/AsyncOpenAI clients attempt to
-    close their transport on a dead loop during garbage collection.
-    """
+    """Long-lived event loop for async tool handlers on the main thread."""
     global _tool_loop
     with _tool_loop_lock:
         if _tool_loop is None or _tool_loop.is_closed():
@@ -106,19 +90,7 @@ def _get_tool_loop():
 
 
 def _get_worker_loop():
-    """Return a persistent event loop for the current worker thread.
-
-    Each worker thread (e.g., delegate_task's ThreadPoolExecutor threads)
-    gets its own long-lived loop stored in thread-local storage.  This
-    prevents the "Event loop is closed" errors that occurred when
-    asyncio.run() was used per-call: asyncio.run() creates a loop, runs
-    the coroutine, then *closes* the loop — but cached httpx/AsyncOpenAI
-    clients remain bound to that now-dead loop and raise RuntimeError
-    during garbage collection or subsequent use.
-
-    By keeping the loop alive for the thread's lifetime, cached clients
-    stay valid and their cleanup runs on a live loop.
-    """
+    """Persistent event loop for the current worker thread (thread-local)."""
     loop = getattr(_worker_thread_local, 'loop', None)
     if loop is None or loop.is_closed():
         loop = asyncio.new_event_loop()
@@ -128,36 +100,17 @@ def _get_worker_loop():
 
 
 def _run_async(coro):
-    """Run an async coroutine from a sync context.
-
-    If the current thread already has a running event loop (e.g., inside
-    the gateway's async stack or Atropos's event loop), we spin up a
-    disposable thread so asyncio.run() can create its own loop without
-    conflicting.
-
-    For the common CLI path (no running loop), we use a persistent event
-    loop so that cached async clients (httpx / AsyncOpenAI) remain bound
-    to a live loop and don't trigger "Event loop is closed" on GC.
-
-    When called from a worker thread (parallel tool execution), we use a
-    per-thread persistent loop to avoid both contention with the main
-    thread's shared loop AND the "Event loop is closed" errors caused by
-    asyncio.run()'s create-and-destroy lifecycle.
-
-    This is the single source of truth for sync->async bridging in tool
-    handlers. Each handler is self-protecting via this function.
-    """
+    """Run a coroutine from sync code; safe under a running loop (gateway/RL env)."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
 
     if loop and loop.is_running():
-        # Inside an async context (gateway, RL env) — run in a fresh thread
-        # with its own event loop we own a reference to, so on timeout we
-        # can cancel the task inside that loop (ThreadPoolExecutor.cancel()
-        # only works on not-yet-started futures — it's a no-op on a running
-        # worker, which previously leaked the thread on every 300 s timeout).
+        # Already inside an event loop: run in a fresh thread whose loop we
+        # hold a reference to, so on timeout we can cancel the task inside it
+        # (ThreadPoolExecutor.cancel() is a no-op on a running worker and
+        # would leak the thread on every 300 s timeout).
         import concurrent.futures
 
         worker_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -172,8 +125,7 @@ def _run_async(coro):
                 return worker_loop.run_until_complete(coro)
             finally:
                 try:
-                    # Cancel anything still pending (e.g. task cancelled
-                    # externally via call_soon_threadsafe on timeout).
+                    # Drain tasks still pending after an external cancel.
                     pending = asyncio.all_tasks(worker_loop)
                     for t in pending:
                         t.cancel()
@@ -186,41 +138,28 @@ def _run_async(coro):
                 worker_loop.close()
 
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        # Carry the active profile + approval/sudo callbacks into the worker so
-        # async tools resolve get_hermes_home() under the active profile.
+        # Carry profile + approval/sudo context so get_hermes_home() resolves correctly.
         from tools.thread_context import propagate_context_to_thread
 
         future = pool.submit(propagate_context_to_thread(_run_in_worker))
         try:
             return future.result(timeout=300)
         except concurrent.futures.TimeoutError:
-            # Cancel the coroutine inside its own loop so the worker thread
-            # can wind down instead of running forever.
+            # Cancel inside the worker's own loop so the thread can wind down.
             if loop_ready.wait(timeout=1.0) and worker_loop is not None:
                 try:
                     for t in asyncio.all_tasks(worker_loop):
                         worker_loop.call_soon_threadsafe(t.cancel)
                 except RuntimeError:
-                    # Loop already closed — nothing to cancel.
-                    pass
+                    pass  # loop already closed
             raise
         finally:
-            # wait=False: don't block the caller on a stuck coroutine. We've
-            # already requested cancellation above; the worker will exit
-            # once the coroutine observes it (usually at the next await).
+            # wait=False: never block the caller on a stuck coroutine.
             pool.shutdown(wait=False)
 
-    # If we're on a worker thread (e.g., parallel tool execution in
-    # delegate_task), use a per-thread persistent loop.  This avoids
-    # contention with the main thread's shared loop while keeping cached
-    # httpx/AsyncOpenAI clients bound to a live loop for the thread's
-    # lifetime — preventing "Event loop is closed" on GC cleanup.
     if threading.current_thread() is not threading.main_thread():
-        worker_loop = _get_worker_loop()
-        return worker_loop.run_until_complete(coro)
-
-    tool_loop = _get_tool_loop()
-    return tool_loop.run_until_complete(coro)
+        return _get_worker_loop().run_until_complete(coro)
+    return _get_tool_loop().run_until_complete(coro)
 
 
 # =============================================================================
@@ -229,18 +168,9 @@ def _run_async(coro):
 
 discover_builtin_tools()
 
-# MCP tool discovery (external MCP servers from config) used to run here as
-# a module-level side effect.  It was removed because discover_mcp_tools()
-# internally uses a blocking future.result(timeout=120) wait, and the
-# gateway lazy-imports this module from inside the asyncio event loop on
-# the first user message — freezing Discord/Telegram heartbeats for up to
-# 120s whenever any configured MCP server was slow or unreachable (#16856).
-#
-# Each entry point now runs discovery explicitly at its own startup:
-#   - gateway/run.py            -> start_gateway() uses run_in_executor
-#   - cli.py, hermes_cli/*      -> inline on startup (no event loop)
-#   - tui_gateway/server.py     -> inline on startup (no event loop)
-#   - acp_adapter/server.py     -> asyncio.to_thread on session init
+# MCP discovery is deliberately NOT run here: it blocks up to 120 s and the
+# gateway lazy-imports this module inside its event loop. Each entry point
+# (gateway/run.py, cli.py, tui_gateway, acp_adapter) runs it at its own startup.
 
 # Plugin tool discovery (user/project/pip plugins)
 try:
@@ -258,8 +188,7 @@ TOOL_TO_TOOLSET_MAP: Dict[str, str] = registry.get_tool_to_toolset_map()
 
 TOOLSET_REQUIREMENTS: Dict[str, dict] = registry.get_toolset_requirements()
 
-# Resolved tool names from the last get_tool_definitions() call.
-# Used by code_execution_tool to know which tools are available in this session.
+# Tool names from the last get_tool_definitions() call (execute_code sandbox fallback).
 _last_resolved_tool_names: List[str] = []
 
 
@@ -289,33 +218,21 @@ _LEGACY_TOOLSET_MAP = {
 # get_tool_definitions  (the main schema provider)
 # =============================================================================
 
-# Module-level memoization for get_tool_definitions(). Keyed on
-# (profile scope, enabled/disabled toolsets, registry generation).
-# Hot callers (gateway runner, AIAgent.__init__) invoke this on every turn
-# with quiet_mode=True; caching avoids ~7 ms of registry walking + schema
-# filtering + check_fn probing per call. Only active when quiet_mode=True
-# because quiet_mode=False has stdout side effects (tool-selection prints).
-#
-# Invalidation happens transparently via the registry's _generation counter,
-# which bumps on register() / deregister() / register_toolset_alias(). The
-# inner check_fn TTL cache in registry.py handles environment drift (Docker
-# daemon start/stop, env var changes, etc.) on a 30 s horizon.
+# Memo for get_tool_definitions(), active only with quiet_mode=True (the
+# non-quiet path prints). Hot callers (gateway runner, AIAgent.__init__) hit it
+# every turn; a miss costs ~7 ms of registry walk + check_fn probing. The key
+# includes registry._generation (bumped on register/deregister/alias) so
+# invalidation is transparent; check_fn drift is handled by registry.py's 30 s TTL.
 _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
 _tool_defs_cache_lock = threading.Lock()
 
-# Hard cap on memoized get_tool_definitions() results. A long-lived Gateway
-# process sees many distinct toolset/config fingerprints over its lifetime
-# (per-session toolset sets, config edits, kanban-task toggles); without a
-# bound the cache grows unboundedly. 8 comfortably covers the warm working
-# set (the handful of distinct platform/toolset combos a gateway actually
-# serves) while keeping the cap small. (#19251)
+# FIFO cap: a long-lived gateway sees many toolset/config fingerprints; 8
+# covers the warm working set of platform/toolset combos it actually serves.
 _TOOL_DEFS_CACHE_MAX = 8
 
 
 def _clear_tool_defs_cache() -> None:
-    """Drop memoized get_tool_definitions() results. Called when dynamic
-    schema dependencies change (e.g. discord capability cache reset,
-    execute_code sandbox reconfigured)."""
+    """Drop memoized results when a dynamic-schema dependency changes (discord caps, sandbox mode)."""
     with _tool_defs_cache_lock:
         _tool_defs_cache.clear()
 
@@ -326,38 +243,25 @@ def get_tool_definitions(
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
 ) -> List[Dict[str, Any]]:
-    """
-    Get tool definitions for model API calls with toolset-based filtering.
-
-    All tools must be part of a toolset to be accessible.
+    """Tool definitions for model API calls, filtered by toolset.
 
     Args:
-        enabled_toolsets: Only include tools from these toolsets.
-        disabled_toolsets: Exclude tools from these toolsets (if enabled_toolsets is None).
-        quiet_mode: Suppress status prints.
-        skip_tool_search_assembly: When True, return the pre-assembly tool list
-            (raw schemas for every enabled tool). Used internally by the
-            tool_search / tool_describe bridge handlers so they can read the
-            real catalog, not the already-collapsed one. Public callers should
-            leave this False.
-
-    Returns:
-        Filtered list of OpenAI-format tool definitions.
+        enabled_toolsets: Only include tools from these toolsets (None = all).
+        disabled_toolsets: Toolsets subtracted after enabling.
+        quiet_mode: Suppress status prints (and enable memoization).
+        skip_tool_search_assembly: Return the pre-assembly list (raw schemas for
+            every enabled tool). Only the tool_search bridge should use this so
+            it reads the real catalog rather than the collapsed one.
     """
-    # Fast path: memoized result when the caller doesn't need stdout prints.
-    # The cache key captures every argument-level input; the registry
-    # generation captures registry mutations (MCP refresh, plugin load).
-    # check_fn results are TTL-cached one level down, inside
-    # registry.get_definitions. The config-mtime fingerprint below captures
-    # user-visible config edits that affect dynamic schemas (execute_code
-    # mode, discord action allowlist, etc.) without needing an explicit
-    # invalidate hook on every config-writer.
+    # Memo key covers every argument plus everything that changes the result
+    # without an argument changing: registry generation, config.yaml mtime/size
+    # (dynamic schemas: execute_code mode, discord allowlist), kanban context,
+    # profile scope. check_fn results are TTL-cached inside registry.get_definitions.
     cache_key = None
     if quiet_mode:
         try:
             from hermes_cli.config import get_config_path
-            cfg_path = get_config_path()
-            cfg_stat = cfg_path.stat()
+            cfg_stat = get_config_path().stat()
             cfg_fp = (cfg_stat.st_mtime_ns, cfg_stat.st_size)
         except (FileNotFoundError, OSError, ImportError):
             cfg_fp = None
@@ -378,30 +282,15 @@ def get_tool_definitions(
         with _tool_defs_cache_lock:
             cached = _tool_defs_cache.get(cache_key) if cache_key is not None else None
         if cached is not None:
-            # Update _last_resolved_tool_names so downstream callers see
-            # consistent state even on a cache hit.
             global _last_resolved_tool_names
             _last_resolved_tool_names = [t["function"]["name"] for t in cached]
-            # Return a shallow copy of the list but share the dict references —
-            # schemas are treated as read-only by all known callers.
             return list(cached)
 
     result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
                                        skip_tool_search_assembly=skip_tool_search_assembly)
     if quiet_mode and cache_key is not None:
-        # Cache the freshly-computed list, but hand callers a shallow copy so
-        # downstream mutations (e.g. run_agent appending memory/LCM tool
-        # schemas to self.tools) don't poison the cache. Without this, a
-        # long-lived Gateway process accumulates duplicate tool names across
-        # agent inits and providers that enforce unique tool names
-        # (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with
-        # HTTP 400. Mirrors the cache-hit path above. (issue #17335)
-        # Bound the cache with LRU eviction so a long-lived Gateway process
-        # doesn't accumulate entries unboundedly across the many distinct
-        # toolset/config fingerprints it sees over its lifetime (#19251).
         with _tool_defs_cache_lock:
-            # Another thread may have populated this exact key while this
-            # thread computed. Reuse it and serialize capacity eviction.
+            # Another thread may have filled this key meanwhile; reuse it.
             cached = _tool_defs_cache.get(cache_key)
             if cached is None:
                 if len(_tool_defs_cache) >= _TOOL_DEFS_CACHE_MAX:
@@ -409,9 +298,25 @@ def get_tool_definitions(
                 _tool_defs_cache[cache_key] = result
                 cached = result
         return list(cached)
+    # Quiet callers always get a shallow copy: run_agent appends memory/LCM
+    # schemas to its list, and a shared list would accumulate duplicate tool
+    # names across agent inits (rejected with HTTP 400 by DeepSeek/Kimi/MiMo).
     if quiet_mode:
         return list(result)
     return result
+
+
+def _find_tool(tool_defs: List[Dict[str, Any]], name: str) -> int:
+    """Index of the tool named *name* in *tool_defs*, or -1."""
+    for i, td in enumerate(tool_defs):
+        if td.get("function", {}).get("name") == name:
+            return i
+    return -1
+
+
+def _drop_tool(tool_defs: List[Dict[str, Any]], available: set, name: str) -> List[Dict[str, Any]]:
+    available.discard(name)
+    return [td for td in tool_defs if td.get("function", {}).get("name") != name]
 
 
 def _compute_tool_definitions(
@@ -421,22 +326,18 @@ def _compute_tool_definitions(
     skip_tool_search_assembly: bool = False,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
-    # Determine which tool names the caller wants
     tools_to_include: set = set()
 
     if enabled_toolsets is not None:
         effective_enabled_toolsets = list(enabled_toolsets)
+        # Dispatcher-spawned kanban workers always get the lifecycle handoff
+        # tools, even when the assignee profile restricts its chat toolsets.
         if (
             os.environ.get("HERMES_KANBAN_TASK")
             and not _is_delegated_child_context()
             and _is_dispatcher_owned_worker()
             and "kanban" not in effective_enabled_toolsets
         ):
-            # Dispatcher-spawned workers are scoped by HERMES_KANBAN_TASK and
-            # must always receive the lifecycle handoff tools. Assignee
-            # profiles may intentionally restrict their normal chat toolsets
-            # (for token/cost reasons), but that should not strip the kanban
-            # worker's completion/block/heartbeat surface.
             effective_enabled_toolsets.append("kanban")
         for toolset_name in effective_enabled_toolsets:
             if validate_toolset(toolset_name):
@@ -452,26 +353,20 @@ def _compute_tool_definitions(
             elif not quiet_mode:
                 print(f"⚠️  Unknown toolset: {toolset_name}")
     else:
-        # Default: start with everything
         from toolsets import get_all_toolsets
         for ts_name in get_all_toolsets():
             tools_to_include.update(resolve_toolset(ts_name))
 
-    # Always apply disabled toolsets as a subtraction step at the end.
-    # This ensures that even if a composite toolset (like hermes-cli)
-    # is enabled, any tools belonging to a disabled toolset are strictly
-    # stripped out. See issue #17309.
+    # Disabled toolsets are always subtracted LAST, so a tool in a disabled
+    # toolset is stripped even when a composite (hermes-cli) re-enables it.
     if disabled_toolsets:
+        from toolsets import bundle_non_core_tools, get_toolset
         for toolset_name in disabled_toolsets:
             if validate_toolset(toolset_name):
-                from toolsets import bundle_non_core_tools, get_toolset
                 if toolset_name.startswith("hermes-") or (get_toolset(toolset_name) or {}).get("posture"):
-                    # Platform bundles (hermes-*) include _HERMES_CORE_TOOLS, and
-                    # posture toolsets (`posture: True`, e.g. `coding`) re-list
-                    # those same core tools without owning them, so subtracting
-                    # the whole toolset would strip core tools shared by other
-                    # enabled toolsets and empty the tool list (#33924, #57315).
-                    # Subtract only the non-core delta; keep core.
+                    # Platform bundles and posture toolsets re-list the core tools
+                    # without owning them; subtracting the whole set would empty
+                    # the tool list. Remove only the non-core delta.
                     to_remove = bundle_non_core_tools(toolset_name)
                     tools_to_include.difference_update(to_remove)
                     resolved = sorted(to_remove)
@@ -500,124 +395,86 @@ def _compute_tool_definitions(
             elif not quiet_mode:
                 print(f"⚠️  Unknown toolset: {toolset_name}")
 
-    # Plugin-registered tools are now resolved through the normal toolset
-    # path — validate_toolset() / resolve_toolset() / get_all_toolsets()
-    # all check the tool registry for plugin-provided toolsets.  No bypass
-    # needed; plugins respect enabled_toolsets / disabled_toolsets like any
-    # other toolset.
-
-    # Ask the registry for schemas (only returns tools whose check_fn passes)
+    # Registry returns only tools whose check_fn passes. Every cross-reference
+    # below must use available_tool_names (not tools_to_include) so the model
+    # is never told about a tool that isn't actually in the list.
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
-
-    # The set of tool names that actually passed check_fn filtering.
-    # Use this (not tools_to_include) for any downstream schema that references
-    # other tools by name — otherwise the model sees tools mentioned in
-    # descriptions that don't actually exist, and hallucinates calls to them.
     available_tool_names = {t["function"]["name"] for t in filtered_tools}
 
-    # Rebuild execute_code schema to only list sandbox tools that are actually
-    # available.  Without this, the model sees "web_search is available in
-    # execute_code" even when the API key isn't configured or the toolset is
-    # disabled (#560-discord).
+    # execute_code: list only sandbox tools that are actually available.
     if "execute_code" in available_tool_names:
         from tools.code_execution_tool import SANDBOX_ALLOWED_TOOLS, build_execute_code_schema, _get_execution_mode
         sandbox_enabled = SANDBOX_ALLOWED_TOOLS & available_tool_names
         dynamic_schema = build_execute_code_schema(sandbox_enabled, mode=_get_execution_mode())
-        for i, td in enumerate(filtered_tools):
-            if td.get("function", {}).get("name") == "execute_code":
-                filtered_tools[i] = {"type": "function", "function": dynamic_schema}
-                break
+        i = _find_tool(filtered_tools, "execute_code")
+        if i != -1:
+            filtered_tools[i] = {"type": "function", "function": dynamic_schema}
 
-    # Rebuild discord / discord_admin schemas based on the bot's privileged
-    # intents (detected from GET /applications/@me) and the user's action
-    # allowlist in config.  Hides actions the bot's intents don't support so
-    # the model never attempts them, and annotates fetch_messages when the
-    # MESSAGE_CONTENT intent is missing.
+    # discord / discord_admin: schema depends on the bot's privileged intents
+    # and the config action allowlist; a None schema drops the tool entirely.
     _discord_schema_fns = {
         "discord": "get_dynamic_schema_core",
         "discord_admin": "get_dynamic_schema_admin",
     }
-    for discord_tool_name in _discord_schema_fns:
+    for discord_tool_name, schema_fn_name in _discord_schema_fns.items():
         if discord_tool_name in available_tool_names:
             try:
                 from tools import discord_tool as _dt
-                schema_fn = getattr(_dt, _discord_schema_fns[discord_tool_name])
-                dynamic = schema_fn()
+                dynamic = getattr(_dt, schema_fn_name)()
             except Exception:
                 dynamic = None
             if dynamic is None:
-                filtered_tools = [
-                    t for t in filtered_tools
-                    if t.get("function", {}).get("name") != discord_tool_name
-                ]
-                available_tool_names.discard(discord_tool_name)
+                filtered_tools = _drop_tool(filtered_tools, available_tool_names, discord_tool_name)
             else:
-                for i, td in enumerate(filtered_tools):
-                    if td.get("function", {}).get("name") == discord_tool_name:
-                        filtered_tools[i] = {"type": "function", "function": dynamic}
-                        break
+                i = _find_tool(filtered_tools, discord_tool_name)
+                if i != -1:
+                    filtered_tools[i] = {"type": "function", "function": dynamic}
 
-    # Strip web tool cross-references from browser_navigate description when
-    # web_search / web_extract are not available.  The static schema says
-    # "prefer web_search or web_extract" which causes the model to hallucinate
-    # those tools when they're missing.
-    if "browser_navigate" in available_tool_names:
-        web_tools_available = {"web_search", "web_extract"} & available_tool_names
-        if not web_tools_available:
-            for i, td in enumerate(filtered_tools):
-                if td.get("function", {}).get("name") == "browser_navigate":
-                    desc = td["function"].get("description", "")
-                    desc = desc.replace(
-                        " For simple information retrieval, prefer web_search or web_extract (faster, cheaper).",
-                        "",
-                    )
-                    filtered_tools[i] = {
-                        "type": "function",
-                        "function": {**td["function"], "description": desc},
-                    }
-                    break
+    # browser_navigate: drop the "prefer web_search or web_extract" hint when
+    # neither web tool is present (otherwise the model hallucinates them).
+    if "browser_navigate" in available_tool_names and not ({"web_search", "web_extract"} & available_tool_names):
+        i = _find_tool(filtered_tools, "browser_navigate")
+        if i != -1:
+            td = filtered_tools[i]
+            desc = td["function"].get("description", "").replace(
+                " For simple information retrieval, prefer web_search or web_extract (faster, cheaper).",
+                "",
+            )
+            filtered_tools[i] = {
+                "type": "function",
+                "function": {**td["function"], "description": desc},
+            }
 
-    # browser_exec (Browser Use mode) runs arbitrary Python on the host via
-    # the browser-use CLI subprocess.  A session whose toolset selection
-    # excludes the terminal surface (e.g. a messaging platform configured
-    # without terminal access) must not regain host code execution through
-    # the browser toolset — that would silently widen the operator's chosen
-    # security posture.  Session-level gate, NOT a check_fn: check_fn results
-    # are TTL-cached process-wide while one gateway process serves many
-    # sessions with different toolset configs.
+    # browser_exec runs arbitrary host Python; a session without the terminal
+    # surface must not regain host execution through the browser toolset.
+    # Session-level gate (not a check_fn: those are TTL-cached process-wide
+    # while one gateway serves sessions with different toolsets).
     if "browser_exec" in available_tool_names and "terminal" not in available_tool_names:
-        filtered_tools = [
-            td for td in filtered_tools
-            if td.get("function", {}).get("name") != "browser_exec"
-        ]
-        available_tool_names.discard("browser_exec")
+        filtered_tools = _drop_tool(filtered_tools, available_tool_names, "browser_exec")
 
-    # delegate_task's child-restrictions rule names sibling tools (clarify,
-    # memory, cronjob). Warning about tools this session doesn't even have
-    # teaches ghost vocabulary — filter the list to tools actually present
-    # and drop the line entirely when none apply. Two source variants exist
-    # (depth-derived): the depth-off line also names delegate_task itself;
-    # the depth-on line lists only the siblings. Pattern order matters —
-    # the sibling list is a substring of the full list.
-    # Same session-level seam as the browser_exec gate above.
+    # delegate_task's child-restrictions line names sibling tools (clarify,
+    # memory, cronjob). Trim it to tools actually present, or drop the line
+    # when none apply, so the model never learns ghost vocabulary. Two source
+    # variants exist (depth-off also names delegate_task itself); test the
+    # longer one first because the sibling list is a substring of it.
     if "delegate_task" in available_tool_names:
         blocked_present = [
             t for t in ("clarify", "memory", "cronjob_manage") if t in available_tool_names
         ]
-        if len(blocked_present) < 3:
+        i = _find_tool(filtered_tools, "delegate_task")
+        if len(blocked_present) < 3 and i != -1:
+            td = filtered_tools[i]
+            fn = td.get("function", {})
+            desc = fn.get("description", "")
             full_offvariant = "delegate_task, clarify, memory, or cronjob"
             full_onvariant = "clarify, memory, or cronjob"
-            for i, td in enumerate(filtered_tools):
-                fn = td.get("function", {})
-                desc = fn.get("description", "")
-                if fn.get("name") != "delegate_task":
-                    continue
-                if full_offvariant in desc:
-                    full, keep_self = full_offvariant, True
-                elif full_onvariant in desc:
-                    full, keep_self = full_onvariant, False
-                else:
-                    break
+            if full_offvariant in desc:
+                full, keep_self = full_offvariant, True
+            elif full_onvariant in desc:
+                full, keep_self = full_onvariant, False
+            else:
+                full = None
+            if full is not None:
                 names = (["delegate_task"] if keep_self else []) + blocked_present
                 if blocked_present:
                     if len(names) == 1:
@@ -628,8 +485,7 @@ def _compute_tool_definitions(
                         replacement = ", ".join(names[:-1]) + ", or " + names[-1]
                     desc = desc.replace(full, replacement)
                 else:
-                    # No sibling tools here — drop the restriction line
-                    # (both variants end at the following "\n").
+                    # Both variants end at the following newline.
                     start = desc.find("- Children cannot call " + full)
                     if start != -1:
                         end = desc.index("\n", start) + 1
@@ -638,7 +494,6 @@ def _compute_tool_definitions(
                     **td,
                     "function": {**fn, "description": desc},
                 }
-                break
 
     if not quiet_mode:
         if filtered_tools:
@@ -650,36 +505,25 @@ def _compute_tool_definitions(
     global _last_resolved_tool_names
     _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
 
-    # Sanitize schemas for broad backend compatibility. llama.cpp's
-    # json-schema-to-grammar converter (used by its OAI server to build
-    # GBNF tool-call parsers) rejects some shapes that cloud providers
-    # silently accept — bare "type": "object" with no properties,
-    # string-valued schema nodes from malformed MCP servers, etc. This
-    # is a no-op for schemas that are already well-formed.
+    # Normalize schema shapes llama.cpp's grammar converter rejects (bare
+    # "type": "object", string-valued nodes from malformed MCP servers).
     try:
         from tools.schema_sanitizer import sanitize_tool_schemas
         filtered_tools = sanitize_tool_schemas(filtered_tools)
     except Exception as e:  # pragma: no cover — defensive
         logger.warning("Schema sanitization skipped: %s", e)
 
-    # ── Tool Search (progressive disclosure) ────────────────────────────
-    # Conditionally replace MCP + plugin (non-core) tools with three bridge
-    # tools (tool_search / tool_describe / tool_call) when the deferrable
-    # surface exceeds the configured threshold (default 10% of context
-    # window). Core Hermes tools (toolsets._HERMES_CORE_TOOLS) are NEVER
-    # deferred. See tools/tool_search.py for full design notes.
-    #
-    # This is deliberately the last step before returning — sanitization
-    # has already normalized schemas, and the assembly is idempotent in
-    # case some caller invokes get_tool_definitions twice.
+    # Tool Search (progressive disclosure): replace MCP/plugin tools with the
+    # tool_search/describe/call bridge when the deferrable surface exceeds the
+    # configured share of the context window. Core tools are never deferred.
+    # Must be the LAST step (after sanitization); idempotent if called twice.
     try:
         from tools.tool_search import assemble_tool_defs, load_config as _load_ts_config
         ts_cfg = _load_ts_config()
         if not skip_tool_search_assembly and ts_cfg.enabled != "off":
-            context_length = _resolve_active_context_length()
             assembly = assemble_tool_defs(
                 filtered_tools,
-                context_length=context_length,
+                context_length=_resolve_active_context_length(),
                 config=ts_cfg,
             )
             if assembly.activated and not quiet_mode:
