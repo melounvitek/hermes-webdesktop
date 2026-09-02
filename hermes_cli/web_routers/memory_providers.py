@@ -8,6 +8,7 @@ import logging
 import math
 import re
 import shlex
+import asyncio
 from fastapi import APIRouter
 from fastapi import HTTPException
 from hermes_cli.web_models import MemoryProviderConfigUpdate, MemoryProviderSetupRequest
@@ -341,7 +342,6 @@ async def get_memory_provider_config(name: str, surface: Optional[str] = None, p
         _load_memory_provider,
         _memory_provider_setup_info,
         _profile_scope,
-        asyncio,
     )
     _require_valid_memory_provider_name(name)
 
@@ -403,7 +403,6 @@ async def update_memory_provider_config(
         _require_memory_provider_ready,
         _stringify_submitted_values,
         _update_memory_provider_config,
-        asyncio,
         load_config,
         save_config,
     )

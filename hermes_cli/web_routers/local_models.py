@@ -439,7 +439,7 @@ def local_models_hardware():
     """The budget as plain facts. Polled by the pane and the statusbar
     resource item (throttled client-side). Sync def on purpose: the body
     shells out to nvidia-smi and probes budgets — threadpool, not loop."""
-    from hermes_cli.local_runtime.hardware import probe_budget, _nvidia_vram, _ram_bytes
+    from hermes_cli.local_runtime.hardware import probe_budget, _ram_bytes
 
     budget = probe_budget()
     ram_total, ram_avail = _ram_bytes()

@@ -5,6 +5,7 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 """
 
 import logging
+import asyncio
 from fastapi import APIRouter
 from fastapi import HTTPException
 from hermes_cli.web_models import ModelAssignment, MoaModelSlot, MoaPresetPayload, MoaConfigPayload
@@ -401,7 +402,7 @@ async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = N
     The currently running chat PTY (if any) is not affected; use the
     ``/model`` slash command inside a chat to hot-swap that specific session.
     """
-    from hermes_cli.web_server import _apply_model_assignment_sync, _profile_scope, asyncio
+    from hermes_cli.web_server import _apply_model_assignment_sync, _profile_scope
     scope = (body.scope or "").strip().lower()
     provider = (body.provider or "").strip()
     model = (body.model or "").strip()

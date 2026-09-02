@@ -7,6 +7,10 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 import concurrent.futures
 import logging
 import re
+import asyncio
+import os
+import sys
+import time
 from fastapi import APIRouter
 from fastapi import HTTPException, Request
 from gateway.status import derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, parse_active_agents, resolve_gateway_liveness
@@ -150,7 +154,6 @@ async def get_status(profile: Optional[str] = None):
         get_runtime_status_running_pid,
         read_runtime_status,
         run_in_threadpool,
-        sys,
     )
     status_scope = None
     requested_profile = (profile or "").strip()
@@ -569,7 +572,7 @@ async def get_system_stats():
     psutil when available, with graceful degradation when it isn't.  Read-only
     and non-sensitive (no env values, no paths beyond the hermes home root).
     """
-    from hermes_cli.web_server import _display_system_platform, get_hermes_home, os, time
+    from hermes_cli.web_server import _display_system_platform, get_hermes_home
     import platform as _platform
 
     info: Dict[str, Any] = {
@@ -699,7 +702,7 @@ async def get_learning_graph(profile: Optional[str] = None):
     Profile-scoped view of learned, non-base skills plus memory chunks, with
     graph links derived from skill relations and memory-skill overlap.
     """
-    from hermes_cli.web_server import _profile_scope, asyncio
+    from hermes_cli.web_server import _profile_scope
     def _run():
         from agent.learning_graph import build_learning_graph
 
@@ -718,7 +721,7 @@ async def get_learning_graph(profile: Optional[str] = None):
 @router.get("/api/learning/node")
 async def get_learning_node(id: str, profile: Optional[str] = None):
     """Current content of a journey node (skill SKILL.md or memory chunk), for an edit prefill."""
-    from hermes_cli.web_server import _profile_scope, asyncio
+    from hermes_cli.web_server import _profile_scope
     from agent.learning_mutations import node_detail
 
     def _run():
@@ -734,7 +737,7 @@ async def get_learning_node(id: str, profile: Optional[str] = None):
 @router.delete("/api/learning/node")
 async def delete_learning_node(body: LearningNodeRef):
     """Delete a journey node — skills are archived (restorable), memories removed."""
-    from hermes_cli.web_server import _profile_scope, asyncio
+    from hermes_cli.web_server import _profile_scope
     from agent.learning_mutations import delete_node
 
     def _run():
@@ -750,7 +753,7 @@ async def delete_learning_node(body: LearningNodeRef):
 @router.put("/api/learning/node")
 async def update_learning_node(body: LearningNodeEdit):
     """Rewrite a journey node's content (SKILL.md or memory chunk)."""
-    from hermes_cli.web_server import _profile_scope, asyncio
+    from hermes_cli.web_server import _profile_scope
     from agent.learning_mutations import edit_node
 
     def _run():
@@ -780,7 +783,6 @@ def _safe_call(mod, fn_name: str, default):
 async def get_portal_status():
     # load_config() + auth/subscription snapshots are disk reads — this is a
     # polled endpoint, so keep them off the event loop.
-    from hermes_cli.web_server import asyncio
     def _run():
         return _get_portal_status_sync()
 
@@ -878,7 +880,6 @@ async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
     dashboard renders those as real, copyable links instead of scraping a log
     tail. Pastes auto-delete after 6 hours (handled inside the share core).
     """
-    from hermes_cli.web_server import asyncio
     from hermes_cli.debug import build_debug_share
 
     req = body or DebugShareRequest()

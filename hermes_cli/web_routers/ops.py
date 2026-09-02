@@ -8,6 +8,9 @@ import logging
 import re
 import tempfile
 import zipfile
+import asyncio
+import os
+import secrets
 from datetime import datetime, timezone
 from fastapi import APIRouter
 from fastapi import File, Form, HTTPException, UploadFile
@@ -512,7 +515,6 @@ async def get_memory_status():
     from hermes_cli.web_server import (
         _discover_memory_provider_statuses,
         _normalize_memory_provider_name,
-        asyncio,
         get_hermes_home,
         load_config,
     )
@@ -545,7 +547,6 @@ async def set_memory_provider(body: MemoryProviderSelect):
         _CONFIG_MUTATION_LOCK,
         _normalize_memory_provider_name,
         _require_memory_provider_ready,
-        asyncio,
         load_config,
         save_config,
     )
@@ -631,7 +632,6 @@ def _dashboard_backup_dir() -> Path:
 
 
 def _new_dashboard_backup_path() -> Path:
-    from hermes_cli.web_server import secrets
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     return _dashboard_backup_dir() / f"hermes-backup-{stamp}-{secrets.token_hex(4)}.zip"
 
@@ -691,7 +691,7 @@ async def download_dashboard_backup(archive: str):
 
 @router.post("/api/ops/import")
 async def run_import(body: ImportRequest):
-    from hermes_cli.web_server import _spawn_hermes_action, os
+    from hermes_cli.web_server import _spawn_hermes_action
     archive = (body.archive or "").strip()
     if not archive:
         raise HTTPException(status_code=400, detail="archive path is required")
@@ -727,8 +727,6 @@ async def run_import_upload(
         _MANAGED_FILE_MAX_BYTES,
         _UPLOAD_CHUNK_BYTES,
         _spawn_hermes_action,
-        os,
-        secrets,
     )
     staging_dir = _dashboard_backup_dir()
     try:
@@ -811,7 +809,6 @@ async def list_hooks():
     currently executable, plus the set of valid hook events so the create
     form can offer them.
     """
-    from hermes_cli.web_server import asyncio
     def _run():
         from hermes_cli.config import load_config as _load_config
         from agent import shell_hooks
@@ -864,7 +861,7 @@ async def create_hook(body: HookCreate):
     consent in the allowlist so the hook actually fires.  Takes effect on the
     next session / gateway restart.
     """
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, asyncio, load_config, save_config
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, load_config, save_config
     from agent import shell_hooks
 
     event = (body.event or "").strip()
@@ -920,7 +917,7 @@ async def create_hook(body: HookCreate):
 @router.delete("/api/ops/hooks")
 async def delete_hook(body: HookDelete):
     """Remove a hook from config.yaml and revoke its consent allowlist entry."""
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, asyncio, load_config, save_config
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, load_config, save_config
     from agent import shell_hooks
 
     event = (body.event or "").strip()
@@ -963,7 +960,7 @@ async def delete_hook(body: HookDelete):
 @router.get("/api/ops/checkpoints")
 async def list_checkpoints():
     """List the /rollback shadow store checkpoints (read-only)."""
-    from hermes_cli.web_server import get_hermes_home, os
+    from hermes_cli.web_server import get_hermes_home
     # Checkpoints live under <hermes_home>/checkpoints/.  Surface a count +
     # total size so the dashboard can show what a prune would reclaim; the
     # actual prune is a spawned action so confirmation/pruning logic stays

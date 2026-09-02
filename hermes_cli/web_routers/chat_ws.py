@@ -7,6 +7,7 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 import asyncio
 import functools
 import logging
+import json
 from fastapi import APIRouter
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from hermes_cli.pty_session import RegistryFull
@@ -188,7 +189,6 @@ async def _console_send_result(
 
 
 def _console_json_payload(msg: Any) -> tuple[Optional[dict[str, Any]], Optional[str]]:
-    from hermes_cli.web_server import json
     raw: str | bytes | None = msg.get("text")
     if raw is None:
         raw = msg.get("bytes")

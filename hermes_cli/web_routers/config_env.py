@@ -6,6 +6,9 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 
 import logging
 import re
+import asyncio
+import time
+import urllib.parse
 from fastapi import APIRouter
 from fastapi import HTTPException, Request
 from hermes_cli.config import DEFAULT_CONFIG, OPTIONAL_ENV_VARS, read_raw_config, custom_endpoint_key_env, coerce_provider_id, find_provider_entry, redact_key, _deep_merge
@@ -24,12 +27,7 @@ async def get_config(profile: Optional[str] = None):
     # froze the whole gateway for >1s (observed via the loop watchdog).
     # asyncio.to_thread copies the contextvar context, so the profile
     # override stays scoped to the worker thread.
-    from hermes_cli.web_server import (
-        _normalize_config_for_web,
-        _profile_scope,
-        asyncio,
-        load_config,
-    )
+    from hermes_cli.web_server import _normalize_config_for_web, _profile_scope, load_config
     def _run():
         with _profile_scope(profile):
             return _normalize_config_for_web(load_config())
@@ -76,7 +74,6 @@ async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
         _denormalize_config_from_web,
         _is_other_profile,
         _profile_scope,
-        asyncio,
         save_config,
     )
     def _run():
@@ -230,7 +227,6 @@ def _catalog_provider_env_metadata() -> dict:
 async def get_env_vars(profile: Optional[str] = None):
     # _profile_scope takes _SKILLS_PROFILE_LOCK and load_env()/catalog
     # discovery read from disk — keep the whole build off the event loop.
-    from hermes_cli.web_server import asyncio
     return await asyncio.to_thread(_get_env_vars_sync, profile)
 
 
@@ -299,7 +295,7 @@ def _get_env_vars_sync(profile: Optional[str] = None):
 
 @router.put("/api/env")
 async def set_env_var(body: EnvVarUpdate, profile: Optional[str] = None):
-    from hermes_cli.web_server import _profile_scope, asyncio
+    from hermes_cli.web_server import _profile_scope
     def _run():
         with _profile_scope(body.profile or profile):
             # Unified credential lifecycle: writes .env AND reconciles any
@@ -472,12 +468,7 @@ def _detach_main_model_from_provider(cfg: Dict[str, Any], provider_key: str) -> 
 
 
 def _write_custom_endpoint(cfg: Dict[str, Any], body: CustomEndpointUpdate) -> Tuple[str, Dict[str, Any]]:
-    from hermes_cli.web_server import (
-        _apply_main_model_assignment,
-        remove_env_value,
-        save_env_value,
-        urllib,
-    )
+    from hermes_cli.web_server import _apply_main_model_assignment, remove_env_value, save_env_value
     endpoint_id = _custom_endpoint_id(body.id or body.name)
     name = (body.name or "").strip()
     base_url = (body.base_url or "").strip().rstrip("/")
@@ -795,7 +786,7 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
 
 @router.delete("/api/env")
 async def remove_env_var(body: EnvVarDelete, profile: Optional[str] = None):
-    from hermes_cli.web_server import _profile_scope, asyncio
+    from hermes_cli.web_server import _profile_scope
     def _run():
         with _profile_scope(body.profile or profile):
             # Unified credential lifecycle: clears the .env entry AND every
@@ -842,9 +833,7 @@ async def reveal_env_var(
         _profile_scope,
         _require_token,
         _reveal_timestamps,
-        asyncio,
         load_env,
-        time,
     )
     # --- Token check ---
     _require_token(request)

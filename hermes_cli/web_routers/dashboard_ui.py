@@ -5,6 +5,7 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 """
 
 import logging
+import asyncio
 from fastapi import APIRouter
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse
@@ -28,7 +29,6 @@ async def get_dashboard_themes():
     from hermes_cli.web_server import (
         _BUILTIN_DASHBOARD_THEMES,
         _discover_user_themes,
-        asyncio,
         cfg_get,
         load_config,
     )
@@ -59,7 +59,7 @@ async def get_dashboard_themes():
 @router.put("/api/dashboard/theme")
 async def set_dashboard_theme(body: ThemeSetBody):
     """Set the active dashboard theme (persists to config.yaml)."""
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, asyncio, load_config, save_config
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, load_config, save_config
     def _run():
         with _CONFIG_MUTATION_LOCK:
             config = load_config()
@@ -91,7 +91,7 @@ _FONT_CHOICES = frozenset({
 @router.get("/api/dashboard/font")
 async def get_dashboard_font():
     """Return the active font override (``"theme"`` = use the theme's font)."""
-    from hermes_cli.web_server import asyncio, cfg_get, load_config
+    from hermes_cli.web_server import cfg_get, load_config
     def _run():
         config = load_config()
         font = cfg_get(config, "dashboard", "font", default=_FONT_DEFAULT_ID)
@@ -111,7 +111,7 @@ async def set_dashboard_font(body: FontSetBody):
     coerced to ``"theme"`` rather than 400'd so a stale client can't wedge
     the picker.
     """
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, asyncio, load_config, save_config
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, load_config, save_config
     font = body.font if body.font in _FONT_CHOICES else _FONT_DEFAULT_ID
 
     def _run():
@@ -129,7 +129,7 @@ async def set_dashboard_font(body: FontSetBody):
 @router.get("/api/dashboard/plugins")
 async def get_dashboard_plugins():
     """Return discovered dashboard plugins (excludes user-hidden and non-enabled ones)."""
-    from hermes_cli.web_server import _get_dashboard_plugins, asyncio, cfg_get, load_config
+    from hermes_cli.web_server import _get_dashboard_plugins, cfg_get, load_config
     def _run():
         plugins = _get_dashboard_plugins()
         # Read user's hidden plugins list from config.
@@ -301,7 +301,6 @@ async def put_plugin_providers(request: Request, body: _PluginProvidersPutBody):
         _normalize_memory_provider_name,
         _require_memory_provider_ready,
         _require_token,
-        asyncio,
     )
     _require_token(request)
     from hermes_cli.plugins_cmd import (
@@ -330,7 +329,6 @@ async def post_plugin_visibility(request: Request, name: str, body: _PluginVisib
         _CONFIG_MUTATION_LOCK,
         _invalidate_plugins_hub_cache,
         _require_token,
-        asyncio,
         load_config,
         save_config,
     )

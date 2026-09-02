@@ -8,6 +8,11 @@ import logging
 import re
 import subprocess
 import threading
+import asyncio
+import json
+import secrets
+import time
+import urllib.parse
 from datetime import datetime, timezone
 from fastapi import APIRouter
 from fastapi import HTTPException
@@ -58,7 +63,6 @@ def _whatsapp_phone_from_identifier(value: Any) -> str | None:
 
 
 def _whatsapp_linked_account_from_session(session_path: Path) -> tuple[str | None, str | None, str | None]:
-    from hermes_cli.web_server import json
     creds_path = session_path / "creds.json"
     try:
         payload = json.loads(creds_path.read_text(encoding="utf-8"))
@@ -93,7 +97,6 @@ def _whatsapp_linked_account_from_session(session_path: Path) -> tuple[str | Non
 
 def _ensure_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
     """Install bridge dependencies when the dashboard is the setup surface."""
-    from hermes_cli.web_server import subprocess
     if (bridge_dir / "node_modules").exists():
         return
 
@@ -204,7 +207,7 @@ def _terminate_whatsapp_pairing(proc: subprocess.Popen | None) -> None:
 
 
 def _watch_whatsapp_pairing(pairing_id: str, proc: subprocess.Popen) -> None:
-    from hermes_cli.web_server import _whatsapp_onboarding_sessions, json
+    from hermes_cli.web_server import _whatsapp_onboarding_sessions
     try:
         stream = proc.stdout
         if stream is not None:
@@ -295,7 +298,7 @@ def _run_whatsapp_pairing(pairing_id: str, session_path: Path, mode: str) -> Non
 
 
 def _prune_whatsapp_onboarding_sessions() -> None:
-    from hermes_cli.web_server import _whatsapp_onboarding_sessions, time
+    from hermes_cli.web_server import _whatsapp_onboarding_sessions
     now = time.time()
     remove_ids: list[str] = []
     for pairing_id, record in _whatsapp_onboarding_sessions.items():
@@ -333,8 +336,6 @@ async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart):
         _whatsapp_onboarding_payload,
         _whatsapp_onboarding_sessions,
         _whatsapp_session_path,
-        secrets,
-        time,
     )
     mode = _normalize_whatsapp_onboarding_mode(body.mode)
     allowed_users = _normalize_whatsapp_allowed_users(body.allowed_users)
@@ -482,7 +483,6 @@ async def cancel_whatsapp_onboarding(pairing_id: str):
 
 
 def _parse_expiry_ts(value: str) -> float:
-    from hermes_cli.web_server import time
     try:
         normalized = value.replace("Z", "+00:00")
         parsed = datetime.fromisoformat(normalized)
@@ -494,7 +494,7 @@ def _parse_expiry_ts(value: str) -> float:
 
 
 def _prune_telegram_onboarding_pairings() -> None:
-    from hermes_cli.web_server import _telegram_onboarding_pairings, time
+    from hermes_cli.web_server import _telegram_onboarding_pairings
     now = time.time()
     expired = [
         pairing_id
@@ -520,7 +520,7 @@ async def _telegram_onboarding_request(
     body: dict[str, Any] | None = None,
     bearer_token: str | None = None,
 ) -> dict[str, Any]:
-    from hermes_cli.web_server import _telegram_onboarding_request_sync, asyncio
+    from hermes_cli.web_server import _telegram_onboarding_request_sync
     return await asyncio.to_thread(
         _telegram_onboarding_request_sync,
         method,
@@ -579,7 +579,6 @@ async def get_telegram_onboarding_status(pairing_id: str):
         _telegram_onboarding_error_message,
         _telegram_onboarding_lock,
         _telegram_onboarding_pairings,
-        urllib,
     )
     with _telegram_onboarding_lock:
         _prune_telegram_onboarding_pairings()
@@ -691,7 +690,6 @@ async def apply_telegram_onboarding(
         _telegram_onboarding_lock,
         _telegram_onboarding_pairings,
         _write_platform_enabled,
-        asyncio,
         save_env_value,
     )
     allowed_user_ids = []
@@ -783,7 +781,6 @@ async def get_messaging_platforms(profile: Optional[str] = None):
         _messaging_platform_catalog,
         _messaging_platform_payload,
         _profile_scope,
-        asyncio,
         load_env,
         read_runtime_status,
     )
@@ -874,7 +871,6 @@ async def update_messaging_platform(
         _profile_scope,
         _validate_messaging_env_value,
         _write_platform_enabled,
-        asyncio,
         remove_env_value,
         save_env_value,
     )
@@ -951,7 +947,6 @@ async def test_messaging_platform(platform_id: str, profile: Optional[str] = Non
         _catalog_lookup,
         _messaging_platform_payload,
         _profile_scope,
-        asyncio,
         load_env,
         read_runtime_status,
     )

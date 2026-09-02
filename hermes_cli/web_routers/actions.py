@@ -5,6 +5,9 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 """
 
 import logging
+import asyncio
+import secrets
+import subprocess
 from fastapi import APIRouter
 from fastapi import HTTPException, Request
 from hermes_cli import __version__
@@ -117,7 +120,6 @@ async def update_hermes():
         _dashboard_local_update_managed_externally,
         _record_completed_action,
         _spawn_hermes_action,
-        secrets,
     )
     if _dashboard_local_update_managed_externally():
         message = (
@@ -207,7 +209,7 @@ def _recent_upstream_commits(n: int = 20) -> List[Dict[str, Any]]:
     Best-effort: returns [] if not a git checkout, origin/main is unreachable,
     or git is unavailable. Never raises into the request path.
     """
-    from hermes_cli.web_server import PROJECT_ROOT, subprocess
+    from hermes_cli.web_server import PROJECT_ROOT
     try:
         out = subprocess.run(
             [
@@ -279,7 +281,6 @@ async def check_hermes_update(force: bool = False):
     from hermes_cli.web_server import (
         PROJECT_ROOT,
         _dashboard_local_update_managed_externally,
-        asyncio,
         detect_install_method,
         get_hermes_home,
     )

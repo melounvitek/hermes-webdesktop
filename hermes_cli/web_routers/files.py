@@ -11,6 +11,11 @@ import os
 import re
 import stat
 import tempfile
+import asyncio
+import secrets
+import shutil
+import subprocess
+import sys
 from datetime import datetime
 from fastapi import APIRouter
 from fastapi import File, Form, HTTPException, Request, UploadFile
@@ -205,7 +210,7 @@ def _fs_find_git_root(start: Path) -> str | None:
 
 
 def _fs_default_cwd() -> str:
-    from hermes_cli.web_server import load_config, os
+    from hermes_cli.web_server import load_config
     cfg_terminal = load_config().get("terminal") or {}
     raw = str(cfg_terminal.get("cwd") or os.environ.get("TERMINAL_CWD") or "").strip()
     if raw and raw not in {".", "auto", "cwd"}:
@@ -219,7 +224,6 @@ def _fs_default_cwd() -> str:
 
 
 def _fs_git_branch(cwd: str) -> str:
-    from hermes_cli.web_server import subprocess, sys
     try:
         run_kwargs: Dict[str, Any] = {
             "capture_output": True,
@@ -377,7 +381,7 @@ async def upload_chat_image(payload: ChatImageUpload, profile: Optional[str] = N
     ``HERMES_HOME/images/`` — the same directory ``clipboard.paste`` /
     ``image.attach`` already use.
     """
-    from hermes_cli.web_server import _profile_scope, asyncio, get_hermes_home, secrets
+    from hermes_cli.web_server import _profile_scope, get_hermes_home
     def _run():
         data, mime_type, ext = _decode_chat_image_upload(payload)
         with _profile_scope(profile) as scoped_home:
@@ -422,7 +426,6 @@ async def list_managed_files(request: Request, path: Optional[str] = None):
         _managed_file_entry,
         _managed_response_meta,
         _resolve_managed_path,
-        os,
     )
     policy, target, display_path = _resolve_managed_path(path, request)
     if not target.exists():
@@ -623,7 +626,6 @@ async def upload_managed_file_stream(
         _managed_file_entry,
         _managed_response_meta,
         _resolve_managed_path,
-        os,
     )
     policy, target, display_path = _resolve_managed_path(path, request, for_write=True)
     if target.exists() and target.is_dir():
@@ -710,7 +712,7 @@ async def create_managed_directory(payload: ManagedDirectoryCreate, request: Req
 
 @router.delete("/api/files")
 async def delete_managed_file(payload: ManagedFileDelete, request: Request):
-    from hermes_cli.web_server import _managed_response_meta, _resolve_managed_path, shutil
+    from hermes_cli.web_server import _managed_response_meta, _resolve_managed_path
     policy, target, display_path = _resolve_managed_path(payload.path, request)
     if policy.locked_root is not None and target == policy.locked_root:
         raise HTTPException(status_code=400, detail="Cannot delete the managed files root")
@@ -736,7 +738,7 @@ async def delete_managed_file(payload: ManagedFileDelete, request: Request):
 
 @router.get("/api/fs/list")
 async def fs_list(path: str):
-    from hermes_cli.web_server import _FS_READDIR_HIDDEN, _fs_path, os
+    from hermes_cli.web_server import _FS_READDIR_HIDDEN, _fs_path
     target = _fs_path(path)
     try:
         entries = []
@@ -798,7 +800,7 @@ async def fs_write_text(payload: FsWriteText):
     original. Stale-on-disk detection is the client's job (re-read before save),
     so both transports behave identically.
     """
-    from hermes_cli.web_server import _fs_path, os
+    from hermes_cli.web_server import _fs_path
     target = _fs_path(payload.path)
     text = payload.content or ""
     if len(text.encode("utf-8")) > _FS_TEXT_WRITE_MAX_BYTES:

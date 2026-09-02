@@ -9,15 +9,11 @@ Usage:
     python -m hermes_cli.main web --port 8080
 """
 
-import contextlib
 from contextlib import asynccontextmanager, contextmanager
 
 import asyncio
 import atexit
-import base64
-import binascii
 import concurrent.futures
-import functools
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,30 +24,25 @@ import importlib.util
 import ipaddress
 import json
 import logging
-import math
 import mimetypes
 import os
-import queue
 import re
 import secrets
 import shlex
 import shutil
-import stat
 import subprocess
 import sys
 import sysconfig
 import tempfile
 import threading
 import time
-import urllib.error
 import urllib.parse
-import zipfile
 
-from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
+from hermes_cli._subprocess_compat import windows_detach_flags
 from hermes_cli.install_identity import get_install_id as _shared_get_install_id
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -59,50 +50,38 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from hermes_cli import __version__, __release_date__
+from hermes_cli import __version__
 from hermes_cli.config import (
     build_cron_model_impact,
     cfg_get,
     DEFAULT_CONFIG,
     OPTIONAL_ENV_VARS,
     clear_model_endpoint_credentials,
-    get_config_path,
-    get_env_path,
     get_hermes_home,
     get_process_hermes_home,
     load_config,
+    # Late-bound by extracted routers (tests monkeypatch web_server.<name>).
+    check_config_version,  # noqa: F401
+    remove_env_value,  # noqa: F401
     load_env,
     read_raw_config,
     resolve_cron_model_drift_defaults,
     save_config,
     save_env_value,
-    remove_env_value,
-    custom_endpoint_key_env,
-    coerce_provider_id,
     find_provider_entry,
-    check_config_version,
     detect_install_method,
-    format_docker_update_message,
-    is_nix_install_method,
-    recommended_update_command_for_method,
     redact_key,
     write_platform_config_field,
-    _deep_merge,
 )
 from plugins.memory.config_schema import (
     ProviderConfigSchema,
     ProviderField,
     STORAGE_HONCHO_HOST_BLOCK,
-    get_provider_config_schema,
 )
 from gateway.status import (
-    derive_gateway_busy,
-    derive_gateway_drainable,
+    get_running_pid,  # noqa: F401 — tests monkeypatch web_server.get_running_pid
     get_running_pid_cached,
-    get_running_pid,
     get_runtime_status_running_pid,
-    normalize_updated_at,
-    parse_active_agents,
     read_runtime_status,
     resolve_gateway_liveness,
 )
@@ -126,13 +105,11 @@ except ImportError:
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("tool.dashboard", prompt=False)
         from fastapi import (
-            FastAPI, File, Form, HTTPException, Query, Request, UploadFile,
-            WebSocket, WebSocketDisconnect,
+            FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect,
         )
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
         from fastapi.staticfiles import StaticFiles
-        from pydantic import BaseModel, SecretStr, field_validator
         from starlette.concurrency import run_in_threadpool
     except Exception:
         raise SystemExit(
@@ -2534,7 +2511,6 @@ _UPLOAD_CHUNK_BYTES = 1024 * 1024
 # these are thin, executor-offloaded wrappers (git/gh can block).
 # ---------------------------------------------------------------------------
 
-from hermes_cli import web_git as _web_git  # noqa: E402
 
 
 async def _git_op(fn, *args):
@@ -9479,7 +9455,7 @@ _PTY_IDLE_BACKOFF = 0.05
 
 # Keep-alive PTY sessions: a terminal connecting with ``?attach=<token>`` is
 # bound to a process that survives disconnect/refresh and is reattachable.
-from hermes_cli.pty_session import PtySessionRegistry, RegistryFull, run_reaper  # noqa: E402
+from hermes_cli.pty_session import PtySessionRegistry, run_reaper  # noqa: E402
 
 PTY_REGISTRY = PtySessionRegistry(
     ttl=30 * 60,

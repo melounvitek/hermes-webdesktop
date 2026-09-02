@@ -5,6 +5,9 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 """
 
 import logging
+import asyncio
+import sys
+import time
 from fastapi import APIRouter
 from fastapi import HTTPException, Request
 from hermes_cli.web_models import OAuthSubmitBody
@@ -29,7 +32,6 @@ def _oauth_provider_disconnect_command(provider: Dict[str, Any]) -> Optional[str
     file — the two sources ``read_claude_code_credentials()`` consults. Returns
     None for providers we can't safely clear (the GUI shows a manual hint).
     """
-    from hermes_cli.web_server import sys
     if provider.get("flow") != "external":
         return None
     if provider.get("id") == "claude-code":
@@ -135,12 +137,7 @@ async def list_oauth_providers(profile: Optional[str] = None):
     sync with the `hermes model` picker; _OAUTH_OVERRIDES supplies per-provider
     flow/status/cli metadata.
     """
-    from hermes_cli.web_server import (
-        _external_process_cli_command,
-        _profile_scope,
-        _resolve_provider_status,
-        asyncio,
-    )
+    from hermes_cli.web_server import _external_process_cli_command, _profile_scope, _resolve_provider_status
     def _run():
         with _profile_scope(profile):
             providers = []
@@ -170,12 +167,7 @@ async def disconnect_oauth_provider(
     profile: Optional[str] = None,
 ):
     """Disconnect an OAuth provider. Token-protected (matches /env/reveal)."""
-    from hermes_cli.web_server import (
-        _profile_scope,
-        _require_token,
-        _resolve_provider_status,
-        asyncio,
-    )
+    from hermes_cli.web_server import _profile_scope, _require_token, _resolve_provider_status
     _require_token(request)
 
     def _run():
@@ -276,7 +268,7 @@ _OAUTH_SESSION_TTL_SECONDS = 15 * 60
 
 def _gc_oauth_sessions() -> None:
     """Drop expired sessions. Called opportunistically on /start."""
-    from hermes_cli.web_server import _oauth_sessions, _oauth_sessions_lock, time
+    from hermes_cli.web_server import _oauth_sessions, _oauth_sessions_lock
     cutoff = time.time() - _OAUTH_SESSION_TTL_SECONDS
     with _oauth_sessions_lock:
         stale = [sid for sid, sess in _oauth_sessions.items() if sess["created_at"] < cutoff]

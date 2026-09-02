@@ -5,6 +5,8 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 """
 
 import yaml
+import asyncio
+import time
 from fastapi import APIRouter
 from fastapi import HTTPException, Query
 from hermes_cli.config import get_config_path, read_raw_config
@@ -40,7 +42,7 @@ async def get_config_raw(profile: Optional[str] = None):
     ``config_path`` is machine-global and always reports the dashboard
     process's own profile, which is wrong under the global profile switcher.
     """
-    from hermes_cli.web_server import _profile_scope, asyncio
+    from hermes_cli.web_server import _profile_scope
     def _run():
         with _profile_scope(profile):
             path = get_config_path()
@@ -58,7 +60,6 @@ async def update_config_raw(body: RawConfigUpdate, profile: Optional[str] = None
         _broadcast_gateway_session_info,
         _is_other_profile,
         _profile_scope,
-        asyncio,
         save_config,
     )
     def _run():
@@ -88,7 +89,6 @@ def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
         _aux_usage_rows,
         _merge_aux_into_by_model,
         _open_session_db_for_profile,
-        time,
     )
     from agent.insights import InsightsEngine
 
@@ -170,7 +170,6 @@ async def get_usage_analytics(
     values would force expensive full-history SQL and InsightsEngine work, or
     produce empty/inverted time windows. The UI only offers 7/30/90-day
     presets."""
-    from hermes_cli.web_server import asyncio
     return await asyncio.to_thread(_get_usage_analytics, days, profile)
 
 
@@ -180,7 +179,7 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
     Returns token/cost/session breakdown per model plus capability metadata
     from models.dev (context window, vision, tools, reasoning, etc.).
     """
-    from hermes_cli.web_server import _aux_usage_rows, _open_session_db_for_profile, time
+    from hermes_cli.web_server import _aux_usage_rows, _open_session_db_for_profile
     db = _open_session_db_for_profile(profile, read_only=True)
     try:
         cutoff = time.time() - (days * 86400)
@@ -358,5 +357,4 @@ async def get_models_analytics(
 ):
     # ``days`` clamped to 1-365 (idea from #74778) — see get_usage_analytics.
     """Return model analytics without blocking the serving event loop."""
-    from hermes_cli.web_server import asyncio
     return await asyncio.to_thread(_get_models_analytics, days, profile)
