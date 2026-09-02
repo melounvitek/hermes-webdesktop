@@ -4449,27 +4449,17 @@ class _StreamingCall:
     def _call_anthropic(self, request_client):
         """Stream an Anthropic Messages API response.
 
-        Fires delta callbacks for real-time token delivery, but returns
-        the native Anthropic Message object from get_final_message() so
-        the rest of the agent loop (validation, tool extraction, etc.)
-        works unchanged.
-
-        Uses ``request_client`` (a per-request Anthropic client registered with
-        the stranger-thread abort machinery) rather than the shared
-        ``_anthropic_client``, so the stale/interrupt watchdog can abort this
-        stream's socket without closing the shared client mid-flight (#67142).
+        Fires delta callbacks but returns the native Message from
+        get_final_message() so the rest of the loop is unchanged. Runs on the
+        per-request ``request_client`` (registered with the abort machinery)
+        so the watchdog can abort this socket without closing the shared
+        client mid-flight (#67142).
         """
         has_tool_use = False
-        # Zero-event guard parity with the chat_completions path: track
-        # whether the provider delivered ANY stream event. On an eventless
-        # stream the real Anthropic SDK's get_final_message() raises
-        # AssertionError (no message_start ⇒ no final-message snapshot);
-        # OpenAI-compat shims may instead fabricate a contentless Message
-        # with no stop_reason, or return None under ``python -O`` (assert
-        # stripped). Every one of those shapes is normalized below to
-        # EmptyStreamError so the shared _call() retry loop treats it as
-        # transient instead of surfacing a raw AssertionError or a
-        # fabricated "successful" empty turn.
+        # Eventless stream: the real SDK's get_final_message() raises
+        # AssertionError (no message_start); shims may fabricate a contentless
+        # Message with no stop_reason, or return None under ``python -O``.
+        # All are normalized to EmptyStreamError so _call() retries.
         saw_stream_event = False
 
         self.last_chunk_time["t"] = time.time()
@@ -4496,9 +4486,8 @@ class _StreamingCall:
 
         def _anthropic_stream_created(raw_stream: Any) -> None:
             _stream_context["stream"] = raw_stream
-            # The Anthropic SDK exposes the raw httpx response on
-            # ``stream.response``. Snapshot diagnostics immediately so they
-            # survive a stream that dies before the first event.
+            # Snapshot ``stream.response`` diagnostics now so they survive a
+            # stream that dies before the first event.
             try:
                 self.agent._stream_diag_capture_response(
                     _diag,
@@ -4598,22 +4587,13 @@ class _StreamingCall:
         def _tool_use_dropped_mid_stream(message) -> bool:
             """True when the stream died mid tool call (#80498 sibling).
 
-            Mirror of the chat_completions zero-byte/truncated-args gate: a
-            legitimate completion always carries a ``stop_reason``
-            (``tool_use``/``end_turn``/...), so a message that contains a
-            ``tool_use`` block but NO stop_reason means the SSE closed after
-            ``content_block_start`` and before ``message_delta`` — the
-            block's ``input`` is whatever partial state the SDK snapshot
-            accumulated (typically ``{}`` when no ``input_json_delta`` ever
-            arrived). Without this gate the empty-input call passed the
-            empty-stream guards (content is non-empty) and executed the tool
-            with no arguments and no retry. Raising EmptyStreamError blocks
-            that execution on every path; when no assistant text streamed
-            before the drop it additionally rides the bounded stream-retry
-            the eventless case uses (probe-verified recovery), while a
-            drop after streamed preamble text degrades to the
-            partial-stream-stub/continuation path instead — still never an
-            empty-args execution.
+            A legitimate completion always has a ``stop_reason``; a
+            ``tool_use`` block with none means the SSE closed between
+            ``content_block_start`` and ``message_delta`` and its ``input`` is
+            a partial snapshot (usually ``{}``). Raising EmptyStreamError
+            blocks the empty-args execution on every path: no streamed text
+            -> bounded stream retry; text already streamed -> partial-stream
+            stub / continuation.
             """
             if getattr(message, "stop_reason", None) is not None:
                 return False
@@ -4664,21 +4644,17 @@ class _StreamingCall:
         try:
             for _stream_attempt in range(_max_stream_retries + 1):
                 stream_attempt_id = self._start_stream_attempt()
-                # Check for interrupt before each retry attempt.  Without
-                # this, /stop closes the HTTP connection (outer poll loop),
-                # but the retry loop opens a FRESH connection — negating the
-                # interrupt entirely.  On slow providers (ollama-cloud) each
-                # retry can block for the full stream-read timeout (120s+),
-                # causing multi-minute delays between /stop and response.
+                # Interrupt check before each retry: otherwise /stop closes
+                # the connection and the retry opens a FRESH one, blocking up
+                # to a full read timeout per attempt.
                 if self.agent._interrupt_requested:
                     self._cancel_current_stream_attempt("interrupt_before_stream_retry")
                     raise InterruptedError("Agent interrupted before stream retry")
                 _emit_stream_start(self.agent)
                 try:
                     if self.agent.api_mode == "anthropic_messages":
-                        # #67142: per-request client (credential refresh happens
-                        # inside _create_request_anthropic_client) registered so
-                        # the watchdog aborts its socket, not the shared client.
+                        # Per-request client (credential refresh inside) so the
+                        # watchdog aborts its socket, not the shared client (#67142).
                         request_client = self.clients.set_client(
                             self.agent._create_request_anthropic_client(
                                 reason="anthropic_stream_request"
@@ -4697,14 +4673,10 @@ class _StreamingCall:
                 except Exception as e:
                     _emit_stream_end(self.agent, final_text="", finished=False, error=str(e))
                     self._close_managed_stream()
-                    # If the main poll loop force-closed this request because
-                    # of an interrupt, the resulting transport error is the
-                    # expected consequence of our own close — NOT a transient
-                    # network error. Exit immediately: no retry, no fallback,
-                    # no "reconnecting" status. The outer poll loop raises
-                    # InterruptedError. This is the fix for the cascading-
-                    # interrupt hang where doomed retries burned full
-                    # stream-stale-timeout cycles. (#6600)
+                    # Our own interrupt force-close caused this error: exit
+                    # with no retry/fallback/"reconnecting" (the poll loop
+                    # raises InterruptedError). Fix for the cascading-interrupt
+                    # hang (#6600).
                     if self._request_cancelled["value"]:
                         logger.debug(
                             "Streaming worker caught %s after request "
@@ -4858,21 +4830,16 @@ class _StreamingCall:
                             "stream" in _err_lower
                             and "not supported" in _err_lower
                         )
-                        # AWS Bedrock (AnthropicBedrock SDK path): IAM policies
-                        # with bedrock:InvokeModel but not
-                        # InvokeModelWithResponseStream reject messages.stream()
-                        # with a permission error naming the streaming action.
-                        # Permanent for the session — flip to non-streaming
-                        # (messages.create() maps to bedrock:InvokeModel).
+                        # AnthropicBedrock: IAM without InvokeModelWithResponseStream
+                        # rejects messages.stream() for the whole session ->
+                        # flip to non-streaming (messages.create = InvokeModel).
                         _is_bedrock_stream_denied = False
                         if (
                             not _is_stream_unsupported
                             and "invokemodelwithresponsestream" in _err_lower
                         ):
-                            # Cheap message pre-check before importing the
-                            # adapter — bedrock_adapter triggers a lazy boto3
-                            # install at import time, which must not run for
-                            # unrelated providers' stream errors.
+                            # Message pre-check first: importing bedrock_adapter
+                            # triggers a lazy boto3 install.
                             from agent.bedrock_adapter import (
                                 is_streaming_access_denied_error,
                             )
@@ -4901,16 +4868,14 @@ class _StreamingCall:
                     self.result["error"] = e
                     return
         except InterruptedError as e:
-            # The interrupt may be noticed inside the worker thread before
-            # the polling loop sees it. Surface it through the normal result
-            # channel so callers never miss a fast pre-retry interrupt.
+            # A fast pre-retry interrupt noticed on the worker surfaces
+            # through the normal result channel.
             self.result["error"] = e
             return
         finally:
             self._close_managed_stream()
-            # Reuse reason only on a clean stream; any other outcome (error,
-            # cancel-swallow) really closes so the next attempt builds a
-            # fresh pool (see _REQUEST_CLIENT_REUSE_REASONS).
+            # Reuse reason only on a clean stream; otherwise really close so
+            # the next attempt builds a fresh pool.
             self.clients.close_once(
                 "stream_request_complete"
                 if self.result["response"] is not None
@@ -5161,20 +5126,16 @@ class _StreamingCall:
             self._monitor_loop()
         if self._monitor_interrupted["yes"]:
             raise InterruptedError("Agent interrupted during streaming API call")
-        # Worker thread exited before the main thread's poll loop could check
-        # the interrupt flag.  If the worker returned early due to an interrupt
-        # (e.g. _call_anthropic() detected _interrupt_requested and returned
-        # None), the InterruptedError above was never raised.  Re-check the
-        # flag here so /stop is not silently swallowed.  (#59999 area)
+        # The worker may return early on interrupt (e.g. _call_anthropic ->
+        # None) before the poll loop saw the flag; re-check so /stop is not
+        # swallowed (#59999 area).
         if self.agent._interrupt_requested:
             raise InterruptedError("Agent interrupted during streaming API call (post-worker)")
         if self.result["error"] is not None:
             if self.deltas_were_sent["yes"]:
-                # Streaming failed AFTER some tokens were already delivered to
-                # the platform.  Re-raising would let the outer retry loop make
-                # Return a partial response stub with finish_reason="length"
-                # so the conversation loop's continuation machinery fires.
-                # tool_calls=None prevents auto-execution of incomplete calls.
+                # Tokens already reached the platform: return a
+                # finish_reason="length" stub so the continuation machinery
+                # fires; tool_calls=None blocks executing incomplete calls.
                 _partial_text = (
                     getattr(self.agent, "_current_streamed_assistant_text", "") or ""
                 ).strip() or None
@@ -5251,9 +5212,7 @@ class _StreamingCall:
                 )
                 if _content_filter_terminated:
                     _stub._content_filter_terminated = True
-                # Partial-stream stub: chunks WERE received (deltas fired), so
-                # the provider is demonstrably responsive — clear the circuit
-                # breaker (#58962) just like the full-success return below.
+                # Deltas fired => provider responsive: clear the breaker (#58962).
                 _reset_stale_streak(self.agent)
                 return _stub
             raise self.result["error"]
@@ -5261,11 +5220,7 @@ class _StreamingCall:
         # responsive.  See the canonical comment block above ``_stale_streak()``.
         if self.result["response"] is not None:
             _reset_stale_streak(self.agent)
-        # Surface first-chunk timing for observability (forwarded to the
-        # ``post_api_request`` plugin hook by the conversation loop). The
-        # per-attempt stream diagnostic dict already records ``first_chunk_at``
-        # on the first received chunk; propagate the latest value onto the agent
-        # so the loop can read it without threading the diag through returns.
+        # Propagate first-chunk timing for the ``post_api_request`` hook.
         _diag_last = self.clients.diag
         if isinstance(_diag_last, dict) and _diag_last.get("first_chunk_at"):
             self.agent._last_api_first_chunk_at = float(_diag_last["first_chunk_at"])
