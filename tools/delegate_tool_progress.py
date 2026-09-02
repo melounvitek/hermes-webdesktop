@@ -18,30 +18,29 @@ logger = logging.getLogger("tools.delegate_tool")
 
 # Terminal child statuses that mean "the subagent did NOT deliver a usable
 # result". Shared by the CLI spinner echo, the gateway failure notice, and
-# the parent-facing failure summary so every surface agrees on what counts
-# as a failure.
+# the parent-facing failure summary so every surface agrees.
 SUBAGENT_FAILURE_STATUSES = frozenset({"failed", "error", "timeout"})
 
 
-def _clean_error_text(error: Any, max_chars: int = 200) -> str:
-    """Reduce an arbitrary error payload to one clean human-readable line.
+def _safe_progress(cb: Any, event_type: Any, *args: Any, **kwargs: Any) -> None:
+    """Invoke a child progress callback; relay failures never reach the run."""
+    if not cb:
+        return
+    try:
+        cb(event_type, *args, **kwargs)
+    except Exception as e:
+        logger.debug("Progress callback %s failed: %s", event_type, e)
 
-    Provider/SDK errors routinely arrive as multi-line tracebacks or JSON
-    walls. For a chat-facing notice we want the single most informative
-    line: the exception message (last line of a traceback) or the first
-    non-empty line otherwise, hard-capped in length.
-    """
-    text = str(error or "").strip()
-    if not text:
-        return ""
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+def _clean_error_text(error: Any, max_chars: int = 200) -> str:
+    """Reduce an error payload (traceback / JSON wall) to one clean line: the
+    exception message (last line of a traceback) or the first non-empty line,
+    hard-capped in length."""
+    lines = [ln.strip() for ln in str(error or "").strip().splitlines() if ln.strip()]
     if not lines:
         return ""
-    # A traceback's last line is the actual exception message.
     line = lines[-1] if lines[0].startswith("Traceback") else lines[0]
-    if len(line) > max_chars:
-        line = line[: max_chars - 3] + "..."
-    return line
+    return line[: max_chars - 3] + "..." if len(line) > max_chars else line
 
 
 def format_subagent_failure_line(
@@ -50,19 +49,13 @@ def format_subagent_failure_line(
     error: Any = None,
     duration_seconds: Any = None,
 ) -> str:
-    """One clean, human-readable line describing a failed subagent.
-
-    Rendered directly to the user (CLI spinner echo, gateway platform
-    notice) — no JSON, no traceback, no internal field names. Example:
-
-        ⚠️ Subagent failed — "research competitor pricing": Error code: 404 —
-        model not found (after 12s)
-    """
+    """One clean, human-readable line describing a failed subagent, rendered
+    directly to the user (CLI spinner echo, gateway platform notice), e.g.
+    ``⚠️ Subagent failed — "research competitor pricing": Error code: 404 (after 12s)``."""
     goal_label = (goal or "").strip().replace("\n", " ")
     if len(goal_label) > 60:
         goal_label = goal_label[:57] + "..."
-    verb = "timed out" if status == "timeout" else "failed"
-    line = f"⚠️ Subagent {verb}"
+    line = f"⚠️ Subagent {'timed out' if status == 'timeout' else 'failed'}"
     if goal_label:
         line += f' — "{goal_label}"'
     err = _clean_error_text(error)
@@ -76,13 +69,11 @@ def format_subagent_failure_line(
 class DelegateEvent(str, enum.Enum):
     """Formal event types emitted during delegation progress.
 
-    _build_child_progress_callback normalises incoming legacy strings
-    (``tool.started``, ``_thinking``, …) to these enum values via
-    ``_LEGACY_EVENT_MAP``.  External consumers (gateway SSE, ACP adapter,
-    CLI) still receive the legacy strings during the deprecation window.
-
-    TASK_SPAWNED / TASK_COMPLETED / TASK_FAILED are reserved for
-    future orchestrator lifecycle events and are not currently emitted.
+    The relay normalises incoming legacy strings (``tool.started``,
+    ``_thinking``, …) to these values via ``_LEGACY_EVENT_MAP``; external
+    consumers (gateway SSE, ACP adapter, CLI) still receive the legacy strings
+    during the deprecation window. TASK_SPAWNED / TASK_COMPLETED / TASK_FAILED
+    are reserved for future orchestrator lifecycle events, not emitted yet.
     """
 
     TASK_SPAWNED = "delegate.task_spawned"
@@ -94,8 +85,7 @@ class DelegateEvent(str, enum.Enum):
     TASK_TOOL_COMPLETED = "delegate.tool_completed"
 
 
-# Legacy event strings → DelegateEvent mapping.
-# Incoming child-agent events use the old names; the callback normalises them.
+# Legacy child-agent event strings → DelegateEvent.
 _LEGACY_EVENT_MAP: Dict[str, DelegateEvent] = {
     "_thinking": DelegateEvent.TASK_THINKING,
     "reasoning.available": DelegateEvent.TASK_THINKING,
@@ -103,6 +93,36 @@ _LEGACY_EVENT_MAP: Dict[str, DelegateEvent] = {
     "tool.completed": DelegateEvent.TASK_TOOL_COMPLETED,
     "subagent_progress": DelegateEvent.TASK_PROGRESS,
 }
+
+# Event → _ChildProgressRelay method name. Lifecycle strings are emitted by the
+# orchestrator itself (not DelegateEvent). Any other DelegateEvent
+# (TASK_TOOL_STARTED and the reserved TASK_* values) takes the tool-started
+# path; None means "recognised but ignored".
+_LIFECYCLE_EVENTS = frozenset({"subagent.start", "subagent.complete", "subagent.text"})
+_EVENT_HANDLERS: Dict[Any, Optional[str]] = {
+    "subagent.start": "_on_start",
+    "subagent.complete": "_on_complete",
+    "subagent.text": "_on_text",
+    DelegateEvent.TASK_THINKING: "_on_thinking",
+    DelegateEvent.TASK_PROGRESS: "_on_progress",
+    DelegateEvent.TASK_TOOL_COMPLETED: None,
+}
+
+
+def _normalize_event(event_type: Any) -> Any:
+    """Lifecycle string / DelegateEvent / legacy string / ``delegate.*`` string
+    → dispatch key; None for unknown events."""
+    if isinstance(event_type, DelegateEvent) or (
+        isinstance(event_type, str) and event_type in _LIFECYCLE_EVENTS
+    ):
+        return event_type
+    event = _LEGACY_EVENT_MAP.get(event_type)
+    if event is not None:
+        return event
+    try:
+        return DelegateEvent(event_type)
+    except (ValueError, TypeError):
+        return None
 
 
 def _build_child_system_prompt(
@@ -116,11 +136,9 @@ def _build_child_system_prompt(
 ) -> str:
     """Build a focused system prompt for a child agent.
 
-    When role='orchestrator', appends a delegation-capability block
-    modeled on OpenClaw's buildSubagentSystemPrompt (canSpawn branch at
-    inspiration/openclaw/src/agents/subagent-system-prompt.ts:63-95).
-    The depth note is literal truth (grounded in the passed config) so
-    the LLM doesn't confabulate nesting capabilities that don't exist.
+    role='orchestrator' appends a delegation-capability block (modeled on
+    OpenClaw's buildSubagentSystemPrompt); its depth note is literal truth
+    grounded in the passed config so the LLM can't confabulate nesting.
     """
     parts = [
         "You are a focused subagent working on a specific delegated task.",
@@ -135,17 +153,13 @@ def _build_child_system_prompt(
             f"{workspace_path}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
-        # Project context files (AGENTS.md / CLAUDE.md / .cursorrules ...)
-        # from the workspace, via the SAME discovery/priority/cap logic the
-        # main agent's system prompt uses. Children are constructed with
-        # skip_context_files=True (their prompt is this focused one), so
-        # without this a subagent works in a repo without the repo's own
-        # conventions unless it thinks to go read them. SOUL.md is skipped —
-        # identity belongs to the parent. workspace_path comes only from
-        # explicit sources (_resolve_workspace_hint: TERMINAL_CWD / agent cwd
-        # hints, never bare getcwd), so the #64590 install-tree-fallback leak
-        # doesn't apply here. Best-effort: on any failure the child prompt is
-        # simply built without the block.
+        # Project context files (AGENTS.md / CLAUDE.md / .cursorrules ...) via
+        # the SAME discovery/priority/cap logic as the main agent's prompt:
+        # children are built with skip_context_files=True, so without this a
+        # subagent works in a repo blind to its conventions. SOUL.md is skipped
+        # (identity belongs to the parent). workspace_path comes only from
+        # explicit sources (_resolve_workspace_hint, never bare getcwd), so the
+        # install-tree-fallback leak doesn't apply. Best-effort.
         try:
             from agent.prompt_builder import build_context_files_prompt
 
@@ -212,12 +226,8 @@ def _build_child_system_prompt(
 
 
 def _resolve_workspace_hint(parent_agent) -> Optional[str]:
-    """Best-effort local workspace hint for child prompts.
-
-    We only inject a path when we have a concrete absolute directory. This avoids
-    teaching subagents a fake container path while still helping them avoid
-    guessing `/workspace/...` for local repo tasks.
-    """
+    """Best-effort local workspace hint for child prompts: only a concrete
+    absolute directory is ever injected (never a fake container path)."""
     candidates = [
         os.getenv("TERMINAL_CWD"),
         getattr(
@@ -243,23 +253,19 @@ _BATCH_ORDINALS_LOCK = threading.Lock()
 
 
 def format_batch_tag(delegation_id: Optional[str]) -> str:
-    """Short human tag identifying which delegation batch a line belongs to.
+    """Short human tag for a delegation batch: ``deleg_6a664903`` → ``set 1``
+    (first batch seen in this process), the next distinct id → ``set 2``.
 
-    ``deleg_6a664903`` → ``set 1`` (first batch seen in this process),
-    the next distinct id → ``set 2``, and so on. Several batches (a parent's
-    fan-out plus a child's nested fan-out, or two concurrent tools) print
-    interleaved ``[n/N]`` progress lines to the same console; without a batch
-    tag a ``✓ [3/3]`` and a ``✓ [3/9]`` are indistinguishable, and a raw hex
-    slice (``[b2ac 3/9]``) is attributable but unreadable. Empty string when
-    no id is known so callers can concatenate unconditionally.
+    Several batches (a parent's fan-out plus a child's nested fan-out, or two
+    concurrent tools) print interleaved ``[n/N]`` lines to one console; without
+    a tag ``✓ [3/3]`` and ``✓ [3/9]`` are indistinguishable, and a raw hex
+    slice is unreadable. Empty string when no id is known so callers can
+    concatenate unconditionally.
     """
     if not isinstance(delegation_id, str) or not delegation_id:
         return ""
     with _BATCH_ORDINALS_LOCK:
-        n = _BATCH_ORDINALS.get(delegation_id)
-        if n is None:
-            n = len(_BATCH_ORDINALS) + 1
-            _BATCH_ORDINALS[delegation_id] = n
+        n = _BATCH_ORDINALS.setdefault(delegation_id, len(_BATCH_ORDINALS) + 1)
     return f"set {n}"
 
 
@@ -274,13 +280,9 @@ def _batch_prefix(delegation_id: Optional[str], task_index: int, task_count: int
 
 
 def _emit_parent_console(parent_agent, line: str) -> None:
-    """Emit a human-readable progress line to the parent's console.
-
-    Routes through ``parent_agent._safe_print`` when available so headless
-    stdio hosts (ACP, gateway API) can redirect non-protocol output to
-    stderr via their configured ``_print_fn``. A bare ``print()`` would
-    otherwise land on stdout and corrupt JSON-RPC framing.
-    """
+    """Emit a progress line through ``parent_agent._safe_print`` when available
+    so headless stdio hosts (ACP, gateway API) can redirect it to stderr; a
+    bare ``print()`` would land on stdout and corrupt JSON-RPC framing."""
     printer = getattr(parent_agent, "_safe_print", None)
     if callable(printer):
         try:
@@ -289,6 +291,163 @@ def _emit_parent_console(parent_agent, line: str) -> None:
         except Exception:
             pass
     print(line)
+
+
+def _print_completion_line(parent_agent: Any, spinner_ref: Any, line: str) -> None:
+    """Above-spinner line when a spinner exists (console fallback if it raises), else console."""
+    if spinner_ref:
+        try:
+            spinner_ref.print_above(line)
+            return
+        except Exception:
+            pass
+    _emit_parent_console(parent_agent, f"  {line}")
+
+
+def _short(text: str, n: int) -> str:
+    return (text[:n] + "...") if len(text) > n else text
+
+
+class _ChildProgressRelay:
+    """Callable relaying one child's events to the parent display.
+
+    CLI: prints tree-view lines above the parent's delegation spinner.
+    Gateway: batches tool names (``_BATCH_SIZE``) and relays to the parent's
+    progress callback, threading the identity kwargs (subagent_id, parent_id,
+    depth, model, toolsets) into every event so the TUI can rebuild the live
+    spawn tree and route per-branch controls back by ``subagent_id``.
+    """
+
+    _BATCH_SIZE = 5
+
+    def __init__(
+        self, task_index: int, goal: str, spinner: Any, parent_cb: Any, task_count: int,
+        subagent_id, parent_id, depth, model, toolsets, session_ref,
+    ) -> None:
+        self.task_index, self.task_count, self.goal_label = task_index, task_count, (goal or "").strip()
+        self.spinner, self.parent_cb, self.session_ref = spinner, parent_cb, session_ref
+        self.subagent_id, self.parent_id, self.depth, self.model, self.toolsets = (
+            subagent_id, parent_id, depth, model, toolsets
+        )
+        self.batch: List[str] = []
+        self.tool_count = 0  # per-subagent running counter
+
+    def _prefix(self) -> str:
+        # The batch tag is resolved lazily from session_ref: the relay is built
+        # before delegate_task stamps ``_delegation_id`` on the child.
+        deleg = self.session_ref.get("delegation_id") if self.session_ref else None
+        return _batch_prefix(deleg, self.task_index, self.task_count)
+
+    def _identity_kwargs(self) -> Dict[str, Any]:
+        kw: Dict[str, Any] = {
+            "task_index": self.task_index, "task_count": self.task_count, "goal": self.goal_label,
+        }
+        for key in ("subagent_id", "parent_id", "depth", "model"):
+            if getattr(self, key) is not None:
+                kw[key] = getattr(self, key)
+        if self.toolsets is not None:
+            kw["toolsets"] = list(self.toolsets)
+        # child_session_id / delegation_id are filled into the shared ref once
+        # the child exists, so every relayed event lets UIs open its session.
+        for src, dst in (("session_id", "child_session_id"), ("delegation_id", "delegation_id")):
+            if self.session_ref and self.session_ref.get(src):
+                kw[dst] = str(self.session_ref[src])
+        kw["tool_count"] = self.tool_count
+        return kw
+
+    def _relay(self, event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
+        if not self.parent_cb:
+            return
+        payload = self._identity_kwargs()
+        payload.update(kwargs)  # caller overrides (e.g. status, duration_seconds)
+        try:
+            self.parent_cb(event_type, tool_name, preview, args, **payload)
+        except Exception as e:
+            logger.debug("Parent callback failed: %s", e)
+
+    def _tree_line(self, text: str) -> None:
+        """Print one tree-view line above the CLI spinner (no-op without a spinner)."""
+        if not self.spinner:
+            return
+        try:
+            self.spinner.print_above(f" {self._prefix()}├─ {text}")
+        except Exception as e:
+            logger.debug("Spinner print_above failed: %s", e)
+
+    def _flush(self) -> None:
+        """Flush remaining batched tool names to the gateway."""
+        if self.parent_cb and self.batch:
+            self._relay("subagent.progress", preview=f"🔀 {self._prefix()}{', '.join(self.batch)}")
+            self.batch.clear()
+
+    # ── Lifecycle events emitted by the orchestrator itself ──
+    def _on_start(self, tool_name, preview, args, kwargs):
+        if self.goal_label:
+            self._tree_line(f"🔀 {_short(self.goal_label, 55)}")
+        self._relay("subagent.start", preview=preview or self.goal_label or "", **kwargs)
+
+    def _on_complete(self, tool_name, preview, args, kwargs):
+        # Failed child: echo one clean reason line into the CLI tree so the human
+        # sees WHY, not just a vanished branch (gateway renders off the relayed event).
+        if kwargs.get("status") in SUBAGENT_FAILURE_STATUSES:
+            self._tree_line(format_subagent_failure_line(
+                self.goal_label, kwargs.get("status"),
+                error=kwargs.get("summary") or preview,
+                duration_seconds=kwargs.get("duration_seconds"),
+            ))
+        self._relay("subagent.complete", preview=preview, **kwargs)
+
+    def _on_text(self, tool_name, preview, args, kwargs):
+        # Streamed child reply text, relayed verbatim for gateway watch windows;
+        # inert on CLI/TUI (their progress handlers ignore non-tool events).
+        self._relay("subagent.text", preview=preview)
+
+    # ── DelegateEvent handlers ──
+    def _on_thinking(self, tool_name, preview, args, kwargs):
+        text = preview or tool_name or ""
+        self._tree_line(f'💭 "{_short(text, 55)}"')
+        self._relay("subagent.thinking", preview=text)
+
+    def _on_progress(self, tool_name, preview, args, kwargs):
+        # Pre-batched summary from a nested orchestrator's grandchild arrives in
+        # the tool_name slot: render distinctly (no tool-emoji lookup) and relay
+        # upward without re-batching.
+        summary_text = tool_name or preview or ""
+        if summary_text:
+            self._tree_line(f"🔀 {summary_text}")
+        if self.parent_cb:
+            try:
+                self.parent_cb("subagent_progress", f"{self._prefix()}{summary_text}")
+            except Exception as e:
+                logger.debug("Parent callback relay failed: %s", e)
+
+    def _on_tool_started(self, tool_name, preview, args, kwargs):
+        self.tool_count += 1
+        if self.subagent_id is not None:
+            with _active_subagents_lock:
+                rec = _active_subagents.get(self.subagent_id)
+                if rec is not None:
+                    rec["tool_count"] = self.tool_count
+                    rec["last_tool"] = tool_name or ""
+        if self.spinner:
+            from agent.display import get_tool_emoji
+
+            line = f"{get_tool_emoji(tool_name or '')} {tool_name}"
+            short = _short(preview, 35) if preview else ""
+            self._tree_line(f'{line}  "{short}"' if short else line)
+        if self.parent_cb:
+            self._relay("subagent.tool", tool_name, preview, args)
+            self.batch.append(tool_name or "")
+            if len(self.batch) >= self._BATCH_SIZE:
+                self._flush()
+
+    def __call__(self, event_type, tool_name: str = None, preview: str = None, args=None, **kwargs):
+        key = _normalize_event(event_type)
+        if key is None:
+            return
+        method = _EVENT_HANDLERS.get(key, "_on_tool_started")
+        if method is not None:
+            getattr(self, method)(tool_name, preview, args, kwargs)
 
 
 def _build_child_progress_callback(
@@ -304,203 +463,14 @@ def _build_child_progress_callback(
     toolsets: Optional[List[str]] = None,
     session_ref: Optional[Dict[str, Any]] = None,
 ) -> Optional[callable]:
-    """Build a callback that relays child agent tool calls to the parent display.
-
-    Two display paths:
-      CLI:     prints tree-view lines above the parent's delegation spinner
-      Gateway: batches tool names and relays to parent's progress callback
-
-    The identity kwargs (``subagent_id``, ``parent_id``, ``depth``, ``model``,
-    ``toolsets``) are threaded into every relayed event so the TUI can
-    reconstruct the live spawn tree and route per-branch controls (kill,
-    pause) back by ``subagent_id``.  All are optional for backward compat —
-    older callers that ignore them still produce a flat list on the TUI.
-
-    Returns None if no display mechanism is available, in which case the
-    child agent runs with no progress callback (identical to current behavior).
-    """
+    """Relay for one child's events (see ``_ChildProgressRelay``), or None when
+    the parent has neither a spinner nor a progress callback — the child then
+    runs with no progress callback at all (zero behavior change)."""
     spinner = getattr(parent_agent, "_delegate_spinner", None)
     parent_cb = getattr(parent_agent, "tool_progress_callback", None)
-
     if not spinner and not parent_cb:
-        return None  # No display → no callback → zero behavior change
-
-    # Show 1-indexed prefix only in batch mode (multiple tasks). The batch tag
-    # (short delegation id) is resolved lazily from session_ref because the
-    # callback is built before delegate_task stamps ``_delegation_id`` on the
-    # child; delegate_task drops the id into the same shared ref.
-    def _prefix() -> str:
-        deleg = session_ref.get("delegation_id") if session_ref else None
-        return _batch_prefix(deleg, task_index, task_count)
-
-    goal_label = (goal or "").strip()
-
-    # Gateway: batch tool names, flush periodically
-    _BATCH_SIZE = 5
-    _batch: List[str] = []
-    _tool_count = [0]  # per-subagent running counter (list for closure mutation)
-
-    def _identity_kwargs() -> Dict[str, Any]:
-        kw: Dict[str, Any] = {
-            "task_index": task_index,
-            "task_count": task_count,
-            "goal": goal_label,
-        }
-        if subagent_id is not None:
-            kw["subagent_id"] = subagent_id
-        if parent_id is not None:
-            kw["parent_id"] = parent_id
-        if depth is not None:
-            kw["depth"] = depth
-        if model is not None:
-            kw["model"] = model
-        if toolsets is not None:
-            kw["toolsets"] = list(toolsets)
-        # The child's own session id — filled into the shared ref once the
-        # child agent exists (the callback is built first), so every relayed
-        # event lets UIs open/inspect the subagent's session directly.
-        if session_ref and session_ref.get("session_id"):
-            kw["child_session_id"] = str(session_ref["session_id"])
-        if session_ref and session_ref.get("delegation_id"):
-            kw["delegation_id"] = str(session_ref["delegation_id"])
-        kw["tool_count"] = _tool_count[0]
-        return kw
-
-    def _relay(
-        event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs
-    ):
-        if not parent_cb:
-            return
-        payload = _identity_kwargs()
-        payload.update(kwargs)  # caller overrides (e.g. status, duration_seconds)
-        try:
-            parent_cb(event_type, tool_name, preview, args, **payload)
-        except Exception as e:
-            logger.debug("Parent callback failed: %s", e)
-
-    def _tree_line(text: str) -> None:
-        """Print one tree-view line above the CLI spinner (no-op without a spinner)."""
-        if not spinner:
-            return
-        try:
-            spinner.print_above(f" {_prefix()}├─ {text}")
-        except Exception as e:
-            logger.debug("Spinner print_above failed: %s", e)
-
-    def _flush_batch() -> None:
-        if parent_cb and _batch:
-            _relay("subagent.progress", preview=f"🔀 {_prefix()}{', '.join(_batch)}")
-            _batch.clear()
-
-    def _short(text: str, n: int) -> str:
-        return (text[:n] + "...") if len(text) > n else text
-
-    # ── Lifecycle events emitted by the orchestrator itself (not DelegateEvent) ──
-    def _on_start(tool_name, preview, args, kwargs):
-        if goal_label:
-            _tree_line(f"🔀 {_short(goal_label, 55)}")
-        _relay("subagent.start", preview=preview or goal_label or "", **kwargs)
-
-    def _on_complete(tool_name, preview, args, kwargs):
-        # Failed child: echo one clean reason line into the CLI tree so the human
-        # sees WHY, not just a vanished branch. Gateway-side rendering happens in
-        # TurnRunner.progress_callback off the relayed event.
-        if kwargs.get("status") in SUBAGENT_FAILURE_STATUSES:
-            _tree_line(
-                format_subagent_failure_line(
-                    goal_label,
-                    kwargs.get("status"),
-                    error=kwargs.get("summary") or preview,
-                    duration_seconds=kwargs.get("duration_seconds"),
-                )
-            )
-        _relay("subagent.complete", preview=preview, **kwargs)
-
-    def _on_text(tool_name, preview, args, kwargs):
-        # Streamed child reply text, relayed verbatim so a gateway watch window
-        # mirrors the child "talking". No spinner echo: CLI/TUI progress
-        # handlers ignore non-tool events, so this is inert there.
-        _relay("subagent.text", preview=preview)
-
-    # ── DelegateEvent handlers ──
-    def _on_thinking(tool_name, preview, args, kwargs):
-        text = preview or tool_name or ""
-        _tree_line(f'💭 "{_short(text, 55)}"')
-        _relay("subagent.thinking", preview=text)
-
-    def _on_progress(tool_name, preview, args, kwargs):
-        # Pre-batched summary from a nested orchestrator's grandchild; upstream
-        # emits parent_cb("subagent_progress", summary) with the summary in the
-        # tool_name slot. Pass through: render distinctly (not via the tool
-        # emoji lookup) and relay upward without re-batching.
-        summary_text = tool_name or preview or ""
-        if summary_text:
-            _tree_line(f"🔀 {summary_text}")
-        if parent_cb:
-            try:
-                parent_cb("subagent_progress", f"{_prefix()}{summary_text}")
-            except Exception as e:
-                logger.debug("Parent callback relay failed: %s", e)
-
-    def _on_tool_started(tool_name, preview, args, kwargs):
-        _tool_count[0] += 1
-        if subagent_id is not None:
-            with _active_subagents_lock:
-                rec = _active_subagents.get(subagent_id)
-                if rec is not None:
-                    rec["tool_count"] = _tool_count[0]
-                    rec["last_tool"] = tool_name or ""
-        if spinner:
-            from agent.display import get_tool_emoji
-
-            line = f"{get_tool_emoji(tool_name or '')} {tool_name}"
-            short = _short(preview, 35) if preview else ""
-            if short:
-                line += f'  "{short}"'
-            _tree_line(line)
-        if parent_cb:
-            _relay("subagent.tool", tool_name, preview, args)
-            _batch.append(tool_name or "")
-            if len(_batch) >= _BATCH_SIZE:
-                _flush_batch()
-
-    _lifecycle_handlers = {
-        "subagent.start": _on_start,
-        "subagent.complete": _on_complete,
-        "subagent.text": _on_text,
-    }
-    # Any other DelegateEvent (TASK_TOOL_STARTED and the reserved TASK_* values)
-    # takes the tool-started path, as before the table.
-    _event_handlers = {
-        DelegateEvent.TASK_THINKING: _on_thinking,
-        DelegateEvent.TASK_PROGRESS: _on_progress,
-        DelegateEvent.TASK_TOOL_COMPLETED: None,
-    }
-
-    def _callback(
-        event_type, tool_name: str = None, preview: str = None, args=None, **kwargs
-    ):
-        handler = _lifecycle_handlers.get(event_type) if isinstance(event_type, str) else None
-        if handler is None:
-            # Normalise legacy strings, "delegate.*" strings and DelegateEvent
-            # values to one DelegateEvent; unknown events are ignored.
-            if isinstance(event_type, DelegateEvent):
-                event = event_type
-            else:
-                event = _LEGACY_EVENT_MAP.get(event_type)
-                if event is None:
-                    try:
-                        event = DelegateEvent(event_type)
-                    except (ValueError, TypeError):
-                        return
-            handler = _event_handlers.get(event, _on_tool_started)
-            if handler is None:
-                return
-        handler(tool_name, preview, args, kwargs)
-
-    def _flush():
-        """Flush remaining batched tool names to gateway on completion."""
-        _flush_batch()
-
-    _callback._flush = _flush
-    return _callback
+        return None
+    return _ChildProgressRelay(
+        task_index, goal, spinner, parent_cb, task_count,
+        subagent_id, parent_id, depth, model, toolsets, session_ref,
+    )
