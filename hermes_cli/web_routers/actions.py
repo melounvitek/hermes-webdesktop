@@ -9,6 +9,7 @@ import asyncio
 import secrets
 import subprocess
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import HTTPException, Request
 from hermes_cli import __version__
 from hermes_cli.config import format_docker_update_message, recommended_update_command_for_method
@@ -18,11 +19,20 @@ _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 status_router = APIRouter()
 
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_dashboard_local_update_managed_externally = late("_dashboard_local_update_managed_externally")
+_durable_completed_update_action_id = late("_durable_completed_update_action_id")
+_record_completed_action = late("_record_completed_action")
+_spawn_gateway_restart = late("_spawn_gateway_restart")
+_spawn_hermes_action = late("_spawn_hermes_action")
+_tail_lines = late("_tail_lines")
+detect_install_method = late("detect_install_method")
+get_hermes_home = late("get_hermes_home")
+
 
 @router.post("/api/gateway/restart")
 async def restart_gateway(profile: Optional[str] = None):
     """Kick off a ``hermes gateway restart`` in the background."""
-    from hermes_cli.web_server import _spawn_gateway_restart
     try:
         proc, _reused = _spawn_gateway_restart(profile)
     except HTTPException:
@@ -113,14 +123,7 @@ async def gateway_drain(request: Request):
 @router.post("/api/hermes/update")
 async def update_hermes():
     """Kick off ``hermes update`` in the background."""
-    from hermes_cli.web_server import (
-        PROJECT_ROOT,
-        _ACTION_IDS,
-        _ACTION_PROCS,
-        _dashboard_local_update_managed_externally,
-        _record_completed_action,
-        _spawn_hermes_action,
-    )
+    from hermes_cli.web_server import PROJECT_ROOT, _ACTION_IDS, _ACTION_PROCS
     if _dashboard_local_update_managed_externally():
         message = (
             "Hermes updates are managed outside this dashboard in "
@@ -278,12 +281,7 @@ async def check_hermes_update(force: bool = False):
                  desktop's remote update overlay renders this as "what's
                  changed". Additive: existing consumers ignore it.
     """
-    from hermes_cli.web_server import (
-        PROJECT_ROOT,
-        _dashboard_local_update_managed_externally,
-        detect_install_method,
-        get_hermes_home,
-    )
+    from hermes_cli.web_server import PROJECT_ROOT
     if _dashboard_local_update_managed_externally():
         return {
             "install_method": "managed-runtime",
@@ -363,8 +361,6 @@ async def get_action_status(name: str, lines: int = 200):
         _ACTION_LOG_FILES,
         _ACTION_PROCS,
         _ACTION_RESULTS,
-        _durable_completed_update_action_id,
-        _tail_lines,
     )
     log_file_name = _ACTION_LOG_FILES.get(name)
     if log_file_name is None:

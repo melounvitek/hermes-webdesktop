@@ -8,12 +8,24 @@ import yaml
 import asyncio
 import time
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import HTTPException, Query
 from hermes_cli.config import get_config_path, read_raw_config
 from hermes_cli.web_models import RawConfigUpdate
 from typing import Any, Dict, List, Optional
 
 router = APIRouter()
+
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_approval_mode_of = late("_approval_mode_of")
+_aux_task_summary = late("_aux_task_summary")
+_aux_usage_rows = late("_aux_usage_rows")
+_broadcast_gateway_session_info = late("_broadcast_gateway_session_info")
+_is_other_profile = late("_is_other_profile")
+_merge_aux_into_by_model = late("_merge_aux_into_by_model")
+_open_session_db_for_profile = late("_open_session_db_for_profile")
+_profile_scope = late("_profile_scope")
+save_config = late("save_config")
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +54,6 @@ async def get_config_raw(profile: Optional[str] = None):
     ``config_path`` is machine-global and always reports the dashboard
     process's own profile, which is wrong under the global profile switcher.
     """
-    from hermes_cli.web_server import _profile_scope
     def _run():
         with _profile_scope(profile):
             path = get_config_path()
@@ -55,13 +66,6 @@ async def get_config_raw(profile: Optional[str] = None):
 
 @router.put("/api/config/raw")
 async def update_config_raw(body: RawConfigUpdate, profile: Optional[str] = None):
-    from hermes_cli.web_server import (
-        _approval_mode_of,
-        _broadcast_gateway_session_info,
-        _is_other_profile,
-        _profile_scope,
-        save_config,
-    )
     def _run():
         parsed = yaml.safe_load(body.yaml_text)
         if not isinstance(parsed, dict):
@@ -84,12 +88,6 @@ async def update_config_raw(body: RawConfigUpdate, profile: Optional[str] = None
 
 
 def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
-    from hermes_cli.web_server import (
-        _aux_task_summary,
-        _aux_usage_rows,
-        _merge_aux_into_by_model,
-        _open_session_db_for_profile,
-    )
     from agent.insights import InsightsEngine
 
     db = _open_session_db_for_profile(profile, read_only=True)
@@ -179,7 +177,6 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
     Returns token/cost/session breakdown per model plus capability metadata
     from models.dev (context window, vision, tools, reasoning, etc.).
     """
-    from hermes_cli.web_server import _aux_usage_rows, _open_session_db_for_profile
     db = _open_session_db_for_profile(profile, read_only=True)
     try:
         cutoff = time.time() - (days * 86400)

@@ -10,6 +10,7 @@ import re
 import shlex
 import asyncio
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import HTTPException
 from hermes_cli.web_models import MemoryProviderConfigUpdate, MemoryProviderSetupRequest
 from plugins.memory.config_schema import get_provider_config_schema
@@ -18,11 +19,38 @@ from typing import Any, Dict, List, Optional
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_coerce_bool = late("_coerce_bool")
+_command_result = late("_command_result")
+_declared_provider_payload = late("_declared_provider_payload")
+_discover_memory_provider_statuses = late("_discover_memory_provider_statuses")
+_field_default = late("_field_default")
+_field_is_set = late("_field_is_set")
+_field_value = late("_field_value")
+_field_visible = late("_field_visible")
+_install_memory_provider_pip_dependencies = late("_install_memory_provider_pip_dependencies")
+_invalidate_plugins_hub_cache = late("_invalidate_plugins_hub_cache")
+_load_memory_provider = late("_load_memory_provider")
+_memory_provider_label = late("_memory_provider_label")
+_memory_provider_manifest = late("_memory_provider_manifest")
+_memory_provider_setup_info = late("_memory_provider_setup_info")
+_memory_provider_setup_manifest = late("_memory_provider_setup_manifest")
+_normalize_memory_provider_schema = late("_normalize_memory_provider_schema")
+_profile_scope = late("_profile_scope")
+_read_memory_provider_existing_values = late("_read_memory_provider_existing_values")
+_require_memory_provider_ready = late("_require_memory_provider_ready")
+_run_setup_command = late("_run_setup_command")
+_stringify_submitted_values = late("_stringify_submitted_values")
+_update_memory_provider_config = late("_update_memory_provider_config")
+get_hermes_home = late("get_hermes_home")
+load_config = late("load_config")
+save_config = late("save_config")
+save_env_value = late("save_env_value")
+
 
 def _install_memory_provider_external_dependencies(
     dependencies: List[Dict[str, str]],
 ) -> List[Dict[str, Any]]:
-    from hermes_cli.web_server import _command_result, _run_setup_command
     results: List[Dict[str, Any]] = []
     for dep in dependencies:
         name = dep.get("name") or "dependency"
@@ -132,14 +160,6 @@ def _install_memory_provider_external_dependencies(
 
 
 def _install_memory_provider_setup(name: str) -> Dict[str, Any]:
-    from hermes_cli.web_server import (
-        _command_result,
-        _discover_memory_provider_statuses,
-        _install_memory_provider_pip_dependencies,
-        _load_memory_provider,
-        _memory_provider_manifest,
-        _memory_provider_setup_manifest,
-    )
     provider = _load_memory_provider(name)
     manifest = _memory_provider_manifest(name)
     if provider is None and not manifest:
@@ -172,7 +192,6 @@ def _install_memory_provider_setup(name: str) -> Dict[str, Any]:
 
 
 def _public_memory_provider_field(field: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
-    from hermes_cli.web_server import _field_is_set, _field_value
     entry = {
         "key": field["key"],
         "label": field["label"],
@@ -193,12 +212,6 @@ def _public_memory_provider_field(field: Dict[str, Any], data: Dict[str, Any]) -
 
 
 def _memory_provider_payload(name: str, provider: Any) -> Dict[str, Any]:
-    from hermes_cli.web_server import (
-        _memory_provider_label,
-        _memory_provider_setup_info,
-        _normalize_memory_provider_schema,
-        _read_memory_provider_existing_values,
-    )
     data = _read_memory_provider_existing_values(name)
     fields = [
         _public_memory_provider_field(field, data)
@@ -213,7 +226,6 @@ def _memory_provider_payload(name: str, provider: Any) -> Dict[str, Any]:
 
 
 def _coerce_schema_field(field: Dict[str, Any], raw: Any) -> Any:
-    from hermes_cli.web_server import _coerce_bool, _field_default
     if field["kind"] == "boolean":
         return _coerce_bool(raw, default=_coerce_bool(_field_default(field), default=False))
 
@@ -255,7 +267,6 @@ def _coerce_schema_field(field: Dict[str, Any], raw: Any) -> Any:
 
 
 def _save_memory_provider_native_config(name: str, provider: Any, values: Dict[str, Any]) -> None:
-    from hermes_cli.web_server import get_hermes_home, load_config, save_config
     if provider is not None and hasattr(provider, "save_config"):
         try:
             from agent.memory_provider import MemoryProvider as _BaseMemoryProvider
@@ -284,13 +295,6 @@ def _write_memory_provider_config_values(
     provider: Any,
     values: Dict[str, Any],
 ) -> None:
-    from hermes_cli.web_server import (
-        _field_default,
-        _field_visible,
-        _normalize_memory_provider_schema,
-        _read_memory_provider_existing_values,
-        save_env_value,
-    )
     existing = _read_memory_provider_existing_values(name)
     fields = _normalize_memory_provider_schema(name, provider)
     fields_by_key = {field["key"]: field for field in fields}
@@ -337,12 +341,6 @@ def _require_valid_memory_provider_name(name: str) -> None:
 
 @router.get("/api/memory/providers/{name}/config")
 async def get_memory_provider_config(name: str, surface: Optional[str] = None, profile: Optional[str] = None):
-    from hermes_cli.web_server import (
-        _declared_provider_payload,
-        _load_memory_provider,
-        _memory_provider_setup_info,
-        _profile_scope,
-    )
     _require_valid_memory_provider_name(name)
 
     def _run():
@@ -367,11 +365,6 @@ async def get_memory_provider_config(name: str, surface: Optional[str] = None, p
 
 @router.post("/api/memory/providers/{name}/setup")
 async def setup_memory_provider(name: str, body: MemoryProviderSetupRequest):
-    from hermes_cli.web_server import (
-        _invalidate_plugins_hub_cache,
-        _load_memory_provider,
-        _memory_provider_manifest,
-    )
     _require_valid_memory_provider_name(name)
     provider = _load_memory_provider(name)
     if provider is None and not _memory_provider_manifest(name):
@@ -396,16 +389,6 @@ async def setup_memory_provider(name: str, body: MemoryProviderSetupRequest):
 async def update_memory_provider_config(
     name: str, body: MemoryProviderConfigUpdate, surface: Optional[str] = None, profile: Optional[str] = None
 ):
-    from hermes_cli.web_server import (
-        _invalidate_plugins_hub_cache,
-        _load_memory_provider,
-        _profile_scope,
-        _require_memory_provider_ready,
-        _stringify_submitted_values,
-        _update_memory_provider_config,
-        load_config,
-        save_config,
-    )
     _require_valid_memory_provider_name(name)
     values = body.values or {}
 

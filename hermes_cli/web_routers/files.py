@@ -18,6 +18,7 @@ import subprocess
 import sys
 from datetime import datetime
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from hermes_cli._subprocess_compat import windows_hide_flags
@@ -26,6 +27,15 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 router = APIRouter()
+
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_fs_path = late("_fs_path")
+_managed_file_entry = late("_managed_file_entry")
+_managed_response_meta = late("_managed_response_meta")
+_profile_scope = late("_profile_scope")
+_resolve_managed_path = late("_resolve_managed_path")
+get_hermes_home = late("get_hermes_home")
+load_config = late("load_config")
 
 
 # Directory names whose entire subtree is credential material. Both canonical
@@ -175,7 +185,6 @@ def _fs_looks_binary(data: bytes) -> bool:
 
 
 def _fs_regular_file(path: Path) -> tuple[Path, os.stat_result]:
-    from hermes_cli.web_server import _fs_path
     target = _fs_path(str(path))
     try:
         st = target.stat()
@@ -210,7 +219,6 @@ def _fs_find_git_root(start: Path) -> str | None:
 
 
 def _fs_default_cwd() -> str:
-    from hermes_cli.web_server import load_config
     cfg_terminal = load_config().get("terminal") or {}
     raw = str(cfg_terminal.get("cwd") or os.environ.get("TERMINAL_CWD") or "").strip()
     if raw and raw not in {".", "auto", "cwd"}:
@@ -251,7 +259,6 @@ def _media_serve_roots() -> list[Path]:
     key or a screenshot outside the cache) merely because the suffix passes the
     allowlist.
     """
-    from hermes_cli.web_server import get_hermes_home
     home = get_hermes_home()
     roots = [home / "images", home / "screenshots", home / "cache"]
     out: list[Path] = []
@@ -381,7 +388,6 @@ async def upload_chat_image(payload: ChatImageUpload, profile: Optional[str] = N
     ``HERMES_HOME/images/`` — the same directory ``clipboard.paste`` /
     ``image.attach`` already use.
     """
-    from hermes_cli.web_server import _profile_scope, get_hermes_home
     def _run():
         data, mime_type, ext = _decode_chat_image_upload(payload)
         with _profile_scope(profile) as scoped_home:
@@ -422,11 +428,6 @@ async def upload_chat_image(payload: ChatImageUpload, profile: Optional[str] = N
 
 @router.get("/api/files")
 async def list_managed_files(request: Request, path: Optional[str] = None):
-    from hermes_cli.web_server import (
-        _managed_file_entry,
-        _managed_response_meta,
-        _resolve_managed_path,
-    )
     policy, target, display_path = _resolve_managed_path(path, request)
     if not target.exists():
         raise HTTPException(status_code=404, detail="Path not found")
@@ -460,11 +461,7 @@ async def list_managed_files(request: Request, path: Optional[str] = None):
 
 @router.get("/api/files/read")
 async def read_managed_file(request: Request, path: str):
-    from hermes_cli.web_server import (
-        _MANAGED_FILE_MAX_BYTES,
-        _managed_response_meta,
-        _resolve_managed_path,
-    )
+    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES
     policy, target, display_path = _resolve_managed_path(path, request)
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -506,11 +503,7 @@ def _managed_file_response(
     media_only: bool = False,
 ) -> FileResponse:
     """Build a range-aware response after applying managed-file policy."""
-    from hermes_cli.web_server import (
-        _MANAGED_FILE_MAX_BYTES,
-        _STREAMABLE_MEDIA_EXTENSIONS,
-        _resolve_managed_path,
-    )
+    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES, _STREAMABLE_MEDIA_EXTENSIONS
     policy, target, _display_path = _resolve_managed_path(path, request)
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -585,11 +578,6 @@ async def stream_managed_file(request: Request, path: str):
 
 @router.post("/api/files/upload")
 async def upload_managed_file(payload: ManagedFileUpload, request: Request):
-    from hermes_cli.web_server import (
-        _managed_file_entry,
-        _managed_response_meta,
-        _resolve_managed_path,
-    )
     policy, target, display_path = _resolve_managed_path(payload.path, request, for_write=True)
     if target.exists() and target.is_dir():
         raise HTTPException(status_code=409, detail="A directory already exists at that path")
@@ -620,13 +608,7 @@ async def upload_managed_file_stream(
     path: str = Form(...),
     overwrite: bool = Form(True),
 ):
-    from hermes_cli.web_server import (
-        _MANAGED_FILE_MAX_BYTES,
-        _UPLOAD_CHUNK_BYTES,
-        _managed_file_entry,
-        _managed_response_meta,
-        _resolve_managed_path,
-    )
+    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES, _UPLOAD_CHUNK_BYTES
     policy, target, display_path = _resolve_managed_path(path, request, for_write=True)
     if target.exists() and target.is_dir():
         raise HTTPException(status_code=409, detail="A directory already exists at that path")
@@ -686,11 +668,6 @@ async def upload_managed_file_stream(
 
 @router.post("/api/files/mkdir")
 async def create_managed_directory(payload: ManagedDirectoryCreate, request: Request):
-    from hermes_cli.web_server import (
-        _managed_file_entry,
-        _managed_response_meta,
-        _resolve_managed_path,
-    )
     policy, target, display_path = _resolve_managed_path(payload.path, request, for_write=True)
     if target.exists() and not target.is_dir():
         raise HTTPException(status_code=409, detail="A file already exists at that path")
@@ -712,7 +689,6 @@ async def create_managed_directory(payload: ManagedDirectoryCreate, request: Req
 
 @router.delete("/api/files")
 async def delete_managed_file(payload: ManagedFileDelete, request: Request):
-    from hermes_cli.web_server import _managed_response_meta, _resolve_managed_path
     policy, target, display_path = _resolve_managed_path(payload.path, request)
     if policy.locked_root is not None and target == policy.locked_root:
         raise HTTPException(status_code=400, detail="Cannot delete the managed files root")
@@ -738,7 +714,7 @@ async def delete_managed_file(payload: ManagedFileDelete, request: Request):
 
 @router.get("/api/fs/list")
 async def fs_list(path: str):
-    from hermes_cli.web_server import _FS_READDIR_HIDDEN, _fs_path
+    from hermes_cli.web_server import _FS_READDIR_HIDDEN
     target = _fs_path(path)
     try:
         entries = []
@@ -765,7 +741,6 @@ async def fs_list(path: str):
 
 @router.get("/api/fs/read-text")
 async def fs_read_text(path: str):
-    from hermes_cli.web_server import _fs_path
     target, st = _fs_regular_file(_fs_path(path))
     if st.st_size > _FS_TEXT_SOURCE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
@@ -800,7 +775,6 @@ async def fs_write_text(payload: FsWriteText):
     original. Stale-on-disk detection is the client's job (re-read before save),
     so both transports behave identically.
     """
-    from hermes_cli.web_server import _fs_path
     target = _fs_path(payload.path)
     text = payload.content or ""
     if len(text.encode("utf-8")) > _FS_TEXT_WRITE_MAX_BYTES:
@@ -838,7 +812,7 @@ async def fs_write_text(payload: FsWriteText):
 
 @router.get("/api/fs/read-data-url")
 async def fs_read_data_url(path: str):
-    from hermes_cli.web_server import _FS_DATA_URL_MAX_BYTES, _fs_path
+    from hermes_cli.web_server import _FS_DATA_URL_MAX_BYTES
     target, st = _fs_regular_file(_fs_path(path))
     if st.st_size > _FS_DATA_URL_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
@@ -853,7 +827,6 @@ async def fs_read_data_url(path: str):
 
 @router.get("/api/fs/download")
 async def fs_download(path: str):
-    from hermes_cli.web_server import _fs_path
     target, _st = _fs_regular_file(_fs_path(path))
     if _is_sensitive_path(target):
         raise HTTPException(status_code=403, detail="Access to sensitive files is not allowed")
@@ -867,7 +840,6 @@ async def fs_download(path: str):
 
 @router.get("/api/fs/git-root")
 async def fs_git_root(path: str):
-    from hermes_cli.web_server import _fs_path
     target = _fs_path(path)
     try:
         st = target.stat()

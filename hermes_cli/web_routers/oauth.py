@@ -9,12 +9,22 @@ import asyncio
 import sys
 import time
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import HTTPException, Request
 from hermes_cli.web_models import OAuthSubmitBody
 from typing import Any, Dict, Optional
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
+
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_external_process_cli_command = late("_external_process_cli_command")
+_oauth_profile_name = late("_oauth_profile_name")
+_profile_scope = late("_profile_scope")
+_require_token = late("_require_token")
+_resolve_profile_dir = late("_resolve_profile_dir")
+_resolve_provider_status = late("_resolve_provider_status")
+_start_device_code_flow = late("_start_device_code_flow")
 
 
 def _oauth_provider_disconnect_command(provider: Dict[str, Any]) -> Optional[str]:
@@ -137,7 +147,6 @@ async def list_oauth_providers(profile: Optional[str] = None):
     sync with the `hermes model` picker; _OAUTH_OVERRIDES supplies per-provider
     flow/status/cli metadata.
     """
-    from hermes_cli.web_server import _external_process_cli_command, _profile_scope, _resolve_provider_status
     def _run():
         with _profile_scope(profile):
             providers = []
@@ -167,7 +176,6 @@ async def disconnect_oauth_provider(
     profile: Optional[str] = None,
 ):
     """Disconnect an OAuth provider. Token-protected (matches /env/reveal)."""
-    from hermes_cli.web_server import _profile_scope, _require_token, _resolve_provider_status
     _require_token(request)
 
     def _run():
@@ -277,7 +285,6 @@ def _gc_oauth_sessions() -> None:
 
 
 def _validate_oauth_profile(profile: Optional[str]) -> None:
-    from hermes_cli.web_server import _oauth_profile_name, _resolve_profile_dir
     profile_name = _oauth_profile_name(profile)
     if profile_name:
         _resolve_profile_dir(profile_name)
@@ -290,11 +297,7 @@ async def start_oauth_login(
     profile: Optional[str] = None,
 ):
     """Initiate an OAuth login flow. Token-protected."""
-    from hermes_cli.web_server import (
-        _OAUTH_PROVIDER_CATALOG,
-        _require_token,
-        _start_device_code_flow,
-    )
+    from hermes_cli.web_server import _OAUTH_PROVIDER_CATALOG
     _require_token(request)
     _gc_oauth_sessions()
     _validate_oauth_profile(profile)
@@ -326,7 +329,6 @@ async def submit_oauth_code(
     profile: Optional[str] = None,
 ):
     """Submit the auth code for PKCE flows. Token-protected."""
-    from hermes_cli.web_server import _require_token
     _require_token(request)
     raise HTTPException(status_code=400, detail=f"submit not supported for {provider_id}")
 
@@ -343,7 +345,7 @@ async def poll_oauth_session(
     Each surfaces progress through the same background-worker-updated
     ``status`` field, so a single poll endpoint serves them all.
     """
-    from hermes_cli.web_server import _oauth_profile_name, _oauth_sessions, _oauth_sessions_lock
+    from hermes_cli.web_server import _oauth_sessions, _oauth_sessions_lock
     _validate_oauth_profile(profile)
     requested_profile = _oauth_profile_name(profile)
     with _oauth_sessions_lock:
@@ -376,12 +378,7 @@ async def cancel_oauth_session(
     polling/exchanging/saving instead of completing the login after the
     user believed it was aborted.
     """
-    from hermes_cli.web_server import (
-        _oauth_profile_name,
-        _oauth_sessions,
-        _oauth_sessions_lock,
-        _require_token,
-    )
+    from hermes_cli.web_server import _oauth_sessions, _oauth_sessions_lock
     _require_token(request)
     _validate_oauth_profile(profile)
     requested_profile = _oauth_profile_name(profile)

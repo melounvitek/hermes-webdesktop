@@ -7,6 +7,7 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 import logging
 import asyncio
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse
 from hermes_cli.web_models import ThemeSetBody, FontSetBody, _AgentPluginInstallBody, _PluginProvidersPutBody, _PluginVisibilityBody
@@ -14,6 +15,18 @@ from pathlib import Path
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
+
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_discover_user_themes = late("_discover_user_themes")
+_get_dashboard_plugins = late("_get_dashboard_plugins")
+_invalidate_plugins_hub_cache = late("_invalidate_plugins_hub_cache")
+_merged_plugins_hub = late("_merged_plugins_hub")
+_normalize_memory_provider_name = late("_normalize_memory_provider_name")
+_require_memory_provider_ready = late("_require_memory_provider_ready")
+_require_token = late("_require_token")
+cfg_get = late("cfg_get")
+load_config = late("load_config")
+save_config = late("save_config")
 
 
 @router.get("/api/dashboard/themes")
@@ -26,12 +39,7 @@ async def get_dashboard_themes():
     normalised definition under `definition`, so the client can apply
     them without a stub.
     """
-    from hermes_cli.web_server import (
-        _BUILTIN_DASHBOARD_THEMES,
-        _discover_user_themes,
-        cfg_get,
-        load_config,
-    )
+    from hermes_cli.web_server import _BUILTIN_DASHBOARD_THEMES
     def _run():
         config = load_config()
         active = cfg_get(config, "dashboard", "theme", default="default")
@@ -59,7 +67,7 @@ async def get_dashboard_themes():
 @router.put("/api/dashboard/theme")
 async def set_dashboard_theme(body: ThemeSetBody):
     """Set the active dashboard theme (persists to config.yaml)."""
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, load_config, save_config
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     def _run():
         with _CONFIG_MUTATION_LOCK:
             config = load_config()
@@ -91,7 +99,6 @@ _FONT_CHOICES = frozenset({
 @router.get("/api/dashboard/font")
 async def get_dashboard_font():
     """Return the active font override (``"theme"`` = use the theme's font)."""
-    from hermes_cli.web_server import cfg_get, load_config
     def _run():
         config = load_config()
         font = cfg_get(config, "dashboard", "font", default=_FONT_DEFAULT_ID)
@@ -111,7 +118,7 @@ async def set_dashboard_font(body: FontSetBody):
     coerced to ``"theme"`` rather than 400'd so a stale client can't wedge
     the picker.
     """
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, load_config, save_config
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     font = body.font if body.font in _FONT_CHOICES else _FONT_DEFAULT_ID
 
     def _run():
@@ -129,7 +136,6 @@ async def set_dashboard_font(body: FontSetBody):
 @router.get("/api/dashboard/plugins")
 async def get_dashboard_plugins():
     """Return discovered dashboard plugins (excludes user-hidden and non-enabled ones)."""
-    from hermes_cli.web_server import _get_dashboard_plugins, cfg_get, load_config
     def _run():
         plugins = _get_dashboard_plugins()
         # Read user's hidden plugins list from config.
@@ -174,7 +180,6 @@ async def get_dashboard_plugins():
 @router.get("/api/dashboard/plugins/rescan")
 async def rescan_dashboard_plugins():
     """Force re-scan of dashboard plugins."""
-    from hermes_cli.web_server import _get_dashboard_plugins
     plugins = _get_dashboard_plugins(force_rescan=True)
     return {"ok": True, "count": len(plugins)}
 
@@ -182,7 +187,6 @@ async def rescan_dashboard_plugins():
 @router.get("/api/dashboard/plugins/hub")
 async def get_plugins_hub(request: Request):
     """Unified agent plugins + dashboard extension metadata (session protected)."""
-    from hermes_cli.web_server import _merged_plugins_hub, _require_token
     _require_token(request)
     try:
         return _merged_plugins_hub()
@@ -193,11 +197,6 @@ async def get_plugins_hub(request: Request):
 
 @router.post("/api/dashboard/agent-plugins/install")
 async def post_agent_plugin_install(request: Request, body: _AgentPluginInstallBody):
-    from hermes_cli.web_server import (
-        _get_dashboard_plugins,
-        _invalidate_plugins_hub_cache,
-        _require_token,
-    )
     _require_token(request)
     from hermes_cli.plugins_cmd import dashboard_install_plugin
 
@@ -228,7 +227,6 @@ def _validate_plugin_name(name: str) -> str:
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/enable")
 async def post_agent_plugin_enable(request: Request, name: str):
-    from hermes_cli.web_server import _invalidate_plugins_hub_cache, _require_token
     _require_token(request)
     name = _validate_plugin_name(name)
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
@@ -242,7 +240,6 @@ async def post_agent_plugin_enable(request: Request, name: str):
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/disable")
 async def post_agent_plugin_disable(request: Request, name: str):
-    from hermes_cli.web_server import _invalidate_plugins_hub_cache, _require_token
     _require_token(request)
     name = _validate_plugin_name(name)
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
@@ -256,11 +253,6 @@ async def post_agent_plugin_disable(request: Request, name: str):
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/update")
 async def post_agent_plugin_update(request: Request, name: str):
-    from hermes_cli.web_server import (
-        _get_dashboard_plugins,
-        _invalidate_plugins_hub_cache,
-        _require_token,
-    )
     _require_token(request)
     name = _validate_plugin_name(name)
     from hermes_cli.plugins_cmd import dashboard_update_user_plugin
@@ -275,11 +267,6 @@ async def post_agent_plugin_update(request: Request, name: str):
 
 @router.delete("/api/dashboard/agent-plugins/{name:path}")
 async def delete_agent_plugin(request: Request, name: str):
-    from hermes_cli.web_server import (
-        _get_dashboard_plugins,
-        _invalidate_plugins_hub_cache,
-        _require_token,
-    )
     _require_token(request)
     name = _validate_plugin_name(name)
     from hermes_cli.plugins_cmd import dashboard_remove_user_plugin
@@ -295,13 +282,7 @@ async def delete_agent_plugin(request: Request, name: str):
 @router.put("/api/dashboard/plugin-providers")
 async def put_plugin_providers(request: Request, body: _PluginProvidersPutBody):
     """Persist memory provider / context engine selection (writes config.yaml)."""
-    from hermes_cli.web_server import (
-        _CONFIG_MUTATION_LOCK,
-        _invalidate_plugins_hub_cache,
-        _normalize_memory_provider_name,
-        _require_memory_provider_ready,
-        _require_token,
-    )
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     _require_token(request)
     from hermes_cli.plugins_cmd import (
         _save_context_engine,
@@ -325,13 +306,7 @@ async def put_plugin_providers(request: Request, body: _PluginProvidersPutBody):
 @router.post("/api/dashboard/plugins/{name:path}/visibility")
 async def post_plugin_visibility(request: Request, name: str, body: _PluginVisibilityBody):
     """Toggle a plugin's sidebar visibility (persists to config.yaml dashboard.hidden_plugins)."""
-    from hermes_cli.web_server import (
-        _CONFIG_MUTATION_LOCK,
-        _invalidate_plugins_hub_cache,
-        _require_token,
-        load_config,
-        save_config,
-    )
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     _require_token(request)
     name = _validate_plugin_name(name)
 
@@ -378,7 +353,6 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
     User plugins must be in plugins.enabled before their assets are
     served. (#46435, GHSA-mcfc-hp25-cjv7)
     """
-    from hermes_cli.web_server import _get_dashboard_plugins
     plugins = _get_dashboard_plugins()
     plugin = next((p for p in plugins if p["name"] == plugin_name), None)
     if not plugin:

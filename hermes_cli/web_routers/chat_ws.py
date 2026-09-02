@@ -9,6 +9,7 @@ import functools
 import logging
 import json
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from hermes_cli.pty_session import RegistryFull
 from pathlib import Path
@@ -16,6 +17,27 @@ from typing import Any, Dict, Optional
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
+
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_active_session_file_for_channel = late("_active_session_file_for_channel")
+_broadcast_event = late("_broadcast_event")
+_build_sidecar_url = late("_build_sidecar_url")
+_channel_or_close_code = late("_channel_or_close_code")
+_forget_active_session_file = late("_forget_active_session_file")
+_get_console_executor = late("_get_console_executor")
+_get_event_state = late("_get_event_state")
+_legacy_pump = late("_legacy_pump")
+_profile_scope = late("_profile_scope")
+_read_active_session_file = late("_read_active_session_file")
+_resolve_chat_argv_async = late("_resolve_chat_argv_async")
+_resolve_profile_dir = late("_resolve_profile_dir")
+_ws_auth_mode = late("_ws_auth_mode")
+_ws_auth_ok = late("_ws_auth_ok")
+_ws_auth_reason = late("_ws_auth_reason")
+_ws_client_reason = late("_ws_client_reason")
+_ws_close_reason = late("_ws_close_reason")
+_ws_host_origin_reason = late("_ws_host_origin_reason")
+_ws_request_is_allowed = late("_ws_request_is_allowed")
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +71,6 @@ def _execute_console_line(
 ) -> Any:
     # _profile_scope swaps process-global skill module paths; keep it inside
     # the worker thread and never hold it across awaits.
-    from hermes_cli.web_server import _profile_scope
     with _profile_scope(profile):
         return engine.execute(line, confirmed=confirmed)
 
@@ -210,17 +231,7 @@ def _console_json_payload(msg: Any) -> tuple[Optional[dict[str, Any]], Optional[
 
 @router.websocket("/api/console")
 async def console_ws(ws: WebSocket) -> None:
-    from hermes_cli.web_server import (
-        _DASHBOARD_EMBEDDED_CHAT_ENABLED,
-        _get_console_executor,
-        _resolve_profile_dir,
-        _ws_auth_mode,
-        _ws_auth_reason,
-        _ws_client_reason,
-        _ws_close_reason,
-        _ws_host_origin_reason,
-        asyncio,
-    )
+    from hermes_cli.web_server import _DASHBOARD_EMBEDDED_CHAT_ENABLED, asyncio
     peer = ws.client.host if ws.client else "?"
 
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
@@ -578,18 +589,6 @@ async def pty_ws(ws: WebSocket) -> None:
         _DASHBOARD_EMBEDDED_CHAT_ENABLED,
         _PTY_BRIDGE_AVAILABLE,
         _RESIZE_RE,
-        _active_session_file_for_channel,
-        _build_sidecar_url,
-        _channel_or_close_code,
-        _forget_active_session_file,
-        _legacy_pump,
-        _read_active_session_file,
-        _resolve_chat_argv_async,
-        _ws_auth_mode,
-        _ws_auth_reason,
-        _ws_client_reason,
-        _ws_close_reason,
-        _ws_host_origin_reason,
     )
     peer = ws.client.host if ws.client else "?"
 
@@ -787,11 +786,7 @@ async def pty_ws(ws: WebSocket) -> None:
 
 @router.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
-    from hermes_cli.web_server import (
-        _DASHBOARD_EMBEDDED_CHAT_ENABLED,
-        _ws_auth_ok,
-        _ws_request_is_allowed,
-    )
+    from hermes_cli.web_server import _DASHBOARD_EMBEDDED_CHAT_ENABLED
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         await ws.close(code=4403)
         return
@@ -831,13 +826,7 @@ async def gateway_ws(ws: WebSocket) -> None:
 
 @router.websocket("/api/pub")
 async def pub_ws(ws: WebSocket) -> None:
-    from hermes_cli.web_server import (
-        _DASHBOARD_EMBEDDED_CHAT_ENABLED,
-        _broadcast_event,
-        _channel_or_close_code,
-        _ws_auth_ok,
-        _ws_request_is_allowed,
-    )
+    from hermes_cli.web_server import _DASHBOARD_EMBEDDED_CHAT_ENABLED
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         await ws.close(code=4403)
         return
@@ -866,13 +855,7 @@ async def pub_ws(ws: WebSocket) -> None:
 
 @router.websocket("/api/events")
 async def events_ws(ws: WebSocket) -> None:
-    from hermes_cli.web_server import (
-        _DASHBOARD_EMBEDDED_CHAT_ENABLED,
-        _channel_or_close_code,
-        _get_event_state,
-        _ws_auth_ok,
-        _ws_request_is_allowed,
-    )
+    from hermes_cli.web_server import _DASHBOARD_EMBEDDED_CHAT_ENABLED
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         await ws.close(code=4403)
         return

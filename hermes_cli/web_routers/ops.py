@@ -13,6 +13,7 @@ import os
 import secrets
 from datetime import datetime, timezone
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from hermes_cli.config import redact_key
@@ -22,6 +23,20 @@ from typing import Any, Dict, List, Optional
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
+
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_discover_memory_provider_statuses = late("_discover_memory_provider_statuses")
+_gateway_subcommand = late("_gateway_subcommand")
+_normalize_memory_provider_name = late("_normalize_memory_provider_name")
+_path_is_under = late("_path_is_under")
+_require_memory_provider_ready = late("_require_memory_provider_ready")
+_resolve_profile_dir = late("_resolve_profile_dir")
+_restart_gateway_after_webhook_enable = late("_restart_gateway_after_webhook_enable")
+_spawn_hermes_action = late("_spawn_hermes_action")
+_write_platform_enabled = late("_write_platform_enabled")
+get_hermes_home = late("get_hermes_home")
+load_config = late("load_config")
+save_config = late("save_config")
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +60,6 @@ def _pairing_store(profile: Optional[str] = None):
     ``_profile_scope`` needed, and nothing process-global is swapped across
     the ``await`` boundary.
     """
-    from hermes_cli.web_server import _resolve_profile_dir
     from gateway.pairing import PairingStore
 
     requested = (profile or "").strip()
@@ -169,7 +183,6 @@ async def list_webhooks():
 
 @router.post("/api/webhooks/enable")
 async def enable_webhooks():
-    from hermes_cli.web_server import _restart_gateway_after_webhook_enable, _write_platform_enabled
     try:
         _write_platform_enabled("webhook", True)
     except Exception as exc:
@@ -288,7 +301,6 @@ async def set_webhook_enabled(name: str, body: WebhookEnabledToggle):
 
 @router.post("/api/gateway/start")
 async def start_gateway(profile: Optional[str] = None):
-    from hermes_cli.web_server import _gateway_subcommand, _spawn_hermes_action
     try:
         proc = _spawn_hermes_action(_gateway_subcommand(profile, "start"), "gateway-start")
     except HTTPException:
@@ -301,7 +313,6 @@ async def start_gateway(profile: Optional[str] = None):
 
 @router.post("/api/gateway/stop")
 async def stop_gateway(profile: Optional[str] = None):
-    from hermes_cli.web_server import _gateway_subcommand, _spawn_hermes_action
     try:
         proc = _spawn_hermes_action(_gateway_subcommand(profile, "stop"), "gateway-stop")
     except HTTPException:
@@ -512,12 +523,6 @@ async def remove_credential_pool_entry(provider: str, index: int):
 async def get_memory_status():
     # load_config(), file stats and provider discovery are disk reads — keep
     # them off the event loop.
-    from hermes_cli.web_server import (
-        _discover_memory_provider_statuses,
-        _normalize_memory_provider_name,
-        get_hermes_home,
-        load_config,
-    )
     def _run():
         cfg = load_config()
         active = ""
@@ -543,13 +548,7 @@ async def get_memory_status():
 
 @router.put("/api/memory/provider")
 async def set_memory_provider(body: MemoryProviderSelect):
-    from hermes_cli.web_server import (
-        _CONFIG_MUTATION_LOCK,
-        _normalize_memory_provider_name,
-        _require_memory_provider_ready,
-        load_config,
-        save_config,
-    )
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     provider = _normalize_memory_provider_name(body.provider)
 
     def _run():
@@ -568,7 +567,6 @@ async def set_memory_provider(body: MemoryProviderSelect):
 
 @router.post("/api/memory/reset")
 async def reset_memory(body: MemoryReset):
-    from hermes_cli.web_server import get_hermes_home
     target = (body.target or "all").strip().lower()
     if target not in {"all", "memory", "user"}:
         raise HTTPException(status_code=400, detail="target must be all, memory, or user")
@@ -606,7 +604,6 @@ async def reset_memory(body: MemoryReset):
 
 @router.post("/api/ops/doctor")
 async def run_doctor():
-    from hermes_cli.web_server import _spawn_hermes_action
     try:
         proc = _spawn_hermes_action(["doctor"], "doctor")
     except Exception as exc:
@@ -617,7 +614,6 @@ async def run_doctor():
 
 @router.post("/api/ops/security-audit")
 async def run_security_audit():
-    from hermes_cli.web_server import _spawn_hermes_action
     try:
         proc = _spawn_hermes_action(["security", "audit"], "security-audit")
     except Exception as exc:
@@ -627,7 +623,6 @@ async def run_security_audit():
 
 
 def _dashboard_backup_dir() -> Path:
-    from hermes_cli.web_server import get_hermes_home
     return get_hermes_home() / "backups"
 
 
@@ -638,7 +633,6 @@ def _new_dashboard_backup_path() -> Path:
 
 @router.post("/api/ops/backup")
 async def run_backup(body: BackupRequest):
-    from hermes_cli.web_server import _spawn_hermes_action
     args = ["backup"]
     archive: Optional[Path] = None
     output = (body.output or "").strip()
@@ -667,7 +661,6 @@ async def run_backup(body: BackupRequest):
 
 @router.get("/api/ops/backup/download")
 async def download_dashboard_backup(archive: str):
-    from hermes_cli.web_server import _path_is_under
     try:
         backup_dir = _dashboard_backup_dir().expanduser().resolve(strict=False)
         target = Path(archive).expanduser().resolve(strict=True)
@@ -691,7 +684,6 @@ async def download_dashboard_backup(archive: str):
 
 @router.post("/api/ops/import")
 async def run_import(body: ImportRequest):
-    from hermes_cli.web_server import _spawn_hermes_action
     archive = (body.archive or "").strip()
     if not archive:
         raise HTTPException(status_code=400, detail="archive path is required")
@@ -723,11 +715,7 @@ async def run_import_upload(
     file: UploadFile = File(...),
     force: bool = Form(False),
 ):
-    from hermes_cli.web_server import (
-        _MANAGED_FILE_MAX_BYTES,
-        _UPLOAD_CHUNK_BYTES,
-        _spawn_hermes_action,
-    )
+    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES, _UPLOAD_CHUNK_BYTES
     staging_dir = _dashboard_backup_dir()
     try:
         staging_dir.mkdir(parents=True, exist_ok=True)
@@ -861,7 +849,7 @@ async def create_hook(body: HookCreate):
     consent in the allowlist so the hook actually fires.  Takes effect on the
     next session / gateway restart.
     """
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, load_config, save_config
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     from agent import shell_hooks
 
     event = (body.event or "").strip()
@@ -917,7 +905,7 @@ async def create_hook(body: HookCreate):
 @router.delete("/api/ops/hooks")
 async def delete_hook(body: HookDelete):
     """Remove a hook from config.yaml and revoke its consent allowlist entry."""
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK, load_config, save_config
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     from agent import shell_hooks
 
     event = (body.event or "").strip()
@@ -960,7 +948,6 @@ async def delete_hook(body: HookDelete):
 @router.get("/api/ops/checkpoints")
 async def list_checkpoints():
     """List the /rollback shadow store checkpoints (read-only)."""
-    from hermes_cli.web_server import get_hermes_home
     # Checkpoints live under <hermes_home>/checkpoints/.  Surface a count +
     # total size so the dashboard can show what a prune would reclaim; the
     # actual prune is a spawned action so confirmation/pruning logic stays
@@ -994,7 +981,6 @@ async def list_checkpoints():
 
 @router.post("/api/ops/checkpoints/prune")
 async def prune_checkpoints():
-    from hermes_cli.web_server import _spawn_hermes_action
     try:
         proc = _spawn_hermes_action(["checkpoints", "prune"], "checkpoints-prune")
     except Exception as exc:

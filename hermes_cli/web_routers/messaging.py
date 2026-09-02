@@ -15,6 +15,7 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import HTTPException
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import get_env_path
@@ -24,6 +25,27 @@ from typing import Any, Optional
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
+
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_catalog_lookup = late("_catalog_lookup")
+_config_profile_scope = late("_config_profile_scope")
+_gateway_display_command = late("_gateway_display_command")
+_messaging_platform_catalog = late("_messaging_platform_catalog")
+_messaging_platform_payload = late("_messaging_platform_payload")
+_profile_scope = late("_profile_scope")
+_resolve_profile_dir = late("_resolve_profile_dir")
+_restart_gateway_after_whatsapp_onboarding = late("_restart_gateway_after_whatsapp_onboarding")
+_spawn_gateway_restart = late("_spawn_gateway_restart")
+_telegram_onboarding_error_message = late("_telegram_onboarding_error_message")
+_telegram_onboarding_request_sync = late("_telegram_onboarding_request_sync")
+_validate_messaging_env_value = late("_validate_messaging_env_value")
+_whatsapp_onboarding_payload = late("_whatsapp_onboarding_payload")
+_whatsapp_session_path = late("_whatsapp_session_path")
+_write_platform_enabled = late("_write_platform_enabled")
+load_env = late("load_env")
+read_runtime_status = late("read_runtime_status")
+remove_env_value = late("remove_env_value")
+save_env_value = late("save_env_value")
 
 
 _WHATSAPP_ONBOARDING_TTL_SECONDS = 600
@@ -330,13 +352,7 @@ def _supersede_whatsapp_onboarding_sessions(session_path: Path) -> None:
 
 @router.post("/api/messaging/whatsapp/onboarding/start")
 async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart):
-    from hermes_cli.web_server import (
-        _WhatsAppOnboardingSession,
-        _config_profile_scope,
-        _whatsapp_onboarding_payload,
-        _whatsapp_onboarding_sessions,
-        _whatsapp_session_path,
-    )
+    from hermes_cli.web_server import _WhatsAppOnboardingSession, _whatsapp_onboarding_sessions
     mode = _normalize_whatsapp_onboarding_mode(body.mode)
     allowed_users = _normalize_whatsapp_allowed_users(body.allowed_users)
     effective_profile = body.profile
@@ -394,7 +410,7 @@ async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart):
 
 @router.get("/api/messaging/whatsapp/onboarding/{pairing_id}")
 async def get_whatsapp_onboarding_status(pairing_id: str):
-    from hermes_cli.web_server import _whatsapp_onboarding_payload, _whatsapp_onboarding_sessions
+    from hermes_cli.web_server import _whatsapp_onboarding_sessions
     with _whatsapp_onboarding_lock:
         _prune_whatsapp_onboarding_sessions()
         record = _whatsapp_onboarding_sessions.get(pairing_id)
@@ -412,13 +428,7 @@ async def get_whatsapp_onboarding_status(pairing_id: str):
 async def apply_whatsapp_onboarding(
     pairing_id: str, body: WhatsAppOnboardingApply, profile: Optional[str] = None
 ):
-    from hermes_cli.web_server import (
-        _config_profile_scope,
-        _restart_gateway_after_whatsapp_onboarding,
-        _whatsapp_onboarding_sessions,
-        _write_platform_enabled,
-        save_env_value,
-    )
+    from hermes_cli.web_server import _whatsapp_onboarding_sessions
     with _whatsapp_onboarding_lock:
         _prune_whatsapp_onboarding_sessions()
         record = _whatsapp_onboarding_sessions.get(pairing_id)
@@ -520,7 +530,6 @@ async def _telegram_onboarding_request(
     body: dict[str, Any] | None = None,
     bearer_token: str | None = None,
 ) -> dict[str, Any]:
-    from hermes_cli.web_server import _telegram_onboarding_request_sync
     return await asyncio.to_thread(
         _telegram_onboarding_request_sync,
         method,
@@ -575,11 +584,7 @@ async def start_telegram_onboarding(body: TelegramOnboardingStart):
 
 @router.get("/api/messaging/telegram/onboarding/{pairing_id}")
 async def get_telegram_onboarding_status(pairing_id: str):
-    from hermes_cli.web_server import (
-        _telegram_onboarding_error_message,
-        _telegram_onboarding_lock,
-        _telegram_onboarding_pairings,
-    )
+    from hermes_cli.web_server import _telegram_onboarding_lock, _telegram_onboarding_pairings
     with _telegram_onboarding_lock:
         _prune_telegram_onboarding_pairings()
         record = _telegram_onboarding_pairings.get(pairing_id)
@@ -660,7 +665,6 @@ def _restart_gateway_after_telegram_onboarding(profile: Optional[str] = None) ->
     broken from the chat side. Keep the config save authoritative, but report
     restart failures so the UI can fall back to the existing manual banner.
     """
-    from hermes_cli.web_server import _spawn_gateway_restart
     try:
         proc, reused = _spawn_gateway_restart(profile)
     except Exception as exc:
@@ -685,13 +689,7 @@ def _restart_gateway_after_telegram_onboarding(profile: Optional[str] = None) ->
 async def apply_telegram_onboarding(
     pairing_id: str, body: TelegramOnboardingApply, profile: Optional[str] = None
 ):
-    from hermes_cli.web_server import (
-        _profile_scope,
-        _telegram_onboarding_lock,
-        _telegram_onboarding_pairings,
-        _write_platform_enabled,
-        save_env_value,
-    )
+    from hermes_cli.web_server import _telegram_onboarding_lock, _telegram_onboarding_pairings
     allowed_user_ids = []
     seen = set()
     for raw_id in body.allowed_user_ids:
@@ -776,14 +774,6 @@ async def get_messaging_platforms(profile: Optional[str] = None):
     # load_env() honors the HERMES_HOME contextvar override; the gateway
     # status readers do NOT (they resolve process-level paths), so the
     # profile directory is passed explicitly for those (#71211).
-    from hermes_cli.web_server import (
-        _gateway_display_command,
-        _messaging_platform_catalog,
-        _messaging_platform_payload,
-        _profile_scope,
-        load_env,
-        read_runtime_status,
-    )
     def _run():
         with _profile_scope(profile) as scoped_dir:
             env_on_disk = load_env()
@@ -826,7 +816,6 @@ def _multiplex_port_binding_conflict(
     *enabling* is blocked; disabling/clearing stays allowed so users can
     repair an already-invalid profile.
     """
-    from hermes_cli.web_server import _config_profile_scope, _resolve_profile_dir
     from gateway.config import PORT_BINDING_PLATFORM_VALUES, load_gateway_config
 
     if platform_id not in PORT_BINDING_PLATFORM_VALUES:
@@ -866,14 +855,6 @@ def _multiplex_port_binding_conflict(
 async def update_messaging_platform(
     platform_id: str, body: MessagingPlatformUpdate, profile: Optional[str] = None
 ):
-    from hermes_cli.web_server import (
-        _catalog_lookup,
-        _profile_scope,
-        _validate_messaging_env_value,
-        _write_platform_enabled,
-        remove_env_value,
-        save_env_value,
-    )
     entry = _catalog_lookup(platform_id)
     if not entry:
         raise HTTPException(
@@ -943,13 +924,6 @@ async def update_messaging_platform(
 
 @router.post("/api/messaging/platforms/{platform_id}/test")
 async def test_messaging_platform(platform_id: str, profile: Optional[str] = None):
-    from hermes_cli.web_server import (
-        _catalog_lookup,
-        _messaging_platform_payload,
-        _profile_scope,
-        load_env,
-        read_runtime_status,
-    )
     entry = _catalog_lookup(platform_id)
     if not entry:
         raise HTTPException(

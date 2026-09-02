@@ -10,6 +10,7 @@ import asyncio
 import time
 import urllib.parse
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import HTTPException, Request
 from hermes_cli.config import DEFAULT_CONFIG, OPTIONAL_ENV_VARS, read_raw_config, custom_endpoint_key_env, coerce_provider_id, find_provider_entry, redact_key, _deep_merge
 from hermes_cli.web_models import ConfigUpdate, EnvVarUpdate, EnvVarDelete, EnvVarReveal, CustomEndpointUpdate
@@ -19,6 +20,25 @@ _log = logging.getLogger("hermes_cli.web_server")
 config_router = APIRouter()
 router = APIRouter()
 
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_apply_main_model_assignment = late("_apply_main_model_assignment")
+_approval_mode_of = late("_approval_mode_of")
+_broadcast_gateway_session_info = late("_broadcast_gateway_session_info")
+_channel_managed_env_keys = late("_channel_managed_env_keys")
+_config_profile_scope = late("_config_profile_scope")
+_denormalize_config_from_web = late("_denormalize_config_from_web")
+_is_other_profile = late("_is_other_profile")
+_normalize_config_for_web = late("_normalize_config_for_web")
+_parse_model_ids = late("_parse_model_ids")
+_profile_scope = late("_profile_scope")
+_require_token = late("_require_token")
+_schema_with_dynamic_provider_options = late("_schema_with_dynamic_provider_options")
+load_config = late("load_config")
+load_env = late("load_env")
+remove_env_value = late("remove_env_value")
+save_config = late("save_config")
+save_env_value = late("save_env_value")
+
 
 @config_router.get("/api/config")
 async def get_config(profile: Optional[str] = None):
@@ -27,7 +47,6 @@ async def get_config(profile: Optional[str] = None):
     # froze the whole gateway for >1s (observed via the loop watchdog).
     # asyncio.to_thread copies the contextvar context, so the profile
     # override stays scoped to the worker thread.
-    from hermes_cli.web_server import _normalize_config_for_web, _profile_scope, load_config
     def _run():
         with _profile_scope(profile):
             return _normalize_config_for_web(load_config())
@@ -47,11 +66,7 @@ async def get_schema(profile: Optional[str] = None):
     # Discovery-driven provider options (voice command providers + memory
     # provider plugins) are merged per-request so providers added after server
     # start still show up, scoped to the requested profile's config.
-    from hermes_cli.web_server import (
-        _CATEGORY_ORDER,
-        _config_profile_scope,
-        _schema_with_dynamic_provider_options,
-    )
+    from hermes_cli.web_server import _CATEGORY_ORDER
     with _config_profile_scope(profile):
         fields = _schema_with_dynamic_provider_options()
     return {"fields": fields, "category_order": _CATEGORY_ORDER}
@@ -67,15 +82,7 @@ async def get_egress_status():
 
 @router.put("/api/config")
 async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
-    from hermes_cli.web_server import (
-        _CONFIG_MUTATION_LOCK,
-        _approval_mode_of,
-        _broadcast_gateway_session_info,
-        _denormalize_config_from_web,
-        _is_other_profile,
-        _profile_scope,
-        save_config,
-    )
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     def _run():
         approvals_mode_changed = False
         with _profile_scope(body.profile or profile):
@@ -231,7 +238,6 @@ async def get_env_vars(profile: Optional[str] = None):
 
 
 def _get_env_vars_sync(profile: Optional[str] = None):
-    from hermes_cli.web_server import _channel_managed_env_keys, _profile_scope, load_env
     with _profile_scope(profile):
         env_on_disk = load_env()
     channel_keys = _channel_managed_env_keys()
@@ -295,7 +301,6 @@ def _get_env_vars_sync(profile: Optional[str] = None):
 
 @router.put("/api/env")
 async def set_env_var(body: EnvVarUpdate, profile: Optional[str] = None):
-    from hermes_cli.web_server import _profile_scope
     def _run():
         with _profile_scope(body.profile or profile):
             # Unified credential lifecycle: writes .env AND reconciles any
@@ -468,7 +473,6 @@ def _detach_main_model_from_provider(cfg: Dict[str, Any], provider_key: str) -> 
 
 
 def _write_custom_endpoint(cfg: Dict[str, Any], body: CustomEndpointUpdate) -> Tuple[str, Dict[str, Any]]:
-    from hermes_cli.web_server import _apply_main_model_assignment, remove_env_value, save_env_value
     endpoint_id = _custom_endpoint_id(body.id or body.name)
     name = (body.name or "").strip()
     base_url = (body.base_url or "").strip().rstrip("/")
@@ -572,7 +576,6 @@ def list_custom_endpoints(profile: Optional[str] = None):
     active profile, so read/write must resolve that profile's home rather than
     the process-level HERMES_HOME. Mirrors ``/api/config``'s profile scoping.
     """
-    from hermes_cli.web_server import _config_profile_scope, load_config
     try:
         with _config_profile_scope(profile):
             return _custom_endpoint_response(load_config())
@@ -586,7 +589,6 @@ def list_custom_endpoints(profile: Optional[str] = None):
 @router.post("/api/providers/custom-endpoints")
 def upsert_custom_endpoint(body: CustomEndpointUpdate, profile: Optional[str] = None):
     """Create or update a v12+ ``providers`` custom endpoint entry."""
-    from hermes_cli.web_server import _config_profile_scope, load_config, save_config
     try:
         with _config_profile_scope(profile):
             cfg = load_config()
@@ -606,12 +608,6 @@ def upsert_custom_endpoint(body: CustomEndpointUpdate, profile: Optional[str] = 
 @router.post("/api/providers/custom-endpoints/{endpoint_id}/activate")
 def activate_custom_endpoint(endpoint_id: str, profile: Optional[str] = None):
     """Set a configured custom endpoint as the default model provider."""
-    from hermes_cli.web_server import (
-        _apply_main_model_assignment,
-        _config_profile_scope,
-        load_config,
-        save_config,
-    )
     try:
         with _config_profile_scope(profile):
             cfg = load_config()
@@ -663,12 +659,6 @@ def activate_custom_endpoint(endpoint_id: str, profile: Optional[str] = None):
 @router.delete("/api/providers/custom-endpoints/{endpoint_id}")
 def delete_custom_endpoint(endpoint_id: str, profile: Optional[str] = None):
     """Remove a configured custom endpoint from ``providers``."""
-    from hermes_cli.web_server import (
-        _config_profile_scope,
-        load_config,
-        remove_env_value,
-        save_config,
-    )
     try:
         with _config_profile_scope(profile):
             cfg = load_config()
@@ -695,7 +685,6 @@ def delete_custom_endpoint(endpoint_id: str, profile: Optional[str] = None):
 @router.post("/api/providers/custom-endpoints/validate")
 async def validate_custom_endpoint(body: CustomEndpointUpdate):
     """Probe a custom endpoint by calling its OpenAI-compatible /models URL."""
-    from hermes_cli.web_server import _parse_model_ids
     import httpx
 
     base_url = (body.base_url or "").strip().rstrip("/")
@@ -730,7 +719,6 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
     reachable=False means the network probe couldn't run (caller may save with
     a warning rather than hard-blocking offline users).
     """
-    from hermes_cli.web_server import _parse_model_ids, _require_token
     _require_token(request)
     import httpx
 
@@ -786,7 +774,6 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
 
 @router.delete("/api/env")
 async def remove_env_var(body: EnvVarDelete, profile: Optional[str] = None):
-    from hermes_cli.web_server import _profile_scope
     def _run():
         with _profile_scope(body.profile or profile):
             # Unified credential lifecycle: clears the .env entry AND every
@@ -830,10 +817,7 @@ async def reveal_env_var(
     from hermes_cli.web_server import (
         _REVEAL_MAX_PER_WINDOW,
         _REVEAL_WINDOW_SECONDS,
-        _profile_scope,
-        _require_token,
         _reveal_timestamps,
-        load_env,
     )
     # --- Token check ---
     _require_token(request)

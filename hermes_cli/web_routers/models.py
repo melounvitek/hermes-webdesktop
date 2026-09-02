@@ -7,12 +7,22 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 import logging
 import asyncio
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import HTTPException
 from hermes_cli.web_models import ModelAssignment, MoaModelSlot, MoaPresetPayload, MoaConfigPayload
 from typing import Optional
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
+
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_apply_model_assignment_sync = late("_apply_model_assignment_sync")
+_config_profile_scope = late("_config_profile_scope")
+_dashboard_code_skew_guard = late("_dashboard_code_skew_guard")
+_profile_scope = late("_profile_scope")
+load_config = late("load_config")
+run_in_threadpool = late("run_in_threadpool")
+save_config = late("save_config")
 
 
 @router.get("/api/model/info")
@@ -23,7 +33,7 @@ def get_model_info(profile: Optional[str] = None):
     frontend can display "Auto-detected: 200K" alongside the override field.
     Also returns model capabilities (vision, reasoning, tools) when available.
     """
-    from hermes_cli.web_server import _EMPTY_MODEL_INFO, _profile_scope, load_config
+    from hermes_cli.web_server import _EMPTY_MODEL_INFO
     try:
         with _profile_scope(profile):
             cfg = load_config()
@@ -120,11 +130,6 @@ async def get_model_options(
     re-fetches its live catalog — used by the picker's explicit "Refresh
     Models" control. Normal opens leave it false to stay on the 1h cache.
     """
-    from hermes_cli.web_server import (
-        _config_profile_scope,
-        _dashboard_code_skew_guard,
-        run_in_threadpool,
-    )
     try:
         skew_msg = _dashboard_code_skew_guard()
         if skew_msg:
@@ -267,7 +272,7 @@ def get_auxiliary_models(profile: Optional[str] = None):
     the dashboard profile's auxiliary pins while /api/model/set wrote the
     selected profile's (read/write asymmetry).
     """
-    from hermes_cli.web_server import _AUX_TASK_SLOTS, _profile_scope, load_config
+    from hermes_cli.web_server import _AUX_TASK_SLOTS
     try:
         with _profile_scope(profile):
             cfg = load_config()
@@ -305,7 +310,6 @@ def get_auxiliary_models(profile: Optional[str] = None):
 @router.get("/api/model/moa")
 def get_moa_models(profile: Optional[str] = None):
     """Return the configured Mixture-of-Agents provider/model slots."""
-    from hermes_cli.web_server import _profile_scope, load_config
     try:
         from hermes_cli.moa_config import normalize_moa_config
 
@@ -322,7 +326,6 @@ def get_moa_models(profile: Optional[str] = None):
 @router.put("/api/model/moa")
 def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
     """Persist the Mixture-of-Agents provider/model slots."""
-    from hermes_cli.web_server import _profile_scope, load_config, save_config
     try:
         from hermes_cli.moa_config import normalize_moa_config, validate_moa_payload
 
@@ -402,7 +405,6 @@ async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = N
     The currently running chat PTY (if any) is not affected; use the
     ``/model`` slash command inside a chat to hot-swap that specific session.
     """
-    from hermes_cli.web_server import _apply_model_assignment_sync, _profile_scope
     scope = (body.scope or "").strip().lower()
     provider = (body.provider or "").strip()
     model = (body.model or "").strip()

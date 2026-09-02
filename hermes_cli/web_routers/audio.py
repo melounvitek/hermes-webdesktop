@@ -17,6 +17,7 @@ import os
 import urllib.parse
 import urllib.request
 from fastapi import APIRouter
+from hermes_cli.web_deps import late
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from hermes_cli.web_models import AudioTranscriptionRequest, TTSSpeakRequest, TTSLeaseRequest
 from typing import Any, Dict, Optional
@@ -24,16 +25,21 @@ from typing import Any, Dict, Optional
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_audio_extension_for_mime = late("_audio_extension_for_mime")
+_config_profile_scope = late("_config_profile_scope")
+_split_text_for_speak_stream = late("_split_text_for_speak_stream")
+_voice_list_error_logged_once = late("_voice_list_error_logged_once")
+_ws_auth_ok = late("_ws_auth_ok")
+_ws_request_is_allowed = late("_ws_request_is_allowed")
+load_env = late("load_env")
+
 
 @router.post("/api/audio/transcribe")
 async def transcribe_audio_upload(
     payload: AudioTranscriptionRequest, profile: Optional[str] = None
 ):
-    from hermes_cli.web_server import (
-        _MAX_TRANSCRIPTION_UPLOAD_BYTES,
-        _audio_extension_for_mime,
-        _config_profile_scope,
-    )
+    from hermes_cli.web_server import _MAX_TRANSCRIPTION_UPLOAD_BYTES
     data_url = (payload.data_url or "").strip()
     if not data_url.startswith("data:") or "," not in data_url:
         raise HTTPException(status_code=400, detail="Invalid audio payload")
@@ -140,7 +146,6 @@ async def get_client_voice_config(profile: Optional[str] = None):
     response are held in client memory only, never persisted client-side.
     Gate: ``voice.client_direct`` in config.yaml (default true).
     """
-    from hermes_cli.web_server import _config_profile_scope
     from tools.voice_client_config import resolve_client_voice_config
 
     def _resolve_scoped():
@@ -175,7 +180,6 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
     The desktop UI uses this for the ``tts.elevenlabs.voice_id`` dropdown.
     Only non-secret voice metadata is returned; the API key stays server-side.
     """
-    from hermes_cli.web_server import _config_profile_scope, _voice_list_error_logged_once, load_env
     # Config-only scope (await-safe): the key lookup reads the requested
     # profile's .env, matching the profile the settings UI writes to.
     with _config_profile_scope(profile):
@@ -262,7 +266,6 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
     existing TTS provider chain (Edge / OpenAI / ElevenLabs / etc.)
     configured in ``~/.hermes/config.yaml`` under ``tts.``.
     """
-    from hermes_cli.web_server import _config_profile_scope
     text = (payload.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text is required")
@@ -354,7 +357,6 @@ async def tts_lease(payload: TTSLeaseRequest, profile: Optional[str] = None):
     Warm-up failures are reported in the body, never as an HTTP error — the
     toggle must succeed even when the engine can't preload.
     """
-    from hermes_cli.web_server import _config_profile_scope
     lease = (payload.lease or "").strip()
     if not lease:
         raise HTTPException(status_code=400, detail="lease is required")
@@ -397,12 +399,6 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
       server → ``{"type": "fallback"}`` when the configured provider has no
                chunked API — the client uses the POST endpoint instead.
     """
-    from hermes_cli.web_server import (
-        _config_profile_scope,
-        _split_text_for_speak_stream,
-        _ws_auth_ok,
-        _ws_request_is_allowed,
-    )
     if not _ws_auth_ok(ws):
         await ws.close(code=4401)
         return

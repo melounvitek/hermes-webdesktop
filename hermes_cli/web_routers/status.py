@@ -12,6 +12,7 @@ import os
 import sys
 import time
 from fastapi import APIRouter
+from hermes_cli.web_deps import LateState, late
 from fastapi import HTTPException, Request
 from gateway.status import derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, parse_active_agents, resolve_gateway_liveness
 from hermes_cli import __version__, __release_date__
@@ -25,10 +26,34 @@ router = APIRouter()
 # Mounted separately by web_server so /api/logs keeps its original route-table position.
 logs_router = APIRouter()
 
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_collect_profile_gateway_topology_cached = late("_collect_profile_gateway_topology_cached")
+_config_profile_scope = late("_config_profile_scope")
+_dashboard_local_update_managed_externally = late("_dashboard_local_update_managed_externally")
+_display_system_platform = late("_display_system_platform")
+_load_configured_gateway_platforms = late("_load_configured_gateway_platforms")
+_probe_gateway_health = late("_probe_gateway_health")
+_profile_scope = late("_profile_scope")
+_require_token = late("_require_token")
+_resolve_profile_dir = late("_resolve_profile_dir")
+_resolve_restart_drain_timeout = late("_resolve_restart_drain_timeout")
+_spawn_hermes_action = late("_spawn_hermes_action")
+_ssh_runtime_intact = late("_ssh_runtime_intact")
+_status_active_sessions = late("_status_active_sessions")
+app = LateState("app")  # the FastAPI instance (app.state.*)
+check_config_version = late("check_config_version")
+get_hermes_home = late("get_hermes_home")
+get_install_id = late("get_install_id")
+get_running_pid_cached = late("get_running_pid_cached")
+get_runtime_status_running_pid = late("get_runtime_status_running_pid")
+load_config = late("load_config")
+read_runtime_status = late("read_runtime_status")
+run_in_threadpool = late("run_in_threadpool")
+
 
 @router.get("/api/ssh/ownership")
 async def get_ssh_ownership(request: Request):
-    from hermes_cli.web_server import _SSH_OWNER_NONCE, _require_token, _ssh_runtime_intact
+    from hermes_cli.web_server import _SSH_OWNER_NONCE
     _require_token(request)
     if not _SSH_OWNER_NONCE:
         raise HTTPException(status_code=404, detail="SSH ownership is not active")
@@ -43,7 +68,6 @@ async def get_ssh_ownership(request: Request):
 @router.get("/api/health")
 async def get_health():
     """Lightweight process liveness for desktop/backend readiness probes."""
-    from hermes_cli.web_server import app
     return {
         "ok": True,
         "version": __version__,
@@ -138,22 +162,6 @@ async def get_status(profile: Optional[str] = None):
         DASHBOARD_HEALTH,
         _GATEWAY_HEALTH_ROUTE_TIMEOUT,
         _GATEWAY_HEALTH_URL,
-        _collect_profile_gateway_topology_cached,
-        _config_profile_scope,
-        _dashboard_local_update_managed_externally,
-        _load_configured_gateway_platforms,
-        _probe_gateway_health,
-        _resolve_profile_dir,
-        _resolve_restart_drain_timeout,
-        _status_active_sessions,
-        app,
-        check_config_version,
-        get_hermes_home,
-        get_install_id,
-        get_running_pid_cached,
-        get_runtime_status_running_pid,
-        read_runtime_status,
-        run_in_threadpool,
     )
     status_scope = None
     requested_profile = (profile or "").strip()
@@ -572,7 +580,6 @@ async def get_system_stats():
     psutil when available, with graceful degradation when it isn't.  Read-only
     and non-sensitive (no env values, no paths beyond the hermes home root).
     """
-    from hermes_cli.web_server import _display_system_platform, get_hermes_home
     import platform as _platform
 
     info: Dict[str, Any] = {
@@ -687,7 +694,6 @@ async def set_curator_paused(body: CuratorPause):
 @router.post("/api/curator/run")
 async def run_curator():
     """Trigger a curator review now (backgrounded; tail via action status)."""
-    from hermes_cli.web_server import _spawn_hermes_action
     try:
         proc = _spawn_hermes_action(["curator", "run"], "curator-run")
     except Exception as exc:
@@ -702,7 +708,6 @@ async def get_learning_graph(profile: Optional[str] = None):
     Profile-scoped view of learned, non-base skills plus memory chunks, with
     graph links derived from skill relations and memory-skill overlap.
     """
-    from hermes_cli.web_server import _profile_scope
     def _run():
         from agent.learning_graph import build_learning_graph
 
@@ -721,7 +726,6 @@ async def get_learning_graph(profile: Optional[str] = None):
 @router.get("/api/learning/node")
 async def get_learning_node(id: str, profile: Optional[str] = None):
     """Current content of a journey node (skill SKILL.md or memory chunk), for an edit prefill."""
-    from hermes_cli.web_server import _profile_scope
     from agent.learning_mutations import node_detail
 
     def _run():
@@ -737,7 +741,6 @@ async def get_learning_node(id: str, profile: Optional[str] = None):
 @router.delete("/api/learning/node")
 async def delete_learning_node(body: LearningNodeRef):
     """Delete a journey node — skills are archived (restorable), memories removed."""
-    from hermes_cli.web_server import _profile_scope
     from agent.learning_mutations import delete_node
 
     def _run():
@@ -753,7 +756,6 @@ async def delete_learning_node(body: LearningNodeRef):
 @router.put("/api/learning/node")
 async def update_learning_node(body: LearningNodeEdit):
     """Rewrite a journey node's content (SKILL.md or memory chunk)."""
-    from hermes_cli.web_server import _profile_scope
     from agent.learning_mutations import edit_node
 
     def _run():
@@ -790,7 +792,6 @@ async def get_portal_status():
 
 
 def _get_portal_status_sync():
-    from hermes_cli.web_server import load_config
     cfg = load_config() or {}
     auth: Dict[str, Any] = {}
     try:
@@ -841,7 +842,6 @@ def _get_portal_status_sync():
 
 @router.post("/api/ops/prompt-size")
 async def run_prompt_size():
-    from hermes_cli.web_server import _spawn_hermes_action
     try:
         proc = _spawn_hermes_action(["prompt-size"], "prompt-size")
     except Exception as exc:
@@ -851,7 +851,6 @@ async def run_prompt_size():
 
 @router.post("/api/ops/dump")
 async def run_dump():
-    from hermes_cli.web_server import _spawn_hermes_action
     try:
         proc = _spawn_hermes_action(["dump"], "dump")
     except Exception as exc:
@@ -861,7 +860,6 @@ async def run_dump():
 
 @router.post("/api/ops/config-migrate")
 async def run_config_migrate():
-    from hermes_cli.web_server import _spawn_hermes_action
     try:
         proc = _spawn_hermes_action(["config", "migrate"], "config-migrate")
     except Exception as exc:
@@ -918,7 +916,6 @@ async def get_logs(
     component: Optional[str] = None,
     search: Optional[str] = None,
 ):
-    from hermes_cli.web_server import get_hermes_home
     from hermes_cli.logs import _read_tail, LOG_FILES
 
     log_name = LOG_FILES.get(file)
