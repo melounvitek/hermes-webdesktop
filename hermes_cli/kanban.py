@@ -1,8 +1,11 @@
 """CLI for the Hermes Kanban board — ``hermes kanban …`` subcommand.
 
-All DB work is delegated to ``kanban_db``; this module adds argparse
-construction (``build_parser``), dispatch (``kanban_command``), text/``--json``
-output, and ``run_slash`` for ``/kanban …`` from the CLI and gateway.
+All DB work is delegated to ``kanban_db``. This module holds dispatch
+(``kanban_command``), the task-verb handlers, and ``run_slash`` for
+``/kanban …`` from the CLI and gateway. Siblings: ``kanban_parser``
+(argparse tree, re-exported here as ``build_parser``), ``kanban_output``
+(text/``--json`` helpers), ``kanban_boards`` (``boards …``), ``kanban_ops``
+(``dispatch``/``daemon``/``tail``/``watch``/``gc``/``repair``).
 """
 
 from __future__ import annotations
@@ -104,31 +107,24 @@ def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
 def _check_dispatcher_presence(
     hermes_home: Optional[Path] = None,
 ) -> tuple[bool, str]:
-    """Return ``(running, message)`` for the "will anything dispatch this?" warning.
+    """``(running, message)`` for the "will anything dispatch this?" warning.
 
     ``running=True`` when a gateway is alive for this HERMES_HOME with
-    ``kanban.dispatch_in_gateway`` on (message is a status line); otherwise
-    ``False`` with human guidance. Fails OPEN — import/probe/config errors
-    return ``(True, "")`` — since a missed warning beats crying wolf.
-
-    ``hermes_home`` scopes the probe to a profile's directory: the dashboard
-    backend may run under a different HERMES_HOME than the profile it serves,
-    which otherwise misreports a healthy gateway as absent. CLI callers pass
-    ``None``.
+    ``kanban.dispatch_in_gateway`` on; otherwise ``False`` plus human guidance.
+    Fails OPEN — import/probe/config errors return ``(True, "")`` — since a
+    missed warning beats crying wolf. ``hermes_home`` scopes the probe to a
+    profile dir (the dashboard backend may run under a different HERMES_HOME
+    than the profile it serves); CLI callers pass ``None``.
     """
     try:
         from gateway.status import resolve_gateway_liveness  # type: ignore
+
+        # Same ladder as the dashboard status endpoints so PID-file-less or
+        # cross-container gateways aren't misreported; use_cache=False because
+        # this one-shot probe must see the gateway's state right now.
+        liveness = resolve_gateway_liveness(profile_dir=hermes_home, use_cache=False)
     except Exception:
         return (True, "")  # can't probe — silent
-    try:
-        # Same ladder the dashboard status endpoints use, so PID-file-less or
-        # cross-container gateways aren't misreported. use_cache=False: this
-        # one-shot probe must see the gateway's state right now.
-        liveness = resolve_gateway_liveness(
-            profile_dir=hermes_home, use_cache=False
-        )
-    except Exception:
-        return (True, "")  # probe errored — silent
     if liveness.probe_error:
         # The resolver swallows per-rung failures; "can't tell" != "no gateway".
         return (True, "")
@@ -166,7 +162,6 @@ def kanban_command(args: argparse.Namespace) -> int:
     """Entry point from ``hermes kanban …``; returns a shell-style exit code."""
     action = getattr(args, "kanban_action", None)
     if not action:
-        # No subaction given: print help via the stored parser reference.
         parser = getattr(args, "_kanban_parser", None)
         if parser is not None:
             parser.print_help()
@@ -178,20 +173,19 @@ def kanban_command(args: argparse.Namespace) -> int:
             )
         return 0
 
-    # Fast-fail for clearer CLI UX only. The durable trust boundary is lower in
-    # hermes_cli.kanban_db, because children can import DB mutators directly.
+    # Fast-fail for UX only; the durable trust boundary is in kanban_db, since
+    # children can import DB mutators directly.
     if _is_delegated_child_cli_mutation(args):
         return _err("kanban: delegate_task child contexts cannot mutate Kanban tasks via the CLI")
 
-    # Board-management commands operate on board metadata and the persisted
-    # current-board pointer itself, so they must ignore the shared `--board`
-    # task-routing override (else `--board beta boards show` reports beta).
+    # `boards …` manages board metadata and the current-board pointer itself, so
+    # it must ignore the `--board` routing override (else `--board beta boards
+    # show` reports beta).
     if action == "boards":
         return _dispatch_boards(args)
 
-    # `--board <slug>` applies to every subcommand below via an env-var pin
-    # (HERMES_KANBAN_BOARD) for the duration of this call, so it inherits the
-    # exact resolution the dispatcher uses for workers.
+    # `--board <slug>` pins HERMES_KANBAN_BOARD for the duration of this call so
+    # it inherits the exact resolution the dispatcher uses for workers.
     board_override = getattr(args, "board", None)
     board_scope = contextlib.nullcontext()
     if board_override:
@@ -211,14 +205,13 @@ def kanban_command(args: argparse.Namespace) -> int:
         board_scope = kb.scoped_current_board(normed)
 
     with board_scope:
-        # `repair` must dispatch BEFORE the auto-init: on a corrupt DB init_db()
-        # itself raises KanbanDbCorruptError, which would turn every
-        # `hermes kanban repair` into "could not initialize database".
+        # `repair` dispatches BEFORE auto-init: on a corrupt DB init_db() itself
+        # raises KanbanDbCorruptError, which would turn every repair into
+        # "could not initialize database".
         if action == "repair":
             return _cmd_repair(args)
-        # Auto-initialize the DB before any subcommand. init_db is idempotent
-        # (one SELECT against sqlite_master when tables exist) and prevents
-        # "no such table: tasks" on first use from a fresh HERMES_HOME.
+        # init_db is idempotent (one sqlite_master SELECT when tables exist) and
+        # prevents "no such table: tasks" on first use from a fresh HERMES_HOME.
         try:
             kb.init_db()
         except Exception as exc:
@@ -280,9 +273,6 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
         return bool(os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT"))
 
 
-# ---------------------------------------------------------------------------
-
-
 def _joined_words(words) -> Optional[str]:
     """Free-text positional ``nargs="*"`` words -> stripped string, or None when absent."""
     return " ".join(words).strip() if words else None
@@ -341,8 +331,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     print(f"Kanban DB initialized at {path}")
 
     print()
-    # Enumerate profiles on disk so the user knows what assignees are
-    # already addressable.
+    # Profiles on disk == assignees already addressable.
     try:
         profiles = kb.list_profiles_on_disk()
     except Exception:
@@ -443,11 +432,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
         _print_json(_task_to_dict(task))
     else:
         print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
-
-        # Warn when the task would sit in `ready` because no dispatcher is
-        # present. Only ready+assigned tasks — triage/todo idle by design,
-        # unassigned can't dispatch. Skipped in --json so stdout stays
-        # machine-parseable.
+        # Warn only for ready+assigned tasks that would sit without a dispatcher
+        # (triage/todo idle by design, unassigned can't dispatch); skipped under
+        # --json so stdout stays machine-parseable.
         if task.status == "ready" and task.assignee:
             running, message = _check_dispatcher_presence()
             if not running and message:
@@ -489,8 +476,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
     if args.mine and not assignee:
         assignee = _profile_author()
     with kb.connect_closing() as conn:
-        # Cheap "mini-dispatch": recompute ready so list output reflects
-        # dependencies that may have cleared since the last dispatcher tick.
+        # Cheap mini-dispatch so list reflects dependencies cleared since the last tick.
         kb.recompute_ready(conn)
         tasks = kb.list_tasks(
             conn,
@@ -558,8 +544,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         parents = kb.parent_ids(conn, args.task_id)
         children = kb.child_ids(conn, args.task_id)
         runs = kb.list_runs(conn, args.task_id, **rsk)
-        # Workers hand off via task_runs.summary; tasks.result stays NULL unless
-        # explicitly set, so surface the latest summary here.
+        # Workers hand off via task_runs.summary; tasks.result stays NULL unless set.
         latest_summary = kb.latest_summary(conn, args.task_id)
         if not getattr(args, "json", False):
             graph = kb.task_graph_context(conn, task.id)
@@ -590,8 +575,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     if task.model_override:
         _prov = f" (provider: {task.provider_override})" if task.provider_override else ""
         print(f"  model:     {task.model_override}{_prov}")
-    # Effective retry threshold: per-task override, else config, else default —
-    # so operators can see why a task auto-blocked when it did.
+    # Effective retry threshold (task > config > default) explains auto-blocks.
     if task.max_retries is not None:
         print(f"  max-retries: {task.max_retries} (task)")
     else:
@@ -936,11 +920,11 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
 
 
 def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
-    """Apply the goal judge to every terminal worker handoff, including review.
+    """Goal judge for every terminal worker handoff (including review).
 
-    Returns ``(verdict, reason_or_None)`` — ``"done"`` allows the handoff;
-    ``"blocked"`` means the judge ruled the goal unachievable (#100954);
-    ``"continue"``/``"wait"`` reject with the judge's reason.
+    Returns ``(verdict, reason_or_None)``: ``"done"`` allows; ``"blocked"`` =
+    judge ruled the goal unachievable; ``"continue"``/``"wait"`` reject with
+    the judge's reason. Judge failures allow the handoff (logged).
     """
     if task is None or not task.goal_mode:
         return ("done", None)
@@ -994,8 +978,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         return rc
     summary = getattr(args, "summary", None)
     raw_meta = getattr(args, "metadata", None)
-    # Structured handoff fields are per-run; copying them across N runs is
-    # almost always a footgun, so refuse rather than silently do it.
+    # Handoff fields are per-run; refuse to copy them across N runs.
     if len(ids) > 1 and (summary or raw_meta):
         return _err(
             "kanban: --summary / --metadata are per-task and can't be used "
@@ -1063,8 +1046,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
             )
 
         def ok_msg(tid):
-            # Report where the task actually landed — dependency blocks go
-            # to todo, and a tripped unblock-loop breaker routes to triage.
+            # Report where it landed: dependency blocks -> todo, tripped unblock-loop breaker -> triage.
             landed = kb.get_task(conn, tid)
             where = landed.status if landed else "blocked"
             if where == "todo":
@@ -1419,8 +1401,7 @@ def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_ke
             print(f"kanban: {verb} {outcome.task_id}: {outcome.reason}", file=sys.stderr)
     if not all_flag:
         return 0 if ok_count == 1 else 1
-    # --all: succeed if at least one promotion landed; exit 1 only when
-    # every candidate failed (honest signal for scripts).
+    # --all: exit 1 only when every candidate failed (honest signal for scripts).
     return 0 if (ok_count > 0 or not ids) else 1
 
 
@@ -1429,8 +1410,7 @@ def _retitled_suffix(outcome) -> str:
 
 
 def _cmd_specify(args: argparse.Namespace) -> int:
-    """Flesh out a triage task (or all of them) via auxiliary LLM, then
-    promote to todo. Thin wrapper over ``kanban_specify``."""
+    """Spec a triage task (or all) via the auxiliary LLM, promote to todo."""
     from hermes_cli import kanban_specify as spec
 
     return _run_triage_sweep(
@@ -1448,8 +1428,7 @@ def _decompose_ok_line(o) -> str:
 
 
 def _cmd_decompose(args: argparse.Namespace) -> int:
-    """Fan a triage task (or all of them) out into a graph of child tasks via
-    the auxiliary LLM. Thin wrapper over ``kanban_decompose``."""
+    """Fan a triage task (or all) out into child tasks via the auxiliary LLM."""
     from hermes_cli import kanban_decompose as decomp
 
     return _run_triage_sweep(
@@ -1512,24 +1491,20 @@ Read-only commands are safe while an agent is running.\
 
 
 def run_slash(rest: str) -> str:
-    """Execute a ``/kanban …`` string and return captured stdout/stderr.
-
-    ``rest`` is everything after ``/kanban``. Shared by the interactive CLI
-    and the gateway so formatting is identical.
-    """
+    """Execute a ``/kanban …`` string (``rest`` = everything after ``/kanban``)
+    and return captured stdout/stderr. Shared by the interactive CLI and the
+    gateway so formatting is identical."""
     import io
 
     tokens = shlex.split(rest) if rest and rest.strip() else []
 
-    # Bare ``/kanban`` / ``help`` / ``-h``: the curated short block, not
-    # argparse's full usage tree (garbage in a chat bubble). Per-subcommand
-    # help still works via ``/kanban foo -h``.
+    # Bare ``/kanban`` / ``help`` / ``-h``: curated short block, not argparse's
+    # full tree (garbage in a chat bubble). ``/kanban foo -h`` still works.
     if not tokens or tokens[0] in {"help", "--help", "-h", "?"}:
         return _SLASH_KANBAN_HELP
 
-    # build_parser() needs a subparsers action to attach to, so build a
-    # throwaway one and pull kanban_parser back out; drive it directly so
-    # usage/error text reads as ``/kanban`` (not ``/kanban-wrap kanban``).
+    # build_parser() needs a subparsers action to attach to: build a throwaway
+    # one and drive kanban_parser directly so usage/error text reads ``/kanban``.
     _wrap = argparse.ArgumentParser(prog="/kanban-wrap", add_help=False)
     _wrap.exit_on_error = False  # type: ignore[attr-defined]
     _top_sub = _wrap.add_subparsers(dest="_top")
@@ -1553,15 +1528,13 @@ def run_slash(rest: str) -> str:
 
     buf_out = io.StringIO()
     buf_err = io.StringIO()
-    # ``-h`` prints to stdout and SystemExit(0); capture both streams.
     try:
         with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
             args = kanban_parser.parse_args(tokens)
     except SystemExit as exc:
         out = buf_out.getvalue().rstrip()
         err = buf_err.getvalue().rstrip()
-        # Help dump (exit 0) → return the captured help text directly.
-        if exc.code in {0, None} and out:
+        if exc.code in {0, None} and out:  # ``-h`` help dump
             return out
         body = err or out
         return f"⚠ /kanban usage error\n{body}" if body else "⚠ /kanban usage error"
