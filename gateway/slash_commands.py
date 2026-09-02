@@ -242,6 +242,158 @@ def _model_provider_listing_lines(providers) -> list[str]:
     return lines
 
 
+def _status_model_route(status_agent, persisted_route: dict, session_row: dict, session_entry):
+    """``(model, provider, context_used, context_total)`` for /status.
+
+    Order: live/cached agent route -> persisted dominant route -> SessionDB row -> gateway config
+    (only loaded when something is still missing).
+    """
+    from gateway.run import _AGENT_PENDING_SENTINEL, _load_gateway_config, _resolve_gateway_model
+
+    model_name = provider_name = ""
+    route_resolved = False
+    context_used = context_total = 0
+    if status_agent is not None and status_agent is not _AGENT_PENDING_SENTINEL:
+        live_model = _clean_str(getattr(status_agent, "model", ""))
+        live_provider = _clean_str(getattr(status_agent, "provider", ""))
+        if live_model and live_provider:
+            model_name, provider_name, route_resolved = live_model, live_provider, True
+        ctx = getattr(status_agent, "context_compressor", None)
+        if ctx is not None:
+            context_used = _int_value(getattr(ctx, "last_prompt_tokens", 0))
+            context_total = _int_value(getattr(ctx, "context_length", 0))
+
+    persisted_model = _clean_str(persisted_route.get("model"))
+    persisted_provider = _clean_str(persisted_route.get("billing_provider"))
+    if not route_resolved and persisted_model and persisted_provider:
+        model_name, provider_name, route_resolved = persisted_model, persisted_provider, True
+    if not route_resolved:
+        model_name = _clean_str(session_row.get("model"))
+        provider_name = _clean_str(session_row.get("billing_provider"))
+    context_used = context_used or _int_value(getattr(session_entry, "last_prompt_tokens", 0))
+
+    user_config: dict[str, Any] = {}
+    if not model_name or not provider_name or not context_total:
+        try:
+            user_config = _load_gateway_config()
+        except Exception:
+            user_config = {}
+    model_cfg = user_config.get("model", {}) if isinstance(user_config, dict) else {}
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    if not model_name:
+        model_name = _resolve_gateway_model(user_config)
+    if not provider_name:
+        provider_name = _clean_str(model_cfg.get("provider"))
+    if not context_total:
+        configured_context = model_cfg.get("context_length")
+        if isinstance(configured_context, int) and configured_context > 0:
+            context_total = configured_context
+    return model_name, provider_name, context_used, context_total
+
+
+def _context_compressor_lines(agent, ctx, used: int) -> list[str]:
+    """/context full view: auto-compression threshold/headroom, compression count + last savings,
+    and cumulative throughput (labelled as throughput, NOT context size)."""
+    lines: list[str] = []
+    threshold = getattr(ctx, "threshold_tokens", 0) or 0
+    threshold_pct = (getattr(ctx, "threshold_percent", 0) or 0) * 100
+    if threshold > 0:
+        if used >= threshold:
+            lines.append(
+                t("gateway.context.over_threshold", threshold=f"{threshold:,}", threshold_pct=f"{threshold_pct:.0f}")
+            )
+        else:
+            lines.append(
+                t(
+                    "gateway.context.threshold",
+                    threshold=f"{threshold:,}",
+                    threshold_pct=f"{threshold_pct:.0f}",
+                    to_go=f"{threshold - used:,}",
+                )
+            )
+    compressions = getattr(ctx, "compression_count", 0) or 0
+    lines.append(t("gateway.context.compressions", count=compressions))
+    if compressions:
+        savings = getattr(ctx, "_last_compression_savings_pct", None)
+        if savings is not None:
+            lines.append(t("gateway.context.last_savings", savings=f"{savings:.0f}"))
+
+    def _n(attr):
+        return getattr(agent, attr, 0) or 0
+
+    lines.append("")
+    lines.append(t("gateway.context.totals_header", calls=_n("session_api_calls")))
+    lines.append(
+        t(
+            "gateway.context.totals_line",
+            input=f"{_n('session_input_tokens'):,}",
+            output=f"{_n('session_output_tokens'):,}",
+            reasoning=f"{_n('session_reasoning_tokens'):,}",
+        )
+    )
+    lines.append(t("gateway.context.total_billed", total=f"{_n('session_total_tokens'):,}"))
+    lines.append(t("gateway.context.throughput_note"))
+    return lines
+
+
+def _agents_delegation_lines(d: dict) -> list[str]:
+    """/agents rows for one background delegation. Live per-child activity comes from the
+    registry's progress sampler: api calls, current tool, seconds since last activity."""
+    goal = " ".join(str(d.get("goal") or "").split())
+    if len(goal) > 70:
+        goal = goal[:67] + "..."
+    status = d.get("status", "?")
+    row = f"- `{d.get('delegation_id', '?')}` · {status}"
+    if status == "stalling":
+        quiet = d.get("stalled_after_quiet_seconds")
+        if quiet is not None:
+            row += f" · no progress {quiet:.0f}s"
+    elif d.get("seconds_since_progress", 0) >= 60:
+        row += f" · quiet {d['seconds_since_progress']:.0f}s"
+    if goal:
+        row += f" · {goal}"
+    lines = [row]
+    for i, child in enumerate(d.get("children_activity") or []):
+        if not isinstance(child, dict):
+            continue
+        tool = child.get("current_tool")
+        doing = f"`{tool}`" if tool else "between turns"
+        part = f"  - child {i + 1}: {child.get('api_calls', '?')} api calls · {doing}"
+        idle = child.get("seconds_since_activity")
+        if idle is not None:
+            part += f" · active {idle:.0f}s ago"
+        lines.append(part)
+    return lines
+
+
+def _usage_agent_stats_lines(agent) -> list[str]:
+    """/usage session block for a live agent: rate limits, token breakdown (matches the CLI),
+    context window and compression count."""
+    lines: list[str] = []
+    rl_state = agent.get_rate_limit_state()
+    if rl_state and rl_state.has_data:
+        from agent.rate_limit_tracker import format_rate_limit_compact
+        lines.append(t("gateway.usage.rate_limits", state=format_rate_limit_compact(rl_state)))
+        lines.append("")
+    input_tokens = getattr(agent, "session_input_tokens", 0) or 0
+    output_tokens = getattr(agent, "session_output_tokens", 0) or 0
+    lines.append(t("gateway.usage.header_session"))
+    lines.append(t("gateway.usage.label_model", model=agent.model))
+    lines.append(t("gateway.usage.label_input_tokens", count=f"{input_tokens:,}"))
+    lines.append(t("gateway.usage.label_output_tokens", count=f"{output_tokens:,}"))
+    lines.append(t("gateway.usage.label_total", count=f"{agent.session_total_tokens:,}"))
+    lines.append(t("gateway.usage.label_api_calls", count=agent.session_api_calls))
+    ctx = agent.context_compressor
+    _lpt = ctx.last_prompt_tokens if ctx.last_prompt_tokens > 0 else 0
+    if _lpt:
+        pct = min(100, _lpt / ctx.context_length * 100) if ctx.context_length else 0
+        lines.append(t("gateway.usage.label_context", used=f"{_lpt:,}", total=f"{ctx.context_length:,}", pct=f"{pct:.0f}"))
+    if ctx.compression_count:
+        lines.append(t("gateway.usage.label_compressions", count=ctx.compression_count))
+    return lines
+
+
 def _home_thread_from_source(source) -> Optional[str]:
     """The thread id /sethome should persist on the home target, or None.
 
@@ -519,26 +671,8 @@ class GatewaySlashCommandsMixin:
 
         # Set session title if provided with /new <title>
         _title_arg = event.get_command_args().strip()
-        _title_note = ""
         if _title_arg and self._session_db and new_entry:
-            from hermes_state import SessionDB
-            try:
-                sanitized = SessionDB.sanitize_title(_title_arg)
-            except ValueError as e:
-                sanitized = None
-                _title_note = t("gateway.reset.title_rejected", error=str(e))
-            if sanitized:
-                try:
-                    await self._session_db.set_session_title(new_entry.session_id, sanitized)
-                    header = t("gateway.reset.header_titled", title=sanitized)
-                except ValueError as e:
-                    _title_note = t("gateway.reset.title_error_untitled", error=str(e))
-                except Exception:
-                    pass
-            elif not _title_note:
-                # sanitize_title returned empty (whitespace-only / unprintable)
-                _title_note = t("gateway.reset.title_empty_untitled")
-        header = header + _title_note
+            header = await self._reset_titled_header(header, new_entry.session_id, _title_arg)
 
         # When /new runs inside a Telegram DM topic lane, rewrite the (chat_id, thread_id) →
         # session_id binding so the next message uses the freshly-created session. Otherwise the
@@ -574,6 +708,28 @@ class GatewaySlashCommandsMixin:
         if session_info:
             return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
         return EphemeralReply(f"{header}{_tip_line}")
+
+    async def _reset_titled_header(self, header: str, session_id: str, title_arg: str) -> str:
+        """Apply ``/new <title>``: titled header on success, else the header plus a rejection note."""
+        from hermes_state import SessionDB
+        note = ""
+        try:
+            sanitized = SessionDB.sanitize_title(title_arg)
+        except ValueError as e:
+            sanitized = None
+            note = t("gateway.reset.title_rejected", error=str(e))
+        if sanitized:
+            try:
+                await self._session_db.set_session_title(session_id, sanitized)
+                header = t("gateway.reset.header_titled", title=sanitized)
+            except ValueError as e:
+                note = t("gateway.reset.title_error_untitled", error=str(e))
+            except Exception:
+                pass
+        elif not note:
+            # sanitize_title returned empty (whitespace-only / unprintable)
+            note = t("gateway.reset.title_empty_untitled")
+        return header + note
 
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show the profile serving this source and its home.
@@ -774,7 +930,7 @@ class GatewaySlashCommandsMixin:
 
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
-        from gateway.run import _AGENT_PENDING_SENTINEL, _load_gateway_config, _resolve_gateway_model
+        from gateway.run import _AGENT_PENDING_SENTINEL
 
         source = event.source
         session_entry = await self.async_session_store.get_or_create_session(source)
@@ -792,90 +948,16 @@ class GatewaySlashCommandsMixin:
         adapter = self.adapters.get(source.platform) if source else None
         queue_depth = self._queue_depth(session_key, adapter=adapter)
 
-        title = None
-        session_row: dict[str, Any] = {}
-        # Pull token totals from the SQLite session DB rather than the in-memory SessionStore. The
-        # agent's per-turn token deltas are persisted into sessions_db (run_agent.py), not into
-        # SessionEntry, so session_entry.total_tokens is always 0.
-        db_total_tokens = 0
-        persisted_route: dict[str, Any] = {}
-        if self._session_db:
-            try:
-                title = await self._session_db.get_session_title(session_entry.session_id)
-            except Exception:
-                title = None
-            try:
-                row = await self._session_db.get_session(session_entry.session_id)
-                if isinstance(row, dict):
-                    session_row = row
-                    db_total_tokens = (
-                        _int_value(row.get("input_tokens"))
-                        + _int_value(row.get("output_tokens"))
-                        + _int_value(row.get("cache_read_tokens"))
-                        + _int_value(row.get("cache_write_tokens"))
-                        + _int_value(row.get("reasoning_tokens"))
-                    )
-            except Exception:
-                db_total_tokens = 0
-            try:
-                route = await self._session_db.get_dominant_session_model_route(
-                    session_entry.session_id
-                )
-                if isinstance(route, dict):
-                    persisted_route = route
-            except Exception:
-                persisted_route = {}
-
+        title, session_row, db_total_tokens, persisted_route = await self._status_session_db_facts(
+            session_entry.session_id
+        )
         # Resolve model/context for cockpit-style status. Prefer the live or cached agent because it
         # carries the actual runtime route and context compressor; fall back to SessionDB metadata +
         # last_prompt_tokens so /status stays useful between turns without billing/account calls.
         status_agent = agent if is_running else self._cached_agent_for(session_key)
-
-        model_name = ""
-        provider_name = ""
-        route_resolved = False
-        context_used = 0
-        context_total = 0
-        if status_agent is not None and status_agent is not _AGENT_PENDING_SENTINEL:
-            live_model = _clean_str(getattr(status_agent, "model", ""))
-            live_provider = _clean_str(getattr(status_agent, "provider", ""))
-            if live_model and live_provider:
-                model_name = live_model
-                provider_name = live_provider
-                route_resolved = True
-            ctx = getattr(status_agent, "context_compressor", None)
-            if ctx is not None:
-                context_used = _int_value(getattr(ctx, "last_prompt_tokens", 0))
-                context_total = _int_value(getattr(ctx, "context_length", 0))
-
-        persisted_model = _clean_str(persisted_route.get("model"))
-        persisted_provider = _clean_str(persisted_route.get("billing_provider"))
-        if not route_resolved and persisted_model and persisted_provider:
-            model_name = persisted_model
-            provider_name = persisted_provider
-            route_resolved = True
-        if not route_resolved:
-            model_name = _clean_str(session_row.get("model"))
-            provider_name = _clean_str(session_row.get("billing_provider"))
-        context_used = context_used or _int_value(getattr(session_entry, "last_prompt_tokens", 0))
-
-        user_config: dict[str, Any] = {}
-        if not model_name or not provider_name or not context_total:
-            try:
-                user_config = _load_gateway_config()
-            except Exception:
-                user_config = {}
-        if not model_name:
-            model_name = _resolve_gateway_model(user_config)
-        if not provider_name:
-            model_cfg = user_config.get("model", {}) if isinstance(user_config, dict) else {}
-            if isinstance(model_cfg, dict):
-                provider_name = _clean_str(model_cfg.get("provider"))
-        if not context_total:
-            model_cfg = user_config.get("model", {}) if isinstance(user_config, dict) else {}
-            configured_context = model_cfg.get("context_length") if isinstance(model_cfg, dict) else None
-            if isinstance(configured_context, int) and configured_context > 0:
-                context_total = configured_context
+        model_name, provider_name, context_used, context_total = _status_model_route(
+            status_agent, persisted_route, session_row, session_entry
+        )
 
         model_line = ""
         if model_name:
@@ -939,6 +1021,41 @@ class GatewaySlashCommandsMixin:
 
         return "\n".join(lines)
 
+    async def _status_session_db_facts(self, session_id: str):
+        """``(title, session_row, db_total_tokens, persisted_route)`` for /status; each fail-open.
+
+        Token totals come from the SQLite session DB rather than the in-memory SessionStore: the
+        agent's per-turn token deltas are persisted into sessions_db (run_agent.py), not into
+        SessionEntry, so session_entry.total_tokens is always 0.
+        """
+        title = None
+        session_row: dict[str, Any] = {}
+        db_total_tokens = 0
+        persisted_route: dict[str, Any] = {}
+        if not self._session_db:
+            return title, session_row, db_total_tokens, persisted_route
+        try:
+            title = await self._session_db.get_session_title(session_id)
+        except Exception:
+            title = None
+        try:
+            row = await self._session_db.get_session(session_id)
+            if isinstance(row, dict):
+                session_row = row
+                db_total_tokens = sum(
+                    _int_value(row.get(k))
+                    for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
+                )
+        except Exception:
+            db_total_tokens = 0
+        try:
+            route = await self._session_db.get_dominant_session_model_route(session_id)
+            if isinstance(route, dict):
+                persisted_route = route
+        except Exception:
+            persisted_route = {}
+        return title, session_row, db_total_tokens, persisted_route
+
     @staticmethod
     def _redact_matrix_session_key(session_key: str) -> str:
         """Return a stable Matrix session-key fingerprint for shared room status."""
@@ -965,59 +1082,9 @@ class GatewaySlashCommandsMixin:
         has_agent = bool(agent)
 
         ctx = getattr(agent, "context_compressor", None) if has_agent else None
-
-        # Resolve current-context size + window with cascading fallbacks.
-        #   used  : compressor.last_prompt_tokens → SessionStore.last_prompt_tokens
-        #   model : agent.model → SessionDB row model
-        #   window: compressor.context_length → effective gateway model route
-        used = 0
-        context_length = 0
-        if ctx is not None:
-            used = getattr(ctx, "last_prompt_tokens", 0) or 0
-            context_length = getattr(ctx, "context_length", 0) or 0
-
-        model_name = _clean_str(getattr(agent, "model", "")) if has_agent else ""
-
-        if not used:
-            used = _int_value(getattr(session_entry, "last_prompt_tokens", 0))
-
-        if not model_name and self._session_db:
-            try:
-                row = await self._session_db.get_session(session_entry.session_id) or {}
-                if isinstance(row, dict):
-                    model_name = _clean_str(row.get("model", ""))
-            except Exception:
-                model_name = ""
-
-        if not context_length:
-            try:
-                from gateway.run import (
-                    _profile_runtime_scope,
-                    _resolve_gateway_model_context,
-                )
-
-                def _resolve_nonresident_context():
-                    if getattr(getattr(self, "config", None), "multiplex_profiles", False):
-                        profile_home = self._resolve_profile_home_for_source(source)
-                        with _profile_runtime_scope(profile_home):
-                            return _resolve_gateway_model_context(model_name or None)
-                    return _resolve_gateway_model_context(model_name or None)
-
-                resolved = await asyncio.to_thread(_resolve_nonresident_context)
-                model_name = model_name or resolved.model
-                context_length = _int_value(resolved.context_length)
-            except Exception:
-                context_length = 0
-
-        if not context_length and model_name:
-            try:
-                from agent.model_metadata import get_model_context_length
-
-                context_length = _int_value(
-                    await asyncio.to_thread(get_model_context_length, model_name)
-                )
-            except Exception:
-                context_length = 0
+        used, context_length, model_name = await self._resolve_context_figures(
+            agent if has_agent else None, ctx, session_entry, source
+        )
 
         # Gauge path: real current-context figure
         if used > 0 and context_length > 0:
@@ -1040,61 +1107,12 @@ class GatewaySlashCommandsMixin:
                 ),
                 t("gateway.context.bar", bar=bar),
                 t("gateway.context.headroom", headroom=f"{headroom:,}"),
+                "",
             ]
-
             # Full view — compression / throughput need the live agent.
             if ctx is not None:
-                threshold = getattr(ctx, "threshold_tokens", 0) or 0
-                threshold_pct = (getattr(ctx, "threshold_percent", 0) or 0) * 100
-                lines.append("")
-                if threshold > 0:
-                    if used >= threshold:
-                        lines.append(
-                            t(
-                                "gateway.context.over_threshold",
-                                threshold=f"{threshold:,}",
-                                threshold_pct=f"{threshold_pct:.0f}",
-                            )
-                        )
-                    else:
-                        lines.append(
-                            t(
-                                "gateway.context.threshold",
-                                threshold=f"{threshold:,}",
-                                threshold_pct=f"{threshold_pct:.0f}",
-                                to_go=f"{threshold - used:,}",
-                            )
-                        )
-                compressions = getattr(ctx, "compression_count", 0) or 0
-                lines.append(t("gateway.context.compressions", count=compressions))
-                if compressions:
-                    savings = getattr(ctx, "_last_compression_savings_pct", None)
-                    if savings is not None:
-                        lines.append(
-                            t("gateway.context.last_savings", savings=f"{savings:.0f}")
-                        )
-
-                api_calls = getattr(agent, "session_api_calls", 0) or 0
-                input_tokens = getattr(agent, "session_input_tokens", 0) or 0
-                output_tokens = getattr(agent, "session_output_tokens", 0) or 0
-                reasoning_tokens = getattr(agent, "session_reasoning_tokens", 0) or 0
-                total_tokens = getattr(agent, "session_total_tokens", 0) or 0
-                lines.append("")
-                lines.append(
-                    t("gateway.context.totals_header", calls=api_calls)
-                )
-                lines.append(
-                    t(
-                        "gateway.context.totals_line",
-                        input=f"{input_tokens:,}",
-                        output=f"{output_tokens:,}",
-                        reasoning=f"{reasoning_tokens:,}",
-                    )
-                )
-                lines.append(t("gateway.context.total_billed", total=f"{total_tokens:,}"))
-                lines.append(t("gateway.context.throughput_note"))
+                lines.extend(_context_compressor_lines(agent, ctx, used))
             else:
-                lines.append("")
                 lines.append(t("gateway.context.detail_after_first"))
 
             # Per-category estimated breakdown (+ optional expanded listings). Same chars/4 engine
@@ -1134,6 +1152,52 @@ class GatewaySlashCommandsMixin:
                 ]
             )
         return t("gateway.context.no_data")
+
+    async def _resolve_context_figures(self, agent, ctx, session_entry, source):
+        """``(used, context_length, model_name)`` for /context with cascading fallbacks.
+
+        used  : compressor.last_prompt_tokens -> SessionStore.last_prompt_tokens
+        model : agent.model -> SessionDB row model
+        window: compressor.context_length -> effective gateway model route -> model metadata
+        """
+        used = context_length = 0
+        if ctx is not None:
+            used = getattr(ctx, "last_prompt_tokens", 0) or 0
+            context_length = getattr(ctx, "context_length", 0) or 0
+        model_name = _clean_str(getattr(agent, "model", "")) if agent is not None else ""
+        if not used:
+            used = _int_value(getattr(session_entry, "last_prompt_tokens", 0))
+        if not model_name and self._session_db:
+            try:
+                row = await self._session_db.get_session(session_entry.session_id) or {}
+                if isinstance(row, dict):
+                    model_name = _clean_str(row.get("model", ""))
+            except Exception:
+                model_name = ""
+        if not context_length:
+            try:
+                from gateway.run import _profile_runtime_scope, _resolve_gateway_model_context
+
+                def _resolve_nonresident_context():
+                    if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+                        profile_home = self._resolve_profile_home_for_source(source)
+                        with _profile_runtime_scope(profile_home):
+                            return _resolve_gateway_model_context(model_name or None)
+                    return _resolve_gateway_model_context(model_name or None)
+
+                resolved = await asyncio.to_thread(_resolve_nonresident_context)
+                model_name = model_name or resolved.model
+                context_length = _int_value(resolved.context_length)
+            except Exception:
+                context_length = 0
+        if not context_length and model_name:
+            try:
+                from agent.model_metadata import get_model_context_length
+
+                context_length = _int_value(await asyncio.to_thread(get_model_context_length, model_name))
+            except Exception:
+                context_length = 0
+        return used, context_length, model_name
 
     def _gateway_session_origin_for_id(self, session_id: str) -> Optional[SessionSource]:
         """Best-effort origin lookup for gateway session IDs."""
@@ -1431,9 +1495,6 @@ class GatewaySlashCommandsMixin:
         )
 
         # Background (async) delegations — delegate_task(background=true).
-        # Live per-child activity comes from the registry's progress sampler
-        # (#51690): api calls, current tool, seconds since last activity.
-        delegations: list[dict] = []
         try:
             from tools.async_delegation import list_async_delegations
             delegations = [
@@ -1443,47 +1504,11 @@ class GatewaySlashCommandsMixin:
         except Exception:
             delegations = []
         if delegations:
-            lines.extend(
-                [
-                    "",
-                    t(
-                        "gateway.agents.background_delegations",
-                        count=len(delegations),
-                    ),
-                ]
-            )
+            lines.extend(["", t("gateway.agents.background_delegations", count=len(delegations))])
             for d in delegations[:12]:
-                goal = " ".join(str(d.get("goal") or "").split())
-                if len(goal) > 70:
-                    goal = goal[:67] + "..."
-                status = d.get("status", "?")
-                row = f"- `{d.get('delegation_id', '?')}` · {status}"
-                if status == "stalling":
-                    quiet = d.get("stalled_after_quiet_seconds")
-                    if quiet is not None:
-                        row += f" · no progress {quiet:.0f}s"
-                elif d.get("seconds_since_progress", 0) >= 60:
-                    row += f" · quiet {d['seconds_since_progress']:.0f}s"
-                if goal:
-                    row += f" · {goal}"
-                lines.append(row)
-                for i, child in enumerate(d.get("children_activity") or []):
-                    if not isinstance(child, dict):
-                        continue
-                    tool = child.get("current_tool")
-                    doing = f"`{tool}`" if tool else "between turns"
-                    part = (
-                        f"  - child {i + 1}: "
-                        f"{child.get('api_calls', '?')} api calls · {doing}"
-                    )
-                    idle = child.get("seconds_since_activity")
-                    if idle is not None:
-                        part += f" · active {idle:.0f}s ago"
-                    lines.append(part)
+                lines.extend(_agents_delegation_lines(d))
             if len(delegations) > 12:
-                lines.append(
-                    t("gateway.agents.more", count=len(delegations) - 12)
-                )
+                lines.append(t("gateway.agents.more", count=len(delegations) - 12))
 
         if (
             not agent_rows
@@ -2445,133 +2470,125 @@ class GatewaySlashCommandsMixin:
 
         if not args or lower == "status":
             return mgr.status_line()
-
-        # /goal show → print the active goal's completion contract
         if lower == "show":
             return f"{mgr.status_line()}\n{mgr.render_contract()}"
-
+        if lower == "unwait":
+            return "▶ Wait barrier cleared — goal loop resumes." if mgr.stop_waiting() else "No wait barrier set."
+        if lower in {"clear", "stop", "done"}:
+            had = mgr.has_goal()
+            mgr.clear()
+            self._clear_goal_continuations(event, "clear")
+            return t("gateway.goal_cleared") if had else t("gateway.no_active_goal")
         if lower == "pause":
             state = mgr.pause(reason="user-paused")
             if state is None:
                 return t("gateway.goal.no_goal_set")
-            try:
-                adapter, _quick_key = self._adapter_and_key_for(event)
-                if adapter and _quick_key:
-                    self._clear_goal_pending_continuations(_quick_key, adapter)
-            except Exception as exc:
-                logger.debug("goal pause: pending continuation cleanup failed: %s", exc)
+            self._clear_goal_continuations(event, "pause")
             return t("gateway.goal.paused", goal=state.goal)
-
         if lower == "resume":
-            state = mgr.resume()
-            if state is None:
-                return t("gateway.goal.no_resume")
-            # Resume must restart work, not just flip persisted state: enqueue the canonical
-            # continuation through the adapter FIFO — the same path the post-turn judge uses — so
-            # the next turn fires as soon as this reply is delivered.
-            prompt = mgr.next_continuation_prompt()
-            try:
-                adapter, _quick_key = self._adapter_and_key_for(event)
-                if prompt and adapter and _quick_key:
-                    cont_event = MessageEvent(
-                        text=prompt,
-                        message_type=MessageType.TEXT,
-                        source=event.source,
-                        message_id=None,
-                        channel_prompt=None,
-                    )
-                    self._enqueue_fifo(_quick_key, cont_event, adapter)
-            except Exception as exc:
-                logger.debug("goal resume: continuation enqueue failed: %s", exc)
-            return t("gateway.goal.resumed", goal=state.goal)
+            return self._goal_resume(mgr, event)
+        # Verb-prefixed forms take the remainder as their argument.
+        for verb, handler in (("wait ", self._goal_wait), ("gate ", self._goal_gate)):
+            if lower == verb.strip() or lower.startswith(verb):
+                return handler(mgr, args[len(verb) - 1:].strip(), event)
+        return await self._goal_set(mgr, args, lower, event)
 
-        if lower in {"clear", "stop", "done"}:
-            had = mgr.has_goal()
-            mgr.clear()
-            try:
-                adapter, _quick_key = self._adapter_and_key_for(event)
-                if adapter and _quick_key:
-                    self._clear_goal_pending_continuations(_quick_key, adapter)
-            except Exception as exc:
-                logger.debug("goal clear: pending continuation cleanup failed: %s", exc)
-            return t("gateway.goal_cleared") if had else t("gateway.no_active_goal")
+    def _clear_goal_continuations(self, event: MessageEvent, verb: str) -> None:
+        try:
+            adapter, _quick_key = self._adapter_and_key_for(event)
+            if adapter and _quick_key:
+                self._clear_goal_pending_continuations(_quick_key, adapter)
+        except Exception as exc:
+            logger.debug("goal %s: pending continuation cleanup failed: %s", verb, exc)
 
-        # /goal wait <pid> [reason] — park the loop on a background process.
-        if lower == "wait" or lower.startswith("wait "):
-            wait_arg = args[len("wait"):].strip()
-            if not wait_arg:
-                return "Usage: /goal wait <pid> [reason]"
-            wtokens = wait_arg.split(None, 1)
-            try:
-                pid = int(wtokens[0])
-            except ValueError:
-                return "/goal wait: <pid> must be an integer process id."
-            reason = wtokens[1].strip() if len(wtokens) > 1 else ""
-            try:
-                mgr.wait_on(pid, reason=reason)
-            except (RuntimeError, ValueError) as exc:
-                return f"/goal wait: {exc}"
-            rtxt = f" ({reason})" if reason else ""
-            return f"⏳ Goal parked on pid {pid}{rtxt}. Loop pauses until it exits."
-
-        # /goal unwait — clear the wait barrier.
-        if lower == "unwait":
-            if mgr.stop_waiting():
-                return "▶ Wait barrier cleared — goal loop resumes."
-            return "No wait barrier set."
-
-        # /goal gate ... — manage deterministic quality gates.
-        if lower == "gate" or lower.startswith("gate "):
-            gate_arg = args[len("gate"):].strip()
-            gate_lower = gate_arg.lower()
-            if not gate_arg or gate_lower == "list":
-                return mgr.render_gates()
-            if gate_lower.startswith("add "):
-                # SECURITY: a gate is persisted and later executed with
-                # shell=True at every goal turn boundary (run_gate), with no
-                # approval prompt. Letting an allowed but non-admin gateway
-                # sender choose that string is authenticated RCE under the
-                # Hermes process account — and with no admin list configured
-                # (the backward-compatible default) every allowed sender is
-                # treated as unrestricted. Gate ONLY this shell-creating
-                # operation behind a real, explicitly-configured admin (the
-                # same fail-closed check that guards cross-origin /resume);
-                # list/remove/clear stay open so a non-admin can still recover.
-                if not self._resume_caller_is_admin(event.source):
-                    return (
-                        "⛔ /goal gate add requires an explicitly configured "
-                        "gateway admin (allow_admin_from for DMs, "
-                        "group_allow_admin_from for groups)."
-                    )
-                command = gate_arg[len("add"):].strip()
-                try:
-                    gate = mgr.add_gate(command)
-                except (RuntimeError, ValueError) as exc:
-                    return f"/goal gate add: {exc}"
-                return (
-                    f"⚿ Gate added: $ {gate.command} "
-                    f"({gate.max_retries} retries, {gate.timeout_seconds}s timeout). "
-                    f"It must pass before the goal can complete."
+    def _goal_resume(self, mgr, event: MessageEvent) -> str:
+        state = mgr.resume()
+        if state is None:
+            return t("gateway.goal.no_resume")
+        # Resume must restart work, not just flip persisted state: enqueue the canonical
+        # continuation through the adapter FIFO — the same path the post-turn judge uses — so
+        # the next turn fires as soon as this reply is delivered.
+        prompt = mgr.next_continuation_prompt()
+        try:
+            adapter, _quick_key = self._adapter_and_key_for(event)
+            if prompt and adapter and _quick_key:
+                cont_event = MessageEvent(
+                    text=prompt,
+                    message_type=MessageType.TEXT,
+                    source=event.source,
+                    message_id=None,
+                    channel_prompt=None,
                 )
-            if gate_lower.startswith("remove ") or gate_lower.startswith("rm "):
-                idx_text = gate_arg.split(None, 1)[1].strip()
-                try:
-                    removed = mgr.remove_gate(int(idx_text))
-                except (RuntimeError, ValueError, IndexError) as exc:
-                    return f"/goal gate remove: {exc}"
-                return f"✓ Gate removed: $ {removed}"
-            if gate_lower == "clear":
-                try:
-                    prev = mgr.clear_gates()
-                except RuntimeError as exc:
-                    return f"/goal gate clear: {exc}"
-                return f"✓ Cleared {prev} gate{'s' if prev != 1 else ''}."
-            return "Usage: /goal gate [list | add <command> | remove <N> | clear]"
+                self._enqueue_fifo(_quick_key, cont_event, adapter)
+        except Exception as exc:
+            logger.debug("goal resume: continuation enqueue failed: %s", exc)
+        return t("gateway.goal.resumed", goal=state.goal)
 
-        # /goal draft <objective> → draft a structured completion contract,
-        # then set it. The aux LLM call is sync; run it off the event loop.
-        draft_contract_obj = None
+    @staticmethod
+    def _goal_wait(mgr, wait_arg: str, event: MessageEvent) -> str:
+        """/goal wait <pid> [reason] — park the loop on a background process."""
+        if not wait_arg:
+            return "Usage: /goal wait <pid> [reason]"
+        wtokens = wait_arg.split(None, 1)
+        try:
+            pid = int(wtokens[0])
+        except ValueError:
+            return "/goal wait: <pid> must be an integer process id."
+        reason = wtokens[1].strip() if len(wtokens) > 1 else ""
+        try:
+            mgr.wait_on(pid, reason=reason)
+        except (RuntimeError, ValueError) as exc:
+            return f"/goal wait: {exc}"
+        rtxt = f" ({reason})" if reason else ""
+        return f"⏳ Goal parked on pid {pid}{rtxt}. Loop pauses until it exits."
+
+    def _goal_gate(self, mgr, gate_arg: str, event: MessageEvent) -> str:
+        """/goal gate [list | add <command> | remove <N> | clear] — deterministic quality gates."""
+        gate_lower = gate_arg.lower()
+        if not gate_arg or gate_lower == "list":
+            return mgr.render_gates()
+        if gate_lower.startswith("add "):
+            # SECURITY: a gate is persisted and later executed with shell=True at every goal turn
+            # boundary (run_gate), with no approval prompt. Letting an allowed but non-admin gateway
+            # sender choose that string is authenticated RCE under the Hermes process account — and
+            # with no admin list configured (the backward-compatible default) every allowed sender
+            # is treated as unrestricted. Gate ONLY this shell-creating operation behind a real,
+            # explicitly-configured admin (the same fail-closed check that guards cross-origin
+            # /resume); list/remove/clear stay open so a non-admin can still recover.
+            if not self._resume_caller_is_admin(event.source):
+                return (
+                    "⛔ /goal gate add requires an explicitly configured "
+                    "gateway admin (allow_admin_from for DMs, "
+                    "group_allow_admin_from for groups)."
+                )
+            try:
+                gate = mgr.add_gate(gate_arg[len("add"):].strip())
+            except (RuntimeError, ValueError) as exc:
+                return f"/goal gate add: {exc}"
+            return (
+                f"⚿ Gate added: $ {gate.command} "
+                f"({gate.max_retries} retries, {gate.timeout_seconds}s timeout). "
+                f"It must pass before the goal can complete."
+            )
+        if gate_lower.startswith("remove ") or gate_lower.startswith("rm "):
+            try:
+                removed = mgr.remove_gate(int(gate_arg.split(None, 1)[1].strip()))
+            except (RuntimeError, ValueError, IndexError) as exc:
+                return f"/goal gate remove: {exc}"
+            return f"✓ Gate removed: $ {removed}"
+        if gate_lower == "clear":
+            try:
+                prev = mgr.clear_gates()
+            except RuntimeError as exc:
+                return f"/goal gate clear: {exc}"
+            return f"✓ Cleared {prev} gate{'s' if prev != 1 else ''}."
+        return "Usage: /goal gate [list | add <command> | remove <N> | clear]"
+
+    async def _goal_set(self, mgr, args: str, lower: str, event: MessageEvent) -> str:
+        """Set a new goal from free text, inline ``field: value`` contract lines, or ``draft <objective>``."""
         if lower.startswith("draft"):
+            # Draft a structured completion contract, then set it. The aux LLM call is sync;
+            # run it off the event loop.
             objective = args[len("draft"):].strip()
             if not objective:
                 return "Usage: /goal draft <objective in plain language>"
@@ -2581,32 +2598,27 @@ class GatewaySlashCommandsMixin:
                 # _run_in_executor_with_context, not a bare hop: drafting a contract calls the
                 # auxiliary LLM, whose provider/credential resolution reads the profile secret scope
                 # — a contextvar that a default-executor hop drops, leaving it unscoped.
-                draft_contract_obj = await self._run_in_executor_with_context(
-                    draft_contract, objective
-                )
+                contract = await self._run_in_executor_with_context(draft_contract, objective)
             except Exception as exc:
                 logger.debug("goal draft failed: %s", exc)
-                draft_contract_obj = None
+                contract = None
             args = objective  # the goal text is the objective
-            contract = draft_contract_obj
         else:
-            # Inline `field: value` lines parse into a completion contract;
-            # the remaining prose is the goal headline. Plain free-form goals
-            # (no such lines) behave exactly as before.
+            # Inline `field: value` lines parse into a completion contract; the remaining prose is
+            # the goal headline. Plain free-form goals (no such lines) behave exactly as before.
             from hermes_cli.goals import parse_contract
 
             headline, parsed = parse_contract(args)
             args = headline or args
             contract = parsed if not parsed.is_empty() else None
 
-        # Otherwise — treat the remaining text as the new goal.
         try:
             state = mgr.set(args, contract=contract)
         except ValueError as exc:
             return t("gateway.goal.invalid", error=str(exc))
 
-        # Queue the goal text as an immediate first turn so the agent
-        # starts making progress. The post-turn hook takes over after.
+        # Queue the goal text as an immediate first turn so the agent starts making progress. The
+        # post-turn hook takes over after.
         adapter, _quick_key = self._adapter_and_key_for(event)
         if adapter and _quick_key:
             try:
@@ -4534,6 +4546,7 @@ class GatewaySlashCommandsMixin:
             name = name[1:-1].strip()
 
         async def _list_titled_sessions() -> list[dict]:
+            """Titled sessions visible to the caller (origin-scoped unless admin ``--all``)."""
             user_source = source.platform.value if source.platform else None
             widen = allow_all and self._resume_caller_is_admin(source)
             sessions = await self._session_db.list_sessions_rich(
@@ -4541,43 +4554,14 @@ class GatewaySlashCommandsMixin:
                 session_key=None if widen else session_key,
                 limit=10,
             )
-            return [s for s in sessions if s.get("title")][:10]
+            titled = [s for s in sessions if s.get("title")][:10]
+            return [s for s in titled if await self._resume_row_visible(source, s, allow_all)]
 
         if not name:
             # List recent titled sessions for this user/platform
             try:
                 titled = await _list_titled_sessions()
-                titled = [
-                    s for s in titled
-                    if await self._resume_row_visible(source, s, allow_all)
-                ]
-                # A non-admin `--all` silently falls back to same-origin
-                # scoping; say so instead of rendering an unexplained
-                # narrower list (sibling of the /sessions `all` notice).
-                scope_note = (
-                    t("gateway.resume.all_requires_admin")
-                    if allow_all and not self._resume_caller_is_admin(source)
-                    else None
-                )
-                if not titled:
-                    if source.platform == Platform.MATRIX and not allow_all:
-                        return t("gateway.resume.matrix_no_named_sessions")
-                    base = t("gateway.resume.no_named_sessions")
-                    return f"{base}\n{scope_note}" if scope_note else base
-                lines = [t("gateway.resume.list_header")]
-                for idx, s in enumerate(titled[:10], start=1):
-                    title = s["title"]
-                    if source.platform == Platform.MATRIX and allow_all:
-                        origin = self._gateway_session_origin_for_id(str(s.get("id") or ""))
-                        if origin:
-                            title = f"{title} — {origin.chat_name or origin.chat_id}"
-                    preview = s.get("preview", "")[:40]
-                    preview_part = t("gateway.resume.list_preview_suffix", preview=preview) if preview else ""
-                    lines.append(t("gateway.resume.list_item_numbered", index=idx, title=title, preview_part=preview_part))
-                if scope_note:
-                    lines.append(scope_note)
-                lines.append(t("gateway.resume.list_footer_numbered"))
-                return "\n".join(lines)
+                return self._resume_listing_reply(source, titled, allow_all)
             except Exception as e:
                 logger.debug("Failed to list titled sessions: %s", e)
                 return t("gateway.resume.list_failed", error=e)
@@ -4586,10 +4570,6 @@ class GatewaySlashCommandsMixin:
         if name.isdigit():
             try:
                 titled = await _list_titled_sessions()
-                titled = [
-                    s for s in titled
-                    if await self._resume_row_visible(source, s, allow_all)
-                ]
             except Exception as e:
                 logger.debug("Failed to list titled sessions for numeric resume: %s", e)
                 return t("gateway.resume.list_failed", error=e)
@@ -4677,6 +4657,34 @@ class GatewaySlashCommandsMixin:
         if msg_count == 1:
             return t("gateway.resume.resumed_one", title=title, count=msg_count)
         return t("gateway.resume.resumed_many", title=title, count=msg_count)
+
+    def _resume_listing_reply(self, source, titled: list[dict], allow_all: bool) -> str:
+        """Numbered /resume list. A non-admin ``--all`` silently falls back to same-origin scoping;
+        say so instead of rendering an unexplained narrower list (sibling of the /sessions notice)."""
+        scope_note = (
+            t("gateway.resume.all_requires_admin")
+            if allow_all and not self._resume_caller_is_admin(source)
+            else None
+        )
+        if not titled:
+            if source.platform == Platform.MATRIX and not allow_all:
+                return t("gateway.resume.matrix_no_named_sessions")
+            base = t("gateway.resume.no_named_sessions")
+            return f"{base}\n{scope_note}" if scope_note else base
+        lines = [t("gateway.resume.list_header")]
+        for idx, s in enumerate(titled[:10], start=1):
+            title = s["title"]
+            if source.platform == Platform.MATRIX and allow_all:
+                origin = self._gateway_session_origin_for_id(str(s.get("id") or ""))
+                if origin:
+                    title = f"{title} — {origin.chat_name or origin.chat_id}"
+            preview = s.get("preview", "")[:40]
+            preview_part = t("gateway.resume.list_preview_suffix", preview=preview) if preview else ""
+            lines.append(t("gateway.resume.list_item_numbered", index=idx, title=title, preview_part=preview_part))
+        if scope_note:
+            lines.append(scope_note)
+        lines.append(t("gateway.resume.list_footer_numbered"))
+        return "\n".join(lines)
 
     async def _handle_sessions_command(self, event: MessageEvent) -> str:
         """Handle /sessions — list previous sessions for gateway chats."""
@@ -5016,22 +5024,7 @@ class GatewaySlashCommandsMixin:
         base_url = getattr(agent, "base_url", None) if agent else None
         api_key = getattr(agent, "api_key", None) if agent else None
         if not provider and getattr(self, "_session_db", None) is not None:
-            try:
-                _entry_for_billing = await self.async_session_store.get_or_create_session(source)
-                persisted = await self._session_db.get_session(_entry_for_billing.session_id) or {}
-                route = await self._session_db.get_dominant_session_model_route(
-                    _entry_for_billing.session_id
-                )
-                persisted_route = route if isinstance(route, dict) else {}
-            except Exception:
-                persisted = {}
-                persisted_route = {}
-            if persisted_route.get("billing_provider"):
-                provider = persisted_route["billing_provider"]
-                base_url = persisted_route.get("billing_base_url")
-            else:
-                provider = persisted.get("billing_provider")
-                base_url = persisted.get("billing_base_url")
+            provider, base_url = await self._persisted_billing_route(source)
 
         if wants_reset:
             normalized_provider = str(provider or "").strip().lower()
@@ -5076,54 +5069,25 @@ class GatewaySlashCommandsMixin:
         except Exception:
             credits_lines = []  # fail-open: never break /usage
 
+        def _with_account_blocks(lines: list[str]) -> str:
+            # Each block is preceded by a blank divider only when something precedes it.
+            for block in (account_lines, credits_lines):
+                if block:
+                    if lines:
+                        lines.append("")
+                    lines.extend(block)
+            return "\n".join(lines)
+
         if agent and hasattr(agent, "session_total_tokens") and agent.session_api_calls > 0:
-            lines = []
-
-            # Rate limits (when available from provider headers)
-            rl_state = agent.get_rate_limit_state()
-            if rl_state and rl_state.has_data:
-                from agent.rate_limit_tracker import format_rate_limit_compact
-                lines.append(t("gateway.usage.rate_limits", state=format_rate_limit_compact(rl_state)))
-                lines.append("")
-
-            # Session token usage — detailed breakdown matching CLI
-            input_tokens = getattr(agent, "session_input_tokens", 0) or 0
-            output_tokens = getattr(agent, "session_output_tokens", 0) or 0
-
-            lines.append(t("gateway.usage.header_session"))
-            lines.append(t("gateway.usage.label_model", model=agent.model))
-            lines.append(t("gateway.usage.label_input_tokens", count=f"{input_tokens:,}"))
-            lines.append(t("gateway.usage.label_output_tokens", count=f"{output_tokens:,}"))
-            lines.append(t("gateway.usage.label_total", count=f"{agent.session_total_tokens:,}"))
-            lines.append(t("gateway.usage.label_api_calls", count=agent.session_api_calls))
-
-            # Context window and compressions
-            ctx = agent.context_compressor
-            _lpt = ctx.last_prompt_tokens if ctx.last_prompt_tokens > 0 else 0
-            if _lpt:
-                pct = min(100, _lpt / ctx.context_length * 100) if ctx.context_length else 0
-                lines.append(t("gateway.usage.label_context", used=f"{_lpt:,}", total=f"{ctx.context_length:,}", pct=f"{pct:.0f}"))
-            if ctx.compression_count:
-                lines.append(t("gateway.usage.label_compressions", count=ctx.compression_count))
-
+            lines = _usage_agent_stats_lines(agent)
             # Per-category context breakdown (estimated — chars/4 heuristic). Same engine the
             # desktop popover uses. The system prompt / tools / skills / memory slices read off the
             # live agent; the conversation slice is estimated from the session transcript.
-            breakdown_lines = await asyncio.to_thread(
-                self._context_breakdown_lines, agent, source
-            )
+            breakdown_lines = await asyncio.to_thread(self._context_breakdown_lines, agent, source)
             if breakdown_lines:
                 lines.append("")
                 lines.extend(breakdown_lines)
-
-            if account_lines:
-                lines.append("")
-                lines.extend(account_lines)
-            if credits_lines:
-                lines.append("")
-                lines.extend(credits_lines)
-
-            return "\n".join(lines)
+            return _with_account_blocks(lines)
 
         # No agent at all -- check session history for a rough count
         session_entry = await self.async_session_store.get_or_create_session(source)
@@ -5132,28 +5096,29 @@ class GatewaySlashCommandsMixin:
             from agent.model_metadata import estimate_messages_tokens_rough
             msgs = [m for m in history if m.get("role") in {"user", "assistant"} and m.get("content")]
             approx = estimate_messages_tokens_rough(msgs)
-            lines = [
+            return _with_account_blocks([
                 t("gateway.usage.header_session_info"),
                 t("gateway.usage.label_messages", count=len(msgs)),
                 t("gateway.usage.label_estimated_context", count=f"{approx:,}"),
                 t("gateway.usage.detailed_after_first"),
-            ]
-            if account_lines:
-                lines.append("")
-                lines.extend(account_lines)
-            if credits_lines:
-                lines.append("")
-                lines.extend(credits_lines)
-            return "\n".join(lines)
+            ])
         if account_lines or credits_lines:
-            # account-only, credits-only, or both — joined with a blank divider.
-            parts = list(account_lines)
-            if credits_lines:
-                if parts:
-                    parts.append("")
-                parts.extend(credits_lines)
-            return "\n".join(parts)
+            return _with_account_blocks([])
         return t("gateway.usage.no_data")
+
+    async def _persisted_billing_route(self, source):
+        """``(provider, base_url)`` from the SessionDB row / dominant route when no agent is resident."""
+        try:
+            entry = await self.async_session_store.get_or_create_session(source)
+            persisted = await self._session_db.get_session(entry.session_id) or {}
+            route = await self._session_db.get_dominant_session_model_route(entry.session_id)
+            persisted_route = route if isinstance(route, dict) else {}
+        except Exception:
+            persisted = {}
+            persisted_route = {}
+        if persisted_route.get("billing_provider"):
+            return persisted_route["billing_provider"], persisted_route.get("billing_base_url")
+        return persisted.get("billing_provider"), persisted.get("billing_base_url")
 
     async def _handle_insights_command(self, event: MessageEvent) -> str:
         """Handle /insights command -- show usage insights and analytics."""
