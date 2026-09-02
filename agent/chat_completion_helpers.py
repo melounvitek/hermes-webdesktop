@@ -3498,25 +3498,20 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
     result = {"response": None, "error": None}
     first_delta_fired = {"done": False}
     deltas_were_sent = {"yes": False}
-    # Wire-level liveness for the boto3 converse_stream worker: the worker
-    # thread blocks inside ``for event in event_stream`` with NO read
-    # timeout, so a provider that opens the stream then stops yielding
-    # events wedges the thread forever. on_event stamps this on EVERY
-    # yielded Bedrock event (text/tool/metadata) — the poll loop below
+    # Liveness for the boto3 worker: ``for event in event_stream`` has NO
+    # read timeout, so on_event stamps every Bedrock event and the poll loop
     # trips a watchdog when the gap exceeds the stale timeout.
     _bedrock_started_at = time.time()
     _bedrock_last_event = {"t": _bedrock_started_at}
     _bedrock_response_started = {"yes": False}
-    # Region captured for the poll-loop client eviction below.  Read
-    # (not popped) here so the worker's own pop inside _bedrock_call still
-    # resolves the same value.
+    # Read (not popped): the worker's own pop inside _bedrock_call must
+    # still resolve the same region.
     _bedrock_region = api_kwargs.get("__bedrock_region__", "us-east-1")
     # Same patience budget as the OpenAI/Anthropic stale detector.
     _bedrock_stale_timeout = _derive_stream_stale_timeout(agent, api_kwargs)
 
-    # Cross-turn stale-stream circuit breaker (#58962): a pre-elevated
-    # streak from prior wedged turns aborts before we even start — mirrors
-    # the entry check on the OpenAI/Anthropic path below.
+    # Cross-turn stale-stream circuit breaker (#58962), as on the OpenAI/
+    # Anthropic path.
     _check_stale_giveup(agent)
 
     def _fire_first():
@@ -3551,10 +3546,9 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
                 try:
                     raw_response = client.converse_stream(**final_kwargs)
                 except Exception as _bedrock_exc:
-                    # Bedrock refuses a cachePoint block in one section for
-                    # some families (Nova: toolConfig.tools, #97281) and
-                    # fails the whole request. Drop that marker and reopen
-                    # the stream inside the same Relay attempt.
+                    # Some families refuse a cachePoint block in one section
+                    # (Nova: toolConfig.tools, #97281): drop it and reopen
+                    # inside the same Relay attempt.
                     _retry_kwargs = recover_from_cache_point_rejection(
                         _bedrock_exc, final_kwargs
                     )
@@ -3562,10 +3556,8 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
                         return client.converse_stream(**_retry_kwargs).get(
                             "stream", []
                         )
-                    # InvokeModel-only policies cannot open a stream. Keep
-                    # the fallback inside the same managed Relay attempt so
-                    # the real provider request and terminal response still
-                    # share one lifecycle boundary.
+                    # InvokeModel-only IAM policies cannot stream; fall back
+                    # inside the same Relay attempt (one lifecycle boundary).
                     if is_streaming_access_denied_error(_bedrock_exc):
                         agent._disable_streaming = True
                         agent._safe_print(
@@ -3668,17 +3660,11 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
                     time.time() - _bedrock_started_at,
                     response_started=_bedrock_response_started["yes"],
                 )
-                # #81521 (sibling of the main streaming-path fix): give
-                # the Bedrock worker a bounded window to unwind its
-                # Relay-managed stream scopes before surfacing
-                # InterruptedError. No-op when Relay managed execution
-                # is not live.
+                # Let the worker unwind Relay scopes before raising (#81521).
                 _join_worker_for_relay_teardown(t, label="Bedrock streaming")
                 raise InterruptedError("Agent interrupted during Bedrock API call")
-            # Liveness watchdog: no Bedrock event for longer than the stale
-            # timeout means the stream has wedged (open socket, keep-alives but
-            # no data, or a silently hung provider).  Without this the worker
-            # blocks in ``for event in event_stream`` indefinitely.
+            # Liveness watchdog: no event past the stale timeout = wedged
+            # stream (the worker would block in the event loop forever).
             _stale_elapsed = time.time() - _bedrock_last_event["t"]
             if _stale_elapsed > _bedrock_stale_timeout:
                 logger.warning(
@@ -3691,16 +3677,12 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
                     f"⚠️ No events from Bedrock for {int(_stale_elapsed)}s "
                     f"(model: {api_kwargs.get('modelId', 'unknown')}). Aborting..."
                 )
-                # Count the stale kill in the SAME cross-turn breaker as the
-                # OpenAI/Anthropic path (#58962).
                 _bump_stale_streak(agent)
-                # Best-effort: evict the region's cached bedrock-runtime client
-                # so the NEXT call reconnects with a fresh pool.  NOTE: this does
-                # NOT abort the in-flight botocore EventStream the worker thread
-                # is blocked on — botocore exposes no external cancellation for
-                # it — so the daemon worker keeps reading until its socket read
-                # ultimately errors.  We therefore end THIS call by raising
-                # below and let the streak+give-up breaker escalate across turns.
+                # Evict the region's cached client so the NEXT call gets a
+                # fresh pool. This does NOT abort the in-flight botocore
+                # EventStream (no external cancellation exists); the daemon
+                # worker keeps reading until its socket errors, so THIS call
+                # ends via the TimeoutError below and the streak escalates.
                 try:
                     from agent.bedrock_adapter import invalidate_runtime_client
                     invalidate_runtime_client(_bedrock_region)
@@ -3708,31 +3690,20 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
                     logger.debug(
                         "bedrock: stale client eviction failed: %s", _inval_exc
                     )
-                # Reset the timer so a repeated trip (should the worker somehow
-                # survive) waits a fresh interval rather than re-firing instantly.
                 _bedrock_last_event["t"] = time.time()
-                # Escalate across turns: raises RuntimeError once the streak
-                # crosses HERMES_STREAM_STALE_GIVEUP, so a persistently wedged
-                # Bedrock provider aborts fast instead of re-waiting the timeout.
+                # Raises RuntimeError past HERMES_STREAM_STALE_GIVEUP; otherwise
+                # end THIS call with a TimeoutError (break — we cannot abort the
+                # worker) and let the streak carry forward.
                 _check_stale_giveup(agent)
-                # Streak still under the give-up threshold: end THIS call with a
-                # TimeoutError so the outer retry loop / next turn re-evaluates
-                # and the streak carries forward.  Break rather than keep polling
-                # a worker we cannot abort.
                 result["error"] = TimeoutError(
                     f"Bedrock stream produced no events for {int(_stale_elapsed)}s "
                     f"(threshold {int(_bedrock_stale_timeout)}s) — aborting stalled "
                     f"stream so the retry/fallback path can recover."
                 )
                 break
-        # Worker exited before the poll loop observed the interrupt flag. The
-        # Bedrock stream callback breaks out and returns a PARTIAL response
-        # without raising on interrupt (see bedrock_adapter.py
-        # stream_converse_with_callbacks / on_interrupt_check), so result[
-        # "response"] is populated with error=None and the in-loop raise above
-        # never fires. Re-check here so /stop is not silently swallowed on the
-        # Bedrock path — mirrors the post-worker guard on the main streaming
-        # loop. (#59999 area)
+        # The Bedrock callback returns a PARTIAL response on interrupt without
+        # raising (on_interrupt_check), so the in-loop raise may never fire.
+        # Re-check so /stop is not swallowed (#59999 area).
         if agent._interrupt_requested:
             _record_interrupted_provider_wait(
                 agent,
@@ -3742,9 +3713,7 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
             raise InterruptedError("Agent interrupted during Bedrock API call (post-worker)")
         if result["error"] is not None:
             raise result["error"]
-        # Success — clear the cross-turn breaker (#58962): Bedrock proved
-        # responsive.  Mirrors the OpenAI/Anthropic success reset below so a
-        # recovered provider doesn't carry a stale streak into later turns.
+        # Success clears the cross-turn breaker (#58962).
         if result["response"] is not None:
             _reset_stale_streak(agent)
         _emit_stream_end(agent, final_text=_stream_final_text(result["response"]), finished=True, error=None)
@@ -3967,16 +3936,13 @@ class _StreamingCall:
             if _provider_timeout_cfg is not None
             else env_float("HERMES_API_TIMEOUT", 1800.0)
         )
-        # Read timeout: config wins here too.  Otherwise use
-        # HERMES_STREAM_READ_TIMEOUT (default 120s) for cloud providers.
+        # Read timeout: config wins; else HERMES_STREAM_READ_TIMEOUT (120s).
         if _provider_timeout_cfg is not None:
             _stream_read_timeout = _provider_timeout_cfg
         else:
             _stream_read_timeout = env_float("HERMES_STREAM_READ_TIMEOUT", 120.0)
-            # Local providers (Ollama, llama.cpp, vLLM) can take minutes for
-            # prefill on large contexts before producing the first token.
-            # Auto-increase the httpx read timeout unless the user explicitly
-            # overrode HERMES_STREAM_READ_TIMEOUT.
+            # Local providers prefill for minutes: raise the read timeout
+            # unless the user overrode HERMES_STREAM_READ_TIMEOUT.
             if _stream_read_timeout == 120.0 and self.agent.base_url and is_local_endpoint(self.agent.base_url):
                 _stream_read_timeout = _base_timeout
                 logger.debug(
@@ -3989,22 +3955,15 @@ class _StreamingCall:
                 and self._stream_stale_timeout != float("inf")
                 and self._stream_stale_timeout > _stream_read_timeout
             ):
-                # Cloud reasoning models (e.g. Opus) routinely pause mid-stream
-                # for minutes during extended thinking.  The stale-stream
-                # detector is deliberately scaled up to tolerate this (180–300s,
-                # see the stale-timeout block below), but the raw httpx socket
-                # read timeout defaulted to a flat 120s and fired *first* —
-                # tearing down a healthy reasoning stream before the stale
-                # detector (which owns retry + diagnostics) could act.  Keep the
-                # socket read timeout in step with the detector so it no longer
-                # preempts it.
+                # Reasoning models pause mid-stream for minutes; the stale
+                # detector (180–300s) tolerates that, so the raw 120s socket
+                # read timeout must not fire first and preempt it.
                 _stream_read_timeout = self._stream_stale_timeout
                 logger.debug(
                     "Cloud reasoning stream — read timeout raised to %.0fs to "
                     "match stale-stream detector", _stream_read_timeout,
                 )
-        # Cap connect/pool at 60s even when provider timeout is higher.
-        # connect/pool cover TCP handshake, not model inference.
+        # connect/pool cover the TCP handshake, not inference: cap at 60s.
         _conn_cap = min(_base_timeout, 60.0) if _provider_timeout_cfg is not None else 30.0
         content_parts: list = []
         tool_calls = _ToolCallAccumulator()
@@ -4055,11 +4014,10 @@ class _StreamingCall:
             _writer_token["value"] = claim_stream_writer(self.agent)
 
         def _accept_stream_chunk(_chunk: Any) -> bool:
-            # A stale-attempt fence can win while Relay is handing an
-            # already-received tool-call chunk back to Hermes. Preserve only
-            # the fact that a tool call was in flight so retry policy does not
-            # misclassify the attempt as a partial text response. The chunk
-            # itself is still rejected below and never reaches callbacks.
+            # A stale-attempt fence can win while Relay hands back a received
+            # tool-call chunk: record only that a tool call was in flight (so
+            # retry policy doesn't see a partial text response); the chunk is
+            # still rejected below.
             try:
                 choices = getattr(_chunk, "choices", None)
                 delta = getattr(choices[0], "delta", None) if choices else None
@@ -4067,13 +4025,10 @@ class _StreamingCall:
                     self.provider_tool_in_flight["yes"] = True
             except Exception:
                 pass
-            # Payload-empty terminal chunk: the provider completed the
-            # stream (`finish_reason` set, no further writable delta). The
-            # attempt/writer fence exists to stop a superseded stream from
-            # writing *more* text. Fending this marker-only chunk discards
-            # the only completion signal, which the drop-guard then
-            # mislabels as a mid-stream drop. A finish chunk that still
-            # carries content/tool_calls remains gated.
+            # Marker-only finish chunk (finish_reason, no writable delta)
+            # always passes: the fence only stops a superseded stream writing
+            # MORE text, and fending the completion signal would make the
+            # drop-guard mislabel a clean end as a mid-stream drop.
             try:
                 _choices = getattr(_chunk, "choices", None)
                 if _choices:
@@ -4101,10 +4056,8 @@ class _StreamingCall:
                     self.api_kwargs.get("model", "unknown"),
                 )
                 return False
-            # Record provider activity before Relay processes the chunk. This
-            # prevents the stale watchdog from cancelling a live stream while
-            # an interceptor or codec is still handling an already-received
-            # event.
+            # Stamp activity BEFORE Relay processes the chunk so the watchdog
+            # can't cancel a live stream mid-interceptor.
             self.last_chunk_time["t"] = time.time()
             return True
 
@@ -4173,18 +4126,12 @@ class _StreamingCall:
             self.last_chunk_time["t"] = time.time()
             self.agent._touch_activity("receiving stream response")
 
-            # Update per-attempt diagnostic counters.  Best-effort —
-            # failures are swallowed so the streaming hot path is never
-            # interrupted by diagnostic accounting.
+            # Best-effort diagnostics; never interrupt the hot path.
             try:
                 _diag["chunks"] = int(_diag.get("chunks", 0)) + 1
                 if _diag.get("first_chunk_at") is None:
                     _diag["first_chunk_at"] = self.last_chunk_time["t"]
-                # Approximate byte size from the chunk's delta payload —
-                # exact wire bytes aren't exposed by the SDK. A full
-                # repr() per chunk was 5.5-8.8 µs of pure CPU on the
-                # hottest loop in the agent; the delta-length estimate
-                # is ~3x cheaper and stays proportional to traffic.
+                # Delta-length estimate: ~3x cheaper than repr() per chunk.
                 try:
                     _diag["bytes"] = int(_diag.get("bytes", 0)) + _estimate_chunk_bytes(chunk)
                 except Exception:
@@ -4193,20 +4140,15 @@ class _StreamingCall:
                 pass
 
             if self.agent._interrupt_requested:
-                # Abandoning a half-read SSE response leaves its connection
-                # permanently checked out of the httpx pool — and the partial
-                # response built below makes the worker's finally report a
-                # reuse-reason close, which would cache the client together
-                # with the leaked connection (each interrupt leaking one more
-                # until the pool exhausts). Close the stream here, on the
-                # owning thread, so the connection is released first.
+                # A half-read SSE response stays checked out of the httpx pool,
+                # and the partial response below makes the finally cache the
+                # client WITH the leaked connection (one per interrupt until
+                # the pool exhausts). Close on the owning thread first.
                 try:
                     stream.close()
                 except Exception:
-                    # Connection may still be checked out — poison the slot so
-                    # the finally's close really closes the pool instead of
-                    # caching it (owner-thread abort: shutdown is safe, and the
-                    # FD release still happens in the finally below).
+                    # Still checked out: poison the slot so the finally really
+                    # closes the pool instead of caching it.
                     request_client = attempt_request_client["value"]
                     if request_client is not None:
                         self.agent._abort_request_openai_client(
@@ -4225,13 +4167,10 @@ class _StreamingCall:
                 # Usage comes in the final chunk with empty choices
                 if hasattr(chunk, "usage") and chunk.usage:
                     usage_obj = chunk.usage
-                # Some OpenAI-compatible providers (DeepInfra, etc.)
-                # return validation errors as in-stream error chunks:
-                # choices=None with error_type/error_message in
-                # model_extra.  Without this check the error is
-                # silently dropped and the stream ends empty →
-                # EmptyStreamError → misleading "empty stream" message
-                # and pointless retries on the same bad request. (#65631)
+                # Some providers (DeepInfra) send validation errors as
+                # in-stream chunks (choices=None + error_type/error_message);
+                # otherwise they'd surface as a misleading EmptyStreamError
+                # and pointless retries (#65631).
                 _err_type = getattr(chunk, "error_type", None)
                 _err_msg = getattr(chunk, "error_message", None)
                 if _err_type or _err_msg:
@@ -4267,12 +4206,10 @@ class _StreamingCall:
             if hasattr(chunk, "model") and chunk.model:
                 model_name = chunk.model
 
-            # Extract terminal chunk fields BEFORE any content-shape `continue`.
-            # Backends that merge finish_reason into the final content chunk
-            # (e.g. vLLM >= 0.1.dev20051) can have that chunk swallowed by the
-            # SSE-echo guard below when the tokenizer emits standalone ':'
-            # tokens — the finish chunk would never register and the response
-            # would be falsely flagged as truncated (#94614).
+            # Read finish_reason/usage BEFORE any content-shape `continue`:
+            # the SSE-echo guard below can swallow a merged finish chunk
+            # (vLLM emitting standalone ':' tokens), falsely flagging
+            # truncation (#94614).
             chunk_finish_reason = getattr(chunk.choices[0], "finish_reason", None)
             if chunk_finish_reason:
                 finish_reason = chunk_finish_reason
@@ -4282,10 +4219,8 @@ class _StreamingCall:
             # Accumulate reasoning content
             reasoning_text = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
             if reasoning_text:
-                # Summary-part models (gpt-5.x and other Responses relays) send
-                # one complete markdown block per delta with no separator, so
-                # the parts glue into a single unreadable run. Only the tail of
-                # what's accumulated matters. See agent/reasoning_summaries.py.
+                # Summary-part models send one markdown block per delta with no
+                # separator; re-insert it (see agent/reasoning_summaries.py).
                 reasoning_text = separate_glued_reasoning_blocks(
                     reasoning_parts[-1] if reasoning_parts else "",
                     reasoning_text,
@@ -4294,10 +4229,8 @@ class _StreamingCall:
                 self._fire_first_delta()
                 self.agent._fire_reasoning_delta(reasoning_text)
 
-            # Accumulate text content — fire callback only when no tool calls.
-            # Some OpenAI-compatible providers emit a text delta as a list of
-            # content blocks.  Convert it once so callbacks and the synthetic
-            # completion message always receive plain text.
+            # Text content (list-of-blocks deltas flattened once); callbacks
+            # fire only when no tool calls.
             delta_content = flatten_message_text(getattr(delta, "content", None), sep="")
             if delta_content:
                 content_parts.append(delta_content)
@@ -4342,10 +4275,7 @@ class _StreamingCall:
                         # ``tool_calls=None`` and silently discard the action.
                         self.result["partial_tool_names"].append(name)
 
-            # (finish_reason/usage are now extracted at the top of the loop
-            # body. The old tail-side extraction sat after the SSE-echo
-            # guard's `continue` paths, so a merged finish chunk that tripped
-            # the guard never registered — false "stream truncated".)
+
 
         self._close_managed_stream()
 
@@ -4354,9 +4284,8 @@ class _StreamingCall:
                 f"stream attempt {stream_attempt_id} was superseded"
             )
 
-        # Some OpenAI-compatible adapters accept ``stream=True`` but return a
-        # completed response. Relay records that attempt while Hermes preserves
-        # its existing switch-to-non-streaming behavior for later calls.
+        # Some adapters accept ``stream=True`` but return a completed
+        # response: switch this session to non-streaming.
         if stream.final_response is not None:
             final_response = stream.final_response
             logger.info(
@@ -4401,32 +4330,18 @@ class _StreamingCall:
                     try:
                         json.loads(arguments)
                     except json.JSONDecodeError:
-                        # Attempt repair before flagging as truncated.
-                        # Models like GLM-5.1 via Ollama produce trailing
-                        # commas, unclosed brackets, Python None, etc.
-                        # Without repair, these hit the truncation handler
-                        # and kill the session.  _repair_tool_call_arguments
-                        # returns "{}" for unrepairable args, which is far
-                        # better than a crashed session.
+                        # Repair before flagging (GLM via Ollama: trailing
+                        # commas, unclosed brackets, Python None); "{}" means
+                        # unrepairable -> truncation handling.
                         repaired = _repair_tool_call_arguments(arguments, tool_name)
                         if repaired != "{}":
-                            # Successfully repaired — use the fixed args
                             arguments = repaired
                         else:
-                            # Unrepairable — flag for truncation handling
                             has_truncated_tool_args = True
                 elif finish_reason is None:
-                    # Stream ended with no finish_reason AND this tool call's
-                    # arguments never received a single byte (name arrived,
-                    # argument generation never started before the connection
-                    # died). Left unflagged, this fell through to
-                    # `effective_finish_reason = finish_reason or "stop"`
-                    # below — a normal "stop" turn carrying a tool call whose
-                    # empty arguments string later gets silently coerced to
-                    # "{}" at the dispatch boundary and executed with no
-                    # arguments and no retry (#80498). Route it through the
-                    # same dropped-mid-tool-call stub path already used for a
-                    # truncated-but-nonempty JSON string.
+                    # Name arrived, zero argument bytes, no finish_reason:
+                    # unflagged this becomes a "stop" turn whose empty args
+                    # are coerced to "{}" and executed with no retry (#80498).
                     has_truncated_tool_args = True
                 mock_tool_calls.append(SimpleNamespace(
                     id=tc["id"],
@@ -4438,9 +4353,8 @@ class _StreamingCall:
                     ),
                 ))
 
-        # Zero-chunk guard: stream yielded nothing usable — a provider/upstream
-        # error or malformed SSE, not a legitimate empty completion. Raise so the
-        # retry machinery handles it instead of fabricating a successful turn.
+        # Zero-chunk guard: nothing usable = upstream error / malformed SSE,
+        # not a legitimate empty completion.
         if (
             finish_reason is None
             and not content_parts
