@@ -115,7 +115,10 @@ def _parse_heredoc_operator(command: str, index: int):
             quote = char
             cursor += 1
             while cursor < len(command) and command[cursor] != quote:
-                if quote == '"' and command[cursor] == "\\":
+                current = command[cursor]
+                if current in "\r\n":
+                    return None
+                if quote == '"' and current == "\\":
                     if cursor + 1 >= len(command):
                         return None
                     following = command[cursor + 1]
@@ -124,12 +127,7 @@ def _parse_heredoc_operator(command: str, index: int):
                         cursor += 2
                         continue
                     # In double quotes, backslash is literal before other chars.
-                    delimiter.append("\\")
-                    cursor += 1
-                    continue
-                if command[cursor] in "\r\n":
-                    return None
-                delimiter.append(command[cursor])
+                delimiter.append(current)
                 cursor += 1
             if cursor >= len(command):
                 return None
@@ -218,14 +216,8 @@ def _find_heredoc_close(
     cursor = body_start
     while True:
         newline = command.find("\n", cursor)
-        if newline == -1:
-            line = command[cursor:]
-            after = len(command)
-        else:
-            line = command[cursor:newline]
-            after = newline + 1
-        if line.endswith("\r"):
-            line = line[:-1]
+        after = len(command) if newline == -1 else newline + 1
+        line = command[cursor:after].removesuffix("\n").removesuffix("\r")
         candidate = line.lstrip("\t") if strip_tabs else line
         if candidate == delimiter:
             return after
@@ -236,18 +228,15 @@ def _find_heredoc_close(
 
 def strip_inert_heredoc_bodies(command: str) -> str:
     """Mask heredoc bodies that are provably inert data (see module docstring)."""
-    ranges: list[tuple[int, int]] = []
-    command_start = 0
-
     # Runs on every terminal call: skip the state machine when no '<<' exists,
     # and stop scanning once past the last '<<'.
     if "<<" not in command:
         return command
     last_opener_index = command.rfind("<<")
+    ranges: list[tuple[int, int]] = []
+    command_start = 0
 
-    while command_start < len(command):
-        if command_start > last_opener_index:
-            break
+    while command_start <= last_opener_index:
         command_end, specs, unknown_operator, has_list_operator = (
             _scan_heredoc_command_unit(command, command_start)
         )
@@ -264,21 +253,12 @@ def strip_inert_heredoc_bodies(command: str) -> str:
 
         body_cursor = command_end + 1
         body_ranges: list[tuple[int, int]] = []
-        unterminated = False
         for delimiter, strip_tabs, _quoted in specs:
-            close_end = _find_heredoc_close(
-                command,
-                body_cursor,
-                delimiter,
-                strip_tabs,
-            )
+            close_end = _find_heredoc_close(command, body_cursor, delimiter, strip_tabs)
             if close_end is None:
-                unterminated = True
-                break
+                return command  # unterminated
             body_ranges.append((body_cursor, close_end))
             body_cursor = close_end
-        if unterminated:
-            return command
 
         if all(quoted for _delimiter, _strip_tabs, quoted in specs) and not has_list_operator:
             masked_opener = _mask_simple_quotes(command[command_start:command_end])

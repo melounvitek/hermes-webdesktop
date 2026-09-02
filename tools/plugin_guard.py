@@ -1,32 +1,21 @@
 #!/usr/bin/env python3
 """Plugin Guard — security scanner for externally-installed plugins.
 
-Extends the ``tools/skills_guard.py`` static-analysis engine to
+Reuses the ``tools/skills_guard.py`` static-analysis engine for
 ``hermes plugins install`` / ``update``, which otherwise clone and execute
 arbitrary Git repositories unscanned.
 
-Plugins run Python in-process, so they are more dangerous than skills — but
-they are also *expected* to read their own API keys from env vars, call
-provider HTTP APIs with them, and spawn subprocesses. Reusing the skill
-patterns naively would flag every legitimate provider plugin, so this scanner:
-
-- Runs the full skills_guard pattern set on documentation/config files, where
-  prompt-injection and social-engineering content lives.
-- Exempts the "reads own env secret" / "HTTP call with key" pattern family on
-  *code* files while keeping genuinely malicious signals (foreign credential
-  stores, reverse shells, destructive commands, persistence, obfuscation,
-  known exfiltration services).
-- Applies plugin-sized structural limits and skips VCS/venv noise.
+Plugins run Python in-process (more dangerous than skills) but are *expected*
+to read their own API keys from env vars, call provider HTTP APIs and spawn
+subprocesses, so the raw skill patterns would flag every legitimate provider
+plugin. Hence: full pattern set on docs/config files (where prompt-injection
+lives); the "reads own env secret" / "HTTP call with key" family is exempt on
+*code* files while genuinely malicious signals stay; plugin-sized structural
+limits; VCS/venv noise skipped.
 
 Verdict → install policy: ``safe`` installs; ``caution`` requires explicit
 confirmation (prompt, ``--force``, or caller callback); ``dangerous`` is
 blocked and ``--force`` does NOT override.
-
-Usage:
-    from tools.plugin_guard import scan_plugin, should_allow_plugin_install
-
-    result = scan_plugin(Path("/tmp/clone/my-plugin"), source="owner/repo")
-    allowed, reason = should_allow_plugin_install(result)
 """
 
 from __future__ import annotations
@@ -46,21 +35,20 @@ from tools.skills_guard import (
 
 PLUGIN_SCANNER_VERSION = "plugin-guard-v1"
 
-# Directories that are never scanned (VCS internals, caches, vendored envs).
+# Never scanned: VCS internals, caches, vendored envs.
 EXCLUDED_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
 }
 
-# Code file extensions where "reads an env secret" / "HTTP call with a key
-# variable" is the NORMAL, documented plugin pattern (requires_env).
+# Code files, where "reads an env secret" / "HTTP call with a key variable"
+# is the NORMAL, documented plugin pattern (requires_env).
 CODE_FILE_EXTENSIONS = {
     ".py", ".js", ".ts", ".sh", ".bash", ".rb", ".pl", ".php",
 }
 
 # skills_guard pattern ids exempt on code files (every legitimate provider
-# plugin exhibits them). They still apply in full to docs/config files, where
-# such content is a strong injection/social-engineering signal.
+# plugin exhibits them); they still apply in full to docs/config files.
 CODE_EXEMPT_PATTERN_IDS = {
     "python_environ_get_secret",
     "python_getenv_secret",
@@ -102,10 +90,6 @@ MAX_PLUGIN_TOTAL_SIZE_KB = 10 * 1024   # 10MB of scannable tree
 MAX_PLUGIN_SINGLE_FILE_KB = 1024       # 1MB single file
 
 
-def _is_excluded(rel_parts: Tuple[str, ...]) -> bool:
-    return any(part in EXCLUDED_DIRS for part in rel_parts)
-
-
 def _walk(plugin_dir: Path) -> Iterator[Tuple[Path, str]]:
     """Yield (path, "a/b/c" relative path) for every non-excluded entry under plugin_dir."""
     for f in plugin_dir.rglob("*"):
@@ -113,7 +97,7 @@ def _walk(plugin_dir: Path) -> Iterator[Tuple[Path, str]]:
             rel_parts = f.relative_to(plugin_dir).parts
         except ValueError:
             continue
-        if not _is_excluded(rel_parts):
+        if not any(part in EXCLUDED_DIRS for part in rel_parts):
             yield f, "/".join(rel_parts)
 
 
@@ -139,22 +123,20 @@ def _check_plugin_structure(plugin_dir: Path) -> List[Finding]:
     findings: List[Finding] = []
     file_count = 0
     total_size = 0
+    resolved_root = plugin_dir.resolve()
 
     for f, rel in _walk(plugin_dir):
         if f.is_symlink():
             file_count += 1
             try:
                 resolved = f.resolve()
-                if not resolved.is_relative_to(plugin_dir.resolve()):
-                    findings.append(_finding(
-                        "symlink_escape", "critical", "traversal", rel,
-                        f"symlink -> {resolved}", "symlink points outside the plugin directory",
-                    ))
             except OSError:
-                findings.append(_finding(
-                    "broken_symlink", "medium", "traversal", rel,
-                    "broken symlink", "broken or circular symlink",
-                ))
+                findings.append(_finding("broken_symlink", "medium", "traversal", rel,
+                                         "broken symlink", "broken or circular symlink"))
+                continue
+            if not resolved.is_relative_to(resolved_root):
+                findings.append(_finding("symlink_escape", "critical", "traversal", rel,
+                                         f"symlink -> {resolved}", "symlink points outside the plugin directory"))
             continue
 
         if not f.is_file():
@@ -168,28 +150,20 @@ def _check_plugin_structure(plugin_dir: Path) -> List[Finding]:
         total_size += size
 
         if size > MAX_PLUGIN_SINGLE_FILE_KB * 1024:
-            findings.append(_finding(
-                "oversized_file", "medium", "structural", rel, f"{size // 1024}KB",
-                f"file is {size // 1024}KB (limit: {MAX_PLUGIN_SINGLE_FILE_KB}KB)",
-            ))
+            findings.append(_finding("oversized_file", "medium", "structural", rel, f"{size // 1024}KB",
+                                     f"file is {size // 1024}KB (limit: {MAX_PLUGIN_SINGLE_FILE_KB}KB)"))
 
         ext = f.suffix.lower()
         if ext in SUSPICIOUS_BINARY_EXTENSIONS:
-            findings.append(_finding(
-                "binary_file", SEVERITY_REMAP.get("binary_file", "high"), "structural", rel,
-                f"binary: {ext}", f"binary/executable file ({ext}) bundled in plugin (cannot be scanned)",
-            ))
+            findings.append(_finding("binary_file", SEVERITY_REMAP["binary_file"], "structural", rel,
+                                     f"binary: {ext}", f"binary/executable file ({ext}) bundled in plugin (cannot be scanned)"))
 
     if file_count > MAX_PLUGIN_FILE_COUNT:
-        findings.append(_finding(
-            "too_many_files", "medium", "structural", "(directory)", f"{file_count} files",
-            f"plugin has {file_count} files (limit: {MAX_PLUGIN_FILE_COUNT})",
-        ))
+        findings.append(_finding("too_many_files", "medium", "structural", "(directory)", f"{file_count} files",
+                                 f"plugin has {file_count} files (limit: {MAX_PLUGIN_FILE_COUNT})"))
     if total_size > MAX_PLUGIN_TOTAL_SIZE_KB * 1024:
-        findings.append(_finding(
-            "oversized_bundle", "medium", "structural", "(directory)", f"{total_size // 1024}KB",
-            f"plugin is {total_size // 1024}KB total (limit: {MAX_PLUGIN_TOTAL_SIZE_KB}KB)",
-        ))
+        findings.append(_finding("oversized_bundle", "medium", "structural", "(directory)", f"{total_size // 1024}KB",
+                                 f"plugin is {total_size // 1024}KB total (limit: {MAX_PLUGIN_TOTAL_SIZE_KB}KB)"))
 
     return findings
 
@@ -209,6 +183,11 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
                 all_findings.extend(_filter_findings(scan_file(f, rel_path=rel), rel))
 
     verdict = _determine_verdict(all_findings)
+    if all_findings:
+        categories = sorted({f.category for f in all_findings})
+        summary = f"{plugin_dir.name}: {verdict} — {len(all_findings)} finding(s) in {', '.join(categories)}"
+    else:
+        summary = f"{plugin_dir.name}: clean scan, no threats detected"
     result = ScanResult(
         skill_name=plugin_dir.name,
         source=source or plugin_dir.name,
@@ -216,15 +195,8 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
         verdict=verdict,
         findings=all_findings,
         scanned_at=datetime.now(timezone.utc).isoformat(),
+        summary=summary,
     )
-    if all_findings:
-        categories = {f.category for f in all_findings}
-        result.summary = (
-            f"{plugin_dir.name}: {verdict} — {len(all_findings)} finding(s) "
-            f"in {', '.join(sorted(categories))}"
-        )
-    else:
-        result.summary = f"{plugin_dir.name}: clean scan, no threats detected"
     result.scan_provenance = {
         "scanner_version": PLUGIN_SCANNER_VERSION,
         "verdict": verdict,

@@ -38,9 +38,7 @@ _REPO = "sheeki03/tirith"
 _COSIGN_IDENTITY_REGEXP = f"^https://github.com/{_REPO}/\\.github/workflows/release\\.yml@refs/tags/v"
 _COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
 
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
+# --- Config helpers ---
 
 def _env_bool(key: str, default: bool) -> bool:
     val = os.getenv(key)
@@ -73,9 +71,7 @@ def _load_security_config() -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Auto-install
-# ---------------------------------------------------------------------------
+# --- Module state ---
 
 # Cached path after first resolution. _INSTALL_FAILED means "we tried and
 # failed" — distinct from None ("not yet tried") — so we don't retry per command.
@@ -85,12 +81,26 @@ _install_failure_reason: str = ""  # reason tag when _resolved_path is _INSTALL_
 
 # Circuit breaker: after _CRASH_LIMIT consecutive spawn/execution failures,
 # disable tirith for the rest of the process so a broken binary can't turn
-# every tool call into a fail-open retry loop (#41400). Reset on success.
-# Lock-free on purpose: a racing double-increment only opens the breaker one
-# call early; no corruption or security bypass is possible.
+# every tool call into a fail-open retry loop that hangs the user for minutes.
+# Reset on success. Lock-free on purpose (like mcp_tool.py error counters): a
+# racing double-increment only opens the breaker one call early; no corruption
+# or security bypass is possible.
 _CRASH_LIMIT = 3
 _crash_count: int = 0
 _circuit_open: bool = False
+
+# Background install thread coordination
+_install_lock = threading.Lock()
+_install_thread: threading.Thread | None = None
+
+# Warning de-duplication: spawn/path warnings are in the hot path and would
+# otherwise repeat once per terminal command while tirith is unavailable
+# (e.g. Windows with the install thread still running fills errors.log).
+_warned_messages: set[str] = set()
+_warned_lock = threading.Lock()
+
+# Disk-persistent failure marker — avoids retry across process restarts
+_MARKER_TTL = 86400  # 24 hours
 
 
 def _record_tirith_crash() -> None:
@@ -104,15 +114,6 @@ def _record_tirith_crash() -> None:
             "disabling for the rest of the process",
             _crash_count,
         )
-
-# Background install thread coordination
-_install_lock = threading.Lock()
-_install_thread: threading.Thread | None = None
-
-# Warning de-duplication: spawn/path warnings are in the hot path and would
-# otherwise repeat once per terminal command while tirith is unavailable.
-_warned_messages: set[str] = set()
-_warned_lock = threading.Lock()
 
 
 def _warn_once(key: str, message: str, *args) -> None:
@@ -129,9 +130,27 @@ def _reset_spawn_warning_state() -> None:
     with _warned_lock:
         _warned_messages.clear()
 
-# Disk-persistent failure marker — avoids retry across process restarts
-_MARKER_TTL = 86400  # 24 hours
 
+def _cached_path() -> str | None:
+    """Fast path: the path resolved on a previous call, or None if unresolved/failed."""
+    if _resolved_path is None or _resolved_path is _INSTALL_FAILED:
+        return None
+    return _resolved_path
+
+
+def _set_resolved(path: str) -> None:
+    global _resolved_path, _install_failure_reason
+    _resolved_path = path
+    _install_failure_reason = ""
+
+
+def _set_failed(reason: str) -> None:
+    global _resolved_path, _install_failure_reason
+    _resolved_path = _INSTALL_FAILED
+    _install_failure_reason = reason
+
+
+# --- Disk failure marker ---
 
 def _failure_marker_path() -> str:
     return os.path.join(str(get_hermes_home()), ".tirith-install-failed")
@@ -182,6 +201,21 @@ def _clear_install_failed():
     except OSError:
         pass
 
+
+def _disk_marker_blocks_install() -> bool:
+    """Apply a still-valid disk failure marker to module state; True if install must be skipped.
+
+    Preserves the marker's real reason so in-memory retry logic can detect
+    retryable causes (cosign_missing) without a restart.
+    """
+    disk_reason = _read_failure_reason()
+    if disk_reason is None or not _is_install_failed_on_disk():
+        return False
+    _set_failed(disk_reason)
+    return True
+
+
+# --- Auto-install ---
 
 def _hermes_bin_dir() -> str:
     """Return $HERMES_HOME/bin, creating it if needed."""
@@ -255,15 +289,39 @@ def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool |
     return False
 
 
+def _verify_release_provenance(base_url: str, tmpdir: str, checksums_path: str, log) -> tuple[bool, str]:
+    """Cosign step of the install: returns ``(cosign_verified, failure_reason)``.
+
+    Cosign provenance is preferred but not mandatory: only an explicit cosign
+    rejection aborts (non-empty reason); a missing/broken cosign or missing
+    signature artifacts fall back to SHA-256 only.
+    """
+    if not shutil.which("cosign"):
+        logger.info("cosign not on PATH — installing tirith with SHA-256 verification only "
+                    "(install cosign for full supply chain verification)")
+        return False, ""
+    sig_path = os.path.join(tmpdir, "checksums.txt.sig")
+    cert_path = os.path.join(tmpdir, "checksums.txt.pem")
+    try:
+        _download_file(f"{base_url}/checksums.txt.sig", sig_path)
+        _download_file(f"{base_url}/checksums.txt.pem", cert_path)
+    except Exception as exc:
+        logger.info("cosign artifacts unavailable (%s), proceeding with SHA-256 only", exc)
+        return False, ""
+    verified = _verify_cosign(checksums_path, sig_path, cert_path)
+    if verified is False:
+        log("tirith install aborted: cosign provenance verification failed")
+        return False, "cosign_verification_failed"
+    if verified is None:
+        logger.info("cosign execution failed, proceeding with SHA-256 only")
+    return verified is True, ""
+
+
 def _verify_checksum(archive_path: str, checksums_path: str, archive_name: str) -> bool:
     """Verify SHA-256 of the archive against checksums.txt ("<hash>  <filename>" lines)."""
-    expected = None
     with open(checksums_path, encoding="utf-8") as f:
-        for line in f:
-            parts = line.strip().split("  ", 1)
-            if len(parts) == 2 and parts[1] == archive_name:
-                expected = parts[0]
-                break
+        parsed = (line.strip().split("  ", 1) for line in f)
+        expected = next((h for h, *n in parsed if n == [archive_name]), None)
     if not expected:
         logger.warning("No checksum entry for %s", archive_name)
         return False
@@ -282,24 +340,20 @@ def _verify_checksum(archive_path: str, checksums_path: str, archive_name: str) 
 def _extract_tirith_binary(tar: tarfile.TarFile, dest_dir: str, log) -> tuple[str | None, str]:
     """Extract the tirith binary from a release archive into dest_dir."""
     for member in tar.getmembers():
-        if member.name == "tirith" or member.name.endswith("/tirith"):
-            if ".." in member.name:
-                continue
-            if not member.isfile():
-                log("tirith archive member is not a regular file: %s", member.name)
-                return None, "binary_not_regular_file"
-            src_file = tar.extractfile(member)
-            if src_file is None:
-                log("tirith binary could not be read from archive")
-                return None, "binary_extract_failed"
-
-            dest_path = os.path.join(dest_dir, "tirith")
-            try:
-                with open(dest_path, "wb") as out:
-                    shutil.copyfileobj(src_file, out)
-            finally:
-                src_file.close()
-            return dest_path, ""
+        is_tirith = member.name == "tirith" or member.name.endswith("/tirith")
+        if not is_tirith or ".." in member.name:
+            continue
+        if not member.isfile():
+            log("tirith archive member is not a regular file: %s", member.name)
+            return None, "binary_not_regular_file"
+        src_file = tar.extractfile(member)
+        if src_file is None:
+            log("tirith binary could not be read from archive")
+            return None, "binary_extract_failed"
+        dest_path = os.path.join(dest_dir, "tirith")
+        with src_file, open(dest_path, "wb") as out:
+            shutil.copyfileobj(src_file, out)
+        return dest_path, ""
 
     log("tirith binary not found in archive")
     return None, "binary_not_in_archive"
@@ -330,11 +384,8 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
     try:
         archive_path = os.path.join(tmpdir, archive_name)
         checksums_path = os.path.join(tmpdir, "checksums.txt")
-        sig_path = os.path.join(tmpdir, "checksums.txt.sig")
-        cert_path = os.path.join(tmpdir, "checksums.txt.pem")
 
         logger.info("tirith not found — downloading latest release for %s...", target)
-
         try:
             _download_file(f"{base_url}/{archive_name}", archive_path)
             _download_file(f"{base_url}/checksums.txt", checksums_path)
@@ -342,28 +393,9 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
             log("tirith download failed: %s", exc)
             return None, "download_failed"
 
-        # Cosign provenance is preferred but not mandatory: only an explicit
-        # cosign rejection aborts; a missing/broken cosign falls back to SHA-256.
-        cosign_verified = False
-        if shutil.which("cosign"):
-            try:
-                _download_file(f"{base_url}/checksums.txt.sig", sig_path)
-                _download_file(f"{base_url}/checksums.txt.pem", cert_path)
-            except Exception as exc:
-                logger.info("cosign artifacts unavailable (%s), proceeding with SHA-256 only", exc)
-            else:
-                cosign_result = _verify_cosign(checksums_path, sig_path, cert_path)
-                if cosign_result is True:
-                    cosign_verified = True
-                elif cosign_result is False:
-                    log("tirith install aborted: cosign provenance verification failed")
-                    return None, "cosign_verification_failed"
-                else:
-                    logger.info("cosign execution failed, proceeding with SHA-256 only")
-        else:
-            logger.info("cosign not on PATH — installing tirith with SHA-256 verification only "
-                        "(install cosign for full supply chain verification)")
-
+        cosign_verified, reason = _verify_release_provenance(base_url, tmpdir, checksums_path, log)
+        if reason:
+            return None, reason
         if not _verify_checksum(archive_path, checksums_path, archive_name):
             return None, "checksum_failed"
 
@@ -389,28 +421,18 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
                 return None, "cross_device_copy_failed"
         os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-        verification = "cosign + SHA-256" if cosign_verified else "SHA-256 only"
-        logger.info("tirith installed to %s (%s)", dest, verification)
+        logger.info("tirith installed to %s (%s)", dest,
+                    "cosign + SHA-256" if cosign_verified else "SHA-256 only")
         return dest, ""
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# --- Path resolution ---
+
 def _is_executable(path: str) -> bool:
     return os.path.isfile(path) and os.access(path, os.X_OK)
-
-
-def _set_resolved(path: str) -> None:
-    global _resolved_path, _install_failure_reason
-    _resolved_path = path
-    _install_failure_reason = ""
-
-
-def _set_failed(reason: str) -> None:
-    global _resolved_path, _install_failure_reason
-    _resolved_path = _INSTALL_FAILED
-    _install_failure_reason = reason
 
 
 def _find_local_tirith() -> str | None:
@@ -456,26 +478,12 @@ def _resolve_locally(configured_path: str, *, warn_missing: bool) -> tuple[str |
     # Previous install failed: skip the network retry unless the retryable
     # cosign_missing cause has been resolved in-process.
     if _resolved_path is _INSTALL_FAILED:
-        if _install_failure_reason == "cosign_missing" and shutil.which("cosign"):
-            _resolved_path = None
-            _install_failure_reason = ""
-            _clear_install_failed()
-        else:
+        if _install_failure_reason != "cosign_missing" or not shutil.which("cosign"):
             return None, False
+        _resolved_path = None
+        _install_failure_reason = ""
+        _clear_install_failed()
     return None, True
-
-
-def _disk_marker_blocks_install() -> bool:
-    """Apply a still-valid disk failure marker to module state; True if install must be skipped.
-
-    Preserves the marker's real reason so in-memory retry logic can detect
-    retryable causes (cosign_missing) without a restart.
-    """
-    disk_reason = _read_failure_reason()
-    if disk_reason is not None and _is_install_failed_on_disk():
-        _set_failed(disk_reason)
-        return True
-    return False
 
 
 def _record_install_result(installed: str | None, reason: str) -> None:
@@ -495,8 +503,9 @@ def _resolve_tirith_path(configured_path: str) -> str:
     expanded configured path is returned so the spawn fails open via the
     dedupe'd OSError handler.
     """
-    if _resolved_path is not None and _resolved_path is not _INSTALL_FAILED:
-        return _resolved_path
+    cached = _cached_path()
+    if cached:
+        return cached
 
     expanded = os.path.expanduser(configured_path)
 
@@ -512,9 +521,7 @@ def _resolve_tirith_path(configured_path: str) -> str:
 
     # A background install is running — don't start a parallel one; fail-open
     # applies until it finishes.
-    if _install_thread is not None and _install_thread.is_alive():
-        return expanded
-    if _disk_marker_blocks_install():
+    if (_install_thread is not None and _install_thread.is_alive()) or _disk_marker_blocks_install():
         return expanded
 
     installed, reason = _install_tirith()
@@ -546,8 +553,9 @@ def ensure_installed(*, log_failures: bool = True):
     if not cfg["tirith_enabled"]:
         return None
 
-    if _resolved_path is not None and _resolved_path is not _INSTALL_FAILED:
-        return _resolved_path if _is_executable(_resolved_path) else None
+    cached = _cached_path()
+    if cached:
+        return cached if _is_executable(cached) else None
 
     # No tirith build here (e.g. Windows): stay silent — no PATH probe, no
     # download thread, no disk marker. Pattern-matching guards still run.
@@ -570,13 +578,16 @@ def ensure_installed(*, log_failures: bool = True):
     return None  # Not available yet; commands will fail-open until ready
 
 
-# ---------------------------------------------------------------------------
-# Main API
-# ---------------------------------------------------------------------------
+# --- Main API ---
 
 _MAX_FINDINGS = 50
 _MAX_SUMMARY_LEN = 500
 _EXIT_ACTIONS = {0: "allow", 1: "block", 2: "warn"}
+# Summary when tirith's JSON is unparseable and only the exit code is known.
+_NO_DETAILS_SUMMARY = {
+    "block": "security issue detected (details unavailable)",
+    "warn": "security warning detected (details unavailable)",
+}
 
 
 def _verdict(action: str, summary: str = "", findings: list | None = None) -> dict:
@@ -659,13 +670,11 @@ def check_command_security(command: str) -> dict:
         summary = (data.get("summary", "") or "")[:_MAX_SUMMARY_LEN]
     except (json.JSONDecodeError, AttributeError):
         logger.debug("tirith JSON parse failed, using exit code only")
-        if action == "block":
-            summary = "security issue detected (details unavailable)"
-        elif action == "warn":
-            summary = "security warning detected (details unavailable)"
+        summary = _NO_DETAILS_SUMMARY.get(action, "")
 
     # .app is a legitimate gTLD; a warn consisting solely of lookalike_tld
     # findings for .app is a known false positive and is downgraded to allow.
+    # Any other finding (including lookalike_tld for other TLDs) keeps the warn.
     if action == "warn" and findings and all(_is_app_tld_finding(f) for f in findings):
         return _verdict("allow")
 

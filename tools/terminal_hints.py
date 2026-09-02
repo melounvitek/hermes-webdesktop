@@ -20,17 +20,21 @@ from typing import Callable, Optional
 _SCAN_CHARS = 4000
 
 
-def _regex_hint(pattern: str, message: str, flags: int = 0) -> Callable[[str, str], Optional[str]]:
-    """Build a hint that fires when ``pattern`` matches; ``{0}`` = first capture group."""
+def _regex_hint(pattern: str, message: str | Callable[[str], str], flags: int = 0) -> Callable[[str, str], Optional[str]]:
+    """Build a hint that fires when ``pattern`` matches; ``{0}`` = first capture group,
+    or ``message(group1)`` when a callable is given."""
     rx = re.compile(pattern, flags)
 
     def hint(command: str, output: str) -> Optional[str]:
         m = rx.search(output)
-        return message.format(*m.groups()) if m else None
+        if not m:
+            return None
+        return message(m.group(1)) if callable(message) else message.format(*m.groups())
 
     return hint
 
 
+# Most `command not found` hits are bare `python` on python3-only distros.
 _MISSING_COMMAND_HINTS = {
     "python": (
         "This system has no bare `python` — use `python3`, or the "
@@ -43,12 +47,7 @@ _MISSING_COMMAND_HINTS = {
 }
 
 
-def _hint_command_not_found(command: str, output: str) -> Optional[str]:
-    # Most hits are bare `python` on python3-only distros.
-    m = re.search(r"(?:bash: line \d+: |bash: |sh: \d*:? ?)?([\w.+-]+): command not found", output)
-    if not m:
-        return None
-    missing = m.group(1)
+def _missing_command_hint(missing: str) -> str:
     return _MISSING_COMMAND_HINTS.get(missing) or (
         f"`{missing}` is not installed or not on PATH. Verify with "
         f"`which {missing}`; install it or use an absolute path instead of "
@@ -73,7 +72,10 @@ _OUTPUT_HINTS: list[Callable[[str, str], Optional[str]]] = [
         "`--abort`.",
         re.M,
     ),
-    _hint_command_not_found,
+    _regex_hint(
+        r"(?:bash: line \d+: |bash: |sh: \d*:? ?)?([\w.+-]+): command not found",
+        _missing_command_hint,
+    ),
     # Almost always a venv-activation slip, not a missing dependency.
     _regex_hint(
         r"(?:ModuleNotFoundError|ImportError): No module named '?([\w.]+)",
@@ -124,13 +126,28 @@ _EXIT_CODE_HINTS: dict[int, str] = {
 # Consumers whose exit status says nothing about the upstream command.
 _PASSTHROUGH_CONSUMERS = r"(?:tail|head|cat|tee|less|more|wc|sort|uniq)"
 
-# Top-level `... | tail -20` (not `||`); consumer must be the LAST segment.
-_MASKING_PIPE_RE = re.compile(
-    r"(?<!\|)\|(?!\|)\s*" + _PASSTHROUGH_CONSUMERS + r"\b[^|]*$"
-)
-
-# `cmd || echo ...` / `cmd || true` — fallback swallows the failure status.
-_MASKING_OR_RE = re.compile(r"\|\|\s*(?:echo\b|printf\b|true\b|:\s|:$)")
+# Command shapes that swallow an upstream status -> warning, checked in order.
+_MASKING_SHAPES: list[tuple[re.Pattern[str], str]] = [
+    # Top-level `... | tail -20` (not `||`); consumer must be the LAST segment.
+    (
+        re.compile(r"(?<!\|)\|(?!\|)\s*" + _PASSTHROUGH_CONSUMERS + r"\b[^|]*$"),
+        "exit_code 0 here is the status of the last pipeline command "
+        "(tail/head/cat/...), NOT of the command before the pipe — and "
+        "the output contains failure indicators. Treat this run as "
+        "FAILED until proven otherwise: re-run the command WITHOUT the "
+        "pipe (output is auto-truncated and the full text is saved to a "
+        "file, so piping through tail/head is never needed) to get the "
+        "real exit code.",
+    ),
+    # `cmd || echo ...` / `cmd || true` — fallback swallows the failure status.
+    (
+        re.compile(r"\|\|\s*(?:echo\b|printf\b|true\b|:\s|:$)"),
+        "exit_code 0 here is the status of the `||` fallback (echo/true), "
+        "NOT of the command before it — and the output contains failure "
+        "indicators. Treat this run as FAILED until proven otherwise: "
+        "re-run the command bare to get its real exit code.",
+    ),
+]
 
 _READONLY_HEADS = frozenset({
     "grep", "rg", "ag", "find", "ls", "cat", "head", "tail", "jq", "awk",
@@ -172,30 +189,11 @@ def annotate_masked_success(command: str, output: str) -> Optional[str]:
     """
     cmd = command or ""
     window = (output or "")[:_SCAN_CHARS]
-    if not cmd or not window:
-        return None
-    if _first_token(cmd) in _READONLY_HEADS:
+    if not cmd or not window or _first_token(cmd) in _READONLY_HEADS:
         return None
     if not _FAILURE_SHAPES.search(window):
         return None
-    if _MASKING_PIPE_RE.search(cmd):
-        return (
-            "exit_code 0 here is the status of the last pipeline command "
-            "(tail/head/cat/...), NOT of the command before the pipe — and "
-            "the output contains failure indicators. Treat this run as "
-            "FAILED until proven otherwise: re-run the command WITHOUT the "
-            "pipe (output is auto-truncated and the full text is saved to a "
-            "file, so piping through tail/head is never needed) to get the "
-            "real exit code."
-        )
-    if _MASKING_OR_RE.search(cmd):
-        return (
-            "exit_code 0 here is the status of the `||` fallback (echo/true), "
-            "NOT of the command before it — and the output contains failure "
-            "indicators. Treat this run as FAILED until proven otherwise: "
-            "re-run the command bare to get its real exit code."
-        )
-    return None
+    return next((note for rx, note in _MASKING_SHAPES if rx.search(cmd)), None)
 
 
 def annotate_failure(command: str, exit_code: int, output: str) -> Optional[str]:

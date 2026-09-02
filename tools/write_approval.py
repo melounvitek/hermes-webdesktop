@@ -27,6 +27,7 @@ import os
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -45,9 +46,7 @@ _SUBSYSTEMS = (MEMORY, SKILLS)
 CONFIG_KEY = "write_approval"
 
 
-# ---------------------------------------------------------------------------
-# Config resolution
-# ---------------------------------------------------------------------------
+# --- Config resolution ---
 
 def write_approval_enabled(subsystem: str) -> bool:
     """Read ``<subsystem>.write_approval``; any unset/invalid value means gate off."""
@@ -74,9 +73,7 @@ def _normalize_enabled(value: Any) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Pending store (file-backed)
-# ---------------------------------------------------------------------------
+# --- Pending store (file-backed) ---
 
 def _pending_dir(subsystem: str) -> Path:
     return get_hermes_home() / "pending" / subsystem
@@ -84,6 +81,10 @@ def _pending_dir(subsystem: str) -> Path:
 
 def _pending_path(subsystem: str, pending_id: str) -> Path:
     return _pending_dir(subsystem) / f"{pending_id}.json"
+
+
+def _read_record(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def stage_write(subsystem: str, payload: Dict[str, Any],
@@ -107,9 +108,8 @@ def stage_write(subsystem: str, payload: Dict[str, Any],
         "payload": payload,
     }
     try:
-        d = _pending_dir(subsystem)
-        d.mkdir(parents=True, exist_ok=True)
-        path = d / f"{pid}.json"
+        path = _pending_path(subsystem, pid)
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, path)
@@ -126,7 +126,7 @@ def list_pending(subsystem: str) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for p in d.glob("*.json"):
         try:
-            records.append(json.loads(p.read_text(encoding="utf-8")))
+            records.append(_read_record(p))
         except Exception:
             logger.warning("Skipping unreadable pending record: %s", p)
     records.sort(key=lambda r: r.get("created_at", 0))
@@ -139,7 +139,7 @@ def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _read_record(path)
     except Exception:
         return None
 
@@ -167,9 +167,7 @@ def pending_count(subsystem: str) -> int:
         return 0
 
 
-# ---------------------------------------------------------------------------
-# Write origin
-# ---------------------------------------------------------------------------
+# --- Write origin ---
 
 def current_origin() -> str:
     """Return ``foreground`` or ``background_review``.
@@ -184,10 +182,9 @@ def current_origin() -> str:
         return "foreground"
 
 
-# ---------------------------------------------------------------------------
-# Gate decision
-# ---------------------------------------------------------------------------
+# --- Gate decision ---
 
+@dataclass(slots=True, kw_only=True)
 class GateDecision:
     """Result of evaluating the write gate. Exactly one flag is True.
 
@@ -196,13 +193,10 @@ class GateDecision:
     the payload (``message`` is the user-facing "staged for approval" note).
     """
 
-    __slots__ = ("allow", "blocked", "stage", "message")
-
-    def __init__(self, *, allow=False, blocked=False, stage=False, message=""):
-        self.allow = allow
-        self.blocked = blocked
-        self.stage = stage
-        self.message = message
+    allow: bool = False
+    blocked: bool = False
+    stage: bool = False
+    message: str = ""
 
 
 def _staged(subsystem: str) -> GateDecision:
@@ -272,7 +266,7 @@ def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
     header = summary.strip() or "Save to memory?"
     body = detail.strip()
     try:
-        choice = callback(body if body else header, f"Save to memory: {header}", allow_permanent=False)
+        choice = callback(body or header, f"Save to memory: {header}", allow_permanent=False)
     except Exception as e:
         logger.error("Inline memory approval prompt failed: %s", e)
         return None
@@ -284,9 +278,7 @@ def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
     return None  # unknown outcome → no decision, stage rather than drop
 
 
-# ---------------------------------------------------------------------------
-# Skill-specific helpers (gist + diff for the review affordances)
-# ---------------------------------------------------------------------------
+# --- Skill-specific helpers (gist + diff for the review affordances) ---
 
 def skill_gist(action: str, name: str, *, content: str = "",
                file_path: str = "", old_string: str = "",
@@ -320,6 +312,16 @@ def _frontmatter_description(content: str) -> str:
     return m.group(1).strip().strip("'\"")[:140] if m else ""
 
 
+def _find_skill_path(name: str) -> Optional[Path]:
+    """Directory of an installed skill, or None if unknown / lookup unavailable."""
+    try:
+        from tools.skill_manager_tool import _find_skill
+        found = _find_skill(name)
+        return found["path"] if found else None
+    except Exception:
+        return None
+
+
 def skill_pending_diff(record: Dict[str, Any]) -> str:
     """Full content (create) or unified diff vs. the on-disk skill (edit/patch/write_file).
 
@@ -342,16 +344,12 @@ def skill_pending_diff(record: Dict[str, Any]) -> str:
     # patch/write_file target a file inside the skill; edit always targets SKILL.md.
     target_label = "SKILL.md"
     current = ""
-    try:
-        from tools.skill_manager_tool import _find_skill
-    except Exception:
-        _find_skill = None  # type: ignore
-    found = _find_skill(name) if _find_skill is not None else None
-    if found:
+    skill_dir = _find_skill_path(name)
+    if skill_dir:
         if action != "edit":
             target_label = payload.get("file_path") or "SKILL.md"
         try:
-            p = found["path"] / target_label
+            p = skill_dir / target_label
             if p.exists():
                 current = p.read_text(encoding="utf-8")
         except Exception:

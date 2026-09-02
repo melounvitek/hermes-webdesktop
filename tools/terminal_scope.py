@@ -20,6 +20,7 @@ in-process profile boundary.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -30,6 +31,22 @@ logger = logging.getLogger(__name__)
 # None = no scope bound (historical process-env behavior); dict = the active
 # profile's complete policy; TerminalPolicyRefusal = resolution failed.
 _terminal_scope_var: ContextVar = ContextVar("hermes_terminal_scope", default=None)
+
+# Terminal keys whose config default lives in the consuming tool
+# (terminal_tool.py) rather than DEFAULT_CONFIG; DEFAULT_CONFIG wins on overlap.
+_TOOL_LEVEL_DEFAULTS: Dict[str, Any] = {
+    "cwd": ".",
+    "ssh_host": "",
+    "ssh_user": "",
+    "ssh_port": 22,
+    "ssh_key": "",
+    "docker_orphan_reaper": True,
+    "docker_persist_across_processes": True,
+    "sandbox_dir": "",
+    "lifetime_seconds": 300,
+    "docker_shared_container_key": "",
+    "home_mode": "auto",
+}
 
 
 class TerminalPolicyUnavailable(Exception):
@@ -78,14 +95,10 @@ def terminal_env(name: str, default: str = "") -> str:
     """
     scope = _terminal_scope_var.get()
     if scope is None:
-        import os
-
         return os.environ.get(name, default)
     _raise_if_refusal(scope)
     value = scope.get(name)
-    if value is not None:
-        return str(value)
-    return default
+    return default if value is None else str(value)
 
 
 def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
@@ -99,35 +112,19 @@ def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
     """
     home = Path(hermes_home)
 
+    from hermes_cli.config import TERMINAL_CONFIG_ENV_MAP
     from hermes_cli.config_defaults import DEFAULT_CONFIG
 
-    defaults = DEFAULT_CONFIG.get("terminal") if isinstance(
-        DEFAULT_CONFIG, dict) else None
-    defaults = dict(defaults) if isinstance(defaults, dict) else {}
-    # Keys whose config default lives in the consuming tool (terminal_tool.py)
-    # rather than DEFAULT_CONFIG; without them the projection is not total.
-    defaults.setdefault("cwd", ".")
-    defaults.setdefault("ssh_host", "")
-    defaults.setdefault("ssh_user", "")
-    defaults.setdefault("ssh_port", 22)
-    defaults.setdefault("ssh_key", "")
-    defaults.setdefault("docker_orphan_reaper", True)
-    defaults.setdefault("docker_persist_across_processes", True)
-    defaults.setdefault("sandbox_dir", "")
-    defaults.setdefault("lifetime_seconds", 300)
-    defaults.setdefault("docker_shared_container_key", "")
-    defaults.setdefault("home_mode", "auto")
+    defaults = DEFAULT_CONFIG.get("terminal") if isinstance(DEFAULT_CONFIG, dict) else None
+    # Without the tool-level defaults the projection is not total.
+    defaults = {**_TOOL_LEVEL_DEFAULTS, **(defaults if isinstance(defaults, dict) else {})}
 
     scope: Dict[str, str] = {}
 
     def _apply(cfg_key: str, value: Any) -> None:
-        if value is None:
-            return
         # cwd placeholders are resolved per-surface later; not a policy value.
-        if cfg_key == "cwd" and str(value).strip() in {".", "auto", "cwd"}:
+        if value is None or (cfg_key == "cwd" and str(value).strip() in {".", "auto", "cwd"}):
             return
-        from hermes_cli.config import TERMINAL_CONFIG_ENV_MAP
-
         env_var = TERMINAL_CONFIG_ENV_MAP.get(cfg_key)
         if env_var:
             scope[env_var] = str(value)
@@ -142,13 +139,10 @@ def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
         try:
             env_path.read_bytes()
         except Exception as exc:
-            raise TerminalPolicyUnavailable(
-                f"cannot read {env_path}: {exc}"
-            ) from exc
+            raise TerminalPolicyUnavailable(f"cannot read {env_path}: {exc}") from exc
         from agent.secret_scope import load_env_file
 
-        selections = load_env_file(env_path)
-        for key, value in selections.items():
+        for key, value in load_env_file(env_path).items():
             if key.startswith("TERMINAL_"):
                 scope[key] = str(value)
 
@@ -174,9 +168,7 @@ def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
                 with open(config_path, encoding="utf-8") as f:
                     raw = fast_safe_load(f)
             except Exception as exc:
-                raise TerminalPolicyUnavailable(
-                    f"cannot parse {config_path}: {exc}"
-                ) from exc
+                raise TerminalPolicyUnavailable(f"cannot parse {config_path}: {exc}") from exc
             raw_terminal = raw.get("terminal") if isinstance(raw, dict) else None
             if isinstance(raw_terminal, dict):
                 for cfg_key, value in raw_terminal.items():
@@ -184,9 +176,7 @@ def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
     except TerminalPolicyUnavailable:
         raise
     except Exception as exc:
-        raise TerminalPolicyUnavailable(
-            f"cannot resolve terminal config in {home}: {exc}"
-        ) from exc
+        raise TerminalPolicyUnavailable(f"cannot resolve terminal config in {home}: {exc}") from exc
     finally:
         if override_token is not None:
             reset_hermes_home_override(override_token)

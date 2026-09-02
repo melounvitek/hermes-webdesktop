@@ -62,6 +62,10 @@ _WRAPPER_OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
     "time": frozenset({"-f", "--format", "-o", "--output"}),
 }
 _MAX_RECURSION = 4
+# git global options that consume the next argument (-C/--work-tree/-c are acted on).
+_GIT_GLOBAL_OPTIONS_WITH_ARG = frozenset({
+    "-C", "-c", "--work-tree", "--git-dir", "--namespace", "--exec-path",
+})
 
 
 @dataclass
@@ -343,14 +347,13 @@ def _masked_line(line: str) -> str:
 
 
 def _mask_heredocs(command: str) -> tuple[str, list[str]]:
-    """Blank heredoc bodies; return (masked command, bodies a bare shell would execute)."""
+    """Blank heredoc bodies; return (masked command, bodies a bare shell would execute).
+
+    Unterminated heredocs run to end of input and are still reported.
+    """
     output: list[str] = []
     pending: list[_Heredoc] = []
-    shell_scripts: list[str] = []
-
-    def _finish(spec: _Heredoc) -> None:
-        if spec.execute_as_shell:
-            shell_scripts.append("".join(spec.body))
+    finished: list[_Heredoc] = []
 
     for line in command.splitlines(keepends=True):
         if pending:
@@ -359,7 +362,7 @@ def _mask_heredocs(command: str) -> tuple[str, list[str]]:
             if current.strip_tabs:
                 candidate = candidate.lstrip("\t")
             if candidate == current.delimiter:
-                _finish(pending.pop(0))
+                finished.append(pending.pop(0))
             else:
                 current.body.append(line)
             output.append(_masked_line(line))
@@ -368,8 +371,7 @@ def _mask_heredocs(command: str) -> tuple[str, list[str]]:
         output.append(line)
         pending.extend(_heredoc_specs(line))
 
-    for current in pending:
-        _finish(current)
+    shell_scripts = ["".join(spec.body) for spec in finished + pending if spec.execute_as_shell]
     return "".join(output), shell_scripts
 
 
@@ -396,35 +398,26 @@ def _git_target_and_subcommand(
         if arg == "--":
             index += 1
             break
-        if arg == "-C" and index + 1 < len(args):
-            target = _resolve(args[index + 1], target)
+        if not arg.startswith("-"):
+            break
+        if arg in _GIT_GLOBAL_OPTIONS_WITH_ARG:
+            if index + 1 < len(args):
+                value = args[index + 1]
+                if arg == "-C":
+                    target = _resolve(value, target)
+                elif arg == "--work-tree":
+                    work_tree = value
+                elif arg == "-c":
+                    _record_alias(value, aliases)
             index += 2
             continue
         if arg.startswith("-C") and len(arg) > 2:
             target = _resolve(arg[2:], target)
-            index += 1
-            continue
-        if arg in {"--work-tree", "--git-dir", "--namespace", "--exec-path"}:
-            if arg == "--work-tree" and index + 1 < len(args):
-                work_tree = args[index + 1]
-            index += 2
-            continue
-        if arg.startswith("--work-tree="):
+        elif arg.startswith("--work-tree="):
             work_tree = arg.split("=", 1)[1]
-            index += 1
-            continue
-        if arg == "-c" and index + 1 < len(args):
-            _record_alias(args[index + 1], aliases)
-            index += 2
-            continue
-        if arg.startswith("-calias.") and "=" in arg:
+        elif arg.startswith("-calias."):
             _record_alias(arg[2:], aliases)
-            index += 1
-            continue
-        if arg.startswith("-"):
-            index += 1
-            continue
-        break
+        index += 1
 
     explicit_work_tree = work_tree or env.get("GIT_WORK_TREE")
     if explicit_work_tree:
@@ -554,7 +547,9 @@ def _inspect_github_cli(
     executable: str,
     args: list[str],
     current_dir: Path,
+    env: dict[str, str],
     root: Path,
+    depth: int,
 ) -> str | None:
     if not _is_within(current_dir, root):
         return None
@@ -582,8 +577,8 @@ def _inspect_shell(
 # executable name -> inspector(executable, args, current_dir, env, root, depth)
 _INSPECTORS: dict[str, Callable[..., str | None]] = {
     "git": _inspect_git,
-    "gh": lambda exe, args, cwd, env, root, depth: _inspect_github_cli(exe, args, cwd, root),
-    "hub": lambda exe, args, cwd, env, root, depth: _inspect_github_cli(exe, args, cwd, root),
+    "gh": _inspect_github_cli,
+    "hub": _inspect_github_cli,
     **{shell: _inspect_shell for shell in _SHELL_EXECUTABLES},
 }
 
@@ -667,7 +662,9 @@ def detect_self_repo_git_mutation(
 
 
 def _block_message(operation: str, root: Path) -> str:
-    scratch = _scratch_dir_hint()
+    # Suggest a disk-backed scratch dir: /tmp is usually tmpfs (see message).
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    scratch = (Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes") / "scratch"
     return (
         f"Blocked: `{operation}` would rewrite Hermes's live source checkout "
         f"({root}) and can mix module versions in this running process. "
@@ -679,10 +676,3 @@ def _block_message(operation: str, root: Path) -> str:
         "checkout, stop Hermes, run the command externally, then restart "
         "Hermes."
     )
-
-
-def _scratch_dir_hint() -> str:
-    """Disk-backed scratch location suggested to agents for temporary clones."""
-    hermes_home = os.environ.get("HERMES_HOME", "").strip()
-    base = Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes"
-    return str(base / "scratch")

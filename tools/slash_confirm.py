@@ -59,13 +59,15 @@ def clear(session_key: str) -> None:
         _pending.pop(session_key, None)
 
 
+def _is_stale(entry: Dict[str, Any], timeout: float) -> bool:
+    return time.time() - float(entry.get("created_at", 0) or 0) > timeout
+
+
 def clear_if_stale(session_key: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> bool:
     """Drop the pending confirm if older than ``timeout`` seconds; True if dropped."""
     with _lock:
         entry = _pending.get(session_key)
-        if not entry:
-            return False
-        if time.time() - float(entry.get("created_at", 0) or 0) > timeout:
+        if entry and _is_stale(entry, timeout):
             _pending.pop(session_key, None)
             return True
         return False
@@ -90,7 +92,7 @@ async def resolve(
         # Pop before running so duplicate callbacks (button double-click)
         # cannot run the handler twice.
         _pending.pop(session_key, None)
-        if time.time() - float(entry.get("created_at", 0) or 0) > timeout:
+        if _is_stale(entry, timeout):
             return None
         handler = entry.get("handler")
         command = entry.get("command", "?")
