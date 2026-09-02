@@ -19,7 +19,6 @@ real-profile CDP, snapshot store); their names are re-imported here so
 """
 
 import atexit
-import functools
 import json
 import logging
 import os
@@ -32,14 +31,14 @@ import time
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
 from agent.redact import redact_cdp_url
-from hermes_constants import (
+from hermes_constants import (  # noqa: F401  (test-patchable surface, read via origin by sibling modules)
     agent_browser_runnable,
     get_hermes_home,
     get_hermes_home_override,
     hermes_home_key,
     node_tool_runnable,
 )
-from utils import env_int, is_truthy_value
+from utils import env_int, is_truthy_value  # noqa: F401  (read via origin by sibling modules)
 from hermes_cli.config import DEFAULT_CONFIG, cfg_get
 from hermes_cli._subprocess_compat import windows_hide_flags
 
@@ -142,7 +141,7 @@ from plugins.browser.browser_use.provider import (  # noqa: F401
 from plugins.browser.firecrawl.provider import (  # noqa: F401
     FirecrawlBrowserProvider as FirecrawlProvider,
 )
-from tools.tool_backend_helpers import normalize_browser_cloud_provider
+from tools.tool_backend_helpers import normalize_browser_cloud_provider  # noqa: F401  (read via origin)
 # Camofox local anti-detection browser backend (optional).
 # When CAMOFOX_URL is set, all browser operations route through the
 # camofox REST API instead of the agent-browser CLI.
@@ -176,51 +175,26 @@ _SANE_PATH_DIRS = (
 _SANE_PATH = os.pathsep.join(_SANE_PATH_DIRS)
 
 
-@functools.lru_cache(maxsize=1)
-def _discover_homebrew_node_dirs() -> tuple[str, ...]:
-    """Find Homebrew versioned Node.js bin directories (e.g. node@20, node@24).
-
-    When Node is installed via ``brew install node@24`` and NOT linked into
-    /opt/homebrew/bin, agent-browser isn't discoverable on the default PATH.
-    This function finds those directories so they can be prepended.
-    """
-    dirs: list[str] = []
-    homebrew_opt = "/opt/homebrew/opt"
-    if not os.path.isdir(homebrew_opt):
-        return tuple(dirs)
-    try:
-        for entry in os.listdir(homebrew_opt):
-            if entry.startswith("node") and entry != "node":
-                bin_dir = os.path.join(homebrew_opt, entry, "bin")
-                if os.path.isdir(bin_dir):
-                    dirs.append(bin_dir)
-    except OSError:
-        pass
-    return tuple(dirs)
-
-
-def _browser_candidate_path_dirs() -> list[str]:
-    """Return ordered browser CLI PATH candidates shared by discovery and execution."""
-    hermes_home = get_hermes_home()
-    hermes_node_bin = str(hermes_home / "node" / "bin")
-    hermes_node_root = str(hermes_home / "node")
-    hermes_nm_bin = str(hermes_home / "node_modules" / ".bin")
-    return [hermes_node_bin, hermes_node_root, hermes_nm_bin, *list(_discover_homebrew_node_dirs()), *_SANE_PATH_DIRS]
-
-
-def _merge_browser_path(existing_path: str = "") -> str:
-    """Prepend browser-specific PATH fallbacks without reordering existing entries."""
-    path_parts = [p for p in (existing_path or "").split(os.pathsep) if p]
-    existing_parts = set(path_parts)
-    prefix_parts: list[str] = []
-
-    for part in _browser_candidate_path_dirs():
-        if not part or part in existing_parts or part in prefix_parts:
-            continue
-        if os.path.isdir(part):
-            prefix_parts.append(part)
-
-    return os.pathsep.join(prefix_parts + path_parts)
+from tools.browser_tool_install import (  # noqa: F401  (re-exported; tests patch tools.browser_tool.<name>)
+    _discover_homebrew_node_dirs,
+    _browser_candidate_path_dirs,
+    _merge_browser_path,
+    _browser_install_hint,
+    _is_npx_agent_browser_sentinel,
+    _requires_real_termux_browser_install,
+    _termux_browser_install_error,
+    _agent_browser_candidate_present,
+    _resolve_npx_bin,
+    _agent_browser_candidates,
+    _find_agent_browser,
+    warm_agent_browser_npx_cache,
+    _chromium_search_roots,
+    _chromium_installed,
+    _maybe_autoinstall_chromium,
+    _running_in_docker,
+    check_browser_requirements,
+    check_browser_vision_requirements,
+)
 
 # Throttle screenshot cleanup to avoid repeated full directory scans.
 _last_screenshot_cleanup_by_dir: dict[str, float] = {}
@@ -655,190 +629,25 @@ _cached_browser_engine: Optional[str] = None
 _browser_engine_resolved = False
 
 
-def _is_legacy_provider_registry_overridden() -> bool:
-    """True when a test has patched ``_PROVIDER_REGISTRY`` to a custom value.
+from tools.browser_tool_cloud import (  # noqa: F401  (re-exported; tests patch tools.browser_tool.<name>)
+    _is_legacy_provider_registry_overridden,
+    _ensure_browser_plugins_loaded,
+    _get_cloud_provider,
+    _instantiate_explicit_cloud_provider,
+    _autodetect_cloud_provider,
+    _resolve_cloud_provider_uncached,
+    _is_local_mode,
+    _is_local_backend,
+    _get_browser_engine,
+    _is_headed_mode,
+    _should_inject_engine,
+    _auto_local_for_private_urls,
+    _use_real_profile,
+    _allow_private_urls,
+    _resolve_allow_private_urls,
+)
 
-    Each registered value is compared by identity against the canonical class
-    in ``_DEFAULT_PROVIDER_REGISTRY`` (extra keys count too); adding a built-in
-    provider only requires extending that default dict.
-    """
-    try:
-        for key, default_cls in _DEFAULT_PROVIDER_REGISTRY.items():
-            if _PROVIDER_REGISTRY.get(key) is not default_cls:
-                return True
-        # Extra keys not in the default registry → also an override.
-        return len(_PROVIDER_REGISTRY) != len(_DEFAULT_PROVIDER_REGISTRY)
-    except Exception:
-        return False
-
-
-def _ensure_browser_plugins_loaded() -> None:
-    """Idempotently trigger plugin discovery so the browser registry is populated.
-
-    ``model_tools`` normally does this as an import side effect, but
-    ``_get_cloud_provider`` is also reached from standalone scripts and test
-    harnesses that never import it; cheap on repeat calls.
-    """
-    try:
-        from hermes_cli.plugins import _ensure_plugins_discovered
-
-        _ensure_plugins_discovered()
-    except Exception as exc:
-        logger.debug("Browser plugin discovery failed (non-fatal): %s", exc)
-
-
-def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
-    """Return the provider cached for the active Hermes profile."""
-    global _cached_cloud_provider, _cloud_provider_resolved
-    global _cached_cloud_provider_scope
-
-    scope = hermes_home_key()
-    with _cloud_provider_cache_lock:
-        # Tests and legacy reset paths clear the boolean. Treat that as a full
-        # reset even if a previous scoped resolution remains mirrored here.
-        if not _cloud_provider_resolved:
-            _cached_cloud_provider_scope = None
-            _cached_cloud_providers.clear()
-        while True:
-            before_generation = _browser_registry_generation(scope=scope)
-            cache_key = (scope, before_generation)
-            if cache_key in _cached_cloud_providers:
-                _cached_cloud_provider = _cached_cloud_providers[cache_key]
-                _cloud_provider_resolved = True
-                _cached_cloud_provider_scope = scope
-                return _cached_cloud_provider
-
-            _cached_cloud_provider = None
-            _cloud_provider_resolved = False
-            resolved = _resolve_cloud_provider_uncached()
-            after_generation = _browser_registry_generation(scope=scope)
-            if before_generation != after_generation:
-                # A force reload replaced/unloaded this profile's provider
-                # while resolution was in progress. Discard the stale result
-                # and resolve against the new registry generation.
-                continue
-            if _cloud_provider_resolved:
-                _cached_cloud_provider_scope = scope
-                for stale_key in [
-                    key for key in _cached_cloud_providers if key[0] == scope
-                ]:
-                    _cached_cloud_providers.pop(stale_key, None)
-                _cached_cloud_providers[cache_key] = resolved
-            return resolved
-
-
-def _instantiate_explicit_cloud_provider(provider_key: str) -> Optional[CloudBrowserProvider]:
-    """Build the provider named by ``browser.cloud_provider``.
-
-    Test fixtures that patch ``_PROVIDER_REGISTRY`` drive the legacy dict;
-    otherwise the plugin registry is consulted (after idempotent discovery).
-    Strict selection: a stored-but-unregistered name raises ``ValueError``
-    (never a silent reroute to auto-detect). Any other instantiation error is
-    logged and yields None so the next call retries.
-    """
-    try:
-        if _is_legacy_provider_registry_overridden():
-            factory = _PROVIDER_REGISTRY.get(provider_key)
-            resolved = factory() if factory is not None else None
-        else:
-            _ensure_browser_plugins_loaded()
-            resolved = _registry_get_browser_provider(provider_key)
-        if resolved is None:
-            from tools.tool_backend_helpers import selection_error
-
-            raise ValueError(selection_error(
-                "browser",
-                f"'{provider_key}'",
-                "no registered browser plugin has that name (install "
-                "the corresponding plugin or fix the config key "
-                "spelling)",
-            ))
-        return resolved
-    except ValueError:
-        raise
-    except Exception:
-        logger.warning(
-            "Failed to instantiate explicit cloud_provider %r; will retry on next call",
-            provider_key,
-            exc_info=True,
-        )
-        return None
-
-
-def _autodetect_cloud_provider() -> Optional[CloudBrowserProvider]:
-    """Auto-detect: Browser Use (managed Nous gateway or API key), then Browserbase.
-
-    Uses the legacy class names bound on this module so tests that
-    ``monkeypatch.setattr(browser_tool, "BrowserUseProvider", ...)`` keep
-    driving this branch. Third-party plugins are intentionally NOT reachable
-    from auto-detect — only via explicit ``browser.cloud_provider: <name>``.
-    Never raises (a failure must not poison the cache).
-    """
-    try:
-        for cls in (BrowserUseProvider, BrowserbaseProvider):
-            fallback_provider = cls()
-            if fallback_provider.is_configured():
-                return fallback_provider
-    except Exception:  # pragma: no cover - defensive: never poison cache
-        logger.debug("Cloud provider auto-detect failed", exc_info=True)
-    return None
-
-
-def _resolve_cloud_provider_uncached() -> Optional[CloudBrowserProvider]:
-    """Return the configured cloud browser provider, or None for local mode.
-
-    Reads ``browser.cloud_provider`` and pins the result in the cache only when
-    it is definitive (explicit ``local``/``camofox``, or a resolved provider).
-    Explicit selection routes through :mod:`agent.browser_registry` so
-    third-party plugins participate; auto-detect (only when no selection was
-    ever written) walks Browser Use then Browserbase. A transient None
-    (unreadable config, missing credentials) is NOT cached so it can self-heal.
-    """
-    global _cached_cloud_provider, _cloud_provider_resolved
-
-    resolved: Optional[CloudBrowserProvider] = None
-    provider_key = None
-    try:
-        from hermes_cli.config import read_raw_config
-        browser_cfg = read_raw_config().get("browser", {})
-        if isinstance(browser_cfg, dict) and "cloud_provider" in browser_cfg:
-            provider_key = normalize_browser_cloud_provider(browser_cfg.get("cloud_provider"))
-            if provider_key in ("local", "camofox"):
-                # Camofox runs through the built-in browser tools, not a cloud provider.
-                _cached_cloud_provider = None
-                _cloud_provider_resolved = True
-                return None
-            if provider_key == "nous":
-                # Managed "Nous Subscription" is serviced by the Browser Use provider.
-                provider_key = "browser-use"
-        if provider_key:
-            resolved = _instantiate_explicit_cloud_provider(provider_key)
-            if resolved is None:
-                return None
-    except ValueError:
-        raise
-    except Exception as e:
-        # Config may be temporarily unreadable; still try auto-detect so
-        # env-based / managed-gateway credentials can resolve. Don't pin cache.
-        logger.debug("Could not read cloud_provider from config: %s", e)
-
-    if resolved is None and provider_key is None:
-        resolved = _autodetect_cloud_provider()
-    if resolved is None:
-        return None
-
-    _cached_cloud_provider = resolved
-    _cloud_provider_resolved = True
-    return _cached_cloud_provider
-
-
-from hermes_constants import is_termux as _is_termux_environment
-
-
-def _browser_install_hint() -> str:
-    if _is_termux_environment():
-        return "npm install -g agent-browser && agent-browser install"
-    return "npm install -g agent-browser && agent-browser install --with-deps"
+from hermes_constants import is_termux as _is_termux_environment  # noqa: F401  (read via origin)
 
 
 # Sentinel _find_agent_browser returns/caches to mean "resolve via npx" rather
@@ -855,131 +664,12 @@ NPX_AGENT_BROWSER_SENTINEL = "npx agent-browser"
 AGENT_BROWSER_NPX_SPEC = "agent-browser@^0.26.0"
 
 
-def _is_npx_agent_browser_sentinel(browser_cmd: str) -> bool:
-    return browser_cmd.strip() == NPX_AGENT_BROWSER_SENTINEL
-
-
-def _requires_real_termux_browser_install(browser_cmd: str) -> bool:
-    return _is_termux_environment() and _is_local_mode() and _is_npx_agent_browser_sentinel(browser_cmd)
-
-
-def _termux_browser_install_error() -> str:
-    return (
-        "Local browser automation on Termux cannot rely on the bare npx fallback. "
-        f"Install agent-browser explicitly first: {_browser_install_hint()}"
-    )
-
-
-def _is_local_mode() -> bool:
-    """Return True when the browser tool will use a local browser backend."""
-    if _get_cdp_override_raw():
-        return False
-    return _get_cloud_provider() is None
-
-
-def _is_local_backend() -> bool:
-    """Return True when the browser runs locally AND the terminal is also local.
-
-    SSRF protection only matters when the browser can reach networks the user's
-    terminal cannot: cloud backends, and a local browser paired with a
-    containerized terminal (docker/modal/daytona/ssh/singularity). A CDP
-    override is never trusted as local (that Chrome may live off-host) and MUST
-    be checked before the Camofox short-circuit so Camofox + override still
-    fails the local check; ``_is_local_mode`` treats overrides the same way —
-    keep the two in agreement.
-    """
-    if _get_cdp_override_raw():
-        return False
-    if _is_camofox_mode():
-        return True
-    if _get_cloud_provider() is not None:
-        return False
-    # Scope-aware: under gateway multiplexing the routed profile's terminal
-    # backend lives in the per-turn terminal scope, not the process env.
-    from tools.terminal_scope import terminal_env
-
-    terminal_backend = terminal_env("TERMINAL_ENV", "local").strip().lower()
-    return terminal_backend in ("local", "")
-
-
 _auto_local_for_private_urls_resolved = False
 _cached_auto_local_for_private_urls: bool = True
 
 
-def _get_browser_engine() -> str:
-    """Return the browser engine: ``auto`` (no ``--engine`` flag), ``lightpanda`` or ``chrome``.
-
-    ``browser.engine`` first, then ``AGENT_BROWSER_ENGINE``, then ``auto``;
-    cached. Lightpanda is much faster on navigation but has no graphical
-    renderer (no screenshots).
-    """
-    global _cached_browser_engine, _browser_engine_resolved
-    if _browser_engine_resolved:
-        return _cached_browser_engine
-
-    _browser_engine_resolved = True
-    # Config file takes priority; env var only if config didn't set a value.
-    _cached_browser_engine = _browser_cfg(
-        "engine", "auto",
-        lambda v: str(v).strip().lower() if v and str(v).strip() else "auto",
-        "browser.engine from config",
-    )
-    if _cached_browser_engine == "auto":
-        env_val = os.environ.get("AGENT_BROWSER_ENGINE", "").strip().lower()
-        if env_val:
-            _cached_browser_engine = env_val
-
-    # Validate: agent-browser only accepts "chrome" and "lightpanda".
-    _VALID_ENGINES = {"auto", "lightpanda", "chrome"}
-    if _cached_browser_engine not in _VALID_ENGINES:
-        logger.warning(
-            "Unknown browser engine %r (valid: %s), falling back to 'auto'",
-            _cached_browser_engine, ", ".join(sorted(_VALID_ENGINES)),
-        )
-        _cached_browser_engine = "auto"
-
-    return _cached_browser_engine
-
-
 _cached_headed_mode: Optional[bool] = None
 _headed_mode_resolved = False
-
-
-def _is_headed_mode() -> bool:
-    """Return True when the browser should launch in headed (visible) mode.
-
-    Reads ``config["browser"]["headed"]`` with ``AGENT_BROWSER_HEADED`` env
-    var as fallback.  Result is cached after the first call.
-    """
-    global _cached_headed_mode, _headed_mode_resolved
-    if _headed_mode_resolved:
-        return _cached_headed_mode  # type: ignore[return-value]
-
-    _headed_mode_resolved = True
-    _cached_headed_mode = _browser_cfg(
-        "headed", False,
-        lambda v: False if v is None else str(v).strip().lower() in ("true", "1", "yes"),
-        "browser.headed from config",
-    )
-    if not _cached_headed_mode:
-        env_val = os.environ.get("AGENT_BROWSER_HEADED", "").strip()
-        if env_val and env_val.lower() in ("true", "1", "yes"):
-            _cached_headed_mode = True
-
-    return _cached_headed_mode
-
-
-def _should_inject_engine(engine: str) -> bool:
-    """Return True when the engine flag should be added to agent-browser commands.
-
-    Only inject ``--engine`` for non-cloud, non-camofox local sessions where
-    the engine is explicitly set (not ``auto``).
-    """
-    if engine == "auto":
-        return False
-    if _is_camofox_mode():
-        return False
-    return _is_local_mode()
 
 
 from tools.browser_tool_lightpanda_fallback import (  # noqa: F401
@@ -992,37 +682,6 @@ from tools.browser_tool_lightpanda_fallback import (  # noqa: F401
     _run_chrome_fallback_command,
     _chrome_fallback_screenshot,
 )
-
-
-def _auto_local_for_private_urls() -> bool:
-    """``browser.auto_local_for_private_urls`` (default True), cached for the process.
-
-    When on, ``browser_navigate`` routes private/loopback/LAN URLs to a local
-    Chromium sidecar even with a cloud provider configured; public URLs keep
-    using the cloud provider in the same conversation.
-    """
-    global _auto_local_for_private_urls_resolved, _cached_auto_local_for_private_urls
-    if _auto_local_for_private_urls_resolved:
-        return _cached_auto_local_for_private_urls
-
-    _auto_local_for_private_urls_resolved = True
-    _cached_auto_local_for_private_urls = _browser_cfg(
-        "auto_local_for_private_urls", _cached_auto_local_for_private_urls, bool,
-        "auto_local_for_private_urls from config",
-    )
-    return _cached_auto_local_for_private_urls
-
-
-def _use_real_profile() -> bool:
-    """Return whether the user consented to real-profile local browsing.
-
-    Reads ``browser.use_real_profile`` (default False) on EVERY call — it is a
-    consent switch, so flipping it off must take effect without a restart, and
-    in a multiplexed gateway each profile's config must decide for itself.
-    The read is one YAML load per local session creation (not per command),
-    so there is no hot-path cost to keeping it uncached.
-    """
-    return _browser_cfg("use_real_profile", False, bool, "use_real_profile from config")
 
 
 # Session name for the single shared real-profile copy-browser. All consented
@@ -1268,38 +927,6 @@ def _last_session_key(task_id: str) -> str:
         recorded_key,
     )
     return task_id
-
-
-def _allow_private_urls() -> bool:
-    """Return whether the browser is allowed to navigate to private/internal addresses.
-
-    Reads ``config["browser"]["allow_private_urls"]``. Single-profile calls
-    cache the result for the process lifetime; multiplexed profile turns resolve
-    their context-local config on each call. Defaults to ``False`` (SSRF
-    protection active).
-    """
-    global _cached_allow_private_urls, _allow_private_urls_resolved
-
-    # The profile multiplexer scopes config with a ContextVar while sharing
-    # this module. Never reuse another profile's private-network opt-out.
-    if get_hermes_home_override() is not None:
-        return _resolve_allow_private_urls()
-
-    if _allow_private_urls_resolved:
-        return _cached_allow_private_urls
-
-    _allow_private_urls_resolved = True
-    _cached_allow_private_urls = _resolve_allow_private_urls()
-    return _cached_allow_private_urls
-
-
-def _resolve_allow_private_urls() -> bool:
-    """Read the browser private-URL toggle from the active config scope."""
-    return _browser_cfg(
-        "allow_private_urls", False,
-        lambda v: is_truthy_value(v, default=False),
-        "allow_private_urls from config",
-    )
 
 
 def _socket_safe_tmpdir() -> str:
@@ -1884,190 +1511,6 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
         _ensure_cdp_supervisor(task_id)
 
     return session_info
-
-
-def _agent_browser_candidate_present(path: str | None) -> bool:
-    if not path:
-        return False
-    if " " in path and path.split()[0].endswith("npx"):
-        return True
-    return os.path.exists(path) and (os.name == "nt" or os.access(path, os.X_OK))
-
-
-def _resolve_npx_bin() -> Optional[str]:
-    """Resolve a runnable npx, preferring the Hermes-managed/Homebrew extended PATH.
-
-    Bare PATH first would let a broken system npx shadow a healthy managed one
-    with no recovery, so every candidate is validated with ``node_tool_runnable``
-    before being trusted.
-    """
-    extended_path = _merge_browser_path("")
-    if extended_path:
-        extended_npx = shutil.which("npx", path=extended_path)
-        if extended_npx and node_tool_runnable(extended_npx):
-            return extended_npx
-    npx_path = shutil.which("npx")
-    if npx_path and node_tool_runnable(npx_path):
-        return npx_path
-    return None
-
-
-def _agent_browser_candidates(extended_path: str):
-    """Yield agent-browser lookup candidates in resolution order (lazily — each is a filesystem probe).
-
-    Order: ambient PATH (global install) → extended PATH (Hermes-managed Node,
-    macOS versioned Homebrew, Termux/system dirs) → repo-local node_modules/.bin.
-    The local lookup goes through ``shutil.which`` with an explicit path so
-    Windows resolves the ``.cmd`` shim (CreateProcess cannot run npm's
-    extensionless POSIX shim — WinError 193) while POSIX keeps the plain one.
-    """
-    yield shutil.which("agent-browser")
-    if extended_path:
-        yield shutil.which("agent-browser", path=extended_path)
-    local_bin_dir = Path(__file__).parent.parent / "node_modules" / ".bin"
-    if local_bin_dir.is_dir():
-        yield shutil.which("agent-browser", path=str(local_bin_dir))
-
-
-def _find_agent_browser(*, validate: bool = True) -> str:
-    """
-    Find the agent-browser CLI executable.
-
-    Checks in order: current PATH, Homebrew/common bin dirs, Hermes-managed
-    node, local node_modules/.bin/, npx fallback, then a lazy install.
-
-    Every candidate is validated with ``agent_browser_runnable`` before it is
-    cached. A bare ``shutil.which`` hit is NOT trusted: agent-browser's npm
-    postinstall re-points a global symlink at our local node_modules binary,
-    which disappears on the next ``hermes update`` and leaves a dangling link
-    that ``which`` still reports but exec fails on (exit 127). Validating lets a
-    dead candidate fall through instead of being cached and killing every
-    browser tool. ``validate=False`` (schema-time check_fn) only tests presence
-    and never caches.
-
-    Raises:
-        FileNotFoundError: If agent-browser is not installed
-    """
-    global _cached_agent_browser, _agent_browser_resolved
-    if _agent_browser_resolved:
-        if _cached_agent_browser is None:
-            raise FileNotFoundError(
-                "agent-browser CLI not found (cached). Install it with: "
-                f"{_browser_install_hint()}\n"
-                "Or ensure npx is available in your PATH."
-            )
-        return _cached_agent_browser
-
-    def _accept(candidate: str) -> str:
-        # _agent_browser_resolved is set at each accept site (not before the
-        # search) so a concurrent reader never sees resolved=True with a None cache.
-        global _cached_agent_browser, _agent_browser_resolved
-        if validate:
-            _cached_agent_browser = candidate
-            _agent_browser_resolved = True
-        return candidate
-
-    ok = agent_browser_runnable if validate else _agent_browser_candidate_present
-    extended_path = _merge_browser_path("")
-    for candidate in _agent_browser_candidates(extended_path):
-        if candidate and ok(candidate):
-            return _accept(candidate)
-
-    # npx fallback (also searches the extended PATH)
-    if _resolve_npx_bin():
-        return _accept(NPX_AGENT_BROWSER_SENTINEL)
-
-    if not validate:
-        raise FileNotFoundError("agent-browser CLI not found")
-
-    # Nothing found — try lazy installation before giving up.
-    try:
-        from hermes_cli.dep_ensure import ensure_dependency
-        if ensure_dependency("browser"):
-            candidates = [
-                shutil.which("agent-browser"),
-                shutil.which("agent-browser", path=extended_path) if extended_path else None,
-                shutil.which("agent-browser", path=str(get_hermes_home() / "node_modules" / ".bin")),
-                shutil.which("agent-browser", path=str(get_hermes_home() / "node" / "bin")),
-                shutil.which("agent-browser", path=str(get_hermes_home() / "node")),
-            ]
-            for recheck in candidates:
-                if recheck and agent_browser_runnable(recheck):
-                    return _accept(recheck)
-    except Exception:
-        pass
-
-    _agent_browser_resolved = True
-    raise FileNotFoundError(
-        "agent-browser CLI not found. Install it with: "
-        f"{_browser_install_hint()}\n"
-        "Or ensure npx is available in your PATH."
-    )
-
-
-def warm_agent_browser_npx_cache(timeout: float = 60.0) -> bool:
-    """Best-effort pre-fetch of the agent-browser npm package via npx.
-
-    agent-browser resolves lazily via ``npx agent-browser`` (not a root
-    package.json dependency), so the first invocation in a session would pay
-    npx's registry fetch; ``hermes update`` / ``hermes doctor --fix`` call this
-    to warm the cache first. Runs with the credential-scrubbed env every other
-    agent-browser spawn uses (registry-fetched npm code must never see the
-    operator keyring), in its own process group, and tree-kills on timeout so
-    a surviving descendant cannot hold the capture pipe open.
-    Never raises; True only when npx actually exited 0.
-    """
-    npx_bin = _resolve_npx_bin()
-    if not npx_bin:
-        return False
-
-    env = _build_browser_env()
-    env["PATH"] = _merge_browser_path(env.get("PATH", ""))
-
-    popen_kwargs: dict = {
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "text": True,
-        "env": env,
-        "creationflags": windows_hide_flags(),
-    }
-    if os.name == "posix":
-        popen_kwargs["start_new_session"] = True
-    else:
-        popen_kwargs["creationflags"] |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-
-    cmd = [
-        npx_bin,
-        # --ignore-scripts: AGENT_BROWSER_NPX_SPEC is a floating ^0.26.0
-        # range, not an exact pin — a compromised future 0.26.x patch must
-        # not get to run its own install-time lifecycle scripts here.
-        "--ignore-scripts",
-        # --prefer-offline: once cached, repeat `hermes update`/`doctor
-        # --fix` runs shouldn't hit the registry just to re-confirm
-        # "latest" is still latest — that would defeat the point of
-        # warming the cache in the first place.
-        "--prefer-offline",
-        "-y",
-        AGENT_BROWSER_NPX_SPEC,
-        "--version",
-    ]
-    try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, **popen_kwargs)
-    except Exception:
-        return False
-    try:
-        proc.communicate(timeout=timeout)
-        return proc.returncode == 0
-    except subprocess.TimeoutExpired:
-        _kill_process_tree(proc)
-        try:
-            proc.communicate(timeout=5)
-        except Exception:
-            pass
-        return False
-    except Exception:
-        _kill_process_tree(proc)
-        return False
 
 
 from tools.browser_tool_snapshot import (  # noqa: F401
@@ -3548,221 +2991,9 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
 _cached_chromium_installed: Optional[bool] = None
 
 
-def _chromium_search_roots() -> List[str]:
-    """Directories to scan for a Chromium / headless-shell build, in the order
-    agent-browser and Playwright probe them: ``PLAYWRIGHT_BROWSERS_PATH``, then
-    Playwright's per-OS default cache."""
-    roots: List[str] = []
-    env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
-    if env_path and env_path != "0":
-        roots.append(env_path)
-    home = os.path.expanduser("~")
-    roots.append(os.path.join(home, ".cache", "ms-playwright"))
-    if sys.platform == "darwin":
-        roots.append(os.path.join(home, "Library", "Caches", "ms-playwright"))
-    if sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA") or os.path.join(
-            home, "AppData", "Local"
-        )
-        roots.append(os.path.join(local, "ms-playwright"))
-    return roots
-
-
-def _chromium_installed() -> bool:
-    """Return True when a usable Chromium (or headless-shell) build is on disk.
-
-    Checks ``AGENT_BROWSER_EXECUTABLE_PATH``, then system Chrome/Chromium on
-    PATH, then Playwright's cache (``chromium-*`` / ``chromium_headless_shell-*``
-    dirs). Without a binary the CLI hangs on first use until the command
-    timeout fires, so the tool must not be advertised.
-    """
-    global _cached_chromium_installed
-    if _cached_chromium_installed is not None:
-        return _cached_chromium_installed
-
-    # 1. AGENT_BROWSER_EXECUTABLE_PATH — explicit user-configured browser
-    ab_path = os.environ.get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
-    if ab_path and (os.path.isfile(ab_path) or shutil.which(ab_path)):
-        _cached_chromium_installed = True
-        return True
-
-    # 2. System Chrome/Chromium in PATH (common names)
-    system_chrome = (
-        shutil.which("google-chrome")
-        or shutil.which("chromium")
-        or shutil.which("chromium-browser")
-        or shutil.which("chrome")
-    )
-    if system_chrome:
-        _cached_chromium_installed = True
-        return True
-
-    # 3. Playwright browser cache (legacy — chromium-* / chromium_headless_shell-* dirs)
-    for root in _chromium_search_roots():
-        if not root or not os.path.isdir(root):
-            continue
-        try:
-            entries = os.listdir(root)
-        except OSError:
-            continue
-        # Playwright names them ``chromium-<build>`` and
-        # ``chromium_headless_shell-<build>``; agent-browser accepts either.
-        for entry in entries:
-            if entry.startswith("chromium-") or entry.startswith(
-                "chromium_headless_shell-"
-            ):
-                _cached_chromium_installed = True
-                return True
-
-    _cached_chromium_installed = False
-    return False
-
-
 # One-shot per process: a 170MB download that fails (or is slow) must not be
 # retried on every browser call. Reset by _reset_browser_caches() for tests.
 _chromium_autoinstall_attempted = False
-
-
-def _maybe_autoinstall_chromium() -> bool:
-    """Best-effort, gated download of the Chromium *binary* on local cold start.
-
-    Binary only (``agent-browser install``), never ``--with-deps`` — that shells
-    ``apt`` and needs root, so missing system libraries stay a user action.
-    Gated by ``security.allow_lazy_installs``, skipped in Docker (Chromium ships
-    in the image), attempted once per process. True only when Chromium is
-    present afterwards.
-    """
-    global _chromium_autoinstall_attempted
-    if _chromium_autoinstall_attempted:
-        return _chromium_installed()
-    _chromium_autoinstall_attempted = True
-
-    if _running_in_docker():
-        return False
-
-    from tools.lazy_deps import _allow_lazy_installs
-    if not _allow_lazy_installs():
-        return False
-
-    try:
-        browser_cmd = _find_agent_browser()
-    except FileNotFoundError:
-        return False
-
-    if _is_npx_agent_browser_sentinel(browser_cmd):
-        install_cmd = [
-            _resolve_npx_bin() or "npx", "--ignore-scripts", "-y", AGENT_BROWSER_NPX_SPEC, "install",
-        ]
-    else:
-        install_cmd = [browser_cmd, "install"]
-
-    logger.info(
-        "browser: Chromium missing — auto-installing the browser binary "
-        "(one-time ~170MB; disable via security.allow_lazy_installs)"
-    )
-    try:
-        proc = subprocess.run(
-            install_cmd,
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=600,
-            env=_build_browser_env(),
-        )
-    except (OSError, subprocess.SubprocessError) as e:
-        logger.warning("browser: Chromium auto-install failed to start: %s", e)
-        return False
-
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip()[-300:]
-        logger.warning(
-            "browser: Chromium auto-install exited %s: %s", proc.returncode, tail
-        )
-        return False
-
-    global _cached_chromium_installed
-    _cached_chromium_installed = None
-    return _chromium_installed()
-
-
-def _running_in_docker() -> bool:
-    """Best-effort detection of whether we're inside a Docker container."""
-    if os.path.exists("/.dockerenv"):
-        return True
-    try:
-        with open("/proc/1/cgroup", "rt", encoding="utf-8") as fp:
-            return "docker" in fp.read()
-    except OSError:
-        return False
-
-
-def check_browser_requirements() -> bool:
-    """Whether the browser tools should be advertised.
-
-    Local mode needs the ``agent-browser`` CLI plus a Chromium build (except
-    Lightpanda-only text workflows); cloud mode needs the CLI plus provider
-    credentials (the provider hosts its own Chromium).
-    """
-    # Browser Use CLI backend — browser_exec replaces the whole browser_*
-    # surface (including browser_cdp/browser_dialog, whose check_fns funnel
-    # through here), so hide these tools from the model.
-    if _is_browser_use_cli_mode():
-        return False
-
-    # Camofox backend — only needs the server URL, no agent-browser CLI
-    if _is_camofox_mode():
-        return True
-
-    # CDP override mode can connect to an existing remote/local browser endpoint
-    # without requiring the local agent-browser binary on PATH.
-    # Raw (no-I/O) check: this runs during tool-schema assembly at startup,
-    # where a stale endpoint must not cost a blocking HTTP probe.
-    if _get_cdp_override_raw():
-        return True
-
-    # The agent-browser CLI is required for local launch and cloud-provider flows.
-    # Tool-schema assembly runs during Desktop startup; do not execute
-    # ``agent-browser --version`` here, because Windows .cmd shims route through
-    # cmd.exe and can flash a console before the user invokes any browser tool.
-    # Actual browser execution paths still validate the candidate before use.
-    try:
-        browser_cmd = _find_agent_browser(validate=False)
-    except FileNotFoundError:
-        return False
-
-    # On Termux, the bare npx fallback is too fragile to treat as a satisfied
-    # local browser dependency. Require a real install (global or local) so the
-    # browser tool is not advertised as available when it will likely fail on
-    # first use.
-    if _requires_real_termux_browser_install(browser_cmd):
-        return False
-
-    # In cloud mode, also require provider credentials. Cloud browsers
-    # don't need a local Chromium binary.
-    provider = _get_cloud_provider()
-    if provider is not None:
-        return provider.is_configured()
-
-    # Local mode with Lightpanda can provide text/navigation tools without a
-    # local Chromium install. Chrome fallback, screenshots, and browser_vision
-    # will still return actionable Chromium install errors if invoked.
-    if _using_lightpanda_engine():
-        return True
-
-    # Local Chrome mode: agent-browser needs a Chromium build on disk. Without
-    # it the CLI hangs on first use until the command timeout fires.
-    return _chromium_installed()
-
-
-def check_browser_vision_requirements() -> bool:
-    """Advertise ``browser_vision`` only with BOTH a working browser AND a vision
-    backend — otherwise it fails at call time with a cryptic provider error."""
-    if not check_browser_requirements():
-        return False
-    try:
-        from tools.vision_tools import check_vision_requirements
-    except ImportError:
-        return False
-    return check_vision_requirements()
 
 
 # ============================================================================
