@@ -1,9 +1,8 @@
 """Shared file sync manager for remote execution backends.
 
-Tracks local file changes via mtime+size, detects deletions, and
-syncs to remote environments transactionally.  Used by SSH, Modal,
-and Daytona.  Docker and Singularity use bind mounts (live host FS
-view) and don't need this.
+Tracks local file changes via mtime+size, detects deletions, and syncs to
+remote environments transactionally.  Used by SSH, Modal, and Daytona.
+Docker and Singularity use bind mounts (live host FS view) and don't need this.
 """
 
 import hashlib
@@ -30,13 +29,10 @@ from tools.environments.base import _file_mtime_key
 
 logger = logging.getLogger(__name__)
 
-# Keep retry sleeps patchable without mutating the shared stdlib ``time``
-# module. Patching ``tools.environments.file_sync.time.sleep`` replaces
-# ``time.sleep`` globally because ``time`` is the module object; under xdist
-# that lets unrelated background threads inflate retry-test call counts.
+# Tests patch these module-level aliases instead of ``time.sleep`` /
+# ``time.monotonic``: patching attributes on the shared ``time`` module object
+# leaks into unrelated threads under xdist and inflates retry call counts.
 _sleep = time.sleep
-# Same rationale for the rate-limit clock: tests patch ``_monotonic``
-# instead of ``time.monotonic`` on the shared module object.
 _monotonic = time.monotonic
 
 _SYNC_INTERVAL_SECONDS = 5.0
@@ -49,57 +45,55 @@ BulkDownloadFn = Callable[[Path], None]  # (dest_tar_path) -> writes tar archive
 DeleteFn = Callable[[list[str]], None]  # (remote_paths) -> raises on failure
 GetFilesFn = Callable[[], list[tuple[str, str]]]  # () -> [(host_path, remote_path), ...]
 
+_SYNC_BACK_MAX_RETRIES = 3
+_SYNC_BACK_BACKOFF = (2, 4, 8)  # seconds between retries
+_SYNC_BACK_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB — refuse to extract larger tars
+
 
 def iter_sync_files(container_base: str = "/root/.hermes") -> list[tuple[str, str]]:
-    """Enumerate all files that should be synced to a remote environment.
+    """Enumerate all (host_path, remote_path) pairs to sync to a remote.
 
-    Combines credentials, skills, and cache into a single flat list of
-    (host_path, remote_path) pairs.  Credential paths are remapped from
-    the hardcoded /root/.hermes to *container_base* because the remote
-    user's home may differ (e.g. /home/daytona, /home/user).
+    Credential paths are remapped from the hardcoded /root/.hermes to
+    *container_base* because the remote user's home may differ.
     """
-    # Late import: credential_files imports agent modules that create
-    # circular dependencies if loaded at file_sync module level.
+    # Late import: credential_files pulls in agent modules (circular at module level).
     from tools.credential_files import (
         get_credential_file_mounts,
         iter_cache_files,
         iter_skills_files,
     )
 
-    files: list[tuple[str, str]] = []
-    for entry in get_credential_file_mounts():
-        remote = entry["container_path"].replace(
-            "/root/.hermes", container_base, 1
-        )
-        files.append((entry["host_path"], remote))
-    for entry in iter_skills_files(container_base=container_base):
-        files.append((entry["host_path"], entry["container_path"]))
-    for entry in iter_cache_files(container_base=container_base):
+    files: list[tuple[str, str]] = [
+        (entry["host_path"], entry["container_path"].replace("/root/.hermes", container_base, 1))
+        for entry in get_credential_file_mounts()
+    ]
+    for entry in (*iter_skills_files(container_base=container_base),
+                  *iter_cache_files(container_base=container_base)):
         files.append((entry["host_path"], entry["container_path"]))
     return files
+
+
+def _resolve_host_path_str(host_path: str) -> str:
+    """Canonical string form of a host path (``resolve()`` falling back to ``expanduser()``)."""
+    try:
+        return str(Path(host_path).expanduser().resolve())
+    except OSError:
+        return str(Path(host_path).expanduser())
 
 
 def _credential_host_paths() -> set[str]:
     """Return credential files that are upload-only for remote sandboxes."""
     try:
         from tools.credential_files import get_credential_file_mounts
-    except Exception:
-        return set()
 
-    paths: set[str] = set()
-    try:
         mounts = get_credential_file_mounts()
     except Exception:
         return set()
-    for entry in mounts:
-        host_path = entry.get("host_path") if isinstance(entry, dict) else None
-        if not host_path:
-            continue
-        try:
-            paths.add(str(Path(host_path).expanduser().resolve()))
-        except OSError:
-            paths.add(str(Path(host_path).expanduser()))
-    return paths
+    return {
+        _resolve_host_path_str(entry["host_path"])
+        for entry in mounts
+        if isinstance(entry, dict) and entry.get("host_path")
+    }
 
 
 def quoted_rm_command(remote_paths: list[str]) -> str:
@@ -126,20 +120,12 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-_SYNC_BACK_MAX_RETRIES = 3
-_SYNC_BACK_BACKOFF = (2, 4, 8)  # seconds between retries
-_SYNC_BACK_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB — refuse to extract larger tars
-
-
 class FileSyncManager:
     """Tracks local file changes and syncs to a remote environment.
 
-    Backends instantiate this with transport callbacks (upload, delete)
-    and a file-source callable.  The manager handles mtime-based change
-    detection, deletion tracking, rate limiting, and transactional state.
-
-    Not used by bind-mount backends (Docker, Singularity) — those get
-    live host FS views and don't need file sync.
+    Backends instantiate this with transport callbacks (upload, delete) and a
+    file-source callable.  The manager handles mtime-based change detection,
+    deletion tracking, rate limiting, and transactional state.
     """
 
     def __init__(
@@ -166,88 +152,88 @@ class FileSyncManager:
     def sync(self, *, force: bool = False) -> None:
         """Run a sync cycle: upload changed files, delete removed files.
 
-        Rate-limited to once per ``sync_interval`` unless *force* is True
-        or ``HERMES_FORCE_FILE_SYNC=1`` is set.
-
-        Transactional: state only committed if ALL operations succeed.
-        On failure, state rolls back so the next cycle retries everything.
+        Rate-limited to once per ``sync_interval`` unless *force* is True or
+        ``HERMES_FORCE_FILE_SYNC=1`` is set. Transactional: state is committed
+        only if ALL operations succeed; on failure it rolls back so the next
+        cycle retries everything.
         """
         with self._transaction_lock:
             self._sync_transaction(force=force)
 
     def _sync_transaction(self, *, force: bool = False) -> None:
         """Execute one sync cycle while holding the per-manager lock."""
-        if not force and not os.environ.get(_FORCE_SYNC_ENV):
-            now = _monotonic()
-            if now - self._last_sync_time < self._sync_interval:
-                return
+        if (
+            not force
+            and not os.environ.get(_FORCE_SYNC_ENV)
+            and _monotonic() - self._last_sync_time < self._sync_interval
+        ):
+            return
 
         current_files = self._get_files_fn()
         self._upload_only_host_paths.update(_credential_host_paths())
-        current_remote_paths = {remote for _, remote in current_files}
-
-        # --- Uploads: new or changed files ---
-        to_upload: list[tuple[str, str]] = []
-        new_files = dict(self._synced_files)
-        for host_path, remote_path in current_files:
-            file_key = _file_mtime_key(host_path)
-            if file_key is None:
-                continue
-            if self._synced_files.get(remote_path) == file_key:
-                continue
-            to_upload.append((host_path, remote_path))
-            new_files[remote_path] = file_key
-
-        # --- Deletes: synced paths no longer in current set ---
-        to_delete = [p for p in self._synced_files if p not in current_remote_paths]
+        to_upload, new_files, to_delete = self._plan_sync(current_files)
 
         if not to_upload and not to_delete:
             self._last_sync_time = _monotonic()
             return
 
-        # Snapshot for rollback (only when there's work to do)
         prev_files = dict(self._synced_files)
         prev_hashes = dict(self._pushed_hashes)
+        try:
+            self._push(to_upload, to_delete)
+            # Commit (all succeeded).
+            for host_path, remote_path in to_upload:
+                self._pushed_hashes[remote_path] = _sha256_file(host_path)
+            for p in to_delete:
+                new_files.pop(p, None)
+                self._pushed_hashes.pop(p, None)
+            self._synced_files = new_files
+            self._last_sync_time = _monotonic()
+        except Exception as exc:
+            self._synced_files = prev_files
+            self._pushed_hashes = prev_hashes
+            # Do NOT advance _last_sync_time: bumping the rate-limit clock on
+            # failure would suppress the retry for up to _sync_interval,
+            # contradicting the "next cycle retries everything" contract.
+            logger.warning("file_sync: sync failed, rolled back state: %s", exc)
 
+    def _plan_sync(
+        self, current_files: list[tuple[str, str]]
+    ) -> tuple[list[tuple[str, str]], dict[str, tuple[float, int]], list[str]]:
+        """Diff *current_files* against synced state.
+
+        Returns ``(to_upload, new_synced_state, to_delete)``: new/changed
+        (mtime,size) pairs to upload, the state to commit if everything
+        succeeds, and synced remote paths no longer present locally.
+        """
+        to_upload: list[tuple[str, str]] = []
+        new_files = dict(self._synced_files)
+        for host_path, remote_path in current_files:
+            file_key = _file_mtime_key(host_path)
+            if file_key is None or self._synced_files.get(remote_path) == file_key:
+                continue
+            to_upload.append((host_path, remote_path))
+            new_files[remote_path] = file_key
+        current_remote_paths = {remote for _, remote in current_files}
+        to_delete = [p for p in self._synced_files if p not in current_remote_paths]
+        return to_upload, new_files, to_delete
+
+    def _push(self, to_upload: list[tuple[str, str]], to_delete: list[str]) -> None:
+        """Run the transport calls for one cycle (bulk upload when available)."""
         if to_upload:
             logger.debug("file_sync: uploading %d file(s)", len(to_upload))
         if to_delete:
             logger.debug("file_sync: deleting %d stale remote file(s)", len(to_delete))
-
-        try:
-            if to_upload and self._bulk_upload_fn is not None:
-                self._bulk_upload_fn(to_upload)
-                logger.debug("file_sync: bulk-uploaded %d file(s)", len(to_upload))
-            else:
-                for host_path, remote_path in to_upload:
-                    self._upload_fn(host_path, remote_path)
-                    logger.debug("file_sync: uploaded %s -> %s", host_path, remote_path)
-
-            if to_delete:
-                self._delete_fn(to_delete)
-                logger.debug("file_sync: deleted %s", to_delete)
-
-            # --- Commit (all succeeded) ---
+        if to_upload and self._bulk_upload_fn is not None:
+            self._bulk_upload_fn(to_upload)
+            logger.debug("file_sync: bulk-uploaded %d file(s)", len(to_upload))
+        else:
             for host_path, remote_path in to_upload:
-                self._pushed_hashes[remote_path] = _sha256_file(host_path)
-
-            for p in to_delete:
-                new_files.pop(p, None)
-                self._pushed_hashes.pop(p, None)
-
-            self._synced_files = new_files
-            self._last_sync_time = _monotonic()
-
-        except Exception as exc:
-            self._synced_files = prev_files
-            self._pushed_hashes = prev_hashes
-            # Do NOT advance _last_sync_time here: a failed cycle rolls state
-            # back so the next cycle can retry. Bumping the rate-limit clock on
-            # failure would make the next non-forced sync() return early (the
-            # guard above), suppressing that retry for up to _sync_interval and
-            # leaving the remote with stale files — contradicting this method's
-            # documented "next cycle retries everything" contract.
-            logger.warning("file_sync: sync failed, rolled back state: %s", exc)
+                self._upload_fn(host_path, remote_path)
+                logger.debug("file_sync: uploaded %s -> %s", host_path, remote_path)
+        if to_delete:
+            self._delete_fn(to_delete)
+            logger.debug("file_sync: deleted %s", to_delete)
 
     # ------------------------------------------------------------------
     # Sync-back: pull remote changes to host on teardown
@@ -256,24 +242,21 @@ class FileSyncManager:
     def sync_back(self, hermes_home: Path | None = None) -> None:
         """Pull remote changes back to the host filesystem.
 
-        Downloads the remote ``.hermes/`` directory as a tar archive,
-        unpacks it, and applies only files that differ from what was
-        originally pushed (based on SHA-256 content hashes).
-
-        Protected against SIGINT (defers the signal until complete) and
-        serialized across concurrent gateway sandboxes via file lock.
+        Downloads the remote ``.hermes/`` directory as a tar, unpacks it, and
+        applies only files whose SHA-256 differs from what was pushed. SIGINT is
+        deferred until complete; concurrent gateway sandboxes are serialized
+        via a file lock.
         """
         with self._transaction_lock:
             self._sync_back_transaction(hermes_home=hermes_home)
 
     def _sync_back_transaction(self, hermes_home: Path | None = None) -> None:
-        """Execute sync-back against a stable snapshot of manager state."""
+        """Execute sync-back (with retries) against a stable snapshot of manager state."""
         if self._bulk_download_fn is None:
             return
 
-        # Nothing was ever committed through this manager — the initial
-        # push failed or never ran. Skip sync_back to avoid retry storms
-        # against an uninitialized remote .hermes/ directory.
+        # Nothing was ever committed (initial push failed or never ran): skip
+        # to avoid retry storms against an uninitialized remote .hermes/.
         if not self._pushed_hashes and not self._synced_files:
             logger.debug("sync_back: no prior push state — skipping")
             return
@@ -300,9 +283,8 @@ class FileSyncManager:
 
     def _sync_back_once(self, lock_path: Path) -> None:
         """Single sync-back attempt with SIGINT protection and file lock."""
-        # signal.signal() only works from the main thread. In gateway
-        # contexts cleanup() may run from a worker thread — skip SIGINT
-        # deferral there rather than crashing.
+        # signal.signal() only works from the main thread; gateway cleanup()
+        # may run from a worker thread — skip SIGINT deferral there.
         on_main_thread = threading.current_thread() is threading.main_thread()
 
         deferred_sigint: list[object] = []
@@ -321,16 +303,10 @@ class FileSyncManager:
             if on_main_thread and original_handler is not None:
                 signal.signal(signal.SIGINT, original_handler)
                 if deferred_sigint:
-                    # Re-deliver the deferred Ctrl+C to the just-restored
-                    # handler. ``os.kill(os.getpid(), signal.SIGINT)`` is NOT a
-                    # graceful signal on Windows: os.kill only treats
-                    # CTRL_C_EVENT(0)/CTRL_BREAK_EVENT(1) as console events; any
-                    # other value (SIGINT == 2) routes to TerminateProcess(sig),
-                    # hard-killing the CLI (exit code 2) instead of raising
-                    # KeyboardInterrupt — so a Ctrl+C during a remote-backend
-                    # sync-back would kill the whole session on Windows.
-                    # ``signal.raise_signal`` (3.8+) invokes the handler via C
-                    # ``raise()`` on every platform.
+                    # Re-deliver the deferred Ctrl+C to the restored handler.
+                    # ``os.kill(os.getpid(), SIGINT)`` is NOT graceful on
+                    # Windows (routes to TerminateProcess, hard-killing the
+                    # CLI); ``raise_signal`` invokes the handler everywhere.
                     signal.raise_signal(signal.SIGINT)
 
     def _sync_back_locked(self, lock_path: Path) -> None:
@@ -364,8 +340,7 @@ class FileSyncManager:
         with tempfile.NamedTemporaryFile(suffix=".tar") as tf:
             self._bulk_download_fn(Path(tf.name))
 
-            # Defensive size cap: a misbehaving sandbox could produce an
-            # arbitrarily large tar. Refuse to extract if it exceeds the cap.
+            # A misbehaving sandbox could produce an arbitrarily large tar.
             try:
                 tar_size = os.path.getsize(tf.name)
             except OSError:
@@ -381,72 +356,71 @@ class FileSyncManager:
                 with tarfile.open(tf.name) as tar:
                     tar.extractall(staging, filter="data")
 
+                upload_only = self._upload_only_host_paths | _credential_host_paths()
                 applied = 0
-                upload_only_host_paths = (
-                    self._upload_only_host_paths | _credential_host_paths()
-                )
                 for dirpath, _dirnames, filenames in os.walk(staging):
                     for fname in filenames:
                         staged_file = os.path.join(dirpath, fname)
-                        rel = os.path.relpath(staged_file, staging)
-                        remote_path = "/" + rel
-
-                        pushed_hash = self._pushed_hashes.get(remote_path)
-
-                        # Skip hashing for files unchanged from push
-                        if pushed_hash is not None:
-                            remote_hash = _sha256_file(staged_file)
-                            if remote_hash == pushed_hash:
-                                continue
-                        else:
-                            remote_hash = None  # new remote file
-
-                        # Resolve host path from cached mapping
-                        host_path = self._resolve_host_path(remote_path, file_mapping)
-                        if host_path is None:
-                            host_path = self._infer_host_path(
-                                remote_path,
-                                file_mapping,
-                                upload_only_host_paths=upload_only_host_paths,
-                            )
-                            if host_path is None:
-                                logger.debug(
-                                    "sync_back: skipping %s (no host mapping)",
-                                    remote_path,
-                                )
-                                continue
-
-                        if self._is_upload_only_host_path(host_path, upload_only_host_paths):
-                            logger.debug(
-                                "sync_back: skipping upload-only credential file %s",
-                                remote_path,
-                            )
-                            continue
-
-                        if os.path.exists(host_path) and pushed_hash is not None:
-                            host_hash = _sha256_file(host_path)
-                            if host_hash != pushed_hash:
-                                logger.warning(
-                                    "sync_back: conflict on %s — host modified "
-                                    "since push, remote also changed. Applying "
-                                    "remote version (last-write-wins).",
-                                    remote_path,
-                                )
-
-                        os.makedirs(os.path.dirname(host_path), exist_ok=True)
-                        shutil.copy2(staged_file, host_path)
-                        applied += 1
+                        remote_path = "/" + os.path.relpath(staged_file, staging)
+                        applied += self._apply_staged_file(
+                            staged_file, remote_path, file_mapping, upload_only
+                        )
 
                 if applied:
                     logger.info("sync_back: applied %d changed file(s)", applied)
                 else:
                     logger.debug("sync_back: no remote changes detected")
 
+    def _apply_staged_file(
+        self,
+        staged_file: str,
+        remote_path: str,
+        file_mapping: list[tuple[str, str]],
+        upload_only_host_paths: set[str],
+    ) -> int:
+        """Copy one extracted remote file onto the host if it changed since push.
+
+        Returns 1 if applied, 0 if skipped (unchanged, unmapped, or an
+        upload-only credential). A host file modified since push is
+        overwritten with the remote version (last-write-wins) with a warning.
+        """
+        pushed_hash = self._pushed_hashes.get(remote_path)
+        if pushed_hash is not None and _sha256_file(staged_file) == pushed_hash:
+            return 0  # unchanged from push
+
+        host_path = self._resolve_host_path(remote_path, file_mapping)
+        if host_path is None:
+            host_path = self._infer_host_path(
+                remote_path, file_mapping, upload_only_host_paths=upload_only_host_paths
+            )
+            if host_path is None:
+                logger.debug("sync_back: skipping %s (no host mapping)", remote_path)
+                return 0
+
+        if self._is_upload_only_host_path(host_path, upload_only_host_paths):
+            logger.debug("sync_back: skipping upload-only credential file %s", remote_path)
+            return 0
+
+        if (
+            pushed_hash is not None
+            and os.path.exists(host_path)
+            and _sha256_file(host_path) != pushed_hash
+        ):
+            logger.warning(
+                "sync_back: conflict on %s — host modified "
+                "since push, remote also changed. Applying "
+                "remote version (last-write-wins).",
+                remote_path,
+            )
+
+        os.makedirs(os.path.dirname(host_path), exist_ok=True)
+        shutil.copy2(staged_file, host_path)
+        return 1
+
     def _resolve_host_path(self, remote_path: str,
                            file_mapping: list[tuple[str, str]] | None = None) -> str | None:
         """Find the host path for a known remote path from the file mapping."""
-        mapping = file_mapping if file_mapping is not None else []
-        for host, remote in mapping:
+        for host, remote in file_mapping or []:
             if remote == remote_path:
                 return host
         return None
@@ -457,28 +431,20 @@ class FileSyncManager:
                          upload_only_host_paths: set[str] | None = None) -> str | None:
         """Infer a host path for a new remote file by matching path prefixes.
 
-        Uses the existing file mapping to find a remote->host directory
-        pair, then applies the same prefix substitution to the new file.
-        For example, if the mapping has ``/root/.hermes/skills/a.md`` →
-        ``~/.hermes/skills/a.md``, a new remote file at
-        ``/root/.hermes/skills/b.md`` maps to ``~/.hermes/skills/b.md``.
+        Uses an existing remote->host pair whose parent directory prefixes
+        *remote_path* and applies the same substitution, e.g. mapping
+        ``/root/.hermes/skills/a.md`` -> ``~/.hermes/skills/a.md`` sends a new
+        ``/root/.hermes/skills/b.md`` to ``~/.hermes/skills/b.md``.
         """
-        mapping = file_mapping if file_mapping is not None else []
         upload_only_host_paths = upload_only_host_paths or set()
-        for host, remote in mapping:
+        for host, remote in file_mapping or []:
             if self._is_upload_only_host_path(host, upload_only_host_paths):
                 continue
             remote_dir = str(Path(remote).parent)
             if remote_path.startswith(remote_dir + "/"):
-                host_dir = str(Path(host).parent)
-                suffix = remote_path[len(remote_dir):]
-                return host_dir + suffix
+                return str(Path(host).parent) + remote_path[len(remote_dir):]
         return None
 
     @staticmethod
     def _is_upload_only_host_path(host_path: str, upload_only_host_paths: set[str]) -> bool:
-        try:
-            resolved = str(Path(host_path).expanduser().resolve())
-        except OSError:
-            resolved = str(Path(host_path).expanduser())
-        return resolved in upload_only_host_paths
+        return _resolve_host_path_str(host_path) in upload_only_host_paths

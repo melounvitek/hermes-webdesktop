@@ -1,8 +1,7 @@
 """Singularity/Apptainer persistent container environment.
 
-Security-hardened with --containall, --no-home, capability dropping.
-Supports configurable resource limits and optional filesystem persistence
-via writable overlay directories that survive across sessions.
+Security-hardened with --containall, --no-home, capability dropping. Supports
+resource limits and optional persistence via writable overlay dirs that survive sessions.
 """
 
 import logging
@@ -15,13 +14,9 @@ from pathlib import Path
 from typing import Optional
 
 from hermes_constants import get_hermes_home
-from tools.environments.base import (
-    BaseEnvironment,
-    _load_json_store,
-    _popen_bash,
-    _save_json_store,
-)
+from tools.environments.base import BaseEnvironment, _load_json_store, _popen_bash, _save_json_store
 from tools.environments.path_utils import sanitize_task_id_for_path
+from tools.environments.remote_common import bash_argv, run_capture
 
 logger = logging.getLogger(__name__)
 
@@ -45,14 +40,9 @@ def _ensure_singularity_available() -> str:
     """Preflight check: resolve the executable and verify it responds."""
     exe = _find_singularity_executable()
     try:
-        result = subprocess.run(
-            [exe, "version"], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10,
-            stdin=subprocess.DEVNULL,
-        )
+        result = run_capture([exe, "version"], timeout=10)
     except FileNotFoundError:
-        raise RuntimeError(
-            f"Singularity backend selected but '{exe}' could not be executed."
-        )
+        raise RuntimeError(f"Singularity backend selected but '{exe}' could not be executed.")
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"'{exe} version' timed out.")
 
@@ -93,12 +83,7 @@ def _get_scratch_dir() -> Path:
 
 def _get_apptainer_cache_dir() -> Path:
     cache_dir = os.getenv("APPTAINER_CACHEDIR")
-    if cache_dir:
-        cache_path = Path(cache_dir)
-        cache_path.mkdir(parents=True, exist_ok=True)
-        return cache_path
-    scratch = _get_scratch_dir()
-    cache_path = scratch / ".apptainer"
+    cache_path = Path(cache_dir) if cache_dir else _get_scratch_dir() / ".apptainer"
     cache_path.mkdir(parents=True, exist_ok=True)
     return cache_path
 
@@ -115,7 +100,6 @@ def _get_or_build_sif(image: str, executable: str = "apptainer") -> str:
     image_name = image.replace('docker://', '').replace('/', '-').replace(':', '-')
     cache_dir = _get_apptainer_cache_dir()
     sif_path = cache_dir / f"{image_name}.sif"
-
     if sif_path.exists():
         return str(sif_path)
 
@@ -130,19 +114,14 @@ def _get_or_build_sif(image: str, executable: str = "apptainer") -> str:
         tmp_dir = cache_dir / "tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
-        # apptainer/singularity build: external tool, may need registry
-        # credentials from the user env — exact preservation.
+        # External build tool may need registry credentials from the user env — exact preservation.
         from tools.environments.local import build_subprocess_env
         env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
         env["APPTAINER_TMPDIR"] = str(tmp_dir)
         env["APPTAINER_CACHEDIR"] = str(cache_dir)
 
         try:
-            result = subprocess.run(
-                [executable, "build", str(sif_path), image],
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=env,
-                stdin=subprocess.DEVNULL,
-            )
+            result = run_capture([executable, "build", str(sif_path), image], timeout=600, env=env)
             if result.returncode != 0:
                 logger.warning("SIF build failed, falling back to docker:// URL")
                 logger.warning("  Error: %s", result.stderr[:500])
@@ -163,21 +142,12 @@ class SingularityEnvironment(BaseEnvironment):
     """Hardened Singularity/Apptainer container with resource limits and persistence.
 
     Spawn-per-call: every execute() spawns a fresh ``apptainer exec ... bash -c`` process.
-    Session snapshot preserves env vars across calls.
-    CWD persists via in-band stdout markers.
+    Session snapshot preserves env vars across calls; CWD persists via in-band stdout markers.
     """
 
-    def __init__(
-        self,
-        image: str,
-        cwd: str = "~",
-        timeout: int = 60,
-        cpu: float = 0,
-        memory: int = 0,
-        disk: int = 0,
-        persistent_filesystem: bool = False,
-        task_id: str = "default",
-    ):
+    def __init__(self, image: str, cwd: str = "~", timeout: int = 60, cpu: float = 0,
+                 memory: int = 0, disk: int = 0, persistent_filesystem: bool = False,
+                 task_id: str = "default"):
         super().__init__(cwd=cwd, timeout=timeout)
         self.executable = _ensure_singularity_available()
         self.image = _get_or_build_sif(image, self.executable)
@@ -192,10 +162,8 @@ class SingularityEnvironment(BaseEnvironment):
         if self._persistent:
             overlay_base = _get_scratch_dir() / "hermes-overlays"
             overlay_base.mkdir(parents=True, exist_ok=True)
-            # A raw session-key task_id carries colons and other characters
-            # that are unsafe in host path components (same class of bug as
-            # the docker -v mount failure); route it through the shared
-            # sanitizer so all backends agree on the mapping.
+            # A raw session-key task_id carries colons etc. unsafe in host path components;
+            # the shared sanitizer keeps all backends agreeing on the mapping.
             self._overlay_dir = overlay_base / f"overlay-{sanitize_task_id_for_path(task_id)}"
             self._overlay_dir.mkdir(parents=True, exist_ok=True)
 
@@ -203,9 +171,7 @@ class SingularityEnvironment(BaseEnvironment):
         self.init_session()
 
     def _start_instance(self):
-        cmd = [self.executable, "instance", "start"]
-        cmd.extend(["--containall", "--no-home"])
-
+        cmd = [self.executable, "instance", "start", "--containall", "--no-home"]
         if self._persistent and self._overlay_dir:
             cmd.extend(["--overlay", str(self._overlay_dir)])
         else:
@@ -224,44 +190,30 @@ class SingularityEnvironment(BaseEnvironment):
             cmd.extend(["--memory", f"{self._memory}M"])
         if self._cpu > 0:
             cmd.extend(["--cpus", str(self._cpu)])
-
         cmd.extend([str(self.image), self.instance_id])
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120, stdin=subprocess.DEVNULL)
+            result = run_capture(cmd, timeout=120)
             if result.returncode != 0:
                 raise RuntimeError(f"Failed to start instance: {result.stderr}")
             self._instance_started = True
-            logger.info("Singularity instance %s started (persistent=%s)",
-                        self.instance_id, self._persistent)
+            logger.info("Singularity instance %s started (persistent=%s)", self.instance_id, self._persistent)
         except subprocess.TimeoutExpired:
             raise RuntimeError("Instance start timed out")
 
-    def _run_bash(self, cmd_string: str, *, login: bool = False,
-                  timeout: int = 120,
+    def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
         """Spawn a bash process inside the Singularity instance."""
         if not self._instance_started:
             raise RuntimeError("Singularity instance not started")
-
-        cmd = [self.executable, "exec",
-               f"instance://{self.instance_id}"]
-        if login:
-            cmd.extend(["bash", "-l", "-c", cmd_string])
-        else:
-            cmd.extend(["bash", "-c", cmd_string])
-
+        cmd = [self.executable, "exec", f"instance://{self.instance_id}", *bash_argv(cmd_string, login)]
         return _popen_bash(cmd, stdin_data)
 
     def cleanup(self):
         """Stop the instance. If persistent, the overlay dir survives."""
         if self._instance_started:
             try:
-                subprocess.run(
-                    [self.executable, "instance", "stop", self.instance_id],
-                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30,
-                    stdin=subprocess.DEVNULL,
-                )
+                run_capture([self.executable, "instance", "stop", self.instance_id], timeout=30)
                 logger.info("Singularity instance %s stopped", self.instance_id)
             except Exception as e:
                 logger.warning("Failed to stop Singularity instance %s: %s", self.instance_id, e)
