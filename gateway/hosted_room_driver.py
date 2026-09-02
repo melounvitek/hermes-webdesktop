@@ -22,9 +22,7 @@ from gateway.hosted_rooms_common import (
 )
 
 Clock = Callable[[], float]
-TaskStatus = Literal[
-    "queued", "running", "settled", "failed", "cancelled", "indeterminate", "deferred", "stopping",
-]
+TaskStatus = Literal["queued", "running", "settled", "failed", "cancelled", "indeterminate", "deferred", "stopping"]
 TerminalStatus = Literal["settled", "failed"]
 
 MAX_IDENTIFIER_CHARS = 128

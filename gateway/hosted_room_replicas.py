@@ -105,10 +105,6 @@ def _positive_int(value: Any, message: str) -> int:
     return positive_int(value, error=ReplicaError, message=message)
 
 
-def _clock(now: float | None) -> float:
-    return time.time() if now is None else float(now)
-
-
 def _control_event_json(payload: dict[str, Any]) -> tuple[str, str]:
     """Canonical (actor_json, payload_json) for a system authority-control event."""
     return (
@@ -168,7 +164,7 @@ def ingest_page(
     room_name = _validate_room_name(room_name)
     _, members_json = _validate_members(members)
     events, authority = _validate_page(page)
-    now = _clock(now)
+    now = time.time() if now is None else float(now)
 
     with _replica_transaction(db_path) as conn:
         row = conn.execute(
@@ -274,7 +270,7 @@ def promote_replica(
     room_id = _room_id(room_id)
     if not isinstance(reason, str) or not reason or len(reason) > 200:
         raise ReplicaError("reason must be a non-empty string of at most 200 chars")
-    now = _clock(now)
+    now = time.time() if now is None else float(now)
     local_gateway = local_authority_gateway_id()
 
     with _replica_transaction(db_path) as conn:
@@ -353,7 +349,7 @@ def demote_room(
         observed_gateway_id, label="observed_gateway_id", max_chars=MAX_ACTOR_ID_CHARS
     )
     observed_epoch = _positive_int(observed_epoch, "observed_epoch must be a positive integer")
-    now = _clock(now)
+    now = time.time() if now is None else float(now)
     local_gateway = local_authority_gateway_id()
 
     with _transaction(db_path, immediate=True) as conn:
