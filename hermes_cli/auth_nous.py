@@ -93,18 +93,6 @@ _NOUS_STALE_PORTAL_HOSTS: FrozenSet[str] = frozenset({
 })
 
 
-def _is_terminal_nous_refresh_error(exc: Exception) -> bool:
-    return _is_terminal_refresh_error(exc, "nous")
-
-
-def _is_terminal_xai_oauth_refresh_error(exc: Exception) -> bool:
-    return _is_terminal_refresh_error(exc, "xai-oauth")
-
-
-def _is_terminal_codex_oauth_refresh_error(exc: Exception) -> bool:
-    return _is_terminal_refresh_error(exc, "openai-codex")
-
-
 def _format_nous_entitlement_auth_error(error: AuthError) -> str:
     try:
         from hermes_cli.nous_account import (
@@ -593,26 +581,6 @@ def _clear_shared_nous_state(reason: str) -> None:
 # revoked, refresh_token_reused); ``*_auth_missing_refresh_token`` means the pool entry has no
 # refresh token at all. All must also carry ``relogin_required=True``; transient failures
 # (429, 5xx) do not.
-_OAUTH_GRANT_DEAD_CODES = frozenset({"invalid_grant", "invalid_token", "refresh_token_reused"})
-
-
-_TERMINAL_REFRESH_ERROR_CODES: Dict[str, FrozenSet[str]] = {
-    "nous": _OAUTH_GRANT_DEAD_CODES,
-    "xai-oauth": frozenset({"xai_refresh_failed", "xai_auth_missing_refresh_token"}),
-    "openai-codex": _OAUTH_GRANT_DEAD_CODES | {"codex_refresh_failed", "codex_auth_missing_refresh_token"},
-}
-
-
-def _is_terminal_refresh_error(exc: Exception, provider: str) -> bool:
-    """True when retrying the same *provider* refresh token cannot succeed."""
-    return (
-        isinstance(exc, AuthError)
-        and exc.provider == provider
-        and exc.code in _TERMINAL_REFRESH_ERROR_CODES[provider]
-        and bool(exc.relogin_required)
-    )
-
-
 def _quarantine_nous_oauth_state(
     state: Dict[str, Any],
     error: AuthError,
@@ -722,7 +690,7 @@ def _try_import_shared_nous_state(
     Returns ``None`` on any failure (expired token, portal unreachable) so the caller falls
     through to the normal device-code flow.
     """
-    from hermes_cli.auth import _read_shared_nous_state, _write_shared_nous_state, refresh_nous_oauth_from_state
+    from hermes_cli.auth import _read_shared_nous_state, _write_shared_nous_state, refresh_nous_oauth_from_state, _is_terminal_nous_refresh_error
     try:
         with _nous_shared_store_lock(timeout_seconds=max(timeout_seconds + 5.0, AUTH_LOCK_TIMEOUT_SECONDS)):
             shared = _read_shared_nous_state()
@@ -838,7 +806,7 @@ def _refresh_nous_or_quarantine(
     persist: Callable[[], None],
 ) -> Dict[str, Any]:
     """Redeem the Nous refresh token; on a terminal failure quarantine state + pool, persist, re-raise."""
-    from hermes_cli.auth import _refresh_access_token
+    from hermes_cli.auth import _refresh_access_token, _is_terminal_nous_refresh_error
     try:
         return _refresh_access_token(
             client=client,

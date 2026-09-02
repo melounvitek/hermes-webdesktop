@@ -96,8 +96,6 @@ from hermes_cli.auth_nous import (  # noqa: F401  (re-exported; callers/tests us
     _NOUS_SHARED_STATE_KEYS,
     _NOUS_STALE_PORTAL_HOSTS,
     _NousStatePersister,
-    _OAUTH_GRANT_DEAD_CODES,
-    _TERMINAL_REFRESH_ERROR_CODES,
     _agent_key_is_usable,
     _apply_nous_refreshed_tokens,
     _assert_nous_inference_jwt_usable,
@@ -106,10 +104,6 @@ from hermes_cli.auth_nous import (  # noqa: F401  (re-exported; callers/tests us
     _empty_nous_auth_status,
     _format_nous_entitlement_auth_error,
     _healed_nous_inference_url,
-    _is_terminal_codex_oauth_refresh_error,
-    _is_terminal_nous_refresh_error,
-    _is_terminal_refresh_error,
-    _is_terminal_xai_oauth_refresh_error,
     _iso_after,
     _log_nous_invoke_jwt_selected,
     _login_nous,
@@ -2569,6 +2563,78 @@ def get_nous_auth_status() -> Dict[str, Any]:
     return status
 
 
+@dataclass(frozen=True)
+class OAuthProviderFlow:
+    """Per-provider OAuth plumbing, keyed by provider id in ``OAUTH_PROVIDER_FLOWS``.
+
+    Entries name module-level callables (strings) rather than binding them, so
+    ``monkeypatch.setattr("hermes_cli.auth.resolve_codex_runtime_credentials", ...)`` and friends
+    keep intercepting: ``resolve()`` / ``status()`` look the name up in this module at call time.
+    """
+
+    provider_id: str
+    resolve_fn: str
+    status_fn: str
+    # AuthError codes after which retrying the same refresh token cannot succeed.
+    terminal_refresh_codes: FrozenSet[str] = frozenset()
+    # ``hermes logout`` with no active provider falls back to config.yaml ``model.provider``
+    # only for providers whose credentials live in auth.json.
+    logout_from_config: bool = False
+
+    def resolve(self, **kwargs: Any) -> Dict[str, Any]:
+        return globals()[self.resolve_fn](**kwargs)
+
+    def status(self) -> Dict[str, Any]:
+        return globals()[self.status_fn]()
+
+    def is_terminal_refresh_error(self, exc: Exception) -> bool:
+        return (
+            isinstance(exc, AuthError)
+            and exc.provider == self.provider_id
+            and exc.code in self.terminal_refresh_codes
+            and bool(exc.relogin_required)
+        )
+
+
+_OAUTH_GRANT_DEAD_CODES = frozenset({"invalid_grant", "invalid_token", "refresh_token_reused"})
+
+OAUTH_PROVIDER_FLOWS: Dict[str, OAuthProviderFlow] = {
+    "nous": OAuthProviderFlow(
+        "nous", "resolve_nous_runtime_credentials", "get_nous_auth_status",
+        terminal_refresh_codes=_OAUTH_GRANT_DEAD_CODES, logout_from_config=True,
+    ),
+    "openai-codex": OAuthProviderFlow(
+        "openai-codex", "resolve_codex_runtime_credentials", "get_codex_auth_status",
+        terminal_refresh_codes=_OAUTH_GRANT_DEAD_CODES | {"codex_refresh_failed", "codex_auth_missing_refresh_token"},
+        logout_from_config=True,
+    ),
+    "xai-oauth": OAuthProviderFlow(
+        "xai-oauth", "resolve_xai_oauth_runtime_credentials", "get_xai_oauth_auth_status",
+        terminal_refresh_codes=frozenset({"xai_refresh_failed", "xai_auth_missing_refresh_token"}),
+        logout_from_config=True,
+    ),
+    "qwen-oauth": OAuthProviderFlow("qwen-oauth", "resolve_qwen_runtime_credentials", "get_qwen_auth_status"),
+    "minimax-oauth": OAuthProviderFlow("minimax-oauth", "resolve_minimax_oauth_runtime_credentials", "get_minimax_oauth_auth_status"),
+}
+
+
+def _is_terminal_refresh_error(exc: Exception, provider: str) -> bool:
+    """True when retrying the same *provider* refresh token cannot succeed."""
+    return OAUTH_PROVIDER_FLOWS[provider].is_terminal_refresh_error(exc)
+
+
+def _is_terminal_nous_refresh_error(exc: Exception) -> bool:
+    return _is_terminal_refresh_error(exc, "nous")
+
+
+def _is_terminal_xai_oauth_refresh_error(exc: Exception) -> bool:
+    return _is_terminal_refresh_error(exc, "xai-oauth")
+
+
+def _is_terminal_codex_oauth_refresh_error(exc: Exception) -> bool:
+    return _is_terminal_refresh_error(exc, "openai-codex")
+
+
 def _codex_pool_rate_limited_status() -> Optional[Dict[str, Any]]:
     rate_limit = _codex_pool_rate_limit_status()
     if not rate_limit:
@@ -2802,35 +2868,38 @@ def _get_aws_sdk_auth_status(target: str) -> Dict[str, Any]:
 
 
 def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
-    """Generic auth status dispatcher."""
+    """Generic auth status dispatcher.
+
+    Per-provider OAuth status builders come from ``OAUTH_PROVIDER_FLOWS`` (plus Spotify /
+    Azure Foundry bespoke builders); everything else dispatches on the registry ``auth_type``
+    so a provider class (e.g. every external-process ACP backend) gets a real status instead
+    of the ``{"logged_in": False}`` fallthrough. Builders are looked up by NAME at call time
+    so tests that patch ``hermes_cli.auth.get_*_auth_status`` still apply.
+    """
     target = (provider_id or get_active_provider() or "").strip().lower()
     if not target:
         return {"logged_in": False}
-    # Bespoke status builders win over the auth_type-keyed fallbacks. Looked up
-    # at call time so tests that patch ``hermes_cli.auth.get_*_auth_status`` still apply.
-    bespoke: Dict[str, Callable[[], Dict[str, Any]]] = {
-        "spotify": get_spotify_auth_status,
-        "nous": get_nous_auth_status,
-        "openai-codex": get_codex_auth_status,
-        "xai-oauth": get_xai_oauth_auth_status,
-        "qwen-oauth": get_qwen_auth_status,
-        "minimax-oauth": get_minimax_oauth_auth_status,
-        "azure-foundry": _get_azure_foundry_auth_status,
-    }
-    if target in bespoke:
-        return bespoke[target]()
-    # External-process providers (copilot-acp today; other ACP backends tomorrow)
-    # dispatch on auth_type, not a hardcoded slug, so every provider of this
-    # class gets a real status instead of the ``{"logged_in": False}`` fallthrough.
-    by_auth_type: Dict[str, Callable[[str], Dict[str, Any]]] = {
-        "external_process": get_external_process_provider_status,
-        "api_key": get_api_key_provider_status,
-        "aws_sdk": _get_aws_sdk_auth_status,
-    }
+    status_fn_name = _BESPOKE_STATUS_FUNCTIONS.get(target)
+    if status_fn_name:
+        return globals()[status_fn_name]()
     pconfig = PROVIDER_REGISTRY.get(target)
-    if pconfig and pconfig.auth_type in by_auth_type:
-        return by_auth_type[pconfig.auth_type](target)
+    if pconfig and pconfig.auth_type in _STATUS_BY_AUTH_TYPE:
+        return globals()[_STATUS_BY_AUTH_TYPE[pconfig.auth_type]](target)
     return {"logged_in": False}
+
+
+# Bespoke status builders (name -> looked up in this module at call time) win over the
+# auth_type-keyed fallbacks below.
+_BESPOKE_STATUS_FUNCTIONS: Dict[str, str] = {
+    **{pid: flow.status_fn for pid, flow in OAUTH_PROVIDER_FLOWS.items()},
+    "spotify": "get_spotify_auth_status",
+    "azure-foundry": "_get_azure_foundry_auth_status",
+}
+_STATUS_BY_AUTH_TYPE: Dict[str, str] = {
+    "external_process": "get_external_process_provider_status",
+    "api_key": "get_api_key_provider_status",
+    "aws_sdk": "_get_aws_sdk_auth_status",
+}
 
 
 def _get_azure_foundry_auth_status() -> Dict[str, Any]:
@@ -2905,6 +2974,49 @@ def _get_azure_foundry_auth_status() -> Dict[str, Any]:
     return info
 
 
+def _default_api_key_base_url(api_key: str, default: str, env_url: str) -> str:
+    return env_url.rstrip("/") if env_url else default
+
+
+def _copilot_runtime_base_url(api_key: str, default: str, env_url: str) -> str:
+    """Copilot's API base comes from the token-exchange response (endpoints.api, with a
+    proxy-ep fallback), which is authoritative for Enterprise / proxied accounts. Falls back
+    to the registry default; the caller's non-empty guard keeps chat inference from ever
+    resolving an empty base URL (#50252)."""
+    base_url = _default_api_key_base_url(api_key, default, env_url)
+    try:
+        from hermes_cli.copilot_auth import resolve_copilot_token, get_copilot_api_token
+        raw_token, _ = resolve_copilot_token()
+        if raw_token:
+            _, resolved = get_copilot_api_token(raw_token)
+            resolved = (resolved or "").strip()
+            if resolved:
+                base_url = resolved
+    except Exception as exc:
+        logger.debug("Copilot base URL resolution fell back to default: %s", exc)
+    return base_url
+
+
+def _lmstudio_runtime_base_url(api_key: str, default: str, env_url: str) -> str:
+    return _normalize_lmstudio_runtime_base_url(_default_api_key_base_url(api_key, default, env_url))
+
+
+def _actual_runtime_base_url(api_key: str, default: str, env_url: str) -> str:
+    return normalize_actual_base_url(_default_api_key_base_url(api_key, default, env_url))
+
+
+# Providers whose runtime base URL is not simply env-override-or-registry-default:
+# ``(api_key, registry_default, env_override) -> base_url``.
+_API_KEY_BASE_URL_RESOLVERS: Dict[str, Callable[[str, str, str], str]] = {
+    "kimi-coding": _resolve_kimi_base_url,
+    "kimi-coding-cn": _resolve_kimi_base_url,
+    "zai": _resolve_zai_base_url,
+    "copilot": _copilot_runtime_base_url,
+    "lmstudio": _lmstudio_runtime_base_url,
+    "actual": _actual_runtime_base_url,
+}
+
+
 def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     """Resolve API key and base URL for an API-key provider."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)
@@ -2925,41 +3037,9 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
         key_source = key_source or "default"
 
     env_url = _provider_env_base_url(pconfig)
-
-    if provider_id in {"kimi-coding", "kimi-coding-cn"}:
-        base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
-    elif provider_id == "zai":
-        base_url = _resolve_zai_base_url(api_key, pconfig.inference_base_url, env_url)
-    elif provider_id == "copilot":
-        # Resolve the Copilot API base URL from the token-exchange response
-        # (endpoints.api, with a proxy-ep fallback), which is authoritative
-        # for Enterprise / proxied accounts. Falls back to the registry
-        # default and is guarded non-empty below so chat inference never
-        # resolves an empty base URL (#50252).
-        base_url = env_url.rstrip("/") if env_url else pconfig.inference_base_url
-        try:
-            from hermes_cli.copilot_auth import (
-                resolve_copilot_token,
-                get_copilot_api_token,
-            )
-            raw_token, _ = resolve_copilot_token()
-            if raw_token:
-                _, resolved = get_copilot_api_token(raw_token)
-                resolved = (resolved or "").strip()
-                if resolved:
-                    base_url = resolved
-        except Exception as exc:
-            logger.debug("Copilot base URL resolution fell back to default: %s", exc)
-    elif env_url:
-        base_url = env_url.rstrip("/")
-    else:
-        base_url = pconfig.inference_base_url
-
-    if provider_id == "lmstudio":
-        base_url = _normalize_lmstudio_runtime_base_url(base_url)
-
-    if provider_id == "actual":
-        base_url = normalize_actual_base_url(base_url)
+    base_url = _API_KEY_BASE_URL_RESOLVERS.get(provider_id, _default_api_key_base_url)(
+        api_key, pconfig.inference_base_url, env_url
+    )
 
     # Last-resort guard: an API-key provider must never hand back an empty
     # base URL (a set-but-empty COPILOT_API_BASE_URL or similar env override
@@ -3119,9 +3199,8 @@ def _logout_default_provider_from_config() -> Optional[str]:
     target, so logout printed "No provider is currently logged in" and never reset model.provider.
     """
     provider = _get_config_provider()
-    if provider in {"nous", "openai-codex", "xai-oauth"}:
-        return provider
-    return None
+    flow = OAUTH_PROVIDER_FLOWS.get(provider or "")
+    return provider if flow and flow.logout_from_config else None
 
 
 def _reset_config_provider() -> Path:
