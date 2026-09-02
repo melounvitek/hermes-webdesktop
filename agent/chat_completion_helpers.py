@@ -3602,6 +3602,29 @@ def _is_sse_connection_error(exc: BaseException) -> bool:
     return any(phrase in err_lower for phrase in _SSE_CONN_PHRASES)
 
 
+def _relay_stream_identity(agent, name_default: str) -> dict:
+    """``session_id``/``name``/``model_name`` kwargs for ``relay_llm.stream``."""
+    return {
+        "session_id": str(getattr(agent, "session_id", "") or ""),
+        "name": str(getattr(agent, "provider", "") or name_default),
+        "model_name": str(getattr(agent, "model", "") or ""),
+    }
+
+
+def _relay_stream_metadata(agent, api_mode: str) -> dict:
+    return {
+        "api_mode": api_mode,
+        "api_request_id": getattr(agent, "_current_api_request_id", None),
+        "call_role": (
+            "delegated"
+            if getattr(agent, "is_subagent", False)
+            else "fallback"
+            if int(getattr(agent, "_fallback_index", 0) or 0) > 0
+            else "primary"
+        ),
+    }
+
+
 def _stream_final_text(response) -> str:
     try:
         choices = getattr(response, "choices", None)
@@ -3791,9 +3814,7 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
             stream = relay_llm.stream(
                 dict(api_kwargs),
                 _open_bedrock_stream,
-                session_id=str(getattr(agent, "session_id", "") or ""),
-                name=str(getattr(agent, "provider", "") or "bedrock"),
-                model_name=str(getattr(agent, "model", "") or ""),
+                **_relay_stream_identity(agent, "bedrock"),
                 finalizer=_finalize_bedrock_stream,
                 on_stream_created=_bedrock_stream_created,
                 on_chunk=intercepted_events.append,
@@ -3802,19 +3823,7 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
                 completed_response_predicate=lambda response: bool(
                     getattr(response, "choices", None)
                 ),
-                metadata={
-                    "api_mode": "custom",
-                    "api_request_id": getattr(
-                        agent, "_current_api_request_id", None
-                    ),
-                    "call_role": (
-                        "delegated"
-                        if getattr(agent, "is_subagent", False)
-                        else "fallback"
-                        if int(getattr(agent, "_fallback_index", 0) or 0) > 0
-                        else "primary"
-                    ),
-                },
+                metadata=_relay_stream_metadata(agent, "custom"),
                 defer_logical_completion=True,
             )
             streamed_response = stream_converse_with_callbacks(
@@ -4312,24 +4321,12 @@ class _StreamingCall:
             relay_llm.stream(
                 self.api_kwargs,
                 _open_stream,
-                session_id=str(getattr(self.agent, "session_id", "") or ""),
-                name=str(getattr(self.agent, "provider", "") or "provider"),
-                model_name=str(getattr(self.agent, "model", "") or ""),
+                **_relay_stream_identity(self.agent, "provider"),
                 finalizer=_relay_final_response,
                 on_stream_created=_stream_created,
                 accept_chunk=_accept_stream_chunk,
                 completed_response_predicate=lambda value: hasattr(value, "choices"),
-                metadata={
-                    "api_mode": "chat_completions",
-                    "api_request_id": getattr(self.agent, "_current_api_request_id", None),
-                    "call_role": (
-                        "delegated"
-                        if getattr(self.agent, "is_subagent", False)
-                        else "fallback"
-                        if int(getattr(self.agent, "_fallback_index", 0) or 0) > 0
-                        else "primary"
-                    ),
-                },
+                metadata=_relay_stream_metadata(self.agent, "chat_completions"),
                 defer_logical_completion=True,
             )
         )
@@ -4825,24 +4822,12 @@ class _StreamingCall:
             relay_llm.stream(
                 self.api_kwargs,
                 _open_anthropic_stream,
-                session_id=str(getattr(self.agent, "session_id", "") or ""),
-                name=str(getattr(self.agent, "provider", "") or "anthropic"),
-                model_name=str(getattr(self.agent, "model", "") or ""),
+                **_relay_stream_identity(self.agent, "anthropic"),
                 finalizer=accumulator.finalize,
                 on_stream_created=_anthropic_stream_created,
                 on_chunk=accumulator.observe,
                 accept_chunk=_accept_anthropic_event,
-                metadata={
-                    "api_mode": "anthropic_messages",
-                    "api_request_id": getattr(self.agent, "_current_api_request_id", None),
-                    "call_role": (
-                        "delegated"
-                        if getattr(self.agent, "is_subagent", False)
-                        else "fallback"
-                        if int(getattr(self.agent, "_fallback_index", 0) or 0) > 0
-                        else "primary"
-                    ),
-                },
+                metadata=_relay_stream_metadata(self.agent, "anthropic_messages"),
                 defer_logical_completion=True,
             )
         )
