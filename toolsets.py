@@ -72,15 +72,18 @@ def _bundle(description, extras=()):
     return _ts(description, _HERMES_CORE_TOOLS + list(extras))
 
 
-_CODING_TOOLS = [
-    "web_search", "web_extract", "terminal", "process_manage", "read_file",
-    "write_file", "patch", "search_files", "vision_analyze", "skills_list",
-    "skill_view", "skill_manage", "browser_navigate", "browser_snapshot",
-    "browser_click", "browser_type", "browser_scroll", "browser_back", "browser_press",
-    "browser_get_images", "browser_vision", "browser_console", "browser_cdp",
-    "browser_dialog", "browser_exec", "todo_list", "memory", "session_search",
-    "clarify", "execute_code", "delegate_task",
-]
+def _core_without(*excluded, kanban=True):
+    """_HERMES_CORE_TOOLS minus *excluded* (and, unless kanban=True, every kanban_* tool); order preserved."""
+    return [t for t in _HERMES_CORE_TOOLS if t not in excluded and (kanban or not t.startswith("kanban_"))]
+
+
+# Coding posture: everything you reach for while pairing on code; drops messaging,
+# tts, image_gen, home-assistant, cron, kanban and computer-use.
+_CODING_TOOLS = _core_without(
+    "image_generate", "text_to_speech", "cronjob_manage", "computer_use",
+    "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    kanban=False,
+)
 
 # Core toolset definitions: individual tools or references to other toolsets.
 TOOLSETS = {
@@ -255,16 +258,7 @@ TOOLSETS = {
     "hermes-api-server": _ts(
         "OpenAI-compatible API server — full agent tools accessible via HTTP (no "
         "interactive UI tools like clarify or send_message)",
-        [
-            "web_search", "web_extract", "terminal", "process_manage", "read_file",
-            "write_file", "patch", "search_files", "vision_analyze", "image_generate",
-            "skills_list", "skill_view", "skill_manage", "browser_navigate",
-            "browser_snapshot", "browser_click", "browser_type", "browser_scroll",
-            "browser_back", "browser_press", "browser_get_images", "browser_vision",
-            "browser_console", "browser_cdp", "browser_dialog", "browser_exec", "todo_list",
-            "memory", "session_search", "execute_code", "delegate_task", "cronjob_manage",
-            "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
-        ],
+        _core_without("text_to_speech", "clarify", "computer_use", kanban=False),
     ),
     "hermes-cli": _bundle("Full interactive CLI toolset - all default tools plus cronjob management"),
 
