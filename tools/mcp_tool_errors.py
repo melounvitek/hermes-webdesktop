@@ -397,18 +397,9 @@ def _is_auth_error(exc: BaseException) -> bool:
 # Lower-cased substrings meaning the server-side transport session expired /
 # was GC'd. The OAuth token is still valid — only the transport needs rebuilding.
 _SESSION_EXPIRED_MARKERS: tuple = (
-    "invalid or expired session",
-    "expired session",
-    "session expired",
-    "session not found",
-    "unknown session",
-    "session terminated",
-    "closedresourceerror",
-    "closed resource",
-    "transport is closed",
-    "connection closed",
-    "broken pipe",
-    "end of file",
+    "invalid or expired session", "expired session", "session expired", "session not found",
+    "unknown session", "session terminated", "closedresourceerror", "closed resource",
+    "transport is closed", "connection closed", "broken pipe", "end of file",
 )
 
 
