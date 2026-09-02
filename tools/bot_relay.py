@@ -1,9 +1,11 @@
 """Bot Mode cross-connection relay — connections ARE the peer set.
 
 Gateway-side half of the relay that lets agents on ANY Desktop-connected
-gateway message agents on ANY other, with ``message_agent`` as the one send
-path. Plain file plumbing under ``<root>/bot_relay/`` — no network; the Desktop
-owns every socket and does all cross-connection I/O:
+gateway (local, remote URL, SSH, Hermes Cloud, docker) message agents on ANY
+other, with ``message_agent`` as the one send path — connections ARE the peer
+set. Plain file plumbing under ``<root>/bot_relay/`` — no network; the gateway
+never holds another connection's credentials, the Desktop owns every socket and
+does all cross-connection I/O:
 
 - ``roster.json`` — union roster of agents on OTHER connections, pushed by the
   Desktop (``bot_relay.roster.sync``); folded into the Bot Chat protocol section
@@ -80,7 +82,14 @@ class EnvelopeRefusedError(RuntimeError):
         super().__init__(message)
         self.reason = reason
 
+
+# Profile names, handles and connection ids share one shape (also the local
+# ``message_agent`` target grammar in ``tools/bot_mode_dm.py``).
 _HANDLE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+# One turn in a profile's canonical Bot Chat: ``hermes -p <profile> *BOT_CHAT_TURN_ARGS``.
+# ``-c "Bot Chat"`` must match ``bot_mode_probe.BOT_CHAT_TITLE``.
+BOT_CHAT_TURN_ARGS = ("chat", "--in", "~", "-c", "Bot Chat", "--create-if-missing", "-Q")
 
 
 def relay_root(root: Path | str) -> Path:
@@ -116,7 +125,9 @@ def _atomic_write_json(target: Path, payload: Any, *, prefix: str, sort_keys: bo
 def _normalize_roster_row(row: Any) -> Optional[dict]:
     """Validated, minimal roster row or None.
 
-    Rows come from the Desktop over RPC — treat as untrusted input.
+    Rows come from the Desktop over RPC — treat as untrusted input. A row names
+    an agent on another connection: profile, taggable handle, owning connection
+    id/label, and optional title/description for the protocol section.
     """
     if not isinstance(row, dict):
         return None
@@ -210,13 +221,12 @@ def resolve_remote_target(raw_target: str, roster: list[dict]) -> Any:
 
 
 def remote_target_forms(roster: list[dict]) -> list[str]:
-    """Human/agent-facing target strings, ambiguity-aware."""
-    by_handle: dict[str, int] = {}
-    for row in roster:
-        by_handle[row["handle"].lower()] = by_handle.get(row["handle"].lower(), 0) + 1
+    """Human/agent-facing target strings: bare handle when unique across
+    connections, else ``handle@connection`` (mirrors ``resolve_remote_target``)."""
+    handles = [row["handle"].lower() for row in roster]
     return [
-        f"{row['handle']}@{row['connection_id']}" if by_handle[row["handle"].lower()] > 1 else row["handle"]
-        for row in roster
+        f"{row['handle']}@{row['connection_id']}" if handles.count(h) > 1 else row["handle"]
+        for row, h in zip(roster, handles)
     ]
 
 
@@ -309,6 +319,34 @@ def enqueue_envelope(
     return envelope
 
 
+def _expire_if_stale(root: Path | str, path: Path, ttl: float, now: float) -> bool:
+    """True when the outbox envelope at ``path`` is older than ``ttl``; writes the
+    'queued_expired' error reply so the sender's waiter resolves (best effort —
+    an invalid id still counts as expired). Unreadable envelopes are left for
+    the claim attempt to deal with."""
+    try:
+        env = json.loads(path.read_text(encoding="utf-8"))
+        created = float(env.get("created_at") or path.stat().st_mtime)
+    except (OSError, ValueError):
+        return False
+    if now - created <= ttl:
+        return False
+    handle = str(env.get("target_handle") or "?")
+    conn = str(env.get("target_connection") or "?")
+    with contextlib.suppress(OSError, ValueError):
+        write_reply(
+            root,
+            str(env.get("id") or ""),
+            error=(
+                f"queued message to @{handle} on {conn} expired after "
+                f"{ttl}s waiting for the Desktop to drain it — it was "
+                "NOT delivered. Resend once the Desktop reconnects."
+            ),
+            reason="queued_expired",
+        )
+    return True
+
+
 def claim_pending_envelopes(root: Path | str) -> list[dict]:
     """Drain the outbox (rename → claimed/, so a second drain can't double-
     deliver). Sweeps stale claimed/reply artifacts opportunistically.
@@ -322,37 +360,11 @@ def claim_pending_envelopes(root: Path | str) -> list[dict]:
     ttl = _envelope_ttl_seconds()
     now = time.time()
     out: list[dict] = []
-    outbox = base / OUTBOX_DIR
-    for path in sorted(outbox.glob("*.json")):
-        if ttl > 0:
-            expired = False
-            try:
-                env = json.loads(path.read_text(encoding="utf-8"))
-                created = float(env.get("created_at") or path.stat().st_mtime)
-                if now - created > ttl:
-                    expired = True
-                    handle = str(env.get("target_handle") or "?")
-                    conn = str(env.get("target_connection") or "?")
-                    write_reply(
-                        root,
-                        str(env.get("id") or ""),
-                        error=(
-                            f"queued message to @{handle} on {conn} expired after "
-                            f"{ttl}s waiting for the Desktop to drain it — it was "
-                            "NOT delivered. Resend once the Desktop reconnects."
-                        ),
-                        reason="queued_expired",
-                    )
-            except (OSError, ValueError):
-                # Unreadable envelope / invalid id: still removed below if it
-                # already counted as expired, else the claim attempt handles it.
-                pass
-            if expired:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-                continue
+    for path in sorted((base / OUTBOX_DIR).glob("*.json")):
+        if ttl > 0 and _expire_if_stale(root, path, ttl, now):
+            with contextlib.suppress(OSError):
+                path.unlink()
+            continue
         claimed = base / CLAIMED_DIR / path.name
         try:
             os.replace(path, claimed)  # atomic claim
@@ -368,7 +380,8 @@ def write_reply(
     """Persist the relayed reply (or delivery error) for the waiter.
 
     ``reason`` is an optional typed failure code (``tools.bot_failure_reasons``);
-    when omitted and ``error`` is non-empty it is classified from the text.
+    when omitted and ``error`` is non-empty it is classified from the text. The
+    waiter only surfaces the human ``error`` (plus the code as a tag).
     """
     base = _ensure_dirs(root)
     safe = str(envelope_id or "").strip()
@@ -386,21 +399,29 @@ def write_reply(
     return path
 
 
+def unlink_files_older_than(directory: Path, pattern: str, cutoff: float) -> int:
+    """Remove regular files under ``directory`` matching ``pattern`` with mtime
+    before ``cutoff``; returns the count. Never raises (missing dir → 0)."""
+    removed = 0
+    try:
+        for path in directory.glob(pattern):
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return removed
+
+
 def _sweep_stale(base: Path, *, now: float | None = None) -> int:
     cutoff = (time.time() if now is None else now) - STALE_AFTER_SECONDS
-    removed = 0
-    for sub in (CLAIMED_DIR, REPLIES_DIR, OUTBOX_DIR):
-        try:
-            for path in (base / sub).glob("*.json"):
-                try:
-                    if path.stat().st_mtime < cutoff:
-                        path.unlink()
-                        removed += 1
-                except OSError:
-                    continue
-        except OSError:
-            continue
-    return removed
+    return sum(
+        unlink_files_older_than(base / sub, "*.json", cutoff)
+        for sub in (CLAIMED_DIR, REPLIES_DIR, OUTBOX_DIR)
+    )
 
 
 def cleanup_bot_relay_artifacts(max_age_hours: float | None = None) -> int:
@@ -488,8 +509,7 @@ def _hermes_cli() -> str:
 
 def local_delivery_command(profile: str, query_file: str) -> list[str]:
     """argv that delivers a DM into ``profile``'s Bot Chat on THIS gateway."""
-    return [_hermes_cli(), "-p", profile, "chat", "--in", "~", "-c", "Bot Chat",
-            "--create-if-missing", "-Q", "--query-file", query_file]
+    return [_hermes_cli(), "-p", profile, *BOT_CHAT_TURN_ARGS, "--query-file", query_file]
 
 
 # ── per-profile turn lock ────────────────────────────────────────────────────
@@ -550,7 +570,8 @@ def acquire_turn_lock(
     (``bot_mode.turn_wait_seconds`` unless ``timeout_seconds`` is given). No
     ordering among waiters, but every waiter is bounded — no deadlock. Raises
     :class:`TurnBusyError` when the budget is exhausted. Without ``fcntl``
-    (Windows) the lock is a no-op.
+    (Windows) the lock is a no-op — those installs never had this race path
+    in production.
     """
     try:
         import fcntl

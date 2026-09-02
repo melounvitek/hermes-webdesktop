@@ -1,6 +1,8 @@
 """Discord server introspection and management tool (REST API + bot token).
 
-Only in the hermes-discord toolset. The model-visible schema is filtered by two
+Talks to the Discord REST API directly with the bot token — no dependency on
+the gateway adapter's client. Only in the hermes-discord toolset, so it costs
+nothing on other platforms. The model-visible schema is filtered by two
 gates: (1) privileged intents from GET /applications/@me — actions needing an
 intent the bot lacks (search_members / member_info → GUILD_MEMBERS) are hidden,
 and fetch_messages/list_pins are annotated when MESSAGE_CONTENT is missing;
@@ -135,7 +137,8 @@ _CAPABILITY_DISK_TTL_SECONDS = 24 * 3600
 _capability_bg_started: set = set()
 _capability_bg_lock = threading.Lock()
 
-# Permissive default: all actions exposed, call-time 403s mapped to guidance.
+# Permissive default (``detected`` False = detection failed/pending): all actions
+# exposed, call-time 403s mapped to guidance by ``_enrich_403``.
 _PERMISSIVE_CAPS = {"has_members_intent": True, "has_message_content": True, "detected": False}
 
 
@@ -284,21 +287,50 @@ def _ok(message: str) -> str:
 
 
 def _member_summary(m: Dict[str, Any], *, full: bool) -> Dict[str, Any]:
+    """Member row; ``full`` adds the avatar/join fields member_info exposes
+    (key order is part of the result text, so the two shapes stay explicit)."""
     user = m.get("user", {})
-    out = {
+    base = {
         "user_id": user.get("id"),
         "username": user.get("username"),
         "display_name": user.get("global_name"),
         "nickname": m.get("nick"),
     }
-    if full:
-        out["avatar"] = user.get("avatar")
-    out["bot"] = user.get("bot", False)
-    out["roles"] = m.get("roles", [])
-    if full:
-        out["joined_at"] = m.get("joined_at")
-        out["premium_since"] = m.get("premium_since")
-    return out
+    tail = {"bot": user.get("bot", False), "roles": m.get("roles", [])}
+    if not full:
+        return {**base, **tail}
+    return {
+        **base,
+        "avatar": user.get("avatar"),
+        **tail,
+        "joined_at": m.get("joined_at"),
+        "premium_since": m.get("premium_since"),
+    }
+
+
+def _message_summary(msg: Dict[str, Any]) -> Dict[str, Any]:
+    author = msg.get("author", {})
+    return {
+        "id": msg["id"],
+        "content": msg.get("content", ""),
+        "author": {
+            "id": author.get("id"),
+            "username": author.get("username"),
+            "display_name": author.get("global_name"),
+            "bot": author.get("bot", False),
+        },
+        "timestamp": msg.get("timestamp"),
+        "edited_timestamp": msg.get("edited_timestamp"),
+        "attachments": [
+            {"filename": a.get("filename"), "url": a.get("url"), "size": a.get("size")}
+            for a in msg.get("attachments", [])
+        ],
+        "reactions": [
+            {"emoji": r.get("emoji", {}).get("name"), "count": r.get("count", 0)}
+            for r in msg.get("reactions", [])
+        ] if msg.get("reactions") else [],
+        "pinned": msg.get("pinned", False),
+    }
 
 
 def _int_or(value: Any, default: int) -> int:
@@ -306,6 +338,11 @@ def _int_or(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _limit_param(limit: Any, default: int) -> str:
+    """Discord caps list endpoints at 100 per page."""
+    return str(min(_int_or(limit, default), 100))
 
 
 def _list_guilds(token: str, **_kwargs: Any) -> str:
@@ -425,8 +462,8 @@ def _member_info(token: str, guild_id: str, user_id: str, **_kwargs: Any) -> str
 
 
 def _search_members(token: str, guild_id: str, query: str, limit: int = 20, **_kwargs: Any) -> str:
-    """Search for guild members by name."""
-    params = {"query": query, "limit": str(min(_int_or(limit, 20), 100))}
+    """Search for guild members by name prefix (requires the GUILD_MEMBERS intent)."""
+    params = {"query": query, "limit": _limit_param(limit, 20)}
     members = _discord_request("GET", f"/guilds/{guild_id}/members/search", token, params=params)
     return _listing("members", [_member_summary(m, full=False) for m in members])
 
@@ -436,38 +473,15 @@ def _fetch_messages(
     before: Optional[str] = None, after: Optional[str] = None,
     **_kwargs: Any,
 ) -> str:
-    """Fetch recent messages from a channel."""
-    params: Dict[str, str] = {"limit": str(min(_int_or(limit, 50), 100))}
+    """Recent messages from a channel or thread; ``before``/``after`` are
+    message snowflakes for reverse/forward pagination."""
+    params: Dict[str, str] = {"limit": _limit_param(limit, 50)}
     if before:
         params["before"] = before
     if after:
         params["after"] = after
     messages = _discord_request("GET", f"/channels/{channel_id}/messages", token, params=params)
-    result = []
-    for msg in messages:
-        author = msg.get("author", {})
-        result.append({
-            "id": msg["id"],
-            "content": msg.get("content", ""),
-            "author": {
-                "id": author.get("id"),
-                "username": author.get("username"),
-                "display_name": author.get("global_name"),
-                "bot": author.get("bot", False),
-            },
-            "timestamp": msg.get("timestamp"),
-            "edited_timestamp": msg.get("edited_timestamp"),
-            "attachments": [
-                {"filename": a.get("filename"), "url": a.get("url"), "size": a.get("size")}
-                for a in msg.get("attachments", [])
-            ],
-            "reactions": [
-                {"emoji": r.get("emoji", {}).get("name"), "count": r.get("count", 0)}
-                for r in msg.get("reactions", [])
-            ] if msg.get("reactions") else [],
-            "pinned": msg.get("pinned", False),
-        })
-    return _listing("messages", result)
+    return _listing("messages", [_message_summary(msg) for msg in messages])
 
 
 def _list_pins(token: str, channel_id: str, **_kwargs: Any) -> str:
@@ -546,11 +560,11 @@ _ACTIONS = {
     "remove_role": _remove_role,
 }
 
+# Two tools share one action table: ``discord`` (core, the participation trio
+# every bot user wants) and ``discord_admin`` (everything else).
 _CORE_ACTION_NAMES = frozenset({"fetch_messages", "search_members", "create_thread"})
-_ADMIN_ACTION_NAMES = frozenset(_ACTIONS.keys()) - _CORE_ACTION_NAMES
-
 _CORE_ACTIONS = {k: v for k, v in _ACTIONS.items() if k in _CORE_ACTION_NAMES}
-_ADMIN_ACTIONS = {k: v for k, v in _ACTIONS.items() if k in _ADMIN_ACTION_NAMES}
+_ADMIN_ACTIONS = {k: v for k, v in _ACTIONS.items() if k not in _CORE_ACTION_NAMES}
 
 # Single source of truth: action → (required-param signature, description).
 # Drives the schema description AND runtime required-param validation.
@@ -595,18 +609,14 @@ def _load_allowed_actions_config() -> Optional[List[str]]:
     raw = (cfg.get("discord") or {}).get("server_actions")
     if raw is None or raw == "":
         return None
-
     if isinstance(raw, str):
-        names = [n.strip() for n in raw.split(",") if n.strip()]
-    elif isinstance(raw, (list, tuple)):
-        names = [str(n).strip() for n in raw if str(n).strip()]
-    else:
+        raw = raw.split(",")
+    elif not isinstance(raw, (list, tuple)):
         logger.warning(
             "discord.server_actions: unexpected type %s; ignoring.", type(raw).__name__,
         )
         return None
-
-    valid = [n for n in names if n in _ACTIONS]
+    names = [str(n).strip() for n in raw if str(n).strip()]
     invalid = [n for n in names if n not in _ACTIONS]
     if invalid:
         logger.warning(
@@ -614,7 +624,7 @@ def _load_allowed_actions_config() -> Optional[List[str]]:
             "Known: %s",
             ", ".join(invalid), ", ".join(_ACTIONS.keys()),
         )
-    return valid
+    return [n for n in names if n in _ACTIONS]
 
 
 def _available_actions(
@@ -733,39 +743,31 @@ def get_dynamic_schema_admin() -> Optional[Dict[str, Any]]:
 
 # ── 403 error enrichment ─────────────────────────────────────────────────────
 
+_NO_MANAGE_MESSAGES = "Bot lacks MANAGE_MESSAGES permission in this channel"
+_VIEW_HISTORY = "Bot cannot view this channel (missing VIEW_CHANNEL or READ_MESSAGE_HISTORY)."
+_ROLE_HIERARCHY = (
+    "Either the bot lacks MANAGE_ROLES, or the target role sits higher "
+    "than the bot's highest role."
+)
+
+# Per-action guidance for a call-time 403 (per-guild permissions are never pre-checked).
 _ACTION_403_HINT = {
     "pin_message": (
-        "Bot lacks MANAGE_MESSAGES permission in this channel. "
+        f"{_NO_MANAGE_MESSAGES}. "
         "Ask the server admin to grant the bot a role that has MANAGE_MESSAGES, "
         "or a per-channel overwrite."
     ),
-    "unpin_message": (
-        "Bot lacks MANAGE_MESSAGES permission in this channel."
-    ),
-    "delete_message": (
-        "Bot lacks MANAGE_MESSAGES permission in this channel, or cannot view the channel/message."
-    ),
-    "create_thread": (
-        "Bot lacks CREATE_PUBLIC_THREADS in this channel, or cannot view it."
-    ),
+    "unpin_message": f"{_NO_MANAGE_MESSAGES}.",
+    "delete_message": f"{_NO_MANAGE_MESSAGES}, or cannot view the channel/message.",
+    "create_thread": "Bot lacks CREATE_PUBLIC_THREADS in this channel, or cannot view it.",
     "add_role": (
-        "Either the bot lacks MANAGE_ROLES, or the target role sits higher "
-        "than the bot's highest role. Roles can only be assigned below the "
+        f"{_ROLE_HIERARCHY} Roles can only be assigned below the "
         "bot's own position in the role hierarchy."
     ),
-    "remove_role": (
-        "Either the bot lacks MANAGE_ROLES, or the target role sits higher "
-        "than the bot's highest role."
-    ),
-    "fetch_messages": (
-        "Bot cannot view this channel (missing VIEW_CHANNEL or READ_MESSAGE_HISTORY)."
-    ),
-    "list_pins": (
-        "Bot cannot view this channel (missing VIEW_CHANNEL or READ_MESSAGE_HISTORY)."
-    ),
-    "channel_info": (
-        "Bot cannot view this channel (missing VIEW_CHANNEL)."
-    ),
+    "remove_role": _ROLE_HIERARCHY,
+    "fetch_messages": _VIEW_HISTORY,
+    "list_pins": _VIEW_HISTORY,
+    "channel_info": "Bot cannot view this channel (missing VIEW_CHANNEL).",
     "search_members": (
         "Likely missing the Server Members privileged intent — enable it in the "
         "Discord Developer Portal under your bot's settings."
@@ -859,23 +861,18 @@ def discord_admin_handler(action: str, **kwargs) -> str:
 
 
 def _make_handler(handler_fn):
-    """Create a registry-compatible handler lambda for a discord handler."""
+    """Registry-compatible handler: fills every schema param from ``_HANDLER_DEFAULTS``."""
     return lambda args, **kw: handler_fn(
         **{k: args.get(k, v) for k, v in _HANDLER_DEFAULTS.items()},
     )
 
 
-_STATIC_CORE_SCHEMA = _build_schema(
-    list(_CORE_ACTIONS.keys()), caps={"detected": False}, tool_name="discord",
-)
-_STATIC_ADMIN_SCHEMA = _build_schema(
-    list(_ADMIN_ACTIONS.keys()), caps={"detected": False}, tool_name="discord_admin",
-)
-
+# Static (un-detected) schemas at import; the intent/config-filtered ones come
+# from get_dynamic_schema_core/admin via model_tools' dynamic schema overrides.
 registry.register(
     name="discord",
     toolset="discord",
-    schema=_STATIC_CORE_SCHEMA,
+    schema=_build_schema(list(_CORE_ACTIONS), caps={"detected": False}, tool_name="discord"),
     handler=_make_handler(discord_core),
     check_fn=check_discord_tool_requirements,
     requires_env=["DISCORD_BOT_TOKEN"],
@@ -884,7 +881,7 @@ registry.register(
 registry.register(
     name="discord_admin",
     toolset="discord_admin",
-    schema=_STATIC_ADMIN_SCHEMA,
+    schema=_build_schema(list(_ADMIN_ACTIONS), caps={"detected": False}, tool_name="discord_admin"),
     handler=_make_handler(discord_admin_handler),
     check_fn=check_discord_tool_requirements,
     requires_env=["DISCORD_BOT_TOKEN"],

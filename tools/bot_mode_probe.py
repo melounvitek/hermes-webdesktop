@@ -3,11 +3,17 @@
 When any profile on this install carries ``ui_meta['hermes-bots']`` in its
 profile.yaml (Bot-Mode-managed), a bot's canonical "Bot Chat" session — and ONLY
 that session (the caller, agent/system_prompt.py, enforces the title gate against
-``BOT_CHAT_TITLE``) — gets a "Messaging other agents" section. Silent (``""``)
-when no profile is managed, when the profile's SOUL.md already carries the
-heading (legacy plugin-appended text must never double up), or on any error —
-a prompt build must never crash. Cached per (process, home) so compression-
-triggered rebuilds produce identical bytes. Toggle: ``agent.bot_mode_protocol``.
+``BOT_CHAT_TITLE``) — gets a "Messaging other agents" section so the bot can
+receive teammate DMs, reply with attribution, and hand off @mentions. Regular
+sessions never carry it; the desktop's composer middleware owns the @mention
+send path there.
+
+The protocol is injected by the core at prompt-build time instead of the old
+plugin-side SOUL.md append. Silent (``""``) when no profile is managed, when the
+profile's SOUL.md already carries the heading (legacy plugin-appended text must
+never double up), or on any error — a prompt build must never crash. Cached per
+(process, home) so compression-triggered rebuilds produce identical bytes.
+Toggle: ``agent.bot_mode_protocol`` in config.yaml (default True).
 
 Also hosts the path/roster helpers shared by ``bot_mode_dm`` and ``bot_relay``.
 """
@@ -123,18 +129,18 @@ def _soul_has_protocol(profile_dir: Path) -> bool:
 
 def _profile_role(profile_dir: Path) -> str:
     """Teammate role line: Bot Mode title — profile description (either may be
-    absent). Single-line, ≤160 chars, "" when neither exists. Never raises."""
+    absent). The title is the name the user gave the bot in Bot Mode; the
+    description is the profile's stated purpose — either tells a teammate WHO
+    to message for a job. Single-line, ≤160 chars, "" when neither. Never raises."""
     try:
         data = _read_yaml_dict(profile_dir / "profile.yaml")
         if not data:
             return ""
         bots = _bots_meta(data) or {}
-        parts = [
-            p
-            for p in (str(bots.get("title") or "").strip(), str(data.get("description") or "").strip())
-            if p
-        ]
-        return " ".join(" — ".join(parts).split())[:160]
+        title = str(bots.get("title") or "").strip()
+        description = str(data.get("description") or "").strip()
+        line = " — ".join(p for p in (title, description) if p)
+        return " ".join(line.split())[:160]
     except Exception:
         return ""
 
@@ -284,8 +290,11 @@ _EPOCH_RE_TEXT = r"Capability epoch: ([0-9a-f]{12})"
 def capability_fingerprint(home: str | os.PathLike | None = None) -> str:
     """12-hex digest of the capability surface for ``home``'s profile.
 
-    Deliberately NOT cached — the point is detecting on-disk drift against the
-    epoch embedded in a stored prompt. Never raises ("unavailable" on failure).
+    Sources: disabled skills + enabled toolsets + MCP config (config.yaml),
+    SOUL.md bytes, installed skill names, the Bot-Mode roster (+ roles), peers
+    and the relay roster. Deliberately NOT cached — the point is detecting
+    on-disk drift against the epoch embedded in a stored prompt. Never raises
+    ("unavailable" on failure).
     """
     import hashlib
     import json

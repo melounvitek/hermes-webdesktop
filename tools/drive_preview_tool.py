@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Interact with the in-app browser / preview pane in the Hermes desktop GUI.
 
-Clicking, typing, scrolling, history — so the agent drives the page the user sees.
+``open_preview`` shows a page, ``read_preview`` reads it; this is the third leg —
+clicking, typing, scrolling, history — so the agent drives the page the user sees.
 Elements are addressed by legible refs from ``action="elements"`` (``btn-sign-in``,
 ``inp-email``). A ref lasts while the page is open — including across a re-render that
 rebuilds the element — and only a navigation retires it (the renderer says so rather
 than acting on whatever now occupies the spot). Because refs hold, the renderer answers
-with a *delta* (appeared/went/changed/rebound) instead of re-sending the inventory.
-Round-trips through the gateway's blocking-prompt bridge (``preview.act.request`` ->
-``preview.act.respond``); this module is schema + a thin dispatcher over the callback.
+with a *delta* (appeared/went/changed/rebound) instead of re-sending the inventory —
+cheap only because the refs stay legible on their own several turns later.
+Round-trips through the gateway's blocking-prompt bridge like ``read_preview``:
+tui_gateway emits ``preview.act.request``, the renderer injects the interaction engine
+into the pane's webview and answers ``preview.act.respond``. This module is schema + a
+thin dispatcher over the platform-injected callback. Lives in the ``desktop_ui`` toolset,
+which the GUI gateway enables only for desktop-sourced sessions.
 """
 
 from typing import Callable, Optional

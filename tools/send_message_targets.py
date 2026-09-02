@@ -57,24 +57,32 @@ _EMAIL_TARGET_RE = re.compile(r"^\s*[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2
 _HOME_CHANNEL_ENV_OVERRIDES = {"email": "EMAIL_HOME_ADDRESS"}
 
 
-# Per-platform explicit-target parsers: target_ref -> (chat_id, thread_id) or
-# None to fall through to the generic rules below. Order inside each parser
-# matters (e.g. Slack thread form before bare conversation id).
+_UNRESOLVED = object()  # sentinel: stop parsing, target is NOT explicit (skip generic rules)
+
+
+# Per-platform explicit-target parsers: target_ref -> (chat_id, thread_id),
+# None to fall through to the generic rules in _parse_target_ref, or
+# _UNRESOLVED. Order inside each parser matters (e.g. Slack thread form
+# before bare conversation id).
+def _parse_regex_groups(regex, *, thread_group=True):
+    """Explicit when ``regex`` fully matches: chat_id = group 1, thread = group 2 (or None)."""
+    def parse(ref):
+        match = regex.fullmatch(ref)
+        if not match:
+            return None
+        return match.group(1), (match.group(2) if thread_group else None)
+    return parse
+
+
 def _parse_telegram(ref):
-    match = _TELEGRAM_TOPIC_TARGET_RE.fullmatch(ref)
-    if match:
-        return match.group(1), match.group(2)
+    # "<chat_id>[:<topic_id>]" or an @username (usernames must not be force-int'd).
+    parsed = _parse_regex_groups(_TELEGRAM_TOPIC_TARGET_RE)(ref)
+    if parsed:
+        return parsed
     from plugins.platforms.telegram.telegram_ids import parse_telegram_username_target
 
     username = parse_telegram_username_target(ref)
     return (username, None) if username else None
-
-
-def _parse_topic(regex):
-    def parse(ref):
-        match = regex.fullmatch(ref)
-        return (match.group(1), match.group(2)) if match else None
-    return parse
 
 
 def _parse_slack(ref):
@@ -92,13 +100,13 @@ def _parse_slack(ref):
 
 
 def _parse_matrix(ref):
-    # "<room>:$<event_id>" addresses a thread; bare "!room" / "@user" handled below.
+    # "<room>:$<event_id>" addresses a thread (rfind: room ids contain ':').
+    # Bare "!room" / "@user" are explicit too, but via the generic rule so the
+    # numeric check keeps precedence exactly as before.
     trimmed = ref.strip()
     split_idx = trimmed.rfind(":$")
     if split_idx > 0:
         return trimmed[:split_idx], trimmed[split_idx + 1 :]
-    if trimmed.startswith(("!", "@")):
-        return None  # deferred: numeric check must run first (generic rule)
     return None
 
 
@@ -109,20 +117,15 @@ def _parse_regex_stripped(regex):
     return parse
 
 
-def _parse_group1(regex):
-    def parse(ref):
-        match = regex.fullmatch(ref)
-        return (match.group(1), None) if match else None
-    return parse
-
-
 def _parse_yuanbao(ref):
+    # "group:<code>" / "direct:<id>"; a bare number is a group code, never a
+    # generic numeric chat id (yuanbao never falls through to the generic rules).
     match = _YUANBAO_TARGET_RE.fullmatch(ref)
     if match:
         return match.group(1), None
     if ref.strip().isdigit():
         return f"group:{ref.strip()}", None
-    return _UNRESOLVED  # yuanbao never falls through to the generic rules
+    return _UNRESOLVED
 
 
 def _parse_nonempty(ref):
@@ -133,6 +136,7 @@ def _parse_nonempty(ref):
 
 
 def _parse_signal(ref):
+    # "group:<id>" is a native group target; an empty id is not explicit.
     stripped = ref.strip()
     if stripped.startswith("group:"):
         group_id = stripped[len("group:"):].strip()
@@ -140,15 +144,13 @@ def _parse_signal(ref):
     return None
 
 
-_UNRESOLVED = object()  # sentinel: stop parsing, target is not explicit
-
 _PLATFORM_PARSERS = {
     "telegram": _parse_telegram,
-    "feishu": _parse_topic(_FEISHU_TARGET_RE),
-    "discord": _parse_topic(_NUMERIC_TOPIC_RE),
+    "feishu": _parse_regex_groups(_FEISHU_TARGET_RE),
+    "discord": _parse_regex_groups(_NUMERIC_TOPIC_RE),  # "<channel>[:<thread>]" snowflakes
     "slack": _parse_slack,
     "matrix": _parse_matrix,
-    "weixin": _parse_group1(_WEIXIN_TARGET_RE),
+    "weixin": _parse_regex_groups(_WEIXIN_TARGET_RE, thread_group=False),
     "yuanbao": _parse_yuanbao,
     "ntfy": _parse_nonempty,
     "email": _parse_regex_stripped(_EMAIL_TARGET_RE),
@@ -165,10 +167,11 @@ _PLATFORM_PARSERS = {
 def _parse_target_ref(platform_name: str, target_ref: str):
     """Parse a tool target into (chat_id, thread_id, explicit).
 
-    Platform parser first, then the shared rules: E.164 phone numbers (with
-    the '+' the signal/sms/whatsapp adapters expect), bare numeric ids,
-    Matrix ``!room``/``@user`` and XMPP JIDs. Anything else is not explicit
-    and goes to channel-directory resolution.
+    Platform parser first, then the shared rules in this order: E.164 phone
+    numbers (keeping the '+' the signal/sms/whatsapp adapters expect), bare
+    numeric ids, Matrix ``!room``/``@user``, XMPP JIDs (user@server or
+    room@conference.server). Anything else is not explicit and goes to
+    channel-directory resolution.
     """
     parser = _PLATFORM_PARSERS.get(platform_name)
     if parser is not None:

@@ -89,7 +89,16 @@ def _display_chat_id(platform_name: str, chat_id: str) -> str:
     return chat_id
 
 
+_TELEGRAM_TRANSIENT_MARKERS = (
+    "bad gateway", "502", "too many requests", "429",
+    "service unavailable", "503", "gateway timeout", "504",
+)
+
+
 def _telegram_retry_delay(exc: Exception, attempt: int) -> float | None:
+    """Seconds to wait before retrying, or None when the error is final.
+    Honours Telegram's ``retry_after``; timeouts are never retried (the send
+    may have gone through); 5xx/429 back off exponentially."""
     retry_after = getattr(exc, "retry_after", None)
     if retry_after is not None:
         try:
@@ -100,21 +109,13 @@ def _telegram_retry_delay(exc: Exception, attempt: int) -> float | None:
     text = str(exc).lower()
     if "timed out" in text or "timeout" in text:
         return None
-    if (
-        "bad gateway" in text
-        or "502" in text
-        or "too many requests" in text
-        or "429" in text
-        or "service unavailable" in text
-        or "503" in text
-        or "gateway timeout" in text
-        or "504" in text
-    ):
+    if any(marker in text for marker in _TELEGRAM_TRANSIENT_MARKERS):
         return float(2 ** attempt)
     return None
 
 
 async def _send_telegram_message_with_retry(bot, *, attempts: int = 3, **kwargs):
+    """``bot.send_message`` with bounded retries on transient failures."""
     for attempt in range(attempts):
         try:
             return await bot.send_message(**kwargs)
@@ -178,6 +179,7 @@ def _telegram_thread_kwargs(thread_id):
 
 
 def _strip_mdv2_safe(text):
+    """Strip MarkdownV2 escapes for the plain-text fallback; identity if unavailable."""
     try:
         from plugins.platforms.telegram.adapter import _strip_mdv2
         return _strip_mdv2(text)
@@ -199,15 +201,102 @@ async def _telegram_send_media(bot, chat_id, f, ext, is_voice, force_document, *
     return await bot.send_document(chat_id=chat_id, document=f, **kwargs)
 
 
+async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, text_kwargs):
+    """Send one formatted text chunk with the adapter-matching fallbacks:
+    thread-not-found -> retry without ``message_thread_id`` (dropped from
+    ``text_kwargs`` for later chunks too); parse failure -> plain text."""
+    try:
+        return await _send_telegram_message_with_retry(
+            bot, chat_id=chat_id, text=chunk, parse_mode=parse_mode, **text_kwargs
+        )
+    except Exception as md_error:
+        if _is_telegram_thread_not_found(md_error) and text_kwargs.get("message_thread_id") is not None:
+            logger.warning(
+                "Thread %s not found in _send_telegram, retrying without message_thread_id",
+                text_kwargs.get("message_thread_id"),
+            )
+            text_kwargs.pop("message_thread_id", None)
+            return await _send_telegram_message_with_retry(
+                bot, chat_id=chat_id, text=chunk, parse_mode=parse_mode, **text_kwargs
+            )
+        err_text = str(md_error).lower()
+        if "parse" in err_text or "markdown" in err_text or "html" in err_text:
+            logger.warning(
+                "Parse mode %s failed in _send_telegram, falling back to plain text: %s",
+                parse_mode,
+                _sanitize_error_text(md_error),
+            )
+            plain = chunk if has_html else _strip_mdv2_safe(chunk)
+            return await _send_telegram_message_with_retry(
+                bot, chat_id=chat_id, text=plain, parse_mode=None, **text_kwargs
+            )
+        raise
+
+
+async def _telegram_send_one_media(
+    bot, chat_id, media_path, is_voice, *, caption, parse_mode, has_html, thread_kwargs, force_document
+):
+    """Upload one file with the adapter-matching fallbacks (thread-not-found ->
+    no ``message_thread_id``; caption parse failure -> plain caption). Each
+    retry re-seeks the file because the first attempt consumed it."""
+    ext = os.path.splitext(media_path)[1].lower()
+    voice_note = ext in _VOICE_EXTS and is_voice
+    with open(media_path, "rb") as f:
+        media_kwargs = dict(thread_kwargs)
+        # ``caption`` is only set for a single captionable file, so this never
+        # double-captions a multi-file send or a voice note.
+        if caption is not None and not voice_note:
+            media_kwargs["caption"] = caption
+            media_kwargs["parse_mode"] = parse_mode
+        if voice_note or ext in _TELEGRAM_SEND_AUDIO_EXTS:
+            try:
+                from plugins.platforms.telegram.adapter import _probe_voice_duration_seconds
+                duration = await asyncio.to_thread(_probe_voice_duration_seconds, media_path)
+                if duration is not None:
+                    media_kwargs["duration"] = duration
+            except Exception:
+                pass
+
+        async def _send(**kw):
+            return await _telegram_send_media(bot, chat_id, f, ext, is_voice, force_document, **kw)
+
+        try:
+            return await _send(**media_kwargs)
+        except Exception as media_err:
+            if _is_telegram_thread_not_found(media_err) and media_kwargs.get("message_thread_id"):
+                logger.warning(
+                    "Thread %s not found for media send, retrying without message_thread_id",
+                    media_kwargs["message_thread_id"],
+                )
+                f.seek(0)
+                media_kwargs.pop("message_thread_id", None)
+                return await _send(**media_kwargs)
+            err_text = str(media_err).lower()
+            if media_kwargs.get("parse_mode") and ("parse" in err_text or "caption" in err_text):
+                logger.warning(
+                    "Caption parse failed for media send, retrying plain: %s",
+                    _sanitize_error_text(media_err),
+                )
+                f.seek(0)
+                media_kwargs.pop("parse_mode", None)
+                if not has_html and media_kwargs.get("caption"):
+                    media_kwargs["caption"] = _strip_mdv2_safe(media_kwargs["caption"])
+                return await _send(**media_kwargs)
+            raise
+
+
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
     """Send via Telegram Bot API (one-shot, no polling needed).
 
-    Markdown is converted to MarkdownV2 like the gateway adapter; a message that
-    already contains HTML tags is sent with ``parse_mode='HTML'`` instead.
+    Markdown is converted to MarkdownV2 via the gateway adapter's
+    ``format_message`` so bold/links/headers render; a message that already
+    contains HTML tags skips that and is sent with ``parse_mode='HTML'``.
+    Parse failures fall back to plain text so the message still delivers.
     """
     try:
         from telegram.constants import ParseMode
 
+        # Auto-detect HTML tags: if present, skip MarkdownV2 and send as HTML.
         _has_html = bool(re.search(r'<[a-zA-Z/][^>]*>', message))
         if _has_html:
             formatted = message
@@ -252,42 +341,10 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             # Chunk *after* formatting, in UTF-16 units: MarkdownV2/HTML
             # escaping inflates text, so a raw-<4096 message can exceed the
             # limit once formatted and be rejected as "Message is too long".
-            text_chunks = BasePlatformAdapter.truncate_message(formatted, 4096, len_fn=utf16_len)
-            for chunk in text_chunks:
-                try:
-                    last_msg = await _send_telegram_message_with_retry(
-                        bot,
-                        chat_id=int_chat_id, text=chunk,
-                        parse_mode=send_parse_mode, **text_kwargs
-                    )
-                except Exception as md_error:
-                    # Thread not found: retry without message_thread_id so the
-                    # message still delivers (matches the gateway adapter).
-                    if _is_telegram_thread_not_found(md_error) and text_kwargs.get("message_thread_id") is not None:
-                        logger.warning(
-                            "Thread %s not found in _send_telegram, retrying without message_thread_id",
-                            text_kwargs.get("message_thread_id"),
-                        )
-                        text_kwargs.pop("message_thread_id", None)
-                        last_msg = await _send_telegram_message_with_retry(
-                            bot,
-                            chat_id=int_chat_id, text=chunk,
-                            parse_mode=send_parse_mode, **text_kwargs
-                        )
-                    elif "parse" in str(md_error).lower() or "markdown" in str(md_error).lower() or "html" in str(md_error).lower():
-                        logger.warning(
-                            "Parse mode %s failed in _send_telegram, falling back to plain text: %s",
-                            send_parse_mode,
-                            _sanitize_error_text(md_error),
-                        )
-                        plain = chunk if _has_html else _strip_mdv2_safe(chunk)
-                        last_msg = await _send_telegram_message_with_retry(
-                            bot,
-                            chat_id=int_chat_id, text=plain,
-                            parse_mode=None, **text_kwargs
-                        )
-                    else:
-                        raise
+            for chunk in BasePlatformAdapter.truncate_message(formatted, 4096, len_fn=utf16_len):
+                last_msg = await _telegram_send_text_chunk(
+                    bot, int_chat_id, chunk, send_parse_mode, _has_html, text_kwargs
+                )
 
         for media_path, is_voice in media_files:
             if not os.path.exists(media_path):
@@ -310,57 +367,12 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                         )
                 continue
 
-            ext = os.path.splitext(media_path)[1].lower()
             try:
-                with open(media_path, "rb") as f:
-                    media_kwargs = dict(thread_kwargs)
-                    # _tg_caption is only set for a single captionable file, so
-                    # this never double-captions a multi-file send or a voice note.
-                    if _tg_caption is not None and not (ext in _VOICE_EXTS and is_voice):
-                        media_kwargs["caption"] = _tg_caption
-                        media_kwargs["parse_mode"] = send_parse_mode
-                    if (ext in _VOICE_EXTS and is_voice) or ext in _TELEGRAM_SEND_AUDIO_EXTS:
-                        try:
-                            from plugins.platforms.telegram.adapter import _probe_voice_duration_seconds
-                            duration = await asyncio.to_thread(_probe_voice_duration_seconds, media_path)
-                            if duration is not None:
-                                media_kwargs["duration"] = duration
-                        except Exception:
-                            pass
-
-                    async def _send(**kw):
-                        return await _telegram_send_media(
-                            bot, int_chat_id, f, ext, is_voice, force_document, **kw
-                        )
-
-                    try:
-                        last_msg = await _send(**media_kwargs)
-                    except Exception as media_err:
-                        if _is_telegram_thread_not_found(media_err) and media_kwargs.get("message_thread_id"):
-                            logger.warning(
-                                "Thread %s not found for media send, retrying without message_thread_id",
-                                media_kwargs["message_thread_id"],
-                            )
-                            f.seek(0)  # the first attempt consumed the file
-                            media_kwargs.pop("message_thread_id", None)
-                            last_msg = await _send(**media_kwargs)
-                        elif media_kwargs.get("parse_mode") and (
-                            "parse" in str(media_err).lower()
-                            or "caption" in str(media_err).lower()
-                        ):
-                            # Caption failed to parse as MarkdownV2/HTML: retry
-                            # with a plain-text caption so media still delivers.
-                            logger.warning(
-                                "Caption parse failed for media send, retrying plain: %s",
-                                _sanitize_error_text(media_err),
-                            )
-                            f.seek(0)
-                            media_kwargs.pop("parse_mode", None)
-                            if not _has_html and media_kwargs.get("caption"):
-                                media_kwargs["caption"] = _strip_mdv2_safe(media_kwargs["caption"])
-                            last_msg = await _send(**media_kwargs)
-                        else:
-                            raise
+                last_msg = await _telegram_send_one_media(
+                    bot, int_chat_id, media_path, is_voice,
+                    caption=_tg_caption, parse_mode=send_parse_mode, has_html=_has_html,
+                    thread_kwargs=thread_kwargs, force_document=force_document,
+                )
             except Exception as e:
                 warning = _sanitize_error_text(f"Failed to send media {media_path}: {e}")
                 logger.error(warning)

@@ -107,8 +107,9 @@ def _handle_list():
 
 def _handle_react(args, remove=False):
     """Attach (or with ``remove=True`` retract) an emoji reaction via a live
-    gateway adapter exposing ``add_reaction`` / ``remove_reaction``. No
-    standalone fallback: reacting needs the adapter's live message-id state.
+    gateway adapter exposing ``add_reaction(chat_id, emoji, message_id)`` /
+    ``remove_reaction(chat_id, message_id)`` (e.g. photon/iMessage tapbacks).
+    No standalone fallback: reacting needs the adapter's live message-id state.
     """
     target = args.get("target", "")
     emoji = (args.get("emoji") or "").strip()
@@ -199,82 +200,40 @@ def _handle_send(args):
         return tool_error("Interrupted")
 
     try:
-        from gateway.config import load_gateway_config, Platform
+        from gateway.config import load_gateway_config
         config = load_gateway_config()
     except Exception as e:
         return json.dumps(_error(f"Failed to load gateway config: {e}"))
 
-    from gateway.platform_registry import platform_registry
-
-    entry = platform_registry.get(platform_name)
-    is_builtin = platform_name in {member.value for member in Platform}
-    if not is_builtin and entry is None:
-        return tool_error(
-            f"Unknown or unregistered plugin platform: {platform_name}"
-        )
-    try:
-        platform = Platform(platform_name)
-    except (ValueError, KeyError):
-        return tool_error(f"Unknown platform: {platform_name}")
-
-    pconfig = config.platforms.get(platform)
-    if not pconfig or not pconfig.enabled:
-        # Weixin can be configured purely via .env; synthesize a pconfig so
-        # send_message and cron delivery work without a gateway.yaml entry.
-        pconfig = _weixin_env_pconfig() if platform_name == "weixin" else None
-        if pconfig is None:
-            return tool_error(f"Platform '{platform_name}' is not configured. Set up credentials in ~/.hermes/config.yaml or environment variables.")
+    platform, pconfig, entry, err = _resolve_platform_config(platform_name, config)
+    if err:
+        return tool_error(err)
 
     from gateway.platforms.base import BasePlatformAdapter
 
     # Capture [[as_document]] before extract_media strips it: image files then
-    # go through send_document so the original bytes survive recompression.
+    # go through send_document so the original bytes survive (Telegram's
+    # sendPhoto recompresses to 1280px).
     force_document_attachments = "[[as_document]]" in message
 
     media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
 
-    used_home_channel = False
-    if not chat_id:
-        home = config.get_home_channel(platform)
-        if not home and platform_name == "weixin":
-            wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
-            if wx_home:
-                from gateway.config import HomeChannel
-                home = HomeChannel(platform=platform, chat_id=wx_home, name="Weixin Home")
-        if home:
-            chat_id = home.chat_id
-            used_home_channel = True
-        else:
-            home_env = _HOME_CHANNEL_ENV_OVERRIDES.get(
-                platform_name, f"{platform_name.upper()}_HOME_CHANNEL"
-            )
-            return tool_error(
-                f"No home channel set for {platform_name} to determine where to send the message. "
-                f"Either specify a channel directly with '{platform_name}:CHANNEL_NAME', "
-                f"or set a home channel via: hermes config set {home_env} <channel_id>"
-            )
+    used_home_channel = not chat_id
+    if used_home_channel:
+        chat_id, err = _home_chat_id(config, platform, platform_name)
+        if err:
+            return tool_error(err)
 
     duplicate_skip = _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id)
     if duplicate_skip:
         return json.dumps(duplicate_skip)
 
-    # Slack: ``user:U...`` / ``user_name:@handle`` targets (and bare U... ids
-    # from session metadata / home-channel config) must be opened as DM
-    # conversations first — chat.postMessage needs a conversation ID.
     if platform_name == "slack" and chat_id:
-        _slack_dm_target = chat_id
-        if _slack_dm_target.startswith("U") and _SLACK_USER_ID_RE.fullmatch(_slack_dm_target):
-            _slack_dm_target = f"user:{_slack_dm_target}"
-        if _slack_dm_target.startswith(("user:", "user_name:")):
-            from model_tools import _run_async
-            _resolved, _resolve_err = _run_async(
-                _resolve_slack_user_target(pconfig.token, _slack_dm_target)
-            )
-            if _resolve_err:
-                return json.dumps(_resolve_err)
-            chat_id = _resolved
+        chat_id, resolve_err = _slack_dm_chat_id(pconfig, chat_id)
+        if resolve_err:
+            return json.dumps(resolve_err)
 
     try:
         from model_tools import _run_async
@@ -283,39 +242,106 @@ def _handle_send(args):
             "media_files": media_files,
             "force_document": force_document_attachments,
         }
-        # Only custom plugin handlers receive the complete typed request.
+        # Only custom plugin handlers receive the complete typed request; the
+        # built-in call contract stays exact.
         if entry is not None and entry.send_message_handler is not None:
             send_kwargs["args"] = args
         result = _run_async(
             _send_to_platform(platform, pconfig, chat_id, cleaned_message, **send_kwargs)
         )
-        if used_home_channel and isinstance(result, dict) and result.get("success"):
-            result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
-
-        # Mirror the sent message into the target's gateway session
-        if isinstance(result, dict) and result.get("success") and mirror_text:
-            try:
-                from gateway.mirror import mirror_to_session
-                from gateway.session_context import get_session_env
-                source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
-                user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
-                if mirror_to_session(
-                    platform_name,
-                    chat_id,
-                    mirror_text,
-                    source_label=source_label,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                ):
-                    result["mirrored"] = True
-            except Exception:
-                pass
+        if isinstance(result, dict) and result.get("success"):
+            if used_home_channel:
+                result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
+            if mirror_text and _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
+                result["mirrored"] = True
 
         if isinstance(result, dict) and "error" in result:
             result["error"] = _sanitize_error_text(result["error"])
         return json.dumps(result)
     except Exception as e:
         return json.dumps(_error(f"Send failed: {e}"))
+
+
+def _resolve_platform_config(platform_name, config):
+    """Return ``(platform, pconfig, registry_entry, error)`` for a send.
+
+    Plugin platforms must be registered; disabled/missing platforms error,
+    except Weixin, which may be configured purely via .env (synthesized
+    pconfig so send_message and cron delivery work without a gateway.yaml entry).
+    """
+    from gateway.config import Platform
+    from gateway.platform_registry import platform_registry
+
+    entry = platform_registry.get(platform_name)
+    is_builtin = platform_name in {member.value for member in Platform}
+    if not is_builtin and entry is None:
+        return None, None, None, f"Unknown or unregistered plugin platform: {platform_name}"
+    try:
+        platform = Platform(platform_name)
+    except (ValueError, KeyError):
+        return None, None, None, f"Unknown platform: {platform_name}"
+
+    pconfig = config.platforms.get(platform)
+    if not pconfig or not pconfig.enabled:
+        pconfig = _weixin_env_pconfig() if platform_name == "weixin" else None
+        if pconfig is None:
+            return None, None, None, (
+                f"Platform '{platform_name}' is not configured. Set up credentials in "
+                "~/.hermes/config.yaml or environment variables."
+            )
+    return platform, pconfig, entry, None
+
+
+def _home_chat_id(config, platform, platform_name):
+    """Return ``(home chat_id, None)`` or ``(None, actionable error)``.
+    Weixin additionally honours the WEIXIN_HOME_CHANNEL env var."""
+    home = config.get_home_channel(platform)
+    if not home and platform_name == "weixin":
+        wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
+        if wx_home:
+            from gateway.config import HomeChannel
+            home = HomeChannel(platform=platform, chat_id=wx_home, name="Weixin Home")
+    if home:
+        return home.chat_id, None
+    home_env = _HOME_CHANNEL_ENV_OVERRIDES.get(
+        platform_name, f"{platform_name.upper()}_HOME_CHANNEL"
+    )
+    return None, (
+        f"No home channel set for {platform_name} to determine where to send the message. "
+        f"Either specify a channel directly with '{platform_name}:CHANNEL_NAME', "
+        f"or set a home channel via: hermes config set {home_env} <channel_id>"
+    )
+
+
+def _slack_dm_chat_id(pconfig, chat_id):
+    """Open Slack user targets as DM conversations: ``user:U...`` /
+    ``user_name:@handle`` from the parser, or a bare U... id from session
+    metadata / home-channel config. chat.postMessage needs a conversation ID.
+    Returns ``(chat_id, None)`` or ``(None, error_dict)``."""
+    dm_target = chat_id
+    if dm_target.startswith("U") and _SLACK_USER_ID_RE.fullmatch(dm_target):
+        dm_target = f"user:{dm_target}"
+    if not dm_target.startswith(("user:", "user_name:")):
+        return chat_id, None
+    from model_tools import _run_async
+    return _run_async(_resolve_slack_user_target(pconfig.token, dm_target))
+
+
+def _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
+    """Best-effort mirror of the sent message into the target's gateway session."""
+    try:
+        from gateway.mirror import mirror_to_session
+        from gateway.session_context import get_session_env
+        return bool(mirror_to_session(
+            platform_name,
+            chat_id,
+            mirror_text,
+            source_label=get_session_env("HERMES_SESSION_PLATFORM", "cli"),
+            thread_id=thread_id,
+            user_id=get_session_env("HERMES_SESSION_USER_ID", "") or None,
+        ))
+    except Exception:
+        return False
 
 
 def _weixin_env_pconfig():
@@ -408,7 +434,9 @@ async def _send_live_adapter_media(
     metadata=None,
     force_document=False,
 ):
-    """Deliver text and every media descriptor through adapter media APIs."""
+    """Deliver text and every media descriptor through adapter media APIs.
+    Adapters that only inherit the BasePlatformAdapter stub for a media kind
+    are treated as unsupported rather than silently no-op'd."""
     caption, separate_text = _media_caption_split(
         message, media_files, max_caption_len=_DEFAULT_CAPTION_LIMIT
     )
@@ -495,9 +523,11 @@ async def _send_via_adapter(
     media_files=None,
     force_document=False,
 ):
-    """Send via the live in-process gateway adapter, else the plugin's
-    ``standalone_sender_fn`` (out-of-process callers such as cron), else a
-    descriptive error naming both options.
+    """Send via the live in-process gateway adapter (``_gateway_runner_ref``),
+    else the plugin's ``standalone_sender_fn`` (gateway not in this process,
+    e.g. cron — the runner weakref is None), else a descriptive error naming
+    both options. Media descriptors go through the adapter's native media
+    APIs under the same cross-loop rules as text.
     """
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     runner = _live_runner()
@@ -527,7 +557,7 @@ async def _send_via_adapter(
 
             async def _dispatch(make_coro, log_message):
                 if not cross_loop:
-                    return await make_coro()
+                    return await make_coro()  # same loop / no gateway loop (CLI, tests)
                 if not gateway_loop.is_running():
                     return {"error": "Gateway loop is not running; cannot dispatch adapter send"}
                 from agent.async_utils import safe_schedule_threadsafe
@@ -622,8 +652,9 @@ async def _send_chunks(chunks, send_one):
 
 def _platform_max_length(platform):
     """Max message length for chunking: the adapter constant for Signal (its
-    raw JSON-RPC path never sees the adapter's own chunking), the registry's
-    ``max_message_length`` for plugins (Slack, Feishu, ...), else None."""
+    raw JSON-RPC path never sees SignalAdapter's own chunking, so signal-cli
+    would reject long sends whole), the registry's ``max_message_length`` for
+    plugins (Slack, Feishu, ...), else None (no chunking)."""
     from gateway.config import Platform
 
     if platform == Platform.SIGNAL:
@@ -643,7 +674,11 @@ def _platform_max_length(platform):
 
 
 # Plugin platforms whose media (and, for Discord, all) sends go straight to the
-# registry ``standalone_sender_fn`` — bypassing the live adapter on purpose.
+# registry ``standalone_sender_fn`` — bypassing the live adapter on purpose:
+# Discord's plugin ``_standalone_send`` handles forum channels, threads and
+# multipart uploads (historically the only Discord path); Slack uploads via
+# files_upload_v2; WhatsApp posts each file to the Baileys bridge /send-media so
+# images/videos/audio arrive as native bubbles, not documents.
 # platform -> (error label, run discover_plugins first, caption-capable,
 #              media_files sentinel for non-final chunks, forward force_document)
 _PLUGIN_STANDALONE_MEDIA = {
@@ -683,9 +718,35 @@ async def _send_plugin_standalone(
     )
 
 
-# Text-only senders for built-in platforms (generic, non-media path).
-# Signature: (pconfig, chat_id, chunk, thread_id) -> awaitable result dict.
+# Native-media chunked routes for built-in platforms; media rides on the final
+# chunk, non-final chunks get the platform's empty-media sentinel.
+# platform -> (media required, empty-media sentinel,
+#              sender(platform, pconfig, chat_id, chunk, media, thread_id, force_document))
+# Matrix: ALL sends go through the native adapter so text is encrypted in E2EE
+#   rooms too (the raw-HTTP standalone path is not encryption-aware).
+# Signal: attachments ride the JSON-RPC ``attachments`` param.
+# Yuanbao: media needs the running gateway adapter's WebSocket.
+# Slack (text; media was intercepted above): prefer the live adapter — it is
+#   multi-workspace aware and honors adapter gates like ignored_channels, while
+#   the standalone Web-API path may only have a token list — else the plugin's
+#   standalone sender, keeping MEDIA delivery on the cron fallback.
+# WeCom: native media only through the live gateway adapter.
 # Names resolve at call time so tests can monkeypatch e.g. ``_send_signal``.
+_CHUNKED_ROUTES = {
+    "matrix": (False, [], lambda p, pc, cid, chunk, media, tid, fd: _send_matrix_via_adapter(
+        pc, cid, chunk, media_files=media, thread_id=tid)),
+    "signal": (True, [], lambda p, pc, cid, chunk, media, tid, fd: _send_signal(
+        pc.extra, cid, chunk, media_files=media)),
+    "yuanbao": (True, None, lambda p, pc, cid, chunk, media, tid, fd: _send_yuanbao(
+        cid, chunk, media_files=media)),
+    "slack": (False, [], lambda p, pc, cid, chunk, media, tid, fd: _send_via_adapter(
+        p, pc, cid, chunk, thread_id=tid, media_files=media, force_document=fd)),
+    "wecom": (True, None, lambda p, pc, cid, chunk, media, tid, fd: _send_via_adapter(
+        p, pc, cid, chunk, thread_id=tid, media_files=media, force_document=fd)),
+}
+
+# Text-only senders for built-in platforms (generic path; media is dropped
+# with a warning). Signature: (pconfig, chat_id, chunk, thread_id) -> result.
 _TEXT_SENDERS = {
     "whatsapp": lambda pc, cid, chunk, tid: _registry_standalone_send("whatsapp", pc, cid, chunk, tid),
     "signal": lambda pc, cid, chunk, tid: _send_signal(pc.extra, cid, chunk),
@@ -706,9 +767,11 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     """Route a message to the appropriate platform sender.
 
     Long messages are chunked with the adapters' smart splitter (code-block
-    aware, part indicators). Branch order matters: Weixin first (avoids
-    unrelated optional imports), then native-media platforms, then the
-    generic text path that drops media with a warning.
+    aware, part indicators). Branch order matters: Weixin first (its native
+    helper must not be blocked by unrelated optional imports such as
+    lark-oapi's heavy Feishu path), Telegram (chunks itself), plugin
+    standalone media routes, native chunked routes, then the generic text
+    path that drops media with a warning.
     """
     from gateway.config import Platform
 
@@ -718,8 +781,9 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if platform == Platform.WEIXIN:
         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
 
-    # Telegram chunks internally on the *formatted* text (MarkdownV2/HTML
-    # escaping inflates length), so it gets the whole message; media follows.
+    # Telegram chunks internally on the *formatted* text in UTF-16 units
+    # (MarkdownV2/HTML escaping inflates length), so it gets the whole
+    # message; media attaches after all text chunks.
     if platform == Platform.TELEGRAM:
         disable_link_previews = bool(getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews"))
         return await _send_telegram(
@@ -737,55 +801,34 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     max_len = _platform_max_length(platform)
     chunks = BasePlatformAdapter.truncate_message(message, max_len) if max_len else [message]
 
-    # Media rides on the final chunk in every chunked branch below.
-    if platform == Platform.DISCORD or (
-        media_files and platform_name in ("feishu", "slack", "whatsapp")
-    ):
+    if platform_name == "discord" or (media_files and platform_name in _PLUGIN_STANDALONE_MEDIA):
         return await _send_plugin_standalone(
             platform_name, pconfig, chat_id, message, chunks, media_files,
             thread_id=thread_id, max_len=max_len, force_document=force_document,
         )
 
-    # Matrix: every send goes through the native adapter so text is encrypted
-    # in E2EE rooms too (the raw-HTTP standalone path is not encryption-aware).
-    if platform == Platform.MATRIX:
-        return await _send_chunks(chunks, lambda chunk, is_last: _send_matrix_via_adapter(
-            pconfig, chat_id, chunk, media_files=media_files if is_last else [], thread_id=thread_id,
-        ))
-
-    if platform == Platform.SIGNAL and media_files:
-        return await _send_chunks(chunks, lambda chunk, is_last: _send_signal(
-            pconfig.extra, chat_id, chunk, media_files=media_files if is_last else [],
-        ))
-
-    if platform == Platform.YUANBAO and media_files:
-        return await _send_chunks(chunks, lambda chunk, is_last: _send_yuanbao(
-            chat_id, chunk, media_files=media_files if is_last else None,
-        ))
-
-    # Slack text: prefer the live adapter (multi-workspace aware, honors
-    # adapter-side gates) and fall back to the plugin's standalone sender.
-    # WeCom media: native delivery through the live gateway adapter.
-    if platform == Platform.SLACK or (platform == Platform.WECOM and media_files):
-        empty_media = [] if platform == Platform.SLACK else None
-        return await _send_chunks(chunks, lambda chunk, is_last: _send_via_adapter(
-            platform, pconfig, chat_id, chunk, thread_id=thread_id,
-            media_files=media_files if is_last else empty_media, force_document=force_document,
+    route = _CHUNKED_ROUTES.get(platform_name)
+    if route is not None and (media_files or not route[0]):
+        _, empty_media, sender = route
+        return await _send_chunks(chunks, lambda chunk, is_last: sender(
+            platform, pconfig, chat_id, chunk,
+            media_files if is_last else empty_media, thread_id, force_document,
         ))
 
     # --- Generic path: text only. Buzz is a plugin platform with verified
-    # native media delivery through _send_via_adapter, so it is exempt.
-    if media_files and not message.strip() and platform.value != "buzz":
+    # native media delivery through _send_via_adapter (media-only sends
+    # included), so it is exempt from the media error/warning.
+    if media_files and platform_name != "buzz" and not message.strip():
         return {
             "error": (
                 f"send_message MEDIA delivery is currently only supported for {_MEDIA_PLATFORMS_NOTE}; "
-                f"target {platform.value} had only media attachments"
+                f"target {platform_name} had only media attachments"
             )
         }
     warning = None
-    if media_files and platform.value != "buzz":
+    if media_files and platform_name != "buzz":
         warning = (
-            f"MEDIA attachments were omitted for {platform.value}; "
+            f"MEDIA attachments were omitted for {platform_name}; "
             f"native send_message media delivery is currently only supported for {_MEDIA_PLATFORMS_NOTE}"
         )
 
@@ -798,7 +841,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         entry = platform_registry.get(platform_name)
         handler = entry.send_message_handler if entry is not None else None
         if handler is not None:
-            # Custom handler receives the full request once (not per chunk).
+            # Custom handler receives the full typed request once (not per chunk).
             try:
                 import inspect
 
