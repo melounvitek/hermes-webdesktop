@@ -151,23 +151,12 @@ class SessionCompressionMixin:
         )
 
     def publish_compression_child(
-        self,
-        *,
-        parent_session_id: str,
-        child_session_id: str,
-        source: str,
-        messages: List[Dict[str, Any]],
-        model: str = None,
-        model_config: Dict[str, Any] = None,
-        system_prompt: str = None,
-        cwd: str = None,
-        profile_name: str = None,
-        compression_lock_holder: str = None,
-        require_compression_lease: bool = True,
-        require_lease_refresh: bool = False,
-        lease_ttl_seconds: float = 300.0,
-        watermark: Optional[int] = None,
-        watermark_ceiling: Optional[int] = None,
+        self, *, parent_session_id: str, child_session_id: str, source: str,
+        messages: List[Dict[str, Any]], model: str = None, model_config: Dict[str, Any] = None,
+        system_prompt: str = None, cwd: str = None, profile_name: str = None,
+        compression_lock_holder: str = None, require_compression_lease: bool = True,
+        require_lease_refresh: bool = False, lease_ttl_seconds: float = 300.0,
+        watermark: Optional[int] = None, watermark_ceiling: Optional[int] = None,
     ) -> None:
         """Atomically close a parent and publish its durable compression child.
 
@@ -575,16 +564,9 @@ class SessionCompressionMixin:
         return bool(self._execute_write(_do, patience_s=patience_s))
 
     def acquire_session_turn_lease(
-        self,
-        session_id: str,
-        holder: str,
-        *,
-        ttl_seconds: float = 300.0,
-        wait_seconds: float = 1800.0,
-        poll_interval_seconds: float = 1.0,
-        on_wait=None,
-        wait_notice_interval_seconds: float = 15.0,
-        should_abort=None,
+        self, session_id: str, holder: str, *, ttl_seconds: float = 300.0,
+        wait_seconds: float = 1800.0, poll_interval_seconds: float = 1.0, on_wait=None,
+        wait_notice_interval_seconds: float = 15.0, should_abort=None,
         acquire_patience_s: float = 0.5,
     ) -> bool:
         """Wait for a cross-process turn lease without holding a SQLite lock.

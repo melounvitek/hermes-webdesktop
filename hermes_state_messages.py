@@ -201,14 +201,9 @@ class SessionMessagesMixin:
         return value if isinstance(value, str) else json.dumps(value)
 
     def _check_transcript_write_guards(
-        self,
-        conn,
-        session_id: str,
-        compression_lock_holder: Optional[str],
-        turn_lease_holder: Optional[str] = None,
-        turn_lease_ttl_seconds: float = 300.0,
-        reject_active_turn_lease: bool = False,
-        reject_active_compression_lock: bool = False,
+        self, conn, session_id: str, compression_lock_holder: Optional[str],
+        turn_lease_holder: Optional[str] = None, turn_lease_ttl_seconds: float = 300.0,
+        reject_active_turn_lease: bool = False, reject_active_compression_lock: bool = False,
         allow_closed_compression_parent: bool = False,
     ) -> None:
         """Transcript-write admission checks, run INSIDE the write txn.
@@ -317,30 +312,15 @@ class SessionMessagesMixin:
         )
 
     def append_message(
-        self,
-        session_id: str,
-        role: str,
-        content: str = None,
-        tool_name: str = None,
-        tool_calls: Any = None,
-        tool_call_id: str = None,
-        token_count: int = None,
-        finish_reason: str = None,
-        reasoning: str = None,
-        reasoning_content: str = None,
-        reasoning_details: Any = None,
-        codex_reasoning_items: Any = None,
-        codex_message_items: Any = None,
-        platform_message_id: str = None,
-        observed: bool = False,
-        effect_disposition: Optional[str] = None,
-        _compressed_summary: bool = False,
-        timestamp: Any = None,
-        api_content: Optional[str] = None,
-        display_kind: Optional[str] = None,
-        display_metadata: Optional[Dict[str, Any]] = None,
-        compression_lock_holder: Optional[str] = None,
-        turn_lease_holder: Optional[str] = None,
+        self, session_id: str, role: str, content: str = None, tool_name: str = None,
+        tool_calls: Any = None, tool_call_id: str = None, token_count: int = None,
+        finish_reason: str = None, reasoning: str = None, reasoning_content: str = None,
+        reasoning_details: Any = None, codex_reasoning_items: Any = None,
+        codex_message_items: Any = None, platform_message_id: str = None, observed: bool = False,
+        effect_disposition: Optional[str] = None, _compressed_summary: bool = False,
+        timestamp: Any = None, api_content: Optional[str] = None,
+        display_kind: Optional[str] = None, display_metadata: Optional[Dict[str, Any]] = None,
+        compression_lock_holder: Optional[str] = None, turn_lease_holder: Optional[str] = None,
         turn_lease_ttl_seconds: float = 300.0,
     ) -> int:
         """Append one message; returns the row id. Bumps ``message_count`` (and
@@ -394,13 +374,9 @@ class SessionMessagesMixin:
         return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
     def append_messages_batch(
-        self,
-        session_id: str,
-        messages: List[Dict[str, Any]],
-        compression_lock_holder: Optional[str] = None,
-        turn_lease_holder: Optional[str] = None,
-        chunk_rows: Optional[int] = None,
-        turn_lease_ttl_seconds: float = 300.0,
+        self, session_id: str, messages: List[Dict[str, Any]],
+        compression_lock_holder: Optional[str] = None, turn_lease_holder: Optional[str] = None,
+        chunk_rows: Optional[int] = None, turn_lease_ttl_seconds: float = 300.0,
     ) -> int:
         """Append *messages* (``_insert_message_rows`` dict shape) in ONE write txn.
 
@@ -638,12 +614,8 @@ class SessionMessagesMixin:
         return inserted, tool_calls_total
 
     def replace_messages(
-        self,
-        session_id: str,
-        messages: List[Dict[str, Any]],
-        active_only: bool = False,
-        archive_dropped: bool = False,
-        reject_active_turn_lease: bool = False,
+        self, session_id: str, messages: List[Dict[str, Any]], active_only: bool = False,
+        archive_dropped: bool = False, reject_active_turn_lease: bool = False,
     ) -> None:
         """Atomically replace the stored messages for a session (/retry, /undo, /compress).
 
@@ -733,13 +705,9 @@ class SessionMessagesMixin:
             )
 
     def archive_and_compact(
-        self,
-        session_id: str,
-        compacted_messages: List[Dict[str, Any]],
-        model_config_patch: Optional[Dict[str, Any]] = None,
-        watermark: Optional[int] = None,
-        lock_holder: Optional[str] = None,
-        tail_count: int = 0,
+        self, session_id: str, compacted_messages: List[Dict[str, Any]],
+        model_config_patch: Optional[Dict[str, Any]] = None, watermark: Optional[int] = None,
+        lock_holder: Optional[str] = None, tail_count: int = 0,
     ) -> int:
         """Non-destructive in-place compaction under ONE durable session id.
 
@@ -940,13 +908,8 @@ class SessionMessagesMixin:
         return _DISPLAY_ACTIVE_CLAUSE if include_compacted else " AND active = 1"
 
     def get_messages(
-        self,
-        session_id: str,
-        include_inactive: bool = False,
-        include_compacted: bool = False,
-        limit: Optional[int] = None,
-        offset: int = 0,
-        latest: bool = False,
+        self, session_id: str, include_inactive: bool = False, include_compacted: bool = False,
+        limit: Optional[int] = None, offset: int = 0, latest: bool = False,
         after_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Load messages for a session in insertion order (AUTOINCREMENT id, never
@@ -1117,12 +1080,8 @@ class SessionMessagesMixin:
             ).fetchall()
 
     def get_messages_as_conversation(
-        self,
-        session_id: str,
-        include_ancestors: bool = False,
-        include_inactive: bool = False,
-        repair_alternation: bool = False,
-        include_row_ids: bool = False,
+        self, session_id: str, include_ancestors: bool = False, include_inactive: bool = False,
+        repair_alternation: bool = False, include_row_ids: bool = False,
         include_compacted: bool = False,
     ) -> List[Dict[str, Any]]:
         """Load messages in OpenAI conversation format (gateway history restore).
@@ -1176,14 +1135,8 @@ class SessionMessagesMixin:
         return False, exact_clone_key
 
     def _rows_to_conversation(
-        self,
-        rows,
-        *,
-        session_id: str,
-        include_ancestors: bool,
-        repair_alternation: bool,
-        include_row_ids: bool = False,
-        include_summary_markers: bool = False,
+        self, rows, *, session_id: str, include_ancestors: bool, repair_alternation: bool,
+        include_row_ids: bool = False, include_summary_markers: bool = False,
     ) -> List[Dict[str, Any]]:
         """Decode fetched message rows (ordered by id, pre-filtered) into OpenAI format.
 
@@ -1486,13 +1439,8 @@ class SessionMessagesMixin:
         return handoff if preserve_compaction_handoff else None
 
     def rewind_to_message(
-        self,
-        session_id: str,
-        target_message_id: int,
-        *,
-        preserve_compaction_handoff: bool = False,
-        expected_active_ids: Optional[List[int]] = None,
-        expected_target_content: Any = None,
+        self, session_id: str, target_message_id: int, *, preserve_compaction_handoff: bool = False,
+        expected_active_ids: Optional[List[int]] = None, expected_target_content: Any = None,
     ) -> Dict[str, Any]:
         """Soft-delete (``active=0``) every message with id >= *target_message_id*.
 
