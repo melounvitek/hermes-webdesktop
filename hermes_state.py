@@ -2119,75 +2119,7 @@ class SessionDB(
         initialization_complete = False
         try:
             if read_only:
-                # Read-only attach for cross-profile aggregation: SELECT-only,
-                # so we skip schema init entirely (no DDL, no FTS probe, no
-                # column reconcile). Crucially this takes NO write lock, so
-                # polling another profile's live DB on every sidebar refresh
-                # never contends with that profile's running backend. The DB
-                # must already exist + be initialised (callers guard on
-                # db_path.exists()); a SELECT against an empty file raises and
-                # the caller degrades per-profile.
-                open_attempt = 0
-                while True:
-                    try:
-                        self._conn = _connect_tracked_db(
-                            f"file:{self.db_path}?mode=ro",
-                            tracking_path=self.db_path,
-                            uri=True,
-                            check_same_thread=False,
-                            timeout=1.0,
-                            isolation_level=None,
-                        )
-                        self._conn.row_factory = sqlite3.Row
-                        # FTS capability flags normally come from writable schema
-                        # initialisation. Probe existing virtual tables with
-                        # SELECTs only so read-only search keeps its FTS and
-                        # trigram paths. Close the connection on ANY probe
-                        # failure (e.g. malformed schema raises DatabaseError,
-                        # not the OperationalError the probe handles). The
-                        # constructor's outer finally also covers failures
-                        # before this probe and BaseException paths, so a
-                        # leaked tracked connection cannot block
-                        # _backup_db_file's raw-copy for the rest of the
-                        # process — the writable heal that follows would then
-                        # repair WITHOUT its forensic backup.
-                        try:
-                            apply_database_pragmas(self._conn, db_label="state.db")
-                            cursor = self._conn.cursor()
-                            self._fts_enabled = (
-                                self._fts_table_probe(cursor, "messages_fts")
-                                is True
-                            )
-                            if self._fts_enabled:
-                                self._trigram_available = (
-                                    self._fts_table_probe(
-                                        cursor,
-                                        "messages_fts_trigram",
-                                    )
-                                    is True
-                                )
-                        except BaseException:
-                            conn, self._conn = self._conn, None
-                            try:
-                                conn.close()
-                            except Exception:
-                                pass
-                            raise
-                        break
-                    except sqlite3.OperationalError as ioerr:
-                        # A WAL checkpoint / reset / frame-flush in flight on
-                        # the writer side can surface SQLITE_IOERR to a
-                        # concurrent mode=ro reader (it cannot perform the
-                        # recovery the read needs — recovery writes the -shm
-                        # index, which mode=ro refuses). The transition closes
-                        # in milliseconds, so retry a bounded number of times
-                        # before classifying the store as failed (#100436).
-                        if not _is_transient_read_only_ioerr(
-                            ioerr, attempt=open_attempt
-                        ):
-                            raise
-                        open_attempt += 1
-                        time.sleep(_READ_ONLY_IOERR_RETRY_BACKOFF_S)
+                self._open_read_only()
                 self._record_db_file_identity()
                 initialization_complete = True
                 return
@@ -2204,121 +2136,12 @@ class SessionDB(
             # #68474 / #97568: Serialize startup across zero-byte check, quarantine,
             # connect, and schema commit so concurrent openers don't race on an
             # absent-path -> connect -> schema-commit window.
-            needs_startup_guard = (
-                not read_only
-                and (
-                    not self.db_path.exists()
-                    or is_zeroed_state_db(self.db_path)
-                )
+            needs_startup_guard = not read_only and (
+                not self.db_path.exists() or is_zeroed_state_db(self.db_path)
             )
 
-            def _handle_quarantine_if_zeroed(already_locked: bool = False):
-                if (
-                    self.db_path.exists()
-                    and is_zeroed_state_db(self.db_path)
-                ):
-                    try:
-                        zsize = self.db_path.stat().st_size
-                    except OSError:
-                        zsize = -1
-                    qpath = quarantine_zeroed_state_db(
-                        self.db_path, already_locked=already_locked
-                    )
-                    snaps = self.db_path.parent / "state-snapshots"
-                    msg = (
-                        f"state.db looks ZEROED ({zsize} bytes, no SQLite header). "
-                        f"Preserved at {qpath or '(quarantine failed — file left in place)'}. "
-                        f"Restore from {snaps} via `hermes snapshot list` / "
-                        f"`hermes snapshot restore <id>` if available. "
-                        "Opening a fresh empty database so the agent can start."
-                    )
-                    logger.error(msg)
-                    _set_last_init_error(msg)
-                    # If quarantine failed, do not open the zeroed file (would fail
-                    # opaquely or risk further damage). Raise with the clear message.
-                    if qpath is None and self.db_path.exists() and is_zeroed_state_db(self.db_path):
-                        raise sqlite3.DatabaseError(msg)
-
-            def _connect_and_init():
-                # Refuse before sqlite3.connect (under the startup lock) so we
-                # cannot mint a replacement WAL while a live writer still
-                # holds a deleted sidecar inode.
-                refuse_deleted_wal_generation(self.db_path)
-                self._conn = _connect_tracked_db(
-                    str(self.db_path),
-                    check_same_thread=False,
-                    # Short timeout — application-level retry with random
-                    # jitter handles contention instead of sitting in
-                    # SQLite's internal busy handler for up to 30s.
-                    timeout=1.0,
-                    # auto-starts transactions on DML, which conflicts with
-                    # our explicit BEGIN IMMEDIATE.  None = we manage
-                    # transactions ourselves.
-                    isolation_level=None,
-                )
-                self._conn.row_factory = sqlite3.Row
-                self._wal_active = (
-                    apply_wal_with_fallback(self._conn, db_label="state.db") == "wal"
-                )
-                apply_database_pragmas(self._conn, db_label="state.db")
-                self._conn.execute("PRAGMA foreign_keys=ON")
-                self._fts_cjk_loaded = load_fts5_cjk_extension(self._conn)
-                self._init_schema()
-
-            def _connect_and_init_with_lock_patience():
-                # Lock contention during open: _init_schema's DDL/reconcile
-                # statements run on a 1s-timeout connection with no retry, so
-                # a sibling process holding the write lock (VACUUM, TRUNCATE
-                # checkpoint at close, a long FTS pass from an older
-                # still-running install) used to fail the ENTIRE open —
-                # callers then disable persistence for the whole run
-                # ("Failed to initialize SessionDB ... database is locked",
-                # #74478). The store is healthy; wait it out with the same
-                # jittered patience the write path uses. Non-lock errors
-                # (including the malformed class) propagate immediately.
-                deadline = time.monotonic() + self._WRITE_PATIENCE_S
-                while True:
-                    try:
-                        _connect_and_init()
-                        return
-                    except sqlite3.OperationalError as exc:
-                        err = str(exc).lower()
-                        if "locked" not in err and "busy" not in err:
-                            raise
-                        try:
-                            if self._conn is not None:
-                                self._conn.close()
-                        except Exception:
-                            pass
-                        now = time.monotonic()
-                        if now >= deadline:
-                            raise
-                        time.sleep(
-                            min(
-                                random.uniform(
-                                    self._WRITE_RETRY_SLOW_MIN_S,
-                                    self._WRITE_RETRY_SLOW_MAX_S,
-                                ),
-                                max(deadline - now, 0.001),
-                            )
-                        )
-
-            def _open_with_optional_startup_guard():
-                if needs_startup_guard:
-                    with quarantine_cross_process_lock(self.db_path) as lock_acquired:
-                        if not lock_acquired:
-                            logger.warning(
-                                "startup quarantine lock for %s not acquired within 5s; proceeding",
-                                self.db_path,
-                            )
-                        _handle_quarantine_if_zeroed(already_locked=lock_acquired)
-                        _connect_and_init_with_lock_patience()
-                else:
-                    _handle_quarantine_if_zeroed(already_locked=False)
-                    _connect_and_init_with_lock_patience()
-
             try:
-                _open_with_optional_startup_guard()
+                self._open_with_optional_startup_guard(needs_startup_guard)
             except sqlite3.DatabaseError as exc:
                 # The malformed-schema class (e.g. a duplicate sqlite_master
                 # row for messages_fts) fails on the very first statement —
@@ -2341,7 +2164,7 @@ class SessionDB(
                 report = repair_state_db_schema(self.db_path)
                 if not report.get("repaired"):
                     raise
-                _connect_and_init_with_lock_patience()
+                self._connect_and_init_with_lock_patience()
 
             # NOTE: the v23 FTS optimization is OPT-IN (`hermes db optimize`),
             # never auto-started on open. Legacy installs keep their working
@@ -2372,6 +2195,154 @@ class SessionDB(
             if not initialization_complete:
                 conn, self._conn = self._conn, None
                 self._close_connection_quietly(conn)
+
+    def _open_read_only(self) -> None:
+        """Read-only attach for cross-profile aggregation (SELECT-only).
+
+        Skips schema init entirely (no DDL, no FTS probe, no column reconcile)
+        and takes NO write lock, so polling another profile's live DB on every
+        sidebar refresh never contends with that profile's backend. The DB must
+        already exist + be initialised (callers guard on ``db_path.exists()``);
+        a SELECT against an empty file raises and the caller degrades.
+
+        FTS capability flags are probed with SELECTs only. The connection is
+        closed on ANY probe failure (malformed schema raises DatabaseError, not
+        the OperationalError the probe handles) so a leaked tracked connection
+        cannot block ``_backup_db_file``'s raw copy — the writable heal that
+        follows would then repair WITHOUT its forensic backup.
+        """
+        open_attempt = 0
+        while True:
+            try:
+                self._conn = conn = _connect_tracked_db(
+                    f"file:{self.db_path}?mode=ro",
+                    tracking_path=self.db_path,
+                    uri=True,
+                    check_same_thread=False,
+                    timeout=1.0,
+                    isolation_level=None,
+                )
+                conn.row_factory = sqlite3.Row
+                try:
+                    apply_database_pragmas(conn, db_label="state.db")
+                    cursor = conn.cursor()
+                    self._fts_enabled = self._fts_table_probe(cursor, "messages_fts") is True
+                    if self._fts_enabled:
+                        self._trigram_available = (
+                            self._fts_table_probe(cursor, "messages_fts_trigram") is True
+                        )
+                except BaseException:
+                    self._conn = None
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    raise
+                return
+            except sqlite3.OperationalError as ioerr:
+                # A WAL checkpoint / reset / frame-flush in flight on the writer
+                # side can surface SQLITE_IOERR to a concurrent mode=ro reader
+                # (it cannot perform the -shm recovery the read needs). The
+                # transition closes in milliseconds; retry a bounded number of
+                # times before classifying the store as failed.
+                if not _is_transient_read_only_ioerr(ioerr, attempt=open_attempt):
+                    raise
+                open_attempt += 1
+                time.sleep(_READ_ONLY_IOERR_RETRY_BACKOFF_S)
+
+    def _handle_quarantine_if_zeroed(self, already_locked: bool = False) -> None:
+        """Quarantine a zero-byte/headerless state.db so a fresh one can open.
+
+        If quarantine failed, do not open the zeroed file (it would fail
+        opaquely or risk further damage) — raise with the clear message.
+        """
+        if not (self.db_path.exists() and is_zeroed_state_db(self.db_path)):
+            return
+        try:
+            zsize = self.db_path.stat().st_size
+        except OSError:
+            zsize = -1
+        qpath = quarantine_zeroed_state_db(self.db_path, already_locked=already_locked)
+        snaps = self.db_path.parent / "state-snapshots"
+        msg = (
+            f"state.db looks ZEROED ({zsize} bytes, no SQLite header). "
+            f"Preserved at {qpath or '(quarantine failed — file left in place)'}. "
+            f"Restore from {snaps} via `hermes snapshot list` / "
+            f"`hermes snapshot restore <id>` if available. "
+            "Opening a fresh empty database so the agent can start."
+        )
+        logger.error(msg)
+        _set_last_init_error(msg)
+        if qpath is None and self.db_path.exists() and is_zeroed_state_db(self.db_path):
+            raise sqlite3.DatabaseError(msg)
+
+    def _connect_and_init(self) -> None:
+        # Refuse before sqlite3.connect (under the startup lock) so we cannot
+        # mint a replacement WAL while a live writer still holds a deleted
+        # sidecar inode.
+        refuse_deleted_wal_generation(self.db_path)
+        self._conn = _connect_tracked_db(
+            str(self.db_path),
+            check_same_thread=False,
+            # Short timeout — application-level jittered retry handles
+            # contention instead of SQLite's internal busy handler (up to 30s).
+            timeout=1.0,
+            # None = we manage transactions ourselves (explicit BEGIN IMMEDIATE).
+            isolation_level=None,
+        )
+        self._conn.row_factory = sqlite3.Row
+        self._wal_active = apply_wal_with_fallback(self._conn, db_label="state.db") == "wal"
+        apply_database_pragmas(self._conn, db_label="state.db")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._fts_cjk_loaded = load_fts5_cjk_extension(self._conn)
+        self._init_schema()
+
+    def _connect_and_init_with_lock_patience(self) -> None:
+        """Open + init, waiting out a sibling's write lock with jittered patience.
+
+        ``_init_schema``'s DDL/reconcile statements run on a 1s-timeout
+        connection with no retry, so a sibling process holding the write lock
+        (VACUUM, TRUNCATE checkpoint at close, a long FTS pass from an older
+        install) used to fail the ENTIRE open — callers then disable
+        persistence for the whole run. The store is healthy; wait it out with
+        the write path's patience. Non-lock errors (including the malformed
+        class) propagate immediately.
+        """
+        deadline = time.monotonic() + self._WRITE_PATIENCE_S
+        while True:
+            try:
+                self._connect_and_init()
+                return
+            except sqlite3.OperationalError as exc:
+                err = str(exc).lower()
+                if "locked" not in err and "busy" not in err:
+                    raise
+                try:
+                    if self._conn is not None:
+                        self._conn.close()
+                except Exception:
+                    pass
+                now = time.monotonic()
+                if now >= deadline:
+                    raise
+                time.sleep(min(
+                    random.uniform(self._WRITE_RETRY_SLOW_MIN_S, self._WRITE_RETRY_SLOW_MAX_S),
+                    max(deadline - now, 0.001),
+                ))
+
+    def _open_with_optional_startup_guard(self, needs_startup_guard: bool) -> None:
+        if needs_startup_guard:
+            with quarantine_cross_process_lock(self.db_path) as lock_acquired:
+                if not lock_acquired:
+                    logger.warning(
+                        "startup quarantine lock for %s not acquired within 5s; proceeding",
+                        self.db_path,
+                    )
+                self._handle_quarantine_if_zeroed(already_locked=lock_acquired)
+                self._connect_and_init_with_lock_patience()
+        else:
+            self._handle_quarantine_if_zeroed(already_locked=False)
+            self._connect_and_init_with_lock_patience()
 
     # ── Read-path split ──
 
