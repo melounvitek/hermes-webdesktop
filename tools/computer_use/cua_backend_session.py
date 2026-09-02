@@ -69,12 +69,38 @@ class _AsyncBridge:
         self._loop = None
 
 
-def _outcome_unknown(name: str, exc: Exception, code: str, message: str) -> Dict[str, Any]:
-    """Fail-closed result for a call whose effect on the remote screen is unknown."""
+# Fail-closed messages for calls whose effect on the remote screen is unknown. The action
+# MAY have landed, so it is never replayed; the caller decides after taking fresh state.
+_UNKNOWN_OUTCOME_MESSAGES = {
+    "transport_outcome_unknown": (
+        "cua-driver transport failed during {name}; the action outcome is "
+        "unknown, so Hermes did not replay it. Take fresh state before "
+        "deciding whether to act again."),
+    "timeout_outcome_unknown": (
+        "cua-driver MCP call {name} timed out; the action outcome is "
+        "unknown and may still have taken effect on the remote screen. "
+        "The session has been marked suspect and will be recreated before "
+        "the next computer-use call. Take fresh state before deciding "
+        "whether to act again."),
+}
+
+
+def _outcome_unknown(name: str, exc: Exception, code: str) -> Dict[str, Any]:
+    """Fail-closed ``isError`` result for *code* (see ``_UNKNOWN_OUTCOME_MESSAGES``)."""
+    message = _UNKNOWN_OUTCOME_MESSAGES[code].format(name=name)
     structured = {"ok": False, "code": code, "message": message, "operation": name,
                   "next_step": "fresh_state", "detail": str(exc)}
     return {"data": message, "images": [], "image_mime_types": [],
             "structuredContent": structured, "isError": True}
+
+
+def _tool_field(obj: Any, *names: str) -> Any:
+    """``_mcp_field`` plus the ``model_extra`` fallback some MCP SDKs (Pydantic v2)
+    use to forward custom fields such as ``capabilities``."""
+    value = _mcp_field(obj, names[0], names[-1])
+    if value is None:
+        value = (getattr(obj, "model_extra", None) or {}).get(names[-1])
+    return value
 
 
 # ── CLI fallback transport helpers ───────────────────────────────────
@@ -212,12 +238,10 @@ class _CuaDriverSession:
         _t0 = _time.monotonic()
         # Phase marker: the ready-timeout error reports HOW FAR a wedged startup got.
         self._startup_phase = "binary-check"
-
         try:
             driver_cmd = _cb.resolve_cua_driver_cmd()
             if not driver_cmd:
                 raise RuntimeError(_cb.cua_driver_install_hint())
-
             self._startup_phase = "manifest-discovery"
             if self._embedded_daemon is not None:
                 command, args = self._embedded_daemon.proxy_invocation()
@@ -229,7 +253,6 @@ class _CuaDriverSession:
             # Telemetry policy first (default: disabled), then strip Hermes secrets.
             params = StdioServerParameters(command=command, args=args,
                                            env=_sanitize_subprocess_env(child_env))
-
             async with stdio_client(params) as (read, write):
                 self._startup_phase = "mcp-initialize"
                 async with ClientSession(read, write) as session:
@@ -261,28 +284,19 @@ class _CuaDriverSession:
         self._capabilities = {}
         self._tool_schemas = {}
         self._capability_version = ""
-
-        def _field(obj: Any, *names: str) -> Any:
-            # Some MCP SDKs forward custom fields via `model_extra` (Pydantic v2).
-            value = _mcp_field(obj, names[0], names[-1])
-            if value is None:
-                value = (getattr(obj, "model_extra", None) or {}).get(names[-1])
-            return value
-
         try:
             tools_list = await session.list_tools()
             for tool in getattr(tools_list, "tools", []) or []:
                 tool_name = getattr(tool, "name", None)
                 if not isinstance(tool_name, str):
                     continue
-                caps = _field(tool, "capabilities")
+                caps = _tool_field(tool, "capabilities")
                 self._capabilities[tool_name] = (
-                    {c for c in caps if isinstance(c, str)} if isinstance(caps, list) else set()
-                )
-                schema = _field(tool, "input_schema", "inputSchema")
+                    {c for c in caps if isinstance(c, str)} if isinstance(caps, list) else set())
+                schema = _tool_field(tool, "input_schema", "inputSchema")
                 self._tool_schemas[tool_name] = dict(schema) if isinstance(schema, dict) else {}
             # capability_version is a sibling of `tools` in tools/list (NOT in initialize).
-            cv = _field(tools_list, "capability_version")
+            cv = _tool_field(tools_list, "capability_version")
             if isinstance(cv, str):
                 self._capability_version = cv
         except Exception as e:
@@ -443,25 +457,11 @@ class _CuaDriverSession:
 
     @staticmethod
     def _unknown_transport_outcome(name: str, exc: Exception) -> Dict[str, Any]:
-        return _outcome_unknown(
-            name, exc, "transport_outcome_unknown",
-            f"cua-driver transport failed during {name}; the action outcome is "
-            "unknown, so Hermes did not replay it. Take fresh state before "
-            "deciding whether to act again.",
-        )
+        return _outcome_unknown(name, exc, "transport_outcome_unknown")
 
     @staticmethod
     def _timeout_outcome(name: str, exc: Exception) -> Dict[str, Any]:
-        """Fail-closed result for a timed-out MCP call: the action MAY have landed,
-        so it is never replayed here; the caller decides after taking fresh state."""
-        return _outcome_unknown(
-            name, exc, "timeout_outcome_unknown",
-            f"cua-driver MCP call {name} timed out; the action outcome is "
-            "unknown and may still have taken effect on the remote screen. "
-            "The session has been marked suspect and will be recreated before "
-            "the next computer-use call. Take fresh state before deciding "
-            "whether to act again.",
-        )
+        return _outcome_unknown(name, exc, "timeout_outcome_unknown")
 
     # ── Recovery ─────────────────────────────────────────────────────
     def _revive_declared_session_once(self, name: str, args: Dict[str, Any],
