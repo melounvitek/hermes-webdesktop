@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import logging
 import asyncio
+from typing import Optional
+
 from agent.i18n import t
 from gateway.platforms.base import MessageEvent
 from hermes_cli.config import atomic_config_write, clear_model_endpoint_credentials
-from typing import Optional
 from utils import base_url_host_matches
 
 # Log-record parity with gateway/run.py and the origin module.

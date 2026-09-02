@@ -8,6 +8,7 @@ import ...``) inside the bodies to avoid the import cycle.
 from __future__ import annotations
 
 import logging
+
 from agent.i18n import t
 from gateway.platforms.base import MessageEvent, MessageType
 

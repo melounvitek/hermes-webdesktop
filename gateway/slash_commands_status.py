@@ -13,11 +13,12 @@ import hashlib
 import os
 import re
 import time
+from typing import Any
+
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.i18n import t
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent
-from typing import Any
 
 # Log-record parity with gateway/run.py and the origin module.
 logger = logging.getLogger("gateway.run")
@@ -610,20 +611,9 @@ class GatewayStatusCommandsMixin:
         Estimated (chars/4), same engine as /usage. Runs in a thread; returns [] and never raises.
         """
         try:
-            from agent.context_breakdown import (
-                compute_context_details,
-                compute_session_context_breakdown,
-                render_context_breakdown_lines,
-            )
+            from agent.context_breakdown import compute_context_details, render_context_breakdown_lines
 
-            history: list[dict] = []
-            try:
-                entry = self.session_store.get_or_create_session(source)
-                history = self.session_store.load_transcript(entry.session_id) or []
-            except Exception:
-                history = []
-
-            payload = compute_session_context_breakdown(agent, history)
+            payload = self._session_context_breakdown(agent, source)
             if not (payload.get("categories") or []):
                 return []
 
@@ -638,22 +628,25 @@ class GatewayStatusCommandsMixin:
         except Exception:
             return []
 
+    def _session_context_breakdown(self, agent, source) -> dict:
+        """Per-category context estimate (chars/4) for *agent* over the session transcript (sync)."""
+        from agent.context_breakdown import compute_session_context_breakdown
+
+        history: list[dict] = []
+        try:
+            entry = self.session_store.get_or_create_session(source)
+            history = self.session_store.load_transcript(entry.session_id) or []
+        except Exception:
+            history = []
+        return compute_session_context_breakdown(agent, history)
+
     def _context_breakdown_lines(self, agent, source) -> list[str]:
         """Render the per-category context breakdown for /usage.
 
         Estimated (chars/4). Returns [] and never raises so /usage stays robust.
         """
         try:
-            from agent.context_breakdown import compute_session_context_breakdown
-
-            history: list[dict] = []
-            try:
-                entry = self.session_store.get_or_create_session(source)
-                history = self.session_store.load_transcript(entry.session_id) or []
-            except Exception:
-                history = []
-
-            payload = compute_session_context_breakdown(agent, history)
+            payload = self._session_context_breakdown(agent, source)
             categories = payload.get("categories") or []
             if not categories:
                 return []

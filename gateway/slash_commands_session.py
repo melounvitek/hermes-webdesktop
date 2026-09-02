@@ -13,12 +13,13 @@ import contextlib
 import dataclasses
 import os
 import shlex
+from typing import Optional, Union
+
 from agent.i18n import t
 from agent.turn_context import extract_api_content_sidecar
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply, MessageEvent, MessageType
 from gateway.session import SessionSource, build_session_key, is_shared_multi_user_session
-from typing import Optional, Union
 
 # Log-record parity with gateway/run.py and the origin module.
 logger = logging.getLogger("gateway.run")

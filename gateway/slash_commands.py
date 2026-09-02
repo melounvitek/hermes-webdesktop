@@ -1,9 +1,13 @@
 """Gateway slash-command handlers for GatewayRunner.
 
-The in-session slash commands (/model, /reset, /usage, ...) dispatched from ``_handle_message``,
-lifted out of ``gateway/run.py`` into a mixin so every ``self._handle_*_command`` reference keeps
-working via the MRO. run.py helpers (``_hermes_home``, ``_load_gateway_config``, ...) are imported
-lazily inside handler bodies — a deferred ``from gateway.run import ...`` avoids the import cycle.
+The in-session slash commands dispatched from ``_handle_message``, lifted out of ``gateway/run.py``
+into a mixin so every ``self._handle_*_command`` reference keeps working via the MRO. Cohesive
+clusters live in sibling mixins this class inherits: ``slash_commands_model`` (/model, /reasoning,
+/fast, ...), ``slash_commands_session`` (/new, /resume, /branch, /compress, ...),
+``slash_commands_status`` (/status, /context, /usage, ...) and ``slash_commands_goals`` (/goal,
+/loop, /heartbeat, ...). This module keeps the shared helpers plus the remaining one-off commands.
+run.py helpers (``_hermes_home``, ``_load_gateway_config``, ...) are imported lazily inside handler
+bodies — a deferred ``from gateway.run import ...`` avoids the import cycle.
 """
 
 from __future__ import annotations
@@ -24,25 +28,16 @@ from typing import Optional, Union
 from agent.i18n import t
 from gateway.config import HomeChannel, Platform, PlatformConfig, persist_home_channel
 from gateway.platforms.base import EphemeralReply, MessageEvent
-from gateway.session import (
-    AsyncSessionStore,
-)
-from hermes_cli.config import atomic_config_write, cfg_get
-from utils import (
-    atomic_json_write,
-    is_truthy_value,
-)
-
-from gateway.slash_commands_model import (  # noqa: F401 — _model_switch_skew_guard re-exported for callers/tests
+from gateway.session import AsyncSessionStore
+from gateway.slash_commands_goals import GatewayGoalCommandsMixin
+from gateway.slash_commands_model import (  # noqa: F401 — _model_switch_skew_guard re-exported for tests
     GatewayModelCommandsMixin,
     _model_switch_skew_guard,
 )
-
 from gateway.slash_commands_session import GatewaySessionCommandsMixin
-
 from gateway.slash_commands_status import GatewayStatusCommandsMixin
-
-from gateway.slash_commands_goals import GatewayGoalCommandsMixin
+from hermes_cli.config import atomic_config_write, cfg_get
+from utils import atomic_json_write, is_truthy_value
 
 logger = logging.getLogger("gateway.run")
 
@@ -190,8 +185,13 @@ def _home_thread_from_source(source) -> Optional[str]:
     return str(thread_id)
 
 
-class GatewaySlashCommandsMixin(GatewayModelCommandsMixin, GatewaySessionCommandsMixin, GatewayStatusCommandsMixin, GatewayGoalCommandsMixin):
-    """In-session slash-command handlers for GatewayRunner."""
+class GatewaySlashCommandsMixin(
+    GatewayModelCommandsMixin,
+    GatewaySessionCommandsMixin,
+    GatewayStatusCommandsMixin,
+    GatewayGoalCommandsMixin,
+):
+    """In-session slash-command handlers for GatewayRunner (plus the helpers the sibling mixins share)."""
 
     async_session_store: AsyncSessionStore
 
@@ -319,7 +319,6 @@ class GatewaySlashCommandsMixin(GatewayModelCommandsMixin, GatewaySessionCommand
         """
         adapter = self.adapters.get(platform) if getattr(self, "adapters", None) else None
         return getattr(adapter, "typed_command_prefix", "/") if adapter is not None else "/"
-
 
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show the profile serving this source and its home.
@@ -522,7 +521,6 @@ class GatewaySlashCommandsMixin(GatewayModelCommandsMixin, GatewaySessionCommand
                 conn.close()
         await asyncio.to_thread(_sub)
         return True
-
 
     async def _handle_stop_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /stop command - interrupt a running agent.
@@ -790,7 +788,6 @@ class GatewaySlashCommandsMixin(GatewayModelCommandsMixin, GatewaySessionCommand
             ),
         )
         return self._telegramized_command_reply(event, reply.text)
-
 
     async def _handle_set_home_command(self, event: MessageEvent) -> str:
         """Handle /sethome command -- set the current chat as the platform's home channel."""
@@ -1183,7 +1180,6 @@ class GatewaySlashCommandsMixin(GatewayModelCommandsMixin, GatewaySessionCommand
 
         return t("gateway.btw.started", preview=preview)
 
-
     async def _handle_memory_command(self, event: MessageEvent) -> str:
         """Handle /memory — review pending memory writes + toggle the approval gate.
 
@@ -1246,7 +1242,6 @@ class GatewaySlashCommandsMixin(GatewayModelCommandsMixin, GatewaySessionCommand
                    + "\n… (truncated — full diff in "
                      f"~/.hermes/pending/skills/{pending_id}.json)")
         return out
-
 
     async def _handle_approvals_command(self, event: MessageEvent) -> str:
         """Show or persist the profile-wide dangerous-command approval mode."""
@@ -1440,7 +1435,6 @@ class GatewaySlashCommandsMixin(GatewayModelCommandsMixin, GatewaySessionCommand
             if preview:
                 example = t("gateway.footer.example_line", preview=preview)
         return t("gateway.footer.saved", state=state, example=example)
-
 
     async def _handle_reload_mcp_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /reload-mcp — reconnect MCP servers and rebuild the cached agent.
