@@ -19,19 +19,16 @@ real-profile CDP, snapshot store); their names are re-imported here so
 """
 
 import atexit
-import contextlib
 import functools
 import json
 import logging
 import os
-import signal
 import subprocess
 import shutil
 import sys
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
 from agent.redact import redact_cdp_url
@@ -41,8 +38,6 @@ from hermes_constants import (
     get_hermes_home_override,
     hermes_home_key,
     node_tool_runnable,
-    reset_hermes_home_override,
-    set_hermes_home_override,
 )
 from utils import env_int, is_truthy_value
 from hermes_cli.config import DEFAULT_CONFIG, cfg_get

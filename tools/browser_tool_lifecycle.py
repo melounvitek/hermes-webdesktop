@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
 from tools.browser_tool_origin import origin_module as _origin
 
 
@@ -136,7 +137,7 @@ def _session_owner_scope(task_id: str):
     )
     from hermes_cli.env_loader import hydrate_profile_secret_sources
 
-    home_token = _bt.set_hermes_home_override(owner_home)
+    home_token = set_hermes_home_override(owner_home)
     try:
         hydrate_profile_secret_sources(Path(owner_home))
         secret_token = set_secret_scope(build_profile_secret_scope(Path(owner_home)))
@@ -145,7 +146,7 @@ def _session_owner_scope(task_id: str):
         finally:
             reset_secret_scope(secret_token)
     finally:
-        _bt.reset_hermes_home_override(home_token)
+        reset_hermes_home_override(home_token)
 
 
 def _cleanup_inactive_browser_sessions():
@@ -513,7 +514,7 @@ def _update_session_activity(task_id: str):
     _bt = _origin()
     with _bt._cleanup_lock:
         _bt._session_last_activity[task_id] = time.time()
-        _bt._session_owner_homes.setdefault(task_id, str(_bt.get_hermes_home()))
+        _bt._session_owner_homes.setdefault(task_id, str(get_hermes_home()))
 
 
 def _kill_process_tree(proc: "subprocess.Popen") -> None:
@@ -626,7 +627,7 @@ def _cleanup_old_recordings(max_age_hours=72):
     """Remove browser recordings older than max_age_hours to prevent disk bloat."""
     _bt = _origin()
     try:
-        hermes_home = _bt.get_hermes_home()
+        hermes_home = get_hermes_home()
         recordings_dir = hermes_home / "browser_recordings"
         if not recordings_dir.exists():
             return
