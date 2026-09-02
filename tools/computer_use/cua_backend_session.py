@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from tools.computer_use.cua_backend_parse import _extract_tool_result, _mcp_field
 
@@ -90,6 +90,89 @@ def _outcome_unknown(name: str, exc: Exception, code: str, message: str) -> Dict
     }
 
 
+# ── CLI fallback transport helpers ───────────────────────────────────
+_CLI_ATTEMPTS = 4
+
+
+def _cli_run_json(cmd: List[str], env: Dict[str, str], name: str, timeout: float) -> Any:
+    """Run ``cua-driver call`` with backoff until it prints JSON; return the parsed value.
+
+    Fails fast on "daemon is not running": that is PERMANENT for this
+    invocation (the CLI needs the machine-wide daemon socket, which Linux
+    installs typically never start), so burning ~3.5s of backoff is pointless.
+    """
+    import subprocess as _subprocess
+    import time as _time
+    from tools.computer_use import cua_backend as _cb
+
+    backoff = 0.5
+    last_err = ""
+    for attempt in range(_CLI_ATTEMPTS):
+        try:
+            proc = _subprocess.run(
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=max(15.0, timeout), creationflags=_cb.windows_hide_flags(), env=env)
+        except Exception as e:  # pragma: no cover - subprocess spawn failure
+            raise RuntimeError(f"cua-driver CLI fallback for {name} failed to spawn: {e}") from e
+
+        out = (proc.stdout or "").strip()
+        err = proc.stderr or ""
+        last_err = out[:200] or err[:200]
+        if "daemon is not running" in out or "daemon is not running" in err:
+            raise RuntimeError(
+                f"cua-driver CLI fallback for {name} unavailable: the "
+                "machine-wide cua-driver daemon is not running (the "
+                "CLI transport requires it; the MCP runtime does not)."
+            )
+        start = min((i for i in (out.find("{"), out.find("[")) if i != -1), default=-1)
+        if start != -1:
+            try:
+                return json.loads(out[start:])
+            except json.JSONDecodeError:
+                pass
+        # No JSON (EAGAIN warning / empty) — retry with backoff.
+        if attempt < _CLI_ATTEMPTS - 1:
+            logger.warning(
+                "cua-driver CLI fallback for %s got no JSON "
+                "(attempt %d/%d); retrying in %.1fs",
+                name, attempt + 1, _CLI_ATTEMPTS, backoff,
+            )
+            _time.sleep(backoff)
+            backoff *= 2
+    raise RuntimeError(f"cua-driver CLI fallback for {name} returned no JSON after "
+                       f"{_CLI_ATTEMPTS} attempts: {last_err}")
+
+
+def _cli_result(parsed: Any, shot_file: Optional[str]) -> Dict[str, Any]:
+    """Remap a ``cua-driver call`` JSON body into the ``_extract_tool_result`` shape."""
+    images: List[str] = []
+    data: Any = None
+    is_error = False
+    if isinstance(parsed, dict):
+        # Logical failures may be reported in-band even when the subprocess
+        # exits 0 — preserve the bit so callers fail closed.
+        is_error = parsed.get("isError") is True or parsed.get("is_error") is True
+        shot = parsed.get("screenshot_png_b64")
+        if not shot:
+            # Screenshot was routed to a file (ours or the daemon's choice).
+            fpath = parsed.get("screenshot_file_path") or shot_file
+            if fpath and os.path.exists(fpath):
+                try:
+                    with open(fpath, "rb") as fh:
+                        shot = base64.b64encode(fh.read()).decode("ascii")
+                except Exception as e:
+                    logger.debug("cua-driver CLI fallback: failed reading %s: %s", fpath, e)
+        if shot:
+            images.append(shot)
+        tree = parsed.get("tree_markdown")
+        if tree is not None:
+            ec = parsed.get("element_count")
+            summary = f"{ec} elements" if ec is not None else ""
+            data = f"{summary}\n{tree}" if summary else tree
+    structured = parsed if isinstance(parsed, dict) else None
+    return {"data": data, "images": images, "structuredContent": structured, "isError": is_error}
+
+
 class _CuaDriverSession:
     """Holds the mcp ClientSession. Spawned lazily; re-entered on drop.
 
@@ -128,9 +211,8 @@ class _CuaDriverSession:
         self._session = None
         self._lock = threading.Lock()
         self._started = False
-        # Per-tool capability-token sets from `tools/list` (e.g. "click" ->
-        # {"accessibility.element_tokens", ...}). Empty until the session
-        # starts; consumers call `supports_capability` rather than reading it.
+        # Per-tool capability-token sets from `tools/list`; empty until the
+        # session starts. Consumers call `supports_capability`, not this map.
         self._capabilities: Dict[str, set] = {}
         # Raw input schemas are the source of truth for action properties:
         # 0.9-era drivers advertise delivery_mode in inputSchema while
@@ -210,8 +292,7 @@ class _CuaDriverSession:
             # A session that dies for ANY reason (MCP drop, driver crash,
             # unexpected exit) must be re-enterable: the next call sees
             # _started False and rebuilds instead of hanging on a dead one.
-            # Plain bool write is atomic, so no lock needed here (stop() may
-            # hold self._lock while awaiting this coro's future).
+            # Plain bool write is atomic — stop() may hold self._lock here.
             self._started = False
 
     async def _populate_capabilities(self, session: Any) -> None:
@@ -222,11 +303,11 @@ class _CuaDriverSession:
         self._tool_schemas = {}
         self._capability_version = ""
 
-        def _field(obj: Any, name: str) -> Any:
+        def _field(obj: Any, *names: str) -> Any:
             # Some MCP SDKs forward custom fields via `model_extra` (Pydantic v2).
-            value = getattr(obj, name, None)
+            value = _mcp_field(obj, names[0], names[-1])
             if value is None:
-                value = (getattr(obj, "model_extra", None) or {}).get(name)
+                value = (getattr(obj, "model_extra", None) or {}).get(names[-1])
             return value
 
         try:
@@ -239,9 +320,7 @@ class _CuaDriverSession:
                 self._capabilities[tool_name] = (
                     {c for c in caps if isinstance(c, str)} if isinstance(caps, list) else set()
                 )
-                schema = _mcp_field(tool, "input_schema", "inputSchema")
-                if schema is None:
-                    schema = (getattr(tool, "model_extra", None) or {}).get("inputSchema")
+                schema = _field(tool, "input_schema", "inputSchema")
                 self._tool_schemas[tool_name] = dict(schema) if isinstance(schema, dict) else {}
             # capability_version is a top-level sibling of `tools` on the
             # tools/list response (cua-driver leaves it OUT of initialize).
@@ -347,12 +426,9 @@ class _CuaDriverSession:
         return any(capability in caps for caps in self._capabilities.values())
 
     def _has_tool(self, name: str) -> bool:
-        """True when ``tools/list`` advertised *name*.
-
-        Routes capture(): cua-driver dropped the standalone ``screenshot``
-        tool and folded PNG capture into ``get_window_state``. False before
-        discovery populated the map — callers treat that as "unknown".
-        """
+        """True when ``tools/list`` advertised *name*. Routes capture(): cua-driver
+        folded PNG capture into ``get_window_state`` and dropped ``screenshot``.
+        False before discovery populated the map — callers treat that as "unknown"."""
         return name in self._capabilities
 
     def supports_input_property(self, tool: str, property_name: str) -> bool:
@@ -413,14 +489,11 @@ class _CuaDriverSession:
 
     @staticmethod
     def _is_transient_daemon_error(exc: Exception) -> bool:
-        """True for the daemon-proxy EAGAIN congestion error.
-
-        On macOS the ``cua-driver mcp`` bridge forwards calls to the daemon
-        over a non-blocking unix socket; heavy ops (``get_window_state``)
-        can fail with ``Resource temporarily unavailable (os error 35)`` when
-        the buffer is momentarily full. The same call succeeds on retry, so
-        we back off / fall back instead of surfacing an empty 0x0 capture.
-        """
+        """True for the daemon-proxy EAGAIN congestion error: on macOS the
+        ``cua-driver mcp`` bridge talks to the daemon over a non-blocking unix
+        socket and heavy ops (``get_window_state``) fail with ``os error 35``
+        when the buffer is full. A retry succeeds, so back off / fall back
+        instead of surfacing an empty 0x0 capture."""
         msg = str(exc)
         return (
             "Resource temporarily unavailable" in msg
@@ -508,26 +581,16 @@ class _CuaDriverSession:
             self._restart_session_locked()
         self._restore_declared_session_after_transport_reset(timeout)
 
-    def _call_tool_via_cli(self, name: str, args: Dict[str, Any], timeout: float) -> Dict[str, Any]:
-        """Fallback transport: ``cua-driver call <tool> <json>`` as a subprocess.
-
-        The ``cua-driver mcp`` stdio bridge can persistently fail heavy calls
-        (notably ``get_window_state``) with EAGAIN while the plain CLI — which
-        talks to the daemon over its own socket — keeps working. The JSON is
-        remapped into the ``_extract_tool_result`` dict shape so callers stay
-        transport-agnostic.
+    def _cli_command(self, name: str, args: Dict[str, Any]) -> Tuple[List[str], Dict[str, str], Optional[str]]:
+        """Build ``(cmd, child_env, shot_file)`` for the CLI fallback.
 
         For ``get_window_state`` the screenshot is routed to a temp file via
-        ``screenshot_out_file`` so the daemon returns a tiny JSON body instead
-        of a multi-megabyte base64 blob (the large payload is what congests
-        the socket in the first place); we read the PNG back ourselves. The
-        CLI call is retried with backoff since the socket may still be busy.
+        ``screenshot_out_file`` so the daemon returns a tiny JSON body instead of
+        a multi-megabyte base64 blob (the payload that congests the socket in
+        the first place); ``_cli_result`` reads the PNG back.
         """
-        import subprocess as _subprocess
         import tempfile as _tempfile
-        import time as _time
         from tools.computer_use import cua_backend as _cb
-        from tools.environments.local import _sanitize_subprocess_env
 
         call_args = dict(args)
         shot_file: Optional[str] = None
@@ -546,81 +609,24 @@ class _CuaDriverSession:
             driver_command = embedded_daemon.proxy_invocation()[0]
             child_env = embedded_daemon.child_env()
             socket_args = ["--socket", embedded_daemon.socket_path]
-        cmd = [driver_command, "call", name, json.dumps(call_args), *socket_args]
-        attempts = 4
-        backoff = 0.5
-        parsed: Any = None
-        last_err = ""
+        return [driver_command, "call", name, json.dumps(call_args), *socket_args], child_env, shot_file
+
+    def _call_tool_via_cli(self, name: str, args: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+        """Fallback transport: ``cua-driver call <tool> <json>`` as a subprocess.
+
+        The ``cua-driver mcp`` stdio bridge can persistently fail heavy calls
+        (notably ``get_window_state``) with EAGAIN while the plain CLI — which
+        talks to the daemon over its own socket — keeps working. The JSON is
+        remapped into the ``_extract_tool_result`` dict shape so callers stay
+        transport-agnostic; the call is retried with backoff since the socket
+        may still be busy.
+        """
+        from tools.environments.local import _sanitize_subprocess_env
+
+        cmd, child_env, shot_file = self._cli_command(name, args)
         try:
-            for attempt in range(attempts):
-                try:
-                    proc = _subprocess.run(
-                        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                        timeout=max(15.0, timeout), creationflags=_cb.windows_hide_flags(),
-                        env=_sanitize_subprocess_env(child_env))
-                except Exception as e:  # pragma: no cover - subprocess spawn failure
-                    raise RuntimeError(f"cua-driver CLI fallback for {name} failed to spawn: {e}") from e
-
-                out = (proc.stdout or "").strip()
-                last_err = out[:200] or (proc.stderr or "")[:200]
-                # PERMANENT for this invocation: `cua-driver call` needs the
-                # machine-wide daemon socket, which Linux installs typically
-                # never start. Fail fast instead of burning ~3.5s of backoff.
-                if "daemon is not running" in out or "daemon is not running" in (proc.stderr or ""):
-                    raise RuntimeError(
-                        f"cua-driver CLI fallback for {name} unavailable: the "
-                        "machine-wide cua-driver daemon is not running (the "
-                        "CLI transport requires it; the MCP runtime does not)."
-                    )
-                start = min((i for i in (out.find("{"), out.find("[")) if i != -1), default=-1)
-                if start != -1:
-                    try:
-                        candidate = json.loads(out[start:])
-                    except json.JSONDecodeError:
-                        candidate = None
-                    if candidate is not None:
-                        parsed = candidate
-                        break
-                # No JSON (EAGAIN warning / empty) — retry with backoff.
-                if attempt < attempts - 1:
-                    logger.warning(
-                        "cua-driver CLI fallback for %s got no JSON "
-                        "(attempt %d/%d); retrying in %.1fs",
-                        name, attempt + 1, attempts, backoff,
-                    )
-                    _time.sleep(backoff)
-                    backoff *= 2
-
-            if parsed is None:
-                raise RuntimeError(f"cua-driver CLI fallback for {name} returned no JSON after "
-                                   f"{attempts} attempts: {last_err}")
-
-            images: List[str] = []
-            data: Any = None
-            structured: Optional[Dict] = parsed if isinstance(parsed, dict) else None
-            is_error = False
-            if isinstance(parsed, dict):
-                # CLI responses may report logical failures in-band even when
-                # the subprocess exits 0 — preserve the bit so callers fail closed.
-                is_error = parsed.get("isError") is True or parsed.get("is_error") is True
-                shot = parsed.get("screenshot_png_b64")
-                if not shot:
-                    # Screenshot was routed to a file (ours or the daemon's choice).
-                    fpath = parsed.get("screenshot_file_path") or shot_file
-                    if fpath and os.path.exists(fpath):
-                        try:
-                            with open(fpath, "rb") as fh:
-                                shot = base64.b64encode(fh.read()).decode("ascii")
-                        except Exception as e:
-                            logger.debug("cua-driver CLI fallback: failed reading %s: %s", fpath, e)
-                if shot:
-                    images.append(shot)
-                tree = parsed.get("tree_markdown")
-                if tree is not None:
-                    ec = parsed.get("element_count")
-                    summary = f"{ec} elements" if ec is not None else ""
-                    data = f"{summary}\n{tree}" if summary else tree
-            return {"data": data, "images": images, "structuredContent": structured, "isError": is_error}
+            parsed = _cli_run_json(cmd, _sanitize_subprocess_env(child_env), name, timeout)
+            return _cli_result(parsed, shot_file)
         finally:
             if shot_file and os.path.exists(shot_file):
                 try:
