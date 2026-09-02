@@ -12,10 +12,6 @@ from __future__ import annotations
 CWD_PLACEHOLDERS = frozenset({".", "auto", "cwd"})
 
 
-def _truthy_env(value: str | None) -> bool:
-    return (value or "").strip().lower() in {"true", "1", "yes"}
-
-
 def resolve_placeholder_terminal_cwd(
     *,
     configured_cwd: str,
@@ -37,13 +33,9 @@ def resolve_placeholder_terminal_cwd(
         return configured_cwd
 
     backend = (terminal_backend or "local").strip().lower()
+    messaging = (messaging_cwd or "").strip()
     if backend == "local":
-        messaging = (messaging_cwd or "").strip()
         return messaging or home_fallback
-
-    if backend == "docker" and docker_mount_cwd_to_workspace:
-        messaging = (messaging_cwd or "").strip()
-        if messaging and messaging not in CWD_PLACEHOLDERS:
-            return messaging
-
+    if backend == "docker" and docker_mount_cwd_to_workspace and messaging and messaging not in CWD_PLACEHOLDERS:
+        return messaging
     return None

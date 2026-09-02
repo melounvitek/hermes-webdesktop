@@ -21,6 +21,7 @@ from gateway.hosted_room_peer import (
     TransportSecurity,
     validate_room_link_url,
 )
+import contextlib
 
 
 MAX_LINKS = 512
@@ -36,6 +37,21 @@ _LEGACY_FIELDS = {
     "trace_id",
     "updated_at",
 }
+_OPTIONAL_FIELDS = {"transport_security", "status"}
+# SQLite record columns that map 1:1 onto mapping fields, in record order
+# (``catalog_json`` is the serialized ``catalog``).
+_RECORD_FIELDS = (
+    "room_id",
+    "member_id",
+    "target_url",
+    "target_profile",
+    "grant",
+    "cancellation_scope_id",
+    "trace_id",
+    "transport_security",
+    "status",
+    "updated_at",
+)
 _STATUSES = {"ready", "unavailable", "needs_reauthorization"}
 
 
@@ -55,8 +71,7 @@ class StoredRoomLink:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "StoredRoomLink":
-        allowed = _LEGACY_FIELDS | {"transport_security", "status"}
-        if set(value) - allowed or not _LEGACY_FIELDS.issubset(value):
+        if set(value) - _LEGACY_FIELDS - _OPTIONAL_FIELDS or not _LEGACY_FIELDS.issubset(value):
             raise HostedRoomPeerError("stored room link fields are invalid")
         room_id = _short_string(value["room_id"], "room_id")
         member_id = _short_string(value["member_id"], "member_id")
@@ -96,54 +111,19 @@ class StoredRoomLink:
             catalog = json.loads(str(value["catalog_json"]))
         except Exception as exc:
             raise HostedRoomPeerError("stored room link catalog is unreadable") from exc
-        return cls.from_mapping({
-            "room_id": value["room_id"],
-            "member_id": value["member_id"],
-            "target_url": value["target_url"],
-            "target_profile": value["target_profile"],
-            "grant": value["grant"],
-            "catalog": catalog,
-            "cancellation_scope_id": value["cancellation_scope_id"],
-            "trace_id": value["trace_id"],
-            "transport_security": value["transport_security"],
-            "status": value["status"],
-            "updated_at": value["updated_at"],
-        })
+        return cls.from_mapping(
+            {**{name: value[name] for name in _RECORD_FIELDS}, "catalog": catalog}
+        )
 
     def catalog_mapping(self) -> dict[str, Any]:
-        value = {
-            "installation_id": self.catalog.installation_id,
-            "protocol_versions": list(self.catalog.protocol_versions),
-            "link_modes": list(self.catalog.link_modes),
-            "persistent_process": self.catalog.persistent_process,
-            "text": self.catalog.text,
-            "attachments": self.catalog.attachments,
-            "execution_policy": self.catalog.execution_policy.as_mapping(),
-            "catalog_digest": self.catalog.catalog_digest,
-        }
-        if (
-            self.catalog.endpoint_url is not None
-            or self.catalog.endpoint_reason is not None
-        ):
-            value["endpoint"] = self.catalog.endpoint_mapping()
-        return value
+        return self.catalog.as_mapping()
 
     def as_record(self) -> dict[str, Any]:
-        return {
-            "room_id": self.room_id,
-            "member_id": self.member_id,
-            "target_url": self.target_url,
-            "target_profile": self.target_profile,
-            "grant": self.grant,
-            "catalog_json": json.dumps(
-                self.catalog_mapping(), sort_keys=True, separators=(",", ":")
-            ),
-            "cancellation_scope_id": self.cancellation_scope_id,
-            "trace_id": self.trace_id,
-            "transport_security": self.transport_security,
-            "status": self.status,
-            "updated_at": self.updated_at,
-        }
+        record = {name: getattr(self, name) for name in _RECORD_FIELDS}
+        record["catalog_json"] = json.dumps(
+            self.catalog_mapping(), sort_keys=True, separators=(",", ":")
+        )
+        return record
 
 
 def _short_string(value: Any, field: str) -> str:
@@ -153,23 +133,24 @@ def _short_string(value: Any, field: str) -> str:
     return normalized
 
 
-def load_room_links(db_path: Path | str) -> tuple[StoredRoomLink, ...]:
+def _link_rows(db_path: Path | str) -> list[dict[str, Any]]:
     rows = hosted_rooms.list_room_link_records(db_path)
     if len(rows) > MAX_LINKS:
         raise HostedRoomPeerError("stored room link list is invalid")
-    return tuple(StoredRoomLink.from_record(row) for row in rows)
+    return rows
+
+
+def load_room_links(db_path: Path | str) -> tuple[StoredRoomLink, ...]:
+    return tuple(StoredRoomLink.from_record(row) for row in _link_rows(db_path))
 
 
 def load_room_links_tolerant(
     db_path: Path | str,
 ) -> tuple[tuple[StoredRoomLink, ...], tuple[str, ...]]:
     """Load healthy routes while quarantining malformed rows by identity."""
-    rows = hosted_rooms.list_room_link_records(db_path)
-    if len(rows) > MAX_LINKS:
-        raise HostedRoomPeerError("stored room link list is invalid")
     links = []
     errors = []
-    for row in rows:
+    for row in _link_rows(db_path):
         try:
             links.append(StoredRoomLink.from_record(row))
         except Exception:
@@ -184,10 +165,8 @@ def save_room_link(db_path: Path | str, link: StoredRoomLink) -> None:
         db_path, record=link.as_record(), max_links=MAX_LINKS
     )
     if os.name == "posix":
-        try:
+        with contextlib.suppress(OSError):
             Path(db_path).chmod(0o600)
-        except OSError:
-            pass
 
 
 def mark_room_link_status(
@@ -225,22 +204,7 @@ def make_stored_link(
         "target_url": target_url,
         "target_profile": target_profile,
         "grant": grant,
-        "catalog": {
-            "installation_id": catalog.installation_id,
-            "protocol_versions": list(catalog.protocol_versions),
-            "link_modes": list(catalog.link_modes),
-            "persistent_process": catalog.persistent_process,
-            "text": catalog.text,
-            "attachments": catalog.attachments,
-            "execution_policy": catalog.execution_policy.as_mapping(),
-            "catalog_digest": catalog.catalog_digest,
-            **(
-                {"endpoint": catalog.endpoint_mapping()}
-                if catalog.endpoint_url is not None
-                or catalog.endpoint_reason is not None
-                else {}
-            ),
-        },
+        "catalog": catalog.as_mapping(),
         "cancellation_scope_id": cancellation_scope_id,
         "trace_id": trace_id,
         "transport_security": transport_security,

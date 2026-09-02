@@ -1,14 +1,11 @@
 """Compatibility shim — the real implementation is ``hermes_startup_watchdog``.
 
-The startup-liveness watchdog (OOF-298) must be armable *before* the
-``gateway`` package is imported: ``gateway/__init__`` eagerly pulls in the
-config/session/delivery graph, and an import-time deadlock is squarely inside
-the watchdog's coverage mandate. The implementation therefore lives at the
-repository top level as a stdlib-only module.
-
-This shim keeps the intuitive ``gateway.startup_watchdog`` import path
-working for code that runs after the package is loaded (the disarm site in
-``gateway.run``, tests, operators poking at a REPL).
+The startup-liveness watchdog must be armable *before* the ``gateway`` package
+is imported (``gateway/__init__`` eagerly pulls in the config/session/delivery
+graph, and an import-time deadlock is inside the watchdog's coverage mandate),
+so the implementation lives at the repository top level as a stdlib-only
+module. This shim keeps ``gateway.startup_watchdog`` importable for code that
+runs after the package is loaded (the disarm site in ``gateway.run``, tests).
 """
 
 from hermes_startup_watchdog import (  # noqa: F401

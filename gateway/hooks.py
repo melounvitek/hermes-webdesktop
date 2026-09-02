@@ -1,41 +1,25 @@
 """
 Event Hook System
 
-A lightweight event-driven system that fires handlers at key lifecycle points.
-Hooks are discovered from ~/.hermes/hooks/ directories, each containing:
-  - HOOK.yaml  (metadata: name, description, events list)
-  - handler.py (Python handler with async def handle(event_type, context))
+Fires handlers at gateway lifecycle points. Hooks are discovered from
+~/.hermes/hooks/<name>/ directories, each containing HOOK.yaml (name,
+description, events) and handler.py (``def handle(event_type, context)``,
+sync or async). Handler errors are logged and never block the pipeline.
 
 Events:
-  - gateway:startup     -- Gateway process starts
-  - session:start       -- New session created (first message of a new session)
-  - session:end         -- Session ends (user ran /new or /reset)
-  - session:reset       -- Session reset completed (new session entry created)
-  - agent:start         -- Agent begins processing a message
-  - agent:step          -- Each turn in the tool-calling loop
-  - agent:end           -- Agent finishes processing
-  - command:*           -- Any slash command executed (wildcard match)
+  gateway:startup, session:start, session:end (user ran /new or /reset),
+  session:reset, agent:start, agent:step (each tool-loop turn), agent:end,
+  command:* (any slash command; wildcard match).
 
-Errors in hooks are caught and logged but never block the main pipeline.
+Context passed to ``agent:start`` / ``agent:end``:
+  platform, user_id, chat_id, thread_id (Telegram forum-topic / thread root
+  id as string; empty when not in a thread), chat_type ("dm" | "group" |
+  "forum" | ""), session_id, message (truncated to 500 chars).
+``agent:end`` adds: response (truncated to 500 chars), model, provider.
 
-Context dict passed to ``agent:start`` / ``agent:end`` handlers:
-  platform     -- source platform name (e.g. "telegram", "matrix", "slack")
-  user_id      -- platform user id of the sender
-  chat_id      -- platform chat id (group/DM identifier)
-  thread_id    -- Telegram forum-topic id / thread root id (string; empty
-                  when not in a thread / topic)
-  chat_type    -- "dm" | "group" | "forum" (empty if unknown)
-  session_id   -- Hermes session id
-  message      -- inbound message text (truncated to 500 chars)
-
-``agent:end`` adds:
-  response     -- agent response text (truncated to 500 chars)
-  model        -- model name that handled the turn
-  provider     -- provider that handled the turn
-
-Handlers posting a follow-up into the same Telegram forum-topic should
-include ``message_thread_id=int(thread_id)`` when ``chat_type == "forum"``
-and ``thread_id`` is non-empty.
+Handlers posting a follow-up into the same Telegram forum-topic should pass
+``message_thread_id=int(thread_id)`` when ``chat_type == "forum"`` and
+``thread_id`` is non-empty.
 """
 
 import asyncio
@@ -52,44 +36,22 @@ HOOKS_DIR = get_hermes_home() / "hooks"
 
 
 class HookRegistry:
-    """
-    Discovers, loads, and fires event hooks.
-
-    Usage:
-        registry = HookRegistry()
-        registry.discover_and_load()
-        await registry.emit("agent:start", {"platform": "telegram", ...})
-    """
+    """Discovers, loads, and fires event hooks."""
 
     def __init__(self):
-        # event_type -> [handler_fn, ...]
-        self._handlers: Dict[str, List[Callable]] = {}
+        self._handlers: Dict[str, List[Callable]] = {}  # event_type -> handlers
         self._loaded_hooks: List[dict] = []  # metadata for listing
 
     @property
     def loaded_hooks(self) -> List[dict]:
-        """Return metadata about all loaded hooks."""
         return list(self._loaded_hooks)
 
     def _register_builtin_hooks(self) -> None:
-        """Register built-in hooks that are always active.
-
-        Currently empty — no shipped built-in hooks. Kept as the extension
-        point for future always-on gateway hooks so they drop in without
-        re-plumbing discover_and_load().
-        """
+        """Extension point for always-on built-in hooks; currently none shipped."""
         return
 
     def discover_and_load(self) -> None:
-        """
-        Scan the hooks directory for hook directories and load their handlers.
-
-        Also registers built-in hooks that are always active.
-
-        Each hook directory must contain:
-          - HOOK.yaml with at least 'name' and 'events' keys
-          - handler.py with a top-level 'handle' function (sync or async)
-        """
+        """Register built-in hooks, then load every valid hook dir under HOOKS_DIR."""
         self._register_builtin_hooks()
 
         if not HOOKS_DIR.exists():
@@ -117,17 +79,12 @@ class HookRegistry:
                     print(f"[hooks] Skipping {hook_name}: no events declared", flush=True)
                     continue
 
-                # Dynamically load the handler module.
-                # Register in sys.modules BEFORE exec_module so Pydantic /
-                # dataclasses / typing introspection can resolve forward
-                # references (triggered by `from __future__ import annotations`
-                # in the handler). Without this, a handler that declares a
-                # Pydantic BaseModel for webhook/event payloads fails at first
+                # Register in sys.modules BEFORE exec_module so Pydantic/dataclass
+                # forward references (from ``from __future__ import annotations``)
+                # resolve; otherwise a handler declaring a BaseModel fails at first
                 # dispatch with "TypeAdapter ... is not fully defined".
                 module_name = f"hermes_hook_{hook_name}"
-                spec = importlib.util.spec_from_file_location(
-                    module_name, handler_path
-                )
+                spec = importlib.util.spec_from_file_location(module_name, handler_path)
                 if spec is None or spec.loader is None:
                     print(f"[hooks] Skipping {hook_name}: could not load handler.py", flush=True)
                     continue
@@ -145,7 +102,6 @@ class HookRegistry:
                     print(f"[hooks] Skipping {hook_name}: no 'handle' function found", flush=True)
                     continue
 
-                # Register the handler for each declared event
                 for event in events:
                     self._handlers.setdefault(event, []).append(handle_fn)
 
@@ -162,42 +118,19 @@ class HookRegistry:
                 print(f"[hooks] Error loading hook {hook_dir.name}: {e}", flush=True)
 
     def _resolve_handlers(self, event_type: str) -> List[Callable]:
-        """Return all handlers that should fire for ``event_type``.
+        """Exact-match handlers first, then ``<base>:*`` wildcard handlers.
 
-        Exact matches fire first, followed by wildcard matches (e.g.
-        ``command:*`` matches ``command:reset``).
+        A handler registered for a bare base type ("agent") does NOT fire for
+        "agent:start" — only exact matches and explicit wildcards.
         """
         handlers = list(self._handlers.get(event_type, []))
         if ":" in event_type:
-            base = event_type.split(":")[0]
-            wildcard_key = f"{base}:*"
-            handlers.extend(self._handlers.get(wildcard_key, []))
+            handlers.extend(self._handlers.get(f"{event_type.split(':')[0]}:*", []))
         return handlers
 
     async def emit(self, event_type: str, context: Optional[Dict[str, Any]] = None) -> None:
-        """
-        Fire all handlers registered for an event, discarding return values.
-
-        Supports wildcard matching: handlers registered for "command:*" will
-        fire for any "command:..." event. Handlers registered for a base type
-        like "agent" won't fire for "agent:start" -- only exact matches and
-        explicit wildcards.
-
-        Args:
-            event_type: The event identifier (e.g. "agent:start").
-            context:    Optional dict with event-specific data.
-        """
-        if context is None:
-            context = {}
-
-        for fn in self._resolve_handlers(event_type):
-            try:
-                result = fn(event_type, context)
-                # Support both sync and async handlers
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception as e:
-                print(f"[hooks] Error in handler for '{event_type}': {e}", flush=True)
+        """Fire all handlers for an event, discarding return values."""
+        await self.emit_collect(event_type, context)
 
     async def emit_collect(
         self,
@@ -206,12 +139,9 @@ class HookRegistry:
     ) -> List[Any]:
         """Fire handlers and return their non-None return values in order.
 
-        Like :meth:`emit` but captures each handler's return value. Used for
-        decision-style hooks (e.g. ``command:<name>`` policies that want to
-        allow/deny/rewrite the command before normal dispatch).
-
-        Exceptions from individual handlers are logged but do not abort the
-        remaining handlers.
+        Used for decision-style hooks (e.g. ``command:<name>`` policies that
+        allow/deny/rewrite a command). A failing handler is logged and does not
+        abort the remaining handlers.
         """
         if context is None:
             context = {}
@@ -220,7 +150,7 @@ class HookRegistry:
         for fn in self._resolve_handlers(event_type):
             try:
                 result = fn(event_type, context)
-                if asyncio.iscoroutine(result):
+                if asyncio.iscoroutine(result):  # sync and async handlers both supported
                     result = await result
                 if result is not None:
                     results.append(result)

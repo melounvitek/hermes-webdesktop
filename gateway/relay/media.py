@@ -1,42 +1,30 @@
 """Relay media client — gateway↔connector media plane (Phase 2). EXPERIMENTAL.
 
-The relay wire contract carries media BY REFERENCE, never by value: an inbound
-event's ``media_urls`` name connector re-hosted attachments
-(``{connector}/relay/media/{id}``), and an outbound ``send_media`` op names a
-``source_url`` the connector resolves back to bytes. This module is the
-gateway-side HTTP client for that plane:
+The relay wire carries media BY REFERENCE: inbound ``media_urls`` name
+connector re-hosts (``{connector}/relay/media/{id}``) and an outbound
+``send_media`` op names a ``source_url`` the connector resolves back to bytes.
 
-  - ``download(url)``  → GET a re-hosted attachment to a local temp file (the
-    agent's vision/file tools consume LOCAL paths, matching every native
-    adapter's inbound media behaviour).
-  - ``upload(path)``   → POST local file bytes to ``/relay/media``; returns the
-    ``/relay/media/{id}`` reference for a subsequent ``send_media`` op. This is
-    how a locally-generated artifact (image_generate output, TTS voice note,
-    a document) crosses to the connector WITHOUT the gateway needing a public
-    URL.
+  - ``download(url)`` → GET a re-hosted attachment to a local temp file (the
+    agent's vision/file tools consume LOCAL paths, like every native adapter).
+  - ``upload(path)``  → POST local bytes to ``/relay/media``; returns the
+    ``/relay/media/{id}`` reference for a subsequent ``send_media`` op, so a
+    locally-generated artifact crosses without the gateway needing a public URL.
 
-Both requests present the SAME per-gateway signed bearer the WS upgrade uses
-(``make_upgrade_token``, gateway/relay/auth.py — the channel authenticator; the
-connector authenticates it with ``authenticateGatewayBearer`` on the mirrored
-routes). Uploads are
-per-gateway-owned on the connector (only this gateway can reference the id
-back); downloads accept both this gateway's uploads and connector ingest
-re-hosts.
-
-Transport is stdlib ``urllib`` run in a thread executor (the same dependency
-posture as ``_post_provision`` — the relay lane adds no HTTP client deps).
-EXPERIMENTAL: may change without a deprecation cycle (docs/relay-connector-contract.md).
+Both present the same per-gateway signed bearer the WS upgrade uses
+(``make_upgrade_token``). Uploads are per-gateway-owned on the connector;
+downloads accept this gateway's uploads and connector ingest re-hosts.
+Transport is stdlib ``urllib`` in a thread executor (no HTTP client deps).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import mimetypes
 import os
 import tempfile
 import urllib.error
-import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -45,19 +33,19 @@ from gateway.relay.auth import make_upgrade_token
 
 logger = logging.getLogger(__name__)
 
-# Mirror the connector's MEDIA_MAX_BYTES (mediaStore.ts) so an oversized local
-# artifact fails fast here instead of round-tripping to a connector 413.
+# Mirrors the connector's MEDIA_MAX_BYTES (mediaStore.ts): fail fast here
+# instead of round-tripping to a connector 413.
 MEDIA_MAX_BYTES = 25 * 1024 * 1024
 
 _REQUEST_TIMEOUT_S = 30.0
 
+# Discord's CDN (and other public hosts) 403 urllib's default UA, which
+# silently killed every CDN pass-through download. Always send a descriptive UA.
+_MEDIA_USER_AGENT = "HermesAgent-Relay/1.0 (+https://github.com/NousResearch/hermes-agent)"
+
 
 def media_base_url(relay_dial_url: str) -> str:
-    """Map the ``ws(s)://…/relay`` dial URL to the ``http(s)://…`` base.
-
-    Same host derivation as ``_provision_url`` (gateway/relay/__init__.py):
-    scheme ws→http / wss→https, trailing ``/relay`` stripped.
-    """
+    """Map the ``ws(s)://…/relay`` dial URL to the ``http(s)://…`` base (same derivation as ``_provision_url``)."""
     raw = (relay_dial_url or "").strip().rstrip("/")
     if raw.startswith("ws://"):
         raw = "http://" + raw[len("ws://") :]
@@ -66,14 +54,6 @@ def media_base_url(relay_dial_url: str) -> str:
     if raw.endswith("/relay"):
         raw = raw[: -len("/relay")]
     return raw
-
-
-# Discord's CDN (and other public hosts) reject urllib's default
-# ``Python-urllib/x.y`` User-Agent with HTTP 403 — which silently killed EVERY
-# Discord CDN pass-through download (voice notes, images, documents): the
-# localizer kept the raw URL and downstream consumers then tried to open a URL
-# as a file path. Always send a descriptive UA.
-_MEDIA_USER_AGENT = "HermesAgent-Relay/1.0 (+https://github.com/NousResearch/hermes-agent)"
 
 
 class RelayMediaClient:
@@ -108,12 +88,7 @@ class RelayMediaClient:
         mime: Optional[str] = None,
         filename: Optional[str] = None,
     ) -> Optional[str]:
-        """POST local file bytes to ``/relay/media``; return the reference URL.
-
-        Returns the ``{base}/relay/media/{id}`` reference for a ``send_media``
-        op's ``source_url``, or None on any failure (callers fall back to their
-        pre-media behaviour — media delivery is best-effort by design).
-        """
+        """POST local file bytes to ``/relay/media``; return the reference URL or None on any failure."""
         if not self.enabled:
             return None
         path = Path(file_path)
@@ -147,8 +122,6 @@ class RelayMediaClient:
             req = urllib.request.Request(url, data=data, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S) as resp:
-                    import json
-
                     body = json.loads(resp.read().decode("utf-8"))
                     media_id = body.get("id")
                     if not media_id:
@@ -161,12 +134,10 @@ class RelayMediaClient:
         return await asyncio.get_running_loop().run_in_executor(None, _post)
 
     async def download(self, url: str, *, suggested_name: Optional[str] = None) -> Optional[str]:
-        """GET a re-hosted attachment to a local temp file; return its path.
+        """GET an attachment to a local temp file; return its path or None on any failure.
 
-        Presents the per-gateway bearer for connector re-host URLs; plain
-        public URLs (e.g. a Discord CDN pass-through) are fetched without it.
-        Returns None on any failure (the event then keeps the remote URL, and
-        downstream consumers that need a local file skip it — best-effort).
+        The bearer is presented only for connector re-host URLs; public URLs
+        (e.g. a Discord CDN pass-through) are fetched without it.
         """
         if not url:
             return None
@@ -188,9 +159,8 @@ class RelayMediaClient:
                     data = resp.read(MEDIA_MAX_BYTES + 1)
                     if not data or len(data) > MEDIA_MAX_BYTES:
                         return None
-                    # Extension: prefer the response's content-disposition /
-                    # suggested name, fall back to the mime type, then .bin —
-                    # vision/file tools sniff by extension.
+                    # Extension matters: vision/file tools sniff by extension.
+                    # Prefer suggested/content-disposition name, then mime, then .bin.
                     name = suggested_name or ""
                     if not name:
                         cd = resp.headers.get("Content-Disposition") or ""

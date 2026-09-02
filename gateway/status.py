@@ -1,14 +1,8 @@
-"""
-Gateway runtime status helpers.
+"""Gateway runtime status helpers.
 
-Provides PID-file based detection of whether the gateway daemon is running,
-used by send_message's check_fn to gate availability in the CLI.
-
-The PID file lives at ``{HERMES_HOME}/gateway.pid``.  HERMES_HOME defaults to
-``~/.hermes`` but can be overridden via the environment variable.  This means
-separate HERMES_HOME directories naturally get separate PID files — a property
-that will be useful when we add named profiles (multiple agents running
-concurrently under distinct configurations).
+PID-file based detection of whether the gateway daemon is running (used by
+send_message's check_fn to gate CLI availability). The PID file lives at
+``{HERMES_HOME}/gateway.pid``, so separate homes/profiles get separate files.
 """
 
 import copy
@@ -29,6 +23,7 @@ from pathlib import Path
 from hermes_constants import get_hermes_home, _get_platform_default_hermes_home
 from typing import Any, Callable, NamedTuple, Optional
 from utils import atomic_json_write
+import contextlib
 
 if sys.platform == "win32":
     import msvcrt
@@ -54,8 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 class StormInfo(NamedTuple):
-    """Result of a respawn-storm check: how many starts, over what window, and
-    the backoff the caller should sleep to break the storm."""
+    """Respawn-storm check result: start count, window, and backoff to sleep."""
 
     count: int
     window_s: float
@@ -63,24 +57,16 @@ class StormInfo(NamedTuple):
 
 
 def _get_starts_log_path() -> Path:
-    """Path to the append-only gateway-start ledger used by the respawn-storm
-    breaker. Distinct from ``restart_loop.json`` (the auto-resume guard) — no
-    collision."""
+    """Append-only start ledger for the respawn-storm breaker (distinct from ``restart_loop.json``)."""
     return get_hermes_home() / "gateway-starts.log"
 
 
 def record_start_and_check_storm(
     max_starts: int = 5, window_s: float = 120.0, *, backoff_cap_s: float = 300.0
 ) -> Optional[StormInfo]:
-    """Record this gateway start and report whether a respawn storm is underway.
+    """Record this start; return :class:`StormInfo` when > ``max_starts`` landed in ``window_s``.
 
-    Appends the current UTC timestamp to the starts-log, prunes entries older
-    than ``window_s``, and ring-buffers the file so it can't grow unbounded.
-    Returns a :class:`StormInfo` when more than ``max_starts`` starts landed in
-    the window (with an exponential backoff capped at ``backoff_cap_s``), else
-    ``None``.
-
-    Best-effort: any bookkeeping failure is logged and swallowed so a broken
+    Best-effort: bookkeeping failures are logged and swallowed so a broken
     ledger can never crash gateway startup.
     """
     try:
@@ -102,11 +88,8 @@ def record_start_and_check_storm(
 
         existing.append(now)
 
-        # Keep only starts within the sliding window for the storm decision.
         recent = [ts for ts in existing if now - ts <= window_s]
-
-        # Ring-buffer what we persist so the file stays bounded even if the
-        # window is wide or starts are frequent.
+        # Ring-buffer the persisted file so it stays bounded.
         keep = max(max_starts * 4, 40)
         to_write = existing[-keep:]
 
@@ -130,14 +113,11 @@ def record_start_and_check_storm(
 
 
 def _get_process_hermes_home() -> Path:
-    """Return the process-level HERMES_HOME, skipping context-local overrides.
+    """Process-level HERMES_HOME, skipping context-local overrides.
 
-    Gateway identity files (PID, lock, runtime status, takeover/stop markers)
-    must always live in the directory the gateway process was launched with.
-    ``get_hermes_home()`` honors ``_HERMES_HOME_OVERRIDE`` contextvar used for
-    per-session profile dispatch, which would route these files into the wrong
-    profile directory when a profile-context task happens to be active at write
-    time.  See issue #56986.
+    Gateway identity files (PID, lock, runtime status, markers) must live in the
+    home the process was launched with; ``get_hermes_home()`` honors the
+    per-session ``_HERMES_HOME_OVERRIDE`` contextvar and would misroute them.
     """
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:
@@ -164,21 +144,15 @@ def recorded_gateway_home_conflicts(
 ) -> bool:
     """True when a persisted gateway record names a DIFFERENT HERMES_HOME.
 
-    Cross-profile kill refusal (#89315): a poisoned/contaminated PID record
-    inside one profile's home can truthfully name ANOTHER profile's live
-    gateway (its ``hermes_home`` stamp records the real owner). Any
-    destructive caller about to signal the recorded PID must consult this
-    first and refuse when the record positively proves the target belongs to
-    a different profile — otherwise ``gateway stop``/``restart``/``profile
-    delete`` from profile B SIGTERMs profile A's gateway and the supervisors
-    enter the mutual restart loop from the issue report.
+    Cross-profile kill refusal: a contaminated PID record in one profile's home
+    can truthfully name another profile's live gateway. Destructive callers must
+    refuse when the record proves foreign ownership, or profile B's stop/restart
+    SIGTERMs profile A's gateway and the supervisors enter a mutual restart loop.
 
-    ``expected_home`` overrides the comparison base (e.g. ``profile delete``
-    stopping a TARGET profile's gateway rather than the current process's).
-    Legacy records without a ``hermes_home`` stamp return False — they prove
-    nothing either way, and destructive callers already pair this with the
-    exact PID + start-time identity guards. A comparison failure returns True
-    (destructive action + unprovable ownership ⇒ fail closed).
+    ``expected_home`` overrides the comparison base (e.g. ``profile delete`` on a
+    target profile). Legacy records without ``hermes_home`` return False (they
+    prove nothing; callers pair this with PID + start-time guards). A comparison
+    failure returns True: destructive action + unprovable ownership => fail closed.
     """
     if not isinstance(record, dict):
         return False
@@ -198,12 +172,9 @@ _PROFILE_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def _profile_label_for_home(home: Path | str) -> Optional[str]:
-    """Best-effort profile label for a HERMES_HOME path.
+    """Best-effort profile label: ``<root>/profiles/<name>`` -> name, root home -> "default", else None.
 
-    Returns the profile name for ``<root>/profiles/<name>`` layouts (both
-    ``~/.hermes/profiles/coder`` and Docker ``/opt/data/profiles/coder``),
-    ``"default"`` for the deployment's root home, and ``None`` when no label
-    can be inferred.  Never raises — this feeds diagnostics only.
+    Never raises -- diagnostics only.
     """
     try:
         canonical = _canonical_hermes_home(home)
@@ -227,21 +198,18 @@ def _profile_label_for_home(home: Path | str) -> Optional[str]:
 
 
 def scoped_lock_owner_label(record: Optional[dict[str, Any]]) -> Optional[str]:
-    """Profile label for the gateway that owns a scoped credential lock.
+    """Profile label for the gateway owning a (machine-global) scoped lock.
 
-    Scoped locks are machine-global, so the holder may belong to a different
-    HERMES_HOME profile than the caller.  Prefers the explicit ``profile``
-    field stamped by :func:`acquire_scoped_lock`; falls back to inferring the
-    label from the persisted ``hermes_home`` for locks written before the
-    profile field existed.  Returns ``None`` for legacy or malformed records
-    so callers keep their PID-only wording.
+    Prefers the ``profile`` field stamped by :func:`acquire_scoped_lock`, then
+    infers from ``hermes_home`` for older locks. None for legacy/malformed
+    records so callers keep PID-only wording.
     """
     if not isinstance(record, dict):
         return None
     profile = record.get("profile")
     if isinstance(profile, str) and _PROFILE_LABEL_RE.match(profile.strip()):
-        # Validate the persisted label — lock files are plain JSON on disk,
-        # and this string flows into log lines and a suggested CLI command.
+        # Validated: lock files are plain JSON and this flows into log lines
+        # and a suggested CLI command.
         return profile.strip()
     home = record.get("hermes_home")
     if isinstance(home, str) and home.strip():
@@ -251,16 +219,14 @@ def scoped_lock_owner_label(record: Optional[dict[str, Any]]) -> Optional[str]:
 
 def _get_pid_path() -> Path:
     """Return the path to the gateway PID file, respecting HERMES_HOME."""
-    home = _get_process_hermes_home()
-    return home / "gateway.pid"
+    return _get_process_hermes_home() / "gateway.pid"
 
 
 def _get_gateway_lock_path(pid_path: Optional[Path] = None) -> Path:
     """Return the path to the runtime gateway lock file."""
     if pid_path is not None:
         return pid_path.with_name(_GATEWAY_LOCK_FILENAME)
-    home = _get_process_hermes_home()
-    return home / _GATEWAY_LOCK_FILENAME
+    return _get_process_hermes_home() / _GATEWAY_LOCK_FILENAME
 
 
 def _get_runtime_status_path() -> Path:
@@ -281,33 +247,19 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# Reject epoch values before 2000-01-01T00:00:00Z: nothing in Hermes' lifetime
-# legitimately produced a gateway heartbeat last century, so anything older is
-# a corrupt or hand-edited state file (e.g. an accidental 0 / tiny int).
+# Epochs before 2000-01-01 are corrupt/hand-edited state (e.g. an accidental 0).
 _EPOCH_MIN_PLAUSIBLE = 946684800.0  # 2000-01-01T00:00:00Z
 
 
 def normalize_updated_at(value: Any) -> Optional[str]:
     """Coerce a persisted ``updated_at`` value to an RFC3339 string or ``None``.
 
-    The ``gateway_state.json`` writers all emit RFC3339 via :func:`_utc_now_iso`,
-    but the file can also be produced by legacy gateways (which wrote unix
-    epoch floats), hand edits, or partial corruption. Every read/emit surface
-    (``/api/status``'s ``gateway_updated_at``, the gateway's
-    ``/health/detailed`` ``updated_at``) promises consumers ``string | null``
-    (see ``web/src/lib/api.ts``), so this funnel enforces that contract:
-
-    - ``str``: accepted iff :meth:`datetime.fromisoformat` parses it (a
-      trailing ``Z`` is tolerated). Naive timestamps are coerced to UTC.
-      Returns the canonical ``datetime.isoformat()`` rendering.
-    - ``int`` / ``float``: treated as unix epoch **seconds** and converted to
-      a UTC ISO string. Implausible values — before 2000-01-01, more than a
-      day in the future, or non-finite — return ``None``.
-    - ``bool``: returns ``None``. Although ``bool`` is an ``int`` subclass,
-      ``True``/``False`` as a timestamp is always garbage (epoch 0/1 would be
-      rejected by the range guard anyway); rejecting explicitly keeps the
-      behaviour documented rather than incidental.
-    - anything else (``None``, dict, list, ...): ``None``.
+    ``/api/status`` and ``/health/detailed`` promise ``string | null`` (see
+    ``web/src/lib/api.ts``), but the file may come from legacy gateways (epoch
+    floats), hand edits, or corruption. ``str``: accepted iff fromisoformat
+    parses it (trailing ``Z`` tolerated; naive -> UTC). ``int``/``float``:
+    epoch seconds; before 2000-01-01, > 1 day in the future, or non-finite ->
+    None. ``bool`` (an int subclass) and anything else -> None.
     """
     if isinstance(value, bool):
         return None
@@ -365,25 +317,18 @@ def terminate_pid(
     force: bool = False,
     expected_start_time: Optional[float] = None,
 ) -> None:
-    """Terminate a PID with platform-appropriate force semantics.
+    """Terminate a PID; POSIX SIGTERM/SIGKILL, Windows taskkill /T /F for force.
 
-    POSIX uses SIGTERM/SIGKILL. Windows uses taskkill /T /F for true force-kill
-    because os.kill(..., SIGTERM) is not equivalent to a tree-killing hard stop.
-
-    Identity guard: on Windows, ``force=True`` REQUIRES a matching
-    ``expected_start_time`` (fail closed — taskkill /T /F on a recycled PID
-    has killed svchost.exe and blue-screened the host, #89614). On POSIX an
-    expectation is optional, but when the caller provides one and it no
-    longer matches the live process, the kill is refused on every platform —
-    a mismatched fingerprint always means the PID was recycled.
+    Identity guard: on Windows ``force=True`` REQUIRES a matching
+    ``expected_start_time`` (taskkill /T /F on a recycled PID has killed
+    svchost.exe). On POSIX it is optional, but a provided, mismatched
+    fingerprint refuses the kill everywhere -- the PID was recycled.
     """
-    if force and expected_start_time is not None and not _IS_WINDOWS:
+    if force and (_IS_WINDOWS or expected_start_time is not None):
         _assert_process_start_time_matches(pid, expected_start_time)
     if force and _IS_WINDOWS:
-        _assert_process_start_time_matches(pid, expected_start_time)
-        # CREATE_NO_WINDOW: terminate_pid runs from the windowless pythonw.exe
-        # gateway/desktop backend, so a bare taskkill spawn would flash a
-        # conhost window on every force-kill.
+        # Hide flags: a bare taskkill spawn from windowless pythonw.exe would
+        # flash a conhost window on every force-kill.
         from hermes_cli._subprocess_compat import windows_hide_flags
 
         try:
@@ -416,33 +361,18 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
 
 
 def _get_process_start_time(pid: int) -> Optional[int]:
-    """Return a stable per-process start-time fingerprint, or None.
+    """Stable per-process start-time fingerprint (PID-reuse guard), or None.
 
-    Used as a PID-reuse guard: a ``(pid, start_time)`` pair uniquely identifies
-    a process, so a recycled PID (same number, different process) yields a
-    different value and is never mistaken for the original.
-
-    On Linux this is field 22 of ``/proc/<pid>/stat`` (start time in clock
-    ticks since boot, an int).  On platforms without ``/proc`` (macOS, Windows)
-    we fall back to ``psutil.Process(pid).create_time()`` — a float epoch
-    timestamp — quantized to an int (centiseconds) for stable equality.
-
-    The two sources are never mixed on a single platform: ``/proc`` always
-    succeeds first on Linux, and always fails on macOS/Windows so psutil is
-    always used there.  Because the guard only compares the value recorded at
-    spawn against the live value *on the same host*, the differing units across
-    platforms are irrelevant — only same-source equality matters.
+    Linux: field 22 of ``/proc/<pid>/stat`` (clock ticks since boot). Without
+    ``/proc`` (macOS/Windows): psutil ``create_time()`` quantized to
+    centiseconds for stable equality. Units differ per platform but the guard
+    only ever compares same-host, same-source values.
     """
     stat_path = Path(f"/proc/{pid}/stat")
     try:
-        # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
         return int(stat_path.read_text(encoding="utf-8").split()[21])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
         pass
-
-    # No /proc (macOS / Windows): psutil is a hard dependency and exposes a
-    # cross-platform creation time.  Quantize to centiseconds so repeated reads
-    # of the same process compare equal without float-precision fragility.
     try:
         import psutil  # type: ignore
         return int(round(psutil.Process(pid).create_time() * 100))
@@ -456,12 +386,7 @@ def get_process_start_time(pid: int) -> Optional[int]:
 
 
 def _read_process_cmdline(pid: int) -> Optional[str]:
-    """Return the process command line as a space-separated string.
-
-    On Linux, reads /proc/<pid>/cmdline directly.  On macOS and other
-    platforms without /proc, falls back to ``ps -p <pid> -o command=``.
-    On Windows (no /proc, no ps), uses psutil.
-    """
+    """Process command line as one string: /proc, then ``ps``, then psutil (Windows)."""
     cmdline_path = Path(f"/proc/{pid}/cmdline")
     try:
         raw = cmdline_path.read_bytes()
@@ -484,7 +409,6 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    # Windows fallback: psutil (already used by _pid_exists)
     try:
         import psutil  # type: ignore
         proc = psutil.Process(pid)
@@ -500,22 +424,14 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
 def _gateway_command_subcommand(command: str | None) -> str | None:
     """Return the Hermes gateway lifecycle subcommand from a command line.
 
-    Lifecycle decisions (is the gateway up? did restart relaunch it?) must not
-    fire on loose substring matches.  The previous ``"... gateway" in cmdline``
-    test also matched ``hermes_cli.main gateway status`` and even unrelated
-    processes like ``python -m tui_gateway`` -- which made ``restart()`` race
-    against a still-draining old process and ``status``/``start`` report false
-    positives.  This requires the actual ``gateway`` subcommand followed by
-    ``run`` (or one of the gateway-dedicated entrypoints), excluding the other
-    ``gateway`` management subcommands and any process that merely contains the
-    word "gateway".
-
-    Tokenizes quote-aware (``shlex``) so quoted Windows paths with spaces
-    (``"C:\\Program Files\\...\\hermes-gateway.exe"``) survive, and strips
-    ``--profile``/``-p`` selectors from anywhere in argv -- Hermes's
-    ``_apply_profile_override`` removes them before argparse, so the profile
-    flag (and a profile literally named ``gateway``) can legally appear on
-    either side of the ``gateway`` subcommand.
+    Lifecycle decisions must not fire on loose substring matches: ``"gateway"
+    in cmdline`` also matched ``gateway status`` and ``python -m tui_gateway``,
+    making ``restart()`` race a draining process and ``status`` report false
+    positives. Requires a Hermes entrypoint plus the ``gateway`` subcommand (or
+    a gateway-dedicated entrypoint). Tokenizes quote-aware so Windows paths with
+    spaces survive, and strips ``--profile``/``-p`` selectors from anywhere in
+    argv -- ``_apply_profile_override`` removes them before argparse, so they
+    (and a profile literally named ``gateway``) can appear on either side.
     """
     if not command:
         return None
@@ -533,8 +449,7 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
     for token in tokens:
         if token == "gateway/run.py" or token.endswith("/gateway/run.py"):
             return "run"
-        basename = token.rsplit("/", 1)[-1]
-        if basename in ("hermes-gateway", "hermes-gateway.exe"):
+        if token.rsplit("/", 1)[-1] in ("hermes-gateway", "hermes-gateway.exe"):
             return "run"
 
     joined = " ".join(tokens)
@@ -546,9 +461,7 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
     if not has_gateway_entry:
         return None
 
-    # Drop profile selectors anywhere: --profile X / -p X / --profile=X / -p=X.
-    # This consumes a profile VALUE of "gateway" too, so the real subcommand
-    # token is the one we land on below.
+    # Drop --profile X / -p X / --profile=X / -p=X (consumes a VALUE of "gateway" too).
     filtered: list[str] = []
     skip_next = False
     for token in tokens:
@@ -577,15 +490,12 @@ def looks_like_gateway_command_line(command: str | None) -> bool:
 
 
 def looks_like_gateway_runtime_command_line(command: str | None) -> bool:
-    """Return True for command lines that can host the gateway runtime.
+    """True for command lines that can host the gateway runtime (``run`` or ``restart``).
 
-    ``gateway restart`` is normally a management command, not the gateway
-    runtime. On hosts without a service manager, though, the manual restart
-    fallback executes ``run_gateway()`` in that same process, so its argv stays
-    as ``gateway restart`` while it owns the webhook port and writes runtime
-    state. Keep the public ``looks_like_gateway_command_line()`` strict, and
-    use this broader matcher only when validating Hermes-owned runtime records
-    or no-supervisor cleanup scans.
+    Without a service manager the manual restart fallback runs ``run_gateway()``
+    in-process, so argv stays ``gateway restart`` while it owns the runtime.
+    Use only for validating Hermes-owned records / no-supervisor cleanup scans;
+    ``looks_like_gateway_command_line()`` stays strict.
     """
     return _gateway_command_subcommand(command) in {"run", "restart"}
 
@@ -593,53 +503,37 @@ def looks_like_gateway_runtime_command_line(command: str | None) -> bool:
 def _looks_like_gateway_process(pid: int) -> bool:
     """Return True when the live PID still looks like the Hermes gateway."""
     cmdline = _read_process_cmdline(pid)
-    if not cmdline:
-        return False
-    return looks_like_gateway_command_line(cmdline)
+    return bool(cmdline) and looks_like_gateway_command_line(cmdline)
 
 
 def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
     """Validate gateway identity from PID-file metadata when cmdline is unavailable."""
     if record.get("kind") != _GATEWAY_KIND:
         return False
-
     argv = record.get("argv")
     if not isinstance(argv, list) or not argv:
         return False
-
-    cmdline = " ".join(str(part) for part in argv)
-    return looks_like_gateway_runtime_command_line(cmdline)
+    return looks_like_gateway_runtime_command_line(" ".join(str(part) for part in argv))
 
 
 def _profile_name_for_home(profile_home: Path) -> Optional[str]:
-    """Return the profile id a HERMES_HOME directory represents, or None.
-
-    A named profile's home is ``<root>/profiles/<name>`` (immediate parent is
-    ``profiles``).  The root/default home (``~/.hermes`` or ``$HERMES_HOME``)
-    has no such parent, so it maps to the default profile (``None`` here, which
-    callers treat as "the bare, flag-less gateway").
-    """
+    """Profile id for ``<root>/profiles/<name>``; None for the root/default home (bare gateway)."""
     if profile_home.parent.name == "profiles":
         return profile_home.name
     return None
 
 
 def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
-    """Return True when a gateway command line belongs to ``profile_home``.
+    """True when a gateway command line belongs to ``profile_home``.
 
-    Mirrors ``hermes_cli.gateway._matches_current_profile`` so the dashboard's
-    cross-profile liveness fallback scopes a live PID to the *right* profile.
-    In a per-profile container, one profile's stale ``gateway_state.json`` can
-    record a PID that the OS has since recycled onto a DIFFERENT profile's live
-    gateway.  That recycled PID's command line still ``looks_like_gateway`` —
-    so without a profile check the dead profile is reported running.  A named
-    profile gateway carries ``-p <name>``/``--profile <name>`` (or, rarely, an
-    explicit ``HERMES_HOME=<path>``) on its argv; the default/root gateway runs
-    bare with no profile flag.
+    Mirrors ``hermes_cli.gateway._matches_current_profile``: a stale state file
+    can record a PID the OS recycled onto a DIFFERENT profile's live gateway,
+    which still looks like a gateway -- so the dead profile would read running.
+    Named profiles carry ``-p``/``--profile <name>`` (or explicit
+    ``HERMES_HOME=``) on argv; the default gateway runs bare.
     """
-    # Normalize separators before the substring match: on Windows,
-    # str(Path) renders backslashes while a HERMES_HOME= value on the argv
-    # may carry forward slashes (Git Bash, JSON configs) — and vice versa.
+    # Normalize separators: Windows str(Path) uses backslashes while an argv
+    # HERMES_HOME= value may use forward slashes (Git Bash, JSON) -- or vice versa.
     command_lc = command.lower().replace("\\", "/")
     profile_name = _profile_name_for_home(profile_home)
     home_lc = str(profile_home).lower().replace("\\", "/")
@@ -652,16 +546,12 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
             or f"hermes_home={home_lc}" in command_lc
         )
 
-    # Default/root profile: the gateway runs with no profile flag. Accept unless
-    # the command advertises *some other* profile (an explicit -p/--profile) or
-    # a non-matching explicit HERMES_HOME= on the argv. HERMES_HOME is usually
-    # passed via the environment (not visible on the command line), so its mere
-    # absence is not disqualifying — only a conflicting explicit value is.
+    # Default profile: accept unless argv names some other profile or a
+    # conflicting explicit HERMES_HOME= (its absence is not disqualifying --
+    # HERMES_HOME usually arrives via the environment).
     if "--profile " in command_lc or " -p " in command_lc:
         return False
-    if "hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc:
-        return False
-    return True
+    return not ("hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc)
 
 
 def _record_matches_live_gateway_pid(
@@ -670,29 +560,18 @@ def _record_matches_live_gateway_pid(
     *,
     expected_home: Optional[Path] = None,
 ) -> bool:
-    """Return True when a live PID still identifies as this gateway record.
+    """True when a live PID still identifies as this gateway record.
 
-    Prefer the live command line whenever it is readable. Runtime status files
-    can outlive the gateway process they describe; if PID reuse leaves the same
-    PID occupied by an s6 supervisor/log process, the stale record's argv should
-    not make that unrelated process count as a running gateway.
-
-    When ``expected_home`` is provided (the dashboard enumerating a specific
-    profile's state file), the readable live command line must additionally
-    belong to *that* profile — otherwise a PID recycled onto a different
-    profile's live gateway would make the dead profile look alive.  When the
-    live command line cannot be read (Windows/permission), fall back to the
-    persisted record so cross-platform behavior is preserved.
+    Prefer the live command line: a stale record's argv must not make an
+    unrelated process (PID reuse) count as a gateway. With ``expected_home``
+    the live command line must also belong to that profile. When the command
+    line is unreadable (Windows/permission), fall back to the persisted record.
     """
     live_cmdline = _read_process_cmdline(pid)
     if live_cmdline:
         if not looks_like_gateway_runtime_command_line(live_cmdline):
             return False
-        if expected_home is not None and not _command_line_belongs_to_profile(
-            live_cmdline, expected_home
-        ):
-            return False
-        return True
+        return not (expected_home is not None and not _command_line_belongs_to_profile(live_cmdline, expected_home))
     return _record_looks_like_gateway(record)
 
 
@@ -702,24 +581,18 @@ def _build_pid_record() -> dict:
         "kind": _GATEWAY_KIND,
         "argv": list(sys.argv),
         "start_time": _get_process_start_time(os.getpid()),
-        # Scoped credential locks are machine-global rather than
-        # HERMES_HOME-local.  Persist the owning gateway's process home so an
-        # explicit cross-profile --replace can place its planned-takeover
-        # marker where the target process will actually read it.
+        # Scoped locks are machine-global; the owner's home lets a cross-profile
+        # --replace place its takeover marker where the target will read it.
         "hermes_home": str(_canonical_hermes_home(_get_process_hermes_home())),
     }
 
 
 def _get_code_identity_fields() -> dict[str, Any]:
-    """Code identity of THIS gateway process, for fleet version checks.
+    """Code identity of THIS process, stamped into ``gateway_state.json``.
 
-    Lazy import so ``gateway.status`` keeps no import-time dependency on
-    ``hermes_cli``; the helper itself is cached per process. A gateway
-    keeps serving the module versions it imported at startup, so stamping
-    the identity into ``gateway_state.json`` lets `hermes update` (and the
-    dashboard) prove whether a running gateway actually picked up new code
-    after the restart phase — instead of assuming it did (#88654, #69754).
-    Never raises; degrades to absent fields.
+    Lets ``hermes update``/the dashboard prove a restarted gateway picked up new
+    code. Lazy import keeps ``gateway.status`` free of ``hermes_cli`` at import
+    time. Never raises; degrades to absent fields.
     """
     try:
         from hermes_cli.build_info import get_code_identity
@@ -736,23 +609,16 @@ def _get_code_identity_fields() -> dict[str, Any]:
 def _pid_record_belongs_to_current_profile(
     record: Optional[dict[str, Any]],
 ) -> bool:
-    """Return True when the PID record's ``hermes_home`` matches the current process.
+    """True when the record's ``hermes_home`` matches the current process.
 
-    PID records written by ``_build_pid_record()`` include the gateway's
-    ``hermes_home`` at write time. If a profile gateway was started (or recorded)
-    under a different HERMES_HOME, the record belongs to a different profile
-    and must be ignored — otherwise the default-profile gateway can mistakenly
-    assume the identity of another profile (issue #74872).
-
-    Records that predate the ``hermes_home`` field (pre-#74872 gateways) are
-    accepted conservatively (no field → assume current profile).
+    A record written under a different HERMES_HOME belongs to another profile
+    and must be ignored, or the default gateway assumes that profile's identity.
+    Legacy records without the field are accepted conservatively.
     """
     if not isinstance(record, dict):
         return False
     record_home = record.get("hermes_home")
     if not record_home:
-        # Records without hermes_home belong to a pre-#74872 gateway;
-        # accept them conservatively.
         return True
     return _same_hermes_home(record_home, _get_process_hermes_home())
 
@@ -772,17 +638,24 @@ def _build_runtime_status_record() -> dict[str, Any]:
     return payload
 
 
-def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
+def _read_text_file(path: Path) -> Optional[str]:
+    """Stripped file text, or None when absent/empty/unreadable.
+
+    OSError: vanished or permission flipped between exists() and read.
+    UnicodeDecodeError: non-UTF-8 / binary garbage (truncated or clobbered file).
+    """
     if not path.exists():
         return None
     try:
         raw = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
-        # OSError: file vanished or permission flipped between exists() and
-        # read. UnicodeDecodeError: file holds non-UTF-8 / binary garbage
-        # (a truncated or clobbered status file). Either way it's unusable.
         return None
-    if not raw:
+    return raw or None
+
+
+def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
+    raw = _read_text_file(path)
+    if raw is None:
         return None
     try:
         payload = json.loads(raw)
@@ -795,20 +668,16 @@ def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
     atomic_json_write(path, payload, indent=None, separators=(",", ":"))
 
 
+def _unlink_quietly(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
+
+
 def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
-    pid_path = pid_path or _get_pid_path()
-    if not pid_path.exists():
+    """PID record as a dict; legacy bare-integer files become ``{"pid": N}``."""
+    raw = _read_text_file(pid_path or _get_pid_path())
+    if raw is None:
         return None
-
-    try:
-        raw = pid_path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError):
-        # File was deleted between exists() and read_text(), permission
-        # flipped, or it holds non-UTF-8 / binary garbage.
-        return None
-    if not raw:
-        return None
-
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
@@ -816,7 +685,6 @@ def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
             return {"pid": int(raw)}
         except ValueError:
             return None
-
     if isinstance(payload, int):
         return {"pid": payload}
     if isinstance(payload, dict):
@@ -835,6 +703,13 @@ def _pid_from_record(record: Optional[dict[str, Any]]) -> Optional[int]:
         return int(record["pid"])
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _start_time_conflicts(record: dict[str, Any], pid: int) -> bool:
+    """PID-reuse guard: True only when BOTH start times are known and differ."""
+    recorded_start = record.get("start_time")
+    current_start = _get_process_start_time(pid)
+    return recorded_start is not None and current_start is not None and current_start != recorded_start
 
 
 def _clear_running_pid_cache() -> None:
@@ -865,26 +740,18 @@ def _running_pid_cache_signature(
 
 
 def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
-    """Delete a stale gateway PID file (and its sibling lock metadata).
+    """Force-unlink a stale PID file and its sibling lock file.
 
-    Called from ``get_running_pid()`` after the runtime lock has already been
-    confirmed inactive, so the on-disk metadata is known to belong to a dead
-    process.  Unlike ``remove_pid_file()`` (which defensively refuses to delete
-    a PID file whose ``pid`` field differs from ``os.getpid()`` to protect
-    ``--replace`` handoffs), this path force-unlinks both files so the next
-    startup sees a clean slate.
+    Called only after the runtime lock is confirmed inactive (dead owner), so
+    unlike ``remove_pid_file()`` it does not check the recorded pid.
     """
     if not cleanup_stale:
         return
     _clear_running_pid_cache()
-    try:
+    with contextlib.suppress(Exception):
         pid_path.unlink(missing_ok=True)
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         _get_gateway_lock_path(pid_path).unlink(missing_ok=True)
-    except Exception:
-        pass
 
 
 def _write_gateway_lock_record(handle) -> None:
@@ -892,10 +759,8 @@ def _write_gateway_lock_record(handle) -> None:
     handle.truncate()
     json.dump(_build_pid_record(), handle)
     handle.flush()
-    try:
+    with contextlib.suppress(OSError):
         os.fsync(handle.fileno())
-    except OSError:
-        pass
 
 
 def _try_acquire_file_lock(handle) -> bool:
@@ -917,39 +782,20 @@ def _try_acquire_file_lock(handle) -> bool:
 def _pid_exists(pid: int) -> bool:
     """Cross-platform "is this PID alive" check that does NOT kill the target.
 
-    CRITICAL on Windows: Python's ``os.kill(pid, 0)`` is NOT a no-op like it
-    is on POSIX. CPython's Windows implementation
-    (``Modules/posixmodule.c::os_kill_impl``) treats ``sig=0`` as
-    ``CTRL_C_EVENT`` because the two values collide at the C level, and
-    routes it through ``GenerateConsoleCtrlEvent(0, pid)`` — which sends
-    a Ctrl+C to the entire console process group containing the target
-    PID, not just the PID itself. Any caller that wanted to "check if
-    this PID is alive" via ``os.kill(pid, 0)`` on Windows was silently
-    killing that process (and often unrelated processes in the same
-    console group). Long-standing Python quirk; see bpo-14484.
-
-    Implementation: prefer :mod:`psutil` (hard dependency — the canonical
-    cross-platform answer, maintained by Giampaolo Rodolà, uses
-    ``OpenProcess + GetExitCodeProcess`` on Windows internally). Fall back
-    to a hand-rolled ctypes ``OpenProcess`` / ``WaitForSingleObject`` pair
-    on Windows + ``os.kill(pid, 0)`` on POSIX if psutil is somehow
-    unavailable — e.g. stripped-down install or import error during the
-    scaffold phase before ``psutil`` is pip-installed.
+    CRITICAL on Windows: ``os.kill(pid, 0)`` is NOT a no-op -- CPython maps
+    ``sig=0`` to ``CTRL_C_EVENT`` and ``GenerateConsoleCtrlEvent`` sends Ctrl+C
+    to the target's whole console group (bpo-14484). Prefer psutil; fall back
+    to ctypes ``OpenProcess``/``WaitForSingleObject`` on Windows and
+    ``os.kill(pid, 0)`` on POSIX when psutil is unavailable (stripped install /
+    scaffold phase).
     """
     try:
         import psutil  # type: ignore
 
-        # A zombie (defunct) process is still in the process table, so
-        # ``psutil.pid_exists()`` returns True for it — but it is already
-        # dead: SIGKILL has no effect and it cannot be a running gateway.
-        # Treating a zombie as alive makes ``--replace`` wait for the old
-        # PID to die (it never does, until its parent reaps it), then abort
-        # with exit 1 — a silent crash loop under systemd ``Restart=always``,
-        # which respawns the gateway before reaping the previous process
-        # (issue #42126). Report zombies as dead so the takeover proceeds.
-        # Best-effort: any failure to read status (partial/stub psutil,
-        # access denied, transient race) falls through to the authoritative
-        # ``pid_exists()`` below rather than raising.
+        # Zombies are still in the process table (pid_exists() -> True) but are
+        # dead: treating one as alive makes --replace wait forever under systemd
+        # Restart=always, which respawns before reaping. Report them as dead.
+        # Best-effort: status-read failures fall through to pid_exists().
         try:
             if psutil.Process(int(pid)).status() == psutil.STATUS_ZOMBIE:
                 return False
@@ -965,8 +811,7 @@ def _pid_exists(pid: int) -> bool:
         try:
             import ctypes
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-            # Pin return types — default ctypes restype is c_int (signed),
-            # which mangles WAIT_* DWORD return codes into negative numbers.
+            # Pin restypes: default c_int mangles WAIT_* DWORDs into negatives.
             kernel32.OpenProcess.restype = ctypes.c_void_p
             kernel32.WaitForSingleObject.restype = ctypes.c_uint
             kernel32.GetLastError.restype = ctypes.c_uint
@@ -986,27 +831,21 @@ def _pid_exists(pid: int) -> bool:
                     return True   # Exists but owned by another user/session
                 return False      # Conservative default for unknown errors
             try:
-                wait_result = kernel32.WaitForSingleObject(handle, 0)
-                # WAIT_TIMEOUT = still running; anything else (WAIT_OBJECT_0
-                # via exit, WAIT_FAILED via handle issue) = treat as gone.
-                return wait_result == WAIT_TIMEOUT
+                # WAIT_TIMEOUT = still running; anything else = gone.
+                return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
             finally:
                 kernel32.CloseHandle(handle)
         except (OSError, AttributeError):
             return False
     else:
-        # psutil missing (stripped install / scaffold phase). Catch the same
-        # zombie case as the psutil path above (issue #42126): a zombie
-        # answers os.kill(pid, 0) successfully, so without this check
-        # ``--replace`` would wait on a dead PID and abort with exit 1.
+        # Same zombie case as the psutil path: a zombie answers os.kill(pid, 0).
         try:
             stat_fields = (
                 Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8").split()
             )
             if len(stat_fields) > 2 and stat_fields[2] == "Z":
                 return False
-        except FileNotFoundError:
-            # No /proc (macOS/BSD) — fall back to ps state.
+        except FileNotFoundError:  # No /proc (macOS/BSD): use ps state.
             try:
                 r = subprocess.run(
                     ["ps", "-o", "state=", "-p", str(int(pid))],
@@ -1026,11 +865,17 @@ def _pid_exists(pid: int) -> bool:
         except ProcessLookupError:
             return False
         except PermissionError:
-            # Process exists but we can't signal it — still alive.
-            return True
+            return True  # Exists but we can't signal it.
         except OSError:
             return False
 
+
+def _lock_is_held(handle) -> bool:
+    """Probe: True when another process holds the lock (a won probe is released)."""
+    if _try_acquire_file_lock(handle):
+        _release_file_lock(handle)
+        return False
+    return True
 
 
 def _release_file_lock(handle) -> None:
@@ -1045,11 +890,7 @@ def _release_file_lock(handle) -> None:
 
 
 def acquire_gateway_runtime_lock() -> bool:
-    """Claim the cross-process runtime lock for the gateway.
-
-    Unlike the PID file, the lock is owned by the live process itself. If the
-    process dies abruptly, the OS releases the lock automatically.
-    """
+    """Claim the cross-process runtime lock; the OS releases it if the process dies."""
     global _gateway_lock_handle
     if _gateway_lock_handle is not None:
         return True
@@ -1059,11 +900,8 @@ def acquire_gateway_runtime_lock() -> bool:
     try:
         handle = open(path, "a+", encoding="utf-8")
     except PermissionError:
-        # Stale root-owned lock file from a previous launchd Background
-        # session that ran as root (same failure mode handled in
-        # is_gateway_runtime_lock_active).  The parent directory owner can
-        # unlink files even when they don't own them, so remove the stale
-        # lock and retry once with a fresh file.
+        # Stale root-owned lock from a launchd Background session that ran as
+        # root. The directory owner can unlink it; retry once with a fresh file.
         try:
             path.unlink()
         except OSError:
@@ -1089,23 +927,17 @@ def release_gateway_runtime_lock() -> None:
         return
     _gateway_lock_handle = None
     _release_file_lock(handle)
-    try:
+    with contextlib.suppress(OSError):
         handle.close()
-    except OSError:
-        pass
     _clear_running_pid_cache()
 
 
 def owns_gateway_runtime_lock() -> bool:
-    """Return True when THIS process holds the gateway runtime lock.
+    """True when THIS process holds the runtime lock.
 
-    ``is_gateway_runtime_lock_active`` answers "does *anyone* hold the lock?"
-    and deliberately returns True for the lock's own owner — a caller deciding
-    whether to yield to a *fresh* gateway (e.g. the cron tick's stale-code
-    gate) must distinguish self-ownership from another process's lock, and
-    re-probing the lock file cannot: acquiring a probe handle on a lock this
-    process already holds succeeds on POSIX. The in-process handle is the only
-    discriminator, so expose it as a tiny predicate.
+    ``is_gateway_runtime_lock_active`` answers "does anyone hold it?" and a
+    file re-probe cannot tell self-ownership apart (a probe on our own flock
+    succeeds on POSIX); the in-process handle is the only discriminator.
     """
     return _gateway_lock_handle is not None
 
@@ -1123,25 +955,16 @@ def is_gateway_runtime_lock_active(lock_path: Optional[Path] = None) -> bool:
     try:
         handle = open(resolved_lock_path, "a+", encoding="utf-8")
     except PermissionError:
-        # Stale root-owned lock file from a previous launchd Background
-        # session that ran as root.  The parent directory owner can unlink
-        # files even when they don't own them, so remove the stale lock
-        # and report inactive — the new process will create a fresh one.
-        try:
+        # Stale root-owned lock (launchd session that ran as root): the
+        # directory owner can unlink it; report inactive so a fresh one is made.
+        with contextlib.suppress(OSError):
             resolved_lock_path.unlink()
-        except OSError:
-            pass
         return False
     try:
-        if _try_acquire_file_lock(handle):
-            _release_file_lock(handle)
-            return False
-        return True
+        return _lock_is_held(handle)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             handle.close()
-        except OSError:
-            pass
 
 
 def _strict_path_exists(path: Path, label: str) -> bool:
@@ -1163,42 +986,27 @@ def _is_gateway_runtime_lock_active_strict(lock_path: Path) -> bool:
     except OSError as exc:
         raise RuntimeError(f"gateway runtime lock is not inspectable: {exc}") from exc
     try:
-        if _try_acquire_file_lock(handle):
-            _release_file_lock(handle)
-            return False
-        return True
+        return _lock_is_held(handle)
     except OSError as exc:
         raise RuntimeError(f"gateway runtime lock probe failed: {exc}") from exc
     finally:
-        try:
+        with contextlib.suppress(OSError):
             handle.close()
-        except OSError:
-            pass
 
 
 def write_pid_file() -> None:
-    """Write the current process PID and metadata to the gateway PID file.
-
-    Uses atomic O_CREAT | O_EXCL creation so that concurrent --replace
-    invocations race: exactly one process wins and the rest get
-    FileExistsError.
-    """
+    """Write this process's PID record via O_CREAT|O_EXCL (concurrent racers get FileExistsError)."""
     path = _get_pid_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     record = json.dumps(_build_pid_record())
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        raise  # Let caller decide: another gateway is racing us
+    # FileExistsError propagates: another gateway is racing us; caller decides.
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(record)
         _clear_running_pid_cache()
     except Exception:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _unlink_quietly(path)
         raise
 
 
@@ -1225,11 +1033,9 @@ def write_runtime_status(
     current_record = _build_pid_record()
     payload.setdefault("platforms", {})
     if clear_profile_platforms:
-        # Secondary-profile adapter health is stored in the process-level
-        # status file as ``<profile>:<platform>``.  A fresh gateway process
-        # must not inherit those entries from the prior process: they would
-        # otherwise keep /api/status degraded until every old adapter emitted
-        # a new state (and removed profiles would remain degraded forever).
+        # Secondary-profile entries are keyed ``<profile>:<platform>``. A fresh
+        # process must not inherit them or /api/status stays degraded until
+        # every old adapter re-emits (removed profiles: forever).
         platforms = payload["platforms"]
         if not isinstance(platforms, dict):
             platforms = {}
@@ -1238,28 +1044,22 @@ def write_runtime_status(
             for key, value in platforms.items()
             if not isinstance(key, str) or ":" not in key
         }
-    payload["kind"] = current_record["kind"]
-    payload["pid"] = current_record["pid"]
-    payload["argv"] = current_record["argv"]
-    payload["start_time"] = current_record["start_time"]
+    for key in ("kind", "pid", "argv", "start_time"):
+        payload[key] = current_record[key]
     payload["updated_at"] = _utc_now_iso()
-    # Re-stamp code identity on every write: the file can outlive the process
-    # that created it, and the top-level record must always describe the
-    # CURRENT writer's code (per-process cached, so this is a dict copy).
+    # Re-stamp on every write: the file can outlive its creator and the top-level
+    # record must describe the CURRENT writer's code.
     payload.update(_get_code_identity_fields())
 
-    if gateway_state is not _UNSET:
-        payload["gateway_state"] = gateway_state
-    if exit_reason is not _UNSET:
-        payload["exit_reason"] = exit_reason
+    for key, value in (("gateway_state", gateway_state), ("exit_reason", exit_reason)):
+        if value is not _UNSET:
+            payload[key] = value
     if restart_requested is not _UNSET:
         payload["restart_requested"] = bool(restart_requested)
     if active_agents is not _UNSET:
         payload["active_agents"] = parse_active_agents(active_agents)
     if served_profiles is not _UNSET:
-        # Profiles this gateway multiplexes (multi-profile mode). Absent/empty
-        # for a single-profile gateway. Lets `hermes status` show per-profile
-        # coverage without a second probe.
+        # Multiplexed profiles; absent/empty for a single-profile gateway.
         payload["served_profiles"] = list(served_profiles or [])
     if session_store is not _UNSET:
         state = "unknown"
@@ -1271,33 +1071,26 @@ def write_runtime_status(
 
     if platform is not _UNSET:
         platform_payload = payload["platforms"].get(platform, {})
-        if platform_state is not _UNSET:
-            platform_payload["state"] = platform_state
-        if error_code is not _UNSET:
-            platform_payload["error_code"] = error_code
-        if error_message is not _UNSET:
-            platform_payload["error_message"] = error_message
+        for key, value in (
+            ("state", platform_state),
+            ("error_code", error_code),
+            ("error_message", error_message),
+        ):
+            if value is not _UNSET:
+                platform_payload[key] = value
         if needs_attention is not _UNSET:
-            # Long-lived reconnect-loop escalation (OOF-156): True once a
-            # platform has been continuously failing/retrying past the
-            # attention threshold. Retry never stops — this is a signal for
-            # owners and fleet monitoring, not a circuit breaker. Cleared
-            # (False) on successful reconnect.
+            # Reconnect-loop escalation past the attention threshold: a signal
+            # for owners/fleet monitoring, not a circuit breaker (retry never
+            # stops). Cleared on successful reconnect.
             platform_payload["needs_attention"] = bool(needs_attention)
         if retrying_since is not _UNSET:
-            # ISO timestamp of when the platform entered its current
-            # continuous retry episode; None clears it on reconnect.
+            # ISO start of the current retry episode; None clears it.
             platform_payload["retrying_since"] = retrying_since
         platform_payload["updated_at"] = _utc_now_iso()
-        # Writer identity: which PROCESS wrote this entry.  The top-level
-        # pid/start_time are refreshed on every write, so they only identify
-        # the file's most recent writer — per-entry provenance is what lets
-        # a reader (the /api/status cross-profile aggregation) distinguish
-        # "written by the current live process" from "preserved from a prior
-        # process" with exact (pid, start_time) equality instead of clock
-        # heuristics.  start_time is the same PID-reuse fingerprint the
-        # liveness checks use, so a recycled PID never masquerades as the
-        # original writer.
+        # Per-entry writer provenance: top-level pid/start_time only identify
+        # the most recent writer, so /api/status distinguishes "written by the
+        # live process" from "preserved from a prior one" by exact
+        # (pid, start_time) equality rather than clock heuristics.
         platform_payload["writer_pid"] = current_record["pid"]
         platform_payload["writer_start_time"] = current_record["start_time"]
         payload["platforms"][platform] = platform_payload
@@ -1311,21 +1104,13 @@ def write_runtime_status(
 
 
 def read_runtime_status(path: Optional[Path] = None) -> Optional[dict[str, Any]]:
-    """Read the persisted gateway runtime health/status information.
-
-    ``path`` is optional so callers that need to inspect a *different*
-    profile's state file (e.g. the dashboard enumerating every profile)
-    can do so without mutating ``HERMES_HOME`` in-process.  Defaults to
-    the active profile's ``gateway_state.json``.
-    """
+    """Read ``gateway_state.json``; ``path`` lets callers inspect another profile's file."""
     return _read_json_file(path or _get_runtime_status_path())
 
 
-# Max age of a persisted ``gateway_state.json`` snapshot before its liveness
-# claim is treated as suspect.  A healthy gateway rewrites the file (advancing
-# ``updated_at``) far more often than this; a record older than the TTL whose
-# PID is also dead almost certainly outlived an ungracefully-killed writer
-# (taskkill /F, OOM, power loss) that never ran its shutdown handler.
+# Max age of a ``gateway_state.json`` snapshot before its liveness claim is
+# suspect: an older record with a dead PID outlived an ungracefully-killed
+# writer (taskkill /F, OOM, power loss) that never ran its shutdown handler.
 _RUNTIME_STATUS_STALE_TTL_S = 120
 
 
@@ -1333,79 +1118,42 @@ def runtime_status_is_stale(
     record: Optional[dict[str, Any]],
     ttl_s: int = _RUNTIME_STATUS_STALE_TTL_S,
 ) -> bool:
-    """Return True when the runtime-status snapshot is older than ``ttl_s``.
-
-    Delegates to the existing :func:`_marker_is_stale` on the record's
-    ``updated_at`` timestamp.  A missing or unparseable timestamp is treated as
-    stale (the freshness signal is absent, so it cannot vouch for the record).
-    """
+    """True when the snapshot's ``updated_at`` is older than ``ttl_s`` (missing/unparseable => stale)."""
     if not isinstance(record, dict):
         return True
     return _marker_is_stale(record.get("updated_at") or "", ttl_s)
 
 
 def runtime_status_pid_is_live(record: Optional[dict[str, Any]]) -> bool:
-    """Return True when the PID recorded in the snapshot is still alive.
-
-    Uses the existing no-kill :func:`_pid_exists` probe and the same
-    ``start_time`` PID-reuse guard as :func:`get_runtime_status_running_pid`:
-    when both the recorded and live start-times are known they must match, so a
-    recycled PID (same number, different process) is not mistaken for the
-    original.  Degrades to ``False`` when the record has no usable PID.
-    """
+    """True when the snapshot's PID is alive and passes the start-time PID-reuse guard."""
     pid = _pid_from_record(record)
     if pid is None or not _pid_exists(pid):
         return False
-    recorded_start = (record or {}).get("start_time")
-    current_start = _get_process_start_time(pid)
-    if (
-        recorded_start is not None
-        and current_start is not None
-        and current_start != recorded_start
-    ):
-        return False
-    return True
+    return not _start_time_conflicts(record, pid)
 
 
 def parse_active_agents(raw: Any) -> int:
-    """Coerce a persisted ``active_agents`` value to a clamped non-negative int.
-
-    The shared coercion for the in-flight gateway-turn count. Used on the WRITE
-    side (``write_runtime_status``) and by both HTTP read surfaces
-    (``/api/status`` and ``/health/detailed``) so the count is clamped to a
-    single contract — never negative, never raising on a manually-edited or
-    otherwise non-numeric value (degrades to ``0``).
-    """
+    """Coerce ``active_agents`` to a non-negative int (shared by the writer and both HTTP readers)."""
     try:
         return max(0, int(raw))
     except (TypeError, ValueError):
         return 0
 
 
-# States in which the gateway is alive and could be asked to drain.  Anything
-# else (draining already, stopping, stopped, startup_failed, None) is NOT a
-# valid begin-drain target.
+# Only a live ``running`` gateway is a valid begin-drain target.
 _DRAINABLE_GATEWAY_STATES = frozenset({"running"})
 
 
 def derive_gateway_busy(
     *, gateway_running: bool, gateway_state: Any, active_agents: Any
 ) -> bool:
-    """Whether the gateway is actively processing in-flight turns.
+    """Busy iff live, in ``running`` state, and ``active_agents > 0`` (the contract NAS gates on).
 
-    The contract NAS gates lifecycle actions on.  Busy iff the gateway is live
-    (``gateway_running``), in the ``running`` state, AND at least one agent is
-    mid-turn (``active_agents > 0``).  Degrades to ``False`` whenever liveness
-    is unknown, the state is anything but ``running``, or the count is
-    absent/unparseable — i.e. a down or file-absent gateway reads "not busy",
-    never a spurious "busy".
-
-    NOTE: liveness keys off ``gateway_running`` (a live PID / health probe),
-    NEVER ``updated_at`` — a healthy idle gateway never advances that timestamp.
+    Degrades to False on unknown liveness / other state / unparseable count.
+    Liveness keys off ``gateway_running``, NEVER ``updated_at`` -- a healthy
+    idle gateway never advances that timestamp.
     """
-    if not gateway_running:
-        return False
-    if gateway_state not in _DRAINABLE_GATEWAY_STATES:
+    if not gateway_running or gateway_state not in _DRAINABLE_GATEWAY_STATES:
         return False
     try:
         return int(active_agents) > 0
@@ -1414,14 +1162,7 @@ def derive_gateway_busy(
 
 
 def derive_gateway_drainable(*, gateway_running: bool, gateway_state: Any) -> bool:
-    """Whether the gateway can accept a begin-drain request right now.
-
-    True iff the gateway is live and in the ``running`` state — i.e. not already
-    draining/stopping/stopped and not in a failed-start state.  This is
-    independent of ``active_agents``: an idle running gateway is drainable (the
-    drain just completes immediately).  Degrades to ``False`` for a down or
-    non-running gateway.
-    """
+    """Drainable iff live and ``running`` (independent of ``active_agents``; an idle drain completes at once)."""
     return bool(gateway_running) and gateway_state in _DRAINABLE_GATEWAY_STATES
 
 
@@ -1429,14 +1170,10 @@ def derive_gateway_drainable(*, gateway_running: bool, gateway_state: Any) -> bo
 class GatewayLiveness:
     """Resolved gateway liveness for one dashboard surface.
 
-    ``source`` records which rung of the ladder answered, purely for logging
-    and tests — never branch product behavior on it.
-
-    ``probe_error`` is True when a rung raised instead of answering. Callers
-    that must distinguish "the gateway is down" from "we could not tell"
-    need it: the dashboard renders a down badge either way, but the kanban
-    dispatcher warning deliberately fails OPEN on an unreadable probe so it
-    never cries wolf at a user whose gateway is fine.
+    ``source``: which ladder rung answered (logging/tests only -- never branch
+    product behavior on it). ``probe_error``: a rung raised instead of
+    answering; lets fail-open callers (kanban dispatcher warning) tell "down"
+    from "could not tell".
     """
 
     running: bool
@@ -1458,38 +1195,16 @@ def resolve_gateway_liveness(
 ) -> GatewayLiveness:
     """Single source of truth for "is the gateway up?" across dashboard surfaces.
 
-    Before this existed, ``/api/status`` and ``/api/messaging/platforms``
-    each open-coded their own ladder and disagreed on the same page load —
-    the sidebar read "running" while the Channels page rendered "The gateway
-    is not running."  Three deployments hit it: a cross-container gateway
-    (only ``/api/status`` ran the HTTP health probe), a profile-scoped
-    dashboard (only ``/api/status`` passed the profile's paths, so messaging
-    borrowed another profile's runtime state — issue #71211), and a
-    launch-service-managed gateway with no PID file (only some callers used
-    the runtime-status fallback).
-
-    The ladder, most to least authoritative:
-
-    1. **PID file + runtime lock** — scoped to ``profile_dir`` when given.
-       Cached by default (``use_cache``); high-frequency polling must not
-       churn file descriptors re-flocking ``gateway.lock`` on every request.
-    2. **HTTP health probe** — supplied by the caller (the dashboard owns the
-       deprecated ``GATEWAY_HEALTH_URL`` config).  Covers the gateway running
-       in another container where no local PID is visible.
-    3. **Runtime status PID** — validated against the live process table with
-       ``expected_home`` so a recycled PID belonging to a *different*
-       profile's gateway is never reported as this one's.
-
-    Rung 3 only ever runs against a LOCAL state record: the probe body's PID
-    belongs to another host, and ``os.kill``-ing a remote PID is both wrong
-    and trips the test live-system guard.  Pass ``runtime`` when the caller
-    has already read the state file so it isn't read twice per request.
-
-    ``pid_probe`` / ``runtime_reader`` / ``runtime_pid_probe`` let a caller
-    inject its own module-level references to these helpers.  The dashboard
-    passes its ``hermes_cli.web_server`` bindings so the long-standing
-    monkeypatch seam in the test-suite keeps working; production callers
-    leave them ``None`` and get this module's implementations.
+    Ladder, most to least authoritative:
+    1. PID file + runtime lock (scoped to ``profile_dir``; cached by default so
+       high-frequency polling does not re-flock ``gateway.lock`` per request).
+    2. Caller-supplied HTTP health probe (covers a gateway in another container).
+    3. Runtime status PID, validated against the live process table with
+       ``expected_home`` so a recycled PID of a different profile never counts.
+    Rung 3 only runs against the LOCAL state record -- the probe body's PID
+    belongs to another host. Pass ``runtime`` if the state file is already read.
+    ``pid_probe``/``runtime_reader``/``runtime_pid_probe`` let the dashboard
+    inject its ``hermes_cli.web_server`` bindings (test monkeypatch seam).
     """
     _pid_probe = pid_probe or (
         get_running_pid_cached if use_cache else get_running_pid
@@ -1500,14 +1215,11 @@ def resolve_gateway_liveness(
     pid_path = (profile_dir / "gateway.pid") if profile_dir is not None else None
     probe_error = False
     try:
-        # Plain zero-arg call when unscoped: several callers monkeypatch these
-        # probes with zero-arg lambdas, and /api/status's cache signature is
-        # keyed on the exact call shape.
+        # Zero-arg call when unscoped: callers monkeypatch with zero-arg lambdas
+        # and /api/status's cache signature is keyed on the call shape.
         pid = _pid_probe(pid_path) if pid_path is not None else _pid_probe()
     except Exception:
-        # A probe failure (permissions, exotic /proc, Windows quirks) must
-        # degrade to the next rung, never 500 a status endpoint. Recorded in
-        # probe_error so fail-open callers can tell "down" from "unknown".
+        # Degrade to the next rung; never 500 a status endpoint.
         pid = None
         probe_error = True
     if pid is not None:
@@ -1571,20 +1283,13 @@ def get_runtime_status_running_pid(
     *,
     expected_home: Optional[Path] = None,
 ) -> Optional[int]:
-    """Return a live gateway PID from the runtime status record, if valid.
+    """Live gateway PID from the runtime status record, or None.
 
-    ``get_running_pid()`` is the primary liveness source because it verifies the
-    runtime lock and PID file.  Launch-service managers can still leave us with
-    a live process and a fresh ``gateway_state.json`` but no ``gateway.pid``; use
-    this as a conservative fallback by checking both the persisted state and the
-    OS process identity.
-
-    ``expected_home`` scopes the OS-identity check to a specific profile's
-    HERMES_HOME.  Pass it when validating *another* profile's state file (the
-    dashboard enumerating every profile): a stale record whose PID the OS has
-    recycled onto a different profile's live gateway must not be reported
-    running for the dead profile.  Omit it (the default) for the active
-    profile, where any live gateway command line is acceptable.
+    Conservative fallback to ``get_running_pid()`` for launch-service-managed
+    gateways that have a fresh ``gateway_state.json`` but no ``gateway.pid``.
+    ``expected_home`` scopes the OS-identity check to another profile's home
+    (dashboard enumeration) so a PID recycled onto a different profile's
+    gateway is not reported running for the dead one.
     """
     payload = runtime if runtime is not None else read_runtime_status()
     if not isinstance(payload, dict):
@@ -1593,22 +1298,11 @@ def get_runtime_status_running_pid(
         return None
 
     pid = _pid_from_record(payload)
-    if pid is None or not _pid_exists(pid):
+    if pid is None or not _pid_exists(pid) or _start_time_conflicts(payload, pid):
         return None
 
-    recorded_start = payload.get("start_time")
-    current_start = _get_process_start_time(pid)
-    if (
-        recorded_start is not None
-        and current_start is not None
-        and current_start != recorded_start
-    ):
-        return None
-
-    # When no explicit expected_home is given (active profile context),
-    # verify the persisted record's hermes_home matches the current process.
-    # This prevents the default-profile gateway from assuming another
-    # profile's identity via a stale runtime status record (#74872).
+    # Active-profile context: the record's hermes_home must match this process
+    # so a stale record cannot lend another profile's identity.
     if expected_home is None and not _pid_record_belongs_to_current_profile(payload):
         return None
 
@@ -1618,24 +1312,18 @@ def get_runtime_status_running_pid(
 
 
 def remove_pid_file() -> None:
-    """Remove the gateway PID file, but only if it belongs to this process.
+    """Remove the PID file only if it belongs to this process.
 
-    During --replace handoffs, the old process's atexit handler can fire AFTER
-    the new process has written its own PID file.  Blindly removing the file
-    would delete the new process's record, leaving the gateway running with no
-    PID file (invisible to ``get_running_pid()``).
+    During --replace the old process's atexit can fire AFTER the new process
+    wrote its own record; blind removal would leave the gateway invisible.
     """
     try:
         path = _get_pid_path()
         record = _read_json_file(path)
         if record is not None:
-            try:
-                file_pid = int(record["pid"])
-            except (KeyError, TypeError, ValueError):
-                file_pid = None
+            file_pid = _pid_from_record(record)
             if file_pid is not None and file_pid != os.getpid():
-                # PID file belongs to a different process — leave it alone.
-                return
+                return  # Belongs to a different process — leave it alone.
         path.unlink(missing_ok=True)
         _clear_running_pid_cache()
     except Exception:
@@ -1643,11 +1331,7 @@ def remove_pid_file() -> None:
 
 
 def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, Any]] = None) -> tuple[bool, Optional[dict[str, Any]]]:
-    """Acquire a machine-local lock keyed by scope + identity.
-
-    Used to prevent multiple local gateways from using the same external identity
-    at once (e.g. the same Telegram bot token across different HERMES_HOME dirs).
-    """
+    """Acquire a machine-local lock keyed by scope + identity (e.g. one Telegram token across homes)."""
     lock_path = _get_scope_lock_path(scope, identity)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -1657,40 +1341,24 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         "metadata": metadata or {},
         "updated_at": _utc_now_iso(),
     }
-    # Human-readable profile label for cross-profile conflict diagnostics
-    # (OOF-3): "Telegram bot token already in use (PID 559)" gives an
-    # operator no way to tell WHICH profile owns the credential.  Stamped
-    # only on scoped-lock records (they're machine-global; PID/runtime
-    # status files are per-home and don't need it).  Omitted when no label
-    # is inferable; readers fall back to deriving it from hermes_home.
+    # Profile label for cross-profile conflict diagnostics ("token already in
+    # use (PID 559)" alone does not say WHICH profile). Omitted when not
+    # inferable; readers fall back to hermes_home.
     profile = _profile_label_for_home(_get_process_hermes_home())
     if profile:
         record["profile"] = profile
 
     existing = _read_json_file(lock_path)
     if existing is None and lock_path.exists():
-        # Lock file exists but is empty or contains invalid JSON — treat as
-        # stale.  This happens when a previous process was killed between
-        # O_CREAT|O_EXCL and the subsequent json.dump() (e.g. DNS failure
-        # during rapid Slack reconnect retries).
-        try:
-            lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # Empty/invalid JSON: previous process died between O_EXCL create and
+        # json.dump(). Treat as stale.
+        _unlink_quietly(lock_path)
     if existing:
-        try:
-            existing_pid = int(existing["pid"])
-        except (KeyError, TypeError, ValueError):
-            existing_pid = None
+        existing_pid = _pid_from_record(existing)
 
-        # Same live PID as this process: always self-reacquire.
-        # ``start_time`` is a PID-reuse guard for *other* PIDs; it cannot
-        # distinguish two processes that share the caller's own PID (impossible
-        # while we are alive). Requiring start_time equality here falsely
-        # rejects reconnects when the on-disk record has ``start_time: null``
-        # (older writers / psutil failure at first write) while the freshly
-        # built record has a real value — the gateway then reports itself as
-        # the foreign squatter of its own token (#81468).
+        # Our own PID: always self-reacquire. start_time guards reuse of OTHER
+        # PIDs; requiring equality here rejects reconnects when the on-disk
+        # record has start_time null (older writers / psutil failure).
         if existing_pid == os.getpid():
             _write_json_file(lock_path, record)
             return True, existing
@@ -1707,75 +1375,49 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                     and current_start != existing.get("start_time")
                 ):
                     stale = True
-                # When start_time comparison is unavailable on either side
-                # (macOS / Windows have no /proc, so the lock record's
-                # start_time may be None; psutil may also fail to read
-                # create_time for recycled PIDs), fall back to checking the
-                # live process command line.  When cmdline is also unreadable
-                # (Windows has no ps), consult the lock record's own argv —
-                # the gateway writes it at startup and it's the only identity
-                # signal on platforms without ps.  Both oracles must indicate
-                # "not a gateway" to mark stale.
+                # Live process is not a gateway: stale when its cmdline is
+                # readable and says so (also catches boot-time PID+start_time
+                # collisions -- systemd spawns deterministically, so an unrelated
+                # service can land on the same PID and jiffy count). When the
+                # cmdline is unreadable (Windows has no ps) AND start_time is
+                # unavailable on either side (no /proc, psutil failure), consult
+                # the lock record's own argv -- the only identity signal there.
                 if (
                     not stale
-                    and (existing.get("start_time") is None or current_start is None)
                     and not _looks_like_gateway_process(existing_pid)
+                    and (
+                        _read_process_cmdline(existing_pid) is not None
+                        or (
+                            (existing.get("start_time") is None or current_start is None)
+                            and not _record_looks_like_gateway(existing)
+                        )
+                    )
                 ):
-                    live_cmdline = _read_process_cmdline(existing_pid)
-                    if live_cmdline is not None or not _record_looks_like_gateway(existing):
-                        stale = True
-                # Secondary defence against boot-time PID+start_time collisions:
-                # systemd spawns core services deterministically, so an unrelated
-                # process (e.g. cron) can land on the exact same PID and jiffy
-                # count as a previous gateway. If both start_times are known and
-                # match but the live process is not a gateway, and we can confirm
-                # that by reading its cmdline, the lock is stale.
-                if (
-                    not stale
-                    and existing.get("start_time") is not None
-                    and current_start is not None
-                    and not _looks_like_gateway_process(existing_pid)
-                ):
-                    live_cmdline = _read_process_cmdline(existing_pid)
-                    if live_cmdline is not None:
-                        stale = True
-                # Check if process is stopped (Ctrl+Z / SIGTSTP) — stopped
-                # processes still appear alive to _pid_exists but are not
-                # actually running. Treat them as stale so --replace works.
+                    stale = True
+                # Stopped processes (Ctrl+Z / SIGTSTP) look alive to _pid_exists
+                # but are not running; treat as stale so --replace works.
                 if not stale:
                     try:
                         _proc_status = Path(f"/proc/{existing_pid}/status")
                         if _proc_status.exists():
                             for _line in _proc_status.read_text(encoding="utf-8").splitlines():
                                 if _line.startswith("State:"):
-                                    _state = _line.split()[1]
-                                    if _state in {"T", "t"}:  # stopped or tracing stop
+                                    if _line.split()[1] in {"T", "t"}:  # stopped / tracing stop
                                         stale = True
                                     break
                     except (OSError, PermissionError):
                         pass
         if stale:
-            # Remove the stale lock ATOMICALLY by renaming it to a tombstone
-            # instead of unlinking. With unlink()+O_EXCL, two racing starters
-            # could both observe "removed" (the second unlink() silently
-            # deleting the first racer's freshly-created lock) and both win.
-            # os.replace() is atomic: exactly one racer claims the stale
-            # file; the loser gets FileNotFoundError and falls through to
-            # the O_EXCL create below, where at most one process succeeds.
+            # Rename to a tombstone instead of unlink(): with unlink()+O_EXCL two
+            # racing starters could both win (the second unlink deleting the
+            # first racer's fresh lock). os.replace() lets exactly one claim it.
             tombstone = lock_path.with_name(lock_path.name + ".stale")
             try:
                 os.replace(lock_path, tombstone)
-            except FileNotFoundError:
-                # Another racer already claimed the stale lock (and may have
-                # created a fresh one) — let O_EXCL below decide the winner.
-                pass
             except OSError:
-                pass
+                pass  # Another racer claimed it -- O_EXCL below decides the winner.
             else:
-                try:
-                    tombstone.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                _unlink_quietly(tombstone)
         else:
             return False, existing
 
@@ -1787,10 +1429,7 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(record, handle)
     except Exception:
-        try:
-            lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _unlink_quietly(lock_path)
         raise
     return True, None
 
@@ -1803,14 +1442,9 @@ def release_scoped_lock(scope: str, identity: str) -> None:
         return
     if existing.get("pid") != os.getpid():
         return
-    # Same PID as the live process means we own the lock. Do not require
-    # start_time equality: on-disk null vs a live fingerprint (macOS/psutil
-    # timing) would otherwise leave the lock stuck across Discord/Telegram
-    # reconnects (#81468). start_time only guards PID reuse for *other* PIDs.
-    try:
-        lock_path.unlink(missing_ok=True)
-    except OSError:
-        pass
+    # Own PID => we own the lock. No start_time equality: on-disk null vs a live
+    # fingerprint would leave the lock stuck across reconnects.
+    _unlink_quietly(lock_path)
 
 
 def release_all_scoped_locks(
@@ -1818,18 +1452,10 @@ def release_all_scoped_locks(
     owner_pid: Optional[int] = None,
     owner_start_time: Optional[int] = None,
 ) -> int:
-    """Remove scoped lock files in the lock directory.
+    """Remove scoped lock files (--replace cleanup); returns the count removed.
 
-    Called during --replace to clean up stale locks left by stopped/killed
-    gateway processes that did not release their locks gracefully. When an
-    ``owner_pid`` is provided, only lock records belonging to that gateway
-    process are removed. ``owner_start_time`` further narrows the match to
-    protect against PID reuse.
-
-    When no owner is provided, preserves the legacy behavior and removes every
-    scoped lock file in the directory.
-
-    Returns the number of lock files removed.
+    With ``owner_pid`` only that gateway's records go (``owner_start_time``
+    narrows against PID reuse); with no owner every lock file is removed.
     """
     lock_dir = _get_lock_dir()
     removed = 0
@@ -1839,11 +1465,7 @@ def release_all_scoped_locks(
                 record = _read_json_file(lock_file)
                 if not isinstance(record, dict):
                     continue
-                try:
-                    record_pid = int(record.get("pid"))
-                except (TypeError, ValueError):
-                    continue
-                if record_pid != owner_pid:
+                if _pid_from_record(record) != owner_pid:
                     continue
                 if (
                     owner_start_time is not None
@@ -1860,22 +1482,13 @@ def release_all_scoped_locks(
 
 # ── --replace takeover marker ─────────────────────────────────────────
 #
-# When a new gateway starts with ``--replace``, it SIGTERMs the existing
-# gateway so it can take over the bot token. PR #5646 made SIGTERM exit
-# the gateway with code 1 so ``Restart=on-failure`` can revive it after
-# unexpected kills — but that also means a --replace takeover target
-# exits 1, which tricks systemd into reviving it 30 seconds later,
-# starting a flap loop against the replacer when both services are
-# enabled in the user's systemd (e.g. ``hermes.service`` + ``hermes-
-# gateway.service``).
-#
-# The takeover marker breaks the loop: the replacer writes a short-lived
-# file naming the target PID + start_time BEFORE sending SIGTERM.
-# The target's shutdown handler reads the marker and, if it names
-# this process, treats the SIGTERM as a planned takeover and exits 0.
-# The marker is unlinked after the target has consumed it, so a stale
-# marker left by a crashed replacer can grief at most one future
-# shutdown on the same PID — and only within _TAKEOVER_MARKER_TTL_S.
+# SIGTERM exits the gateway with code 1 so Restart=on-failure revives it after
+# unexpected kills -- which would also revive a --replace target and start a
+# flap loop against the replacer. The replacer therefore writes a short-lived
+# marker naming the target PID + start_time BEFORE SIGTERM; the target's
+# shutdown handler treats a matching marker as a planned takeover and exits 0.
+# The marker is unlinked once consumed, so a stale one can grief at most one
+# future shutdown on the same PID, within _TAKEOVER_MARKER_TTL_S.
 
 _TAKEOVER_MARKER_FILENAME = ".gateway-takeover.json"
 _TAKEOVER_MARKER_TTL_S = 60  # Marker older than this is treated as stale
@@ -1884,64 +1497,75 @@ _PLANNED_STOP_MARKER_TTL_S = 60
 
 
 def _get_takeover_marker_path(hermes_home: Optional[Path] = None) -> Path:
-    """Return the path to the --replace takeover marker file.
-
-    ``hermes_home`` is supplied only for a verified cross-home handoff.  The
-    target process always consumes the marker from its own process-level home.
-    """
+    """Takeover marker path; ``hermes_home`` is given only for a verified cross-home handoff."""
     home = hermes_home or _get_process_hermes_home()
     return _canonical_hermes_home(home) / _TAKEOVER_MARKER_FILENAME
 
 
 def _get_planned_stop_marker_path() -> Path:
     """Return the path to the intentional gateway stop marker file."""
-    home = _get_process_hermes_home()
-    return home / _PLANNED_STOP_MARKER_FILENAME
+    return _get_process_hermes_home() / _PLANNED_STOP_MARKER_FILENAME
 
 
 def _marker_is_stale(written_at: str, ttl_s: int) -> bool:
     try:
-        written_dt = datetime.fromisoformat(written_at)
-        age = (datetime.now(timezone.utc) - written_dt).total_seconds()
-        return age > ttl_s
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(written_at)).total_seconds() > ttl_s
     except (TypeError, ValueError):
         return True
 
 
-def _consume_pid_marker_for_self(
-    path: Path,
-    *,
-    pid_field: str,
-    start_time_field: str,
-    ttl_s: int,
-) -> bool:
+def _read_live_pid_marker(path: Path, ttl_s: int) -> Optional[tuple[dict[str, Any], int, Any]]:
+    """Return ``(record, target_pid, target_start_time)`` for a usable marker.
+
+    Malformed or expired markers can never match anyone, so they are unlinked
+    here (a stale file left by a previous instance must not wedge a new one).
+    """
     record = _read_json_file(path)
     if not record:
-        return False
-
+        return None
     try:
-        target_pid = int(record[pid_field])
-        target_start_time = record.get(start_time_field)
+        target_pid = int(record["target_pid"])
+        target_start_time = record.get("target_start_time")
         written_at = record.get("written_at") or ""
     except (KeyError, TypeError, ValueError):
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return False
-
+        _unlink_quietly(path)
+        return None
     if _marker_is_stale(written_at, ttl_s):
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return False
+        _unlink_quietly(path)
+        return None
+    return record, target_pid, target_start_time
 
-    # Cross-profile guard (#29092): new markers explicitly name the verified
-    # TARGET home.  That permits a deliberate cross-HERMES_HOME --replace while
-    # ensuring a marker accidentally written into another profile's directory
-    # is ignored.  Legacy markers have no target field, so retain the original
-    # same-replacer-home rule for backwards compatibility.
+
+def _pid_marker_names_self(target_pid: int, target_start_time: Any) -> bool:
+    """PID match with an optional start-time PID-reuse guard.
+
+    ``_get_process_start_time`` returns None on platforms without /proc (macOS,
+    native Windows -- where the planned-stop watcher matters most). Requiring a
+    non-None match there would make every consume return False and misclassify
+    a legitimate ``hermes gateway stop`` as an unexpected exit (revived by the
+    service manager). So: when both start times are known they must match; when
+    either is unknown, PID equality alone decides (bounded by the marker TTL).
+    Shared by the watcher's non-destructive probe and the authoritative consume
+    so they agree on every platform.
+    """
+    if target_pid != os.getpid():
+        return False
+    our_start_time = _get_process_start_time(target_pid)
+    if target_start_time is not None and our_start_time is not None:
+        return target_start_time == our_start_time
+    return True
+
+
+def _consume_pid_marker_for_self(path: Path, *, ttl_s: int) -> bool:
+    parsed = _read_live_pid_marker(path, ttl_s)
+    if parsed is None:
+        return False
+    record, target_pid, target_start_time = parsed
+
+    # Cross-profile guard: new markers name the verified TARGET home, which
+    # permits a deliberate cross-HERMES_HOME --replace while ignoring a marker
+    # accidentally written into another profile's directory.  Legacy markers
+    # have no target field, so keep the original same-replacer-home rule.
     our_home = _get_process_hermes_home()
     target_home = record.get("target_hermes_home")
     if target_home is not None:
@@ -1956,32 +1580,8 @@ def _consume_pid_marker_for_self(
         ):
             return False
 
-    our_pid = os.getpid()
-    our_start_time = _get_process_start_time(our_pid)
-    # Start-time is a PID-reuse guard. It is only meaningful when both
-    # sides actually have it: ``_get_process_start_time`` returns None on
-    # platforms without ``/proc`` (macOS, native Windows — the very
-    # platform the planned-stop watcher exists for). Requiring a non-None
-    # match there would make every consume return False, so a legitimate
-    # ``hermes gateway stop`` on Windows would be misclassified as an
-    # unexpected ``UNKNOWN`` exit (exit 1) and revived by the service
-    # manager. So: when both start_times are known they must match; when
-    # either is unknown, fall back to PID equality alone (bounded by the
-    # marker's short TTL). This mirrors ``planned_stop_marker_targets_self``
-    # so the watcher's non-destructive probe and this authoritative
-    # consume agree on every platform (issue #34597).
-    if target_pid != our_pid:
-        matches = False
-    elif target_start_time is not None and our_start_time is not None:
-        matches = target_start_time == our_start_time
-    else:
-        matches = True
-
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
+    matches = _pid_marker_names_self(target_pid, target_start_time)
+    _unlink_quietly(path)
     return matches
 
 
@@ -1991,21 +1591,13 @@ def write_takeover_marker(
     target_home: Optional[Path] = None,
     target_start_time: Any = _UNSET,
 ) -> bool:
-    """Record that ``target_pid`` is being replaced by the current process.
+    """Record that ``target_pid`` is being replaced by this process; True on success.
 
-    Captures the target's ``start_time`` so that PID reuse after the
-    target exits cannot later match the marker. Also records the
-    replacer's PID and a UTC timestamp for TTL-based staleness checks.
-
-    A verified scoped-lock handoff supplies ``target_home`` and the already
-    validated ``target_start_time`` so the marker is written into the target
-    gateway's HERMES_HOME rather than the replacer's.  Same-home callers omit
-    both arguments and preserve the historical behavior.
-
-    Returns True on successful write, False on any failure. Historical
-    same-home callers may treat the marker as best effort. Cross-home callers
-    must fail closed because the target's supervisor could otherwise revive it
-    without recognizing the handoff.
+    Captures the target's ``start_time`` (PID-reuse guard) and a timestamp for
+    TTL checks. A verified cross-home handoff passes ``target_home`` and the
+    validated ``target_start_time`` so the marker lands in the target's home;
+    such callers must fail closed on False (the target's supervisor could
+    otherwise revive it).
     """
     try:
         marker_home = _canonical_hermes_home(
@@ -2030,52 +1622,32 @@ def write_takeover_marker(
 
 
 def consume_takeover_marker_for_self() -> bool:
-    """Check & unlink the takeover marker if it names the current process.
+    """Consume the takeover marker; True means this SIGTERM is a planned takeover (exit 0).
 
-    Returns True only when a valid (non-stale) marker names this PID +
-    start_time. A returning True indicates the current SIGTERM is a
-    planned --replace takeover; the caller should exit 0 instead of
-    signalling ``_signal_initiated_shutdown``.
-
-    Always unlinks the marker on match (and on detected staleness) so
-    subsequent unrelated signals don't re-trigger.
+    Always unlinks on match or staleness so later unrelated signals don't re-trigger.
     """
-    return _consume_pid_marker_for_self(
-        _get_takeover_marker_path(),
-        pid_field="target_pid",
-        start_time_field="target_start_time",
-        ttl_s=_TAKEOVER_MARKER_TTL_S,
-    )
+    return _consume_pid_marker_for_self(_get_takeover_marker_path(), ttl_s=_TAKEOVER_MARKER_TTL_S)
 
 
 def clear_takeover_marker(target_home: Optional[Path] = None) -> None:
     """Remove the takeover marker unconditionally. Safe to call repeatedly."""
-    try:
-        _get_takeover_marker_path(target_home).unlink(missing_ok=True)
-    except OSError:
-        pass
+    _unlink_quietly(_get_takeover_marker_path(target_home))
 
 
 def _validated_scoped_lock_gateway_owner(
     record: dict[str, Any],
 ) -> Optional[tuple[int, int, Path]]:
-    """Resolve a live scoped-lock owner to a verified gateway identity.
+    """Resolve a live scoped-lock owner to a verified ``(pid, start_time, home)``.
 
-    A machine-global scoped-lock file is only a claim; it is not sufficient
-    authority to terminate a process or choose a marker destination.  Require
-    the lock record, the target HERMES_HOME's gateway PID record, and the live
-    OS process to agree on PID, start-time fingerprint, gateway identity, and
-    process home.  Missing legacy metadata fails closed and leaves the normal
-    retryable lock-conflict path in charge.
+    A lock file is only a claim: the record, the target home's PID record, and
+    the live process must agree on PID, start-time, gateway identity, and home.
+    Missing legacy metadata fails closed (normal retryable conflict path).
     """
     if not isinstance(record, dict) or not _record_looks_like_gateway(record):
         return None
 
-    try:
-        owner_pid = int(record["pid"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if owner_pid <= 0 or owner_pid == os.getpid():
+    owner_pid = _pid_from_record(record)
+    if owner_pid is None or owner_pid <= 0 or owner_pid == os.getpid():
         return None
 
     owner_start_time = record.get("start_time")
@@ -2104,11 +1676,7 @@ def _validated_scoped_lock_gateway_owner(
     pid_record = _read_json_file(target_home / "gateway.pid")
     if not isinstance(pid_record, dict) or not _record_looks_like_gateway(pid_record):
         return None
-    try:
-        pid_record_pid = int(pid_record["pid"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if pid_record_pid != owner_pid or pid_record.get("start_time") != owner_start_time:
+    if _pid_from_record(pid_record) != owner_pid or pid_record.get("start_time") != owner_start_time:
         return None
 
     pid_record_home = pid_record.get("hermes_home")
@@ -2128,9 +1696,7 @@ def _scoped_lock_owner_state(owner_pid: int, owner_start_time: int) -> str:
     if live_start_time is None:
         return "unknown"
     if live_start_time != owner_start_time:
-        # The original owner exited and the OS recycled its PID.  Never signal
-        # the replacement process.
-        return "exited"
+        return "exited"  # PID recycled; never signal the replacement process.
     return "same"
 
 
@@ -2153,14 +1719,10 @@ def _wait_for_scoped_lock_owner_exit(
 
 
 def _snapshot_gateway_children(pid: int) -> list:
-    """Best-effort snapshot of ``pid``'s live descendants (POSIX only).
+    """Best-effort snapshot of ``pid``'s live descendants (POSIX only; never raises).
 
-    Must be taken while the old gateway is still alive: once the parent
-    exits, its children are reparented (to init or a subreaper) and can no
-    longer be discovered by a parent walk.  Returns ``[]`` on Windows —
-    ``terminate_pid(force=True)`` there already tree-kills via
-    ``taskkill /T`` — and on any error (missing psutil, process already
-    gone, access denied).  Never raises.
+    Take it while the parent is alive -- once it exits the children are
+    reparented and undiscoverable. ``[]`` on Windows (taskkill /T tree-kills).
     """
     if _IS_WINDOWS:
         return []
@@ -2176,22 +1738,13 @@ def _snapshot_gateway_children(pid: int) -> list:
 
 
 def reap_gateway_children(children: list, *, parent_pid: int, timeout: float = 5.0) -> int:
-    """Best-effort reap of a dead gateway's orphaned descendants (POSIX).
+    """Best-effort reap of a dead gateway's orphaned descendants (POSIX); returns count signalled.
 
-    Mirrors the Windows ``taskkill /T`` tree-kill for the POSIX ``--replace``
-    paths: adapter subprocesses that survive their parent keep holding scoped
-    token locks and block the replacement gateway.  Call only AFTER the main
-    gateway PID is confirmed dead, with a ``children`` snapshot taken via
-    :func:`_snapshot_gateway_children` while it was still alive.
-
-    Safety properties:
-    - ``psutil.Process.is_running()`` is identity-aware (PID + create time),
-      so a recycled child PID is never signalled.
-    - A child whose current ppid still equals ``parent_pid`` is skipped: that
-      means the parent is in fact alive (caller raced or was mocked) and the
-      child is not an orphan.
-    - SIGTERM first, bounded wait, SIGKILL only for survivors.
-    - Never raises; returns the number of children signalled.
+    Surviving adapter subprocesses keep holding token locks. Call only AFTER the
+    parent is confirmed dead with a snapshot from :func:`_snapshot_gateway_children`.
+    ``is_running()`` is identity-aware so a recycled child PID is never
+    signalled; a child whose ppid still equals ``parent_pid`` is skipped (parent
+    alive => not an orphan). SIGTERM, bounded wait, SIGKILL survivors. Never raises.
     """
     if _IS_WINDOWS or not children:
         return 0
@@ -2207,7 +1760,6 @@ def reap_gateway_children(children: list, *, parent_pid: int, timeout: float = 5
                 if child.status() == psutil.STATUS_ZOMBIE:
                     continue
                 if child.ppid() == parent_pid:
-                    # Parent still alive — this is not an orphan; leave it.
                     logger.debug(
                         "Skipping child PID %d of old gateway %d: parent "
                         "still appears alive",
@@ -2262,25 +1814,17 @@ def take_over_scoped_lock_holder(
 ) -> Optional[int]:
     """Terminate one verified scoped-lock holder for explicit ``--replace``.
 
-    Returns the original owner PID only after that exact PID/start-time identity
-    has exited (or ``terminate_pid`` reports it already gone).  Validation or
-    marker-write failure returns ``None`` without signalling anything.  This is
-    deliberately stricter than the same-home PID-file replacement path: a
-    cross-home handoff must place a consumable marker in the target's home or a
-    service supervisor could revive the target and start a flap loop.
-
-    On POSIX, after the owner is confirmed dead, its previously snapshotted
-    child processes are reaped best-effort (see :func:`reap_gateway_children`)
-    so orphaned adapter subprocesses cannot keep holding token locks.
+    Returns the owner PID only after that exact PID/start-time identity exited;
+    validation or marker-write failure returns None without signalling. Stricter
+    than same-home replacement: a cross-home handoff must place a consumable
+    marker in the target's home or its supervisor could revive it (flap loop).
+    On POSIX the owner's snapshotted children are then reaped best-effort.
     """
     owner = _validated_scoped_lock_gateway_owner(record)
     if owner is None:
         return None
     owner_pid, owner_start_time, target_home = owner
-
-    # Snapshot descendants while the owner is still alive — after it exits
-    # they are reparented and undiscoverable (POSIX; [] on Windows where
-    # taskkill /T already tree-kills).
+    # Snapshot while the owner is alive; afterwards children are reparented.
     owner_children = _snapshot_gateway_children(owner_pid)
 
     replaced = _terminate_scoped_lock_owner_once(
@@ -2355,17 +1899,15 @@ def _terminate_scoped_lock_owner_once(
         )
         return owner_pid if exited else None
     finally:
-        # The target normally consumes its marker from the signal handler.
-        # Clean up any remainder after an already-gone/forced/failed handoff.
+        # The target normally consumes the marker; clean up any remainder.
         clear_takeover_marker(target_home)
 
 
 def write_planned_stop_marker(target_pid: int) -> bool:
     """Record that ``target_pid`` is being stopped intentionally.
 
-    The gateway exits non-zero for unexpected SIGTERM so service managers can
-    revive it. Service stop commands send the same SIGTERM, so the CLI writes
-    this short-lived marker first to let the target process exit cleanly.
+    Unexpected SIGTERM exits non-zero so service managers revive the gateway;
+    the CLI writes this marker first so a deliberate stop exits cleanly.
     """
     try:
         target_start_time = _get_process_start_time(target_pid)
@@ -2383,82 +1925,28 @@ def write_planned_stop_marker(target_pid: int) -> bool:
 
 def consume_planned_stop_marker_for_self() -> bool:
     """Return True when the current process is being intentionally stopped."""
-    return _consume_pid_marker_for_self(
-        _get_planned_stop_marker_path(),
-        pid_field="target_pid",
-        start_time_field="target_start_time",
-        ttl_s=_PLANNED_STOP_MARKER_TTL_S,
-    )
+    return _consume_pid_marker_for_self(_get_planned_stop_marker_path(), ttl_s=_PLANNED_STOP_MARKER_TTL_S)
 
 
 def planned_stop_marker_targets_self() -> bool:
-    """Return True only when a live planned-stop marker names the current process.
+    """Non-destructive probe: True when a live planned-stop marker names this process.
 
-    This is a **non-destructive** probe used by the watcher thread
-    (``gateway/run.py:_run_planned_stop_watcher``) to decide whether to
-    trigger shutdown. Unlike :func:`consume_planned_stop_marker_for_self`,
-    it never unlinks a marker that matches us — the shutdown handler does
-    the authoritative consume on its own thread.
-
-    It *does* clean up markers that can never apply to this process:
-    malformed markers and markers older than the TTL are unlinked so a
-    stale file left behind by a previous gateway instance cannot wedge
-    the new one. Markers naming a different PID/start_time are left in
-    place (they may still be consumed legitimately by the process they
-    name) but report False here.
-
-    Returns False (without raising) on any read/parse error.
+    Used by the watcher thread (``gateway/run.py:_run_planned_stop_watcher``).
+    Unlike :func:`consume_planned_stop_marker_for_self` it never unlinks a
+    matching marker -- the shutdown handler does the authoritative consume.
+    Malformed/expired markers are still cleaned up; markers naming another
+    PID are left for that process and report False here.
     """
-    path = _get_planned_stop_marker_path()
-    record = _read_json_file(path)
-    if not record:
+    parsed = _read_live_pid_marker(_get_planned_stop_marker_path(), _PLANNED_STOP_MARKER_TTL_S)
+    if parsed is None:
         return False
-
-    try:
-        target_pid = int(record["target_pid"])
-        target_start_time = record.get("target_start_time")
-        written_at = record.get("written_at") or ""
-    except (KeyError, TypeError, ValueError):
-        # Malformed marker can never match anyone — drop it.
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return False
-
-    if _marker_is_stale(written_at, _PLANNED_STOP_MARKER_TTL_S):
-        # A marker this old is past its useful life regardless of target —
-        # clean it up so it cannot crash-loop a freshly booted gateway.
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return False
-
-    our_pid = os.getpid()
-    if target_pid != our_pid:
-        return False
-
-    # Start-time is a PID-reuse guard. It is only meaningful when both
-    # sides actually have it: ``_get_process_start_time`` returns None on
-    # platforms without ``/proc`` (macOS, native Windows — the very
-    # platform this watcher exists for). Requiring a non-None match there
-    # would make the watcher never fire and re-break the #33778 Windows
-    # session-resume path. So: when both start_times are known they must
-    # match; when either is unknown, fall back to PID equality alone
-    # (the marker is short-lived under a 60s TTL, bounding reuse risk).
-    our_start_time = _get_process_start_time(our_pid)
-    if target_start_time is not None and our_start_time is not None:
-        return target_start_time == our_start_time
-    return True
+    _, target_pid, target_start_time = parsed
+    return _pid_marker_names_self(target_pid, target_start_time)
 
 
 def clear_planned_stop_marker() -> None:
     """Remove the planned-stop marker unconditionally."""
-    try:
-        _get_planned_stop_marker_path().unlink(missing_ok=True)
-    except OSError:
-        pass
+    _unlink_quietly(_get_planned_stop_marker_path())
 
 
 def get_running_pid(
@@ -2466,49 +1954,26 @@ def get_running_pid(
     *,
     cleanup_stale: bool = True,
 ) -> Optional[int]:
-    """Return the PID of a running gateway instance, or ``None``.
-
-    Checks the PID file and verifies the process is actually alive.
-    Cleans up stale PID files automatically.
-    """
+    """PID of a running gateway (lock + PID file verified against the live process), or None."""
     resolved_pid_path = pid_path or _get_pid_path()
     resolved_lock_path = _get_gateway_lock_path(resolved_pid_path)
-    lock_active = is_gateway_runtime_lock_active(resolved_lock_path)
-    if not lock_active:
-        if pid_path is None:
-            runtime_pid = get_runtime_status_running_pid()
-            if runtime_pid is not None:
-                return runtime_pid
+    if is_gateway_runtime_lock_active(resolved_lock_path):
+        for record in (_read_pid_record(resolved_pid_path), _read_gateway_lock_record(resolved_lock_path)):
+            pid = _pid_from_record(record)
+            if pid is None or not _pid_exists(pid) or _start_time_conflicts(record, pid):
+                continue
+            if not _pid_record_belongs_to_current_profile(record):
+                continue
+            if _record_matches_live_gateway_pid(record, pid):
+                return pid
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
-        return None
-
-    primary_record = _read_pid_record(resolved_pid_path)
-    fallback_record = _read_gateway_lock_record(resolved_lock_path)
-
-    for record in (primary_record, fallback_record):
-        pid = _pid_from_record(record)
-        if pid is None:
-            continue
-
-        if not _pid_exists(pid):
-            continue
-
-        recorded_start = record.get("start_time")
-        current_start = _get_process_start_time(pid)
-        if recorded_start is not None and current_start is not None and current_start != recorded_start:
-            continue
-
-        if not _pid_record_belongs_to_current_profile(record):
-            continue
-
-        if _record_matches_live_gateway_pid(record, pid):
-            return pid
-
-    _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
+        return get_runtime_status_running_pid() if pid_path is None else None
+    # Lock inactive: the runtime-status fallback runs BEFORE cleanup here.
     if pid_path is None:
         runtime_pid = get_runtime_status_running_pid()
         if runtime_pid is not None:
             return runtime_pid
+    _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
     return None
 
 
@@ -2518,15 +1983,10 @@ def get_running_pid_identity_strict(pid_path: Path) -> Optional[tuple[int, float
     resolved_lock_path = _get_gateway_lock_path(resolved_pid_path)
     pid_exists = _strict_path_exists(resolved_pid_path, "gateway PID")
     lock_exists = _strict_path_exists(resolved_lock_path, "gateway lock")
-    if not pid_exists and not lock_exists:
-        return None
     if not lock_exists:
-        # No runtime lock can be owned. A stale PID file is not a live gateway.
-        return None
+        return None  # A stale PID file without a lock is not a live gateway.
     if not _is_gateway_runtime_lock_active_strict(resolved_lock_path):
-        # The lock probe is authoritative for absence. Stale or malformed files
-        # may remain after a crash, but no process currently owns this runtime.
-        return None
+        return None  # Lock probe is authoritative for absence.
     if not pid_exists:
         raise RuntimeError("active gateway lock has no PID metadata")
     pid_record = _read_pid_record(resolved_pid_path)
@@ -2551,9 +2011,8 @@ def get_running_pid_identity_strict(pid_path: Path) -> Optional[tuple[int, float
         raise RuntimeError("gateway process identity changed")
     if not all(_record_matches_live_gateway_pid(record, pid) for record in (pid_record, lock_record)):
         raise RuntimeError("runtime metadata does not identify a live gateway")
-    # Windows persists a centisecond fingerprint; SCM ownership checks need the
-    # exact psutil epoch timestamp. Re-read it only after the persisted identity
-    # has been validated, and prove it still rounds to that same fingerprint.
+    # Windows persists a centisecond fingerprint; SCM checks need the exact psutil
+    # epoch. Re-read only after validation and prove it rounds to the same value.
     if _IS_WINDOWS:
         try:
             import psutil  # type: ignore
@@ -2573,14 +2032,10 @@ def get_running_pid_cached(
     cleanup_stale: bool = True,
     ttl_seconds: float = _GATEWAY_RUNNING_PID_CACHE_TTL_SECONDS,
 ) -> Optional[int]:
-    """Cached read-side wrapper for dashboard/status polling.
+    """Cached ``get_running_pid()`` for high-frequency dashboard polling.
 
-    ``get_running_pid()`` probes the runtime lock by briefly opening and locking
-    ``gateway.lock``. That is the right authoritative check for control paths,
-    but high-frequency read-only HTTP polling can call it hundreds of times per
-    minute. Cache for a short window and invalidate on PID/lock/runtime-status
-    file changes so status endpoints do not churn file descriptors while still
-    noticing gateway start/stop transitions quickly.
+    Short TTL, invalidated on PID/lock/runtime-status file changes, so status
+    endpoints do not re-flock ``gateway.lock`` hundreds of times a minute.
     """
     if ttl_seconds <= 0:
         return get_running_pid(pid_path, cleanup_stale=cleanup_stale)

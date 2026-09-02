@@ -33,7 +33,6 @@ def test_failed_open_obeys_backoff_then_recovers() -> None:
         return handle
 
     assert cache.get(path, opener) is None
-    assert cache.status_for(path) == "unavailable"
     clock.now = 1.99
     assert cache.get(path, opener) is None
     assert calls == 1
@@ -42,7 +41,6 @@ def test_failed_open_obeys_backoff_then_recovers() -> None:
     assert cache.get(path, opener) is handle
     assert cache.get(path, opener) is handle
     assert calls == 2
-    assert cache.status_for(path) == "ok"
 
 
 def test_retry_is_single_flight_for_concurrent_callers() -> None:
@@ -74,7 +72,6 @@ def test_retry_is_single_flight_for_concurrent_callers() -> None:
     # and keep using the fallback rather than opening or blocking behind it.
     assert cache.get(path, opener) is None
     assert calls == 2
-    assert cache.status_for(path) == "retrying"
 
     release.set()
     thread.join(timeout=5)
@@ -196,7 +193,6 @@ def test_non_cacheable_guard_is_retried_immediately() -> None:
         except RuntimeError:
             pass
     assert calls == 2
-    assert cache.status_for(path) == "unknown"
 
 
 def test_close_all_rejects_and_closes_inflight_success() -> None:

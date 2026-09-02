@@ -1,30 +1,21 @@
-"""Disk-usage rollup for ``/api/status`` (NS-656).
+"""Disk-usage rollup for ``/api/status``.
 
-Companion to :mod:`gateway.memory_status`, closing the same class of gap
-for storage: a hosted agent can fill its data volume completely — SQLite
-writes failing, session persistence dead, config saves lost — while its
-dashboard and the NAS agent card both look perfectly healthy.  Fleet
-incidents OOF-2 (unrecoverable disk-full) and OOF-107 (fleet-wide disk
-exhaustion, remediated by hand) are exactly this failure mode.
+Companion to :mod:`gateway.memory_status`: a hosted agent can fill its data
+volume (SQLite writes failing, sessions and config saves lost) while its
+dashboard and the NAS agent card look healthy.  ``gateway/readiness.py``
+already probes disk, but readiness is a component verdict, not user-facing
+telemetry — this module produces the public block the dashboard SPA and the
+NAS availability sweep consume.
 
-The readiness endpoint already probes disk (``gateway/readiness.py::
-_probe_disk``), but readiness is a component verdict, not user-facing
-telemetry — nothing renders it.  This module produces the public block
-the dashboard SPA and the NAS availability sweep actually consume.
+Disk is sampled live via :func:`shutil.disk_usage` (one ``statvfs`` call), so
+there is no staleness dimension and no ``sampled_at``.
 
-Unlike the memory block (which distills already-persisted heartbeat
-files), disk is sampled live via :func:`shutil.disk_usage` — a single
-``statvfs`` call, the same thing the readiness probe does per request.
-There is no meaningful "staleness" dimension, so no ``sampled_at``.
+Public-safety: ``/api/status`` is unauthenticated (``PUBLIC_API_PATHS``); this
+block carries only coarse numbers (MB, one-decimal percent) and an enum — the same
+disclosure class as the ``memory`` block.
 
-Public-safety note: ``/api/status`` is an unauthenticated liveness probe
-(``PUBLIC_API_PATHS``).  This block carries only coarse numbers (MB
-granularity, whole-percent usage) and an enum — the same disclosure
-class as the ``memory`` block.
-
-Everything is best-effort and read-only: an unreadable filesystem
-degrades to ``pressure="unknown"`` rather than raising into the status
-endpoint.
+Best-effort and read-only: an unreadable filesystem degrades to
+``pressure="unknown"`` rather than raising into the status endpoint.
 """
 
 from __future__ import annotations
@@ -36,12 +27,10 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Disk-pressure thresholds. Percent alone misleads in both directions:
-# 90% used on a 100 GB volume leaves a comfortable 10 GB, while 50% used
-# on a tiny volume can be one image download from write failures. So the
-# percent triggers are gated on absolute headroom also being low, and a
-# hard absolute floor applies regardless of size — below it, SQLite
-# journaling and config writes are at genuine risk on any volume.
+# Percent alone misleads both ways: 90% used on 100 GB leaves 10 GB, while 50%
+# on a tiny volume is one download from write failures.  So percent triggers are
+# gated on absolute headroom also being low, and a hard absolute floor applies
+# regardless of size (below it SQLite journaling / config writes are at risk).
 _CRITICAL_FREE_MB = 256  # < 256 MB free: critical on any volume
 _CRITICAL_PERCENT = 95.0  # >= 95% used AND < 1 GB free: critical
 _CRITICAL_HEADROOM_MB = 1024
@@ -69,28 +58,22 @@ def classify_disk_pressure(free_mb: Any, total_mb: Any) -> str:
     if free is None or total is None or total <= 0:
         return "unknown"
     used_percent = (1 - free / total) * 100.0
-    if free < _CRITICAL_FREE_MB or (
-        used_percent >= _CRITICAL_PERCENT and free < _CRITICAL_HEADROOM_MB
+    for level, free_floor, percent_floor, headroom in (
+        ("critical", _CRITICAL_FREE_MB, _CRITICAL_PERCENT, _CRITICAL_HEADROOM_MB),
+        ("elevated", _ELEVATED_FREE_MB, _ELEVATED_PERCENT, _ELEVATED_HEADROOM_MB),
     ):
-        return "critical"
-    if free < _ELEVATED_FREE_MB or (
-        used_percent >= _ELEVATED_PERCENT and free < _ELEVATED_HEADROOM_MB
-    ):
-        return "elevated"
+        if free < free_floor or (used_percent >= percent_floor and free < headroom):
+            return level
     return "ok"
 
 
 def collect_disk_status(home: Optional[Path] = None) -> Dict[str, Any]:
     """Build the ``disk`` block for ``/api/status``.
 
-    ``home`` scopes the sample to a profile's HERMES_HOME (the status
-    endpoint's ``?profile=`` handling passes it through); on hosted
-    images every profile shares the ``/opt/data`` volume, so the answer
-    is the same — but scoping keeps the contract identical to the
-    ``memory`` block's.
-
-    Always returns a dict — an unreadable/unmounted filesystem yields
-    ``{"pressure": "unknown", ...}``.  Never raises.
+    ``home`` scopes the sample to a profile's HERMES_HOME (same contract as the
+    ``memory`` block; on hosted images every profile shares one volume).
+    Always returns a dict and never raises — an unreadable/unmounted filesystem
+    yields ``{"pressure": "unknown", ...}``.
     """
     status: Dict[str, Any] = {
         "pressure": "unknown",
