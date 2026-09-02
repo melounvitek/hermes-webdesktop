@@ -9641,51 +9641,43 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return text
         return (enriched_text or text).strip()
 
-    async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
-        # Authorization gate: the cold path (_handle_message) checks _is_user_authorized before
-        # creating a session; the busy path must enforce the same check, else unauthorized users in
-        # shared threads (Slack/Telegram/Discord) inject messages into a session they don't own.
-        if not self._is_user_authorized(event.source):
-            logger.warning(
-                "Dropping message from unauthorized user in active session: "
-                "user=%s (%s), platform=%s, session=%s",
-                event.source.user_id,
-                event.source.user_name,
-                event.source.platform.value if event.source.platform else "unknown",
-                session_key,
-            )
-            return True  # handled (silently dropped); do not fall through
+    @staticmethod
+    def _busy_reply_to(event: MessageEvent, reply_anchor):
+        # Telegram DM topics anchor on the thread; other Telegram threads send unanchored.
+        return (
+            reply_anchor
+            if event.source.platform == Platform.TELEGRAM
+            and event.source.chat_type == "dm"
+            and event.source.thread_id
+            else (None if event.source.platform == Platform.TELEGRAM and event.source.thread_id else event.message_id)
+        )
 
-        effective_mode = self._effective_busy_input_mode(event.source)
+    async def _send_busy_drain_notice(self, event: MessageEvent, session_key: str, effective_mode: str) -> None:
+        """Busy path while the gateway is restarting/stopping: queue (if allowed) and tell the user."""
+        adapter = self._adapter_for_source(event.source)
+        if not adapter:
+            return
 
-        # --- Draining case (gateway restarting/stopping) ---
-        if self._draining:
-            adapter = self._adapter_for_source(event.source)
-            if not adapter:
-                return True
+        reply_anchor = self._reply_anchor_for_event(event)
+        thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+        if self._queue_during_drain_enabled(effective_mode):
+            self._queue_or_replace_pending_event(session_key, event)
+            message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
+        else:
+            message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
 
-            reply_anchor = self._reply_anchor_for_event(event)
-            thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
-            if self._queue_during_drain_enabled(effective_mode):
-                self._queue_or_replace_pending_event(session_key, event)
-                message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
-            else:
-                message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
+        await adapter._send_with_retry(
+            chat_id=event.source.chat_id,
+            content=message,
+            reply_to=self._busy_reply_to(event, reply_anchor),
+            metadata=thread_meta,
+        )
 
-            await adapter._send_with_retry(
-                chat_id=event.source.chat_id,
-                content=message,
-                reply_to=(
-                    reply_anchor
-                    if event.source.platform == Platform.TELEGRAM
-                    and event.source.chat_type == "dm"
-                    and event.source.thread_id
-                    else (None if event.source.platform == Platform.TELEGRAM and event.source.thread_id else event.message_id)
-                ),
-                metadata=thread_meta,
-            )
-            return True
+    async def _route_plaintext_approval_while_busy(self, event: MessageEvent, session_key: str) -> bool:
+        """Route a bare "yes"/"no" to the approval handlers while a dangerous-command approval blocks.
 
+        Returns True when the message was consumed as an approval response.
+        """
         # Approval routing: while blocked on a dangerous-command approval, a bare "yes" must reach the
         # approval handler, not be steered/queued/interrupted (else it queues behind a turn that can't
         # start until the approval resolves -> auto-deny deadlock). Slash forms already bypass at the
@@ -9741,33 +9733,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "falling through to busy handling",
                 session_key, exc_info=True,
             )
+        return False
 
-        # Normal busy case (agent actively running a task)
-        adapter = self._adapter_for_source(event.source)
-        if not adapter:
-            return False  # let default path handle it
+    @dataclasses.dataclass
+    class _BusySteerOutcome:
+        effective_mode: str
+        demoted_for_subagents: bool
+        demoted_for_compression: bool
+        steered: bool
+        redirected: bool
 
-        # Internal synthetic events (async-delegation / background-process completions) must never
-        # interrupt/steer: treated as user TEXT while busy, interrupt mode would abort the active turn;
-        # a completion surfaces as a NEW turn only when idle. Plugin events carry untrusted payload
-        # text, so queue them through the gateway FIFO (security metadata kept apart).
-        if getattr(event, "internal", False) and not event.allow_gateway_control:
-            self._queue_or_replace_pending_event(session_key, event)
-            return True
-        if getattr(event, "internal", False):
-            return False
-
-        _busy_state = self._peek_session_state(session_key)
-        running_agent = _busy_state.turn.agent if _busy_state else None
-
-        busy_text_mode = self._effective_busy_text_mode(event.source)
-        if (
-            event.message_type == MessageType.TEXT
-            and busy_text_mode == "queue"
-            and effective_mode != "steer"
-        ):
-            return False
-
+    async def _resolve_busy_steer_or_redirect(
+        self,
+        event: MessageEvent,
+        session_key: str,
+        effective_mode: str,
+        running_agent: Any,
+    ) -> "GatewayRunner._BusySteerOutcome":
+        """Apply interrupt->queue demotions, then attempt steer (steer mode) or redirect (interrupt mode)."""
         # Steer mode injects mid-run via running_agent.steer(); fall back to queue (nothing lost) if the
         # agent isn't running yet (sentinel), lacks steer(), or the payload is empty. interrupt()
         # cascades to ``_active_children`` and aborts delegate_task work, so demote ``interrupt`` to
@@ -9842,80 +9825,68 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception as exc:
                 logger.warning("Gateway redirect failed for session %s: %s", session_key, exc)
                 redirected = False
+        return self._BusySteerOutcome(
+            effective_mode=effective_mode,
+            demoted_for_subagents=demoted_for_subagents,
+            demoted_for_compression=demoted_for_compression,
+            steered=steered,
+            redirected=redirected,
+        )
 
-        # Queue as the next turn after the current run ends. Skip after a successful steer — the text
-        # is already in the run and must NOT replay. Use the FIFO helper, not raw
-        # merge_pending_message_event (merge_text=True newline-joins consecutive TEXT follow-ups into
-        # ONE turn); FIFO gives each text its own turn while keeping photo-burst / album merge for media.
-        if not steered and not redirected:
-            self._queue_or_replace_pending_event(session_key, event)
+    async def _interrupt_running_agent_for_busy_event(self, event: MessageEvent, adapter, running_agent) -> None:
+        """Interrupt mode: abort in-flight tool calls; the agent loop exits at its next check point."""
+        try:
+            _interrupt_text = event.text
+            _media_urls = getattr(event, "media_urls", None) or []
+            if self._pending_event_audio_paths(event):
+                _interrupt_text, _ = await self._transcribe_and_echo_pending_voice(
+                    event,
+                    adapter,
+                    event.source,
+                    event.text or "",
+                    log_context="Voice-busy-interrupt",
+                )
+            elif not _interrupt_text and _media_urls:
+                _interrupt_text = _build_media_placeholder(event)
+            running_agent.interrupt(_interrupt_text)
+        except Exception:
+            pass  # don't let interrupt failure block the ack
 
-        is_queue_mode = effective_mode == "queue"
-        is_steer_mode = effective_mode == "steer"
-        is_redirect_mode = effective_mode == "interrupt" and redirected
-
-        # Interrupt mode: abort in-flight tool calls; the agent loop exits at its next check point.
-        if (
-            effective_mode == "interrupt"
-            and not redirected
-            and running_agent
-            and running_agent is not _AGENT_PENDING_SENTINEL
-        ):
-            try:
-                _interrupt_text = event.text
-                _media_urls = getattr(event, "media_urls", None) or []
-                if self._pending_event_audio_paths(event):
-                    _interrupt_text, _ = await self._transcribe_and_echo_pending_voice(
-                        event,
-                        adapter,
-                        event.source,
-                        event.text or "",
-                        log_context="Voice-busy-interrupt",
-                    )
-                elif not _interrupt_text and _media_urls:
-                    _interrupt_text = _build_media_placeholder(event)
-                running_agent.interrupt(_interrupt_text)
-            except Exception:
-                pass  # don't let interrupt failure block the ack
-
-        # Disabled ack: skip sending, still process input. Checked before debounce so we never stamp a
-        # "last ack" timestamp for an ack that was not delivered.
-        busy_ack_enabled = os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() == "true"
-        if not busy_ack_enabled:
-            logger.debug("Busy ack suppressed for session %s", session_key)
-            return True  # input still processed, just no ack sent
-
-        # Debounce before the config-heavy display lookup: rapid follow-ups are still processed but
-        # shouldn't cost a config read just to learn no ack will be sent.
-        _BUSY_ACK_COOLDOWN = 30
-        now = time.time()
-        last_ack = _busy_state.turn.busy_ack_ts if _busy_state else 0
-        if now - last_ack < _BUSY_ACK_COOLDOWN:
-            return True  # interrupt sent (if not queue), ack already delivered recently
-
-        from gateway.display_config import resolve_display_setting
-        platform_key = _platform_config_key(event.source.platform)
-
+    def _busy_steer_ack_enabled(self, event: MessageEvent, session_key: str) -> bool:
         # Steer mode already injected the text; some mobile chat setups want silent steering (like STT
         # echo suppression) — keep the behavior, drop only the confirmation bubble.
-        if is_steer_mode:
-            steer_ack_env = os.environ.get("HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED")
-            if steer_ack_env is not None:
-                steer_ack_enabled = steer_ack_env.strip().lower() in {"1", "true", "yes", "on"}
-            else:
-                steer_ack_enabled = bool(
-                    resolve_display_setting(
-                        _load_gateway_config(),
-                        platform_key,
-                        "busy_steer_ack_enabled",
-                        True,
-                    )
+        from gateway.display_config import resolve_display_setting
+        platform_key = _platform_config_key(event.source.platform)
+        steer_ack_env = os.environ.get("HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED")
+        if steer_ack_env is not None:
+            steer_ack_enabled = steer_ack_env.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            steer_ack_enabled = bool(
+                resolve_display_setting(
+                    _load_gateway_config(),
+                    platform_key,
+                    "busy_steer_ack_enabled",
+                    True,
                 )
-            if not steer_ack_enabled:
-                logger.debug("Busy steer ack suppressed for session %s", session_key)
-                return True
+            )
+        if not steer_ack_enabled:
+            logger.debug("Busy steer ack suppressed for session %s", session_key)
+        return steer_ack_enabled
 
-        self._session_state(session_key).turn.busy_ack_ts = now
+    def _compose_busy_ack_message(
+        self,
+        event: MessageEvent,
+        now: float,
+        _busy_state,
+        running_agent: Any,
+        *,
+        is_steer_mode: bool,
+        is_queue_mode: bool,
+        is_redirect_mode: bool,
+        demoted_for_subagents: bool,
+        demoted_for_compression: bool,
+    ) -> str:
+        from gateway.display_config import resolve_display_setting
 
         # Mobile chat defaults keep the ack terse; iteration/tool detail stays in logs and can be opted
         # in per platform via display.platforms.<platform>.busy_ack_detail.
@@ -10006,25 +9977,131 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 mark_seen(_hermes_home / "config.yaml", BUSY_INPUT_FLAG)
         except Exception as _onb_err:
             logger.debug("Failed to apply busy-input onboarding hint: %s", _onb_err)
+        return message
 
+    async def _send_busy_ack_reply(self, event: MessageEvent, adapter, message: str) -> None:
         reply_anchor = self._reply_anchor_for_event(event)
         thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
         try:
             await adapter._send_with_retry(
                 chat_id=event.source.chat_id,
                 content=message,
-                reply_to=(
-                    reply_anchor
-                    if event.source.platform == Platform.TELEGRAM
-                    and event.source.chat_type == "dm"
-                    and event.source.thread_id
-                    else (None if event.source.platform == Platform.TELEGRAM and event.source.thread_id else event.message_id)
-                ),
+                reply_to=self._busy_reply_to(event, reply_anchor),
                 metadata=thread_meta,
             )
         except Exception as e:
             logger.debug("Failed to send busy-ack: %s", e)
 
+    async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+        # Authorization gate: the cold path (_handle_message) checks _is_user_authorized before
+        # creating a session; the busy path must enforce the same check, else unauthorized users in
+        # shared threads (Slack/Telegram/Discord) inject messages into a session they don't own.
+        if not self._is_user_authorized(event.source):
+            logger.warning(
+                "Dropping message from unauthorized user in active session: "
+                "user=%s (%s), platform=%s, session=%s",
+                event.source.user_id,
+                event.source.user_name,
+                event.source.platform.value if event.source.platform else "unknown",
+                session_key,
+            )
+            return True  # handled (silently dropped); do not fall through
+
+        effective_mode = self._effective_busy_input_mode(event.source)
+
+        # --- Draining case (gateway restarting/stopping) ---
+        if self._draining:
+            await self._send_busy_drain_notice(event, session_key, effective_mode)
+            return True
+
+        if await self._route_plaintext_approval_while_busy(event, session_key):
+            return True
+
+        # Normal busy case (agent actively running a task)
+        adapter = self._adapter_for_source(event.source)
+        if not adapter:
+            return False  # let default path handle it
+
+        # Internal synthetic events (async-delegation / background-process completions) must never
+        # interrupt/steer: treated as user TEXT while busy, interrupt mode would abort the active turn;
+        # a completion surfaces as a NEW turn only when idle. Plugin events carry untrusted payload
+        # text, so queue them through the gateway FIFO (security metadata kept apart).
+        if getattr(event, "internal", False) and not event.allow_gateway_control:
+            self._queue_or_replace_pending_event(session_key, event)
+            return True
+        if getattr(event, "internal", False):
+            return False
+
+        _busy_state = self._peek_session_state(session_key)
+        running_agent = _busy_state.turn.agent if _busy_state else None
+
+        busy_text_mode = self._effective_busy_text_mode(event.source)
+        if (
+            event.message_type == MessageType.TEXT
+            and busy_text_mode == "queue"
+            and effective_mode != "steer"
+        ):
+            return False
+
+        _steer = await self._resolve_busy_steer_or_redirect(event, session_key, effective_mode, running_agent)
+        effective_mode = _steer.effective_mode
+        demoted_for_subagents = _steer.demoted_for_subagents
+        demoted_for_compression = _steer.demoted_for_compression
+        steered = _steer.steered
+        redirected = _steer.redirected
+
+        # Queue as the next turn after the current run ends. Skip after a successful steer — the text
+        # is already in the run and must NOT replay. Use the FIFO helper, not raw
+        # merge_pending_message_event (merge_text=True newline-joins consecutive TEXT follow-ups into
+        # ONE turn); FIFO gives each text its own turn while keeping photo-burst / album merge for media.
+        if not steered and not redirected:
+            self._queue_or_replace_pending_event(session_key, event)
+
+        is_queue_mode = effective_mode == "queue"
+        is_steer_mode = effective_mode == "steer"
+        is_redirect_mode = effective_mode == "interrupt" and redirected
+
+        # Interrupt mode: abort in-flight tool calls; the agent loop exits at its next check point.
+        if (
+            effective_mode == "interrupt"
+            and not redirected
+            and running_agent
+            and running_agent is not _AGENT_PENDING_SENTINEL
+        ):
+            await self._interrupt_running_agent_for_busy_event(event, adapter, running_agent)
+
+        # Disabled ack: skip sending, still process input. Checked before debounce so we never stamp a
+        # "last ack" timestamp for an ack that was not delivered.
+        busy_ack_enabled = os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() == "true"
+        if not busy_ack_enabled:
+            logger.debug("Busy ack suppressed for session %s", session_key)
+            return True  # input still processed, just no ack sent
+
+        # Debounce before the config-heavy display lookup: rapid follow-ups are still processed but
+        # shouldn't cost a config read just to learn no ack will be sent.
+        _BUSY_ACK_COOLDOWN = 30
+        now = time.time()
+        last_ack = _busy_state.turn.busy_ack_ts if _busy_state else 0
+        if now - last_ack < _BUSY_ACK_COOLDOWN:
+            return True  # interrupt sent (if not queue), ack already delivered recently
+
+        if is_steer_mode and not self._busy_steer_ack_enabled(event, session_key):
+            return True
+
+        self._session_state(session_key).turn.busy_ack_ts = now
+
+        message = self._compose_busy_ack_message(
+            event,
+            now,
+            _busy_state,
+            running_agent,
+            is_steer_mode=is_steer_mode,
+            is_queue_mode=is_queue_mode,
+            is_redirect_mode=is_redirect_mode,
+            demoted_for_subagents=demoted_for_subagents,
+            demoted_for_compression=demoted_for_compression,
+        )
+        await self._send_busy_ack_reply(event, adapter, message)
         return True
 
     async def _drain_active_agents(
@@ -17503,37 +17580,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             logger.debug("Failed to restore one-turn model override", exc_info=True)
 
-    async def _prepare_inbound_message_text(
-        self,
-        *,
-        event: MessageEvent,
-        source: SessionSource,
-        history: List[Dict[str, Any]],
-        session_key: Optional[str] = None,
-    ) -> Optional[str]:
-        """Prepare inbound event text for the agent.
-
-        Shared by the normal inbound and queued follow-up paths so attribution, image enrichment,
-        STT, document notes, reply context and @ references behave the same. Side effect: buffers
-        per-session native image paths when the model supports native vision; the caller consumes
-        that buffer at ``run_conversation``. Empty list means the text vision path already ran.
-        """
-        history = history or []
-        _pending_stt_prepared = hasattr(event, "_gateway_pending_stt_text")
-        message_text = (
-            getattr(event, "_gateway_pending_stt_text", None)
-            if _pending_stt_prepared
-            else event.text
-        ) or ""
+    def _prefix_inbound_sender_context(self, event: MessageEvent, source: SessionSource, message_text: str) -> str:
+        """Attribute the sender in shared multi-user sessions and prepend history-backfill channel context."""
         _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
         _thread_sessions_per_user = getattr(self.config, "thread_sessions_per_user", False)
-        # Prefer the caller's resolved session key so this write key matches the consume key at the
-        # run_conversation site; derive it here only for tests and legacy standalone callers.
-        session_key = session_key or self._session_key_for_source(source)
-        # Reset only this session's per-call buffer; other sessions may be
-        # concurrently preparing multimodal turns on the same runner.
-        self._consume_pending_native_image_paths(session_key)
-
         _is_shared_multi_user = is_shared_multi_user_session(
             source,
             group_sessions_per_user=_group_sessions_per_user,
@@ -17559,15 +17609,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # only to the trigger message, not the backfill block.
         if getattr(event, "channel_context", None):
             message_text = f"{event.channel_context}\n\n[New message]\n{message_text}"
+        return message_text
 
-        # Declare at outer scope so the audio-file-paths handling block below
-        # remains safe when ``event.media_urls`` is empty (no inner block runs).
+    @staticmethod
+    def _classify_inbound_media(
+        event: MessageEvent, pending_stt_prepared: bool
+    ) -> Tuple[list, list, list, list]:
+        """Split ``event.media_urls`` into (image, STT-voice, audio-file, video) paths."""
+        image_paths: list[str] = []
+        audio_paths: list[str] = []
         audio_file_paths: list[str] = []
         video_paths: list[str] = []
 
         if event.media_urls:
-            image_paths = []
-            audio_paths = []
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 # Classify images per-attachment: trust this attachment's own MIME, and only honour
@@ -17581,87 +17635,96 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _event_media_is_audio(event, i):
                     if event.message_type in {MessageType.AUDIO, MessageType.DOCUMENT}:
                         audio_file_paths.append(path)
-                    elif not _pending_stt_prepared and _event_media_is_stt_input(event, i):
+                    elif not pending_stt_prepared and _event_media_is_stt_input(event, i):
                         audio_paths.append(path)
                 if mtype.startswith("video/") or (not mtype and event.message_type == MessageType.VIDEO):
                     video_paths.append(path)
+        return image_paths, audio_paths, audio_file_paths, video_paths
 
-            if image_paths:
-                # Decide routing: native (attach pixels) vs text (vision_analyze pre-run + prepend
-                # description). See agent/image_routing.py. Offloaded to a thread: the decision does
-                # blocking network I/O (models.dev fetch on cache miss, Ollama /api/show probe) whose
-                # timeout would otherwise stall the whole gateway event loop.
-                _img_mode = await asyncio.to_thread(
-                    self._decide_image_input_mode,
+    async def _enrich_inbound_images(
+        self, source: SessionSource, session_key: str, message_text: str, image_paths: list[str]
+    ) -> str:
+        # Decide routing: native (attach pixels) vs text (vision_analyze pre-run + prepend
+        # description). See agent/image_routing.py. Offloaded to a thread: the decision does
+        # blocking network I/O (models.dev fetch on cache miss, Ollama /api/show probe) whose
+        # timeout would otherwise stall the whole gateway event loop.
+        _img_mode = await asyncio.to_thread(
+            self._decide_image_input_mode,
+            source=source,
+            session_key=session_key,
+        )
+        if _img_mode == "native":
+            # Defer attachment to the run_conversation call site.
+            self._session_state(
+                session_key
+            ).persistent.native_image_paths = list(image_paths)
+            logger.info(
+                "Image routing: native (model supports vision). %d image(s) will be attached inline.",
+                len(image_paths),
+            )
+        else:
+            logger.info(
+                "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
+                _img_mode, len(image_paths),
+            )
+            # Vision enrichment runs before AIAgent.run_conversation(),
+            # so bind this session's resolved runtime explicitly rather
+            # than consulting process-global compatibility mirrors.
+            vision_runtime = None
+            try:
+                turn_model, runtime_kwargs = self._resolve_session_agent_runtime(
                     source=source,
                     session_key=session_key,
                 )
-                if _img_mode == "native":
-                    # Defer attachment to the run_conversation call site.
-                    self._session_state(
-                        session_key
-                    ).persistent.native_image_paths = list(image_paths)
-                    logger.info(
-                        "Image routing: native (model supports vision). %d image(s) will be attached inline.",
-                        len(image_paths),
-                    )
-                else:
-                    logger.info(
-                        "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
-                        _img_mode, len(image_paths),
-                    )
-                    # Vision enrichment runs before AIAgent.run_conversation(),
-                    # so bind this session's resolved runtime explicitly rather
-                    # than consulting process-global compatibility mirrors.
-                    vision_runtime = None
-                    try:
-                        turn_model, runtime_kwargs = self._resolve_session_agent_runtime(
-                            source=source,
-                            session_key=session_key,
-                        )
-                        vision_runtime = dict(runtime_kwargs or {})
-                        vision_runtime["model"] = turn_model
-                    except Exception:
-                        logger.debug(
-                            "vision enrichment: session runtime resolution failed",
-                            exc_info=True,
-                        )
-
-                    from agent.auxiliary_client import scoped_runtime_main
-
-                    with scoped_runtime_main(vision_runtime):
-                        message_text = await self._enrich_message_with_vision(
-                            message_text,
-                            image_paths,
-                        )
-
-            if audio_paths:
-                message_text, _successful_transcripts = await self._enrich_message_with_transcription(
-                    message_text,
-                    audio_paths,
+                vision_runtime = dict(runtime_kwargs or {})
+                vision_runtime["model"] = turn_model
+            except Exception:
+                logger.debug(
+                    "vision enrichment: session runtime resolution failed",
+                    exc_info=True,
                 )
-                # Echo each successful transcript back to the user immediately when configured. Lets
-                # users verify STT quality in real-time, while allowing quiet STT for users who only
-                # want the agent to receive the transcription.
-                if _successful_transcripts and self._should_echo_stt_transcripts():
-                    _echo_adapter = self._adapter_for_source(source)
-                    _echo_meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
-                    if _echo_adapter:
-                        for _tx in _successful_transcripts:
-                            try:
-                                await _echo_adapter.send(
-                                    source.chat_id,
-                                    f'🎙️ "{_tx}"',
-                                    metadata=_echo_meta,
-                                )
-                            except Exception as _echo_exc:
-                                logger.debug(
-                                    "Transcript echo failed (non-fatal): %s", _echo_exc,
-                                )
-                # On transcription failure, do NOT send a hardcoded notice here: that bypassed the
-                # LLM and produced two replies (one pre-canned, TTS'd in the wrong language).
-                # Enrichment leaves a single neutral marker so the LLM gives one localized reply.
 
+            from agent.auxiliary_client import scoped_runtime_main
+
+            with scoped_runtime_main(vision_runtime):
+                message_text = await self._enrich_message_with_vision(
+                    message_text,
+                    image_paths,
+                )
+        return message_text
+
+    async def _enrich_inbound_voice(
+        self, event: MessageEvent, source: SessionSource, message_text: str, audio_paths: list[str]
+    ) -> str:
+        message_text, _successful_transcripts = await self._enrich_message_with_transcription(
+            message_text,
+            audio_paths,
+        )
+        # Echo each successful transcript back to the user immediately when configured. Lets
+        # users verify STT quality in real-time, while allowing quiet STT for users who only
+        # want the agent to receive the transcription.
+        if _successful_transcripts and self._should_echo_stt_transcripts():
+            _echo_adapter = self._adapter_for_source(source)
+            _echo_meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+            if _echo_adapter:
+                for _tx in _successful_transcripts:
+                    try:
+                        await _echo_adapter.send(
+                            source.chat_id,
+                            f'🎙️ "{_tx}"',
+                            metadata=_echo_meta,
+                        )
+                    except Exception as _echo_exc:
+                        logger.debug(
+                            "Transcript echo failed (non-fatal): %s", _echo_exc,
+                        )
+        # On transcription failure, do NOT send a hardcoded notice here: that bypassed the
+        # LLM and produced two replies (one pre-canned, TTS'd in the wrong language).
+        # Enrichment leaves a single neutral marker so the LLM gives one localized reply.
+        return message_text
+
+    @staticmethod
+    def _prepend_inbound_media_file_notes(message_text: str, audio_file_paths: list[str], video_paths: list[str]) -> str:
         if audio_file_paths:
             from tools.credential_files import to_agent_visible_cache_path as _to_agent_path
             for _apath in audio_file_paths:
@@ -17699,7 +17762,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     f"with it if their intent is genuinely unclear.]"
                 )
                 message_text = f"{_note}\n\n{message_text}"
+        return message_text
 
+    @staticmethod
+    def _prepend_inbound_document_notes(event: MessageEvent, message_text: str) -> str:
         if event.media_urls:
             import mimetypes as _mimetypes
             from tools.credential_files import to_agent_visible_cache_path
@@ -17746,7 +17812,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     content_inlined=inline_flag is not False,
                 )
                 message_text = f"{context_note}\n\n{message_text}"
+        return message_text
 
+    @staticmethod
+    def _prepend_inbound_reply_context(event: MessageEvent, source: SessionSource, message_text: str) -> str:
         # Discord: surface the triggering message id per-turn on the user message rather than in the
         # cached system prompt. message_id changes every turn, so baking it into
         # build_session_context_prompt() would bust the agent-cache signature and rebuild the
@@ -17776,111 +17845,161 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             else:
                 message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+        return message_text
 
-        if "@" in message_text:
+    async def _expand_inbound_context_references(
+        self, source: SessionSource, session_key: str, message_text: str
+    ) -> Optional[str]:
+        """Expand ``@`` context references; returns None when the injection was refused (user notified)."""
+        try:
+            from agent.context_references import preprocess_context_references_async
+            from agent.model_metadata import get_model_context_length_async
+
             try:
-                from agent.context_references import preprocess_context_references_async
-                from agent.model_metadata import get_model_context_length_async
-
+                from tools.terminal_scope import terminal_env as _ts_env
+            except ImportError:
+                _msg_cwd = os.environ.get("TERMINAL_CWD", os.path.expanduser("~"))
+            else:
+                _msg_cwd = _ts_env("TERMINAL_CWD", os.path.expanduser("~"))
+            _msg_config_ctx = None
+            _msg_cfg = None
+            _msg_model_cfg = {}
+            _msg_custom_providers = []
+            try:
+                _msg_cfg = _load_gateway_config()
+                _msg_model_cfg = _msg_cfg.get("model", {})
+                if isinstance(_msg_model_cfg, dict):
+                    _msg_raw_ctx = _msg_model_cfg.get("context_length")
+                    if _msg_raw_ctx is not None:
+                        _msg_config_ctx = int(_msg_raw_ctx)
                 try:
-                    from tools.terminal_scope import terminal_env as _ts_env
-                except ImportError:
-                    _msg_cwd = os.environ.get("TERMINAL_CWD", os.path.expanduser("~"))
-                else:
-                    _msg_cwd = _ts_env("TERMINAL_CWD", os.path.expanduser("~"))
+                    from hermes_cli.config import get_compatible_custom_providers
+
+                    _msg_custom_providers = get_compatible_custom_providers(_msg_cfg)
+                except Exception:
+                    _msg_custom_providers = _msg_cfg.get("custom_providers") or []
+            except Exception:
+                pass
+            # Resolve the session's actual model/provider/base_url as the hygiene compression
+            # block does; GatewayRunner has no self._model/self._base_url (AttributeError,
+            # silently caught below).
+            _msg_model, _msg_runtime = self._resolve_session_agent_runtime(
+                source=source,
+                session_key=session_key,
+                user_config=_msg_cfg,
+            )
+            _msg_base_url = _msg_runtime.get("base_url") or ""
+            # A global model.context_length belongs to the configured
+            # model, not a session /model or channel override. Prefer a
+            # matching per-custom-provider model limit when available.
+            _msg_configured_model = (
+                _msg_model_cfg.get("default") or _msg_model_cfg.get("model")
+                if isinstance(_msg_model_cfg, dict)
+                else _msg_model_cfg
+            )
+            if _msg_model != _msg_configured_model:
                 _msg_config_ctx = None
-                _msg_cfg = None
-                _msg_model_cfg = {}
-                _msg_custom_providers = []
+            if _msg_config_ctx is not None and isinstance(_msg_model_cfg, dict):
                 try:
-                    _msg_cfg = _load_gateway_config()
-                    _msg_model_cfg = _msg_cfg.get("model", {})
-                    if isinstance(_msg_model_cfg, dict):
-                        _msg_raw_ctx = _msg_model_cfg.get("context_length")
-                        if _msg_raw_ctx is not None:
-                            _msg_config_ctx = int(_msg_raw_ctx)
-                    try:
-                        from hermes_cli.config import get_compatible_custom_providers
+                    from hermes_cli.route_identity import should_clear_context_pin_async
 
-                        _msg_custom_providers = get_compatible_custom_providers(_msg_cfg)
-                    except Exception:
-                        _msg_custom_providers = _msg_cfg.get("custom_providers") or []
+                    if await should_clear_context_pin_async(
+                        None,  # model match already checked above
+                        None,
+                        _msg_model_cfg.get("base_url"),
+                        _msg_base_url,
+                        _msg_model_cfg.get("provider"),
+                        _msg_runtime.get("provider"),
+                    ):
+                        _msg_config_ctx = None
+                except Exception:
+                    _msg_config_ctx = None
+            if _msg_custom_providers and _msg_base_url:
+                try:
+                    from hermes_cli.config import get_custom_provider_context_length
+
+                    _msg_custom_ctx = get_custom_provider_context_length(
+                        model=_msg_model,
+                        base_url=_msg_base_url,
+                        custom_providers=_msg_custom_providers,
+                    )
+                    if _msg_custom_ctx:
+                        _msg_config_ctx = _msg_custom_ctx
                 except Exception:
                     pass
-                # Resolve the session's actual model/provider/base_url as the hygiene compression
-                # block does; GatewayRunner has no self._model/self._base_url (AttributeError,
-                # silently caught below).
-                _msg_model, _msg_runtime = self._resolve_session_agent_runtime(
-                    source=source,
-                    session_key=session_key,
-                    user_config=_msg_cfg,
-                )
-                _msg_base_url = _msg_runtime.get("base_url") or ""
-                # A global model.context_length belongs to the configured
-                # model, not a session /model or channel override. Prefer a
-                # matching per-custom-provider model limit when available.
-                _msg_configured_model = (
-                    _msg_model_cfg.get("default") or _msg_model_cfg.get("model")
-                    if isinstance(_msg_model_cfg, dict)
-                    else _msg_model_cfg
-                )
-                if _msg_model != _msg_configured_model:
-                    _msg_config_ctx = None
-                if _msg_config_ctx is not None and isinstance(_msg_model_cfg, dict):
-                    try:
-                        from hermes_cli.route_identity import should_clear_context_pin_async
+            _msg_ctx_len = await get_model_context_length_async(
+                _msg_model,
+                base_url=_msg_base_url,
+                api_key=_msg_runtime.get("api_key") or "",
+                config_context_length=_msg_config_ctx,
+                provider=_msg_runtime.get("provider") or "",
+                custom_providers=_msg_custom_providers,
+            )
+            _ctx_result = await preprocess_context_references_async(
+                message_text,
+                cwd=_msg_cwd,
+                context_length=_msg_ctx_len,
+                allowed_root=_msg_cwd,
+            )
+            if _ctx_result.blocked:
+                _adapter = self._adapter_for_source(source)
+                if _adapter:
+                    await _adapter.send(
+                        source.chat_id,
+                        "\n".join(_ctx_result.warnings) or "Context injection refused.",
+                    )
+                return None
+            if _ctx_result.expanded:
+                message_text = _ctx_result.message
+        except Exception as exc:
+            logger.warning("@ context reference expansion failed: %s", exc)
+            logger.debug("@ context reference expansion failure detail", exc_info=True)
+        return message_text
 
-                        if await should_clear_context_pin_async(
-                            None,  # model match already checked above
-                            None,
-                            _msg_model_cfg.get("base_url"),
-                            _msg_base_url,
-                            _msg_model_cfg.get("provider"),
-                            _msg_runtime.get("provider"),
-                        ):
-                            _msg_config_ctx = None
-                    except Exception:
-                        _msg_config_ctx = None
-                if _msg_custom_providers and _msg_base_url:
-                    try:
-                        from hermes_cli.config import get_custom_provider_context_length
+    async def _prepare_inbound_message_text(
+        self,
+        *,
+        event: MessageEvent,
+        source: SessionSource,
+        history: List[Dict[str, Any]],
+        session_key: Optional[str] = None,
+    ) -> Optional[str]:
+        """Prepare inbound event text for the agent.
 
-                        _msg_custom_ctx = get_custom_provider_context_length(
-                            model=_msg_model,
-                            base_url=_msg_base_url,
-                            custom_providers=_msg_custom_providers,
-                        )
-                        if _msg_custom_ctx:
-                            _msg_config_ctx = _msg_custom_ctx
-                    except Exception:
-                        pass
-                _msg_ctx_len = await get_model_context_length_async(
-                    _msg_model,
-                    base_url=_msg_base_url,
-                    api_key=_msg_runtime.get("api_key") or "",
-                    config_context_length=_msg_config_ctx,
-                    provider=_msg_runtime.get("provider") or "",
-                    custom_providers=_msg_custom_providers,
-                )
-                _ctx_result = await preprocess_context_references_async(
-                    message_text,
-                    cwd=_msg_cwd,
-                    context_length=_msg_ctx_len,
-                    allowed_root=_msg_cwd,
-                )
-                if _ctx_result.blocked:
-                    _adapter = self._adapter_for_source(source)
-                    if _adapter:
-                        await _adapter.send(
-                            source.chat_id,
-                            "\n".join(_ctx_result.warnings) or "Context injection refused.",
-                        )
-                    return None
-                if _ctx_result.expanded:
-                    message_text = _ctx_result.message
-            except Exception as exc:
-                logger.warning("@ context reference expansion failed: %s", exc)
-                logger.debug("@ context reference expansion failure detail", exc_info=True)
+        Shared by the normal inbound and queued follow-up paths so attribution, image enrichment,
+        STT, document notes, reply context and @ references behave the same. Side effect: buffers
+        per-session native image paths when the model supports native vision; the caller consumes
+        that buffer at ``run_conversation``. Empty list means the text vision path already ran.
+        """
+        history = history or []
+        _pending_stt_prepared = hasattr(event, "_gateway_pending_stt_text")
+        message_text = (
+            getattr(event, "_gateway_pending_stt_text", None)
+            if _pending_stt_prepared
+            else event.text
+        ) or ""
+        # Prefer the caller's resolved session key so this write key matches the consume key at the
+        # run_conversation site; derive it here only for tests and legacy standalone callers.
+        session_key = session_key or self._session_key_for_source(source)
+        # Reset only this session's per-call buffer; other sessions may be
+        # concurrently preparing multimodal turns on the same runner.
+        self._consume_pending_native_image_paths(session_key)
+
+        message_text = self._prefix_inbound_sender_context(event, source, message_text)
+        image_paths, audio_paths, audio_file_paths, video_paths = self._classify_inbound_media(
+            event, _pending_stt_prepared
+        )
+        if image_paths:
+            message_text = await self._enrich_inbound_images(source, session_key, message_text, image_paths)
+        if audio_paths:
+            message_text = await self._enrich_inbound_voice(event, source, message_text, audio_paths)
+        message_text = self._prepend_inbound_media_file_notes(message_text, audio_file_paths, video_paths)
+        message_text = self._prepend_inbound_document_notes(event, message_text)
+        message_text = self._prepend_inbound_reply_context(event, source, message_text)
+        if "@" in message_text:
+            message_text = await self._expand_inbound_context_references(source, session_key, message_text)
+            if message_text is None:
+                return None
 
         return message_text
 
