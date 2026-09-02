@@ -2714,11 +2714,8 @@ def get_model_context_length(
     # model has different limits per provider (claude-opus-4.6: 1M on
     # Anthropic, 128K on Copilot). Generic providers are inferred from the URL.
     effective_provider = provider
-    if not effective_provider or effective_provider in {"openrouter", "custom"}:
-        if base_url:
-            inferred = _infer_provider_from_url(base_url)
-            if inferred:
-                effective_provider = inferred
+    if base_url and (not effective_provider or effective_provider in {"openrouter", "custom"}):
+        effective_provider = _infer_provider_from_url(base_url) or effective_provider
 
     # 5a. Copilot live /models — account-specific models (claude-opus-4.6-1m)
     # absent from models.dev, and the provider-enforced limit for the rest.
