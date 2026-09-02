@@ -787,6 +787,64 @@ def _dispatch_bridge_tool(
     return None, (underlying_name, underlying_args)
 
 
+def _pre_dispatch_guards(
+    function_name: str,
+    function_args: Dict[str, Any],
+    skip_pre_tool_call_hook: bool,
+    *,
+    task_id: Optional[str],
+    session_id: Optional[str],
+    tool_call_id: Optional[str],
+    turn_id: Optional[str],
+    api_request_id: Optional[str],
+    middleware_trace: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Optional[Tuple[Any, str, Optional[str]]]]:
+    """Plugin pre_tool_call hook, then ACP edit approval.
+
+    Returns ``(args, None)`` to proceed (args possibly modified by a plugin), or
+    ``(args, (result, error_type, error_message))`` when the call is blocked.
+    """
+    # pre_tool_call fires exactly once per execution: _dispatch_pre_tool_call_hooks
+    # returns the block message (block/approve) and modified args (modify) from a
+    # single invoke_hook pass. skip=True means the caller already fired it.
+    if not skip_pre_tool_call_hook:
+        block_message: Optional[str] = None
+        try:
+            from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
+            block_message, modified_args = _dispatch_pre_tool_call_hooks(
+                function_name,
+                function_args,
+                task_id=task_id or "",
+                session_id=session_id or "",
+                tool_call_id=tool_call_id or "",
+                turn_id=turn_id or "",
+                api_request_id=api_request_id or "",
+                middleware_trace=list(middleware_trace),
+            )
+            if modified_args is not None:
+                function_args = modified_args
+        except Exception as _hook_err:
+            logger.debug("pre_tool_call hook error: %s", _hook_err)
+        if block_message is not None:
+            return function_args, (tool_error(block_message), "plugin_block", block_message)
+
+    # ACP/Zed edit approval before any file mutation. The requester is bound
+    # via ContextVar only for ACP sessions, so CLI/gateway paths are unaffected.
+    try:
+        from acp_adapter.edit_approval import maybe_require_edit_approval
+
+        edit_block_message = maybe_require_edit_approval(function_name, function_args)
+        if edit_block_message is not None:
+            return function_args, (edit_block_message, "edit_approval_denied", None)
+    except Exception as _edit_approval_err:
+        logger.debug("ACP edit approval guard error: %s", _edit_approval_err)
+        if function_name in {"write_file", "patch"}:
+            return function_args, (
+                tool_error("Edit approval denied: approval guard failed"), "edit_approval_error", None,
+            )
+    return function_args, None
+
+
 def handle_function_call(
     function_name: str,
     function_args: Dict[str, Any],
@@ -891,45 +949,14 @@ def handle_function_call(
         if function_name in _AGENT_LOOP_TOOLS:
             return tool_error(f"{function_name} must be handled by the agent loop")
 
-        # pre_tool_call fires exactly once per execution: _dispatch_pre_tool_call_hooks
-        # returns the block message (block/approve) and modified args (modify) from a
-        # single invoke_hook pass. skip=True means the caller already fired it.
-        if not skip_pre_tool_call_hook:
-            block_message: Optional[str] = None
-            try:
-                from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
-                block_message, modified_args = _dispatch_pre_tool_call_hooks(
-                    function_name,
-                    function_args,
-                    task_id=task_id or "",
-                    session_id=session_id or "",
-                    tool_call_id=tool_call_id or "",
-                    turn_id=turn_id or "",
-                    api_request_id=api_request_id or "",
-                    middleware_trace=list(_tool_middleware_trace),
-                )
-                if modified_args is not None:
-                    function_args = modified_args
-            except Exception as _hook_err:
-                logger.debug("pre_tool_call hook error: %s", _hook_err)
-
-            if block_message is not None:
-                return _emit(tool_error(block_message), status="blocked",
-                             error_type="plugin_block", error_message=block_message)
-
-        # ACP/Zed edit approval before any file mutation. The requester is bound
-        # via ContextVar only for ACP sessions, so CLI/gateway paths are unaffected.
-        try:
-            from acp_adapter.edit_approval import maybe_require_edit_approval
-
-            edit_block_message = maybe_require_edit_approval(function_name, function_args)
-            if edit_block_message is not None:
-                return _emit(edit_block_message, status="blocked", error_type="edit_approval_denied")
-        except Exception as _edit_approval_err:
-            logger.debug("ACP edit approval guard error: %s", _edit_approval_err)
-            if function_name in {"write_file", "patch"}:
-                return _emit(tool_error("Edit approval denied: approval guard failed"),
-                             status="blocked", error_type="edit_approval_error")
+        function_args, blocked = _pre_dispatch_guards(
+            function_name, function_args, skip_pre_tool_call_hook,
+            task_id=task_id, session_id=session_id, tool_call_id=tool_call_id,
+            turn_id=turn_id, api_request_id=api_request_id, middleware_trace=_tool_middleware_trace,
+        )
+        if blocked is not None:
+            result, error_type, error_message = blocked
+            return _emit(result, status="blocked", error_type=error_type, error_message=error_message)
 
         # Any non-read/search tool resets the consecutive-read-loop counter.
         if function_name not in _READ_SEARCH_TOOLS:
