@@ -239,13 +239,13 @@ _TOOL_ROW_BUILDERS = (
 
 def _print_cmd_rows(rows):
     """Print (command, description) rows as '   <green cmd><desc>'."""
-    from hermes_cli.setup import Colors, color
+    from hermes_cli.setup import color, Colors
     for cmd, desc in rows:
         print(f"   {color(cmd, Colors.GREEN)}{desc}")
 
 
 def _print_section_header(title):
-    from hermes_cli.setup import Colors, color
+    from hermes_cli.setup import color, Colors
     print(color("─" * 60, Colors.DIM))
     print()
     print(color(title, Colors.CYAN, Colors.BOLD))
@@ -255,13 +255,11 @@ def _print_section_header(title):
 def _print_setup_summary(config: dict, hermes_home):
     """Print the setup completion summary."""
     from hermes_cli.setup import (
-        Colors, color, get_config_path, get_env_path, get_nous_subscription_features, _info, print_header,
+        color, Colors, get_config_path, get_env_path, get_nous_subscription_features, _info, print_header,
         print_warning,
     )
-    # Provider readiness — the one thing setup absolutely must produce. Previously a user
-    # could cancel the API-key prompt mid-wizard (Enter → "Cancelled."), watch the wizard
-    # continue through Terminal/Gateway/Tools, and exit "successfully" with NO working model —
-    # believing they were set up. Say so loudly instead (consumer-onboarding audit finding #7).
+    # Provider readiness — the one thing setup must produce. A user who cancelled the API-key
+    # prompt mid-wizard used to exit "successfully" with NO working model; say so loudly.
     try:
         from hermes_cli.auth import resolve_provider
 
@@ -283,10 +281,7 @@ def _print_setup_summary(config: dict, hermes_home):
     subscription_features = get_nous_subscription_features(config)
     for build in _TOOL_ROW_BUILDERS:
         row = build(config, subscription_features)
-        if isinstance(row, list):
-            tool_status.extend(row)
-        elif row is not None:
-            tool_status.append(row)
+        tool_status.extend(row if isinstance(row, list) else [row] if row is not None else [])
 
     available_count = sum(1 for _, avail, _ in tool_status if avail)
     _info(f"{available_count}/{len(tool_status)} tool categories available:", None)

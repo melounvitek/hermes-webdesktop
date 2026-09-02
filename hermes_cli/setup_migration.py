@@ -23,13 +23,9 @@ _OPENROUTER_ENV_VARS = ("OPENROUTER_API_KEY", "OPENAI_API_KEY")
 
 
 def _model_section_has_credentials(config: dict) -> bool:
-    """Return True when any known inference provider has usable credentials.
-
-    Sources of truth: ``PROVIDER_REGISTRY`` in ``hermes_cli.auth`` (every provider with its
-    ``api_key_env_vars``); ``active_provider`` in the auth store (OAuth device-code / external-OAuth
-    providers: Nous, Codex, Qwen, Gemini CLI, ...); and the legacy OpenRouter aggregator env vars,
-    which route generic ``OPENAI_API_KEY`` / ``OPENROUTER_API_KEY`` values through OpenRouter.
-    """
+    """True when any known inference provider has usable credentials: ``active_provider`` in the
+    auth store (OAuth providers), ``PROVIDER_REGISTRY`` ``api_key_env_vars``, or the legacy
+    OpenRouter aggregator env vars (``OPENAI_API_KEY`` / ``OPENROUTER_API_KEY``)."""
     from hermes_cli.setup import get_env_value
     try:
         from hermes_cli.auth import get_active_provider
@@ -93,10 +89,8 @@ def _cfg_summary(config: dict, section: str, key: str, default, prefix: str) -> 
 
 def _gateway_summary(config: dict) -> Optional[str]:
     from hermes_cli.gateway import _all_platforms, _platform_status
-    # Count any non-empty status other than the "not configured" sentinel — platforms like
-    # WhatsApp ("enabled, not paired"), Matrix ("configured + E2EE"), and Signal ("partially
-    # configured") all indicate the user has already started setup and we shouldn't force
-    # the section to rerun.  No platforms configured -> None -> section must run.
+    # Any non-empty status other than "not configured" counts — WhatsApp ("enabled, not paired"),
+    # Matrix ("configured + E2EE"), Signal ("partially configured") mean setup already started.
     configured = [
         _gateway_platform_short_label(plat["label"])
         for plat in _all_platforms()
@@ -179,10 +173,8 @@ def _load_openclaw_migration_module():
     return mod
 
 
-# Item kinds that represent high-impact changes warranting explicit warnings.
-# Gateway tokens/channels can hijack messaging platforms from the old agent.
-# Config values may have different semantics between OpenClaw and Hermes.
-# Instruction/context files (.md) can contain incompatible setup procedures.
+# Item kinds that warrant explicit warnings: gateway tokens/channels hijack the old agent's
+# platforms; config values and instruction/context .md files may not map 1:1 to Hermes.
 _HIGH_IMPACT_KIND_KEYWORDS = {
     "gateway": "⚠ Gateway/messaging — this will configure Hermes to use your OpenClaw messaging channels",
     "telegram": "⚠ Telegram — this will point Hermes at your OpenClaw Telegram bot",
@@ -214,12 +206,9 @@ def _reason_row(default_reason: str, item: dict, kind: str) -> str:
 
 
 def _print_migration_preview(report: dict):
-    """Print a detailed dry-run preview of what migration would do.
-
-    Groups items by status and adds explicit warnings for high-impact changes like
-    gateway token takeover and config value differences.
-    """
-    from hermes_cli.setup import Colors, color, print_info
+    """Dry-run preview grouped by status, with warnings for high-impact items (gateway takeover,
+    config semantics)."""
+    from hermes_cli.setup import color, Colors, print_info
     items = report.get("items", [])
     if not items:
         print_info("Nothing to migrate.")
@@ -267,14 +256,10 @@ def _run_migrator(mod, openclaw_dir: Path, hermes_home: Path, selected, *, execu
 
 
 def _offer_openclaw_migration(hermes_home: Path) -> bool:
-    """Detect ~/.openclaw and offer to migrate during first-time setup.
-
-    Runs a dry-run first to show the user exactly what would be imported, overwritten, or
-    taken over. Only executes after explicit confirmation.  Returns True if migration ran
-    successfully, False otherwise.
-    """
+    """Detect ~/.openclaw and offer to migrate during first-time setup: dry-run preview first,
+    execute only after explicit confirmation. Returns True iff migration ran successfully."""
     from hermes_cli.setup import (
-        _OPENCLAW_SCRIPT, get_config_path, _info, load_config, print_header, print_info, print_success,
+        get_config_path, _info, load_config, _OPENCLAW_SCRIPT, print_header, print_info, print_success,
         print_warning, prompt_yes_no, save_config,
     )
     openclaw_dir = Path.home() / ".openclaw"

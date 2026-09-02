@@ -150,10 +150,9 @@ def _setup_telegram():
           "   1. Message @userinfobot on Telegram",
           "   2. It will reply with your numeric ID (e.g., 123456789)", None)
 
-    open_access_q = "Allowed user IDs (comma-separated, leave empty for open access)"
-    detected_user_id = getattr(setup_result, "owner_user_id", None)
-    if detected_user_id:
-        detected_id = str(detected_user_id)
+    allowed_users = None
+    detected_id = str(getattr(setup_result, "owner_user_id", None) or "")
+    if detected_id:
         print_success(f"Detected your Telegram user ID: {detected_id}")
         if prompt_yes_no("Allow this Telegram account to use the bot?", True):
             extra = prompt("Additional allowed user IDs (comma-separated, optional)")
@@ -162,15 +161,12 @@ def _setup_telegram():
                 if uid and uid not in ids:
                     ids.append(uid)
             allowed_users = ",".join(ids)
-        else:
-            allowed_users = prompt(open_access_q)
-    else:
-        allowed_users = prompt(open_access_q)
+    if allowed_users is None:
+        allowed_users = prompt("Allowed user IDs (comma-separated, leave empty for open access)")
 
     if allowed_users:
         allowed_users = allowed_users.replace(" ", "")
-        save_env_value("TELEGRAM_ALLOWED_USERS", allowed_users)
-        print_success("Telegram allowlist configured - only listed users can use the bot")
+        _save_allowlist("TELEGRAM_ALLOWED_USERS", allowed_users, "Telegram allowlist configured - only listed users can use the bot")
     else:
         print_info("⚠️  No allowlist set - anyone who finds your bot can use it!")
 
@@ -179,20 +175,15 @@ def _setup_telegram():
           "   For Telegram DMs, this is your user ID (same as above).")
 
     first_user_id = allowed_users.split(",")[0].strip() if allowed_users else ""
-    if first_user_id:
-        if prompt_yes_no(f"Use your user ID ({first_user_id}) as the home channel?", True):
-            save_env_value("TELEGRAM_HOME_CHANNEL", first_user_id)
-            print_success(f"Telegram home channel set to {first_user_id}")
-        else:
-            q = "Home channel ID (or leave empty to set later with /set-home in Telegram)"
-            _save_if_set("TELEGRAM_HOME_CHANNEL", prompt(q))
-    else:
+    if not first_user_id:
         print_info("   You can also set this later by typing /set-home in your Telegram chat.")
         _save_if_set("TELEGRAM_HOME_CHANNEL", prompt("Home channel ID (leave empty to set later)"))
-
-
-# _setup_slack/_write_slack_manifest_and_instruct and _setup_matrix live in their plugins
-# (plugins/platforms/{slack,matrix}/adapter.py::interactive_setup, via setup_fn). #41112 #3823.
+    elif prompt_yes_no(f"Use your user ID ({first_user_id}) as the home channel?", True):
+        save_env_value("TELEGRAM_HOME_CHANNEL", first_user_id)
+        print_success(f"Telegram home channel set to {first_user_id}")
+    else:
+        q = "Home channel ID (or leave empty to set later with /set-home in Telegram)"
+        _save_if_set("TELEGRAM_HOME_CHANNEL", prompt(q))
 
 
 def _setup_bluebubbles():
@@ -209,17 +200,15 @@ def _setup_bluebubbles():
           "   Download: https://bluebubbles.app/", None,
           "In BlueBubbles Server → Settings → API, note your Server URL and Password.", None)
 
-    server_url = prompt("BlueBubbles server URL (e.g. http://192.168.1.10:1234)")
-    if not server_url:
-        print_warning("Server URL is required — skipping BlueBubbles setup")
-        return
-    save_env_value("BLUEBUBBLES_SERVER_URL", server_url.rstrip("/"))
-
-    password = prompt("BlueBubbles server password", password=True)
-    if not password:
-        print_warning("Password is required — skipping BlueBubbles setup")
-        return
-    save_env_value("BLUEBUBBLES_PASSWORD", password)
+    for label, env_var, secret, what in (
+        ("BlueBubbles server URL (e.g. http://192.168.1.10:1234)", "BLUEBUBBLES_SERVER_URL", False, "Server URL"),
+        ("BlueBubbles server password", "BLUEBUBBLES_PASSWORD", True, "Password"),
+    ):
+        value = prompt(label, password=secret)
+        if not value:
+            print_warning(f"{what} is required — skipping BlueBubbles setup")
+            return
+        save_env_value(env_var, value.rstrip("/") if env_var == "BLUEBUBBLES_SERVER_URL" else value)
     print_success("BlueBubbles credentials saved")
 
     _info(None, "🔒 Security: Restrict who can message your bot",
@@ -281,8 +270,6 @@ def _setup_webhooks():
           "   Open config in your editor:  hermes config edit")
 
 
-# ── Gateway ──
-
 # (platform label, credential env var, home-channel env vars — any one satisfies)
 _HOME_CHANNEL_CHECKS = (
     ("Telegram", "TELEGRAM_BOT_TOKEN", ("TELEGRAM_HOME_CHANNEL",)),
@@ -317,9 +304,8 @@ def _warn_missing_home_channels() -> None:
 
 
 def _restart_running_gateway(any_messaging: bool, supports_systemd: bool) -> None:
-    """Already running: only offer a restart when this setup pass may have changed
-    platform config — a restart interrupts any active session, so it stays behind a
-    prompt."""
+    """Already running: offer a restart only when this pass may have changed platform config —
+    a restart interrupts any active session, so it stays behind a prompt."""
     from hermes_cli.setup import print_error, prompt_yes_no
     from hermes_cli.gateway import (
         systemd_restart, launchd_restart, UserSystemdUnavailableError, SystemScopeRequiresRootError,
@@ -344,9 +330,8 @@ def _restart_running_gateway(any_messaging: bool, supports_systemd: bool) -> Non
         for line in str(e).splitlines():
             print(f"  {line}")
     except SystemScopeRequiresRootError as e:
-        # Defense in depth: the pre-check above should have caught this, but a race
-        # (unit file appearing mid-run) could still land here. Previously this exited
-        # the whole wizard via sys.exit(1).
+        # Defense in depth: a race (unit file appearing mid-run) can slip past the pre-check;
+        # this used to sys.exit(1) the whole wizard.
         print_error(f"  Restart failed: {e}")
         _print_system_scope_remediation("restart")
     except Exception as e:
@@ -374,9 +359,8 @@ def setup_gateway(config: dict):
     for idx in selected or ():
         _configure_platform(platforms[idx])
 
-    # Count any platform (built-in or plugin) the user configured during this setup
-    # pass — reuses ``_platform_status`` so plugin platforms like IRC are picked up
-    # without another hard-coded env-var list.
+    # Any platform (built-in or plugin) configured in this pass — via ``_platform_status`` so
+    # plugin platforms like IRC are counted without another hard-coded env-var list.
     any_messaging = any(_is_progress(_platform_status(p)) for p in _all_platforms())
     if any_messaging:
         print()
@@ -384,13 +368,10 @@ def setup_gateway(config: dict):
         print_success("Messaging platforms configured!")
         _warn_missing_home_channels()
 
-    # ── Gateway Service Setup ──
-    # Runs UNCONDITIONALLY — even with zero platforms configured. A gateway without
-    # platforms is a supported mode (cron scheduler keeps running, and adapters come up
-    # automatically once tokens are added later, e.g. via `hermes import` or
-    # `hermes setup gateway`). Gating this on messaging config was the bug that left
-    # install-then-import machines with registered cron jobs and restored bot tokens
-    # but no process to serve them.
+    # Gateway service setup runs UNCONDITIONALLY — a gateway with zero platforms is a supported
+    # mode (cron keeps running; adapters come up once tokens are added via `hermes import` /
+    # `hermes setup gateway`). Gating it on messaging config left install-then-import machines
+    # with cron jobs and bot tokens but no process to serve them.
     from hermes_cli.gateway import _is_service_running, supports_systemd_services, ensure_gateway_service
 
     supports_systemd = supports_systemd_services()

@@ -83,11 +83,8 @@ def _install_kittentts_deps() -> bool:
 
 
 def _xai_oauth_logged_in_for_setup() -> bool:
-    """True iff xAI Grok OAuth credentials are already stored locally.
-
-    Lets TTS / STT setup skip the API-key prompt for users who logged in
-    through ``hermes model`` -> xAI Grok OAuth (SuperGrok / Premium+).
-    """
+    """True iff xAI Grok OAuth credentials are stored locally, so TTS/STT setup can skip the
+    API-key prompt for users who logged in via ``hermes model`` -> xAI Grok OAuth."""
     try:
         from hermes_cli.auth import get_xai_oauth_auth_status
 
@@ -99,12 +96,9 @@ def _xai_oauth_logged_in_for_setup() -> bool:
 def _run_xai_oauth_login_from_setup() -> bool:
     """Run the xAI Grok OAuth device-code login from inside the setup wizard.
 
-    Saves OAuth tokens only. Does **not** switch the active inference
-    provider or rewrite ``model.provider`` — callers (TTS setup, tools
-    config) only need credentials for side tools.
-
-    Returns True on success, False on any failure (the caller falls back
-    to whatever the user picked next, e.g. Edge TTS).
+    Saves OAuth tokens only — does **not** switch the active provider or rewrite
+    ``model.provider`` (callers only need credentials for side tools). Returns True on success,
+    False on any failure (the caller falls back, e.g. to Edge TTS).
     """
     from hermes_cli.setup import _info, print_warning
     try:
@@ -124,8 +118,8 @@ def _run_xai_oauth_login_from_setup() -> bool:
             creds["tokens"], discovery=creds.get("discovery"), redirect_uri=creds.get("redirect_uri", ""),
             last_refresh=creds.get("last_refresh"), auth_mode="oauth_device_code", set_active=False,
         )
-        # Mirror model/dashboard re-login: clear device_code suppression so
-        # the pool can seed from the singleton after a prior `auth remove`.
+        # Mirror model/dashboard re-login: clear device_code suppression so the pool can seed
+        # from the singleton after a prior `auth remove`.
         unsuppress_credential_source("xai-oauth", "device_code")
         return True
     except Exception as exc:
@@ -182,7 +176,9 @@ _TTS_LOCAL_PROVIDERS = {
 
 def _tts_api_key_step(selected: str) -> str:
     """Ensure the key for an API-key TTS provider exists; fall back to edge otherwise."""
-    from hermes_cli.setup import get_env_value, print_info, print_success, print_warning, prompt, save_env_value
+    from hermes_cli.setup import (
+        get_env_value, print_info, print_success, print_warning, prompt, save_env_value,
+    )
     env_vars, save_var, prompt_label, saved_msg, hint = _TTS_API_KEY_PROVIDERS[selected]
     if any(get_env_value(v) for v in env_vars):
         return selected
@@ -222,8 +218,8 @@ def _tts_xai_step(config: dict) -> str:
     """xAI TTS auth. Order: existing OAuth tokens (free for SuperGrok) > existing
     XAI_API_KEY > offer both paths — xAI TTS works with OAuth bearer tokens too."""
     from hermes_cli.setup import (
-        _run_xai_oauth_login_from_setup, _xai_oauth_logged_in_for_setup, get_env_value, print_success,
-        print_warning, prompt, prompt_choice, save_env_value,
+        get_env_value, print_success, print_warning, prompt, prompt_choice, _run_xai_oauth_login_from_setup,
+        save_env_value, _xai_oauth_logged_in_for_setup,
     )
     selected = "xai"
     if _xai_oauth_logged_in_for_setup():

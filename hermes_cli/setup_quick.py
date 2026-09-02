@@ -41,7 +41,7 @@ def _run_portal_one_shot(config: dict) -> None:
     ``_model_flow_nous`` — the same flow quick setup and ``hermes model`` use for Nous — so
     there is one source of truth and ``hermes portal`` always offers a picker.
     """
-    from hermes_cli.setup import Colors, color, _info, load_config, print_error, print_info, print_success
+    from hermes_cli.setup import color, Colors, _info, load_config, print_error, print_info, print_success
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.MAGENTA))
     print(color("│     ⚕ Hermes Setup — Nous Portal (one-shot)             │", Colors.MAGENTA))
@@ -374,7 +374,8 @@ def _blank_slate_walkthrough(config: dict, hermes_home):
 def _run_quick_setup(config: dict, hermes_home):
     """Quick setup — only configure items that are missing."""
     from hermes_cli.setup import (
-        Colors, color, _info, print_header, print_info, _print_setup_summary, print_success, _prompt_api_key, prompt_checklist, save_config,
+        color, Colors, _info, print_header, print_info, _print_setup_summary, print_success,
+        _prompt_api_key, prompt_checklist, save_config,
     )
     from hermes_cli.config import (get_missing_env_vars, get_missing_config_fields, check_config_version)
     print()

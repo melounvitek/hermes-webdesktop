@@ -36,8 +36,9 @@ def _prompt_vercel_sandbox_settings(config: dict):
     save_env_value("TERMINAL_VERCEL_RUNTIME", runtime)
 
     persist_label = "yes" if terminal.get("container_persistent", True) else "no"
-    answer = prompt("  Persist filesystem with snapshots? (yes/no)", persist_label)
-    terminal["container_persistent"] = answer.lower() in {"yes", "true", "y", "1"}
+    terminal["container_persistent"] = (
+        prompt("  Persist filesystem with snapshots? (yes/no)", persist_label).lower() in {"yes", "true", "y", "1"}
+    )
 
     # (key, prompt label, default, parser) — unparseable input leaves the value untouched.
     for key, label, default, parse in (
@@ -50,9 +51,7 @@ def _prompt_vercel_sandbox_settings(config: dict):
             pass
 
     if terminal.get("container_disk", 51200) not in {0, 51200}:
-        print_warning(
-            "Vercel Sandbox does not support custom disk sizing; resetting container_disk to 51200."
-        )
+        print_warning("Vercel Sandbox does not support custom disk sizing; resetting container_disk to 51200.")
     terminal["container_disk"] = 51200
 
     _info(None, "Vercel authentication:", "  Use a long-lived Vercel access token plus project/team IDs.")
@@ -61,12 +60,14 @@ def _prompt_vercel_sandbox_settings(config: dict):
         print_info("  Found defaults in nearest .vercel/project.json.")
 
     remove_env_value("VERCEL_OIDC_TOKEN")
-    token = prompt("    Vercel access token", get_env_value("VERCEL_TOKEN") or "", password=True)
-    project = prompt(
-        "    Vercel project ID", get_env_value("VERCEL_PROJECT_ID") or linked.get("projectId", "")
-    )
-    team = prompt("    Vercel team ID", get_env_value("VERCEL_TEAM_ID") or linked.get("orgId", ""))
-    for env_var, value in (("VERCEL_TOKEN", token), ("VERCEL_PROJECT_ID", project), ("VERCEL_TEAM_ID", team)):
+    # (label, env var, linked-project fallback key, secret) — prompted in order, saved when non-empty.
+    for label, env_var, linked_key, secret in (
+        ("    Vercel access token", "VERCEL_TOKEN", None, True),
+        ("    Vercel project ID", "VERCEL_PROJECT_ID", "projectId", False),
+        ("    Vercel team ID", "VERCEL_TEAM_ID", "orgId", False),
+    ):
+        default = get_env_value(env_var) or (linked.get(linked_key, "") if linked_key else "")
+        value = prompt(label, default, password=secret)
         if value:
             save_env_value(env_var, value)
 
@@ -135,11 +136,11 @@ def _setup_backend_docker(config: dict) -> None:
     from hermes_cli.setup import _info, print_info, print_success, print_warning, prompt_yes_no
     print_success("Terminal backend: Docker")
     docker_bin = shutil.which("docker")
-    if not docker_bin:
+    if docker_bin:
+        print_info(f"Docker found: {docker_bin}")
+    else:
         print_warning("Docker not found in PATH!")
         print_info("Install Docker: https://docs.docker.com/get-docker/")
-    else:
-        print_info(f"Docker found: {docker_bin}")
 
     # Image and resource limits use defaults; tune via `hermes setup terminal`.
     config["terminal"].setdefault("docker_image", _SANDBOX_IMAGE)
@@ -161,11 +162,11 @@ def _setup_backend_singularity(config: dict) -> None:
     from hermes_cli.setup import print_info, print_success, print_warning
     print_success("Terminal backend: Singularity/Apptainer")
     sing_bin = shutil.which("apptainer") or shutil.which("singularity")
-    if not sing_bin:
+    if sing_bin:
+        print_info(f"Found: {sing_bin}")
+    else:
         print_warning("Singularity/Apptainer not found in PATH!")
         print_info("Install: https://apptainer.org/docs/admin/main/installation.html")
-    else:
-        print_info(f"Found: {sing_bin}")
     # Image and resource limits use defaults; tune via `hermes setup terminal`.
     config["terminal"].setdefault("singularity_image", "docker://nikolaik/python-nodejs:python3.11-nodejs20")
 
@@ -188,17 +189,14 @@ def _setup_backend_modal(config: dict) -> None:
     modal_mode = normalize_modal_mode(cfg_get(config, "terminal", "modal_mode"))
     use_managed_modal = False
     if managed_modal_available:
-        if modal_mode == "managed":
-            default_modal_idx = 0
-        elif modal_mode == "direct":
-            default_modal_idx = 1
+        if modal_mode in ("managed", "direct"):
+            default_modal_idx = 0 if modal_mode == "managed" else 1
         else:
             default_modal_idx = 1 if get_env_value("MODAL_TOKEN_ID") else 0
-        modal_mode_idx = prompt_choice(
+        use_managed_modal = prompt_choice(
             "Select how Modal execution should be billed:",
             ["Use my Nous subscription", "Use my own Modal account"], default_modal_idx,
-        )
-        use_managed_modal = modal_mode_idx == 0
+        ) == 0
 
     if use_managed_modal:
         config["terminal"]["modal_mode"] = "managed"
@@ -248,9 +246,8 @@ def _setup_backend_vercel(config: dict) -> None:
         print_info("Installing vercel SDK...")
         import subprocess
 
-        # Managed uv first: $HERMES_HOME/bin is never on PATH, so a bare which()
-        # misses the uv Hermes installed; bootstrapping one mid-wizard is fine,
-        # and a `uv venv` venv may not even have pip.
+        # Managed uv first: $HERMES_HOME/bin is never on PATH so which() misses Hermes' uv;
+        # bootstrapping one mid-wizard is fine, and a `uv venv` venv may not even have pip.
         from hermes_cli.managed_uv import ensure_uv
 
         uv_bin = ensure_uv()
@@ -338,7 +335,7 @@ _TERMINAL_BACKEND_SETUP = {
 def setup_terminal_backend(config: dict):
     """Configure the terminal execution backend."""
     from hermes_cli.setup import (
-        _DOCS_BASE, cfg_get, _info, print_header, print_info, print_success, prompt_choice, save_config,
+        cfg_get, _DOCS_BASE, _info, print_header, print_info, print_success, prompt_choice, save_config,
         save_env_value,
     )
     import platform as _platform
@@ -352,8 +349,8 @@ def setup_terminal_backend(config: dict):
     if _platform.system() == "Linux":
         backends.append(("singularity", "Singularity/Apptainer - HPC-friendly container"))
 
-    # Plugin-registered terminal backends (standalone plugin repos under
-    # ~/.hermes/plugins/). Fail-soft: a broken plugin must not take the wizard down.
+    # Plugin-registered backends (~/.hermes/plugins/). Fail-soft: a broken plugin must not take
+    # the wizard down.
     plugin_backend_names = []
     try:
         from hermes_cli.plugins import discover_plugins
@@ -384,8 +381,7 @@ def setup_terminal_backend(config: dict):
     elif selected_backend in plugin_backend_names:
         _setup_backend_plugin(config, selected_backend)
 
-    # config.yaml is the source of truth, but terminal_tool reads TERMINAL_ENV
-    # from .env — keep them in sync.
+    # config.yaml is the source of truth, but terminal_tool reads TERMINAL_ENV from .env — sync.
     save_env_value("TERMINAL_ENV", selected_backend)
     if selected_backend == "modal":
         save_env_value("TERMINAL_MODAL_MODE", config["terminal"].get("modal_mode", "auto"))
