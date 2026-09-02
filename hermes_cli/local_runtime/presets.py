@@ -1,9 +1,5 @@
-"""Per-model preset generation (--models-preset INI) — the router-side
-carrier for context-policy launch decisions.
-
-The INI shape is what the router itself generates per child: a
-[model-id] section whose keys are long-form
-llama-server flag names without the leading dashes.
+"""Per-model preset generation (--models-preset INI) — the router-side carrier for context-policy
+launch decisions.
 """
 
 from __future__ import annotations
@@ -69,16 +65,10 @@ def _args_to_keys(args: list[str]) -> dict[str, str]:
 def generate_presets(models_dir: Path, budget: HardwareBudget,
                      preset_path: Path,
                      mtp_capable: set[str] | None = None) -> list[PresetEntry]:
-    """Walk the staged models, run the launch decision per model, and
-    write one INI. Refused models get no section (the router simply won't
-    have policy for them; the picker surfaces the refusal + smaller-quant
-    suggestion from the returned entries).
-
-    Catalog-declared companions merge in here: sampling defaults (policy
-    keys always win), the vision projector when present, and a spec-decode
-    draft model iff the decision spilled — the rule: speculative
-    decode is a spill amplifier, so a resident draft accelerates a spilled
-    main model; a zero-spill model doesn't pay the draft's memory."""
+    """Walk the staged models, run the launch decision per model, and write one INI. Refused models get
+    no section (the router simply won't have policy for them; the picker surfaces the refusal +
+    smaller-quant suggestion from the returned entries).
+    """
     from hermes_cli.local_runtime.bootstrap import assets_dir
     from hermes_cli.local_runtime.catalog import find_entry_for_model
 
@@ -221,9 +211,9 @@ def generate_presets(models_dir: Path, budget: HardwareBudget,
 
 
 def read_preset_decisions(preset_path: Path | None = None) -> dict[str, PresetEntry]:
-    """The launch decisions the running server was actually given, read
-    back from the preset INI (the INI is the record — it's what spawned
-    the children). Missing/unparseable file returns {}."""
+    """The launch decisions the running server was actually given, read back from the preset INI (the
+    INI is the record — it's what spawned the children). Missing/unparseable file returns {}.
+    """
     import configparser
 
     if preset_path is None:

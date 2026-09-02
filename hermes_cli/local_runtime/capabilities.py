@@ -1,22 +1,9 @@
 """Capability answers for models served by the managed runtime.
 
-Capability lookups (vision, and whatever comes next) consult cloud-shaped
-catalogs that have never heard of a local GGUF, so a vision-capable local
-model reads as text-only and images detour to an auxiliary cloud model —
-the wrong behavior twice over for a local-first user (broken feature, and
-a screenshot silently leaving the machine).
-
-The managed runtime can answer from ground truth instead, best source
-first:
-
-1. The RUNNING child's /props: llama-server reports a ``modalities`` block
-   when a vision projector is loaded. The server that will receive the
-   image says whether it can see — no inference, no catalog.
-2. The catalog entry's declared capability (the ``vision`` tag + mmproj
-   asset) for staged-but-unloaded models: what the model WILL support once
-   its projector loads beside it.
-3. None — not one of ours, or nothing known; the caller falls through to
-   its other sources.
+Capability lookups (vision, and whatever comes next) consult cloud-shaped catalogs that have never
+heard of a local GGUF, so a vision-capable local model reads as text-only and images detour to an
+auxiliary cloud model — the wrong behavior twice over for a local-first user (broken feature, and a
+screenshot silently leaving the machine).
 """
 
 from __future__ import annotations
@@ -27,7 +14,7 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
-_LLAMACPP_ALIASES = frozenset({"llamacpp", "llama.cpp", "llama-cpp"})
+from hermes_cli.local_runtime.endpoint import LLAMACPP_ALIASES as _LLAMACPP_ALIASES
 
 # Image formats the managed server's decoder actually handles. llama.cpp
 # decodes with stb_image: PNG/JPEG/GIF/BMP yes, WebP NO — and a WebP part
@@ -45,20 +32,20 @@ def is_managed_provider(provider: str, base_url: str = "") -> bool:
     p = (provider or "").strip().lower()
     if p in _LLAMACPP_ALIASES:
         return True
-    if p == "custom" and base_url:
-        try:
-            from hermes_cli.local_runtime.growth import is_managed_endpoint
+    if p != "custom" or not base_url:
+        return False
+    try:
+        from hermes_cli.local_runtime.growth import is_managed_endpoint
 
-            return is_managed_endpoint(base_url)
-        except Exception:  # noqa: BLE001
-            return False
-    return False
+        return is_managed_endpoint(base_url)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _props_modalities(model_id: str) -> "bool | None":
-    """Ask the running server whether this loaded child sees images.
-    None when the server is down, the model isn't loaded, or the build
-    doesn't report modalities."""
+    """Ask the running server whether this loaded child sees images. None when the server is down, the
+    model isn't loaded, or the build doesn't report modalities.
+    """
     try:
         from hermes_cli.local_runtime.endpoint import _state_endpoint
 

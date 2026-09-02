@@ -1,20 +1,7 @@
 """In-session context growth for the managed llama.cpp runtime.
 
-The live half of the window ladder (context_policy.growth_decision): when a
-session reaches the edge of its granted window, Hermes grows the window
-toward the model's native max INSTEAD of compressing. Compression becomes
-what the design says it is — the move of last resort, once the window is at
-native (or the speed floor / physics say stop).
-
-Mechanism: growth is re-prefill. A per-model window
-override is persisted, presets regenerate with the bigger window, the
-supervised server bounces, and the next request autoloads the model at the
-new window and re-prefills the conversation. Nothing about the Hermes
-conversation mutates — no prompt-cache or role-alternation risk; the whole
-operation is server-side.
-
-Scope guard: only a server THIS process supervises grows. Detected external
-servers and other-process supervisors keep their own policies.
+Scope guard: only a server THIS process supervises grows. Detected external servers and other-
+process supervisors keep their own policies.
 """
 
 from __future__ import annotations
@@ -75,13 +62,12 @@ def is_managed_endpoint(base_url: str) -> bool:
 def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
                       current_window: int,
                       measured_decode_tok_s: float | None = None) -> int | None:
-    """One growth evaluation + execution. Returns the NEW window when the
-    ladder granted a bigger one, else None (hold / compress / not ours).
+    """One growth evaluation + execution. Returns the NEW window when the ladder granted a bigger
+    one, else None (hold / compress / not ours).
 
-    The caller sits at a request boundary by construction (the pre-API
-    compression gate), so re-prefill growth is safe at any call: the next
-    request rebuilds server state from scratch in the larger window —
-    nothing rewinds.
+    The caller sits at a request boundary by construction (the pre-API compression gate), so
+    re-prefill growth is safe at any call: the next request rebuilds server state in the larger
+    window — nothing rewinds.
     """
     from hermes_cli.local_runtime.bootstrap import (
         get_supervisor,

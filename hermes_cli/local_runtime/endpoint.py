@@ -1,14 +1,7 @@
 """Endpoint resolution for llamacpp-alias requests (provider integration).
 
-The seam between the existing provider mechanism and the managed runtime:
-``provider: llamacpp`` with no explicit base_url resolves, in order, to
-
-1. the managed server this Hermes is supervising (state file written by
-   LlamaServerSupervisor.start, removed on stop, staleness-checked), or
-2. a detected external llama-server.
-
-Returns None when neither exists — the caller falls through to the normal
-custom-provider path and its own error reporting.
+The seam between the existing provider mechanism and the managed runtime: ``provider: llamacpp``
+with no explicit base_url resolves, in order, to
 """
 
 from __future__ import annotations
@@ -28,9 +21,8 @@ logger = logging.getLogger(__name__)
 def _pid_alive(pid: int) -> bool:
     """Liveness for the state file's supervisor-child pid.
 
-    psutil when available; otherwise fall back to True (optimistic) — on
-    Windows ``os.kill(pid, 0)`` TERMINATES the process, so it must never be
-    used as a probe (windows-git-bash interop pitfall).
+    psutil when available; otherwise fall back to True (optimistic) — on Windows ``os.kill(pid, 0)``
+    TERMINATES the process, so it must never be used as a probe (windows-git-bash interop pitfall).
     """
     if not pid or pid < 0:
         return False
@@ -78,25 +70,16 @@ def _state_endpoint() -> dict | None:
     # optimistically so readiness probes racing the boot see a configured
     # provider, not missing credentials. A dead pid is a crashed-without-
     # cleanup leftover — ignore it so requests don't blackhole.
-    if pid_ok:
-        return endpoint
-    return None
+    return endpoint if pid_ok else None
 
 
 def resolve_llamacpp_endpoint(config: dict | None = None,
                               wait_for_boot_s: float = 8.0) -> dict | None:
     """Managed-first, detection-second endpoint for llamacpp aliases.
 
-    Returns {"base_url", "api_key"} or None. api_key is empty for keyless
-    external servers (callers substitute the SDK placeholder).
-
-    Boot-race rung: on a fresh backend start there is NO state file yet —
-    the lifespan boot thread is still spawning the server (config load +
-    preset generation + spawn ≈ 1-3 s) while the desktop's readiness probe
-    fires the moment the WebSocket connects. When the runtime is enabled
-    and installed, a missing endpoint means BOOTING, not unconfigured:
-    poll briefly for the state file instead of failing the probe (twice
-    observed as 'no usable credentials' → onboarding on restart).
+    Boot-race rung: on a fresh backend start there is NO state file yet — the lifespan boot thread
+    is still spawning the server (config load + preset generation + spawn ≈ 1-3 s) while the
+    desktop's readiness probe fires the moment the WebSocket connects.
     """
     managed = _state_endpoint()
     if managed:
@@ -104,11 +87,8 @@ def resolve_llamacpp_endpoint(config: dict | None = None,
 
     from hermes_cli.local_runtime.detect import detect_server
 
-    extra = ()
-    if config:
-        ports = (config.get("local_runtime") or {}).get("detect_ports") or []
-        extra = tuple(int(p) for p in ports)
-    hit = detect_server(extra_ports=extra)
+    ports = ((config or {}).get("local_runtime") or {}).get("detect_ports") or []
+    hit = detect_server(extra_ports=tuple(int(p) for p in ports))
     if hit and not hit.auth_required:
         return {"base_url": hit.base_url, "api_key": ""}
 
@@ -126,33 +106,28 @@ def resolve_llamacpp_endpoint(config: dict | None = None,
 _KICK_LOCK = threading.Lock()
 
 
+def _load_config_if_none(config: dict | None) -> dict | None:
+    if config is not None:
+        return config
+    from hermes_cli.config import load_config
+
+    return load_config()
+
+
 def _kick_managed_boot(config: dict | None) -> None:
     """Actively start the managed server when resolution finds it missing.
 
-    The wait loop above assumes some OTHER thread is bringing the server
-    up — true only at backend start (the lifespan boot thread). A router
-    that dies LATER leaves no boot in flight: the backend process was
-    killed with the router as part of its tree, or another install took
-    the stable port and the ownership guard rightly refused it. In those
-    states the wait just expired and agent init failed with 'no provider
-    configured', even though the fix is the same idempotent ensure call
-    the lifespan makes. Kick it here, off-thread (the resolver's wait
-    stays bounded; ensure's own state checks make a concurrent lifespan
-    boot harmless) and non-reentrant (racing resolutions kick once).
+    The wait loop above assumes some OTHER thread is bringing the server up — true only at backend
+    start (the lifespan boot thread).
     """
     if not _KICK_LOCK.acquire(blocking=False):
         return  # a kick is already in flight
 
     def _boot() -> None:
         try:
-            cfg = config
-            if cfg is None:
-                from hermes_cli.config import load_config
-
-                cfg = load_config()
             from hermes_cli.local_runtime.bootstrap import ensure_local_runtime
 
-            ensure_local_runtime(cfg)
+            ensure_local_runtime(_load_config_if_none(config))
         except Exception:  # noqa: BLE001 — best-effort; resolution falls back
             logger.warning("on-demand managed-server boot failed", exc_info=True)
         finally:
@@ -164,28 +139,20 @@ def _kick_managed_boot(config: dict | None) -> None:
 
 def _boot_in_flight(config: dict | None) -> bool:
     """True when the managed runtime is enabled and installed — the state
-    a lifespan boot thread is (or is about to be) bringing up.
 
-    Installed-ness is a verified-manifest scan under runtimes_root(), NOT a
-    server_binary() call — that helper requires an install_dir argument, and
-    calling it bare made this gate throw-and-return-False forever, silently
-    disabling the boot wait (the regression
-    test had monkeypatched this function instead of exercising it).
+    Installed-ness is a verified-manifest scan under runtimes_root(), NOT a bare ``server_binary()``
+    call: that helper needs an install_dir, and calling it bare made this gate throw-and-return
+    False forever, silently disabling the boot wait.
     """
     try:
-        if config is None:
-            from hermes_cli.config import load_config
-
-            config = load_config()
+        config = _load_config_if_none(config)
         if not ((config or {}).get("local_runtime") or {}).get("enabled"):
             return False
-        import json as _json
-
         from hermes_cli.local_runtime.binaries import runtimes_root
 
         for manifest in runtimes_root().glob("*/*/manifest.json"):
             try:
-                if _json.loads(manifest.read_text(encoding="utf-8")).get("verified_version"):
+                if json.loads(manifest.read_text(encoding="utf-8")).get("verified_version"):
                     return True
             except (ValueError, OSError):
                 continue

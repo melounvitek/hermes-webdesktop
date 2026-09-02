@@ -1,12 +1,4 @@
-"""Picker-only search aliases for model ids.
-
-Wire IDs stay unchanged. Some providers report short or brand-less ids
-(Kimi Coding's flagship is literally ``k3``) that users still search for by
-the familiar ``kimi-…`` naming of sibling models.
-
-Keep in sync with ``ui-tui/src/lib/model-search-text.ts`` and
-``web/src/lib/model-search-text.ts``.
-"""
+"""Picker-only search aliases for model ids."""
 
 from __future__ import annotations
 
@@ -30,11 +22,7 @@ _MODEL_ALIAS_CANONICAL: dict[str, str] = {
 
 
 def model_alias_canonical(model: str) -> str:
-    """Return the canonical public slug for a bare wire-id alias.
-
-    Identity for ids with no alias entry. Lowercases the input so callers
-    can use the result directly as a dedup key.
-    """
+    """Return the canonical public slug for a bare wire-id alias."""
     key = (model or "").strip().lower()
     return _MODEL_ALIAS_CANONICAL.get(key, key)
 

@@ -1,24 +1,22 @@
-"""Bootstrap for the managed runtime: config -> installed binaries ->
-running supervised server.
+"""Bootstrap for the managed runtime: config -> installed binaries -> running supervised server.
 
-One public call, ``ensure_local_runtime(config)``, safe to call at any
-session start:
-- disabled or already-running (state file answers /health) -> no-op
-- enabled -> install binaries if missing (idempotent), spawn supervisor
+One public call, ``ensure_local_runtime(config)``, safe to call at any session start: - disabled or
+already-running (state file answers /health) -> no-op - enabled -> install binaries if missing
+(idempotent), spawn supervisor
 
-Kept import-light: callers gate on config before importing this module so
-sessions with local_runtime disabled never pay the import.
+Kept import-light: callers gate on config before importing this module so sessions with
+local_runtime disabled never pay the import.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
+import signal
 import subprocess
 import time
 from pathlib import Path
-
-from hermes_constants import get_hermes_home  # noqa: F401 — config paths
 
 from hermes_cli.local_runtime.binaries import runtimes_root
 
@@ -28,10 +26,10 @@ _SUPERVISOR = None  # process-wide singleton; one router per Hermes process
 
 
 def _detect_gpu_vendor() -> str | None:
-    """Best-effort GPU vendor for backend selection. NVIDIA via nvidia-smi
-    (resolved by the hardware probe's PATH-independent ladder — a stripped
-    service PATH must not demote an NVIDIA box to vulkan/cpu); anything
-    else defers to select_backend's fallback ladder."""
+    """Best-effort GPU vendor for backend selection. NVIDIA via nvidia-smi (resolved by the hardware
+    probe's PATH-independent ladder — a stripped service PATH must not demote an NVIDIA box to
+    vulkan/cpu); anything else defers to select_backend's fallback ladder.
+    """
     from hermes_cli.local_runtime.hardware import _nvidia_smi_path
 
     smi = _nvidia_smi_path()
@@ -65,13 +63,10 @@ def assets_dir() -> Path:
 
 
 def staged_models() -> "list[Path]":
-    """Servable staged models: single-file GGUFs count when present; a
-    split GGUF counts once, by its first part, and only when EVERY part
-    is on disk — a mid-download split is not servable and must not
-    surface anywhere as a model. Continuation parts and assets/ never
-    count."""
-    import re
-
+    """Servable staged models: single-file GGUFs count when present; a split GGUF counts once, by its
+    first part, and only when EVERY part is on disk — a mid-download split is not servable and must
+    not surface anywhere as a model. Continuation parts and assets/ never count.
+    """
     part = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
     files = sorted(models_dir().glob("*.gguf"))
     names = {p.name for p in files}
@@ -92,8 +87,6 @@ def staged_models() -> "list[Path]":
 
 
 def staged_model_ids() -> "list[str]":
-    import re
-
     return [re.sub(r"-\d{5}-of-\d{5}$", "", p.stem) for p in staged_models()]
 
 
@@ -110,21 +103,18 @@ def _presets_stale() -> bool:
 
 
 def _stop_state_server(state: dict) -> None:
-    """Best-effort stop of the server the state file points at (an
-    incumbent this process doesn't supervise). The state pid is ours by
-    contract — the file only ever describes the managed server."""
+    """Best-effort stop of the server the state file points at (an incumbent this process doesn't
+    supervise). The state pid is ours by contract — the file only ever describes the managed server.
+    """
     from hermes_cli.local_runtime.endpoint import _pid_alive
 
-    pid = state.get("pid")
     try:
-        pid = int(pid)
+        pid = int(state.get("pid"))
     except (TypeError, ValueError):
         return
     if pid <= 0:
         return
     try:
-        import signal
-
         os.kill(pid, signal.SIGTERM)
     except (OSError, ValueError):
         return
@@ -140,16 +130,9 @@ def _stop_state_server(state: dict) -> None:
 def refresh_local_runtime() -> bool:
     """Restart the managed server so it rescans the models directory.
 
-    The router's model list is SPAWN-ONLY: a GGUF added after start is
-    invisible to GET /models and 400s on completion, so anything that
-    changes the staged set while the server runs must bounce it. Covers
-    both ownership shapes: a supervised server restarts in-process; an
-    ADOPTED server (started by a previous backend session — the normal
-    shape after any restart) is stopped via its state-file pid and
-    replaced with a supervised boot. Without the adopted branch, every
-    download/delete in a post-restart session silently no-ops the bounce
-    and the router serves a stale catalog. Returns False when there is
-    nothing to refresh (no server anywhere; next boot scans fresh).
+    The router's model list is SPAWN-ONLY: a GGUF added after start is invisible to GET /models and
+    400s on completion, so anything that changes the staged set while the server runs must bounce
+    it.
     """
     global _SUPERVISOR
     try:
@@ -173,13 +156,9 @@ def refresh_local_runtime() -> bool:
 
 
 def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
-    """Idempotent boot of the managed runtime. Returns the supervisor (or
-    None when disabled/unavailable). Never raises into a session start —
-    failures log and return None; chat falls back to configured providers.
-
-    ``force=True`` skips the enabled gate — used by the explicit "Use this
-    model" action, where the click IS the opt-in (the caller records it in
-    config so future boots auto-start).
+    """Idempotent boot of the managed runtime. Returns the supervisor (or None when
+    disabled/unavailable). Never raises into a session start — failures log and return None; chat
+    falls back to configured providers.
     """
     global _SUPERVISOR
     section = (config or {}).get("local_runtime") or {}
@@ -216,7 +195,9 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
 
     try:
         from hermes_cli.local_runtime.binaries import (
+            default_tag,
             ensure_runtime_installed,
+            installed_tags,
             select_backend,
         )
         from hermes_cli.local_runtime.hardware import probe_budget
@@ -233,8 +214,6 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
         # endpoint reports the pending update — the download is a deliberate
         # button click in the pane, not a boot-path surprise (a multi-minute
         # inline download here is exactly how the onboarding bounce returns).
-        from hermes_cli.local_runtime.binaries import default_tag, installed_tags
-
         tag = section.get("tag") or default_tag()
         have = installed_tags()
         if tag not in have:

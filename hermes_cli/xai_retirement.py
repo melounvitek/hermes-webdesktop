@@ -1,11 +1,4 @@
-"""Detect xAI models retired on May 15, 2026.
-
-Source: https://docs.x.ai/developers/migration/may-15-retirement
-
-Pure logic: walks a Hermes config dict, returns issues for any reference
-to a retired xAI model. No I/O, no CLI dependencies — testable in isolation
-and reusable from both `hermes doctor` and a future `hermes migrate xai`.
-"""
+"""Detect xAI models retired on May 15, 2026."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -62,12 +55,8 @@ def _looks_like_xai(model_id: Optional[str]) -> bool:
 def find_retired_xai_refs(config: Dict[str, Any]) -> List[RetirementIssue]:
     """Walk all model slots in a Hermes config and return retirement issues.
 
-    Slots scanned:
-      - ``principal.model``
-      - ``auxiliary.<any>.model`` (introspective — covers future aux slots)
-      - ``delegation.model``
-      - ``tts.xai.model``
-      - ``plugins.image_gen.xai.model``
+    Slots scanned: ``principal.model``, ``auxiliary.<any>.model`` (introspective, covers future
+    aux slots), ``delegation.model``, ``tts.xai.model``, ``plugins.image_gen.xai.model``.
     """
     issues: List[RetirementIssue] = []
 
@@ -86,36 +75,31 @@ def find_retired_xai_refs(config: Dict[str, Any]) -> List[RetirementIssue]:
             note=entry.get("note"),
         ))
 
+    def _section(*keys: str) -> Optional[Dict[str, Any]]:
+        node: Any = config
+        for key in keys:
+            if not isinstance(node, dict):
+                return None
+            node = node.get(key)
+        return node if isinstance(node, dict) else None
+
     if not isinstance(config, dict):
         return issues
 
-    principal = config.get("principal")
-    if isinstance(principal, dict):
+    principal = _section("principal")
+    if principal is not None:
         _check("principal.model", principal.get("model"))
 
-    aux = config.get("auxiliary")
-    if isinstance(aux, dict):
+    aux = _section("auxiliary")
+    if aux is not None:
         for slot_name, slot_cfg in aux.items():
             if isinstance(slot_cfg, dict):
                 _check(f"auxiliary.{slot_name}.model", slot_cfg.get("model"))
 
-    delegation = config.get("delegation")
-    if isinstance(delegation, dict):
-        _check("delegation.model", delegation.get("model"))
-
-    tts = config.get("tts")
-    if isinstance(tts, dict):
-        tts_xai = tts.get("xai")
-        if isinstance(tts_xai, dict):
-            _check("tts.xai.model", tts_xai.get("model"))
-
-    plugins = config.get("plugins")
-    if isinstance(plugins, dict):
-        image_gen = plugins.get("image_gen")
-        if isinstance(image_gen, dict):
-            ig_xai = image_gen.get("xai")
-            if isinstance(ig_xai, dict):
-                _check("plugins.image_gen.xai.model", ig_xai.get("model"))
+    for path in (("delegation",), ("tts", "xai"), ("plugins", "image_gen", "xai")):
+        section = _section(*path)
+        if section is not None:
+            _check(".".join(path) + ".model", section.get("model"))
 
     return issues
 
@@ -153,11 +137,7 @@ class ApplyResult:
 
 
 def _walk_to_parent(yaml_doc: Any, dotted_path: str) -> "tuple[Any, str]":
-    """Resolve a dotted slot path to (parent_mapping, leaf_key).
-
-    Example: "auxiliary.vision.model" -> (yaml_doc["auxiliary"]["vision"], "model").
-    Raises KeyError if any intermediate node is missing or not a mapping.
-    """
+    """Resolve a dotted slot path to (parent_mapping, leaf_key)."""
     parts = dotted_path.split(".")
     if len(parts) < 2:
         raise ValueError(f"Path must have at least one parent: {dotted_path!r}")
@@ -176,31 +156,23 @@ def apply_migration(
 ) -> ApplyResult:
     """Rewrite ``config_path`` in-place so each issue is resolved.
 
-    For every issue, the model name is replaced by ``issue.replacement``. If the
-    issue has ``reasoning_effort`` set (i.e. the migration is from a
-    ``*-non-reasoning`` variant), a sibling ``reasoning_effort`` key is added
-    or updated alongside the model.
+    Uses ``ruamel.yaml`` round-trip mode so comments, key order, indentation, and type literals
+    (booleans, ints) are preserved.
 
-    Uses ``ruamel.yaml`` round-trip mode so comments, key order, indentation,
-    and type literals (booleans, ints) are preserved.
-
-    A backup copy is written to
-    ``<config_path>.bak-pre-migrate-xai-YYYYMMDD-HHMMSS`` before rewriting,
-    unless ``backup=False``.
+    A backup copy is written to ``<config_path>.bak-pre-migrate-xai-YYYYMMDD-HHMMSS`` before
+    rewriting, unless ``backup=False``.
     """
     from ruamel.yaml import YAML  # local import — avoid hard dep at module load
 
     config_path = Path(config_path)
     if not config_path.exists():
         raise FileNotFoundError(config_path)
+    unchanged = ApplyResult(
+        file_path=config_path, backup_path=None, issues_resolved=[], config_changed=False
+    )
 
     if not issues:
-        return ApplyResult(
-            file_path=config_path,
-            backup_path=None,
-            issues_resolved=[],
-            config_changed=False,
-        )
+        return unchanged
 
     yaml = YAML(typ="rt")
     yaml.preserve_quotes = True
@@ -208,12 +180,7 @@ def apply_migration(
         doc = yaml.load(fh)
 
     if doc is None:
-        return ApplyResult(
-            file_path=config_path,
-            backup_path=None,
-            issues_resolved=[],
-            config_changed=False,
-        )
+        return unchanged
 
     resolved: List[RetirementIssue] = []
     for issue in issues:
@@ -228,12 +195,7 @@ def apply_migration(
         resolved.append(issue)
 
     if not resolved:
-        return ApplyResult(
-            file_path=config_path,
-            backup_path=None,
-            issues_resolved=[],
-            config_changed=False,
-        )
+        return unchanged
 
     backup_path: Optional[Path] = None
     if backup:

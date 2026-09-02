@@ -1,45 +1,13 @@
 """Remote model catalog fetcher.
 
-The Hermes docs site hosts a JSON manifest of curated models for providers
-we want to update without shipping a release (currently OpenRouter and
-Nous Portal). This module fetches, validates, and caches that manifest,
-falling back to the in-repo hardcoded lists when the network is unavailable.
+Pipeline -------- 1. ``get_catalog()`` — returns a parsed manifest dict. - Checks in-process cache
+(invalidated by TTL). - Reads disk cache at ``~/.hermes/cache/model_catalog.json``. - Fetches the
+master URL if disk cache is stale or missing. - On any fetch failure, keeps using the stale cache
+(or empty dict).
 
-Pipeline
---------
-1. ``get_catalog()`` — returns a parsed manifest dict.
-   - Checks in-process cache (invalidated by TTL).
-   - Reads disk cache at ``~/.hermes/cache/model_catalog.json``.
-   - Fetches the master URL if disk cache is stale or missing.
-   - On any fetch failure, keeps using the stale cache (or empty dict).
-
-2. ``get_curated_openrouter_models()`` / ``get_curated_nous_models()`` —
-   thin accessors returning the shapes existing callers expect. Each
-   falls back to the in-repo hardcoded list on any lookup failure.
-
-Schema (version 1)
-------------------
-::
-
-    {
-      "version": 1,
-      "updated_at": "2026-04-25T22:00:00Z",
-      "metadata": {...},                # free-form
-      "providers": {
-        "openrouter": {
-          "metadata": {...},            # free-form
-          "models": [
-            {"id": "vendor/model", "description": "recommended",
-             "metadata": {...}}          # free-form, model-level
-          ]
-        },
-        "nous": {...}
-      }
-    }
-
-Unknown fields are ignored — extra metadata can be added at either level
-without bumping ``version``. ``version`` bumps are reserved for
-breaking changes (renaming ``providers``, changing ``models`` shape).
+2. ``get_curated_openrouter_models()`` / ``get_curated_nous_models()`` — thin accessors returning
+the shapes existing callers expect. Each falls back to the in-repo hardcoded list on any lookup
+failure.
 """
 
 from __future__ import annotations
@@ -177,10 +145,9 @@ def _fetch_manifest_with_fallback(
 ) -> dict[str, Any] | None:
     """Try ``primary_url`` first, then walk ``fallback_urls``.
 
-    Returns the first manifest that fetches and validates, or None when
-    every URL fails. Skips fallback URLs identical to the primary so an
-    operator who configured the catalog URL to point at the raw GitHub
-    copy doesn't double-fetch.
+    Returns the first manifest that fetches and validates, or None when every URL fails. Skips
+    fallback URLs identical to the primary so an operator who configured the catalog URL to point at
+    the raw GitHub copy doesn't double-fetch.
     """
     data = _fetch_manifest(primary_url, timeout)
     if data is not None:
@@ -289,8 +256,8 @@ def _spawn_catalog_swr_refresh(url: str) -> None:
 def get_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
     """Return the parsed model catalog manifest, or an empty dict on failure.
 
-    Callers should treat a missing provider/model as "use the in-repo fallback"
-    — never raise from this function so the CLI keeps working offline.
+    Callers should treat a missing provider/model as "use the in-repo fallback" — never raise from
+    this function so the CLI keeps working offline.
     """
     global _catalog_cache, _catalog_cache_source_mtime
 
@@ -359,11 +326,9 @@ def refresh_interval_seconds() -> float:
 def refresh_catalogs() -> bool:
     """Force-refresh every remote model catalog the picker reads from.
 
-    Fetches the curated manifest, the OpenRouter live list (tool-support /
-    free-pricing filter) and the Nous Portal recommendations, writing each
-    to its disk cache so the next ``/model`` open in ANY process on this
-    machine sees the new lists. Blocking; run it off the event loop.
-    Returns True when the manifest refresh succeeded.
+    Fetches the curated manifest, the OpenRouter live list (tool-support / free-pricing filter) and
+    the Nous Portal recommendations, writing each to its disk cache so the next ``/model`` open in
+    ANY process on this machine sees the new lists. Blocking; run it off the event loop.
     """
     if not _load_catalog_config()["enabled"]:
         return False
@@ -411,11 +376,7 @@ def _get_provider_block(provider: str) -> dict[str, Any] | None:
 
 
 def get_curated_openrouter_models() -> list[tuple[str, str]] | None:
-    """Return OpenRouter's curated ``[(id, description), ...]`` from the manifest.
-
-    Returns ``None`` when the manifest is unavailable, so callers can fall
-    back to their hardcoded list.
-    """
+    """Return OpenRouter's curated ``[(id, description), ...]`` from the manifest."""
     block = _get_provider_block("openrouter")
     if not block:
         return None
@@ -430,10 +391,7 @@ def get_curated_openrouter_models() -> list[tuple[str, str]] | None:
 
 
 def get_curated_nous_models() -> list[str] | None:
-    """Return Nous Portal's curated list of model ids from the manifest.
-
-    Returns ``None`` when the manifest is unavailable.
-    """
+    """Return Nous Portal's curated list of model ids from the manifest."""
     block = _get_provider_block("nous")
     if not block:
         return None
@@ -460,14 +418,8 @@ def _default_model_from_block(block: dict[str, Any] | None) -> str | None:
 def get_default_model_from_cache(provider: str) -> str | None:
     """Return the catalog's labeled default model for ``provider`` — cache only.
 
-    The manifest marks exactly one model entry per provider with
-    ``"default": true``; that entry is the model Hermes silently lands on when
-    the user never picked one. This accessor reads ONLY the in-process copy or
-    the disk cache — it NEVER triggers a network fetch, so it is safe on hot
-    resolution paths (agent build, gateway session setup) that must stay
-    network-free. The cache is kept fresh by the picker/`hermes update` paths;
-    when no cached manifest exists (fresh install, offline), returns None and
-    the caller falls back to the in-repo constant.
+    The manifest marks exactly one model entry per provider with ``"default": true``; that entry is
+    the model Hermes silently lands on when the user never picked one.
     """
     if _catalog_cache is not None:
         block = _catalog_cache.get("providers", {}).get(provider)
@@ -484,18 +436,13 @@ def get_default_model_from_cache(provider: str) -> str | None:
 def seed_cache_from_checkout(project_root: "Path | str") -> bool:
     """Overwrite the disk cache with the catalog shipped in a local checkout.
 
-    ``hermes update`` pulls the latest repo, so the freshly-pulled
-    ``website/static/api/model-catalog.json`` IS the newest catalog — no
-    network round-trip needed. Copying it straight over the disk cache keeps
-    the model picker current even when the remote manifest fetch is bot-gated
+    ``hermes update`` pulls the latest repo, so the freshly-pulled ``website/static/api/model-
+    catalog.json`` IS the newest catalog — no network round-trip needed. Copying it straight over
+    the disk cache keeps the model picker current even when the remote manifest fetch is bot-gated
     or the Portal hiccups.
 
-    Reads the shipped manifest, validates it against the schema, and writes it
-    to ``~/.hermes/cache/model_catalog.json`` via the same atomic writer the
-    network path uses. Returns ``True`` on success, ``False`` if the file is
-    missing, malformed, or fails validation (caller should treat a ``False``
-    as non-fatal — the network fetch path still applies on the next picker
-    open).
+    Reads the shipped manifest, validates it against the schema, and writes it to
+    ``~/.hermes/cache/model_catalog.json`` via the same atomic writer the network path uses.
     """
     src = Path(project_root) / "website" / "static" / "api" / "model-catalog.json"
     try:

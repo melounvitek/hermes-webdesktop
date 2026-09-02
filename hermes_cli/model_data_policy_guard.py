@@ -1,22 +1,11 @@
 """Data-policy confirmation helpers for model selection surfaces.
 
-Some inference tiers are cheap *because* the vendor trains future models on your
-prompts and completions. Selecting one for the low price without realising the
-data trade-off is a real footgun. This guard mirrors
-``hermes_cli.model_cost_guard`` — it returns a warning payload that the CLI and
-web model-selection flows surface as an explicit confirm step.
+Some inference tiers are cheap *because* the vendor trains future models on your prompts and
+completions. Selecting one for the low price without realising the data trade-off is a real footgun.
 
-Why a static table (not a ProviderProfile hook): the guard runs inside core
-selection code (``auth.py`` / ``web_server.py``), which never calls into the
-active provider profile for a selection-time warning. Keeping the rule set here
-also means it renders regardless of which provider plugin happens to be loaded,
-and it stays testable without importing arbitrary third-party plugin code into
-the selection path.
-
-The status is NOT machine-readable anywhere today: neither models.dev nor the
-Meta ``/v1/models`` payload exposes a training/retention flag (verified
-2026-08-07). The only reliable signals are the vendor-documented model id and
-its anomalously low pricing, so the rule keys on the id.
+Why a static table (not a ProviderProfile hook): the guard runs inside core selection code
+(``auth.py`` / ``web_server.py``), which never calls into the active provider profile for a
+selection-time warning.
 """
 
 from __future__ import annotations
@@ -84,9 +73,9 @@ def data_training_warning(
 ) -> Optional[DataTrainingWarning]:
     """Return a warning payload when *model_name* selects a data-training tier.
 
-    Returns ``None`` when no rule matches (the common case). Callers should run
-    this after model resolution so aliases / provider-specific ids have settled,
-    and surface ``.message`` as a confirm prompt.
+    Returns ``None`` when no rule matches (the common case). Callers should run this after model
+    resolution so aliases / provider-specific ids have settled, and surface ``.message`` as a
+    confirm prompt.
     """
     model = (model_name or "").strip()
     if not model:

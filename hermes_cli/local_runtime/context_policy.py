@@ -1,35 +1,10 @@
 """Context policy — the window ladder for managed local models.
 
-One contract: any model runs at any window up to its native max; hardware
-and session depth only change tokens/s. Constants, not knobs — nothing in
-this module reads config.
+One contract: any model runs at any window up to its native max; hardware and session depth only
+change tokens/s. Constants, not knobs — nothing in this module reads config.
 
-The policy encodes behavior measured on real hardware (llama.cpp,
-discrete NVIDIA GPUs on Windows/WDDM, and unified-memory devices):
-
-- Windows never over-allocates VRAM ahead of need. On WDDM, allocating
-  past residency slows decode roughly 9x even at identical conversation
-  depth — the driver silently demotes pages instead of failing. Every
-  window grant therefore re-fits against live memory at grant time.
-- Models launch at the largest window that fits entirely in GPU memory
-  (zero-spill) and grow toward their native max as the session needs
-  room, at request boundaries only.
-- Growth re-prefills the conversation into the larger window. Measured
-  cost is comparable to save/restore on discrete GPUs, and recurrent or
-  hybrid-attention models cannot rewind mid-sequence anyway, so
-  re-prefill is the only mechanism that works for every architecture.
-- Every recommended model gets at least a 64K window. When weights alone
-  exceed VRAM, the fit deliberately spills weights to host RAM to
-  protect that floor (measured: an explicit context size makes the fit
-  spill weights and hold the window rather than shrink it).
-- Below ~6 tok/s decode, growth stops and compression becomes the
-  default; deeper context is an explicit per-session choice. The deepest
-  measured host-spilled configuration bottomed out near this rate.
-- Spilled mixture-of-experts configs pin expert/FFN weights to host so
-  attention and KV stay GPU-resident — measured ~1.75x faster than
-  spilling layers naively at the same host byte count.
-- Speculative decoding (MTP) defaults on only for spilled configs, where
-  its speedup is largest (measured 1.43x spilled vs 1.35x resident).
+The policy encodes behavior measured on real hardware (llama.cpp, discrete NVIDIA GPUs on
+Windows/WDDM, and unified-memory devices):
 """
 
 from __future__ import annotations
@@ -97,14 +72,10 @@ def initial_window(profile: ModelProfile, budget: HardwareBudget,
                    overhead_bytes: int = 0) -> WindowDecision | PhysicsRefusal:
     """The launch decision: largest cheap rung, never below the floor.
 
-    Zero-spill rung: weights + ctx + overhead fit usable VRAM entirely.
-    Bounded-early-cost rung: weights already exceed VRAM; take the largest
-    rung whose ctx stays <= ~15% of usable VRAM.
-    Floor everywhere, capped at native.
-
-    ``overhead_bytes``: runtime cost beyond weights+KV (RUNTIME_OVERHEAD
-    plus the vision projector when one loads). Zero keeps this function
-    pure physics for decision-table tests; production callers pass it.
+    Zero-spill rung: weights + ctx + overhead fit usable VRAM entirely. Bounded-early-cost rung
+    (weights already exceed VRAM): largest rung whose ctx stays <= ~15% of usable VRAM. Floor
+    everywhere, capped at native. ``overhead_bytes`` is runtime cost beyond weights+KV; zero
+    keeps this pure physics for decision-table tests, production callers pass it.
     """
     refusal = physics_check(profile, budget, FLOOR, flash_attention=flash_attention)
     if refusal:
@@ -160,23 +131,13 @@ def growth_decision(profile: ModelProfile, budget: HardwareBudget, *,
                     server_idle: bool,
                     flash_attention: bool = True,
                     occupancy_confirmed: bool = False) -> GrowthDecision:
-    """One growth evaluation, END-OF-TURN ONLY (caller guarantees the turn
-    boundary; recurrent state cannot rewind mid-sequence).
+    """One growth evaluation, END-OF-TURN ONLY (recurrent state cannot rewind mid-sequence).
 
-    Gate ordering:
-    1. occupancy (~85%) — nothing to do before the edge;
-    2. native cap — the contract tops out at trained context;
-    3. idleness — growth re-grants only on an otherwise-idle
-       server (concurrency design);
-    4. speed floor — below it, compression becomes the default and deeper
-       is an explicit user choice;
-    5. re-fit against LIVE free memory (the rung must fit residency
-       NOW, not at launch time — over-allocation is the slow path).
-
-    ``occupancy_confirmed``: the caller has independently established that
-    the session is at its window's edge (the agent's compression gate fired
-    on its own threshold). Skips gate 1 so two separately-derived edge
-    definitions can't deadlock into compress-before-grow.
+    Gate order: occupancy (~85%) → native cap → idleness (growth only on an otherwise-idle
+    server) → speed floor (below it compression is the default) → re-fit against LIVE free
+    memory (the rung must fit NOW, not at launch). ``occupancy_confirmed`` skips gate 1 when the
+    caller's own compression gate already fired, so two edge definitions can't deadlock into
+    compress-before-grow.
     """
     if not occupancy_confirmed and session_tokens < current_window * _GROW_AT_OCCUPANCY:
         return GrowthDecision("hold", reason="session below growth occupancy")
@@ -211,10 +172,10 @@ def growth_decision(profile: ModelProfile, budget: HardwareBudget, *,
 
 
 def spill_overrides(profile: ModelProfile) -> list[str]:
-    """-ot placement for spilled configs: expert/FFN weights to host so
-    attention + KV stay GPU-resident. MoE gets the expert pattern;
-    hybrids push recurrent-layer FFNs (their n_head_kv==0 layers carry no
-    KV worth protecting)."""
+    """-ot placement for spilled configs: expert/FFN weights to host so attention + KV stay
+    GPU-resident. MoE gets the expert pattern; hybrids push recurrent-layer FFNs (their n_head_kv==0
+    layers carry no KV worth protecting).
+    """
     if profile.moe:
         return ["-ot", r"blk\.\d+\.ffn_.*_exps\.weight=CPU"]
     if profile.recurrent_layer_count:
@@ -228,27 +189,10 @@ def launch_args(profile: ModelProfile, decision: WindowDecision, *,
                 mtp_draft_depth: int = 3,
                 uma: bool = False,
                 mtp_prefill: bool = False) -> list[str]:
-    """Per-model launch flags from a window decision. Explicit -c puts fit
-    into spill-weights-and-hold-ctx; q8 KV cache wherever flash attention
-    exists; -ot placement on spilled configs — DISCRETE cards only.
-
-    ``uma``: on unified memory there is no bus to protect tensors from —
-    "CPU" and "GPU" are the same silicon, and pinning FFN weights to the
-    host path just forces CPU compute (measured well over 2x slower than
-    letting the allocator place everything). The discrete
-    ~1.75x win the -ot pattern encodes does not transfer; a spilled UMA
-    config runs unpinned.
-
-    MTP and the large prefill microbatch both win, and whether they may
-    STACK is a fit question, not a rule: backend sampling keeps a
-    ubatch x vocab x fp32 logits buffer on the GPU and MTP's draft
-    context doubles it, so the stacked posture costs a few GiB extra at
-    large vocab. Where it fits, it measures best on both axes (Qwen3.8
-    Q4 on a 32 GiB card: 93.3 tok/s decode vs 89.5 at ub512, prefill
-    slightly better too); where it doesn't, ub512 keeps the decode win
-    without packing the card. ``mtp_prefill`` is that fit verdict —
-    presets decide it against the priced margin, and ub_logits_bytes()
-    prices the same choice so the flag and its cost travel together."""
+    """Per-model launch flags from a window decision. Explicit -c puts fit into
+    spill-weights-and-hold-ctx; q8 KV cache wherever flash attention exists; -ot placement on
+    spilled configs — DISCRETE cards only.
+    """
     args = ["-c", str(decision.window)]
     if mtp_capable:
         args += ["--spec-type", "draft-mtp",
@@ -267,17 +211,10 @@ def launch_args(profile: ModelProfile, decision: WindowDecision, *,
 
 def ub_logits_bytes(n_vocab: int, *, mtp_capable: bool,
                     mtp_prefill: bool = False) -> int:
-    """GPU logits/compute-buffer cost of the microbatch posture chosen by
-    launch_args, priced from the model's own vocab and calibrated against
-    measured server RSS (Qwen3.8 Q4, both postures, three windows):
-
-      stacked (MTP + ub2048):  ubatch x vocab x fp32 x 1.5  (~2.9 GiB at
-                               248K vocab; fitted 2.5, rounded up)
-      decode  (MTP + ub512):   ubatch x vocab x fp32 x 2    (~1.0 GiB)
-      plain   (ub2048):        ubatch x vocab x fp32        (~1.9 GiB)
-
-    Callers add this to RUNTIME_OVERHEAD per model — the flag and its
-    price travel together or the fit lies."""
+    """GPU logits/compute-buffer cost of the microbatch posture chosen by launch_args, priced from the
+    model's own vocab and calibrated against measured server RSS (Qwen3.8 Q4, both postures, three
+    windows):
+    """
     v = max(0, int(n_vocab))
     if mtp_capable and mtp_prefill:
         return int(2048 * v * 4 * 1.5)

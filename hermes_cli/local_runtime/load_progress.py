@@ -1,24 +1,12 @@
 """Live model-load progress from the managed llama-server router.
 
-llama-server's child processes emit per-tensor load progress
-({stages, current, value}, throttled upstream to ~200ms) which the
-router relays ONLY over its /models/sse stream — GET /models carries
-just the coarse status string. This module owns one lazy background
-watcher on that stream and keeps an in-memory snapshot other code can
-poll cheaply:
+llama-server's child processes emit per-tensor load progress ({stages, current, value}, throttled
+upstream to ~200ms) which the router relays ONLY over its /models/sse stream — GET /models carries
+just the coarse status string.
 
-    get_loading_progress() -> {model_id: {"stage", "value", "percent"}}
-
-"percent" is a composite across stages so a bar doesn't sprint 0->100
-once per stage: the text model dominates load time (its weights dwarf
-the mmproj/spec extras), so it gets the lion's share of the range and
-the extras split the remainder.
-
-The watcher starts on first call, reconnects with backoff (the router
-bounces on model download/eject), and never raises into callers — no
-router, no state file, or no SSE support (older engines) all read as
-"nothing loading". Safe from any process on the machine: the endpoint
-comes from the supervisor's machine-scoped state file.
+The watcher starts on first call, reconnects with backoff (the router bounces on model
+download/eject), and never raises into callers — no router, no state file, or no SSE support (older
+engines) all read as "nothing loading".
 """
 
 from __future__ import annotations
@@ -58,11 +46,11 @@ def _composite_percent(stages: list[str], current: str, value: float) -> int:
 def _endpoint() -> "tuple[str, str] | None":
     """(base_root, api_key) of the managed router, or None.
 
-    Resolved through the endpoint module's ownership-guarded reader, not
-    a raw state-file read: on the shared stable port, a foreign install's
-    server answers /health for anyone, and a raw read would attach this
-    watcher to someone else's SSE stream (or spin on 401s against it).
-    The guard's dead-pid check is the ownership proof."""
+    Resolved through the endpoint module's ownership-guarded reader, not a raw state-file read: on
+    the shared stable port a foreign install's server answers /health for anyone, and a raw read
+    would attach this watcher to someone else's SSE stream. The dead-pid check is the ownership
+    proof.
+    """
     try:
         from hermes_cli.local_runtime.endpoint import _state_endpoint
 
@@ -160,17 +148,13 @@ def get_loading_progress() -> dict[str, dict]:
 
 
 def get_prefill_progress(model: str) -> "dict | None":
-    """{"processed": tokens} while the managed server is prompt-processing
-    for ``model``, or None (idle, decoding, unreachable, or foreign server).
+    """{"processed": tokens} while the managed server is prompt-processing for ``model``, or None
+    (idle, decoding, unreachable, or foreign server).
 
-    llama-server's /slots reports ``n_prompt_tokens_processed`` climbing in
-    real time during prefill, but exposes no total — callers supply their
-    own denominator (the request's estimated token count). Busiest
-    processing slot wins when several are active: a parallel small request
-    (title generation) freezes its counter during decode while a live
-    prefill keeps climbing past it. One authenticated HTTP call per poll;
-    every failure reads as "no prefill" — this is garnish, never load-
-    bearing.
+    llama-server's /slots exposes ``n_prompt_tokens_processed`` but no total, so callers supply the
+    denominator. The busiest processing slot wins: a parallel small request freezes its counter
+    during decode while a live prefill keeps climbing. One HTTP call per poll; every failure reads
+    as "no prefill" — garnish, never load-bearing.
     """
     ep = _endpoint()
     if ep is None:

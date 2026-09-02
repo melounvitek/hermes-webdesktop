@@ -1,19 +1,11 @@
 """Browse Hugging Face for GGUF models the user can run.
 
-The curated catalog is the front page; this module is the firehose behind
-it — day-0 models not yet in the catalog, community quants,
-anything. Three rules keep it safe and honest:
+The curated catalog is the front page; this module is the firehose behind it — day-0 models not yet
+in the catalog, community quants, anything. Three rules keep it safe and honest:
 
-1. Acquisition only. Nothing here serves a model: a browsed download
-   lands in the machine-scoped models dir and from that moment the
-   normal machinery owns it — staleness bounce, preset generation from
-   the real GGUF header, fit policy, placement pills.
-2. The fit verdict shown BEFORE download is a rough cut priced from file
-   size alone (weights dominate; KV/overhead use conservative fill-ins).
-   After download the GGUF header is the authority, as everywhere.
-3. HF is queried directly with short timeouts and a small in-process
-   cache. No third-party proxy service; if HF rate limits ever bite at
-   fleet scale, revisit with a caching proxy then.
+1. Acquisition only. Nothing here serves a model: a browsed download lands in the machine-scoped
+models dir and from that moment the normal machinery owns it — staleness bounce, preset generation
+from the real GGUF header, fit policy, placement pills. 2.
 """
 
 from __future__ import annotations
@@ -24,7 +16,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 
 logger = logging.getLogger(__name__)
 
@@ -87,16 +79,12 @@ def search_models(query: str, limit: int = 20) -> list[HFModelHit]:
     q = urllib.parse.quote(query.strip())
     url = (f"{_HF}/api/models?search={q}&filter=gguf&sort=downloads"
            f"&direction=-1&limit={max(1, min(int(limit), 50))}")
-    out: list[HFModelHit] = []
-    for m in _get_json(url):
-        out.append(HFModelHit(
-            repo=str(m.get("id", "")),
-            downloads=int(m.get("downloads") or 0),
-            likes=int(m.get("likes") or 0),
-            updated=str(m.get("lastModified") or ""),
-            gated=bool(m.get("gated")),
-        ))
-    return out
+    return [HFModelHit(repo=str(m.get("id", "")),
+                       downloads=int(m.get("downloads") or 0),
+                       likes=int(m.get("likes") or 0),
+                       updated=str(m.get("lastModified") or ""),
+                       gated=bool(m.get("gated")))
+            for m in _get_json(url)]
 
 
 def _quant_label(filename: str) -> str:
@@ -128,10 +116,8 @@ def repo_files(repo: str) -> list[HFFileGroup]:
         else:
             singles.append((path, size))
 
-    groups: list[HFFileGroup] = []
-    for path, size in singles:
-        groups.append(HFFileGroup(label=_quant_label(path), paths=(path,),
-                                  total_bytes=size))
+    groups = [HFFileGroup(label=_quant_label(path), paths=(path,), total_bytes=size)
+              for path, size in singles]
     for stem, parts in splits.items():
         parts.sort()
         groups.append(HFFileGroup(
@@ -143,9 +129,9 @@ def repo_files(repo: str) -> list[HFFileGroup]:
 
 
 def rough_fit(total_bytes: int, budget) -> str:
-    """Coarse pre-download verdict from file size alone. The GGUF header
-    refines this after download; bands match the catalog pills' language.
-    File size ≈ in-memory weights for GGUF (mmap'd as-is)."""
+    """Coarse pre-download verdict from file size alone. The GGUF header refines this after download;
+    bands match the catalog pills' language. File size ≈ in-memory weights for GGUF (mmap'd as-is).
+    """
     need = total_bytes + _ROUGH_KV_AND_OVERHEAD
     if need <= budget.usable_vram_bytes:
         return "fits-gpu"
@@ -155,7 +141,5 @@ def rough_fit(total_bytes: int, budget) -> str:
 
 
 def priced_repo_files(repo: str, budget) -> list[HFFileGroup]:
-    from dataclasses import replace
-
     return [replace(g, fit=rough_fit(g.total_bytes, budget))
             for g in repo_files(repo)]

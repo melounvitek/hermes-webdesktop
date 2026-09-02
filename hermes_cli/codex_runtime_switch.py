@@ -1,18 +1,12 @@
 """Shared logic for the /codex-runtime slash command.
 
-Toggles `model.openai_runtime` between "auto" (= chat_completions, Hermes'
-default) and "codex_app_server" (= hand turns to a codex subprocess).
-
-Both CLI (cli.py) and gateway (gateway/run.py) call into this module so the
-behavior stays identical across surfaces.
-
-The actual runtime resolution happens in hermes_cli.runtime_provider's
-_maybe_apply_codex_app_server_runtime() helper, which reads the persisted
-config value. This module just persists the value and reports the change.
+Both CLI (cli.py) and gateway (gateway/run.py) call into this module so the behavior stays identical
+across surfaces.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import dataclass
 from typing import Optional
@@ -33,16 +27,13 @@ class CodexRuntimeStatus:
     old_value: Optional[str] = None
     message: str = ""
     requires_new_session: bool = False
-    codex_binary_ok: bool = True
-    codex_version: Optional[str] = None
 
 
 def parse_args(arg_string: str) -> tuple[Optional[str], list[str]]:
     """Parse the slash-command argument string. Returns (value, errors).
 
-    No args         → return current state (value=None)
-    'auto' / 'codex_app_server' / 'on' / 'off' → return that value
-    anything else   → error
+    No args returns the current state (value=None); ``auto``/``codex_app_server``/``on``/``off``
+    return that value; anything else is an error.
     """
     raw = (arg_string or "").strip().lower()
     if not raw:
@@ -106,27 +97,15 @@ def apply(
 ) -> CodexRuntimeStatus:
     """Top-level entry point used by both CLI and gateway handlers.
 
-    Args:
-        config: in-memory config dict (will be mutated when new_value is set)
-        new_value: desired runtime; None means "show current state only"
-        persist_callback: optional callable taking the mutated config dict
-            and persisting it to disk. Skipped when None (used by tests).
-
-    Returns: CodexRuntimeStatus describing the outcome.
+    ``config`` is mutated in place when ``new_value`` is set (None means show current state
+    only). ``persist_callback`` receives the mutated dict to write it to disk; skipped when None
+    (tests).
     """
     current = get_current_runtime(config)
 
-    # Cache the codex binary check for this apply() call. Subprocess spawn
-    # is cheap (~50ms for `codex --version`), but we'd otherwise call it up
-    # to 3 times in the enable path (read-only/state, gate, success message).
-    # None = not yet checked; (bool, str) = result.
-    _binary_check: Optional[tuple[bool, Optional[str]]] = None
-
-    def _check_binary_cached() -> tuple[bool, Optional[str]]:
-        nonlocal _binary_check
-        if _binary_check is None:
-            _binary_check = check_codex_binary_ok()
-        return _binary_check
+    # Cache the codex binary check for this apply() call: the enable path
+    # would otherwise spawn `codex --version` up to 3 times (state, gate, message).
+    _check_binary_cached = functools.cache(check_codex_binary_ok)
 
     # Read-only call: just report state
     if new_value is None:
@@ -140,8 +119,6 @@ def apply(
             new_value=current,
             old_value=current,
             message=msg,
-            codex_binary_ok=ok,
-            codex_version=ver if ok else None,
         )
 
     # No-config-change paths. For `auto` we return immediately — disabling
@@ -177,8 +154,6 @@ def apply(
                     f"{ver_or_msg or 'codex CLI not available'}\n"
                     "Install with: npm i -g @openai/codex"
                 ),
-                codex_binary_ok=False,
-                codex_version=None,
             )
 
     if not reapplying_enable:
@@ -195,12 +170,11 @@ def apply(
                     message=f"updated config in memory but persist failed: {exc}",
                 )
 
-    if reapplying_enable:
-        msg_lines = [
-            f"openai_runtime already set to {current} — re-applying migration"
-        ]
-    else:
-        msg_lines = [f"openai_runtime: {current} → {new_value}"]
+    msg_lines = [
+        f"openai_runtime already set to {current} — re-applying migration"
+        if reapplying_enable
+        else f"openai_runtime: {current} → {new_value}"
+    ]
     if new_value == "codex_app_server":
         ok, ver = _check_binary_cached()
         if ok:

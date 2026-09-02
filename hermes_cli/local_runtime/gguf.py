@@ -1,12 +1,7 @@
 """GGUF metadata + tensor-table reader (stdlib only).
 
-Feeds the per-layer context estimator: architecture, layer count, per-layer
-KV head counts (0 = recurrent layer — the hybrid discriminator), head dims,
-sliding-window config, trained context, and exact weight bytes summed from
-the tensor table (validated to within 0.01% of the loader's buffer).
-
-Reads the header only (metadata + tensor infos); never touches tensor data,
-so it is fast enough to run at picker time on multi-GB files.
+Reads the header only (metadata + tensor infos); never touches tensor data, so it is fast enough to
+run at picker time on multi-GB files.
 """
 
 from __future__ import annotations
@@ -65,9 +60,9 @@ class GGUFHeader:
 
     @property
     def n_vocab(self) -> int:
-        """Vocabulary size: prices the GPU logits buffers (they scale
-        ubatch x vocab). vocab_size metadata when present, else the
-        tokenizer list length."""
+        """Vocabulary size: prices the GPU logits buffers (they scale ubatch x vocab). vocab_size
+        metadata when present, else the tokenizer list length.
+        """
         v = self._arch_key("vocab_size")
         if v:
             return int(v)
@@ -82,12 +77,10 @@ class GGUFHeader:
     def sampling_defaults(self) -> dict:
         """Upstream's recommended sampling, when the file carries it.
 
-        Model publishers bake general.sampling.* keys into the GGUF
-        (llama-server reads them as that model's default generation
-        settings), so the file itself is the source of truth for how its
-        publisher wants it run — it arrives with the download and updates
-        with every re-upload, no catalog required. Returned as preset INI
-        keys; empty when the file carries none.
+        Publishers bake ``general.sampling.*`` keys into the GGUF (llama-server reads them as that
+        model's defaults), so the file is the source of truth -- it ships with the download and
+        updates with every re-upload, no catalog needed. Returned as preset INI keys; empty if
+        absent.
         """
         ini_key = {"temp": "temp", "temperature": "temp", "top_p": "top-p",
                    "top_k": "top-k", "min_p": "min-p",
@@ -121,16 +114,12 @@ class GGUFHeader:
         return int(self._arch_key("full_attention_interval") or 0)
 
     def head_counts_kv(self) -> list[int]:
-        """Per-layer KV head counts; 0 marks a recurrent/linear layer (the
-        n_head_kv == 0 discriminator).
+        """Per-layer KV head counts; 0 marks a recurrent/linear layer (n_head_kv == 0).
 
-        Three GGUF shapes, each verified against real files:
-        - per-layer array (nemotron_h_moe): use as-is;
-        - scalar + full_attention_interval (qwen35): the scalar applies to
-          every INTERVAL-th layer (1-indexed: layers where (i+1) % N == 0),
-          zero elsewhere — pricing all layers as attention was a 4x
-          overestimate on Qwen3.6-27B;
-        - plain scalar (dense): broadcast to every layer.
+        Three GGUF shapes: a per-layer array (nemotron_h_moe) is used as-is; a scalar plus
+        ``full_attention_interval`` (qwen35) applies to every N-th layer (1-indexed) and is zero
+        elsewhere -- pricing all layers as attention was a 4x overestimate; a plain scalar (dense)
+        broadcasts to every layer.
         """
         v = self._arch_key("attention.head_count_kv")
         if isinstance(v, list):

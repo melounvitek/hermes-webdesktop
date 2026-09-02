@@ -1,27 +1,11 @@
 """Live hardware budget probe.
 
-Budget-source rule: discrete cards may trust the device query (measured
-honest within rounding); unified-memory devices must budget from OS free
-physical memory minus headroom — their device queries have been observed
-off by 3x in both directions. The probe classifies the device and
-constructs the right HardwareBudget for the estimator.
+Budget-source rule: discrete cards may trust the device query (measured honest within rounding);
+unified-memory devices must budget from OS free physical memory minus headroom — their device
+queries have been observed off by 3x in both directions.
 
-Vendor probe quirk (WDDM carve-out): on unified-memory NVIDIA devices
-under Windows, nvidia-smi answers from the legacy dedicated-VRAM
-carve-out — a fraction of the pool the CUDA allocator actually
-addresses uniformly at full bandwidth. The CUDA driver API is
-the tiebreaker: cuDeviceGetAttribute(INTEGRATED) is the vendor's own
-declaration and always wins — 1 budgets unified, 0 stays discrete no
-matter what any other number says. Only when the driver API is
-unreachable does the engine's --list-devices view apply, and then only
-behind two independent conditions no discrete card can meet.
-
-Every probe here must work under a stripped PATH — gateway and service
-sessions don't inherit the interactive environment. nvcuda/libcuda load
-through the system loader (PATH plays no part), so classification never
-depends on PATH; nvidia-smi resolves through an explicit candidate
-ladder (PATH first, then the driver's known install locations) and its
-absence only softens the live number, never the verdict.
+Every probe here must work under a stripped PATH — gateway and service sessions don't inherit the
+interactive environment.
 """
 
 from __future__ import annotations
@@ -81,21 +65,21 @@ _pool_probe_cache: tuple[float, "tuple[int, bool | None] | None"] | None = None
 _DEVICE_LINE_RE = re.compile(r"CUDA\d+:.*\((\d+)\s*MiB,\s*\d+\s*MiB free\)\s*$")
 
 
+def _stdout(*argv: str) -> str:
+    return subprocess.run(list(argv), capture_output=True, text=True, timeout=5).stdout
+
+
 def _ram_bytes() -> tuple[int, int]:
     """(total, available) physical memory, cross-platform stdlib."""
     try:
         import ctypes
 
         class MEMORYSTATUSEX(ctypes.Structure):
-            _fields_ = [("dwLength", ctypes.c_ulong),
-                        ("dwMemoryLoad", ctypes.c_ulong),
-                        ("ullTotalPhys", ctypes.c_ulonglong),
-                        ("ullAvailPhys", ctypes.c_ulonglong),
-                        ("ullTotalPageFile", ctypes.c_ulonglong),
-                        ("ullAvailPageFile", ctypes.c_ulonglong),
-                        ("ullTotalVirtual", ctypes.c_ulonglong),
-                        ("ullAvailVirtual", ctypes.c_ulonglong),
-                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            _fields_ = ([("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong)]
+                        + [(name, ctypes.c_ulonglong) for name in (
+                            "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile",
+                            "ullAvailPageFile", "ullTotalVirtual", "ullAvailVirtual",
+                            "ullAvailExtendedVirtual")])
 
         stat = MEMORYSTATUSEX()
         stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
@@ -103,48 +87,35 @@ def _ram_bytes() -> tuple[int, int]:
         return stat.ullTotalPhys, stat.ullAvailPhys
     except (AttributeError, OSError):
         pass
-    if sys.platform == "darwin":
-        # macOS getconf has no _PHYS_PAGES/_AVPHYS_PAGES (exit 64, "no such
-        # configuration parameter") — the POSIX branch below returns (0, 0)
-        # and every model reads unavailable. sysctl is the platform truth.
-        try:
-            total = int(subprocess.run(
-                ["/usr/sbin/sysctl", "-n", "hw.memsize"],
-                capture_output=True, text=True, timeout=5).stdout.strip() or 0)
+    try:
+        if sys.platform == "darwin":
+            # macOS getconf has no _PHYS_PAGES/_AVPHYS_PAGES (exit 64, "no such
+            # configuration parameter") — the POSIX branch below returns (0, 0)
+            # and every model reads unavailable. sysctl is the platform truth.
+            total = int(_stdout("/usr/sbin/sysctl", "-n", "hw.memsize").strip() or 0)
             if total <= 0:
                 return 0, 0
             avail = total // 2  # conservative fallback
             try:
-                out = subprocess.run(["/usr/bin/vm_stat"], capture_output=True,
-                                     text=True, timeout=5).stdout
+                out = _stdout("/usr/bin/vm_stat")
                 page_m = re.search(r"page size of (\d+)", out)
                 page = int(page_m.group(1)) if page_m else 16384
-                pages = 0
                 # free + inactive + purgeable ≈ reclaimable-on-demand; the
                 # speculative pool is dropped by the OS under pressure too.
-                for key in ("Pages free", "Pages inactive", "Pages purgeable",
-                            "Pages speculative"):
-                    m = re.search(rf"{key}:\s+(\d+)\.", out)
-                    if m:
-                        pages += int(m.group(1))
+                pages = sum(int(m.group(1)) for key in (
+                    "Pages free", "Pages inactive", "Pages purgeable", "Pages speculative")
+                    if (m := re.search(rf"{key}:\s+(\d+)\.", out)))
                 if pages > 0:
                     avail = pages * page
             except (OSError, ValueError):
                 pass
             return total, avail
-        except (OSError, ValueError):
-            return 0, 0
-    # POSIX
-    try:
-        page = int(subprocess.run(["getconf", "PAGE_SIZE"], capture_output=True,
-                                  text=True, timeout=5).stdout or 4096)
-        total = int(subprocess.run(["getconf", "_PHYS_PAGES"], capture_output=True,
-                                   text=True, timeout=5).stdout or 0) * page
+        # POSIX
+        page = int(_stdout("getconf", "PAGE_SIZE") or 4096)
+        total = int(_stdout("getconf", "_PHYS_PAGES") or 0) * page
         avail = total // 2  # conservative when _AVPHYS is unavailable
         try:
-            avail = int(subprocess.run(["getconf", "_AVPHYS_PAGES"],
-                                       capture_output=True, text=True,
-                                       timeout=5).stdout or 0) * page or avail
+            avail = int(_stdout("getconf", "_AVPHYS_PAGES") or 0) * page or avail
         except (OSError, ValueError):
             pass
         return total, avail
@@ -160,25 +131,23 @@ _smi_path_cache: "tuple[str | None] | None" = None
 
 
 def _nvidia_smi_path() -> str | None:
-    """Absolute path to nvidia-smi, or None. PATH first (respects user
-    overrides), then the driver's known install locations on Windows;
-    on Linux/WSL the PATH lookup is the whole ladder."""
+    """Absolute path to nvidia-smi, or None. PATH first (respects user overrides), then the driver's
+    known install locations on Windows; on Linux/WSL the PATH lookup is the whole ladder.
+    """
     global _smi_path_cache
     if _smi_path_cache is not None:
         return _smi_path_cache[0]
     found = shutil.which("nvidia-smi")
     if found is None and os.name == "nt":
         windir = os.environ.get("SystemRoot", r"C:\Windows")
-        for candidate in (
+        candidates = (
             # DCH drivers (every modern install) place it in System32.
             Path(windir) / "System32" / "nvidia-smi.exe",
             # Legacy standalone drivers used NVSMI, never on PATH.
             Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
             / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe",
-        ):
-            if candidate.exists():
-                found = str(candidate)
-                break
+        )
+        found = next((str(c) for c in candidates if c.exists()), None)
     _smi_path_cache = (found,)
     return found
 
@@ -202,12 +171,11 @@ def _nvidia_vram() -> tuple[int, int] | None:
 
 
 def _cuda_driver_pool() -> "tuple[int, bool | None] | None":
-    """(allocator_total_bytes, integrated_or_None) from the CUDA driver
-    API, or None when unreachable. ctypes against the driver's own DLL/SO
-    — no toolkit, no subprocess, ~ms. INTEGRATED is the vendor's own
-    unified-memory declaration; total is the pool the allocator will
-    actually hand out (on carve-out devices, several times what
-    nvidia-smi reports)."""
+    """(allocator_total_bytes, integrated_or_None) from the CUDA driver API, or None when unreachable.
+    ctypes against the driver's own DLL/SO — no toolkit, no subprocess, ~ms. INTEGRATED is the
+    vendor's own unified-memory declaration; total is the pool the allocator will actually hand out
+    (on carve-out devices, several times what nvidia-smi reports).
+    """
     import ctypes
 
     for name in ("nvcuda.dll", "libcuda.so.1", "libcuda.so"):
@@ -239,10 +207,10 @@ def _cuda_driver_pool() -> "tuple[int, bool | None] | None":
 
 
 def _engine_device_pool() -> "tuple[int, bool | None] | None":
-    """(engine_total_bytes, None) from the installed runtime's own
-    --list-devices, or None. The fallback truth source when the driver
-    API is unreachable: asks the exact binary that will do the
-    allocating. Carries no integrated verdict — callers must gate it."""
+    """(engine_total_bytes, None) from the installed runtime's own --list-devices, or None. The
+    fallback truth source when the driver API is unreachable: asks the exact binary that will do the
+    allocating. Carries no integrated verdict — callers must gate it.
+    """
     try:
         from hermes_cli.local_runtime.binaries import (
             installed_tags,
@@ -272,9 +240,9 @@ def _engine_device_pool() -> "tuple[int, bool | None] | None":
 
 
 def _device_pool_view() -> "tuple[int, bool | None] | None":
-    """Best available allocator-side view, cached: a hit is permanent for
-    the process, a miss retries after a short TTL (the engine binary can
-    appear mid-session via a pane install)."""
+    """Best available allocator-side view, cached: a hit is permanent for the process, a miss retries
+    after a short TTL (the engine binary can appear mid-session via a pane install).
+    """
     global _pool_probe_cache
     now = time.monotonic()
     if _pool_probe_cache is not None:
@@ -288,13 +256,10 @@ def _device_pool_view() -> "tuple[int, bool | None] | None":
 
 def _unified_pool_bytes(smi_total: int, ram_total: int) -> int | None:
     """The real pool size when this NVIDIA device is unified memory behind
-    a WDDM carve-out, else None (trust nvidia-smi as ever).
 
-    The driver's INTEGRATED attribute decides when readable — in BOTH
-    directions (0 pins discrete even if the numbers look weird; a driver
-    that declares integrated is believed even at modest pool sizes). Only
-    an attribute-less view (engine fallback) needs the two numeric gates;
-    both must hold and no discrete card meets either.
+    The driver's INTEGRATED attribute decides in BOTH directions when readable (0 pins discrete
+    even if numbers look odd; a declared-integrated driver is believed at modest pool sizes). Only
+    the attribute-less engine fallback needs the two numeric gates, both of which must hold.
     """
     view = _device_pool_view()
     if view is None:
@@ -310,20 +275,19 @@ def _unified_pool_bytes(smi_total: int, ram_total: int) -> int | None:
     return None
 
 
+def _uma_budget(base: int, total: int) -> HardwareBudget:
+    usable = max(0, int(base * (1 - _UMA_HEADROOM_FRACTION)))
+    return HardwareBudget(usable_vram_bytes=usable, total_device_bytes=total,
+                          ram_available_bytes=0, uma=True)
+
+
 def probe_budget(*, planning: bool = False) -> HardwareBudget:
     """Construct the budget per the source rules above.
 
-    ``planning=False`` (default): LIVE budget — free VRAM right now. The
-    right input for launch-time fit decisions and growth re-grants.
-
-    ``planning=True``: CAPACITY budget — what this machine can run once
-    the runtime manages placement (total device memory minus the margin).
-    The right input for catalog pricing and quant selection: pricing
-    against live-free while a model is already loaded made every row read
-    'larger than your GPU memory' and degraded quant picks to Q2 on a
-    32 GiB card. The managed server
-    unloads/relaunches models itself, so at load time the capacity is
-    genuinely available.
+    ``planning=False``: LIVE budget (free VRAM now) for launch-time fit and growth re-grants.
+    ``planning=True``: CAPACITY budget (total minus margin) for catalog pricing and quant selection;
+    pricing against live-free while a model was loaded made every row read as too large and
+    degraded quant picks. The managed server unloads/relaunches itself, so capacity is real.
     """
     ram_total, ram_avail = _ram_bytes()
     vram = _nvidia_vram()
@@ -355,25 +319,17 @@ def probe_budget(*, planning: bool = False) -> HardwareBudget:
             # Without smi, OS-available alone is the honest floor.
             live = (vram[1] + ram_avail) if vram else ram_avail
             base = min(unified, live)
-        usable = max(0, int(base * (1 - _UMA_HEADROOM_FRACTION)))
-        return HardwareBudget(usable_vram_bytes=usable,
-                              total_device_bytes=unified,
-                              ram_available_bytes=0, uma=True)
+        return _uma_budget(base, unified)
 
     if vram is None:
         # No NVIDIA device visible: Metal/Vulkan/CPU paths budget from RAM
         # as UMA (Apple Silicon) — conservative for discrete AMD until a
         # vendor probe lands (E3 hardware).
-        base = ram_total if planning else ram_avail
-        usable = max(0, int(base * (1 - _UMA_HEADROOM_FRACTION)))
-        return HardwareBudget(usable_vram_bytes=usable,
-                              total_device_bytes=ram_total,
-                              ram_available_bytes=0, uma=True)
+        return _uma_budget(ram_total if planning else ram_avail, ram_total)
 
     total, free = vram
     margin = max(_MARGIN_FLOOR, int(total * _MARGIN_FRACTION))
-    base = total if planning else free
-    return HardwareBudget(usable_vram_bytes=max(0, base - margin),
+    return HardwareBudget(usable_vram_bytes=max(0, (total if planning else free) - margin),
                           total_device_bytes=total,
-                          ram_available_bytes=ram_avail if not planning else ram_total,
+                          ram_available_bytes=ram_total if planning else ram_avail,
                           uma=False)
