@@ -326,9 +326,7 @@ class MCPServerTransportMixin:
                     connect_timeout = float(
                         config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT)
                     )
-                    return await self._serve_session(
-                        session, connect_timeout, mark_lifecycle=True
-                    )
+                    return await self._serve_session(session, connect_timeout, mark_lifecycle=True)
         finally:
             # Runs on clean exit, exceptions AND cancellation.
             if new_pids:
@@ -654,9 +652,7 @@ class MCPServerTransportMixin:
             with _core._lock:
                 if _core._servers.get(self.name) is not self:
                     return
-        self._registered_tool_names = _core._register_server_tools(
-            self.name, self, self._config
-        )
+        self._registered_tool_names = _core._register_server_tools(self.name, self, self._config)
         # A retained initial-failure server that just published tools has
         # recovered: drop its stale connect error from status surfaces.
         with _core._lock:

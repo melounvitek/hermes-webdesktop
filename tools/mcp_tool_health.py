@@ -209,9 +209,7 @@ class MCPServerHealthMixin:
 
             # 3. Re-register; the helper may skip names ambiguous after normalization.
             self._tools = new_mcp_tools
-            registered_names = _core._register_server_tools(
-                self.name, self, self._config
-            )
+            registered_names = _core._register_server_tools(self.name, self, self._config)
             # A raw name can become ambiguous without changing its normalized
             # name, so the pre-pass misses it: drop any old entry the final
             # collision-checked registration no longer owns.

@@ -208,10 +208,7 @@ def _handle_auth_error_and_retry(
     try:
         recovered = _core._run_on_mcp_loop(_recover, timeout=10)
     except Exception as rec_exc:
-        logger.warning(
-            "MCP OAuth '%s': recovery attempt failed: %s",
-            server_name, rec_exc,
-        )
+        logger.warning("MCP OAuth '%s': recovery attempt failed: %s", server_name, rec_exc)
         recovered = False
 
     if recovered:
@@ -475,10 +472,7 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
         )
         if watch_task in done and not rpc_task.done():
             rpc_task.cancel()
-            raise _StdioChildExited(
-                f"MCP stdio subprocess for "
-                f"'{server_name}' exited mid-call"
-            )
+            raise _StdioChildExited(f"MCP stdio subprocess for '{server_name}' exited mid-call")
         return await rpc_task
     finally:
         watch_task.cancel()
@@ -638,25 +632,31 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     return _handler
 
 
-def _make_utility_handler(server_name: str, tool_timeout: float, op: str,
-                          log_label: str, build_call):
+def _make_utility_handler(server_name: str, tool_timeout: float, op: str, log_label: str,
+                          rpc, render, required: Optional[str] = None):
     """Shared shape of the four utility handlers (resources/prompts).
 
-    ``build_call(server, args)`` returns an error string (validation failed) or a
-    zero-arg coroutine function doing the RPC under ``_rpc_lock``. The wrapper owns
-    the connected check and the auth / session-expired recovery ladder.
+    ``rpc(session, args)`` is awaited under ``_rpc_lock``; ``render(result,
+    server_name)`` turns its result into the JSON-able payload. ``required`` names
+    a parameter that must be present (validated before any transport work). The
+    wrapper owns the connected check and the auth / session-expired recovery ladder.
     """
 
     def _handler(args: dict, **kwargs) -> str:
         server = _core._get_connected_server_for_call(server_name)
         if not server or not server.session:
             return tool_error(f"MCP server '{server_name}' is not connected")
-        call = build_call(server, args)
-        if isinstance(call, str):
-            return call
+        if required and not args.get(required):
+            return tool_error(f"Missing required parameter '{required}'")
+
+        async def _call():
+            _mark_server_call_started(server)
+            async with server._rpc_lock:
+                result = await rpc(server.session, args)
+            return json.dumps(render(result, server_name), ensure_ascii=False)
 
         def _call_once():
-            return _core._run_on_mcp_loop(call, timeout=tool_timeout)
+            return _core._run_on_mcp_loop(_call, timeout=tool_timeout)
 
         def _on_failure(exc):
             logger.error("MCP %s/%s failed: %s", server_name, log_label, exc)
@@ -689,117 +689,99 @@ def _pick(obj, *specs) -> dict:
     return entry
 
 
+def _render_resource_list(all_resources, server_name: str) -> dict:
+    resources = []
+    for r in all_resources:
+        entry = _pick(r, ("uri", "uri"), ("name", "name"), ("description", "description", True))
+        if "uri" in entry:
+            entry["uri"] = str(entry["uri"])
+        # Key stays camelCase — this is the tool's own JSON output shape.
+        _mime = mcp_field(r, "mime_type", "mimeType")
+        if _mime:
+            entry["mimeType"] = _mime
+        resources.append(entry)
+    return {"resources": resources}
+
+
+def _render_read_resource(result, server_name: str) -> dict:
+    parts: List[str] = []
+    for block in getattr(result, "contents", []):
+        if getattr(block, "text", None) is not None:
+            parts.append(strip_unicode_tags(block.text))
+        elif getattr(block, "blob", None) is not None:
+            # Materialize binary contents into the document cache
+            # (same contract as EmbeddedResource blocks in tool results).
+            rendered = _render_mcp_resource_block(
+                SimpleNamespace(type="resource", resource=block), server_name,
+            )
+            parts.append(rendered or f"[binary data, {len(block.blob)} bytes]")
+    return {"result": "\n".join(parts)}
+
+
+def _render_prompt_list(all_prompts, server_name: str) -> dict:
+    prompts = []
+    for p in all_prompts:
+        entry = _pick(p, ("name", "name"), ("description", "description", True))
+        if hasattr(p, "arguments") and p.arguments:
+            entry["arguments"] = [
+                {"name": a.name, **_pick(a, ("description", "description", True), ("required", "required"))}
+                for a in p.arguments
+            ]
+        prompts.append(entry)
+    return {"prompts": prompts}
+
+
+def _render_get_prompt(result, server_name: str) -> dict:
+    messages = []
+    for msg in getattr(result, "messages", []):
+        entry = _pick(msg, ("role", "role"))
+        if hasattr(msg, "content"):
+            content = msg.content
+            text = content.text if hasattr(content, "text") else (
+                content if isinstance(content, str) else str(content)
+            )
+            entry["content"] = strip_unicode_tags(text)
+        messages.append(entry)
+    resp = {"messages": messages}
+    if hasattr(result, "description") and result.description:
+        resp["description"] = result.description
+    return resp
+
+
 def _make_list_resources_handler(server_name: str, tool_timeout: float):
     """Return a sync handler that lists resources from an MCP server."""
-
-    def _build(server, args):
-        async def _call():
-            _mark_server_call_started(server)
-            async with server._rpc_lock:
-                all_resources = await _core._paginate_full_list(
-                    server.session.list_resources, "resources", server_name
-                )
-            resources = []
-            for r in all_resources:
-                entry = _pick(r, ("uri", "uri"), ("name", "name"), ("description", "description", True))
-                if "uri" in entry:
-                    entry["uri"] = str(entry["uri"])
-                # Key stays camelCase — this is the tool's own JSON output shape.
-                _mime = mcp_field(r, "mime_type", "mimeType")
-                if _mime:
-                    entry["mimeType"] = _mime
-                resources.append(entry)
-            return json.dumps({"resources": resources}, ensure_ascii=False)
-        return _call
-
-    return _make_utility_handler(server_name, tool_timeout, "resources/list", "list_resources", _build)
+    return _make_utility_handler(
+        server_name, tool_timeout, "resources/list", "list_resources",
+        lambda session, args: _core._paginate_full_list(session.list_resources, "resources", server_name),
+        _render_resource_list,
+    )
 
 
 def _make_read_resource_handler(server_name: str, tool_timeout: float):
     """Return a sync handler that reads a resource by URI from an MCP server."""
-
-    def _build(server, args):
-        uri = args.get("uri")
-        if not uri:
-            return tool_error("Missing required parameter 'uri'")
-
-        async def _call():
-            _mark_server_call_started(server)
-            async with server._rpc_lock:
-                result = await server.session.read_resource(uri)
-            parts: List[str] = []
-            for block in getattr(result, "contents", []):
-                if getattr(block, "text", None) is not None:
-                    parts.append(strip_unicode_tags(block.text))
-                elif getattr(block, "blob", None) is not None:
-                    # Materialize binary contents into the document cache
-                    # (same contract as EmbeddedResource blocks in tool results).
-                    rendered = _render_mcp_resource_block(
-                        SimpleNamespace(type="resource", resource=block),
-                        server_name,
-                    )
-                    parts.append(rendered or f"[binary data, {len(block.blob)} bytes]")
-            return json.dumps({"result": "\n".join(parts)}, ensure_ascii=False)
-        return _call
-
-    return _make_utility_handler(server_name, tool_timeout, "resources/read", "read_resource", _build)
+    return _make_utility_handler(
+        server_name, tool_timeout, "resources/read", "read_resource",
+        lambda session, args: session.read_resource(args["uri"]),
+        _render_read_resource, required="uri",
+    )
 
 
 def _make_list_prompts_handler(server_name: str, tool_timeout: float):
     """Return a sync handler that lists prompts from an MCP server."""
-
-    def _build(server, args):
-        async def _call():
-            _mark_server_call_started(server)
-            async with server._rpc_lock:
-                all_prompts = await _core._paginate_full_list(
-                    server.session.list_prompts, "prompts", server_name
-                )
-            prompts = []
-            for p in all_prompts:
-                entry = _pick(p, ("name", "name"), ("description", "description", True))
-                if hasattr(p, "arguments") and p.arguments:
-                    entry["arguments"] = [
-                        {"name": a.name, **_pick(a, ("description", "description", True), ("required", "required"))}
-                        for a in p.arguments
-                    ]
-                prompts.append(entry)
-            return json.dumps({"prompts": prompts}, ensure_ascii=False)
-        return _call
-
-    return _make_utility_handler(server_name, tool_timeout, "prompts/list", "list_prompts", _build)
+    return _make_utility_handler(
+        server_name, tool_timeout, "prompts/list", "list_prompts",
+        lambda session, args: _core._paginate_full_list(session.list_prompts, "prompts", server_name),
+        _render_prompt_list,
+    )
 
 
 def _make_get_prompt_handler(server_name: str, tool_timeout: float):
     """Return a sync handler that gets a prompt by name from an MCP server."""
-
-    def _build(server, args):
-        name = args.get("name")
-        if not name:
-            return tool_error("Missing required parameter 'name'")
-        arguments = args.get("arguments", {})
-
-        async def _call():
-            _mark_server_call_started(server)
-            async with server._rpc_lock:
-                result = await server.session.get_prompt(name, arguments=arguments)
-            messages = []
-            for msg in getattr(result, "messages", []):
-                entry = _pick(msg, ("role", "role"))
-                if hasattr(msg, "content"):
-                    content = msg.content
-                    text = content.text if hasattr(content, "text") else (
-                        content if isinstance(content, str) else str(content)
-                    )
-                    entry["content"] = strip_unicode_tags(text)
-                messages.append(entry)
-            resp = {"messages": messages}
-            if hasattr(result, "description") and result.description:
-                resp["description"] = result.description
-            return json.dumps(resp, ensure_ascii=False)
-        return _call
-
-    return _make_utility_handler(server_name, tool_timeout, "prompts/get", "get_prompt", _build)
+    return _make_utility_handler(
+        server_name, tool_timeout, "prompts/get", "get_prompt",
+        lambda session, args: session.get_prompt(args["name"], arguments=args.get("arguments", {})),
+        _render_get_prompt, required="name",
+    )
 
 
 def _make_check_fn(server_name: str):
