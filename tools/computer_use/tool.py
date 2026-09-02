@@ -89,11 +89,11 @@ def _input_target_mismatch(backend, requested_app: str) -> Optional[str]:
     """Current sticky-target app when it provably differs from *requested_app*: both known and
     neither a substring of the other (names are localized/variant — 'Google-chrome' vs 'chrome').
     Unknown current target -> None (fail open; the verify ladder catches wrong-window delivery)."""
-    current = (getattr(backend, "_last_app", None) or "").strip().lower()
-    wanted = requested_app.strip().lower()
+    last_app = getattr(backend, "_last_app", None)
+    current, wanted = (last_app or "").strip().lower(), requested_app.strip().lower()
     if not current or not wanted or wanted in current or current in wanted:
         return None
-    return getattr(backend, "_last_app", None)
+    return last_app
 
 
 # ── Backend selection — env-swappable for tests ─────────────────────────────
@@ -297,7 +297,7 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
 
     def capture(self, mode: str = "som", app: Optional[str] = None,
                 pid: Optional[int] = None, window_id: Optional[int] = None) -> CaptureResult:
-        self.calls.append(("capture", {"mode": mode, "app": app, "pid": pid, "window_id": window_id}))
+        self._record("capture", {"mode": mode, "app": app, "pid": pid, "window_id": window_id})
         return CaptureResult(mode=mode, width=1024, height=768, png_b64=None,
                              elements=[], app=app or "", window_title="")
 
@@ -423,7 +423,7 @@ def _do_capture(backend: ComputerUseBackend, args: Dict[str, Any]) -> Any:
     capture_kwargs: Dict[str, Any] = {"mode": mode, "app": args.get("app")}
     # pid/window_id forwarded only when given so older backends keep their defaults.
     if args.get("pid") is not None or args.get("window_id") is not None:
-        capture_kwargs.update({"pid": args.get("pid"), "window_id": args.get("window_id")})
+        capture_kwargs.update(pid=args.get("pid"), window_id=args.get("window_id"))
     return _capture_response(backend.capture(**capture_kwargs))
 
 def _do_focus_app(backend: ComputerUseBackend, args: Dict[str, Any]) -> Any:
@@ -505,10 +505,8 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
     handler = _INPUT_HANDLERS.get(action)
     if handler is None:
         hint = _ACTION_SUGGESTIONS.get(str(action))
-        if hint:
-            return json.dumps({"error": (f"unknown action {action!r} — did you mean {hint!r}? "
-                                         "See the action enum in the tool schema.")})
-        return json.dumps({"error": f"unknown action {action!r}"})
+        suffix = f" — did you mean {hint!r}? See the action enum in the tool schema." if hint else ""
+        return json.dumps({"error": f"unknown action {action!r}{suffix}"})
     # app= guard: input goes to the sticky target from the last capture/focus_app and the
     # backend drops app= silently — refuse a clear mismatch rather than type into the
     # wrong window while reporting ok:true.
@@ -555,18 +553,14 @@ def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
     return {"decision": "verify_fresh_state",
             "hint": "Transport succeeded but the effect is unproven. Re-capture and confirm before continuing."}
 
+_VERDICT_FIELDS = ("verified", "effect", "escalation", "path", "degraded", "delivery_mode", "code")
+
 def _action_payload(res: ActionResult) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"ok": res.ok, "action": res.action}
-    if res.message:
-        payload["message"] = res.message
+    payload: Dict[str, Any] = {"ok": res.ok, "action": res.action, **_present(message=res.message)}
     # cua-driver's structured verdict, only for fields it returned (None = old driver).
     # ok is transport success; effect/escalation are the semantic verdict.
-    for key in ("verified", "effect", "escalation", "path", "degraded", "delivery_mode", "code"):
-        value = getattr(res, key)
-        if value is not None:
-            payload[key] = value
-    if res.meta:
-        payload["meta"] = res.meta
+    payload.update({k: v for k in _VERDICT_FIELDS if (v := getattr(res, k)) is not None})
+    payload.update(_present(meta=res.meta))
     payload["verdict"] = _classify_action_result(res)
     return payload
 
@@ -590,20 +584,15 @@ _MAX_CAPTURE_FILES = 20
 
 def _image_dimensions_from_b64(image_b64: str) -> Optional[Tuple[int, int]]:
     """(width, height) of an inline PNG/JPEG screenshot, or None."""
-    if not image_b64:
-        return None
     try:
-        raw = base64.b64decode(image_b64, validate=False)
+        return image_dimensions_from_bytes(base64.b64decode(image_b64, validate=False)) if image_b64 else None
     except Exception:
         return None
-    return image_dimensions_from_bytes(raw)
 
 def _capture_mime(cap: CaptureResult) -> str:
     """Prefer cua-driver's explicit MIME type; sniff the base64 prefix for older
     builds (JPEG base64 starts with /9j/, PNG with iVBOR)."""
-    if cap.image_mime_type:
-        return cap.image_mime_type
-    return "image/jpeg" if (cap.png_b64 or "")[:8].startswith("/9j/") else "image/png"
+    return cap.image_mime_type or ("image/jpeg" if (cap.png_b64 or "").startswith("/9j/") else "image/png")
 
 def _capture_image_ext(cap: CaptureResult) -> str:
     """File extension matching the on-disk bytes so MIME sniffing agrees."""
@@ -865,20 +854,20 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
         logger.warning("follow-up capture failed: %s", e)
         return _text_response(res)
     resp = _capture_response(cap)
+    payload = _action_payload(res)
     if isinstance(resp, dict) and resp.get("_multimodal"):
         # Keep the evidence/verdict contract visible alongside the image — it governs
         # whether repeating input is allowed.
-        prefix = json.dumps(_action_payload(res))
-        resp["content"][0]["text"] = prefix + "\n\n" + resp["content"][0]["text"]
-        resp["text_summary"] = prefix + "\n\n" + resp["text_summary"]
-        resp["action_result"] = _action_payload(res)
+        prefix = json.dumps(payload) + "\n\n"
+        resp["content"][0]["text"] = prefix + resp["content"][0]["text"]
+        resp["text_summary"] = prefix + resp["text_summary"]
+        resp["action_result"] = payload
         return resp
     try:  # text capture: merge the action payload in
         data = json.loads(resp)
     except (TypeError, json.JSONDecodeError):
         data = {"capture": resp}
-    data.update(_action_payload(res))
-    return json.dumps(data)
+    return json.dumps({**data, **payload})
 
 def _bounds_unknown(bounds) -> bool:
     """True when the AX tree reported no real geometry. KDE/Qt apps report ``[0, 0, 0, 0]`` for
@@ -968,9 +957,7 @@ def _bounds_scale(elements: List[UIElement], image_width: int, image_height: int
     diverge (same condition as ``_bounds_space_note``). Larger axis ratio wins so real extent
     data drives it; rounded to 2 decimals (heuristic)."""
     extent = _bounds_divergence(elements, image_width, image_height)
-    if extent is None:
-        return None
-    return round(max(extent[0] / image_width, extent[1] / image_height), 2)
+    return None if extent is None else round(max(extent[0] / image_width, extent[1] / image_height), 2)
 
 def _bounds_space_note(elements: List[UIElement], image_width: int, image_height: int) -> Optional[str]:
     """Warn when element bounds live in a different coordinate space: on HiDPI displays AX bounds
