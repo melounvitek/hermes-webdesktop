@@ -130,8 +130,7 @@ def _get_token_dir(hermes_home: str | Path | None = None) -> Path:
     """``HERMES_HOME/mcp-tokens/`` — per-profile token directory."""
     from hermes_constants import get_hermes_home
 
-    base = Path(hermes_home) if hermes_home is not None else Path(get_hermes_home())
-    return base / "mcp-tokens"
+    return Path(hermes_home if hermes_home is not None else get_hermes_home()) / "mcp-tokens"
 
 
 def _safe_filename(name: str) -> str:
@@ -189,10 +188,8 @@ def _reserve_callback_port() -> int:
 # -- Cached registration lookups ---------------------------------------------
 def _cached_client_info(storage: "HermesTokenStorage | None") -> dict | None:
     """The on-disk client registration for *storage*, or None."""
-    if storage is None:
-        return None
     try:
-        return _read_json(storage._client_info_path())
+        return _read_json(storage._client_info_path()) if storage is not None else None
     except (AttributeError, TypeError, ValueError):
         return None
 
@@ -200,11 +197,8 @@ def _cached_client_info(storage: "HermesTokenStorage | None") -> dict | None:
 def _cached_redirect_uris(storage: "HermesTokenStorage | None"):
     """Yield ``(raw_uri, parsed)`` for each redirect URI in the cached registration."""
     for uri in (_cached_client_info(storage) or {}).get("redirect_uris") or []:
-        try:
-            parsed = urlparse(str(uri))
-        except (TypeError, ValueError):
-            continue
-        yield str(uri), parsed
+        with contextlib.suppress(TypeError, ValueError):
+            yield str(uri), urlparse(str(uri))
 
 
 def _cached_redirect_port(storage: "HermesTokenStorage | None") -> int | None:
@@ -247,8 +241,7 @@ def _raise_if_non_interactive(lead: str) -> None:
     boundary-specific first sentence, the ``hermes mcp login`` next step is shared."""
     if not _is_interactive():
         raise OAuthNonInteractiveError(
-            f"{lead} "
-            "Run `hermes mcp login <server>` interactively to (re)authorize, "
+            f"{lead} Run `hermes mcp login <server>` interactively to (re)authorize, "
             "then restart or reload the gateway."
         )
 
@@ -596,9 +589,8 @@ def _paste_callback_reader(result: dict) -> None:
     if line.lower() in _SKIP_TOKENS:
         result["error"] = _USER_SKIPPED_SENTINEL
         print(
-            "  OAuth skipped. Run `hermes mcp login <server>` later to "
-            "authenticate, or set ``enabled: false`` on that server in "
-            "config.yaml to disable persistently.",
+            "  OAuth skipped. Run `hermes mcp login <server>` later to authenticate, "
+            "or set ``enabled: false`` on that server in config.yaml to disable persistently.",
             file=sys.stderr,
         )
         return
@@ -661,12 +653,7 @@ def _print_ssh_hint(port: int, redirect_uri: str | None) -> None:
 
 def _announce_authorization_url(authorization_url: str, port: int, redirect_uri: str | None) -> None:
     """Print the URL (always, as the fallback) and open the browser when possible."""
-    print(
-        f"\n  MCP OAuth: authorization required.\n"
-        f"  Open this URL in your browser:\n\n"
-        f"    {authorization_url}\n",
-        file=sys.stderr,
-    )
+    print(f"\n  MCP OAuth: authorization required.\n  Open this URL in your browser:\n\n    {authorization_url}\n", file=sys.stderr)
     if os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY"):
         _print_ssh_hint(port, redirect_uri)
 
@@ -717,8 +704,7 @@ def _start_callback_server(port: int, handler_cls: type) -> HTTPServer:
         reserved = _reserved_sockets.pop(port, None)
         if reserved is not None:
             server.socket.close()
-            server.socket = reserved
-            server.server_address = reserved.getsockname()
+            server.socket, server.server_address = reserved, reserved.getsockname()
         else:
             server.allow_reuse_address = True
             server.server_bind()
@@ -736,12 +722,11 @@ def _start_callback_server(port: int, handler_cls: type) -> HTTPServer:
 
 async def _poll_callback_result(server: HTTPServer, result: dict, timeout: float) -> None:
     """Poll *result* until filled or *timeout* elapses; always closes the listener."""
-    poll_interval = 0.5
     elapsed = 0.0
     try:
         while elapsed < timeout and not _result_taken(result):
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+            await asyncio.sleep(0.5)
+            elapsed += 0.5
     finally:
         server.server_close()
 
@@ -806,8 +791,7 @@ def _make_callback_waiter(port: int, cimd_url: str | None = None, timeout: float
                 "\n  Or paste the redirect URL here (or the ``?code=...&state=...`` "
                 "portion) and press Enter. Type ``skip`` + Enter to continue "
                 "without this server:",
-                file=sys.stderr,
-                flush=True,
+                file=sys.stderr, flush=True,
             )
             threading.Thread(target=_paste_callback_reader, args=(result,), daemon=True).start()
 
@@ -926,10 +910,8 @@ def _server_declined_cimd(storage: "HermesTokenStorage | None") -> bool:
     redirect URI. Cached authorization-server metadata closes the gap for every
     server already reached: only a genuinely unknown server pays the optimistic pin.
     """
-    if storage is None:
-        return False
     try:
-        metadata = storage.load_oauth_metadata()
+        metadata = storage.load_oauth_metadata() if storage is not None else None
     except (AttributeError, TypeError, ValueError):
         return False
     return metadata is not None and getattr(metadata, "client_id_metadata_document_supported", None) is not True
