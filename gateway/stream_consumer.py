@@ -121,6 +121,26 @@ class StreamConsumerConfig:
     chat_type: str = ""
 
 
+@dataclass
+class _Tick:
+    """Everything one drain of the queue decided (flag locals of the old run() loop)."""
+    got_done: bool = False
+    got_segment_break: bool = False
+    got_flush: bool = False
+    flush_event: Any = None
+    got_reopen_seed: bool = False
+    approval_boundary: Optional[tuple] = None  # (future, cancelled_flag)
+    commentary_text: Optional[str] = None
+    # Set by _push_update for _finalize_turn / _end_segment.
+    update_visible: bool = False
+    draft_final_fresh_send: bool = False
+
+    @property
+    def is_interim(self) -> bool:
+        """Mid-stream tick: not finalizing, not a segment break, no commentary."""
+        return not self.got_done and not self.got_segment_break and self.commentary_text is None
+
+
 class GatewayStreamConsumer:
     """Async consumer that progressively edits a platform message with streamed tokens.
 
@@ -418,6 +438,86 @@ class GatewayStreamConsumer:
                 pass
         return await self.adapter.edit_message(**kwargs)
 
+    async def _send_seed_frame(self):
+        """Open a native stream with an empty seed frame (typing indicator before any token)."""
+        return await self.adapter.send_stream_frame(
+            "",
+            chat_id=self.chat_id,
+            reply_to=self._initial_reply_to_id,
+            turn_id=self._turn_id,
+        )
+
+    async def _send_frame(self, text: str, *, finalize: bool):
+        """One native-stream frame; every frame carries the same chat/reply/turn routing."""
+        return await self.adapter.send_stream_frame(
+            text,
+            finalize=finalize,
+            chat_id=self.chat_id,
+            reply_to=self._initial_reply_to_id,
+            turn_id=self._turn_id,
+        )
+
+    def _close_native_state(self) -> None:
+        """Mark the native stream closed (next content re-seeds or falls back)."""
+        self._native_stream_opened = False
+        self._native_last_pushed_len = 0
+
+    def _degrade_native_to_buffered_send(self) -> None:
+        """Leave native mode; post-boundary output goes out as ONE send() at got_done.
+
+        buffer_only avoids mid-stream flushes that create multiple messages on
+        non-editable platforms.
+        """
+        self._use_native_streaming = False
+        self._close_native_state()
+        self.cfg.buffer_only = True
+
+    def _draft_metadata(self) -> dict | None:
+        """Draft-frame metadata.
+
+        Every frame must carry the same reply_to_message_id the final send gets
+        from _metadata_for_send: the relay adapter keys draft/seal state on it,
+        else the final can't find the open stream (flat DMs have no thread
+        metadata and would key on the bare chat).
+        """
+        md = dict(self.metadata) if self.metadata else {}
+        if self._initial_reply_to_id:
+            md.setdefault("reply_to_message_id", self._initial_reply_to_id)
+        return md or None
+
+    def _stale_preview_ids(self, *, segment_only: bool = False) -> set:
+        """Preview message ids a fresh final replaces.
+
+        ``segment_only``: never delete an earlier finalized preamble.
+        """
+        if segment_only:
+            stale_ids = set(self._segment_preview_message_ids)
+            if self._message_id and self._message_id != "__no_edit__":
+                stale_ids.add(str(self._message_id))
+            return stale_ids
+        stale_ids = set(self._preview_message_ids)
+        if self._message_id and self._message_id != "__no_edit__":
+            stale_ids.add(self._message_id)
+        return stale_ids
+
+    async def _delete_previews(
+        self, stale_ids, *, skip=None, label: str, retry_on_false: bool = False,
+    ) -> None:
+        """Best-effort delete of stale previews; never the message just sent (``skip``)."""
+        delete_fn = getattr(self.adapter, "delete_message", None)
+        if delete_fn is None:
+            return
+        for stale_id in stale_ids:
+            if not stale_id or stale_id == "__no_edit__" or stale_id == skip:
+                continue
+            try:
+                deleted = await delete_fn(self.chat_id, stale_id)
+                if retry_on_false and deleted is False:
+                    await asyncio.sleep(1.0)
+                    await delete_fn(self.chat_id, stale_id)
+            except Exception as e:
+                logger.debug("%s preview cleanup failed (%s): %s", label, stale_id, e)
+
     def _append_accumulated(self, text: str) -> None:
         """Append to the live buffer and the split-stable stream ledger."""
         if not text:
@@ -670,13 +770,7 @@ class GatewayStreamConsumer:
                 finalize_text = self._accumulated or self._boundary_placeholder
                 finalize_ok = False
                 try:
-                    result = await self.adapter.send_stream_frame(
-                        finalize_text,
-                        finalize=True,
-                        chat_id=self.chat_id,
-                        reply_to=self._initial_reply_to_id,
-                        turn_id=self._turn_id,
-                    )
+                    result = await self._send_frame(finalize_text, finalize=True)
                     finalize_ok = bool(result)
                 except Exception as e:
                     logger.warning("%s boundary: finalize failed: %s", _reason, e)
@@ -719,8 +813,7 @@ class GatewayStreamConsumer:
                 # re-seed in _send_or_edit.  Do NOT set buffer_only — post-prompt
                 # output should stream.  The gap between this INFO and the
                 # "Re-opened native stream" INFO is the typing-reappear latency.
-                self._native_stream_opened = False
-                self._native_last_pushed_len = 0
+                self._close_native_state()
                 self._awaiting_reopen_after_boundary = True
                 self._reset_segment_state()
                 logger.info(
@@ -732,10 +825,7 @@ class GatewayStreamConsumer:
                 # Approval: post-approval output goes via send().  buffer_only
                 # delivers it in one shot on got_done, avoiding mid-stream
                 # flushes that create multiple messages on non-editable platforms.
-                self._use_native_streaming = False
-                self._native_stream_opened = False
-                self._native_last_pushed_len = 0
-                self.cfg.buffer_only = True
+                self._degrade_native_to_buffered_send()
                 self._reset_segment_state()
 
             boundary_ok = not delivery_failed
@@ -908,22 +998,102 @@ class GatewayStreamConsumer:
 
     async def run(self) -> None:
         """Async task that drains the queue and edits the platform message."""
-        # Length function and limit resolve PER-CHAT (a relay adapter fronting
-        # N platforms has different caps per chat) using the platform's unit
-        # (e.g. utf16 for Telegram).  isinstance gate: MagicMock auto-attributes
-        # aren't callables, so test doubles fall back to len.
-        _len_fn: "Callable[[str], int]" = (
+        self._len_fn, self._safe_limit = self._resolve_length_budget()
+        await self._start_transports()
+        try:
+            while True:
+                # Session reset (/new, /stop): abandon rather than deliver stale deltas.
+                if not self._run_still_current():
+                    await self._abandon_native_stream()
+                    return
+                tick = self._drain_queue()
+
+                # Boundary produces its own finalize and resets state, so it
+                # must run before got_done/segment_break processing.
+                if tick.approval_boundary is not None:
+                    await self._handle_approval_boundary(*tick.approval_boundary)
+                    continue
+                if tick.got_reopen_seed:
+                    await self._eager_reopen_seed()
+                    continue
+
+                if tick.got_done:
+                    self._flush_think_buffer()
+                    # A bare intentional-silence marker (NO_REPLY / [SILENT]):
+                    # the gateway's whole-response filter runs too late for a
+                    # streamed preview, so retract it here instead of finalizing.
+                    if _is_intentional_silence_response(
+                        self._clean_for_display(self._accumulated)
+                    ):
+                        await self._suppress_silence_marker()
+                        return
+
+                if self._should_edit(tick) and (
+                    self._accumulated
+                    or (self._use_native_streaming and self._tool_progress_active)
+                ):
+                    # Overflow split.  Native streaming bypasses this: the
+                    # adapter truncates against the stream protocol's own limit.
+                    if (
+                        not self._use_native_streaming
+                        and self._len_fn(self._accumulated) > self._safe_limit
+                        and self._message_id is None
+                    ):
+                        verdict = await self._split_first_send(tick)
+                        if verdict == "return":
+                            return
+                        continue
+                    await self._seal_overflow_heads()
+                    await self._push_update(tick)
+
+                if tick.got_done:
+                    await self._finalize_turn(tick)
+                    return
+
+                if tick.commentary_text is not None:
+                    await self._deliver_commentary(tick.commentary_text)
+                if tick.got_segment_break:
+                    await self._end_segment(tick)
+
+                # Done last so the waiter unblocks only once everything queued
+                # before the barrier is on screen.
+                if tick.got_flush:
+                    self._signal_flush(tick.flush_event)
+
+                await asyncio.sleep(0.05)  # Small yield to not busy-loop
+
+        except asyncio.CancelledError:
+            await self._on_cancelled()
+        except Exception as e:
+            logger.error("Stream consumer error: %s", e)
+        finally:
+            self._wake_flush_waiters()
+
+    # ── run() collaborators ─────────────────────────────────────────────
+
+    def _resolve_length_budget(self) -> "tuple[Callable[[str], int], int]":
+        """Per-chat length function + overflow budget.
+
+        A relay adapter fronting N platforms has different caps per chat, in
+        the platform's unit (e.g. utf16 for Telegram).  isinstance gate:
+        MagicMock auto-attributes aren't callables, so test doubles use len.
+        """
+        len_fn: "Callable[[str], int]" = (
             self.adapter.message_len_fn_for_chat(self.chat_id)
             if isinstance(self.adapter, _BasePlatformAdapter)
             else len
         )
-        _raw_limit = self._raw_message_limit()
-        _safe_limit = max(500, _raw_limit - _len_fn(self.cfg.cursor) - 100)
+        raw_limit = self._raw_message_limit()
+        return len_fn, max(500, raw_limit - len_fn(self.cfg.cursor) - 100)
 
-        # Native streaming wins over draft: adapters that declare it (WeCom)
-        # cannot edit at all.  Send an empty seed frame now so the user sees
-        # "typing" before the first token; on seed failure fall back to the
-        # edit path (which the gateway's fallback send then handles).
+    async def _start_transports(self) -> None:
+        """Resolve native/draft transport; native wins (adapters declaring it can't edit).
+
+        Sends an empty seed frame so the user sees "typing" before the first
+        token; on seed failure fall back to the edit path (the gateway's
+        fallback send then handles it).  Drafts and native streaming target
+        the same first-frame slot.
+        """
         self._use_native_streaming = self._resolve_native_streaming()
         if self._use_native_streaming:
             logger.debug(
@@ -931,12 +1101,7 @@ class GatewayStreamConsumer:
                 self.chat_id,
             )
             try:
-                seed_ok = await self.adapter.send_stream_frame(
-                    "",
-                    chat_id=self.chat_id,
-                    reply_to=self._initial_reply_to_id,
-                    turn_id=self._turn_id,
-                )
+                seed_ok = await self._send_seed_frame()
                 if seed_ok:
                     self._native_stream_opened = True
             except Exception:
@@ -948,558 +1113,477 @@ class GatewayStreamConsumer:
             if not seed_ok:
                 self._use_native_streaming = False
 
-        # Drafts and native streaming target the same first-frame slot.
         if self._use_native_streaming:
             self._use_draft_streaming = False
-        else:
-            self._use_draft_streaming = self._resolve_draft_streaming()
-            if self._use_draft_streaming:
-                type(self)._draft_id_counter += 1
-                self._draft_id = type(self)._draft_id_counter
-                logger.debug(
-                    "Stream consumer using native-draft transport (chat=%s draft_id=%s)",
-                    self.chat_id, self._draft_id,
-                )
+            return
+        self._use_draft_streaming = self._resolve_draft_streaming()
+        if self._use_draft_streaming:
+            type(self)._draft_id_counter += 1
+            self._draft_id = type(self)._draft_id_counter
+            logger.debug(
+                "Stream consumer using native-draft transport (chat=%s draft_id=%s)",
+                self.chat_id, self._draft_id,
+            )
 
+    def _drain_queue(self) -> "_Tick":
+        """Drain everything queued so far into one tick.
+
+        Control sentinels stop the drain (they take effect this tick);
+        _FINAL_TEXT / _TOOL_PROGRESS / text deltas fold into state and keep
+        draining so simultaneous items batch.
+        """
+        tick = _Tick()
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return tick
+            if item is _DONE:
+                tick.got_done = True
+                return tick
+            if item is _NEW_SEGMENT:
+                tick.got_segment_break = True
+                return tick
+            if item is _REOPEN_SEED:
+                tick.got_reopen_seed = True
+                return tick
+            if not isinstance(item, tuple):
+                self._filter_and_accumulate(item)
+                continue
+            try:
+                handler = self._QUEUE_TUPLE_HANDLERS.get((item[0], len(item)))
+            except TypeError:  # unhashable head: not one of ours
+                handler = None
+            if handler is None:
+                self._filter_and_accumulate(item)
+                continue
+            if handler(self, tick, item):
+                return tick
+
+    def _on_final_text(self, tick: "_Tick", item: tuple) -> bool:
+        self._adopt_final_text(item[1])
+        return False
+
+    def _on_approval_boundary(self, tick: "_Tick", item: tuple) -> bool:
+        tick.approval_boundary = (item[1], item[2])
+        return True
+
+    def _on_commentary(self, tick: "_Tick", item: tuple) -> bool:
+        tick.commentary_text = item[1]
+        return True
+
+    def _on_flush(self, tick: "_Tick", item: tuple) -> bool:
+        # Barrier: finalize like a tool boundary, signal at the end of the tick.
+        tick.got_flush = True
+        tick.got_segment_break = True
+        tick.flush_event = item[1]
+        return True
+
+    def _on_tool_progress(self, tick: "_Tick", item: tuple) -> bool:
+        if self._use_native_streaming:
+            self._tool_progress_lines.append(item[1])
+            self._tool_progress_active = True
+        return False  # keep draining to batch simultaneous progress lines
+
+    def _adopt_final_text(self, final_raw: str) -> None:
+        """Adopt the authoritative final (see finish()) as the finalize content.
+
+        Only if this consumer streamed something (a no-stream turn keeps the
+        gateway's normal final-send ownership).  Split delivery: wholesale
+        adoption would repeat sealed heads inside the tail, but refusing
+        entirely makes the gateway resend the ENTIRE body+footer — if the
+        final strictly prefix-extends the ledger, append only the missing
+        suffix; non-prefix rewrites keep the full-resend fallback.
+        """
+        streamed_something = bool(
+            self._accumulated or self._message_id or self._last_sent_text
+        )
+        if not streamed_something:
+            return
+        if not self._turn_split_delivery:
+            final_payload = self._clean_for_display(final_raw)
+            visible = self._clean_for_display(self._accumulated)
+            if final_payload and final_payload != visible:
+                self._accumulated = final_raw
+                self._stream_ledger = final_raw
+            return
+        ledger = self._stream_ledger
+        if ledger and final_raw.startswith(ledger) and len(final_raw) > len(ledger):
+            self._accumulated += final_raw[len(ledger):]
+            self._stream_ledger = final_raw
+
+    async def _eager_reopen_seed(self) -> None:
+        """Eager re-seed after a clarify answer.
+
+        Re-check the gate (state may have advanced between put and dequeue).
+        Trade-off: WeCom's ~6-minute stream limit (errcode 846608, counted
+        from the FIRST frame) now starts at the reply instant rather than the
+        first post-answer delta; if it expires, send_stream_frame returns
+        False and we degrade to send() — only animation is lost.
+        """
+        if not (
+            self._use_native_streaming
+            and self._awaiting_reopen_after_boundary
+            and not self._native_stream_opened
+        ):
+            return
         try:
-            while True:
-                # Session reset (/new, /stop): abandon rather than deliver stale deltas.
-                if not self._run_still_current():
-                    await self._abandon_native_stream()
-                    return
+            seed_ok = await self._send_seed_frame()
+        except Exception as e:
+            logger.debug("Eager reopen seed raised, disabling native: %s", e)
+            seed_ok = False
+        if seed_ok:
+            self._native_stream_opened = True
+            self._native_last_pushed_len = 0
+            self._awaiting_reopen_after_boundary = False
+            self._reopen_seeded_eagerly = True
+            logger.info(
+                "[latency] Eager re-seed after clarify answer "
+                "(typing bubble reopened immediately, turn=%s)",
+                self._turn_id,
+            )
+        else:
+            # Degrade to a single buffered send() (one bubble, not per-tick
+            # fragments), like the approval path.
+            self._degrade_native_to_buffered_send()
 
-                got_done = False
-                got_segment_break = False
-                got_flush = False
-                flush_event = None
-                got_approval_boundary = False
-                got_reopen_seed = False
-                approval_boundary_future = None
-                approval_boundary_cancelled = None
-                commentary_text = None
-                while True:
-                    try:
-                        item = self._queue.get_nowait()
-                        if item is _DONE:
-                            got_done = True
-                            break
-                        if item is _NEW_SEGMENT:
-                            got_segment_break = True
-                            break
-                        if isinstance(item, tuple) and len(item) == 2 and item[0] is _FINAL_TEXT:
-                            # Adopt the authoritative final (see finish()) as the
-                            # finalize content — only if this consumer streamed
-                            # something (a no-stream turn keeps the gateway's
-                            # normal final-send ownership).
-                            _streamed_something = bool(
-                                self._accumulated
-                                or self._message_id
-                                or self._last_sent_text
-                            )
-                            if _streamed_something and not self._turn_split_delivery:
-                                _final_payload = self._clean_for_display(item[1])
-                                _visible = self._clean_for_display(self._accumulated)
-                                if _final_payload and _final_payload != _visible:
-                                    self._accumulated = item[1]
-                                    self._stream_ledger = item[1]
-                            elif _streamed_something and self._turn_split_delivery:
-                                # Split delivery: wholesale adoption would repeat
-                                # sealed heads inside the tail, but refusing
-                                # entirely makes the gateway resend the ENTIRE
-                                # body+footer.  If the final strictly
-                                # prefix-extends the ledger, append only the
-                                # missing suffix; non-prefix rewrites keep the
-                                # full-resend fallback.
-                                _final_raw = item[1]
-                                _ledger = self._stream_ledger
-                                if (
-                                    _ledger
-                                    and _final_raw.startswith(_ledger)
-                                    and len(_final_raw) > len(_ledger)
-                                ):
-                                    _suffix = _final_raw[len(_ledger):]
-                                    self._accumulated += _suffix
-                                    self._stream_ledger = _final_raw
-                            continue
-                        if item is _REOPEN_SEED:
-                            got_reopen_seed = True
-                            break
-                        if isinstance(item, tuple) and len(item) == 3 and item[0] is _APPROVAL_BOUNDARY:
-                            got_approval_boundary = True
-                            approval_boundary_future = item[1]
-                            approval_boundary_cancelled = item[2]
-                            break
-                        if isinstance(item, tuple) and len(item) == 2 and item[0] is _COMMENTARY:
-                            commentary_text = item[1]
-                            break
-                        if isinstance(item, tuple) and len(item) == 2 and item[0] is _FLUSH:
-                            # Barrier: finalize like a tool boundary, signal below.
-                            got_flush = True
-                            got_segment_break = True
-                            flush_event = item[1]
-                            break
-                        if isinstance(item, tuple) and len(item) == 2 and item[0] is _TOOL_PROGRESS:
-                            if self._use_native_streaming:
-                                self._tool_progress_lines.append(item[1])
-                                self._tool_progress_active = True
-                            continue  # continue draining to batch simultaneous progress lines
-                        self._filter_and_accumulate(item)
-                    except queue.Empty:
-                        break
-
-                # Boundary produces its own finalize and resets state, so it
-                # must run before got_done/segment_break processing.
-                if got_approval_boundary:
-                    await self._handle_approval_boundary(
-                        approval_boundary_future, approval_boundary_cancelled
-                    )
-                    continue
-
-                # Eager re-seed after a clarify answer.  Re-check the gate
-                # (state may have advanced between put and dequeue).  Trade-off:
-                # WeCom's ~6-minute stream limit (errcode 846608, counted from
-                # the FIRST frame) now starts at the reply instant rather than
-                # the first post-answer delta; if it expires, send_stream_frame
-                # returns False and we degrade to send() — only animation is lost.
-                if got_reopen_seed:
-                    if (
-                        self._use_native_streaming
-                        and self._awaiting_reopen_after_boundary
-                        and not self._native_stream_opened
-                    ):
-                        try:
-                            seed_ok = await self.adapter.send_stream_frame(
-                                "",
-                                chat_id=self.chat_id,
-                                reply_to=self._initial_reply_to_id,
-                                turn_id=self._turn_id,
-                            )
-                        except Exception as e:
-                            logger.debug(
-                                "Eager reopen seed raised, disabling native: %s", e,
-                            )
-                            seed_ok = False
-                        if seed_ok:
-                            self._native_stream_opened = True
-                            self._native_last_pushed_len = 0
-                            self._awaiting_reopen_after_boundary = False
-                            self._reopen_seeded_eagerly = True
-                            logger.info(
-                                "[latency] Eager re-seed after clarify answer "
-                                "(typing bubble reopened immediately, turn=%s)",
-                                self._turn_id,
-                            )
-                        else:
-                            # Degrade to a single buffered send() (one bubble,
-                            # not per-tick fragments), like the approval path.
-                            self._use_native_streaming = False
-                            self._native_stream_opened = False
-                            self._native_last_pushed_len = 0
-                            self.cfg.buffer_only = True
-                    continue
-
-                if got_done:
-                    self._flush_think_buffer()
-
-                    # A bare intentional-silence marker (NO_REPLY / [SILENT]):
-                    # the gateway's whole-response filter runs too late for a
-                    # streamed preview, so retract it here instead of finalizing.
-                    if _is_intentional_silence_response(
-                        self._clean_for_display(self._accumulated)
-                    ):
-                        await self._suppress_silence_marker()
-                        return
-
-                # Decide whether to flush an edit
-                now = time.monotonic()
-                elapsed = now - self._last_edit_time
-                should_edit = (
-                    got_done
-                    or got_segment_break
-                    or commentary_text is not None
+    def _should_edit(self, tick: "_Tick") -> bool:
+        """Decide whether this tick flushes an edit/frame."""
+        should_edit = tick.got_done or tick.got_segment_break or tick.commentary_text is not None
+        if not self.cfg.buffer_only:
+            if self._use_native_streaming:
+                # No platform edit-rate limit: push every delta immediately.
+                should_edit = should_edit or bool(self._accumulated) or self._tool_progress_active
+            else:
+                elapsed = time.monotonic() - self._last_edit_time
+                should_edit = should_edit or (
+                    (elapsed >= self._current_edit_interval and self._accumulated)
+                    # buffer_threshold is a codepoint debounce heuristic,
+                    # not a platform-limit check (_len_fn is for overflow).
+                    or len(self._accumulated) >= self.cfg.buffer_threshold
                 )
-                if not self.cfg.buffer_only:
-                    if self._use_native_streaming:
-                        # No platform edit-rate limit: push every delta immediately.
-                        should_edit = should_edit or bool(self._accumulated) or self._tool_progress_active
-                    else:
-                        should_edit = should_edit or (
-                            (elapsed >= self._current_edit_interval
-                                and self._accumulated)
-                            # buffer_threshold is a codepoint debounce heuristic,
-                            # not a platform-limit check (_len_fn is for overflow).
-                            or len(self._accumulated) >= self.cfg.buffer_threshold
-                        )
+        # Defer mid-stream edits while the buffer could still resolve to a
+        # silence marker ("NO"→"NO_REPLY") so it never flashes on screen;
+        # got_done always resolves the buffer, so marker-like prose is never lost.
+        if (
+            should_edit
+            and tick.is_interim
+            and _is_partial_silence_marker(self._clean_for_display(self._accumulated))
+        ):
+            return False
+        return should_edit
 
-                current_update_visible = False
-                # got_done update went out as a FRESH send via the draft
-                # transport (drafts have no message id) already carrying
-                # finalize=True — unlike an EDIT during draft streaming, which
-                # still needs the explicit finalize pass for
-                # REQUIRES_EDIT_FINALIZE adapters.
-                draft_final_fresh_send = False
-                # Defer mid-stream edits while the buffer could still resolve
-                # to a silence marker ("NO"→"NO_REPLY") so it never flashes on
-                # screen; got_done always resolves the buffer, so marker-like
-                # prose is never lost.
-                if (
-                    should_edit
-                    and not got_done
-                    and not got_segment_break
-                    and commentary_text is None
-                    and _is_partial_silence_marker(
-                        self._clean_for_display(self._accumulated)
-                    )
-                ):
-                    should_edit = False
-                if should_edit and (self._accumulated or (self._use_native_streaming and self._tool_progress_active)):
-                    # Overflow split.  Native streaming bypasses this: the
-                    # adapter truncates against the stream protocol's own limit.
-                    if (
-                        not self._use_native_streaming
-                        and _len_fn(self._accumulated) > _safe_limit
-                        and self._message_id is None
-                    ):
-                        # No message to edit yet: seal only the overflowing head
-                        # chunks, keep the tail in _accumulated so it becomes the
-                        # active preview that later deltas edit in place.
-                        chunks = self._truncate_for_stream(
-                            self._accumulated, _safe_limit, _len_fn,
-                        )
-                        if len(chunks) <= 1:
-                            # Malformed/legacy adapter result must still be splittable.
-                            chunks = self._split_text_chunks(
-                                self._accumulated, _safe_limit, _len_fn,
-                            )
-                        chunks_delivered = False
-                        reply_to = self._initial_reply_to_id
-                        all_heads_delivered = len(chunks) > 1
-                        for chunk in chunks[:-1]:
-                            new_id = await self._send_new_chunk(
-                                chunk,
-                                reply_to,
-                                final=got_done,
-                            )
-                            if new_id is None or new_id == reply_to:
-                                # Keep the full text intact for the gateway fallback.
-                                all_heads_delivered = False
-                                chunks_delivered = False
-                                break
-                            chunks_delivered = True
-                            reply_to = new_id
+    async def _split_first_send(self, tick: "_Tick") -> str:
+        """No message to edit yet and the buffer overflows: seal only the head chunks.
 
-                        if all_heads_delivered:
-                            self._accumulated = chunks[-1]
-                        # Heads are sealed (or a later head failed): never edit a
-                        # sealed message with the unsplit payload — the tail is
-                        # sent fresh, or the fallback path retries.
-                        self._message_id = None
-                        self._message_created_ts = None
-                        self._last_sent_text = ""
+        The tail stays in _accumulated so it becomes the active preview later
+        deltas edit in place.  Returns "return" (turn finished) or "continue".
+        """
+        chunks = self._truncate_for_stream(self._accumulated, self._safe_limit, self._len_fn)
+        if len(chunks) <= 1:
+            # Malformed/legacy adapter result must still be splittable.
+            chunks = self._split_text_chunks(self._accumulated, self._safe_limit, self._len_fn)
+        chunks_delivered = False
+        reply_to = self._initial_reply_to_id
+        all_heads_delivered = len(chunks) > 1
+        for chunk in chunks[:-1]:
+            new_id = await self._send_new_chunk(chunk, reply_to, final=tick.got_done)
+            if new_id is None or new_id == reply_to:
+                # Keep the full text intact for the gateway fallback.
+                all_heads_delivered = False
+                chunks_delivered = False
+                break
+            chunks_delivered = True
+            reply_to = new_id
 
-                        if chunks_delivered:
-                            # Flag BEFORE the tail send: fresh-final replaces
-                            # every tracked preview with one message, which is
-                            # only valid while the active message holds the whole
-                            # answer — deleting sealed heads drops delivered text.
-                            self._turn_split_delivery = True
+        if all_heads_delivered:
+            self._accumulated = chunks[-1]
+        # Heads are sealed (or a later head failed): never edit a sealed
+        # message with the unsplit payload — the tail is sent fresh, or the
+        # fallback path retries.
+        self._message_id = None
+        self._message_created_ts = None
+        self._last_sent_text = ""
 
-                        self._last_edit_time = time.monotonic()
-                        if got_done:
-                            tail_delivered = True
-                            if self._accumulated:
-                                tail_delivered = await self._send_or_edit(
-                                    self._accumulated, finalize=True,
-                                )
-                            # ``_already_sent`` may be True from prior
-                            # progress/fallback state — only heads + tail count.
-                            self._final_response_sent = chunks_delivered and tail_delivered
-                            if self._final_response_sent:
-                                self._final_content_delivered = True
-                                self._turn_split_delivery = True
-                                self._record_turn_final_payload(self._accumulated)
-                            return
-                        if got_segment_break:
-                            self._message_id = None
-                            self._fallback_final_send = False
-                            self._fallback_prefix = ""
-                            if not self._accumulated:
-                                continue
+        if chunks_delivered:
+            # Flag BEFORE the tail send: fresh-final replaces every tracked
+            # preview with one message, which is only valid while the active
+            # message holds the whole answer — deleting sealed heads drops
+            # delivered text.
+            self._turn_split_delivery = True
 
-                        # Early `continue` skips the bottom-of-loop flush signal.
-                        if got_flush:
-                            self._signal_flush(flush_event)
-                        continue
-                    # Existing message: seal it with the head, start a new
-                    # message for the remainder.
-                    while (
-                        _len_fn(self._accumulated) > _safe_limit
-                        and self._message_id is not None
-                        and self._edit_supported
-                    ):
-                        _cp_budget = _custom_unit_to_cp(
-                            self._accumulated, _safe_limit, _len_fn,
-                        )
-                        split_at = self._accumulated.rfind("\n", 0, _cp_budget)
-                        if split_at < _cp_budget // 2:
-                            split_at = _cp_budget
-                        chunk = self._accumulated[:split_at]
-                        # finalize=True: this sealed chunk is never edited again,
-                        # so it needs its rich-text pass now or it renders raw.
-                        # is_turn_final=False: a split head is not the answer, so
-                        # fresh-final must not mark the turn delivered on it.
-                        ok = await self._send_or_edit(
-                            chunk, finalize=True, is_turn_final=False,
-                        )
-                        if self._fallback_final_send or not ok:
-                            # Keep the full text intact for the fallback final send.
-                            break
-                        self._accumulated = self._accumulated[split_at:].lstrip("\n")
-                        self._message_id = None
-                        self._last_sent_text = ""
-                        self._turn_split_delivery = True
+        self._last_edit_time = time.monotonic()
+        if tick.got_done:
+            tail_delivered = True
+            if self._accumulated:
+                tail_delivered = await self._send_or_edit(self._accumulated, finalize=True)
+            # ``_already_sent`` may be True from prior progress/fallback state
+            # — only heads + tail count.
+            self._final_response_sent = chunks_delivered and tail_delivered
+            if self._final_response_sent:
+                self._final_content_delivered = True
+                self._turn_split_delivery = True
+                self._record_turn_final_payload(self._accumulated)
+            return "return"
+        if tick.got_segment_break:
+            self._message_id = None
+            self._fallback_final_send = False
+            self._fallback_prefix = ""
+            if not self._accumulated:
+                return "continue"
+        # Early `continue` skips the bottom-of-loop flush signal.
+        if tick.got_flush:
+            self._signal_flush(tick.flush_event)
+        return "continue"
 
-                    display_text = self._accumulated
-                    if not got_done and not got_segment_break and commentary_text is None:
-                        if self._use_native_streaming:
-                            display_text = self._compose_frame_content()
-                            if display_text and self.cfg.cursor:
-                                display_text += self.cfg.cursor
-                        else:
-                            display_text += self.cfg.cursor
+    async def _seal_overflow_heads(self) -> None:
+        """Existing message overflowing: seal it with the head, start a new message for the rest."""
+        while (
+            self._len_fn(self._accumulated) > self._safe_limit
+            and self._message_id is not None
+            and self._edit_supported
+        ):
+            cp_budget = _custom_unit_to_cp(self._accumulated, self._safe_limit, self._len_fn)
+            split_at = self._accumulated.rfind("\n", 0, cp_budget)
+            if split_at < cp_budget // 2:
+                split_at = cp_budget
+            chunk = self._accumulated[:split_at]
+            # finalize=True: this sealed chunk is never edited again, so it
+            # needs its rich-text pass now or it renders raw.
+            # is_turn_final=False: a split head is not the answer, so
+            # fresh-final must not mark the turn delivered on it.
+            ok = await self._send_or_edit(chunk, finalize=True, is_turn_final=False)
+            if self._fallback_final_send or not ok:
+                # Keep the full text intact for the fallback final send.
+                break
+            self._accumulated = self._accumulated[split_at:].lstrip("\n")
+            self._message_id = None
+            self._last_sent_text = ""
+            self._turn_split_delivery = True
 
-                    # Segment break finalizes so platforms needing explicit
-                    # closure (DingTalk AI Cards) don't leave the previous
-                    # segment stuck loading; got_done has its own finalize below.
-                    draft_final_fresh_send = (
-                        got_done
-                        and self._use_draft_streaming
-                        and self._message_id is None
-                    )
-                    current_update_visible = await self._send_or_edit(
-                        display_text,
-                        finalize=(got_done or got_segment_break),
-                        # A segment-break finalize closes a preamble, not the answer.
-                        is_turn_final=got_done,
-                    )
-                    self._last_edit_time = time.monotonic()
-                    # Lines stay in _tool_progress_lines for the next compose;
-                    # only new progress should trigger another should_edit.
-                    if self._tool_progress_active:
-                        self._tool_progress_active = False
+    async def _push_update(self, tick: "_Tick") -> None:
+        """Send/edit this tick's visible text (cursor-suffixed unless finalizing)."""
+        display_text = self._accumulated
+        if tick.is_interim:
+            if self._use_native_streaming:
+                display_text = self._compose_frame_content()
+                if display_text and self.cfg.cursor:
+                    display_text += self.cfg.cursor
+            else:
+                display_text += self.cfg.cursor
 
-                if got_done:
-                    if self._accumulated or self._message_id is not None or self._already_sent:
-                        await self._notify_before_finalize()
-                    # Final edit without cursor; if progressive editing failed
-                    # mid-stream, send one continuation here rather than letting
-                    # the gateway resend the full response.
-                    if (
-                        self._awaiting_reopen_after_boundary
-                        and not self._native_stream_opened
-                        and not self._accumulated
-                    ):
-                        # Lazy reopen, no post-prompt content: nothing is open
-                        # on screen, so don't re-seed just to emit a lone "✅".
-                        logger.debug(
-                            "Clarify reopen boundary with no post-prompt content "
-                            "— skipping lone-placeholder finalize (turn=%s)",
-                            self._turn_id,
-                        )
-                    elif (
-                        self._reopen_seeded_eagerly
-                        and self._native_stream_opened
-                        and not self._accumulated
-                        and not current_update_visible
-                    ):
-                        # Eager seed, no content: the typing bubble IS on screen
-                        # and would hang forever — close it with an empty
-                        # finalize (not a lone "✅").  Delivery flags untouched.
-                        try:
-                            await self.adapter.send_stream_frame(
-                                "",
-                                finalize=True,
-                                chat_id=self.chat_id,
-                                reply_to=self._initial_reply_to_id,
-                                turn_id=self._turn_id,
-                            )
-                        except Exception as e:
-                            logger.debug(
-                                "Eager-seed empty finalize failed: %s", e,
-                            )
-                        self._native_stream_opened = False
-                        self._native_last_pushed_len = 0
-                        self._reopen_seeded_eagerly = False
-                        logger.debug(
-                            "Eager reopen seed but no post-answer content — "
-                            "closed empty typing bubble (turn=%s)",
-                            self._turn_id,
-                        )
-                    elif self._use_native_streaming:
-                        # Native streams MUST close with finish=true even when
-                        # empty (tool-only turns) — placeholder if needed.
-                        if not current_update_visible:
-                            close_text = self._accumulated or "✅"
-                            self._final_response_sent = await self._send_or_edit(
-                                close_text, finalize=True,
-                            )
-                            if self._final_response_sent:
-                                self._final_content_delivered = True
-                        else:
-                            self._final_response_sent = True
-                            self._final_content_delivered = True
-                    elif self._accumulated:
-                        if self._fallback_final_send:
-                            await self._send_fallback_final(self._accumulated)
-                        elif self._final_response_sent:
-                            # Fresh-final already delivered above; a second
-                            # finalize would duplicate / re-delete.
-                            self._final_content_delivered = True
-                            self._record_turn_final_payload(self._accumulated)
-                        elif (
-                            current_update_visible
-                            and (
-                                not self._adapter_requires_finalize
-                                or self._last_edit_overflowed
-                                or draft_final_fresh_send
-                            )
-                        ):
-                            # The update above already delivered the final.  A
-                            # second finalize would re-edit an already-final
-                            # message (Telegram: sendRichMessage followed by
-                            # editMessageText falls back to the legacy
-                            # formatter), or overflow-split again into an
-                            # adopted continuation, duplicating chunks.
-                            self._mark_skip_redundant_finalize()
-                        elif self._message_id:
-                            # No visible update this tick, or the adapter needs
-                            # explicit finalize=True.
-                            self._final_response_sent = await self._send_or_edit(
-                                self._accumulated, finalize=True,
-                            )
-                            if self._final_response_sent:
-                                self._final_content_delivered = True
-                                self._record_turn_final_payload(self._accumulated)
-                            elif self._fallback_final_send:
-                                # This edit may have exhausted flood strikes and
-                                # promoted fallback mode; send only the unsent
-                                # tail now so the gateway doesn't duplicate the
-                                # visible prefix.
-                                await self._send_fallback_final(self._accumulated)
-                        elif not self._already_sent:
-                            # Retry after the finalize tick failed.  finalize=True
-                            # keeps stream-is-the-message adapters out of the
-                            # draft-frame branch, whose dedupe against the last
-                            # UNSEALED frame would report success with no
-                            # transport call (silent loss).
-                            self._final_response_sent = await self._send_or_edit(
-                                self._accumulated, finalize=True,
-                            )
-                            if self._final_response_sent:
-                                self._final_content_delivered = True
-                                self._record_turn_final_payload(self._accumulated)
-                    return
+        # got_done update going out as a FRESH send via the draft transport
+        # (drafts have no message id) already carries finalize=True — unlike an
+        # EDIT during draft streaming, which still needs the explicit finalize
+        # pass for REQUIRES_EDIT_FINALIZE adapters.
+        tick.draft_final_fresh_send = (
+            tick.got_done and self._use_draft_streaming and self._message_id is None
+        )
+        # Segment break finalizes so platforms needing explicit closure
+        # (DingTalk AI Cards) don't leave the previous segment stuck loading;
+        # got_done has its own finalize in _finalize_turn.
+        tick.update_visible = await self._send_or_edit(
+            display_text,
+            finalize=(tick.got_done or tick.got_segment_break),
+            # A segment-break finalize closes a preamble, not the answer.
+            is_turn_final=tick.got_done,
+        )
+        self._last_edit_time = time.monotonic()
+        # Lines stay in _tool_progress_lines for the next compose; only new
+        # progress should trigger another should_edit.
+        if self._tool_progress_active:
+            self._tool_progress_active = False
 
-                if commentary_text is not None:
-                    # Cumulative transports (stream-is-the-message drafts, WeCom
-                    # native): commentary posts as its own message and the
-                    # stream continues — resetting _accumulated would break the
-                    # append-only invariant / lose pre-commentary text.
-                    if (
-                        self._stream_is_message() and self._use_draft_streaming
-                    ) or self._use_native_streaming:
-                        await self._send_commentary(commentary_text)
-                        self._last_edit_time = time.monotonic()
-                    else:
-                        self._reset_segment_state()
-                        await self._send_commentary(commentary_text)
-                        self._last_edit_time = time.monotonic()
-                        self._reset_segment_state()
-
-                # Tool boundary: edit-based transports reset so the next chunk
-                # is a fresh message below tool progress.  Cumulative transports
-                # (stream-is-the-message drafts, WeCom native) must NOT reset —
-                # clearing _accumulated makes the next frame a non-prefix
-                # snapshot and the connector re-appends the whole answer.
-                # preserve_no_edit: "__no_edit__" (platform never returned a
-                # real id — Signal, github_comment webhook) must keep its
-                # sentinel or every tool boundary posts a new message (155
-                # comments on one PR); the continuation goes out once via
-                # _send_fallback_final.  A real id from a flood-failed edit
-                # still resets as intended.
-                if got_segment_break:
-                    if (
-                        self._stream_is_message()
-                        and self._use_draft_streaming
-                    ) or self._use_native_streaming:
-                        pass
-                    else:
-                        # If the segment-break edit didn't land (flood control /
-                        # fallback mode), _accumulated holds unseen pre-boundary
-                        # text — flush it before the reset wipes it.
-                        if (
-                            self._accumulated
-                            and not current_update_visible
-                            and self._message_id
-                            and self._message_id != "__no_edit__"
-                        ):
-                            await self._flush_segment_tail_on_edit_failure()
-                        self._reset_segment_state(preserve_no_edit=True)
-
-                # Done last so the waiter unblocks only once everything queued
-                # before the barrier is on screen.
-                if got_flush:
-                    self._signal_flush(flush_event)
-
-                await asyncio.sleep(0.05)  # Small yield to not busy-loop
-
-        except asyncio.CancelledError:
-            # Best-effort final edit.  finalize=True so REQUIRES_EDIT_FINALIZE
-            # platforms apply formatting (the flags below suppress the gateway's
-            # formatted re-send); is_turn_final=False because this handler owns
-            # the flags, not _try_fresh_final.
-            _best_effort_ok = False
-            if self._accumulated and self._message_id:
-                with contextlib.suppress(Exception):
-                    _best_effort_ok = bool(
-                        await self._send_or_edit(
-                            self._accumulated, finalize=True, is_turn_final=False,
-                        )
-                    )
-            elif self._message_id is None:
-                # Draft path keeps _message_id=None, so the edit above never
-                # runs for it; seal in place (else the stream stays visibly
-                # live and the adapter keeps armed interception state for the
-                # next turn).  Sets no delivery flags.
-                await self._abandon_native_stream()
-            # Only a successful best-effort edit confirms delivery — a partial
-            # send (already_sent) may be just "Let me search…", not the answer.
-            if _best_effort_ok and not self._final_response_sent:
+    async def _finalize_turn(self, tick: "_Tick") -> None:
+        """got_done: final edit without cursor, or one continuation send if edits failed mid-stream."""
+        if self._accumulated or self._message_id is not None or self._already_sent:
+            await self._notify_before_finalize()
+        if (
+            self._awaiting_reopen_after_boundary
+            and not self._native_stream_opened
+            and not self._accumulated
+        ):
+            # Lazy reopen, no post-prompt content: nothing is open on screen,
+            # so don't re-seed just to emit a lone "✅".
+            logger.debug(
+                "Clarify reopen boundary with no post-prompt content "
+                "— skipping lone-placeholder finalize (turn=%s)",
+                self._turn_id,
+            )
+        elif (
+            self._reopen_seeded_eagerly
+            and self._native_stream_opened
+            and not self._accumulated
+            and not tick.update_visible
+        ):
+            # Eager seed, no content: the typing bubble IS on screen and would
+            # hang forever — close it with an empty finalize (not a lone "✅").
+            # Delivery flags untouched.
+            try:
+                await self._send_frame("", finalize=True)
+            except Exception as e:
+                logger.debug("Eager-seed empty finalize failed: %s", e)
+            self._close_native_state()
+            self._reopen_seeded_eagerly = False
+            logger.debug(
+                "Eager reopen seed but no post-answer content — "
+                "closed empty typing bubble (turn=%s)",
+                self._turn_id,
+            )
+        elif self._use_native_streaming:
+            # Native streams MUST close with finish=true even when empty
+            # (tool-only turns) — placeholder if needed.
+            if not tick.update_visible:
+                await self._finalize_edit(self._accumulated or "✅", record=False)
+            else:
                 self._final_response_sent = True
                 self._final_content_delivered = True
-                self._record_turn_final_payload(self._accumulated)
-        except Exception as e:
-            logger.error("Stream consumer error: %s", e)
-        finally:
-            # Wake any still-queued _FLUSH waiters so a consumer dying mid-flush
-            # doesn't stall flush_pending_sync() for its full timeout.
-            try:
-                while True:
-                    item = self._queue.get_nowait()
-                    if (
-                        isinstance(item, tuple)
-                        and len(item) == 2
-                        and item[0] is _FLUSH
-                    ):
-                        self._signal_flush(item[1])
-            except queue.Empty:
-                pass
-            except Exception:
-                pass
+        elif self._accumulated:
+            await self._finalize_edit_path(tick)
+
+    async def _finalize_edit_path(self, tick: "_Tick") -> None:
+        """Edit-transport finalize (the non-native got_done branches)."""
+        if self._fallback_final_send:
+            await self._send_fallback_final(self._accumulated)
+        elif self._final_response_sent:
+            # Fresh-final already delivered above; a second finalize would
+            # duplicate / re-delete.
+            self._final_content_delivered = True
+            self._record_turn_final_payload(self._accumulated)
+        elif tick.update_visible and (
+            not self._adapter_requires_finalize
+            or self._last_edit_overflowed
+            or tick.draft_final_fresh_send
+        ):
+            # The update above already delivered the final.  A second finalize
+            # would re-edit an already-final message (Telegram: sendRichMessage
+            # followed by editMessageText falls back to the legacy formatter),
+            # or overflow-split again into an adopted continuation,
+            # duplicating chunks.
+            self._mark_skip_redundant_finalize()
+        elif self._message_id:
+            # No visible update this tick, or the adapter needs explicit finalize=True.
+            ok = await self._finalize_edit(self._accumulated)
+            if not ok and self._fallback_final_send:
+                # This edit may have exhausted flood strikes and promoted
+                # fallback mode; send only the unsent tail now so the gateway
+                # doesn't duplicate the visible prefix.
+                await self._send_fallback_final(self._accumulated)
+        elif not self._already_sent:
+            # Retry after the finalize tick failed.  finalize=True keeps
+            # stream-is-the-message adapters out of the draft-frame branch,
+            # whose dedupe against the last UNSEALED frame would report
+            # success with no transport call (silent loss).
+            await self._finalize_edit(self._accumulated)
+
+    async def _finalize_edit(self, text: str, *, record: bool = True) -> bool:
+        """finalize=True send_or_edit; on success mark the turn delivered (and record the payload)."""
+        self._final_response_sent = await self._send_or_edit(text, finalize=True)
+        if self._final_response_sent:
+            self._final_content_delivered = True
+            if record:
+                self._record_turn_final_payload(text)
+        return self._final_response_sent
+
+    def _cumulative_transport(self) -> bool:
+        """Stream-is-the-message drafts and WeCom native: one append-only stream per turn."""
+        return (
+            self._stream_is_message() and self._use_draft_streaming
+        ) or self._use_native_streaming
+
+    async def _deliver_commentary(self, commentary_text: str) -> None:
+        """Cumulative transports post commentary as its own message and the
+        stream continues — resetting _accumulated would break the append-only
+        invariant / lose pre-commentary text."""
+        if self._cumulative_transport():
+            await self._send_commentary(commentary_text)
+            self._last_edit_time = time.monotonic()
+        else:
+            self._reset_segment_state()
+            await self._send_commentary(commentary_text)
+            self._last_edit_time = time.monotonic()
+            self._reset_segment_state()
+
+    async def _end_segment(self, tick: "_Tick") -> None:
+        """Tool boundary: edit-based transports reset so the next chunk is a fresh message below tool progress.
+
+        Cumulative transports must NOT reset — clearing _accumulated makes the
+        next frame a non-prefix snapshot and the connector re-appends the
+        whole answer.  preserve_no_edit: "__no_edit__" (platform never
+        returned a real id — Signal, github_comment webhook) must keep its
+        sentinel or every tool boundary posts a new message (155 comments on
+        one PR); the continuation goes out once via _send_fallback_final.  A
+        real id from a flood-failed edit still resets as intended.
+        """
+        if self._cumulative_transport():
+            return
+        # If the segment-break edit didn't land (flood control / fallback
+        # mode), _accumulated holds unseen pre-boundary text — flush it
+        # before the reset wipes it.
+        if (
+            self._accumulated
+            and not tick.update_visible
+            and self._message_id
+            and self._message_id != "__no_edit__"
+        ):
+            await self._flush_segment_tail_on_edit_failure()
+        self._reset_segment_state(preserve_no_edit=True)
+
+    async def _on_cancelled(self) -> None:
+        """Best-effort final edit on task cancel.
+
+        finalize=True so REQUIRES_EDIT_FINALIZE platforms apply formatting
+        (the flags set here suppress the gateway's formatted re-send);
+        is_turn_final=False because this handler owns the flags, not
+        _try_fresh_final.  Only a successful best-effort edit confirms
+        delivery — a partial send (already_sent) may be just "Let me
+        search…", not the answer.
+        """
+        best_effort_ok = False
+        if self._accumulated and self._message_id:
+            with contextlib.suppress(Exception):
+                best_effort_ok = bool(
+                    await self._send_or_edit(
+                        self._accumulated, finalize=True, is_turn_final=False,
+                    )
+                )
+        elif self._message_id is None:
+            # Draft path keeps _message_id=None, so the edit above never runs
+            # for it; seal in place (else the stream stays visibly live and
+            # the adapter keeps armed interception state for the next turn).
+            # Sets no delivery flags.
+            await self._abandon_native_stream()
+        if best_effort_ok and not self._final_response_sent:
+            self._final_response_sent = True
+            self._final_content_delivered = True
+            self._record_turn_final_payload(self._accumulated)
+
+    def _wake_flush_waiters(self) -> None:
+        """Wake still-queued _FLUSH waiters so a consumer dying mid-flush
+        doesn't stall flush_pending_sync() for its full timeout."""
+        try:
+            while True:
+                item = self._queue.get_nowait()
+                if isinstance(item, tuple) and len(item) == 2 and item[0] is _FLUSH:
+                    self._signal_flush(item[1])
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
 
     # Shared with the non-streaming path so a MEDIA tag is treated identically
     # either way (only deliverable-extension paths are stripped).
     _MEDIA_RE = MEDIA_TAG_CLEANUP_RE
+
+    # Tuple-shaped queue items keyed on (sentinel, arity); handler returns True
+    # to stop draining.  Order-insensitive: each sentinel is a distinct object.
+    _QUEUE_TUPLE_HANDLERS = {
+        (_FINAL_TEXT, 2): _on_final_text,
+        (_APPROVAL_BOUNDARY, 3): _on_approval_boundary,
+        (_COMMENTARY, 2): _on_commentary,
+        (_FLUSH, 2): _on_flush,
+        (_TOOL_PROGRESS, 2): _on_tool_progress,
+    }
 
     @staticmethod
     def _clean_for_display(text: str) -> str:
@@ -1769,9 +1853,7 @@ class GatewayStreamConsumer:
         leaves the complete streamed preview authoritative).
         """
         # Segment-scoped only: never delete an earlier finalized preamble.
-        stale_ids = set(self._segment_preview_message_ids)
-        if self._message_id and self._message_id != "__no_edit__":
-            stale_ids.add(str(self._message_id))
+        stale_ids = self._stale_preview_ids(segment_only=True)
 
         result = None
         for attempt in range(2):
@@ -1809,25 +1891,11 @@ class GatewayStreamConsumer:
             )
 
         new_message_id = getattr(result, "message_id", None)
-        delete_fn = getattr(self.adapter, "delete_message", None)
-        if delete_fn is not None:
-            for stale_id in stale_ids:
-                if not stale_id or stale_id == new_message_id:
-                    continue
-                try:
-                    deleted = await delete_fn(self.chat_id, stale_id)
-                    if deleted is False:
-                        # Telegram reports delete failure by returning False;
-                        # the flood window that broke the finalize can reject
-                        # this too.  One bounded retry, then best-effort.
-                        await asyncio.sleep(1.0)
-                        await delete_fn(self.chat_id, stale_id)
-                except Exception as exc:
-                    logger.debug(
-                        "Empty fallback preview cleanup failed (%s): %s",
-                        stale_id,
-                        exc,
-                    )
+        # Telegram reports delete failure by returning False; the flood window
+        # that broke the finalize can reject this too — one bounded retry.
+        await self._delete_previews(
+            stale_ids, skip=new_message_id, label="Empty fallback", retry_on_false=True,
+        )
 
         self._segment_preview_message_ids = set()
         self._message_id = new_message_id or "__no_edit__"
@@ -1956,15 +2024,12 @@ class GatewayStreamConsumer:
         # gets from _metadata_for_send: the relay adapter keys draft/seal state
         # on it, else the final can't find the open stream (flat DMs have no
         # thread metadata and would key on the bare chat).
-        _md = dict(self.metadata) if self.metadata else {}
-        if self._initial_reply_to_id:
-            _md.setdefault("reply_to_message_id", self._initial_reply_to_id)
         try:
             result = await self.adapter.send_draft(
                 chat_id=self.chat_id,
                 draft_id=self._draft_id,
                 content=text,
-                metadata=_md or None,
+                metadata=self._draft_metadata(),
             )
         except Exception as e:
             logger.debug(
@@ -1997,13 +2062,10 @@ class GatewayStreamConsumer:
         if abandon is None:
             return
         try:
-            _md = dict(self.metadata) if self.metadata else {}
-            if self._initial_reply_to_id:
-                _md.setdefault("reply_to_message_id", self._initial_reply_to_id)
             await self.adapter.abandon_open_draft(
                 self.chat_id,
                 self._last_sent_text or self._clean_for_display(self._accumulated),
-                metadata=_md or None,
+                metadata=self._draft_metadata(),
             )
         except Exception as e:
             logger.debug("abandon_open_draft failed (best-effort): %s", e)
@@ -2176,9 +2238,7 @@ class GatewayStreamConsumer:
         # delivered text — take the edit path instead.
         if self._turn_split_delivery:
             return False
-        stale_ids = set(self._preview_message_ids)
-        if self._message_id and self._message_id != "__no_edit__":
-            stale_ids.add(self._message_id)
+        stale_ids = self._stale_preview_ids()
         try:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
@@ -2192,18 +2252,7 @@ class GatewayStreamConsumer:
             return False
         new_message_id = getattr(result, "message_id", None)
         # Best-effort preview cleanup; never delete the message just sent.
-        delete_fn = getattr(self.adapter, "delete_message", None)
-        if delete_fn is not None:
-            for stale_id in stale_ids:
-                if not stale_id or stale_id == "__no_edit__" or stale_id == new_message_id:
-                    continue
-                try:
-                    await delete_fn(self.chat_id, stale_id)
-                except Exception as e:
-                    logger.debug(
-                        "Fresh-final preview cleanup failed (%s): %s",
-                        stale_id, e,
-                    )
+        await self._delete_previews(stale_ids, skip=new_message_id, label="Fresh-final")
         self._preview_message_ids = set()
         if new_message_id:
             self._message_id = new_message_id
@@ -2230,36 +2279,16 @@ class GatewayStreamConsumer:
         # (e.g. from an eager re-seed) with an empty finalize so it doesn't hang.
         if self._native_stream_opened:
             try:
-                await self.adapter.send_stream_frame(
-                    "",
-                    finalize=True,
-                    chat_id=self.chat_id,
-                    reply_to=self._initial_reply_to_id,
-                    turn_id=self._turn_id,
-                )
+                await self._send_frame("", finalize=True)
             except Exception as e:
                 logger.debug(
                     "Silence-marker native stream close failed: %s", e,
                 )
-            self._native_stream_opened = False
-            self._native_last_pushed_len = 0
+            self._close_native_state()
             self._reopen_seeded_eagerly = False
 
-        stale_ids = set(self._preview_message_ids)
-        if self._message_id and self._message_id != "__no_edit__":
-            stale_ids.add(self._message_id)
-        delete_fn = getattr(self.adapter, "delete_message", None)
-        if delete_fn is not None:
-            for stale_id in stale_ids:
-                if not stale_id or stale_id == "__no_edit__":
-                    continue
-                try:
-                    await delete_fn(self.chat_id, stale_id)
-                except Exception as e:
-                    logger.debug(
-                        "Silence-marker preview cleanup failed (%s): %s",
-                        stale_id, e,
-                    )
+        stale_ids = self._stale_preview_ids()
+        await self._delete_previews(stale_ids, label="Silence-marker")
         self._preview_message_ids = set()
         self._message_id = None
         self._accumulated = ""
@@ -2301,13 +2330,7 @@ class GatewayStreamConsumer:
             # close the thinking bubble, e.g. for a MEDIA-only response.
             if finalize and self._use_native_streaming and self._native_stream_opened:
                 try:
-                    ok = await self.adapter.send_stream_frame(
-                        "✅",
-                        finalize=True,
-                        chat_id=self.chat_id,
-                        reply_to=self._initial_reply_to_id,
-                        turn_id=self._turn_id,
-                    )
+                    ok = await self._send_frame("✅", finalize=True)
                     if ok:
                         self._final_response_sent = True
                         self._final_content_delivered = True
@@ -2331,12 +2354,7 @@ class GatewayStreamConsumer:
         # here after a boundary closed the stream.
         if self._use_native_streaming and not self._native_stream_opened and text:
             try:
-                seed_ok = await self.adapter.send_stream_frame(
-                    "",
-                    chat_id=self.chat_id,
-                    reply_to=self._initial_reply_to_id,
-                    turn_id=self._turn_id,
-                )
+                seed_ok = await self._send_seed_frame()
                 if seed_ok:
                     self._native_stream_opened = True
                     self._awaiting_reopen_after_boundary = False
@@ -2377,13 +2395,7 @@ class GatewayStreamConsumer:
 
             ok = False
             try:
-                ok = await self.adapter.send_stream_frame(
-                    text,
-                    finalize=finalize,
-                    chat_id=self.chat_id,
-                    reply_to=self._initial_reply_to_id,
-                    turn_id=self._turn_id,
-                )
+                ok = await self._send_frame(text, finalize=finalize)
             except Exception as e:
                 logger.debug(
                     "send_stream_frame raised, disabling native streaming: %s", e,
@@ -2414,13 +2426,7 @@ class GatewayStreamConsumer:
             # but still opens it — hence _native_stream_opened, not pushed_len).
             if self._native_stream_opened:
                 try:
-                    await self.adapter.send_stream_frame(
-                        text,
-                        finalize=True,
-                        chat_id=self.chat_id,
-                        reply_to=self._initial_reply_to_id,
-                        turn_id=self._turn_id,
-                    )
+                    await self._send_frame(text, finalize=True)
                     logger.debug("Native fallback: finalized stream (best-effort close)")
                     # DO NOT mark delivered: the frame closes the bubble but
                     # WeCom may not render the content (errcode 6000 race).
