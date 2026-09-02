@@ -2384,41 +2384,24 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     if reasoning_text:
         reasoning_text = _sanitize_surrogates(reasoning_text)
 
-    # Strip inline reasoning tags (<think>…</think> etc.) from the stored
-    # assistant content.  Reasoning was already captured into
-    # ``reasoning_text`` above (either from structured fields or the
-    # inline-block fallback), so the raw tags in content are redundant.
-    # Leaving them in place caused reasoning to leak to messaging
-    # platforms (#8878, #9568), inflate context on subsequent turns
-    # (#9306 observed 16% content-size reduction on a real MiniMax
-    # session), and pollute generated session titles.  One strip at the
-    # storage boundary cleans content for every downstream consumer:
-    # API replay, session transcript, gateway delivery, CLI display,
-    # compression, title generation.
+    # Strip inline <think> tags at the storage boundary — reasoning is already
+    # in ``reasoning_text``. Left in, they leaked to messaging platforms
+    # (#8878, #9568), inflated context (#9306) and polluted session titles.
     if isinstance(_san_content, str) and _san_content:
         _san_content = agent._strip_think_blocks(_san_content).strip()
 
-    # Defence-in-depth: redact credentials (PATs, API keys, Bearer tokens)
-    # from assistant content BEFORE the message enters conversation history.
-    # If the model accidentally inlines a secret in its natural-language
-    # response, catch it here at the persistence boundary so it never
-    # reaches state.db, session_*.json, gateway delivery, or compression.
-    # Respects HERMES_REDACT_SECRETS via redact_sensitive_text — no-op
-    # when disabled. (#19798)
+    # Redact credentials the model inlined in prose BEFORE the message enters
+    # history / state.db / gateway delivery. No-op when HERMES_REDACT_SECRETS
+    # is off (#19798).
     if isinstance(_san_content, str) and _san_content:
         from agent.redact import redact_sensitive_text
         _san_content = redact_sensitive_text(_san_content)
 
-    # NOTE (empty-content class fix): textless assistant turns are NOT padded
-    # here.  The single owner for "never send a turn strict wire validation
-    # rejects as empty" is ``repair_empty_non_final_messages`` in
-    # agent_runtime_helpers, which runs inside ``sanitize_api_messages`` — the
-    # unconditional pre-send chokepoint for both the main loop and the summary
-    # path.  Padding at write time was tried (a single-space pad, later a
-    # placeholder) and rejected: it forked the concept across three sites,
-    # broke codex commentary turns (content:'' is a designed state there), and
-    # a DB-side pad can't survive ``_rows_to_conversation``'s whitespace strip
-    # anyway.  Repair belongs at the send boundary, once.
+    # Textless turns are NOT padded here: ``repair_empty_non_final_messages``
+    # (inside ``sanitize_api_messages``, the pre-send chokepoint) is the single
+    # owner. Write-time padding was tried and rejected — it broke codex
+    # commentary turns (content:'' is designed there) and cannot survive
+    # ``_rows_to_conversation``'s whitespace strip.
 
     msg = stamp_message_timestamp({
         "role": "assistant",
@@ -2435,49 +2418,25 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     if raw_reasoning_content is not None:
         msg["reasoning_content"] = _sanitize_surrogates(raw_reasoning_content)
     elif assistant_tool_calls and agent._needs_thinking_reasoning_pad():
-        # DeepSeek v4 thinking mode and Kimi / Moonshot thinking mode
-        # both require reasoning_content on every assistant tool-call
-        # message. Without it, replaying the persisted message causes
-        # HTTP 400 ("The reasoning_content in the thinking mode must
-        # be passed back to the API"). Include streamed reasoning
-        # text when captured; otherwise pad with a single space —
-        # DeepSeek V4 Pro tightened validation and rejects empty
-        # string ("The reasoning content in the thinking mode must
-        # be passed back to the API"). A space satisfies non-empty
-        # checks everywhere without leaking fabricated reasoning.
+        # DeepSeek v4 / Kimi thinking modes 400 on a replayed tool-call
+        # message without reasoning_content. Pad with a single space (empty
+        # string is rejected too) without fabricating reasoning.
         # Refs #15250, #17400, #17341.
         msg["reasoning_content"] = reasoning_text or " "
 
-    # Additive fallback (refs #16844, #16884). Streaming-only providers
-    # (glm, MiniMax, gpt-5.x via aigw, Anthropic via openai-compat shims)
-    # accumulate reasoning through ``delta.reasoning_content`` chunks
-    # but never land it on the message object as a top-level attribute,
-    # so neither branch above fires and the chain-of-thought is stored
-    # only under the internal ``reasoning`` key. When the user later
-    # replays that history through a DeepSeek-v4 / Kimi thinking model,
-    # the missing ``reasoning_content`` causes HTTP 400 ("The
-    # reasoning_content in the thinking mode must be passed back to the
-    # API.").
-    #
-    # Promote the already-sanitized streamed ``reasoning_text`` to
-    # ``reasoning_content`` at write time, but ONLY when no prior branch
-    # already set it AND we actually captured reasoning text. This
-    # preserves every existing behavior:
-    #   - SDK-exposed ``reasoning_content`` (OpenAI/Moonshot/DeepSeek SDK)
-    #     still wins.
-    #   - DeepSeek tool-call ""-pad (#15250) still fires.
-    #   - Non-thinking turns with no reasoning leave the field absent,
-    #     so ``_copy_reasoning_content_for_api``'s cross-provider leak
-    #     guard (#15748) and ``reasoning``→``reasoning_content``
-    #     promotion tiers still apply at replay time.
+    # Streaming-only providers accumulate reasoning via delta chunks and never
+    # set it on the message, so neither branch above fires; replaying through
+    # a thinking model then 400s (#16844, #16884). Promote streamed reasoning
+    # ONLY when nothing set the field and text was captured: SDK-exposed
+    # reasoning_content and the tool-call pad still win, and reasoning-less
+    # turns leave the field absent so the replay-time leak guard (#15748)
+    # and promotion tiers still apply.
     if "reasoning_content" not in msg and reasoning_text:
         msg["reasoning_content"] = reasoning_text
 
     if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
-        # Pass reasoning_details back unmodified so providers (OpenRouter,
-        # Anthropic, OpenAI) can maintain reasoning continuity across turns.
-        # Each provider may include opaque fields (signature, encrypted_content)
-        # that must be preserved exactly.
+        # Preserve reasoning_details exactly (opaque signature /
+        # encrypted_content fields) for cross-turn reasoning continuity.
         raw_details = assistant_message.reasoning_details
         preserved = []
         for d in raw_details:
@@ -2495,14 +2454,10 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         if preserved:
             msg["reasoning_details"] = preserved
 
-    # Anthropic interleaved-thinking replay: when a turn interleaves signed
-    # thinking blocks with tool_use, the parallel reasoning_details +
-    # tool_calls fields lose the cross-type ordering, and reconstruction
-    # front-loads thinking — reordering signed blocks and triggering HTTP 400
-    # ("thinking ... blocks in the latest assistant message cannot be
-    # modified"). Carry the verbatim ordered block list so the adapter can
-    # replay the latest assistant message unchanged. See
-    # agent/transports/anthropic.py and agent/anthropic_adapter.py.
+    # Anthropic interleaved thinking: reasoning_details + tool_calls lose the
+    # cross-type order and reconstruction reorders signed blocks (HTTP 400
+    # "thinking blocks ... cannot be modified"). Carry the verbatim ordered
+    # block list so the adapter replays the message unchanged.
     ordered_blocks = getattr(assistant_message, "anthropic_content_blocks", None)
     if ordered_blocks:
         msg["anthropic_content_blocks"] = ordered_blocks
@@ -2562,26 +2517,13 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
                     "arguments": tool_call.function.arguments
                 },
             }
-            # Tool-call arguments are intentionally NOT redacted here. This
-            # dict enters the in-memory conversation history that is replayed
-            # to the model on every subsequent turn AND persisted to state.db,
-            # which is itself replayed verbatim on session resume
-            # (get_messages_as_conversation). Masking a credential to `***`
-            # here poisons that replay: the model reads back its own
-            # `PGPASSWORD='***' psql ...` call and copies the placeholder into
-            # the next tool call, breaking every credential-dependent command
-            # on the second turn (#43083). The masking also provided no real
-            # protection — the same secret still leaks verbatim through tool
-            # OUTPUT (file contents, command output, diffs, the compaction
-            # block), none of which this pass ever touched. Keeping secrets
-            # out of the replayable store is a separate tokenization/vault
-            # concern, not something arg-redaction can deliver without
-            # breaking replay. Storage-time redaction remains governed by the
-            # `security.redact_secrets` toggle. (#19798 introduced this;
-            # #43083 removed it.)
-            # Preserve extra_content (e.g. Gemini thought_signature) so it
-            # is sent back on subsequent API calls.  Without this, Gemini 3
-            # thinking models reject the request with a 400 error.
+            # Tool-call arguments are deliberately NOT redacted: this dict is
+            # replayed to the model every turn (and verbatim on resume), so a
+            # `***` mask gets copied into the next call and breaks every
+            # credential-dependent command (#43083). It also protected
+            # nothing — the secret still leaks via tool OUTPUT.
+            # Preserve extra_content (Gemini thought_signature) or Gemini 3
+            # thinking models 400 on the next request.
             extra = getattr(tool_call, "extra_content", None)
             if extra is not None:
                 if hasattr(extra, "model_dump"):
