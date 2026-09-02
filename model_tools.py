@@ -12,6 +12,7 @@ import json
 import re
 import asyncio
 from contextlib import contextmanager
+from dataclasses import dataclass
 from contextvars import ContextVar
 import logging
 import threading
@@ -669,6 +670,26 @@ def _sanitize_tool_error(error_msg: str) -> str:
     return f"[TOOL_ERROR] {sanitized}"
 
 
+@dataclass(frozen=True)
+class _CallIds:
+    """Identity fields of one tool call, threaded through hooks and middleware."""
+    task_id: Optional[str] = None
+    session_id: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    turn_id: Optional[str] = None
+    api_request_id: Optional[str] = None
+
+    def hook_kwargs(self) -> Dict[str, str]:
+        """The same fields with None normalized to "" (hook/middleware wire contract)."""
+        return {
+            "task_id": self.task_id or "",
+            "session_id": self.session_id or "",
+            "tool_call_id": self.tool_call_id or "",
+            "turn_id": self.turn_id or "",
+            "api_request_id": self.api_request_id or "",
+        }
+
+
 def _tool_result_observer_fields(
     tool_name: str,
     result: Any,
@@ -729,11 +750,7 @@ def _emit_post_tool_call_hook(
             tool_name=function_name,
             args=function_args,
             result=result,
-            task_id=task_id or "",
-            session_id=session_id or "",
-            tool_call_id=tool_call_id or "",
-            turn_id=turn_id or "",
-            api_request_id=api_request_id or "",
+            **_CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id).hook_kwargs(),
             duration_ms=duration_ms,
             status=status,
             error_type=error_type,
@@ -801,12 +818,7 @@ def _pre_dispatch_guards(
     function_name: str,
     function_args: Dict[str, Any],
     skip_pre_tool_call_hook: bool,
-    *,
-    task_id: Optional[str],
-    session_id: Optional[str],
-    tool_call_id: Optional[str],
-    turn_id: Optional[str],
-    api_request_id: Optional[str],
+    ids: _CallIds,
     middleware_trace: List[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], Optional[Tuple[Any, str, Optional[str]]]]:
     """Plugin pre_tool_call hook, then ACP edit approval.
@@ -822,14 +834,7 @@ def _pre_dispatch_guards(
         try:
             from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
             block_message, modified_args = _dispatch_pre_tool_call_hooks(
-                function_name,
-                function_args,
-                task_id=task_id or "",
-                session_id=session_id or "",
-                tool_call_id=tool_call_id or "",
-                turn_id=turn_id or "",
-                api_request_id=api_request_id or "",
-                middleware_trace=list(middleware_trace),
+                function_name, function_args, middleware_trace=list(middleware_trace), **ids.hook_kwargs(),
             )
             if modified_args is not None:
                 function_args = modified_args
@@ -859,12 +864,8 @@ def _execute_tool(
     function_name: str,
     function_args: Dict[str, Any],
     original_args: Dict[str, Any],
+    ids: _CallIds,
     *,
-    task_id: Optional[str],
-    session_id: Optional[str],
-    tool_call_id: Optional[str],
-    turn_id: Optional[str],
-    api_request_id: Optional[str],
     user_task: Optional[str],
     enabled_tools: Optional[List[str]],
     skip_tool_execution_middleware: bool,
@@ -879,14 +880,14 @@ def _execute_tool(
             set_current_observability_context,
         )
         approval_tokens = set_current_observability_context(
-            turn_id=turn_id or "",
-            tool_call_id=tool_call_id or "",
-            session_id=session_id or "",
+            turn_id=ids.turn_id or "",
+            tool_call_id=ids.tool_call_id or "",
+            session_id=ids.session_id or "",
         )
     except Exception:
         reset_obs = None
     try:
-        dispatch_kwargs: Dict[str, Any] = {"task_id": task_id, "session_id": session_id}
+        dispatch_kwargs: Dict[str, Any] = {"task_id": ids.task_id, "session_id": ids.session_id}
         if function_name == "execute_code":
             # Prefer the caller's list so subagents can't overwrite the
             # parent's tool set via the process-global.
@@ -904,15 +905,7 @@ def _execute_tool(
         from hermes_cli.middleware import run_tool_execution_middleware
 
         return run_tool_execution_middleware(
-            function_name,
-            function_args,
-            _dispatch,
-            original_args=original_args,
-            task_id=task_id or "",
-            session_id=session_id or "",
-            tool_call_id=tool_call_id or "",
-            turn_id=turn_id or "",
-            api_request_id=api_request_id or "",
+            function_name, function_args, _dispatch, original_args=original_args, **ids.hook_kwargs(),
         )
     finally:
         if approval_tokens is not None and reset_obs is not None:
@@ -927,12 +920,7 @@ def _apply_transform_tool_result_hook(
     function_args: Dict[str, Any],
     result: Any,
     duration_ms: int,
-    *,
-    task_id: Optional[str],
-    session_id: Optional[str],
-    tool_call_id: Optional[str],
-    turn_id: Optional[str],
-    api_request_id: Optional[str],
+    ids: _CallIds,
 ) -> Any:
     """transform_tool_result: plugins may replace the final result string.
 
@@ -949,11 +937,7 @@ def _apply_transform_tool_result_hook(
                 tool_name=function_name,
                 args=function_args,
                 result=result,
-                task_id=task_id or "",
-                session_id=session_id or "",
-                tool_call_id=tool_call_id or "",
-                turn_id=turn_id or "",
-                api_request_id=api_request_id or "",
+                **ids.hook_kwargs(),
                 duration_ms=duration_ms,
                 status=status,
                 error_type=error_type,
@@ -1002,21 +986,15 @@ def handle_function_call(
         function_args = {}
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
     function_name = _LEGACY_TOOL_ALIASES.get(function_name, function_name)
+    ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id)
     _dispatch_start = time.monotonic()
 
     def _emit(result: Any, **extra: Any) -> Any:
         """Emit post_tool_call with this call's identity fields; returns *result*."""
         _emit_post_tool_call_hook(
-            function_name=function_name,
-            function_args=function_args,
-            result=result,
-            task_id=task_id,
-            session_id=session_id,
-            tool_call_id=tool_call_id,
-            turn_id=turn_id,
-            api_request_id=api_request_id,
-            middleware_trace=list(_tool_middleware_trace),
-            **extra,
+            function_name=function_name, function_args=function_args, result=result,
+            task_id=task_id, session_id=session_id, tool_call_id=tool_call_id, turn_id=turn_id,
+            api_request_id=api_request_id, middleware_trace=list(_tool_middleware_trace), **extra,
         )
         return result
 
@@ -1052,15 +1030,7 @@ def handle_function_call(
         try:
             from hermes_cli.middleware import apply_tool_request_middleware
 
-            _tool_request_mw = apply_tool_request_middleware(
-                function_name,
-                function_args,
-                task_id=task_id or "",
-                session_id=session_id or "",
-                tool_call_id=tool_call_id or "",
-                turn_id=turn_id or "",
-                api_request_id=api_request_id or "",
-            )
+            _tool_request_mw = apply_tool_request_middleware(function_name, function_args, **ids.hook_kwargs())
             function_args = _tool_request_mw.payload
             _tool_original_args = _tool_request_mw.original_payload
             _tool_middleware_trace = _tool_request_mw.trace
@@ -1072,9 +1042,7 @@ def handle_function_call(
             return tool_error(f"{function_name} must be handled by the agent loop")
 
         function_args, blocked = _pre_dispatch_guards(
-            function_name, function_args, skip_pre_tool_call_hook,
-            task_id=task_id, session_id=session_id, tool_call_id=tool_call_id,
-            turn_id=turn_id, api_request_id=api_request_id, middleware_trace=_tool_middleware_trace,
+            function_name, function_args, skip_pre_tool_call_hook, ids, _tool_middleware_trace,
         )
         if blocked is not None:
             result, error_type, error_message = blocked
@@ -1091,21 +1059,15 @@ def handle_function_call(
         # duration_ms (monotonic) is exposed to post_tool_call / transform_tool_result.
         _dispatch_start = time.monotonic()
         result = _execute_tool(
-            function_name, function_args, _tool_original_args,
-            task_id=task_id, session_id=session_id, tool_call_id=tool_call_id, turn_id=turn_id,
-            api_request_id=api_request_id, user_task=user_task, enabled_tools=enabled_tools,
+            function_name, function_args, _tool_original_args, ids,
+            user_task=user_task, enabled_tools=enabled_tools,
             skip_tool_execution_middleware=skip_tool_execution_middleware,
         )
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
 
         _emit(result, duration_ms=duration_ms)
 
-        result = _apply_transform_tool_result_hook(
-            function_name, function_args, result, duration_ms,
-            task_id=task_id, session_id=session_id, tool_call_id=tool_call_id, turn_id=turn_id,
-            api_request_id=api_request_id,
-        )
-        return result
+        return _apply_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids)
 
     except Exception as e:
         error_msg = f"Error executing {function_name}: {str(e)}"
