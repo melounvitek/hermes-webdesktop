@@ -1461,6 +1461,48 @@ def _scoped_key_env(name: str) -> str:
 # Responses API so auxiliary consumers need no changes.
 
 
+def _item_get(obj: Any, key: str, default: Any = None) -> Any:
+    """Field access for Responses output items, which may be SimpleNamespace (raw-event path) or dicts."""
+    val = getattr(obj, key, None)
+    if val is None and isinstance(obj, dict):
+        val = obj.get(key, default)
+    return val if val is not None else default
+
+
+def _parse_codex_final_response(final: Any) -> Tuple[List[str], List[Any], Any]:
+    """Split a completed Responses object into (text_parts, tool_calls, usage) in chat.completions shape."""
+    text_parts: List[str] = []
+    tool_calls_raw: List[Any] = []
+    for item in (getattr(final, "output", None) or []):
+        item_type = _item_get(item, "type")
+        if item_type == "message":
+            for part in (_item_get(item, "content") or []):
+                if _item_get(part, "type") in {"output_text", "text"}:
+                    text_parts.append(_item_get(part, "text", ""))
+        elif item_type == "function_call":
+            tool_calls_raw.append(SimpleNamespace(
+                id=_item_get(item, "call_id", ""),
+                type="function",
+                function=SimpleNamespace(
+                    name=_item_get(item, "name", ""),
+                    arguments=_item_get(item, "arguments", "{}"),
+                ),
+            ))
+    usage = None
+    resp_usage = getattr(final, "usage", None)
+    if resp_usage:
+        def _u(key: str) -> int:
+            return getattr(resp_usage, key, 0) or (
+                resp_usage.get(key, 0) if isinstance(resp_usage, dict) else 0
+            )
+        usage = SimpleNamespace(
+            prompt_tokens=_u("input_tokens"),
+            completion_tokens=_u("output_tokens"),
+            total_tokens=_u("total_tokens"),
+        )
+    return text_parts, tool_calls_raw, usage
+
+
 class _CodexCompletionsAdapter:
     """Drop-in shim routing chat.completions.create() kwargs through Codex Responses streaming."""
 
@@ -1468,7 +1510,8 @@ class _CodexCompletionsAdapter:
         self._client = real_client
         self._model = model
 
-    def create(self, **kwargs) -> Any:
+    def _build_responses_kwargs(self, kwargs: Dict[str, Any]) -> Tuple[Dict[str, Any], str, Any]:
+        """Translate chat.completions kwargs into Responses API kwargs; returns ``(resp_kwargs, model, timeout)``."""
         messages = kwargs.get("messages", [])
         model = kwargs.get("model", self._model)
 
@@ -1639,11 +1682,12 @@ class _CodexCompletionsAdapter:
             logger.debug(
                 "Codex auxiliary: prompt_cache_key derivation skipped", exc_info=True
             )
+        return resp_kwargs, model, timeout
+
+    def create(self, **kwargs) -> Any:
+        resp_kwargs, model, timeout = self._build_responses_kwargs(kwargs)
 
         # Stream and collect the response
-        text_parts: List[str] = []
-        tool_calls_raw: List[Any] = []
-        usage = None
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
         # Progress-aware deadlines, three regimes: (1) first substantive payload must
         # arrive within ``no_progress_timeout`` or we fail fast into the caller's
@@ -1688,6 +1732,25 @@ class _CodexCompletionsAdapter:
             with deadline_lock:
                 return min(hard_deadline, progress_deadline[0])
 
+        def _close_shared_client(failure_note: str) -> None:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.debug("Codex auxiliary: %s", failure_note, exc_info=True)
+
+        def _close_attempt_stream(failure_note: str) -> None:
+            # Closes only this attempt's stream — never the process-shared client.
+            with attempt_stream_lock:
+                stream = attempt_stream[0] if attempt_stream else None
+            close_stream = getattr(stream, "close", None)
+            if callable(close_stream):
+                try:
+                    close_stream()
+                except Exception:
+                    logger.debug("Codex auxiliary: %s", failure_note, exc_info=True)
+
         def _record_stream_progress() -> None:
             # Substantive payload re-arms the no-progress window; hard ceiling never moves.
             with deadline_lock:
@@ -1731,18 +1794,7 @@ class _CodexCompletionsAdapter:
                 # so never close/evict it here (would disrupt unrelated sessions);
                 # wake only this attempt's stream if responses.create() returned one,
                 # otherwise rely on the bounded SDK/provider timeout.
-                with attempt_stream_lock:
-                    stream = attempt_stream[0] if attempt_stream else None
-                close_stream = getattr(stream, "close", None)
-                if callable(close_stream):
-                    try:
-                        close_stream()
-                    except Exception:
-                        logger.debug(
-                            "Codex auxiliary: cancelled attempt stream close "
-                            "during timeout failed",
-                            exc_info=True,
-                        )
+                _close_attempt_stream("cancelled attempt stream close during timeout failed")
                 return
             # FD-ownership contract: only the thread driving the request may
             # ``close()`` this client's FDs. From a stranger thread (the watchdog
@@ -1752,12 +1804,7 @@ class _CodexCompletionsAdapter:
             # corrupts that file. The owner does the real close in its ``finally``.
             timeout_release_pending.set()
             if threading.get_ident() == owner_tid:
-                close = getattr(self._client, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        logger.debug("Codex auxiliary: client close during timeout failed", exc_info=True)
+                _close_shared_client("client close during timeout failed")
             else:
                 try:
                     from agent.agent_runtime_helpers import force_close_tcp_sockets
@@ -1774,18 +1821,7 @@ class _CodexCompletionsAdapter:
                 # may be blocked inside the SDK's event stream (or a socketless test
                 # double). Closing the attempt-owned stream releases it without
                 # touching the shared client's FDs.
-                with attempt_stream_lock:
-                    stream = attempt_stream[0] if attempt_stream else None
-                close_stream = getattr(stream, "close", None)
-                if callable(close_stream):
-                    try:
-                        close_stream()
-                    except Exception:
-                        logger.debug(
-                            "Codex auxiliary: attempt stream close during "
-                            "stranger-thread timeout failed",
-                            exc_info=True,
-                        )
+                _close_attempt_stream("attempt stream close during stranger-thread timeout failed")
             # The aux client cache wraps this same ``self._client``; drop the entry
             # so the next aux call doesn't reuse the dead transport and fail fast.
             try:
@@ -1910,40 +1946,7 @@ class _CodexCompletionsAdapter:
             if final is None:
                 raise RuntimeError("Codex auxiliary Responses stream did not return a final response")
 
-            # Output items may be SimpleNamespace (raw-event path) or dicts.
-            def _item_get(obj: Any, key: str, default: Any = None) -> Any:
-                val = getattr(obj, key, None)
-                if val is None and isinstance(obj, dict):
-                    val = obj.get(key, default)
-                return val if val is not None else default
-
-            for item in (getattr(final, "output", None) or []):
-                item_type = _item_get(item, "type")
-                if item_type == "message":
-                    for part in (_item_get(item, "content") or []):
-                        ptype = _item_get(part, "type")
-                        if ptype in {"output_text", "text"}:
-                            text_parts.append(_item_get(part, "text", ""))
-                elif item_type == "function_call":
-                    tool_calls_raw.append(SimpleNamespace(
-                        id=_item_get(item, "call_id", ""),
-                        type="function",
-                        function=SimpleNamespace(
-                            name=_item_get(item, "name", ""),
-                            arguments=_item_get(item, "arguments", "{}"),
-                        ),
-                    ))
-
-            resp_usage = getattr(final, "usage", None)
-            if resp_usage:
-                usage = SimpleNamespace(
-                    prompt_tokens=getattr(resp_usage, "input_tokens", 0)
-                        or (resp_usage.get("input_tokens", 0) if isinstance(resp_usage, dict) else 0),
-                    completion_tokens=getattr(resp_usage, "output_tokens", 0)
-                        or (resp_usage.get("output_tokens", 0) if isinstance(resp_usage, dict) else 0),
-                    total_tokens=getattr(resp_usage, "total_tokens", 0)
-                        or (resp_usage.get("total_tokens", 0) if isinstance(resp_usage, dict) else 0),
-                )
+            text_parts, tool_calls_raw, usage = _parse_codex_final_response(final)
         except Exception as exc:
             if timed_out.is_set():
                 raise TimeoutError(_timeout_message()) from exc
@@ -1958,15 +1961,7 @@ class _CodexCompletionsAdapter:
             # releases the FDs here. Gated on timeout_release_pending, NOT timed_out:
             # after a hard-cancel the shared client must stay usable for other sessions.
             if timeout_release_pending.is_set():
-                close = getattr(self._client, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        logger.debug(
-                            "Codex auxiliary: owner-thread close after timeout failed",
-                            exc_info=True,
-                        )
+                _close_shared_client("owner-thread close after timeout failed")
 
         content = "".join(text_parts).strip() or None
 
