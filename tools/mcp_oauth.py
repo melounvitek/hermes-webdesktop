@@ -1,31 +1,18 @@
 #!/usr/bin/env python3
-"""
-MCP OAuth 2.1 Client Support
+"""MCP OAuth 2.1 client support: browser authorization-code flow with PKCE.
 
-Browser-based OAuth 2.1 authorization-code flow with PKCE for MCP servers. The
-MCP SDK's ``OAuthClientProvider`` (an ``httpx.Auth``) does discovery, client
+The MCP SDK's ``OAuthClientProvider`` (an ``httpx.Auth``) does discovery, client
 identification, PKCE, exchange, refresh and step-up; this module supplies
 ``HermesTokenStorage`` (on-disk persistence), the localhost callback listener,
 and ``build_oauth_auth()`` (legacy entry point). Per the MCP 2026-07-28 spec the
 client_id is Hermes' published Client ID Metadata Document URL (CIMD) when the
 server advertises support, else RFC 7591 dynamic client registration (DCR).
 
-Configuration in config.yaml::
-
-    mcp_servers:
-      my_server:
-        url: "https://mcp.example.com/mcp"
-        auth: oauth
-        oauth:                                  # all fields optional
-          client_id: "pre-registered-id"        # skip dynamic registration
-          client_secret: "secret"               # confidential clients only
-          scope: "read write"                   # default: server-provided
-          redirect_port: 0                      # 0 = auto-pick free port
-          redirect_uri: "https://proxy/callback"  # default: loopback callback
-          redirect_host: "localhost"            # loopback hostname (WAF-safe)
-          client_name: "My Custom Client"       # default: "Hermes Agent"
-          client_metadata_url: "https://me/cimd.json"  # self-hosted CIMD
-          cimd: false                           # force DCR for this server
+``mcp_servers.<name>.oauth`` keys (all optional): ``client_id`` (skip DCR),
+``client_secret`` (confidential clients), ``scope``, ``redirect_port`` (0 =
+auto), ``redirect_uri`` (proxy callback), ``redirect_host`` (loopback hostname,
+WAF-safe), ``client_name`` (default "Hermes Agent"), ``client_metadata_url``
+(self-hosted CIMD), ``cimd: false`` (force DCR), ``user_agent``, ``timeout``.
 """
 
 import asyncio
@@ -54,7 +41,9 @@ logger = logging.getLogger(__name__)
 
 # Lazy SDK imports: availability is detected WITHOUT importing mcp (~170 ms).
 # Module-level names stay None placeholders so tests can patch.object them;
-# _ensure_sdk_loaded() binds the real classes on first use.
+# _ensure_sdk_loaded() binds the real classes on first use. _SDK_CLASSES caches
+# them so a test that patches a name and restores it to None afterwards doesn't
+# strand the module in a broken state.
 _OAUTH_AVAILABLE = _importlib_util.find_spec("mcp") is not None
 if not _OAUTH_AVAILABLE:
     logger.debug("MCP OAuth types not available -- OAuth MCP auth disabled")
@@ -65,8 +54,6 @@ OAuthClientMetadata: Any = None
 OAuthMetadata: Any = None
 OAuthToken: Any = None
 
-# Cache of the real SDK classes so a test that patches a name and restores it
-# to None afterwards doesn't strand the module in a broken state.
 _SDK_CLASSES: dict[str, Any] = {}
 _SDK_LOAD_FAILED = False
 
@@ -123,16 +110,12 @@ _oauth_port: int | None = None
 # background MCP discovery sets them on the discovery thread while connect+OAuth
 # runs on the `mcp-event-loop` thread via run_coroutine_threadsafe, which copies
 # the calling context into the coroutine — a threading.local would not cross.
-_oauth_interactive_enabled: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
-    "_oauth_interactive_enabled", default=True
-)
+_oauth_interactive_enabled = contextvars.ContextVar("_oauth_interactive_enabled", default=True)
 # Forces _is_interactive() past the stdin-TTY check for GUI-driven flows
 # (dashboard/desktop REST): the browser + callback server do the work and the
 # stdin paste fallback degrades harmlessly (EOF swallowed). Suppression wins —
 # background discovery must never start a browser flow.
-_oauth_interactive_forced: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
-    "_oauth_interactive_forced", default=False
-)
+_oauth_interactive_forced = contextvars.ContextVar("_oauth_interactive_forced", default=False)
 
 # Skip tokens accepted at the paste prompt — exit OAuth without auth.
 _SKIP_TOKENS = frozenset({"skip", "cancel", "s", "n", "no", "q", "quit"})
@@ -175,11 +158,8 @@ def _park_reserved_socket(port: int, sock: socket.socket) -> None:
         stale_port = next((p for p in _reserved_sockets if p not in _CIMD_PORTS), None)
         if stale_port is None:
             break  # only pinned sockets remain — never evict those
-        stale = _reserved_sockets.pop(stale_port, None)
-        if stale is None:
-            continue
         try:
-            stale.close()
+            _reserved_sockets.pop(stale_port).close()
         except OSError:
             pass
     _reserved_sockets[port] = sock
@@ -298,13 +278,8 @@ def _can_open_browser() -> bool:
     """True if opening a browser is likely to work."""
     if os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY"):
         return False  # explicit SSH session → no local display
-    if os.name == "nt":
+    if os.name == "nt" or (hasattr(os, "uname") and os.uname().sysname == "Darwin"):
         return True
-    try:
-        if os.uname().sysname == "Darwin":
-            return True
-    except AttributeError:
-        pass
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
@@ -599,10 +574,7 @@ def _result_taken(result: dict) -> bool:
 
 
 def _fill_result(result: dict, parsed: dict[str, Any]) -> None:
-    result["auth_code"] = parsed["code"]
-    result["state"] = parsed["state"]
-    result["error"] = parsed["error"]
-    result["iss"] = parsed["iss"]
+    result.update(auth_code=parsed["code"], state=parsed["state"], error=parsed["error"], iss=parsed["iss"])
 
 
 def _make_callback_handler() -> tuple[type, dict]:
@@ -912,17 +884,12 @@ def remove_oauth_tokens(server_name: str, *, hermes_home: str | Path | None = No
 # deploy. The github.io origin is deliberate: an authorization server MUST NOT
 # follow HTTP redirects when fetching the document, and
 # hermes-agent.nousresearch.com/docs/* 301s here.
-_CIMD_CLIENT_METADATA_URL = (
-    "https://nousresearch.github.io/hermes-agent/docs/oauth/client-metadata.json"
-)
-
-# Loopback callback ports declared in that document. The redirect URI must be
-# an exact string match against a listed one, so a CIMD flow cannot use an
-# ephemeral port. Below Linux's 32768 ephemeral floor so the kernel never hands
-# one to another process. Keep in sync with the document
+_CIMD_CLIENT_METADATA_URL = "https://nousresearch.github.io/hermes-agent/docs/oauth/client-metadata.json"
+# Loopback callback ports declared in that document (exact string match, so a
+# CIMD flow cannot use an ephemeral port). Below Linux's 32768 ephemeral floor so
+# the kernel never hands one to another process. Keep in sync with the document
 # (tests/tools/test_mcp_cimd.py enforces it).
 _CIMD_PORTS = (27890, 27891, 27892, 27893, 27894)
-
 # Loopback hostnames the document lists alongside each port, so the
 # ``oauth.redirect_host: localhost`` WAF workaround still works under CIMD.
 _CIMD_REDIRECT_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -947,9 +914,7 @@ def _is_valid_cimd_url(url: str) -> bool:
         has_userinfo = bool(parsed.username or parsed.password)  # netloc parse can raise
     except ValueError:
         return False
-    if has_userinfo or parsed.fragment:
-        return False
-    return not any(seg in {".", ".."} for seg in parsed.path.split("/"))
+    return not (has_userinfo or parsed.fragment or any(seg in {".", ".."} for seg in parsed.path.split("/")))
 
 
 # Pinned ports this process has committed to, in order taken. A provider is
@@ -977,9 +942,7 @@ def _pick_cimd_port() -> int | None:
     unsupported by the server entirely.
     """
     for port in _CIMD_PORTS:
-        if port in _assigned_cimd_ports:
-            continue
-        if _bind_reserved(port) is not None:
+        if port not in _assigned_cimd_ports and _bind_reserved(port) is not None:
             _assigned_cimd_ports.append(port)
             return port
     return _assigned_cimd_ports[0] if _assigned_cimd_ports else None
@@ -1053,9 +1016,7 @@ def token_request_user_agent(cfg: dict) -> str | None:
     no other headers are configurable (secrets would land in config.yaml).
     """
     ua = cfg.get("user_agent")
-    if isinstance(ua, str) and ua.strip():
-        return ua.strip()
-    return None
+    return ua.strip() if isinstance(ua, str) and ua.strip() else None
 
 
 def _configure_callback_port(cfg: dict, storage: "HermesTokenStorage | None" = None) -> int:
@@ -1100,11 +1061,7 @@ def _resolve_redirect_uri(cfg: dict, port: int) -> str:
     authorize query, and ``localhost`` works around it. The listener still binds
     ``127.0.0.1``.
     """
-    configured = cfg.get("redirect_uri")
-    if configured:
-        return configured
-    host = cfg.get("redirect_host") or "127.0.0.1"
-    return f"http://{host}:{port}/callback"
+    return cfg.get("redirect_uri") or f"http://{cfg.get('redirect_host') or '127.0.0.1'}:{port}/callback"
 
 
 # Figma's remote MCP implements DCR as a client_name *allowlist*: "Claude Code"
@@ -1119,9 +1076,7 @@ def _is_figma_remote_mcp(server_name: str | None = None, server_url: str | None 
     url = (server_url or "").lower()
     name = (server_name or "").lower()
     from utils import base_url_host_matches, base_url_hostname
-    if base_url_host_matches(url, "mcp.figma.com") or (
-        base_url_host_matches(url, "figma.com") and "/mcp" in url
-    ):
+    if base_url_host_matches(url, "mcp.figma.com") or (base_url_host_matches(url, "figma.com") and "/mcp" in url):
         return True
     # Name-only match only when the URL isn't some other host called figma-*.
     return "figma" in name and (not url or "figma" in base_url_hostname(url))
@@ -1156,9 +1111,7 @@ def _build_client_metadata(cfg: dict) -> "OAuthClientMetadata":
     """Build OAuthClientMetadata; requires ``_configure_callback_port`` first."""
     port = cfg.get("_resolved_port")
     if port is None:
-        raise ValueError(
-            "_configure_callback_port() must be called before _build_client_metadata()"
-        )
+        raise ValueError("_configure_callback_port() must be called before _build_client_metadata()")
     if OAuthClientMetadata is None:
         _ensure_sdk_loaded()
     # Public client by default; confidential only with a known secret or a
@@ -1241,10 +1194,8 @@ def _maybe_preregister_client(storage: "HermesTokenStorage", cfg: dict, client_m
         "grant_types": client_metadata.grant_types,
         "response_types": client_metadata.response_types,
         "token_endpoint_auth_method": client_metadata.token_endpoint_auth_method,
+        **{key: cfg[key] for key in ("client_secret", "client_name", "scope") if cfg.get(key)},
     }
-    for key in ("client_secret", "client_name", "scope"):
-        if cfg.get(key):
-            info_dict[key] = cfg[key]
     client_info = OAuthClientInformationFull.model_validate(info_dict)
     _write_json(storage._client_info_path(), client_info.model_dump(mode="json", exclude_none=True))
     logger.debug("Pre-registered client_id=%s for '%s'", client_id, storage._server_name)
