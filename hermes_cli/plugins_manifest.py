@@ -26,7 +26,6 @@ logger = logging.getLogger("hermes_cli.plugins")
 
 def _plugins_debug() -> bool:
     from hermes_cli import plugins as _origin
-
     return _origin._PLUGINS_DEBUG
 
 
@@ -226,7 +225,6 @@ def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List
     but never removes the dependent plugin (loads never hard-fail on advisory deps).
     """
     import graphlib
-
     keys = sorted(manifests.keys())
     by_name: Dict[str, str] = {}
     for k in keys:
@@ -410,7 +408,6 @@ class PluginManifest:
 def portable_plugin_manifest(child: Path, source: str, prefix: str) -> PluginManifest:
     """Build the manifest for a portable Agent Plugin directory (``plugin.json``); diagnostics warn."""
     from hermes_cli.agent_plugins import read_agent_plugin_manifest
-
     data, diagnostics = read_agent_plugin_manifest(child)
     for diagnostic in diagnostics:
         logger.warning("Agent Plugin '%s': %s", child, diagnostic.message)

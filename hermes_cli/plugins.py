@@ -43,21 +43,12 @@ from hermes_cli.plugins_manifest import (  # noqa: F401 — re-exported
     parse_manifest_file,
     portable_plugin_manifest,
     _CONFIG_SCHEMA_TYPES,
-    _KNOWN_MANIFEST_FIELDS,
-    _VALID_PLUGIN_KINDS,
     SUPPORTED_MANIFEST_VERSION,
     PluginManifest,
-    _detect_kind_from_source,
-    _display_author,
-    _manifest_field_of_type,
-    _parse_manifest_v2_fields,
     _portable_skill_namespace,
-    _read_source_from_origin,
-    _resolve_module_source,
     resolve_module_origin,
     resolve_plugin_load_order,
     validate_config_schema,
-    yaml,
 )
 from hermes_cli.plugins_discovery import (  # noqa: F401 — re-exported
     collect_directory_manifests,
@@ -65,10 +56,8 @@ from hermes_cli.plugins_discovery import (  # noqa: F401 — re-exported
     scan_directory,
     ENTRY_POINT_CAPABILITIES_GROUP,
     ENTRY_POINTS_GROUP,
-    _classify_entrypoint_value_kind,
     _get_disabled_plugins,
     _get_enabled_plugins,
-    _select_entry_point_group,
     discover_entrypoint_manifests,
 )
 from hermes_cli.plugins_loader import (  # noqa: F401 — re-exported
@@ -82,9 +71,6 @@ from hermes_cli.plugins_loader import (  # noqa: F401 — re-exported
 )
 from hermes_cli.plugins_dispatch import (  # noqa: F401 — re-exported
     PluginDispatchMixin,
-    _HOOK_TIMEOUT_BOUNDED_HOOKS,
-    _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS,
-    _HOOK_CALLER_THREAD_HOOKS,
     _HOOK_TIMEOUT_SUPPRESSION_SECONDS,
     _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE,
     SYSTEM_PROMPT_SECTION_POSITIONS,
@@ -92,8 +78,6 @@ from hermes_cli.plugins_dispatch import (  # noqa: F401 — re-exported
     MAX_SYSTEM_PROMPT_SECTION_CHARS,
     MAX_SYSTEM_PROMPT_SECTIONS,
     MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS,
-    _SYSTEM_PROMPT_SECTION_ID_RE,
-    _SYSTEM_PROMPT_SECTION_HEADING_PREFIX,
     PLUGIN_SECTIONS_START,
     PLUGIN_SECTIONS_END,
     is_valid_system_prompt_section_id,
@@ -102,35 +86,22 @@ from hermes_cli.plugins_dispatch import (  # noqa: F401 — re-exported
     HERMES_EVENT_NAMESPACE,
     _EVENT_EMIT_DEPTH_CAP,
     _EVENT_PENDING_CAP,
-    _EVENT_WORKER_STOP,
     PluginSystemPromptSection,
     RenderedPluginSystemPromptSection,
     _EventSubscription,
-    _QueuedPluginEvent,
     _HOOK_CALLBACK_TIMEOUT_SECS,
-    _HOOK_SKIPPED,
     _MAX_HOOK_CALLBACK_TIMEOUT_SECS,
-    _hook_uses_callback_timeout,
-    _pre_tool_call_timeout_block,
 )
 from hermes_cli.plugins_ledger import (  # noqa: F401 — re-exported
     PluginLedgerMixin,
     PluginRegistration,
 )
 from hermes_cli.plugins_state import (  # noqa: F401 — re-exported
-    _PLUGIN_SETTING_RESERVED_ROOTS,
-    _PLUGIN_SETTING_SEGMENT_RE,
-    _PLUGIN_STATE_KEY_RE,
-    _PLUGIN_STATE_LOCKS,
-    _PLUGIN_STATE_LOCKS_GUARD,
-    _PLUGIN_STATE_QUOTA_BYTES,
     PluginState,
     _locked_plugin_state,
     _nested_plugin_mapping,
     _nested_plugin_value,
-    _plugin_data_namespace,
     _plugin_relative_segments,
-    _state_thread_lock,
 )
 
 
@@ -320,7 +291,6 @@ class PluginContext:
             logger.warning("Rejected config path %r from plugin %s", key, self.plugin_id)
             raise
         from hermes_cli.config import load_config_readonly
-
         config = load_config_readonly() or {}
         plugins = config.get("plugins") if isinstance(config, Mapping) else None
         entries = plugins.get("entries") if isinstance(plugins, Mapping) else None
@@ -341,11 +311,9 @@ class PluginContext:
             logger.warning("Rejected config path %r from plugin %s", key, self.plugin_id)
             raise
         from hermes_cli import config as config_mod
-
         if config_mod.is_managed():
             raise PermissionError("Plugin settings cannot be changed in a managed install")
         from hermes_cli import managed_scope
-
         dotted_path = ".".join(("plugins", "entries", self.plugin_id, "settings", *segments))
         if managed_scope.is_key_managed(dotted_path):
             raise PermissionError(f"Plugin setting {dotted_path!r} is administrator-managed")
@@ -567,7 +535,6 @@ class PluginContext:
             )
 
         from tools.registry import registry
-
         scope = self._manager.scope_key
         previous = registry.snapshot_registration(name, scope=scope)
         effective = registry.get_entry(name, scope=scope)
@@ -637,7 +604,6 @@ class PluginContext:
         timeout = max(1.0, min(timeout, 600.0))
 
         from tools.mcp_tool import _make_tool_handler
-
         handler = _make_tool_handler(server, tool, timeout)
         raw = handler(dict(arguments or {}))
 
@@ -841,7 +807,6 @@ class PluginContext:
         """Dispatch a tool call through the registry with the parent agent (when available)
         resolved automatically; returns the handler's JSON string. ``kwargs`` forward to dispatch."""
         from tools.registry import registry
-
         # In gateway mode _cli_ref is None — tools degrade gracefully (no spinner, TERMINAL_CWD).
         if "parent_agent" not in kwargs:
             cli = self._manager._cli_ref
@@ -885,7 +850,6 @@ class PluginContext:
         from agent.context_references import (
             ContextReferenceProvider as _CRP, register_context_reference_provider as _register,
         )
-
         if self._wrong_type(provider, _CRP, "context reference provider"):
             return
         try:
@@ -904,7 +868,6 @@ class PluginContext:
         ``memory.provider``; a provider reaching here was loaded by the general manager, and
         without this method its ``register()`` would fail on a missing attribute."""
         from agent.memory_provider import MemoryProvider
-
         if self._wrong_type(provider, MemoryProvider, "memory provider"):
             return
         self._memory_provider = provider
@@ -922,7 +885,6 @@ class PluginContext:
         from hermes_cli.dashboard_auth.registry import (
             register_global_provider, unregister_global_provider,
         )
-
         if self._wrong_type(provider, DashboardAuthProvider, "dashboard-auth provider"):
             return
         registry_name = provider.name
@@ -963,7 +925,6 @@ class PluginContext:
         unknown keys raise TypeError.
         """
         from gateway.platform_registry import platform_registry, PlatformEntry
-
         entry_kwargs.setdefault("plugin_name", self.manifest.name)
         entry = PlatformEntry(
             name=name, label=label, adapter_factory=adapter_factory, check_fn=check_fn,
@@ -1062,7 +1023,6 @@ class PluginContext:
             )
 
         from hermes_cli.main import _AUX_TASKS as _BUILTIN_AUX_TASKS
-
         builtin_keys = {k for k, _name, _desc in _BUILTIN_AUX_TASKS}
         if key in builtin_keys:
             raise ValueError(
@@ -1109,7 +1069,6 @@ class PluginContext:
         invalid entries warn and are skipped.
         """
         from agent.redact import register_redaction_patterns as _register
-
         try:
             count = _register(patterns, source=f"plugin:{self.manifest.name}")
         except Exception as exc:
@@ -1238,7 +1197,6 @@ class PluginContext:
         Not in ``~/.hermes/skills/`` nor ``<available_skills>`` — explicit loads only. Raises
         ``ValueError`` (``':'``/invalid chars) or ``FileNotFoundError``."""
         from agent.skill_utils import _NAMESPACE_RE
-
         if ":" in name:
             raise ValueError(
                 f"Skill name '{name}' must not contain ':' "
@@ -1633,7 +1591,6 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
     ) -> None:
         """Register one plugin-owned approval transport for this profile."""
         from hermes_cli.approval_transport import RegisteredApprovalTransport
-
         clean = str(name).strip().lower()
         if clean == "builtin":
             raise ValueError("approval transport name 'builtin' is reserved")
@@ -2087,7 +2044,6 @@ def _get_pre_tool_call_directive_details(
         return _PreToolCallDirective(action="block", message=fmt.format(tool_name=tool_name))
 
     from hermes_cli.lifecycle import invoke_hook as invoke_lifecycle_hook
-
     hook_results = invoke_lifecycle_hook(
         "pre_tool_call", tool_name=tool_name, args=args if isinstance(args, dict) else {},
         task_id=task_id, session_id=session_id, tool_call_id=tool_call_id, turn_id=turn_id,
@@ -2242,7 +2198,6 @@ def get_plugin_error_classification(
     ``None``. Privacy: ``error_message``/``error_body`` may be unredacted.
     """
     from agent.error_classifier import FailoverReason
-
     hook_results = invoke_hook(
         "transform_api_error_classification", provider=provider, model=model,
         status_code=status_code, error_type=error_type, error_code=error_code,

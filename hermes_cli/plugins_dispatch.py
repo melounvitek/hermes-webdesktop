@@ -215,7 +215,6 @@ class PluginDispatchMixin:
         return ``{"context": "..."}`` (or a plain string) to inject into the turn.
         """
         from hermes_cli.plugins import _resolve_hook_callback_timeout
-
         # Gateway platform events define event-local envelopes; a bus-wide version here would turn
         # unrelated adapter payloads into one monolithic compatibility contract.
         if hook_name != "gateway_platform_event":
@@ -359,7 +358,6 @@ class PluginDispatchMixin:
     def _deliver_event(self, item: _QueuedPluginEvent) -> None:
         """Deliver one queued event on the host-owned worker thread."""
         from hermes_cli.plugins import resolve_plugin_command_result
-
         with self._event_lock:
             if item.generation != self._event_generation:
                 return

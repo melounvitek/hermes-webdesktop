@@ -85,7 +85,6 @@ class PluginLoaderMixin:
         ``platform_registry`` is first asked for it; a placeholder ``LoadedPlugin`` keeps it visible
         in ``hermes plugins list`` until then."""
         from hermes_cli.plugins import LoadedPlugin
-
         lookup_key = manifest_key(manifest)
         platform_name = self._platform_name_from_manifest(manifest)
 
@@ -141,7 +140,6 @@ class PluginLoaderMixin:
         ``tools`` submodule so ``__init__`` stays import-light.
         """
         from hermes_cli.plugins import PluginContext, _PLUGINS_DEBUG
-
         if not manifest.provides_tools:
             return
 
@@ -264,7 +262,6 @@ class PluginLoaderMixin:
     def _load_plugin_scoped(self, manifest: PluginManifest) -> None:
         """Load one plugin with the manager's home bound as current."""
         from hermes_cli.plugins import LoadedPlugin, PluginContext, _PLUGINS_DEBUG
-
         loaded = LoadedPlugin(manifest=manifest)
         logger.debug(
             "Loading plugin '%s' (source=%s, kind=%s, path=%s)",
@@ -324,7 +321,6 @@ class PluginLoaderMixin:
         from hermes_cli.plugins import PluginContext
 
         from tools.registry import registry as _registry
-
         with replacement_coordinator.transaction():
             previous_policy = _registry.snapshot_plugin_override_policy(
                 module_name, scope=self.scope_key
@@ -377,7 +373,6 @@ class PluginLoaderMixin:
     def _load_portable_plugin(self, manifest: PluginManifest, loaded: LoadedPlugin) -> None:
         """Load validated portable components without importing Python code."""
         from hermes_cli.plugins import PluginContext
-
         lookup_key = manifest_key(manifest)
         try:
             from hermes_cli.agent_plugins import load_agent_plugin

@@ -189,7 +189,6 @@ class PluginLedgerMixin:
     def _dispose_registrations(self, registrations: List[PluginRegistration]) -> None:
         """Dispose registrations in reverse acquisition order, best effort."""
         from hermes_cli.plugins import _PLUGINS_DEBUG
-
         for registration in reversed(registrations):
             try:
                 registration.dispose()
@@ -202,7 +201,6 @@ class PluginLedgerMixin:
     @staticmethod
     def _resolve_plugin_key(plugin: Union[str, PluginManifest, LoadedPlugin]) -> str:
         from hermes_cli.plugins import LoadedPlugin
-
         if isinstance(plugin, LoadedPlugin):
             return manifest_key(plugin.manifest)
         if isinstance(plugin, PluginManifest):
@@ -264,7 +262,6 @@ class PluginLedgerMixin:
         # without a ledger entry (pre-ledger or manually set state) are swept here so they do not
         # survive a force reload as zombies.
         from gateway.platform_registry import platform_registry
-
         for platform_name in tuple(self._plugin_platform_names):
             platform_registry.unregister(platform_name)
         # Ledger-owned tool names are excluded: their handles already restored the previous entry,

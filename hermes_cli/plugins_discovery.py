@@ -166,7 +166,6 @@ def collect_directory_manifests() -> List[PluginManifest]:
     opt-in project) without loading or mutating anything, so startup probes share the exact
     precedence/containment rules of the real discovery sweep."""
     from hermes_cli import plugins as _origin  # patched names resolve through the origin
-
     manifests: List[PluginManifest] = []
     # Excluded bundled top-level categories have their own discovery; platforms scan separately.
     repo_plugins = _origin.get_bundled_plugins_dir()
