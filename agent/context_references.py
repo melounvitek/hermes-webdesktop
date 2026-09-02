@@ -1,3 +1,5 @@
+"""@-reference expansion (``@file:``, ``@folder:``, ``@diff``, ``@git:``, ``@url:`` + plugin prefixes)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +9,7 @@ import mimetypes
 import os
 import re
 import subprocess
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -20,10 +23,8 @@ from hermes_cli._subprocess_compat import (
 )
 from hermes_cli.sizefmt import format_bytes
 
-from abc import ABC, abstractmethod
-
 # ---------------------------------------------------------------------------
-# Plugin context-reference provider API (Issue #26193)
+# Plugin context-reference provider API
 # ---------------------------------------------------------------------------
 
 BUILTIN_PREFIXES = frozenset({"diff", "staged", "file", "folder", "git", "url"})
@@ -43,11 +44,7 @@ class ContextCompletionItem:
 
 
 class ContextReferenceProvider(ABC):
-    """Base class for plugin-registered @-prefix context reference providers.
-
-    Plugins subclass this and register via
-    ``PluginContext.register_context_reference()``.
-    """
+    """Base class for plugin @-prefix providers, registered via ``PluginContext.register_context_reference()``."""
 
     prefix: str = ""  # e.g. "issue", "channel", "doc"
     description: str = ""  # shown in autocomplete meta column
@@ -86,8 +83,7 @@ _QUOTED_REFERENCE_VALUE = r'(?:`[^`\n]+`|"[^"\n]+"|\'[^\'\n]+\')'
 REFERENCE_PATTERN = re.compile(
     rf"(?<![\w/])@(?:(?P<simple>diff|staged)\b|(?P<kind>file|folder|git|url):(?P<value>{_QUOTED_REFERENCE_VALUE}(?::\d+(?:-\d+)?)?|\S+))"
 )
-# Plugin fallback pattern – catches any @<word>:<value> not handled by the
-# built-in regex so that plugin-registered prefixes can be resolved.
+# Plugin fallback: any @<word>:<value> the built-in regex did not claim.
 _PLUGIN_REFERENCE_PATTERN = re.compile(
     rf"(?<![\w/])@(?P<kind>[a-zA-Z][a-zA-Z0-9_-]*):(?P<value>{_QUOTED_REFERENCE_VALUE}(?::\d+(?:-\d+)?)?|\S+)"
 )
@@ -138,9 +134,8 @@ class ContextReferenceResult:
 def format_reference_value(value: str) -> str:
     """Quote a reference value so ``REFERENCE_PATTERN`` reads it back whole.
 
-    The unquoted alternative in the pattern is ``\\S+``, so a path containing a
-    space parses as a truncated ref with the tail left behind as loose text.
-    Mirrors ``formatRefValue`` in the desktop's directive-text.tsx.
+    The unquoted alternative is ``\\S+``, so a path with a space would parse as a
+    truncated ref. Mirrors ``formatRefValue`` in the desktop's directive-text.tsx.
     """
     if not _NEEDS_QUOTING.search(value):
         return value
@@ -158,26 +153,14 @@ def parse_context_references(message: str) -> list[ContextReference]:
     for match in REFERENCE_PATTERN.finditer(message):
         simple = match.group("simple")
         if simple:
-            refs.append(
-                ContextReference(
-                    raw=match.group(0),
-                    kind=simple,
-                    target="",
-                    start=match.start(),
-                    end=match.end(),
-                )
-            )
+            refs.append(ContextReference(raw=match.group(0), kind=simple, target="", start=match.start(), end=match.end()))
             continue
-
         kind = match.group("kind")
         value = _strip_trailing_punctuation(match.group("value") or "")
-        line_start = None
-        line_end = None
-        target = _strip_reference_wrappers(value)
-
         if kind == "file":
             target, line_start, line_end = _parse_file_reference_value(value)
-
+        else:
+            target, line_start, line_end = _strip_reference_wrappers(value), None, None
         refs.append(
             ContextReference(
                 raw=match.group(0),
@@ -190,26 +173,24 @@ def parse_context_references(message: str) -> list[ContextReference]:
             )
         )
 
-    # Second pass: resolve plugin-registered prefixes the built-in pattern missed
+    # Second pass: plugin-registered prefixes the built-in pattern missed.
     if _context_reference_providers:
         for match in _PLUGIN_REFERENCE_PATTERN.finditer(message):
             kind = match.group("kind")
-            if kind in BUILTIN_PREFIXES:
+            if kind in BUILTIN_PREFIXES or kind not in _context_reference_providers:
                 continue
-            # Skip if already captured by the built-in pattern
             if any(r.kind == kind and r.start == match.start() for r in refs):
                 continue
-            if kind in _context_reference_providers:
-                value = _strip_trailing_punctuation(match.group("value") or "")
-                refs.append(
-                    ContextReference(
-                        raw=match.group(0),
-                        kind=kind,
-                        target=_strip_reference_wrappers(value),
-                        start=match.start(),
-                        end=match.end(),
-                    )
+            value = _strip_trailing_punctuation(match.group("value") or "")
+            refs.append(
+                ContextReference(
+                    raw=match.group(0),
+                    kind=kind,
+                    target=_strip_reference_wrappers(value),
+                    start=match.start(),
+                    end=match.end(),
                 )
+            )
 
     return refs
 
@@ -222,6 +203,7 @@ def preprocess_context_references(
     url_fetcher: Callable[[str], str | Awaitable[str]] | None = None,
     allowed_root: str | Path | None = None,
 ) -> ContextReferenceResult:
+    """Sync wrapper; safe both without a loop (CLI) and inside a running loop (gateway)."""
     coro = preprocess_context_references_async(
         message,
         cwd=cwd,
@@ -229,7 +211,6 @@ def preprocess_context_references(
         url_fetcher=url_fetcher,
         allowed_root=allowed_root,
     )
-    # Safe for both CLI (no loop) and gateway (loop already running).
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -254,31 +235,17 @@ async def preprocess_context_references_async(
         return ContextReferenceResult(message=message, original_message=message)
 
     cwd_path = Path(cwd).expanduser().resolve()
-    # Default to the current working directory so @ references cannot escape
-    # the active workspace unless a caller explicitly widens the root.
-    allowed_root_path = (
-        Path(allowed_root).expanduser().resolve() if allowed_root is not None else cwd_path
-    )
+    # Default root = cwd so @ references cannot escape the workspace unless a caller widens it.
+    allowed_root_path = Path(allowed_root).expanduser().resolve() if allowed_root is not None else cwd_path
     warnings: list[str] = []
     blocks: list[str] = []
     injected_tokens = 0
 
-    # Expand all references concurrently. Each _expand_reference is independent
-    # (no shared state during expansion) — a message with several @url: refs
-    # would otherwise pay one full web_extract round-trip per ref in series.
-    # gather preserves positional order, so we reassemble warnings/blocks in the
-    # original ref order exactly as the prior serial loop did; the token-budget
-    # check below is unchanged (it runs once, after all refs are expanded).
+    # Expand concurrently (each ref is independent; several @url: refs would otherwise
+    # serialize web_extract round-trips). gather preserves order, so warnings/blocks
+    # are assembled in ref order; the token-budget check runs once afterwards.
     expanded = await asyncio.gather(
-        *(
-            _expand_reference(
-                ref,
-                cwd_path,
-                url_fetcher=url_fetcher,
-                allowed_root=allowed_root_path,
-            )
-            for ref in refs
-        )
+        *(_expand_reference(ref, cwd_path, url_fetcher=url_fetcher, allowed_root=allowed_root_path) for ref in refs)
     )
     for warning, block in expanded:
         if warning:
@@ -302,17 +269,14 @@ async def preprocess_context_references_async(
             expanded=False,
             blocked=True,
         )
-
     if injected_tokens > soft_limit:
         warnings.append(
             f"@ context injection warning: {injected_tokens} tokens exceeds the 25% soft limit ({soft_limit})."
         )
 
-    # Leave the `@file:`/`@folder:` tokens where the user typed them. The token
-    # IS the reference, not scaffolding around it: clients render each one as an
-    # inline chip, so stripping them left a sentence with a hole in it ("review
-    # and ship") and made the desktop re-derive the refs from the attached block
-    # to show them as a detached list above the prose.
+    # The `@file:`/`@folder:` tokens stay where the user typed them: the token IS the
+    # reference (clients render it as an inline chip); stripping it left a hole in the
+    # sentence and forced the desktop to re-derive refs from the attached block.
     final = message
     if warnings:
         final = f"{final}\n\n--- Context Warnings ---\n" + "\n".join(f"- {warning}" for warning in warnings)
@@ -330,6 +294,19 @@ async def preprocess_context_references_async(
     )
 
 
+def _git_log_args(ref: ContextReference) -> list[str]:
+    count = max(1, min(int(ref.target or "1"), 10))
+    return ["log", f"-{count}", "-p"]
+
+
+# Git-backed reference kinds -> f(ref) -> git argv (the label is "git " + argv).
+_GIT_REFERENCE_ARGS: dict[str, Callable[[ContextReference], list[str]]] = {
+    "diff": lambda ref: ["diff"],
+    "staged": lambda ref: ["diff", "--staged"],
+    "git": _git_log_args,
+}
+
+
 async def _expand_reference(
     ref: ContextReference,
     cwd: Path,
@@ -337,18 +314,15 @@ async def _expand_reference(
     url_fetcher: Callable[[str], str | Awaitable[str]] | None = None,
     allowed_root: Path | None = None,
 ) -> tuple[str | None, str | None]:
+    """Return ``(warning, block)`` for one reference; exactly one side is set."""
     try:
         if ref.kind == "file":
             return _expand_file_reference(ref, cwd, allowed_root=allowed_root)
         if ref.kind == "folder":
             return _expand_folder_reference(ref, cwd, allowed_root=allowed_root)
-        if ref.kind == "diff":
-            return _expand_git_reference(ref, cwd, ["diff"], "git diff")
-        if ref.kind == "staged":
-            return _expand_git_reference(ref, cwd, ["diff", "--staged"], "git diff --staged")
-        if ref.kind == "git":
-            count = max(1, min(int(ref.target or "1"), 10))
-            return _expand_git_reference(ref, cwd, ["log", f"-{count}", "-p"], f"git log -{count} -p")
+        if ref.kind in _GIT_REFERENCE_ARGS:
+            git_args = _GIT_REFERENCE_ARGS[ref.kind](ref)
+            return _expand_git_reference(ref, cwd, git_args, "git " + " ".join(git_args))
         if ref.kind == "url":
             content = await _fetch_url_content(ref.target, url_fetcher=url_fetcher)
             if not content:
@@ -357,7 +331,6 @@ async def _expand_reference(
     except Exception as exc:
         return f"{ref.raw}: {exc}", None
 
-    # Plugin-provided context references
     provider = _context_reference_providers.get(ref.kind)
     if provider is not None:
         try:
@@ -383,13 +356,8 @@ def _expand_file_reference(
     if not path.is_file():
         return f"{ref.raw}: path is not a file", None
     if _is_binary_file(path):
-        # A binary file can't be inlined as text, but it IS on disk (the agent's
-        # tools run where this resolves — the local cwd, or the staged copy in a
-        # remote session workspace). Returning a bare "not supported" warning
-        # with no content was a dead end: the model saw a failure and gave up
-        # (told the user the file type wasn't supported). Instead, hand it an
-        # actionable block — the path, type, size, and a nudge to use its tools —
-        # so it can read/convert/view the file itself.
+        # A bare "not supported" warning was a dead end (the model gave up); the file IS
+        # on disk where the agent's tools run, so hand it an actionable block instead.
         return None, _binary_reference_block(ref, path)
 
     text = path.read_text(encoding="utf-8")
@@ -400,8 +368,7 @@ def _expand_file_reference(
         text = "\n".join(lines[start_idx:end_idx])
 
     lang = _code_fence_language(path)
-    label = ref.raw
-    return None, f"📄 {label} ({estimate_tokens_rough(text)} tokens)\n```{lang}\n{text}\n```"
+    return None, f"📄 {ref.raw} ({estimate_tokens_rough(text)} tokens)\n```{lang}\n{text}\n```"
 
 
 def _expand_folder_reference(
@@ -416,9 +383,26 @@ def _expand_folder_reference(
         return f"{ref.raw}: folder not found", None
     if not path.is_dir():
         return f"{ref.raw}: path is not a folder", None
-
     listing = _build_folder_listing(path, cwd)
     return None, f"📁 {ref.raw} ({estimate_tokens_rough(listing)} tokens)\n{listing}"
+
+
+def _run_quiet(
+    cmd: list[str], cwd: Path, timeout: int, env: dict | None = None
+) -> subprocess.CompletedProcess:
+    """subprocess.run with captured text output, no stdin, and no console flash on Windows."""
+    popen_kwargs: dict = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
+    if env is not None:
+        popen_kwargs["env"] = env
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True, encoding='utf-8', errors='replace',
+        timeout=timeout,
+        stdin=subprocess.DEVNULL,
+        **popen_kwargs,
+    )
 
 
 def _expand_git_reference(
@@ -427,26 +411,17 @@ def _expand_git_reference(
     args: list[str],
     label: str,
 ) -> tuple[str | None, str | None]:
-    _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
     try:
-        result = subprocess.run(
-            ["git", *harden_git_argv(args)],
-            cwd=cwd,
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=30,
-            stdin=subprocess.DEVNULL,
-            env=noninteractive_git_env(),
-            **_popen_kwargs,
+        # Repo-supplied config/attributes must never execute code (GHSA-7x36-8jrh-v4pw).
+        result = _run_quiet(
+            ["git", *harden_git_argv(args)], cwd, 30, env=noninteractive_git_env()
         )
     except subprocess.TimeoutExpired:
         return f"{ref.raw}: git command timed out (30s)", None
     if result.returncode != 0:
         stderr = (result.stderr or "").strip() or "git command failed"
         return f"{ref.raw}: {stderr}", None
-    content = result.stdout.strip()
-    if not content:
-        content = "(no output)"
+    content = result.stdout.strip() or "(no output)"
     return None, f"🧾 {label} ({estimate_tokens_rough(content)} tokens)\n```diff\n{content}\n```"
 
 
@@ -466,8 +441,7 @@ async def _default_url_fetcher(url: str) -> str:
     from tools.web_tools import web_extract_tool
 
     raw = await web_extract_tool([url], format="markdown")
-    payload = json.loads(raw)
-    docs = payload.get("results", [])
+    docs = json.loads(raw).get("results", [])
     if not docs:
         return ""
     doc = docs[0]
@@ -488,6 +462,7 @@ def _resolve_path(cwd: Path, target: str, *, allowed_root: Path | None = None) -
 
 
 def _ensure_reference_path_allowed(path: Path) -> None:
+    """Refuse credential/internal paths. Fails CLOSED: the gateway feeds untrusted remote text here."""
     from hermes_constants import get_hermes_home
     home = Path(os.path.expanduser("~")).resolve()
     hermes_home = get_hermes_home().resolve()
@@ -499,7 +474,6 @@ def _ensure_reference_path_allowed(path: Path) -> None:
 
     if path in blocked_exact:
         raise ValueError("path is a sensitive credential file and cannot be attached")
-
     for blocked_dir in blocked_dirs:
         try:
             path.relative_to(blocked_dir)
@@ -507,16 +481,9 @@ def _ensure_reference_path_allowed(path: Path) -> None:
             continue
         raise ValueError("path is a sensitive credential or internal Hermes path and cannot be attached")
 
-    # Anchor to the canonical read deny-list (agent/file_safety.get_read_block_error),
-    # the single source of truth used by the file/terminal read path. The narrow
-    # list above predates that guard and never caught the real credential stores:
-    # provider keys (auth.json), Anthropic OAuth tokens (.anthropic_oauth.json),
-    # MCP OAuth material (mcp-tokens/), webhook HMAC secrets, and project-local
-    # .env files. That gap matters because the gateway feeds UNTRUSTED remote
-    # message text into reference expansion, so `@file:~/.hermes/auth.json` from a
-    # chat peer would otherwise read the operator's keys straight into context.
-    # Routing through the canonical guard closes the gap today and keeps this path
-    # protected automatically whenever that deny-list grows.
+    # Anchor to the canonical read deny-list (agent/file_safety.get_read_block_error): the
+    # narrow list above never caught auth.json, .anthropic_oauth.json, mcp-tokens/, webhook
+    # secrets or project .env files, and it grows automatically with that deny-list.
     try:
         from agent.file_safety import get_read_block_error
 
@@ -527,13 +494,8 @@ def _ensure_reference_path_allowed(path: Path) -> None:
     except ValueError:
         raise
     except Exception:
-        # Fail CLOSED on the security path. This guard exists specifically to
-        # cover credential stores the narrow list above misses (auth.json,
-        # .anthropic_oauth.json, mcp-tokens/, ...). If the canonical lookup
-        # ever fails, silently falling through would re-open that exact hole —
-        # the gateway feeds untrusted remote text here, so a probe could then
-        # attach the operator's keys. Refuse instead: a spurious block on a
-        # legitimate file is a recoverable annoyance; a leaked credential is not.
+        # If the canonical lookup fails, falling through would re-open the exact hole this
+        # guard closes; a spurious block is recoverable, a leaked credential is not.
         raise ValueError(
             "path could not be verified against the credential deny-list and cannot be attached"
         )
@@ -583,27 +545,26 @@ def _parse_file_reference_value(value: str) -> tuple[str, int | None, int | None
     return _strip_reference_wrappers(value), None, None
 
 
+_TEXT_EXTENSIONS = (".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".js", ".ts")
+
+
 def _is_binary_file(path: Path) -> bool:
     mime, _ = mimetypes.guess_type(path.name)
-    if mime and not mime.startswith("text/") and not any(
-        path.name.endswith(ext) for ext in (".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".js", ".ts")
-    ):
+    if mime and not mime.startswith("text/") and not path.name.endswith(_TEXT_EXTENSIONS):
         return True
-    chunk = path.read_bytes()[:4096]
-    return b"\x00" in chunk
+    return b"\x00" in path.read_bytes()[:4096]
 
 
 def _build_folder_listing(path: Path, cwd: Path, limit: int = 200) -> str:
     lines = [f"{path.relative_to(cwd)}/"]
     entries = _iter_visible_entries(path, cwd, limit=limit)
+    base_depth = len(path.relative_to(cwd).parts)
     for entry in entries:
-        rel = entry.relative_to(cwd)
-        indent = "  " * max(len(rel.parts) - len(path.relative_to(cwd).parts) - 1, 0)
+        indent = "  " * max(len(entry.relative_to(cwd).parts) - base_depth - 1, 0)
         if entry.is_dir():
             lines.append(f"{indent}- {entry.name}/")
         else:
-            meta = _file_metadata(entry)
-            lines.append(f"{indent}- {entry.name} ({meta})")
+            lines.append(f"{indent}- {entry.name} ({_file_metadata(entry)})")
     if len(entries) >= limit:
         lines.append("- ...")
     return "\n".join(lines)
@@ -629,29 +590,16 @@ def _iter_visible_entries(path: Path, cwd: Path, limit: int) -> list[Path]:
         dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "__pycache__")
         files = sorted(f for f in files if not f.startswith("."))
         root_path = Path(root)
-        for d in dirs:
-            output.append(root_path / d)
-            if len(output) >= limit:
-                return output
-        for f in files:
-            output.append(root_path / f)
+        for name in dirs + files:
+            output.append(root_path / name)
             if len(output) >= limit:
                 return output
     return output
 
 
 def _rg_files(path: Path, cwd: Path, limit: int) -> list[Path] | None:
-    _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
     try:
-        result = subprocess.run(
-            ["rg", "--files", str(path.relative_to(cwd))],
-            cwd=cwd,
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=10,
-            stdin=subprocess.DEVNULL,
-            **_popen_kwargs,
-        )
+        result = _run_quiet(["rg", "--files", str(path.relative_to(cwd))], cwd, 10)
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
@@ -661,19 +609,15 @@ def _rg_files(path: Path, cwd: Path, limit: int) -> list[Path] | None:
 
 
 def _agent_visible_path(path: Path) -> str:
-    """Map a host path to the path the agent's tools can read in the active backend.
+    """Map a host path to what the agent's tools can read in the active backend.
 
-    Under a container backend (docker) the gateway host path dangles inside the
-    sandbox — the container has its own filesystem and the host path is not
-    mounted. Files staged into an auto-mounted cache dir (``images/``,
-    ``attachments/``, ...) are translated to their in-container path via the
-    existing ``tools.credential_files`` machinery (#76577). Falls back to the
-    host path when the backend is local or translation is unavailable.
+    Under a container backend the host path dangles inside the sandbox; files staged
+    into an auto-mounted cache dir are translated via ``tools.credential_files``.
+    Falls back to the host path when the backend is local or translation fails.
     """
     try:
-        # Desktop/in-process gateways may not have bridged ``terminal.*``
-        # config into ``TERMINAL_ENV`` at startup; run the idempotent bridge so
-        # the credential_files translation gate sees the active backend.
+        # In-process gateways may not have bridged terminal.* config into TERMINAL_ENV
+        # yet; run the idempotent bridge so the translation gate sees the active backend.
         from tools.terminal_tool import _ensure_terminal_env_bridged
 
         _ensure_terminal_env_bridged()
@@ -709,18 +653,20 @@ def _file_metadata(path: Path) -> str:
     return f"{line_count} lines"
 
 
+_FENCE_LANGUAGES = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".jsx": "jsx",
+    ".json": "json",
+    ".md": "markdown",
+    ".sh": "bash",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".toml": "toml",
+}
+
+
 def _code_fence_language(path: Path) -> str:
-    mapping = {
-        ".py": "python",
-        ".js": "javascript",
-        ".ts": "typescript",
-        ".tsx": "tsx",
-        ".jsx": "jsx",
-        ".json": "json",
-        ".md": "markdown",
-        ".sh": "bash",
-        ".yml": "yaml",
-        ".yaml": "yaml",
-        ".toml": "toml",
-    }
-    return mapping.get(path.suffix.lower(), "")
+    return _FENCE_LANGUAGES.get(path.suffix.lower(), "")

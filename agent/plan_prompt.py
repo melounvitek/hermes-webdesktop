@@ -1,31 +1,16 @@
 #!/usr/bin/env python3
-"""``/plan`` — build the plan-mode prompt that turns the user's request into a
-saved markdown implementation plan, with no execution.
+"""``/plan`` — build the plan-mode prompt: a saved markdown implementation plan, no execution.
 
-``/plan`` used to be a bundled skill (``skills/software-development/plan``)
-whose auto-generated slash command fell off the capped Telegram/Discord command
-menus for most installs (skills are the only tier trimmed at the platform
-caps, alphabetically — ``plan`` sat past the cutoff). It is now a first-class
-built-in: this module builds ONE prompt that instructs the live agent to
-
-  1. Stay in planning mode for the turn — read-only inspection is allowed,
-     but no implementation, no mutating commands, no side effects.
-  2. Write a concrete, bite-sized, TDD-shaped markdown plan under
-     ``.hermes/plans/`` in the active workspace via ``write_file``.
-
-There is no engine and no model-tool footprint: the agent does the work with
-its existing toolset, so this works identically on local, Docker, and remote
-terminal backends. Every surface (CLI ``/plan``, gateway ``/plan``, TUI
-``/plan``) calls :func:`build_plan_prompt` and feeds the result to the agent
-as a normal turn — same pattern as ``/learn`` and ``/init``, preserving
-prompt-cache invariants (no system-prompt or history mutation).
+A first-class built-in (the former bundled skill fell off capped Telegram/Discord
+command menus). No engine, no model-tool footprint: every surface feeds
+:func:`build_plan_prompt` to the agent as a normal turn, like ``/learn`` and
+``/init``, so system prompt and history stay untouched (prompt-cache safe).
 """
 
 from __future__ import annotations
 
-# The plan-mode ground rules + authoring craft, distilled from the retired
-# bundled skill (v2.0.0, writing-craft adapted from obra/superpowers).
-# Embedded in the prompt so the agent plans the way a maintainer would.
+# Plan-mode ground rules + authoring craft, distilled from the retired bundled
+# skill (writing-craft adapted from obra/superpowers).
 _PLAN_MODE_RULES = """\
 For this turn, you are in PLAN MODE — planning only.
 
@@ -76,13 +61,7 @@ Interaction style:
 
 
 def build_plan_prompt(task: str = "") -> str:
-    """Build the plan-mode prompt for the live agent.
-
-    Args:
-        task: What to plan. Empty → infer the task from the current
-            conversation context (mirrors the retired skill's behavior and
-            issue #36821's "plan from context" expectation).
-    """
+    """Build the plan-mode prompt; empty *task* asks the agent to infer it from conversation context."""
     task = (task or "").strip()
     if task:
         task_block = f"Task to plan:\n{task}\n"
