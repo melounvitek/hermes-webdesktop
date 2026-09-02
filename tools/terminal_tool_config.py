@@ -1,4 +1,6 @@
-"""Terminal backend configuration: scope-aware TERMINAL_* reads, env-var parsing, container-cwd sanity checks, plugin-backend classification and the resolved config dict (_get_env_config).
+"""Terminal backend configuration: scope-aware TERMINAL_* reads, env-var parsing,
+container-cwd sanity checks, plugin-backend classification and the resolved
+config dict (_get_env_config).
 
 Split out of ``tools/terminal_tool.py``; every public/patched name is re-imported there,
 so ``tools.terminal_tool.<name>`` keeps resolving (and monkeypatching) as before.
@@ -42,7 +44,6 @@ def _safe_getcwd() -> str:
 # Host-cwd prefixes that cannot exist inside a container sandbox (POSIX user
 # dirs and Windows drive paths as they leak toward a Linux ``-w`` flag).
 _HOST_CWD_PREFIXES = ("/Users/", "/home/", "C:\\", "C:/")
-
 
 _CONTAINER_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona", "vercel_sandbox"})
 

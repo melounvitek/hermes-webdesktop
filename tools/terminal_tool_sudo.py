@@ -1,4 +1,7 @@
-"""Sudo password plumbing and shell-command rewrites for the terminal tool: the per-scope interactive password cache, the /dev/tty prompt, real-sudo tokenizer (sudo -S -p '' rewrite), NOPASSWD probe, and the compound-background brace-group rewrite.
+"""Sudo password plumbing and shell-command rewrites for the terminal tool: the
+per-scope interactive password cache, the /dev/tty prompt, real-sudo tokenizer
+(sudo -S -p '' rewrite), NOPASSWD probe, and the compound-background brace-
+group rewrite.
 
 Split out of ``tools/terminal_tool.py``; every public/patched name is re-imported there,
 so ``tools.terminal_tool.<name>`` keeps resolving (and monkeypatching) as before.
@@ -22,7 +25,6 @@ logger = logging.getLogger("tools.terminal_tool")
 # else callback identity (ACP / CLI), else the current thread — so one
 # session can never reuse another's cached password in a long-lived process.
 _sudo_password_cache: dict[str, str] = {}
-
 
 _sudo_password_cache_lock = threading.Lock()
 

@@ -1,4 +1,6 @@
-"""Skills Hub install/uninstall/update operations: quarantine staging, install-target safety (symlink/junction, category-bucket and nested-skill checks), lock-file-backed uninstall, bundle hashing and upstream update checks.
+"""Skills Hub install/uninstall/update operations: quarantine staging, install-
+target safety (symlink/junction, category-bucket and nested-skill checks),
+lock-file-backed uninstall, bundle hashing and upstream update checks.
 
 Split out of ``tools/skills_hub.py``; every public/patched name is re-imported there,
 so ``tools.skills_hub.<name>`` keeps resolving (and monkeypatching) as before.

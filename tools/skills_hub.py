@@ -26,11 +26,10 @@ from hermes_constants import get_hermes_home
 from tools.url_safety import is_safe_url
 from tools.website_policy import check_website_access
 from tools.skills_hub_models import (  # noqa: F401  (re-exported public API)
-    SkillMeta, SkillBundle, SkillSource, source_url_for_bundle,
-    _referenced_support_paths, _normalize_bundle_path, _validate_skill_name,
-    _validate_install_parent_path, _normalize_lock_install_path,
-    _validate_bundle_rel_path, _skill_meta_to_dict, _parse_frontmatter,
-    _dedupe_by_trust, TRUST_RANK,
+    SkillMeta, SkillBundle, SkillSource, source_url_for_bundle, _referenced_support_paths,
+    _normalize_bundle_path, _validate_skill_name, _validate_install_parent_path,
+    _normalize_lock_install_path, _validate_bundle_rel_path, _skill_meta_to_dict,
+    _parse_frontmatter, _dedupe_by_trust, TRUST_RANK,
 )
 from tools.skills_hub_github import (  # noqa: F401
     GITHUB_TAP_PROVIDERS, github_provider_for, _PROVIDER_FILTER_VALUES,
@@ -43,30 +42,14 @@ from tools.skills_hub_sources import (  # noqa: F401
 )
 from tools.skills_hub_official import OptionalSkillSource, HermesIndexSource  # noqa: F401
 from tools.skills_hub_search import (  # noqa: F401  (re-exported; tests patch tools.skills_hub.<name>)
-    HERMES_INDEX_TTL,
-    HERMES_INDEX_URL,
-    _API_SOURCE_IDS,
-    _hermes_index_cache_file,
-    _load_hermes_index,
-    _load_stale_index_cache,
-    _search_one_source,
-    _select_active_sources,
-    create_source_router,
-    parallel_search_sources,
-    unified_search,
+    HERMES_INDEX_TTL, HERMES_INDEX_URL, _API_SOURCE_IDS, _hermes_index_cache_file,
+    _load_hermes_index, _load_stale_index_cache, _search_one_source, _select_active_sources,
+    create_source_router, parallel_search_sources, unified_search,
 )
 from tools.skills_hub_install import (  # noqa: F401  (re-exported; tests patch tools.skills_hub.<name>)
-    _SOURCE_ID_ALIASES,
-    _category_skill_dirs,
-    _check_install_target,
-    _is_path_redirect,
-    _resolve_lock_install_path,
-    _source_matches,
-    bundle_content_hash,
-    check_for_skill_updates,
-    install_from_quarantine,
-    quarantine_bundle,
-    uninstall_skill,
+    _SOURCE_ID_ALIASES, _category_skill_dirs, _check_install_target, _is_path_redirect,
+    _resolve_lock_install_path, _source_matches, bundle_content_hash, check_for_skill_updates,
+    install_from_quarantine, quarantine_bundle, uninstall_skill,
 )
 
 logger = logging.getLogger(__name__)

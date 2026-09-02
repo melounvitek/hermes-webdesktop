@@ -1,4 +1,7 @@
-"""Sandbox lifecycle for the terminal tool: idle reaping, teardown, manual/atexit cleanup, and the lazy ensure_task_env bring-up. The env cache dicts and locks stay in tools.terminal_tool (tests patch them there) and are read through it at call time.
+"""Sandbox lifecycle for the terminal tool: idle reaping, teardown, manual/atexit
+cleanup, and the lazy ensure_task_env bring-up. The env cache dicts and locks
+stay in tools.terminal_tool (tests patch them there) and are read through it
+at call time.
 
 Split out of ``tools/terminal_tool.py``; every public/patched name is re-imported there,
 so ``tools.terminal_tool.<name>`` keeps resolving (and monkeypatching) as before.
@@ -24,7 +27,6 @@ logger = logging.getLogger("tools.terminal_tool")
 # Advisory disk-usage check; cached so the recursive scan doesn't run on
 # every command (a result up to 5 minutes stale is harmless).
 _disk_usage_cache: dict = {"timestamp": 0.0, "result": False}
-
 
 _DISK_USAGE_CACHE_TTL = 300.0  # seconds
 

@@ -1,4 +1,6 @@
-"""Skills Hub discovery: the centralized Hermes index fetch (cached, stale-fallback), the source router, and parallel/unified search across source adapters.
+"""Skills Hub discovery: the centralized Hermes index fetch (cached, stale-
+fallback), the source router, and parallel/unified search across source
+adapters.
 
 Split out of ``tools/skills_hub.py``; every public/patched name is re-imported there,
 so ``tools.skills_hub.<name>`` keeps resolving (and monkeypatching) as before.
@@ -22,9 +24,7 @@ if TYPE_CHECKING:  # runtime use resolves through the origin (test patch target)
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.skills_hub")
 
-
 HERMES_INDEX_URL = "https://hermes-agent.nousresearch.com/docs/api/skills-index.json"
-
 
 HERMES_INDEX_TTL = 6 * 3600  # 6 hours
 

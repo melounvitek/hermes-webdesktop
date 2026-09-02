@@ -1,4 +1,7 @@
-"""Execution-environment backends for the terminal tool: per-backend builders (local/docker/singularity/modal/daytona/vercel/ssh/plugin), the config-to-kwargs shapers, and the per-backend requirement checkers, both routed by dispatch table.
+"""Execution-environment backends for the terminal tool: per-backend builders
+(local/docker/singularity/modal/daytona/vercel/ssh/plugin), the config-to-
+kwargs shapers, and the per-backend requirement checkers, both routed by
+dispatch table.
 
 Split out of ``tools/terminal_tool.py``; every public/patched name is re-imported there,
 so ``tools.terminal_tool.<name>`` keeps resolving (and monkeypatching) as before.
@@ -28,9 +31,7 @@ from tools.tool_backend_helpers import (
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.terminal_tool")
 
-
 _VERCEL_SANDBOX_DEFAULT_CWD = "/vercel/sandbox"
-
 
 _SUPPORTED_VERCEL_RUNTIMES = ("node24", "node22", "python3.13")
 
