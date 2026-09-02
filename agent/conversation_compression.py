@@ -2824,6 +2824,374 @@ def finalize_context_engine_compression_notification(
     return bool(pending())
 
 
+class _CompactionLifecycle:
+    """Owns the one-shot terminal edge of the compaction status lifecycle.
+
+    ``commit_status`` is rebound to "committed" only on success and read at
+    ``complete()`` time, so abort paths keep the terminal edge suppressed.
+    """
+
+    def __init__(self, agent: Any, status_emitted: bool) -> None:
+        self._agent = agent
+        self._status_emitted = status_emitted
+        self._done_emitted = False
+        self.commit_status = "aborted"
+
+    def complete(self, *, force_terminal: bool = False) -> None:
+        if self._done_emitted:
+            return
+        self._done_emitted = True
+        # Suppressed start → no terminal edge. Non-compacting aborts (lock contender,
+        # cancelled fence) opt in via force_terminal so clients can retire their phase.
+        # Failure warnings go through _emit_warning and are never suppressed here.
+        if self._status_emitted and (
+            self.commit_status == "committed" or force_terminal
+        ):
+            _emit_compaction_done(self._agent)
+
+
+class _CompressionLease:
+    """The per-attempt durable compression lock plus its lifecycle plumbing.
+
+    ``holder`` is None when no durable lock is owned (legacy DB, no session db);
+    ``watermark`` is MAX(id) of active rows at lease start (None = archive
+    everything, no concurrent-tail preservation this cycle).
+    """
+
+    def __init__(
+        self,
+        agent: Any,
+        *,
+        db: Any,
+        sid: str,
+        ttl: float,
+        refresh_interval: Any,
+        commit_fence: Optional[CompressionCommitFence],
+        lifecycle: _CompactionLifecycle,
+    ) -> None:
+        self._agent = agent
+        self.db = db
+        self.sid = sid
+        self.ttl = ttl
+        self._refresh_interval = refresh_interval
+        self._commit_fence = commit_fence
+        self._lifecycle = lifecycle
+        self.holder: Optional[str] = None
+        self.watermark: Optional[int] = None
+        self._refresher: Optional[_CompressionLockLeaseRefresher] = None
+        self._released = False
+        self._release_guard = threading.Lock()
+        # Fence lock acquisition + release-hook publication together so a host timeout
+        # cannot win between acquiring the lock and having a way to release it.
+        self._lock_setup_entered = False
+
+    def begin_lock_setup(self) -> bool:
+        if self._commit_fence is None:
+            return True
+        self._lock_setup_entered = self._commit_fence.begin_lock_setup()
+        return self._lock_setup_entered
+
+    def finish_lock_setup(self) -> None:
+        if not self._lock_setup_entered or self._commit_fence is None:
+            return
+        self._lock_setup_entered = False
+        self._commit_fence.finish_lock_setup()
+
+    def start_refresher(self) -> None:
+        if self.holder is None:
+            return
+        candidate = _CompressionLockLeaseRefresher(
+            self.db, self.sid, self.holder, self.ttl, self._refresh_interval
+        )
+        # Cancellation may release the holder between hook publication and this
+        # start; serialize with the release path so no refresher starts on a freed lock.
+        with self._release_guard:
+            if not self._released:
+                self._refresher = candidate
+                self._refresher.start()
+
+    def release_holder_only(self) -> None:
+        """Stop this holder's refresher and release only its durable lock.
+
+        Holder-qualified and idempotent: safe for the host after a timeout because a
+        newer holder's lease can never be deleted by this stale release.
+        """
+        with self._release_guard:
+            if self._released:
+                return
+            self._released = True
+            if getattr(self._agent, "_active_compression_lock_holder", None) == self.holder:
+                self._agent._active_compression_lock_holder = None
+            if self._refresher is not None:
+                try:
+                    self._refresher.stop()
+                except Exception as _stop_err:
+                    logger.debug("compression lock refresher stop failed: %s", _stop_err)
+            if self.db is not None and self.sid and self.holder:
+                try:
+                    self.db.release_compression_lock(self.sid, self.holder)
+                except Exception as _rel_err:
+                    logger.debug("compression lock release failed: %s", _rel_err)
+
+    def release(self) -> None:
+        """Finish lifecycle cleanup and release the OLD session lock once."""
+        try:
+            self._lifecycle.complete()
+        finally:
+            try:
+                self.release_holder_only()
+            finally:
+                try:
+                    if self._commit_fence is not None:
+                        self._commit_fence.clear_cancelled_lock_release(
+                            self.release_holder_only
+                        )
+                finally:
+                    self.finish_lock_setup()
+
+
+def _acquire_compression_lease(
+    agent: Any,
+    *,
+    commit_fence: Optional[CompressionCommitFence],
+    lifecycle: _CompactionLifecycle,
+    system_message: str,
+    approx_tokens: Optional[int],
+    attempt_started_at: float,
+) -> Tuple[Optional[_CompressionLease], Optional[str]]:
+    """Take the per-session compression lock; ``(None, prompt)`` means sit out.
+
+    Two AIAgents sharing a session_id (e.g. background review fork) would both
+    rotate and orphan a child. Keyed on the OLD id (what rivals read from
+    SessionEntry). Loser sits out: messages unchanged, caller sees no-op.
+    Only structural absence of the lock API (version skew) fails open; once
+    resolved, any exception fails closed since unlocked runs can fork lineage.
+    """
+    _lock_db = getattr(agent, "_session_db", None)
+    _lock_sid = agent.session_id or ""
+    _try_acquire_lock = None
+    _lock_lookup_error: Optional[Exception] = None
+    _legacy_session_db_without_lock_api = False
+    # Clear stale lock-skip so this call's outcome alone is visible; else a manual
+    # /compress after an auto lock-skip falsely reports "already in progress".
+    agent._compression_skipped_due_to_lock = None
+    if _lock_db is not None:
+        try:
+            _legacy_session_db_without_lock_api = _lock_api_is_absent_on_session_db(
+                _lock_db
+            )
+        except Exception as exc:
+            _lock_lookup_error = exc
+        if _lock_lookup_error is None and not _legacy_session_db_without_lock_api:
+            try:
+                _try_acquire_lock = _lock_db.try_acquire_compression_lock
+                if not callable(_try_acquire_lock):
+                    _lock_lookup_error = TypeError(
+                        "compression lock API is present but not callable"
+                    )
+            except Exception as exc:
+                _lock_lookup_error = exc
+    try:
+        _lock_ttl = float(getattr(agent, "_compression_lock_ttl_seconds", 300.0) or 300.0)
+    except (TypeError, ValueError):
+        _lock_ttl = 300.0
+    lease = _CompressionLease(
+        agent,
+        db=_lock_db,
+        sid=_lock_sid,
+        ttl=_lock_ttl,
+        refresh_interval=getattr(agent, "_compression_lock_refresh_interval", None),
+        commit_fence=commit_fence,
+        lifecycle=lifecycle,
+    )
+
+    if _lock_db is not None and _lock_sid:
+        lease.holder = _compression_lock_holder(agent)
+        if _lock_lookup_error is not None:
+            # Attribute lookup itself failed for a reason other than a missing
+            # lock API. It is unsafe to proceed without a lock in that case.
+            lease.holder = None
+            logger.warning(
+                "compression lock lookup raised unexpectedly for session=%s "
+                "(%s: %s) — skipping compression this cycle",
+                _lock_sid, type(_lock_lookup_error).__name__, _lock_lookup_error,
+            )
+            _lock_acquired = False
+        elif _try_acquire_lock is None:
+            # Lock API absent on this instance: log once, proceed unlocked so version skew
+            # cannot stall the outer auto-compression loop forever.
+            lease.holder = None
+            if getattr(agent, "_last_compression_lock_error_sid", None) != _lock_sid:
+                agent._last_compression_lock_error_sid = _lock_sid
+                logger.warning(
+                    "compression lock subsystem unavailable for session=%s "
+                    "— proceeding without lock. This usually means a stale "
+                    "in-memory module after an update; restart the process "
+                    "(or `hermes update`) to resync.",
+                    _lock_sid,
+                )
+            _lock_acquired = True  # acquired-but-unlocked compatibility path
+        else:
+            if not lease.begin_lock_setup():
+                logger.info(
+                    "Compression commit cancelled before lock acquisition "
+                    "(session=%s).",
+                    agent.session_id or "none",
+                )
+                agent._last_compaction_in_place = False
+                _existing_sp = _existing_system_prompt(agent, system_message)
+                _emit_aborted_attempt_telemetry(agent, attempt_started_at, "commit_fence_cancelled")
+                lifecycle.complete(force_terminal=True)
+                return None, _existing_sp
+            try:
+                _lock_acquired = _try_acquire_lock(
+                    _lock_sid, lease.holder, ttl_seconds=_lock_ttl
+                )
+                if _lock_acquired:
+                    # Watermark = MAX(id) of active rows at START. Appends aren't blocked during
+                    # summary; later rows are concurrent tail that archive_and_compact re-sequences.
+                    try:
+                        lease.watermark = _lock_db.get_active_message_watermark(
+                            _lock_sid
+                        )
+                        # A captured watermark makes the commit safe against later rows on BOTH commit
+                        # paths; tell the fence so a host may keep this attempt's admission.
+                        if commit_fence is not None:
+                            try:
+                                commit_fence.mark_commit_watermark_fenced()
+                            except AttributeError:
+                                pass  # test doubles without the method
+                    except Exception as _wm_err:
+                        # Watermark capture is safety-additive (fallback archives everything), so
+                        # failure here must not abort compression.
+                        logger.warning(
+                            "compression watermark capture failed for "
+                            "session=%s (%s) — concurrent appends this cycle "
+                            "will be archived with the snapshot",
+                            _lock_sid, _wm_err,
+                        )
+                        lease.watermark = None
+            except Exception as _lock_err:
+                # Method entered but failed: not version skew, fail closed. Acquire may have
+                # committed, so release holder-qualified best-effort (safe if never acquired).
+                try:
+                    _lock_db.release_compression_lock(_lock_sid, lease.holder)
+                except Exception as _release_err:
+                    logger.debug(
+                        "compression lock cleanup after failed acquire failed: %s",
+                        _release_err,
+                    )
+                lease.holder = None
+                logger.warning(
+                    "compression lock acquisition raised unexpectedly for "
+                    "session=%s (%s: %s) — skipping compression this cycle",
+                    _lock_sid, type(_lock_err).__name__, _lock_err,
+                )
+                _lock_acquired = False
+        if not _lock_acquired:
+            lease.finish_lock_setup()
+            try:
+                existing = _lock_db.get_compression_lock_holder(_lock_sid)
+            except Exception:
+                existing = None
+            logger.warning(
+                "compression skipped: another path is compressing session=%s "
+                "(holder=%s) — returning messages unchanged to avoid session fork",
+                _lock_sid, existing,
+            )
+            lease.holder = None  # don't release a lock we don't own
+            # Distinguish lock-contention no-op from "nothing to compress" so manual
+            # /compress can show a clear status instead of "No changes".
+            agent._compression_skipped_due_to_lock = existing or True
+            # Surface to the user once — quiet for downstream auto-compress loops
+            if getattr(agent, "_last_compression_lock_warning_sid", None) != _lock_sid:
+                agent._last_compression_lock_warning_sid = _lock_sid
+                try:
+                    agent._emit_warning(
+                        "⚠ Skipping concurrent compression — another path "
+                        "is already compressing this session. Will retry "
+                        "after it finishes."
+                    )
+                except Exception:
+                    pass
+            _existing_sp = _existing_system_prompt(agent, system_message)
+            try:
+                if hasattr(agent.context_compressor, "_begin_compression_telemetry"):
+                    agent.context_compressor._begin_compression_telemetry(current_tokens=approx_tokens)
+            except Exception:
+                pass
+            _emit_aborted_attempt_telemetry(agent, attempt_started_at, "lock_contended")
+            lifecycle.complete(force_terminal=True)
+            return None, _existing_sp
+
+    if lease.holder is not None:
+        agent._active_compression_lock_holder = lease.holder
+        if (
+            commit_fence is not None
+            and commit_fence.register_cancelled_lock_release(
+                lease.release_holder_only
+            )
+        ):
+            # Cancellation won during lock setup (hook ran synchronously, lease gone):
+            # abort before any summary work.
+            logger.info(
+                "Compression commit cancelled before summary dispatch "
+                "(session=%s).",
+                agent.session_id or "none",
+            )
+            agent._last_compaction_in_place = False
+            _existing_sp = _existing_system_prompt(agent, system_message)
+            _emit_aborted_attempt_telemetry(agent, attempt_started_at, "commit_fence_cancelled")
+            lease.release()
+            return None, _existing_sp
+    return lease, None
+
+
+def _adopt_if_parent_rotated(
+    agent: Any, lease: _CompressionLease, messages: list, system_message: str
+) -> Optional[Tuple[list, str]]:
+    """Sit out (or adopt the live child) when the parent was already rotated.
+
+    A late contender can take the parent lock after the winner released it and
+    rotated; holding the lock does not prove this agent still owns a live parent.
+    Returns the ``compress_context`` result to hand back, or None to proceed.
+    """
+    if lease.db is None or not lease.sid:
+        return None
+    try:
+        _parent_already_rotated = _session_was_rotated_by_compression(
+            lease.db, lease.sid
+        )
+    except Exception as _session_err:
+        logger.warning(
+            "compression session ownership lookup failed for session=%s "
+            "(%s: %s) - skipping compression this cycle",
+            lease.sid,
+            type(_session_err).__name__,
+            _session_err,
+        )
+        lease.release()
+        return messages, _existing_system_prompt(agent, system_message)
+    if not _parent_already_rotated:
+        return None
+    recovered_messages = _adopt_live_compression_child(agent, lease.db, lease.sid)
+    lease.release()
+    _existing_sp = _existing_system_prompt(agent, system_message)
+    if recovered_messages is not None:
+        logger.warning(
+            "compression recovery: stale session=%s adopted live child=%s",
+            lease.sid,
+            agent.session_id,
+        )
+        return recovered_messages, _existing_sp
+    logger.warning(
+        "compression skipped: session=%s was already rotated by "
+        "another compression path, but no unique live child could be adopted",
+        lease.sid,
+    )
+    return messages, _existing_sp
+
+
 def compress_context(
     agent: Any,
     messages: list,
@@ -2970,299 +3338,26 @@ def compress_context(
     _compaction_status_emitted = bool(_compaction_status)
     if _compaction_status:
         agent._emit_status(_compaction_status)
-    _compaction_done_emitted = False
-    # Rebound to "committed" only on success; the lifecycle closure reads it at
-    # call time, so abort paths keep the terminal edge suppressed.
-    _commit_status = "aborted"
+    lifecycle = _CompactionLifecycle(agent, _compaction_status_emitted)
 
-    def _complete_compaction_lifecycle(*, force_terminal: bool = False) -> None:
-        nonlocal _compaction_done_emitted
-        if _compaction_done_emitted:
-            return
-        _compaction_done_emitted = True
-        # Suppressed start → no terminal edge. Non-compacting aborts (lock contender,
-        # cancelled fence) opt in via force_terminal so clients can retire their phase.
-        # Failure warnings go through _emit_warning and are never suppressed here.
-        if _compaction_status_emitted and (
-            _commit_status == "committed" or force_terminal
-        ):
-            _emit_compaction_done(agent)
-
-    # ── Compression lock: two AIAgents sharing a session_id (e.g. background review
-    # fork) would both rotate and orphan a child. Keyed on the OLD id (what rivals
-    # read from SessionEntry). Loser sits out: messages unchanged, caller sees no-op
-    _lock_db = getattr(agent, "_session_db", None)
-    _lock_sid = agent.session_id or ""
-    _lock_holder: Optional[str] = None
-    # Watermark captured at compression start (#75316); None = fall back to
-    # archive-everything (no concurrent-tail preservation this cycle).
-    _commit_watermark: Optional[int] = None
-    # Only structural absence of the lock API (version skew) fails open; once
-    # resolved, any exception fails closed since unlocked runs can fork lineage.
-    _try_acquire_lock = None
-    _lock_lookup_error: Optional[Exception] = None
-    _legacy_session_db_without_lock_api = False
-    # Clear stale lock-skip so this call's outcome alone is visible; else a manual
-    # /compress after an auto lock-skip falsely reports "already in progress".
-    agent._compression_skipped_due_to_lock = None
-    if _lock_db is not None:
-        try:
-            _legacy_session_db_without_lock_api = _lock_api_is_absent_on_session_db(
-                _lock_db
-            )
-        except Exception as exc:
-            _lock_lookup_error = exc
-        if _lock_lookup_error is None and not _legacy_session_db_without_lock_api:
-            try:
-                _try_acquire_lock = _lock_db.try_acquire_compression_lock
-                if not callable(_try_acquire_lock):
-                    _lock_lookup_error = TypeError(
-                        "compression lock API is present but not callable"
-                    )
-            except Exception as exc:
-                _lock_lookup_error = exc
-    try:
-        _lock_ttl = float(getattr(agent, "_compression_lock_ttl_seconds", 300.0) or 300.0)
-    except (TypeError, ValueError):
-        _lock_ttl = 300.0
-    _lock_refresh_interval = getattr(agent, "_compression_lock_refresh_interval", None)
-    _lock_refresher: Optional[_CompressionLockLeaseRefresher] = None
-    # Fence lock acquisition + release-hook publication together so a host timeout
-    # cannot win between acquiring the lock and having a way to release it.
-    _lock_setup_entered = False
-
-    def _finish_lock_setup() -> None:
-        nonlocal _lock_setup_entered
-        if not _lock_setup_entered or commit_fence is None:
-            return
-        _lock_setup_entered = False
-        commit_fence.finish_lock_setup()
-
-    if _lock_db is not None and _lock_sid:
-        _lock_holder = _compression_lock_holder(agent)
-        if _lock_lookup_error is not None:
-            # Attribute lookup itself failed for a reason other than a missing
-            # lock API. It is unsafe to proceed without a lock in that case.
-            _lock_holder = None
-            logger.warning(
-                "compression lock lookup raised unexpectedly for session=%s "
-                "(%s: %s) — skipping compression this cycle",
-                _lock_sid, type(_lock_lookup_error).__name__, _lock_lookup_error,
-            )
-            _lock_acquired = False
-        elif _try_acquire_lock is None:
-            # Lock API absent on this instance: log once, proceed unlocked so version skew
-            # cannot stall the outer auto-compression loop forever.
-            _lock_holder = None
-            if getattr(agent, "_last_compression_lock_error_sid", None) != _lock_sid:
-                agent._last_compression_lock_error_sid = _lock_sid
-                logger.warning(
-                    "compression lock subsystem unavailable for session=%s "
-                    "— proceeding without lock. This usually means a stale "
-                    "in-memory module after an update; restart the process "
-                    "(or `hermes update`) to resync.",
-                    _lock_sid,
-                )
-            _lock_acquired = True  # acquired-but-unlocked compatibility path
-        else:
-            if commit_fence is not None:
-                _lock_setup_entered = commit_fence.begin_lock_setup()
-                if not _lock_setup_entered:
-                    logger.info(
-                        "Compression commit cancelled before lock acquisition "
-                        "(session=%s).",
-                        agent.session_id or "none",
-                    )
-                    agent._last_compaction_in_place = False
-                    _existing_sp = _existing_system_prompt(agent, system_message)
-                    _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "commit_fence_cancelled")
-                    _complete_compaction_lifecycle(force_terminal=True)
-                    return messages, _existing_sp
-            try:
-                _lock_acquired = _try_acquire_lock(
-                    _lock_sid, _lock_holder, ttl_seconds=_lock_ttl
-                )
-                if _lock_acquired:
-                    # Watermark = MAX(id) of active rows at START. Appends aren't blocked during
-                    # summary; later rows are concurrent tail that archive_and_compact re-sequences.
-                    try:
-                        _commit_watermark = _lock_db.get_active_message_watermark(
-                            _lock_sid
-                        )
-                        # A captured watermark makes the commit safe against later rows on BOTH commit
-                        # paths; tell the fence so a host may keep this attempt's admission.
-                        if commit_fence is not None:
-                            try:
-                                commit_fence.mark_commit_watermark_fenced()
-                            except AttributeError:
-                                pass  # test doubles without the method
-                    except Exception as _wm_err:
-                        # Watermark capture is safety-additive (fallback archives everything), so
-                        # failure here must not abort compression.
-                        logger.warning(
-                            "compression watermark capture failed for "
-                            "session=%s (%s) — concurrent appends this cycle "
-                            "will be archived with the snapshot",
-                            _lock_sid, _wm_err,
-                        )
-                        _commit_watermark = None
-            except Exception as _lock_err:
-                # Method entered but failed: not version skew, fail closed. Acquire may have
-                # committed, so release holder-qualified best-effort (safe if never acquired).
-                try:
-                    _lock_db.release_compression_lock(_lock_sid, _lock_holder)
-                except Exception as _release_err:
-                    logger.debug(
-                        "compression lock cleanup after failed acquire failed: %s",
-                        _release_err,
-                    )
-                _lock_holder = None
-                logger.warning(
-                    "compression lock acquisition raised unexpectedly for "
-                    "session=%s (%s: %s) — skipping compression this cycle",
-                    _lock_sid, type(_lock_err).__name__, _lock_err,
-                )
-                _lock_acquired = False
-        if not _lock_acquired:
-            _finish_lock_setup()
-            try:
-                existing = _lock_db.get_compression_lock_holder(_lock_sid)
-            except Exception:
-                existing = None
-            logger.warning(
-                "compression skipped: another path is compressing session=%s "
-                "(holder=%s) — returning messages unchanged to avoid session fork",
-                _lock_sid, existing,
-            )
-            _lock_holder = None  # don't release a lock we don't own
-            # Distinguish lock-contention no-op from "nothing to compress" so manual
-            # /compress can show a clear status instead of "No changes".
-            agent._compression_skipped_due_to_lock = existing or True
-            # Surface to the user once — quiet for downstream auto-compress loops
-            if getattr(agent, "_last_compression_lock_warning_sid", None) != _lock_sid:
-                agent._last_compression_lock_warning_sid = _lock_sid
-                try:
-                    agent._emit_warning(
-                        "⚠ Skipping concurrent compression — another path "
-                        "is already compressing this session. Will retry "
-                        "after it finishes."
-                    )
-                except Exception:
-                    pass
-            _existing_sp = _existing_system_prompt(agent, system_message)
-            try:
-                if hasattr(agent.context_compressor, "_begin_compression_telemetry"):
-                    agent.context_compressor._begin_compression_telemetry(current_tokens=approx_tokens)
-            except Exception:
-                pass
-            _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "lock_contended")
-            _complete_compaction_lifecycle(force_terminal=True)
-            return messages, _existing_sp
-    _lock_released = False
-    _lock_release_guard = threading.Lock()
-
-    def _release_lock_holder_only() -> None:
-        """Stop this holder's refresher and release only its durable lock.
-
-        Holder-qualified and idempotent: safe for the host after a timeout because a
-        newer holder's lease can never be deleted by this stale release.
-        """
-        nonlocal _lock_released
-        with _lock_release_guard:
-            if _lock_released:
-                return
-            _lock_released = True
-            if getattr(agent, "_active_compression_lock_holder", None) == _lock_holder:
-                agent._active_compression_lock_holder = None
-            if _lock_refresher is not None:
-                try:
-                    _lock_refresher.stop()
-                except Exception as _stop_err:
-                    logger.debug("compression lock refresher stop failed: %s", _stop_err)
-            if _lock_db is not None and _lock_sid and _lock_holder:
-                try:
-                    _lock_db.release_compression_lock(_lock_sid, _lock_holder)
-                except Exception as _rel_err:
-                    logger.debug("compression lock release failed: %s", _rel_err)
-
-    def _release_lock() -> None:
-        """Finish lifecycle cleanup and release the OLD session lock once."""
-        try:
-            _complete_compaction_lifecycle()
-        finally:
-            try:
-                _release_lock_holder_only()
-            finally:
-                try:
-                    if commit_fence is not None:
-                        commit_fence.clear_cancelled_lock_release(
-                            _release_lock_holder_only
-                        )
-                finally:
-                    _finish_lock_setup()
-
-    if _lock_holder is not None:
-        agent._active_compression_lock_holder = _lock_holder
-        if (
-            commit_fence is not None
-            and commit_fence.register_cancelled_lock_release(
-                _release_lock_holder_only
-            )
-        ):
-            # Cancellation won during lock setup (hook ran synchronously, lease gone):
-            # abort before any summary work.
-            logger.info(
-                "Compression commit cancelled before summary dispatch "
-                "(session=%s).",
-                agent.session_id or "none",
-            )
-            agent._last_compaction_in_place = False
-            _existing_sp = _existing_system_prompt(agent, system_message)
-            _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "commit_fence_cancelled")
-            _release_lock()
-            return messages, _existing_sp
+    lease, _abort_prompt = _acquire_compression_lease(
+        agent,
+        commit_fence=commit_fence,
+        lifecycle=lifecycle,
+        system_message=system_message,
+        approx_tokens=approx_tokens,
+        attempt_started_at=_attempt_started_at,
+    )
+    if lease is None:
+        return messages, _abort_prompt
 
     # Publish the holder-qualified release hook before a timeout can win the
     # fence. If no durable lock was acquired there is no hook to publish.
-    _finish_lock_setup()
+    lease.finish_lock_setup()
 
-    # A late contender can take the parent lock after the winner released it and
-    # rotated; holding the lock does not prove this agent still owns a live parent.
-    if _lock_db is not None and _lock_sid:
-        try:
-            _parent_already_rotated = _session_was_rotated_by_compression(
-                _lock_db, _lock_sid
-            )
-        except Exception as _session_err:
-            logger.warning(
-                "compression session ownership lookup failed for session=%s "
-                "(%s: %s) - skipping compression this cycle",
-                _lock_sid,
-                type(_session_err).__name__,
-                _session_err,
-            )
-            _release_lock()
-            _existing_sp = _existing_system_prompt(agent, system_message)
-            return messages, _existing_sp
-        if _parent_already_rotated:
-            recovered_messages = _adopt_live_compression_child(
-                agent, _lock_db, _lock_sid
-            )
-            _release_lock()
-            _existing_sp = _existing_system_prompt(agent, system_message)
-            if recovered_messages is not None:
-                logger.warning(
-                    "compression recovery: stale session=%s adopted live child=%s",
-                    _lock_sid,
-                    agent.session_id,
-                )
-                return recovered_messages, _existing_sp
-            logger.warning(
-                "compression skipped: session=%s was already rotated by "
-                "another compression path, but no unique live child could be adopted",
-                _lock_sid,
-            )
-            return messages, _existing_sp
+    _adopted = _adopt_if_parent_rotated(agent, lease, messages, system_message)
+    if _adopted is not None:
+        return _adopted
 
     # Snapshot durable cooldown only once we own the lease. Runs for force=True
     # too but skips the automatic breaker gate: manual compression retries now.
@@ -3275,7 +3370,7 @@ def compress_context(
     if _durable_cooldown_authoritative is False:
         # Durable cooldown read failed under a built-in compressor: force=True could
         # clear an unknown newer row before cancellation could restore it. Abort.
-        _release_lock()
+        lease.release()
         existing_prompt = _existing_system_prompt(agent, system_message)
         return messages, existing_prompt
 
@@ -3296,37 +3391,24 @@ def compress_context(
             blocked, compressor, bypass_cooldown
         ):
             _mark_compression_blocked_transient(agent, compressor)
-            _release_lock()
+            lease.release()
             existing_prompt = _existing_system_prompt(agent, system_message)
             return messages, existing_prompt
 
     _activity_heartbeat: Optional[_CompressionActivityHeartbeat] = None
     messages_before_compression = None
     try:
-        if _lock_holder is not None:
-            _candidate_refresher = _CompressionLockLeaseRefresher(
-                _lock_db,
-                _lock_sid,
-                _lock_holder,
-                _lock_ttl,
-                _lock_refresh_interval,
-            )
-            # Cancellation may release the holder between hook publication and this
-            # start; serialize with the release path so no refresher starts on a freed lock.
-            with _lock_release_guard:
-                if not _lock_released:
-                    _lock_refresher = _candidate_refresher
-                    _lock_refresher.start()
+        lease.start_refresher()
 
         # Rotation only (in-place never loses rows). The snapshot predates the lease: if
         # durable grew, a writer committed a turn — ADOPT it (aborting wedged busy
         # sessions forever). Length check only: in-memory edits of past turns are legal.
-        if not in_place and _lock_db is not None and _lock_sid:
+        if not in_place and lease.db is not None and lease.sid:
             durable_loader = getattr(
-                type(_lock_db), "get_messages_as_conversation", None
+                type(lease.db), "get_messages_as_conversation", None
             )
             if callable(durable_loader):
-                durable_parent = durable_loader(_lock_db, _lock_sid)
+                durable_parent = durable_loader(lease.db, lease.sid)
                 if isinstance(durable_parent, list) and len(durable_parent) > len(messages):
                     # In-memory carries this turn's un-persisted user tail; flush it via the normal
                     # rotation-boundary path before adopting, else skip adoption (would drop input).
@@ -3353,14 +3435,14 @@ def compress_context(
                             "(%d → %d msgs) but the pre-adoption flush of the "
                             "live tail failed; skipping durable-snapshot "
                             "adoption so un-persisted user input is kept",
-                            _lock_sid,
+                            lease.sid,
                             len(messages),
                             len(durable_parent),
                         )
                     else:
                         # Re-read after the flush so the adopted snapshot
                         # carries the just-persisted tail.
-                        durable_parent = durable_loader(_lock_db, _lock_sid)
+                        durable_parent = durable_loader(lease.db, lease.sid)
                     if (
                         _preflush_ok
                         and isinstance(durable_parent, list)
@@ -3369,7 +3451,7 @@ def compress_context(
                         logger.info(
                             "compression: session=%s grew before lease "
                             "(%d → %d msgs); adopting durable snapshot",
-                            _lock_sid,
+                            lease.sid,
                             len(messages),
                             len(durable_parent),
                         )
@@ -3550,7 +3632,7 @@ def compress_context(
             if _activity_heartbeat is not None:
                 _activity_heartbeat.stop("context compression rollback failed")
                 _activity_heartbeat = None
-            _release_lock()
+            lease.release()
             _emit_aborted_attempt_telemetry(agent, _attempt_started_at, f"rollback:{type(_rollback_exc).__name__}")
             raise
         _restore_messages_snapshot(messages, messages_before_compression)
@@ -3566,7 +3648,7 @@ def compress_context(
         if _activity_heartbeat is not None:
             _activity_heartbeat.stop("context compression cancelled")
             _activity_heartbeat = None
-        _release_lock()
+        lease.release()
         _emit_aborted_attempt_telemetry(
             agent,
             _attempt_started_at,
@@ -3584,7 +3666,7 @@ def compress_context(
         if _activity_heartbeat is not None:
             _activity_heartbeat.stop("context compression failed")
             _activity_heartbeat = None
-        _release_lock()
+        lease.release()
         _emit_aborted_attempt_telemetry(agent, _attempt_started_at, f"exception:{type(_compress_exc).__name__}")
         raise
     finally:
@@ -3628,7 +3710,7 @@ def compress_context(
                 )
                 return messages, _existing_sp
             finally:
-                _release_lock()
+                lease.release()
 
         # Compare semantic state, not identity: engines may return an equal copy or
         # mutate the live list. ``==`` first (subclass __eq__), then marker-insensitive.
@@ -3659,7 +3741,7 @@ def compress_context(
                 )
             _existing_sp = _existing_system_prompt(agent, system_message)
             _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "no_progress")
-            _release_lock()
+            lease.release()
             return messages, _existing_sp
 
         if not compressed:
@@ -3676,7 +3758,7 @@ def compress_context(
             except Exception:
                 pass
             _existing_sp = _existing_system_prompt(agent, system_message)
-            _release_lock()
+            lease.release()
             return messages, _existing_sp
 
         # A newer attempt claiming this compressor supersedes us; discard the late
@@ -3701,7 +3783,7 @@ def compress_context(
             agent._last_compaction_in_place = False
             _existing_sp = _existing_system_prompt(agent, system_message)
             _emit_aborted_attempt_telemetry(agent, _attempt_started_at, "attempt_superseded")
-            _release_lock()
+            lease.release()
             return messages, _existing_sp
 
         if commit_fence is not None:
@@ -3738,7 +3820,7 @@ def compress_context(
                         else "commit_fence_cancelled"
                     ),
                 )
-                _release_lock()
+                lease.release()
                 return messages, _existing_sp
 
         summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
@@ -3973,7 +4055,7 @@ def compress_context(
                             exc_info=True,
                         )
                     _restore_prune_rearm_tokens(agent.context_compressor, _compressor_attempt_snapshot)
-                    _release_lock()
+                    lease.release()
                     return messages, _existing_sp
 
                 if in_place:
@@ -3994,8 +4076,8 @@ def compress_context(
                         model_config_patch={
                             PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None,
                         },
-                        watermark=_commit_watermark,
-                        lock_holder=_lock_holder,
+                        watermark=lease.watermark,
+                        lock_holder=lease.holder,
                         tail_count=_tail_count,
                     )
                     split_status = "in_place_committed"
@@ -4095,12 +4177,12 @@ def compress_context(
                         messages=compressed,
                         cwd=getattr(agent, "working_directory", None),
                         profile_name=_profile_for_child,
-                        compression_lock_holder=_lock_holder,
-                        require_compression_lease=_lock_holder is not None,
-                        require_lease_refresh=_lock_holder is not None,
-                        lease_ttl_seconds=_lock_ttl,
+                        compression_lock_holder=lease.holder,
+                        require_compression_lease=lease.holder is not None,
+                        require_lease_refresh=lease.holder is not None,
+                        lease_ttl_seconds=lease.ttl,
                         watermark=(
-                            _commit_watermark
+                            lease.watermark
                             if _foreign_tail_ceiling is not None
                             else None
                         ),
@@ -4447,11 +4529,11 @@ def compress_context(
             agent.session_id or "none", _pre_msg_count, len(compressed),
             f"{_compressed_est:,}",
         )
-        _commit_status = "committed" if split_status in {"not_applicable", "in_place_committed", "rotated_committed"} else "aborted"
+        lifecycle.commit_status = "committed" if split_status in {"not_applicable", "in_place_committed", "rotated_committed"} else "aborted"
         _emit_compression_attempt_telemetry(
             agent,
             started_at=_attempt_started_at,
-            commit_status=_commit_status,
+            commit_status=lifecycle.commit_status,
             split_status=split_status,
             failure_class=(
                 "session_split_failed"
@@ -4465,7 +4547,7 @@ def compress_context(
         # Release the OLD session's lock only after rotation and all post-rotation
         # bookkeeping; a waking contender then sees the NEW id and acquires on that.
         try:
-            _release_lock()
+            lease.release()
         finally:
             if _commit_fence_entered:
                 commit_fence.finish_commit()
