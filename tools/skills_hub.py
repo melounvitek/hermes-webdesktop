@@ -353,9 +353,9 @@ def ensure_hub_dirs() -> None:
     _quarantine_dir().mkdir(exist_ok=True)
     _index_cache_dir().mkdir(exist_ok=True)
     for path, initial in (
-        (_lock_file(), json.dumps(HubLockFile.EMPTY) + "\n"),
+        (_lock_file(), '{"version": 1, "installed": {}}\n'),
         (_audit_log(), ""),
-        (_taps_file(), json.dumps(TapsManager.EMPTY) + "\n"),
+        (_taps_file(), '{"taps": []}\n'),
     ):
         if not path.exists():
             path.write_text(initial, encoding="utf-8")
