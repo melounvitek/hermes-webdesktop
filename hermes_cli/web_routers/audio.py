@@ -17,6 +17,7 @@ import os
 import urllib.parse
 import urllib.request
 from fastapi import APIRouter
+from hermes_cli.web_routers._common import http_failure
 from hermes_cli.web_deps import late
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from hermes_cli.web_models import AudioTranscriptionRequest, TTSSpeakRequest, TTSLeaseRequest
@@ -270,7 +271,9 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
     if not text:
         raise HTTPException(status_code=400, detail="Text is required")
 
-    try:
+    # _config_profile_scope raises 400/404 for a bad profile — pass it
+    # through instead of masking it as a 500 synthesis failure.
+    with http_failure("Desktop voice TTS failed", 500, "Speech synthesis failed"):
         from tools.tts_tool import text_to_speech_tool
 
         def _speak_scoped():
@@ -283,13 +286,6 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
 
         loop = asyncio.get_running_loop()
         result_json = await loop.run_in_executor(None, _speak_scoped)
-    except HTTPException:
-        # _config_profile_scope raises 400/404 for a bad profile — pass it
-        # through instead of masking it as a 500 synthesis failure.
-        raise
-    except Exception as exc:
-        _log.exception("Desktop voice TTS failed")
-        raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}")
 
     try:
         result = json.loads(result_json) if isinstance(result_json, str) else result_json

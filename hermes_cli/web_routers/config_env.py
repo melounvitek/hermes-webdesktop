@@ -10,6 +10,7 @@ import asyncio
 import time
 import urllib.parse
 from fastapi import APIRouter
+from hermes_cli.web_routers._common import http_failure
 from hermes_cli.web_deps import late
 from fastapi import HTTPException, Request
 from hermes_cli.config import DEFAULT_CONFIG, OPTIONAL_ENV_VARS, read_raw_config, custom_endpoint_key_env, coerce_provider_id, find_provider_entry, redact_key, _deep_merge
@@ -114,13 +115,8 @@ async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
             _broadcast_gateway_session_info()
         return {"ok": True}
 
-    try:
+    with http_failure("PUT /api/config failed", 500, detail="Internal server error"):
         return await asyncio.to_thread(_run)
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("PUT /api/config failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 def _catalog_provider_env_metadata() -> dict:
@@ -576,20 +572,15 @@ def list_custom_endpoints(profile: Optional[str] = None):
     active profile, so read/write must resolve that profile's home rather than
     the process-level HERMES_HOME. Mirrors ``/api/config``'s profile scoping.
     """
-    try:
+    with http_failure("GET /api/providers/custom-endpoints failed", 500, detail="Failed to list custom endpoints"):
         with _config_profile_scope(profile):
             return _custom_endpoint_response(load_config())
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("GET /api/providers/custom-endpoints failed")
-        raise HTTPException(status_code=500, detail="Failed to list custom endpoints")
 
 
 @router.post("/api/providers/custom-endpoints")
 def upsert_custom_endpoint(body: CustomEndpointUpdate, profile: Optional[str] = None):
     """Create or update a v12+ ``providers`` custom endpoint entry."""
-    try:
+    with http_failure("POST /api/providers/custom-endpoints failed", 500, detail="Failed to save custom endpoint"):
         with _config_profile_scope(profile):
             cfg = load_config()
             endpoint_id, _entry = _write_custom_endpoint(cfg, body)
@@ -598,11 +589,6 @@ def upsert_custom_endpoint(body: CustomEndpointUpdate, profile: Optional[str] = 
         response["ok"] = True
         response["id"] = endpoint_id
         return response
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("POST /api/providers/custom-endpoints failed")
-        raise HTTPException(status_code=500, detail="Failed to save custom endpoint")
 
 
 @router.post("/api/providers/custom-endpoints/{endpoint_id}/activate")

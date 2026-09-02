@@ -27,7 +27,7 @@ from hermes_cli.web_models import (
     SessionPrune,
     SessionRename,
 )
-from hermes_cli.web_routers._common import log as _log
+from hermes_cli.web_routers._common import log as _log, http_failure
 from hermes_state import is_malformed_db_error, is_transient_sqlite_error
 
 list_router = APIRouter()
@@ -230,7 +230,7 @@ async def search_sessions(
     """
     if not q or not q.strip():
         return {"results": []}
-    try:
+    with http_failure("GET /api/sessions/search failed", 500, detail="Search failed"):
         db = _open_session_db_for_profile(profile, read_only=True)
         try:
             safe_limit = max(1, min(int(limit or 20), 100))
@@ -416,11 +416,6 @@ async def search_sessions(
             return {"results": list(seen.values())}
         finally:
             db.close()
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("GET /api/sessions/search failed")
-        raise HTTPException(status_code=500, detail="Search failed")
 
 
 @manage_router.post("/api/sessions/bulk-delete")
@@ -654,15 +649,10 @@ async def backfill_session_owner_profiles(body: SessionOwnerBackfill):
     """
     stamp = _serving_profile(body.profile)
 
-    try:
+    with http_failure("POST /api/sessions/owner-backfill failed", 500, detail="Internal server error"):
         stamped = await asyncio.to_thread(
             _with_db, body.profile, lambda db: db.backfill_null_session_profiles(stamp), read_only=False
         )
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("POST /api/sessions/owner-backfill failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
 
     if stamped:
         _log.info(

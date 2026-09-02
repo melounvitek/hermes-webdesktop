@@ -7,6 +7,7 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 import logging
 import asyncio
 from fastapi import APIRouter
+from hermes_cli.web_routers._common import http_failure
 from hermes_cli.web_deps import late
 from fastapi import HTTPException
 from hermes_cli.web_models import ModelAssignment, MoaModelSlot, MoaPresetPayload, MoaConfigPayload
@@ -130,7 +131,7 @@ async def get_model_options(
     re-fetches its live catalog — used by the picker's explicit "Refresh
     Models" control. Normal opens leave it false to stay on the 1h cache.
     """
-    try:
+    with http_failure("GET /api/model/options failed", 500, detail="Failed to list model options"):
         skew_msg = _dashboard_code_skew_guard()
         if skew_msg:
             _log.warning("GET /api/model/options refused: %s", skew_msg)
@@ -157,11 +158,6 @@ async def get_model_options(
                 )
 
         return await run_in_threadpool(_build_payload_scoped)
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("GET /api/model/options failed")
-        raise HTTPException(status_code=500, detail="Failed to list model options")
 
 
 @router.get("/api/model/recommended-default")
@@ -273,7 +269,7 @@ def get_auxiliary_models(profile: Optional[str] = None):
     selected profile's (read/write asymmetry).
     """
     from hermes_cli.web_server import _AUX_TASK_SLOTS
-    try:
+    with http_failure("GET /api/model/auxiliary failed", 500, detail="Failed to read auxiliary config"):
         with _profile_scope(profile):
             cfg = load_config()
         aux_cfg = cfg.get("auxiliary", {})
@@ -300,33 +296,23 @@ def get_auxiliary_models(profile: Optional[str] = None):
             main = {"provider": "", "model": str(model_cfg) if model_cfg else ""}
 
         return {"tasks": tasks, "main": main}
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("GET /api/model/auxiliary failed")
-        raise HTTPException(status_code=500, detail="Failed to read auxiliary config")
 
 
 @router.get("/api/model/moa")
 def get_moa_models(profile: Optional[str] = None):
     """Return the configured Mixture-of-Agents provider/model slots."""
-    try:
+    with http_failure("GET /api/model/moa failed", 500, detail="Failed to read MoA config"):
         from hermes_cli.moa_config import normalize_moa_config
 
         with _profile_scope(profile):
             cfg = load_config()
             return normalize_moa_config(cfg.get("moa") if isinstance(cfg, dict) else {})
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("GET /api/model/moa failed")
-        raise HTTPException(status_code=500, detail="Failed to read MoA config")
 
 
 @router.put("/api/model/moa")
 def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
     """Persist the Mixture-of-Agents provider/model slots."""
-    try:
+    with http_failure("PUT /api/model/moa failed", 500, detail="Failed to save MoA config"):
         from hermes_cli.moa_config import normalize_moa_config, validate_moa_payload
 
         def _slot_dict(slot: MoaModelSlot) -> dict:
@@ -390,11 +376,6 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
             cfg.setdefault("moa", {}).update(normalized)
             save_config(cfg)
             return {"ok": True, **normalized}
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("PUT /api/model/moa failed")
-        raise HTTPException(status_code=500, detail="Failed to save MoA config")
 
 
 @router.post("/api/model/set")
@@ -415,7 +396,7 @@ async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = N
     if scope not in {"main", "auxiliary"}:
         raise HTTPException(status_code=400, detail="scope must be 'main' or 'auxiliary'")
 
-    try:
+    with http_failure("POST /api/model/set failed", 500, detail="Failed to save model assignment"):
         # Expensive-model warning runs BEFORE the profile scope is entered:
         # _profile_scope must never be held across an await (the RLock is
         # reentrant per-thread, so a second coroutine interleaving on the
@@ -451,8 +432,3 @@ async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = N
                 )
 
         return await asyncio.to_thread(_apply_assignment)
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("POST /api/model/set failed")
-        raise HTTPException(status_code=500, detail="Failed to save model assignment")

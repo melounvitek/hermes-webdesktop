@@ -13,6 +13,7 @@ import os
 import secrets
 from datetime import datetime, timezone
 from fastapi import APIRouter
+from hermes_cli.web_routers._common import http_failure
 from hermes_cli.web_deps import late
 from fastapi import File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -301,25 +302,15 @@ async def set_webhook_enabled(name: str, body: WebhookEnabledToggle):
 
 @router.post("/api/gateway/start")
 async def start_gateway(profile: Optional[str] = None):
-    try:
+    with http_failure("Failed to spawn gateway start", 500, "Failed to start gateway"):
         proc = _spawn_hermes_action(_gateway_subcommand(profile, "start"), "gateway-start")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        _log.exception("Failed to spawn gateway start")
-        raise HTTPException(status_code=500, detail=f"Failed to start gateway: {exc}")
     return {"ok": True, "pid": proc.pid, "name": "gateway-start"}
 
 
 @router.post("/api/gateway/stop")
 async def stop_gateway(profile: Optional[str] = None):
-    try:
+    with http_failure("Failed to spawn gateway stop", 500, "Failed to stop gateway"):
         proc = _spawn_hermes_action(_gateway_subcommand(profile, "stop"), "gateway-stop")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        _log.exception("Failed to spawn gateway stop")
-        raise HTTPException(status_code=500, detail=f"Failed to stop gateway: {exc}")
     return {"ok": True, "pid": proc.pid, "name": "gateway-stop"}
 
 

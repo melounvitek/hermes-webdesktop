@@ -88,14 +88,10 @@ from gateway.status import (
 from utils import env_var_enabled
 
 try:
-    from fastapi import (
-        FastAPI, File, Form, HTTPException, Query, Request, UploadFile,
-        WebSocket, WebSocketDisconnect,
-    )
+    from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel, SecretStr, field_validator
     from starlette.concurrency import run_in_threadpool
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually

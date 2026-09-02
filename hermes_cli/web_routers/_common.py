@@ -48,11 +48,14 @@ async def scoped_to_thread(profile: Optional[str], fn: Callable[[], Any]) -> Any
 
 
 @contextlib.contextmanager
-def http_failure(log_msg: str, status: int, prefix: str):
-    """Map unexpected exceptions to ``HTTPException(status, f"{prefix}: {exc}")``.
+def http_failure(log_msg: str, status: int, prefix: Optional[str] = None, *, detail: Optional[str] = None):
+    """Map unexpected exceptions to an ``HTTPException``.
 
     ``HTTPException`` passes through untouched; anything else is logged with
-    ``log_msg`` (full traceback) first.
+    ``log_msg`` (full traceback) first, then re-raised as
+    ``HTTPException(status, f"{prefix}: {exc}")`` or — when ``detail`` is
+    given instead — ``HTTPException(status, detail)`` (fixed message, the
+    exception text is only in the log).
     """
     try:
         yield
@@ -60,7 +63,7 @@ def http_failure(log_msg: str, status: int, prefix: str):
         raise
     except Exception as exc:
         log.exception(log_msg)
-        raise HTTPException(status_code=status, detail=f"{prefix}: {exc}")
+        raise HTTPException(status_code=status, detail=detail if detail is not None else f"{prefix}: {exc}")
 
 
 def spawn_profile_action(

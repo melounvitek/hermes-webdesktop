@@ -9,6 +9,7 @@ import asyncio
 import secrets
 import subprocess
 from fastapi import APIRouter
+from hermes_cli.web_routers._common import http_failure
 from hermes_cli.web_deps import late
 from fastapi import HTTPException, Request
 from hermes_cli import __version__
@@ -33,13 +34,8 @@ get_hermes_home = late("get_hermes_home")
 @router.post("/api/gateway/restart")
 async def restart_gateway(profile: Optional[str] = None):
     """Kick off a ``hermes gateway restart`` in the background."""
-    try:
+    with http_failure("Failed to spawn gateway restart", 500, "Failed to restart gateway"):
         proc, _reused = _spawn_gateway_restart(profile)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        _log.exception("Failed to spawn gateway restart")
-        raise HTTPException(status_code=500, detail=f"Failed to restart gateway: {exc}")
     return {
         "ok": True,
         "pid": proc.pid,
