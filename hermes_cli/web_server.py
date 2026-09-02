@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager, contextmanager
 import asyncio
 import atexit
 import concurrent.futures
+import functools
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -6542,7 +6543,37 @@ async def _start_device_code_flow(
     raise HTTPException(status_code=400, detail=f"Provider {provider_id} does not support device-code flow")
 
 
-def _nous_poller(session_id: str) -> None:
+
+def _oauth_poller(label: str):
+    """Wrap a background device-code poller body ``fn(session_id, sess)``.
+
+    Looks up the session (a vanished session is a no-op), marks it
+    ``approved`` when the body returns, and on any exception records
+    ``error`` + ``error_message`` on the session instead of raising — the
+    thread has no caller to report to; the dashboard reads the status.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def poller(session_id: str) -> None:
+            with _oauth_sessions_lock:
+                sess = _oauth_sessions.get(session_id)
+            if not sess:
+                return
+            try:
+                fn(session_id, sess)
+                with _oauth_sessions_lock:
+                    sess["status"] = "approved"
+                _log.info("oauth/device: %s login completed (session=%s)", label, session_id)
+            except Exception as e:
+                _log.warning("%s device-code poll failed (session=%s): %s", label, session_id, e)
+                with _oauth_sessions_lock:
+                    sess["status"] = "error"
+                    sess["error_message"] = str(e)
+        return poller
+    return deco
+
+@_oauth_poller("nous")
+def _nous_poller(session_id: str, sess: Dict[str, Any]) -> None:
     """Background poller that drives a Nous device-code flow to completion."""
     from hermes_cli.auth import (
         _poll_for_token,
@@ -6550,63 +6581,51 @@ def _nous_poller(session_id: str) -> None:
     )
     from datetime import datetime, timezone
     import httpx
-    with _oauth_sessions_lock:
-        sess = _oauth_sessions.get(session_id)
-    if not sess:
-        return
     portal_base_url = sess["portal_base_url"]
     client_id = sess["client_id"]
     device_code = sess["device_code"]
     interval = sess["interval"]
     scope = sess.get("scope")
     expires_in = max(60, int(sess["expires_at"] - time.time()))
-    try:
-        with httpx.Client(timeout=httpx.Timeout(15.0), headers={"Accept": "application/json"}) as client:
-            token_data = _poll_for_token(
-                client=client,
-                portal_base_url=portal_base_url,
-                client_id=client_id,
-                device_code=device_code,
-                expires_in=expires_in,
-                poll_interval=interval,
-            )
-        # Same post-processing as _nous_device_code_login (validate/refresh JWT)
-        now = datetime.now(timezone.utc)
-        token_ttl = int(token_data.get("expires_in") or 0)
-        auth_state = {
-            "portal_base_url": portal_base_url,
-            "inference_base_url": token_data.get("inference_base_url"),
-            "client_id": client_id,
-            "scope": token_data.get("scope") or scope,
-            "token_type": token_data.get("token_type", "Bearer"),
-            "access_token": token_data["access_token"],
-            "refresh_token": token_data.get("refresh_token"),
-            "obtained_at": now.isoformat(),
-            "expires_at": (
-                datetime.fromtimestamp(now.timestamp() + token_ttl, tz=timezone.utc).isoformat()
-                if token_ttl else None
-            ),
-            "expires_in": token_ttl,
-        }
-        with _profile_scope(_oauth_session_profile(session_id)):
-            full_state = refresh_nous_oauth_from_state(
-                auth_state,
-                timeout_seconds=15.0,
-                force_refresh=False,
-            )
-            from hermes_cli.auth import persist_nous_credentials
-            persist_nous_credentials(full_state)
-        with _oauth_sessions_lock:
-            sess["status"] = "approved"
-        _log.info("oauth/device: nous login completed (session=%s)", session_id)
-    except Exception as e:
-        _log.warning("nous device-code poll failed (session=%s): %s", session_id, e)
-        with _oauth_sessions_lock:
-            sess["status"] = "error"
-            sess["error_message"] = str(e)
+    with httpx.Client(timeout=httpx.Timeout(15.0), headers={"Accept": "application/json"}) as client:
+        token_data = _poll_for_token(
+            client=client,
+            portal_base_url=portal_base_url,
+            client_id=client_id,
+            device_code=device_code,
+            expires_in=expires_in,
+            poll_interval=interval,
+        )
+    # Same post-processing as _nous_device_code_login (validate/refresh JWT)
+    now = datetime.now(timezone.utc)
+    token_ttl = int(token_data.get("expires_in") or 0)
+    auth_state = {
+        "portal_base_url": portal_base_url,
+        "inference_base_url": token_data.get("inference_base_url"),
+        "client_id": client_id,
+        "scope": token_data.get("scope") or scope,
+        "token_type": token_data.get("token_type", "Bearer"),
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data.get("refresh_token"),
+        "obtained_at": now.isoformat(),
+        "expires_at": (
+            datetime.fromtimestamp(now.timestamp() + token_ttl, tz=timezone.utc).isoformat()
+            if token_ttl else None
+        ),
+        "expires_in": token_ttl,
+    }
+    with _profile_scope(_oauth_session_profile(session_id)):
+        full_state = refresh_nous_oauth_from_state(
+            auth_state,
+            timeout_seconds=15.0,
+            force_refresh=False,
+        )
+        from hermes_cli.auth import persist_nous_credentials
+        persist_nous_credentials(full_state)
 
 
-def _minimax_poller(session_id: str) -> None:
+@_oauth_poller("minimax")
+def _minimax_poller(session_id: str, sess: Dict[str, Any]) -> None:
     """Background poller that drives a MiniMax OAuth flow to completion.
 
     Mirrors `_nous_poller` but calls the MiniMax-specific token endpoint,
@@ -6626,71 +6645,59 @@ def _minimax_poller(session_id: str) -> None:
     )
     from datetime import datetime, timezone
     import httpx
-    with _oauth_sessions_lock:
-        sess = _oauth_sessions.get(session_id)
-    if not sess:
-        return
     portal_base_url = sess["portal_base_url"]
     client_id = sess["client_id"]
     user_code = sess["user_code"]
     code_verifier = sess["code_verifier"]
     interval_ms = sess.get("interval_ms")
     expired_in_raw = sess["expired_in_raw"]
-    try:
-        with httpx.Client(
-            timeout=httpx.Timeout(15.0),
-            headers={"Accept": "application/json"},
-            follow_redirects=True,
-        ) as client:
-            token_data = _minimax_poll_token(
-                client=client,
-                portal_base_url=portal_base_url,
-                client_id=client_id,
-                user_code=user_code,
-                code_verifier=code_verifier,
-                expired_in=expired_in_raw,
-                interval_ms=interval_ms,
-            )
-        # Build the auth_state dict in the same shape as the CLI flow's
-        # `_minimax_oauth_login` so `_minimax_save_auth_state` writes
-        # the canonical record. Region is fixed to "global" for the
-        # dashboard path; cn-region operators can still use the CLI
-        # flow which supports `--region cn`.
-        now = datetime.now(timezone.utc)
-        expires_at_ts = _minimax_resolve_token_expiry_unix(
-            int(token_data["expired_in"]), now=now,
+    with httpx.Client(
+        timeout=httpx.Timeout(15.0),
+        headers={"Accept": "application/json"},
+        follow_redirects=True,
+    ) as client:
+        token_data = _minimax_poll_token(
+            client=client,
+            portal_base_url=portal_base_url,
+            client_id=client_id,
+            user_code=user_code,
+            code_verifier=code_verifier,
+            expired_in=expired_in_raw,
+            interval_ms=interval_ms,
         )
-        expires_in_s = max(0, int(expires_at_ts - now.timestamp()))
-        auth_state = {
-            "provider": "minimax-oauth",
-            "region": sess.get("region", "global"),
-            "portal_base_url": portal_base_url,
-            "inference_base_url": MINIMAX_OAUTH_GLOBAL_INFERENCE,
-            "client_id": client_id,
-            "scope": MINIMAX_OAUTH_SCOPE,
-            "token_type": token_data.get("token_type", "Bearer"),
-            "access_token": token_data["access_token"],
-            "refresh_token": token_data["refresh_token"],
-            "resource_url": token_data.get("resource_url"),
-            "obtained_at": now.isoformat(),
-            "expires_at": datetime.fromtimestamp(
-                expires_at_ts, tz=timezone.utc
-            ).isoformat(),
-            "expires_in": expires_in_s,
-        }
-        with _profile_scope(_oauth_session_profile(session_id)):
-            _minimax_save_auth_state(auth_state)
-        with _oauth_sessions_lock:
-            sess["status"] = "approved"
-        _log.info("oauth/device: minimax login completed (session=%s)", session_id)
-    except Exception as e:
-        _log.warning("minimax device-code poll failed (session=%s): %s", session_id, e)
-        with _oauth_sessions_lock:
-            sess["status"] = "error"
-            sess["error_message"] = str(e)
+    # Build the auth_state dict in the same shape as the CLI flow's
+    # `_minimax_oauth_login` so `_minimax_save_auth_state` writes
+    # the canonical record. Region is fixed to "global" for the
+    # dashboard path; cn-region operators can still use the CLI
+    # flow which supports `--region cn`.
+    now = datetime.now(timezone.utc)
+    expires_at_ts = _minimax_resolve_token_expiry_unix(
+        int(token_data["expired_in"]), now=now,
+    )
+    expires_in_s = max(0, int(expires_at_ts - now.timestamp()))
+    auth_state = {
+        "provider": "minimax-oauth",
+        "region": sess.get("region", "global"),
+        "portal_base_url": portal_base_url,
+        "inference_base_url": MINIMAX_OAUTH_GLOBAL_INFERENCE,
+        "client_id": client_id,
+        "scope": MINIMAX_OAUTH_SCOPE,
+        "token_type": token_data.get("token_type", "Bearer"),
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data["refresh_token"],
+        "resource_url": token_data.get("resource_url"),
+        "obtained_at": now.isoformat(),
+        "expires_at": datetime.fromtimestamp(
+            expires_at_ts, tz=timezone.utc
+        ).isoformat(),
+        "expires_in": expires_in_s,
+    }
+    with _profile_scope(_oauth_session_profile(session_id)):
+        _minimax_save_auth_state(auth_state)
 
 
-def _xai_device_poller(session_id: str) -> None:
+@_oauth_poller("xai")
+def _xai_device_poller(session_id: str, sess: Dict[str, Any]) -> None:
     """Background poller for xAI's OAuth device-code flow."""
     import httpx
     from hermes_cli.auth import (
@@ -6701,64 +6708,51 @@ def _xai_device_poller(session_id: str) -> None:
         unsuppress_credential_source,
     )
 
-    with _oauth_sessions_lock:
-        sess = _oauth_sessions.get(session_id)
-    if not sess:
-        return
     device_code = sess["device_code"]
     interval = int(sess["interval"])
     expires_in = max(60, int(sess["expires_at"] - time.time()))
-    try:
-        discovery = _xai_oauth_discovery(20.0)
-        with httpx.Client(
-            timeout=httpx.Timeout(20.0),
-            headers={"Accept": "application/json"},
-        ) as client:
-            token_data = _xai_oauth_poll_device_token(
-                client,
-                token_endpoint=discovery["token_endpoint"],
-                device_code=device_code,
-                expires_in=expires_in,
-                poll_interval=interval,
-            )
-        tokens = {
-            "access_token": str(token_data.get("access_token", "") or "").strip(),
-            "refresh_token": str(token_data.get("refresh_token", "") or "").strip(),
-            "id_token": str(token_data.get("id_token", "") or "").strip(),
-            "expires_in": token_data.get("expires_in"),
-            "token_type": str(token_data.get("token_type") or "Bearer").strip() or "Bearer",
-        }
-        with _profile_scope(_oauth_session_profile(session_id)):
-            _save_xai_oauth_tokens(
-                tokens,
-                discovery=discovery,
-                last_refresh=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                auth_mode="oauth_device_code",
-                # Persist credentials without hijacking an existing active
-                # chat provider.
-                set_active=False,
-            )
-            # Mirror `hermes auth add xai-oauth`: first credential may become
-            # active when none is set yet; never overwrite an existing choice.
-            mark_provider_active_if_unset("xai-oauth")
-            # The singleton write above is the single source of truth: the
-            # credential-pool load seeds it as the canonical ``device_code``
-            # entry. Do NOT also insert a parallel ``manual:dashboard_*`` pool
-            # entry — that duplicates the single-use refresh token across two
-            # entries and triggers rotation churn / ``refresh_token_reused``.
-            # An interactive dashboard login is also an explicit re-enable
-            # signal, so clear any ``device_code`` suppression left by a
-            # prior ``hermes auth remove xai-oauth`` (mirrors auth_add_command
-            # and the ``hermes model`` re-login path in _login_xai_oauth).
-            unsuppress_credential_source("xai-oauth", "device_code")
-        with _oauth_sessions_lock:
-            sess["status"] = "approved"
-        _log.info("oauth/device: xai login completed (session=%s)", session_id)
-    except Exception as e:
-        _log.warning("xai device-code poll failed (session=%s): %s", session_id, e)
-        with _oauth_sessions_lock:
-            sess["status"] = "error"
-            sess["error_message"] = str(e)
+    discovery = _xai_oauth_discovery(20.0)
+    with httpx.Client(
+        timeout=httpx.Timeout(20.0),
+        headers={"Accept": "application/json"},
+    ) as client:
+        token_data = _xai_oauth_poll_device_token(
+            client,
+            token_endpoint=discovery["token_endpoint"],
+            device_code=device_code,
+            expires_in=expires_in,
+            poll_interval=interval,
+        )
+    tokens = {
+        "access_token": str(token_data.get("access_token", "") or "").strip(),
+        "refresh_token": str(token_data.get("refresh_token", "") or "").strip(),
+        "id_token": str(token_data.get("id_token", "") or "").strip(),
+        "expires_in": token_data.get("expires_in"),
+        "token_type": str(token_data.get("token_type") or "Bearer").strip() or "Bearer",
+    }
+    with _profile_scope(_oauth_session_profile(session_id)):
+        _save_xai_oauth_tokens(
+            tokens,
+            discovery=discovery,
+            last_refresh=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            auth_mode="oauth_device_code",
+            # Persist credentials without hijacking an existing active
+            # chat provider.
+            set_active=False,
+        )
+        # Mirror `hermes auth add xai-oauth`: first credential may become
+        # active when none is set yet; never overwrite an existing choice.
+        mark_provider_active_if_unset("xai-oauth")
+        # The singleton write above is the single source of truth: the
+        # credential-pool load seeds it as the canonical ``device_code``
+        # entry. Do NOT also insert a parallel ``manual:dashboard_*`` pool
+        # entry — that duplicates the single-use refresh token across two
+        # entries and triggers rotation churn / ``refresh_token_reused``.
+        # An interactive dashboard login is also an explicit re-enable
+        # signal, so clear any ``device_code`` suppression left by a
+        # prior ``hermes auth remove xai-oauth`` (mirrors auth_add_command
+        # and the ``hermes model`` re-login path in _login_xai_oauth).
+        unsuppress_credential_source("xai-oauth", "device_code")
 
 
 def _http_response_error_detail(resp: Any) -> str:
