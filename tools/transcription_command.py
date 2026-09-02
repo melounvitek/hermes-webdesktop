@@ -40,14 +40,8 @@ logger = logging.getLogger("tools.transcription_tools")
 # The single-env-var HERMES_LOCAL_STT_COMMAND escape hatch stays untouched via
 # the built-in ``local_command`` path.
 DEFAULT_COMMAND_STT_TIMEOUT_SECONDS = 300
-
-
 DEFAULT_COMMAND_STT_LANGUAGE = "en"
-
-
 DEFAULT_COMMAND_STT_OUTPUT_FORMAT = "txt"
-
-
 COMMAND_STT_OUTPUT_FORMATS = frozenset({"txt", "json", "srt", "vtt"})
 
 

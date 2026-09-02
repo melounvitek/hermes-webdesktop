@@ -68,9 +68,6 @@ def _normalize_local_model(model_name: Optional[str]) -> str:
     return model_name
 
 
-_normalize_local_command_model = _normalize_local_model
-
-
 def _try_lazy_install_stt() -> bool:
     """Lazy-install faster-whisper and re-check dynamically so it's usable without a restart."""
     try:
@@ -188,11 +185,7 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
 # condition_on_previous_text=False so one hallucinated token can't seed a run;
 # and the segment confidence gate in _is_hallucinated_segment.
 _VAD_MIN_SILENCE_MS_DEFAULT = 500
-
-
 _NO_SPEECH_PROB_THRESHOLD_DEFAULT = 0.6
-
-
 _LOGPROB_THRESHOLD_DEFAULT = -1.0
 
 
@@ -308,7 +301,7 @@ def _transcribe_local_command(
 
     # Language: hook override > stt.local.language > stt.language > env > "en".
     language = language or _resolve_stt_language("local") or DEFAULT_LOCAL_STT_LANGUAGE
-    normalized_model = _normalize_local_command_model(model_name)
+    normalized_model = _normalize_local_model(model_name)
 
     try:
         with tempfile.TemporaryDirectory(prefix="hermes-local-stt-") as output_dir:

@@ -254,17 +254,9 @@ def _convert_caf_to_wav(file_path: str) -> Optional[str]:
 # they may wrap local CLIs that want the original bytes.
 
 _CLOUD_TRIM_THRESHOLD_DB_DEFAULT = -40  # audio below this level counts as silence
-
-
 _CLOUD_TRIM_KEEP_MS_DEFAULT = 300  # how much of each pause survives the trim
-
-
 _CLOUD_TRIM_MIN_SAVING = 0.10  # use the trimmed file only when >=10% shorter
-
-
 _CLOUD_TRIM_MIN_RESULT_SECONDS = 0.3  # all-silence guard floor: never upload ~empty audio
-
-
 # Below this the trim can't pay for itself (several providers bill a 10s
 # minimum per request) and the encode would sit on the synchronous voice-note path.
 _CLOUD_TRIM_MIN_INPUT_SECONDS = 12.0

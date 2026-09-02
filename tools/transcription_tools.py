@@ -76,7 +76,6 @@ from tools.transcription_local import (  # noqa: F401  (re-exported; tests patch
     _join_confident_segments,
     _load_local_whisper_model,
     _looks_like_cuda_lib_error,
-    _normalize_local_command_model,
     _normalize_local_model,
     _transcribe_local_command,
     _try_lazy_install_stt,
@@ -625,10 +624,9 @@ def _transcribe_prepared_audio(
 
     # Convert CAF (iMessage voice notes) to WAV for cloud STT providers.
     if Path(file_path).suffix.lower() == ".caf" and provider not in ("local", "local_command"):
-        converted = _convert_caf_to_wav(file_path)
-        if not converted:
+        file_path = _convert_caf_to_wav(file_path)
+        if not file_path:
             return _error_result("CAF audio could not be converted to WAV.")
-        file_path = converted
 
     # Best-effort pre-upload silence trim for built-in cloud providers.
     trim_cleanup_dir: Optional[str] = None
@@ -696,12 +694,9 @@ def _dispatch_stt_provider(
     # The hook fires after provider resolution and BEFORE any backend is
     # invoked; ``language`` stays None unless a hook overrides it.
     model, language, prompt = _apply_pre_transcription_hook(
-        file_path=file_path,
-        provider=provider,
-        model=model,
+        file_path=file_path, provider=provider, model=model,
         language=_get_stt_section(stt_config, provider).get("language"),
-        prompt=prompt,
-        source=source,
+        prompt=prompt, source=source,
     )
     prompt = _enforce_prompt_length_limit(prompt, provider)
 
@@ -718,36 +713,28 @@ def _dispatch_stt_provider(
     command_provider_config = _resolve_command_stt_provider_config(provider, stt_config)
     if command_provider_config is not None:
         return _transcribe_command_stt(
-            file_path,
-            provider,
-            command_provider_config,
-            stt_config,
-            model_override=model,
-            language_override=language,
-            prompt=prompt,
+            file_path, provider, command_provider_config, stt_config,
+            model_override=model, language_override=language, prompt=prompt,
         )
 
     # Plugin-registered backend. Plugins read per-provider config under
     # ``stt.<provider>`` like built-ins; the ``model`` argument overrides it.
     plugin_cfg = _get_stt_section(stt_config, provider)
     plugin_result = _dispatch_to_plugin_provider(
-        file_path,
-        provider,
-        stt_config,
+        file_path, provider, stt_config,
         model=model or plugin_cfg.get("model"),
         language=language or _resolve_stt_language(provider, stt_config),
         prompt=prompt,
     )
     if plugin_result is not None:
         return plugin_result
+    return _no_provider_error(provider, stt_config)
 
+
+def _no_provider_error(provider: str, stt_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Error envelope when nothing claimed *provider*: unregistered name > openai selection reason > generic hint."""
     provider_key = str(provider or "").strip().lower()
-    if (
-        "provider" in stt_config
-        and provider_key
-        and provider_key not in BUILTIN_STT_PROVIDERS
-        and provider_key != "none"
-    ):
+    if "provider" in stt_config and provider_key and provider_key not in BUILTIN_STT_PROVIDERS and provider_key != "none":
         return _unregistered_stt_provider_error(provider_key)
 
     # An explicit openai selection flattened to "none" carries a
@@ -794,16 +781,14 @@ def transcribe_audio(
         return source_error
 
     prepared_path, cleanup_dir, prep_error = _prepare_audio_for_transcription(file_path)
-    if prep_error:
-        return prep_error
-    if prepared_path is None:
-        return _error_result("Audio preprocessing did not produce a file for transcription.")
+    if prep_error or prepared_path is None:
+        return prep_error or _error_result("Audio preprocessing did not produce a file for transcription.")
 
     try:
-        prepared_error = _validate_audio_file(prepared_path, enforce_size_limit=False)
-        if prepared_error:
-            return prepared_error
-        return _transcribe_prepared_audio(prepared_path, model, source)
+        return (
+            _validate_audio_file(prepared_path, enforce_size_limit=False)
+            or _transcribe_prepared_audio(prepared_path, model, source)
+        )
     finally:
         if cleanup_dir:
             shutil.rmtree(cleanup_dir, ignore_errors=True)
@@ -828,7 +813,7 @@ def transcribe_audio_local_fallback(
     if _HAS_FASTER_WHISPER:
         return _transcribe_local(file_path, _normalize_local_model(local_model))
     if _has_local_command():
-        return _transcribe_local_command(file_path, _normalize_local_command_model(local_model))
+        return _transcribe_local_command(file_path, _normalize_local_model(local_model))
     return _error_result("No installed local STT backend is available.", provider="local")
 
 
