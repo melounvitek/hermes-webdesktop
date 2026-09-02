@@ -35,6 +35,14 @@ class MCPServerRunMixin:
                 except (asyncio.CancelledError, Exception):
                     pass
 
+    def _recycle_if_due(self) -> bool:
+        """Latch a stdio idle/lifetime recycle when its deadline has passed."""
+        recycle_reason = self._stdio_recycle_reason()
+        if recycle_reason is None:
+            return False
+        self._mark_stdio_recycled(recycle_reason)
+        return True
+
     async def _wait_for_lifecycle_event(self) -> str:
         """Serve the connection until a lifecycle event; return its kind.
 
@@ -58,9 +66,7 @@ class MCPServerRunMixin:
         reconnect_task = asyncio.create_task(self._reconnect_event.wait())
         try:
             while True:
-                recycle_reason = self._stdio_recycle_reason()
-                if recycle_reason is not None:
-                    self._mark_stdio_recycled(recycle_reason)
+                if self._recycle_if_due():
                     return "recycle"
 
                 timeout = keepalive_interval
@@ -75,10 +81,7 @@ class MCPServerRunMixin:
                 )
                 if done:
                     break
-
-                recycle_reason = self._stdio_recycle_reason()
-                if recycle_reason is not None:
-                    self._mark_stdio_recycled(recycle_reason)
+                if self._recycle_if_due():
                     return "recycle"
 
                 # Timeout: probe for a stale session — but NEVER while an RPC
@@ -90,11 +93,8 @@ class MCPServerRunMixin:
                     ):
                         continue
                     try:
-                        async def _probe_under_lock():
-                            async with self._rpc_lock:
-                                await self._keepalive_probe()
-
-                        await _probe_under_lock()
+                        async with self._rpc_lock:
+                            await self._keepalive_probe()
                     except Exception as exc:
                         root = _core._unwrap_exception_group(exc)
                         logger.warning(
