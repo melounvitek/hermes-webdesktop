@@ -4,9 +4,8 @@ Binary discovery, the shared ffmpeg m4a encode (transcode + silence trim),
 source/format validation, WeChat .silk decoding, CAF conversion and the
 best-effort cloud pre-upload silence trim.
 
-Split out of ``tools/transcription_tools.py``; moved names are re-imported
-there so ``tools.transcription_tools.<name>`` keeps resolving and patches on the
-origin still intercept (origin helpers are imported lazily inside functions).
+Split out of ``tools/transcription_tools.py``, which re-imports every name (patch
+surface) and is imported lazily here so origin patches still intercept.
 """
 
 from __future__ import annotations
@@ -220,9 +219,7 @@ def _convert_caf_to_wav(file_path: str) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Cloud pre-upload silence trim
-# ---------------------------------------------------------------------------
+# ---- Cloud pre-upload silence trim --------------------------------------
 #
 # Local faster-whisper gets Silero VAD; cloud providers get the raw file, so
 # every second of silence is paid for twice (upload + per-minute billing) and

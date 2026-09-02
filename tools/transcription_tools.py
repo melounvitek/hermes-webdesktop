@@ -127,9 +127,7 @@ _idle_unload_mgmt_lock = threading.Lock()
 _IDLE_UNLOAD_CHECK_INTERVAL = 30  # seconds between idle checks
 
 
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
+# ---- Config helpers -----------------------------------------------------
 
 
 def _load_stt_config() -> dict:
@@ -173,13 +171,17 @@ def _resolve_stt_language(
     return None
 
 
-def _has_openai_audio_backend() -> bool:
-    """Return True when OpenAI audio can use config credentials, env credentials, or the managed gateway."""
+def _openai_audio_unavailable_reason() -> Optional[str]:
+    """None when OpenAI audio has usable credentials (config, env, or managed gateway); else the reason."""
     try:
         _resolve_openai_audio_client_config()
-        return True
-    except ValueError:
-        return False
+        return None
+    except ValueError as exc:
+        return str(exc)
+
+
+def _has_openai_audio_backend() -> bool:
+    return _openai_audio_unavailable_reason() is None
 
 
 def _is_local_stt_provider(provider: str, stt_config: Dict[str, Any]) -> bool:
@@ -187,9 +189,7 @@ def _is_local_stt_provider(provider: str, stt_config: Dict[str, Any]) -> bool:
     return (provider or "").lower().strip() in {"local", "local_command"}
 
 
-# ---------------------------------------------------------------------------
-# Provider resolution
-# ---------------------------------------------------------------------------
+# ---- Provider resolution ------------------------------------------------
 
 
 def _has_xai_stt_credentials_quietly() -> bool:
@@ -223,12 +223,11 @@ def _resolve_explicit_openai() -> str:
     # Resolve directly rather than via the boolean probe so a managed
     # openai-audio gateway outage is logged with its real reason, not a
     # generic "no API key" hint.
-    try:
-        _resolve_openai_audio_client_config()
+    reason = _openai_audio_unavailable_reason()
+    if reason is None:
         return "openai"
-    except ValueError as exc:
-        logger.warning("STT provider 'openai' configured but unavailable: %s", exc)
-        return "none"
+    logger.warning("STT provider 'openai' configured but unavailable: %s", reason)
+    return "none"
 
 
 def _detect_local_backend() -> Optional[str]:
@@ -374,9 +373,7 @@ def _get_provider(stt_config: dict) -> str:
     return "none"
 
 
-# ---------------------------------------------------------------------------
-# Provider: local (faster-whisper)
-# ---------------------------------------------------------------------------
+# ---- Provider: local (faster-whisper) -----------------------------------
 
 
 def _unload_local_model() -> None:
@@ -537,9 +534,7 @@ def _transcribe_local(
         return _error_result(f"Local transcription failed: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+# ---- Public API ---------------------------------------------------------
 
 
 def _read_block_error(file_path: str) -> Optional[Dict[str, Any]]:
@@ -702,10 +697,9 @@ def _no_provider_error(provider: str, stt_config: Dict[str, Any]) -> Dict[str, A
     # selection-specific reason (e.g. managed openai-audio gateway down);
     # surface it with its remediation instead of the all-provider hint.
     if provider_key == "none" and str(stt_config.get("provider") or "") == "openai" and _HAS_OPENAI:
-        try:
-            _resolve_openai_audio_client_config()
-        except ValueError as exc:
-            return _error_result(str(exc))
+        reason = _openai_audio_unavailable_reason()
+        if reason is not None:
+            return _error_result(reason)
 
     return _error_result(
         "No STT provider available. Install faster-whisper for free local "

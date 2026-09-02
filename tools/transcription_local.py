@@ -5,9 +5,8 @@ anti-hallucination transcribe kwargs and segment gate, and the local whisper CLI
 (``local_command``) provider. The cached-model singleton and its idle-unload
 watcher stay in ``transcription_tools`` (they own the module state).
 
-Split out of ``tools/transcription_tools.py``; moved names are re-imported
-there so ``tools.transcription_tools.<name>`` keeps resolving and patches on the
-origin still intercept (origin helpers are imported lazily inside functions).
+Split out of ``tools/transcription_tools.py``, which re-imports every name (patch
+surface) and is imported lazily here so origin patches still intercept.
 """
 
 from __future__ import annotations

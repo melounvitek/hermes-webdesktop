@@ -4,9 +4,8 @@
 ``TranscriptionProvider`` dispatch, and the ``pre_transcription`` hook that
 threads prompt/language/model overrides into every backend.
 
-Split out of ``tools/transcription_tools.py``; moved names are re-imported
-there so ``tools.transcription_tools.<name>`` keeps resolving and patches on the
-origin still intercept (origin helpers are imported lazily inside functions).
+Split out of ``tools/transcription_tools.py``, which re-imports every name (patch
+surface) and is imported lazily here so origin patches still intercept.
 """
 
 from __future__ import annotations
@@ -30,9 +29,7 @@ from tools.transcription_common import (
 logger = logging.getLogger("tools.transcription_tools")
 
 
-# ---------------------------------------------------------------------------
-# Command-provider registry (``stt.providers.<name>: type: command``)
-# ---------------------------------------------------------------------------
+# ---- Command-provider registry (``stt.providers.<name>: type: command``) ---
 #
 # Mirrors the TTS command-provider registry: same placeholder grammar,
 # shell-quote-aware rendering and process-tree termination on timeout.

@@ -4,9 +4,8 @@ OpenAI-SDK-shaped backends (groq, openai, deepinfra), Mistral Voxtral, the REST
 multipart backends (xAI, ElevenLabs), and OpenAI audio credential resolution
 (config > keyless local server > env > managed Nous gateway).
 
-Split out of ``tools/transcription_tools.py``; moved names are re-imported
-there so ``tools.transcription_tools.<name>`` keeps resolving and patches on the
-origin still intercept (origin helpers are imported lazily inside functions).
+Split out of ``tools/transcription_tools.py``, which re-imports every name (patch
+surface) and is imported lazily here so origin patches still intercept.
 """
 
 from __future__ import annotations
