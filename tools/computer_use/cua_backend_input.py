@@ -17,7 +17,6 @@ _FOREGROUND_UNSUPPORTED_MSG = (
     "assuming the reported package version describes the live schema."
 )
 
-
 def _refuse(action: str, message: str, **fields: Any) -> ActionResult:
     return ActionResult(ok=False, action=action, message=message, **fields)
 

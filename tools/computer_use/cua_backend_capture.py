@@ -77,7 +77,6 @@ _FULL_SCREEN_NOTE = (
     "with elements"
 )
 
-
 def _linux_x11_active_window_id() -> Optional[int]:
     """Best-effort read of ``_NET_ACTIVE_WINDOW`` via xprop. Never raises."""
     if sys.platform != "linux" or not os.environ.get("DISPLAY"):
@@ -88,7 +87,6 @@ def _linux_x11_active_window_id() -> Optional[int]:
     except Exception:
         return None
     return _parse_xprop_net_active_window(proc.stdout or "") if proc.returncode == 0 else None
-
 
 def _select_capture_target(
     windows: List[Dict[str, Any]],
@@ -115,7 +113,6 @@ def _select_capture_target(
                         return w
     return pool[0] if pool else windows[0]
 
-
 def _sorted_windows(out: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Normalised windows from a list_windows result, ``z_index`` DESCENDING
     (frontmost at index 0 — the default target for capture()/focus_app())."""
@@ -123,14 +120,12 @@ def _sorted_windows(out: Dict[str, Any]) -> List[Dict[str, Any]]:
     windows.sort(key=lambda w: w["z_index"], reverse=True)
     return windows
 
-
 def _tree_and_title(out: Dict[str, Any]) -> Tuple[str, str]:
     """``(tree_markdown, window_title)`` from a get_window_state result."""
     data = out.get("data")
     _, tree = _split_tree_text(data if isinstance(data, str) else "")
     match = _WINDOW_TITLE_RE.search(tree)
     return tree, (match.group(1) if match else "")
-
 
 def _gws_is_empty(out: Dict[str, Any]) -> bool:
     """True when a get_window_state result carries neither a screenshot nor a
@@ -143,7 +138,6 @@ def _gws_is_empty(out: Dict[str, Any]) -> bool:
         return False
     tree, _ = _tree_and_title(out)
     return not tree.strip()
-
 
 def _png_metrics(png_b64: str, width: int, height: int) -> Tuple[int, int, int]:
     """Return ``(png_bytes_len, width, height)``, replacing the given size with
@@ -158,11 +152,9 @@ def _png_metrics(png_b64: str, width: int, height: int) -> Tuple[int, int, int]:
         png_bytes_len = len(png_b64) * 3 // 4
     return png_bytes_len, width, height
 
-
 def _is_desktop_window(w: Dict[str, Any], names: Tuple[str, ...] = _DESKTOP_WINDOW_NAMES) -> bool:
     haystack = f"{w.get('app_name', '')} {w.get('title', '')}".lower()
     return any(name in haystack for name in names)
-
 
 def _app_aliases(raw_app: Dict[str, Any]) -> set:
     return {

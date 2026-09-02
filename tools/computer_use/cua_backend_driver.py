@@ -37,13 +37,11 @@ _CUA_DRIVER_RUNTIME_CONTRACT_ARGS = {
 }
 _SEMVER_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?")
 
-
 def _cb():
     """Origin module, looked up lazily so ``patch("tools.computer_use.cua_backend.X")`` applies."""
     from tools.computer_use import cua_backend
 
     return cua_backend
-
 
 def _driver_json(driver_cmd: str, *args: str, timeout: float, require_ok: bool) -> Optional[Dict[str, Any]]:
     """Run a driver verb and parse its stdout as a JSON object; None on spawn
@@ -70,7 +68,6 @@ def _driver_json(driver_cmd: str, *args: str, timeout: float, require_ok: bool) 
 def _has_path_separator(value: str) -> bool:
     return os.sep in value or (os.altsep is not None and os.altsep in value)
 
-
 def _wsl_windows_path_to_posix(path: str) -> str:
     """Translate a Windows absolute manifest command to its DrvFS
     ``/mnt/<drive>/...`` form when Hermes runs in WSL (a Windows cua-driver
@@ -90,7 +87,6 @@ def _wsl_windows_path_to_posix(path: str) -> str:
     if not drive:
         return path
     return os.path.join("/mnt", drive, *(str(part) for part in win.parts[1:]))
-
 
 def _candidate_cua_driver_commands(override: Optional[str] = None) -> List[str]:
     """Candidate commands in resolution order. ``override`` / a non-empty
@@ -118,7 +114,6 @@ def _candidate_cua_driver_commands(override: Optional[str] = None) -> List[str]:
         ]
     return [_CUA_DRIVER_DEFAULT_CMD, *installed]
 
-
 def resolve_cua_driver_cmd(override: Optional[str] = None) -> Optional[str]:
     """Resolve the cua-driver executable for every runtime/status surface.
     An override is never silently replaced by another binary."""
@@ -129,11 +124,9 @@ def resolve_cua_driver_cmd(override: Optional[str] = None) -> Optional[str]:
             return expanded if _has_path_separator(expanded) else resolved
     return None
 
-
 def cua_driver_binary_available() -> bool:
     """True if `cua-driver` resolves via env, PATH, or known install paths."""
     return _cb().resolve_cua_driver_cmd() is not None
-
 
 def cua_driver_install_hint() -> str:
     scripts = "https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts"
@@ -163,7 +156,6 @@ def _mcp_args_with_overlay_flag(
         return [*args, "--no-overlay"]
     return list(args)
 
-
 @functools.lru_cache(maxsize=1)
 def _cua_driver_supports_no_overlay(driver_cmd: str) -> bool:
     """True if ``<driver> --help`` mentions ``--no-overlay`` (probed once).
@@ -173,7 +165,6 @@ def _cua_driver_supports_no_overlay(driver_cmd: str) -> bool:
         return "--no-overlay" in (proc.stdout or "") + (proc.stderr or "")
     except Exception:
         return False
-
 
 def _resolve_mcp_invocation(driver_cmd: str, *, timeout: float = 6.0) -> Tuple[str, List[str]]:
     """``(command, args)`` that spawn cua-driver's stdio MCP server, asked of
@@ -261,7 +252,6 @@ def cua_driver_runtime_contract_status(binary: Optional[str] = None) -> Dict[str
         return _not_ready("driver manifest is missing: " + ", ".join(missing), raw_version)
     return {"ready": True, "binary": resolved, "version": raw_version, "reason": ""}
 
-
 def cua_driver_update_check(*, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """``cua-driver check-update --json`` payload (``{current_version,
     latest_version, update_available, ...}``), or ``None`` when the binary is
@@ -277,7 +267,6 @@ def cua_driver_update_check(*, timeout: Optional[float] = None) -> Optional[Dict
         return None
     data = _driver_json(driver_cmd, "check-update", "--json", timeout=timeout, require_ok=False)
     return None if data is None or data.get("error") else data
-
 
 def cua_driver_update_nudge() -> Optional[str]:
     """One-line "an update is available" message, or ``None`` when up to date,

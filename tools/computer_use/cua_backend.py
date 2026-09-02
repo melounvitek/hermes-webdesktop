@@ -86,7 +86,6 @@ def _computer_use_cfg() -> Dict[str, Any]:
     except Exception:
         return {}
 
-
 def _cua_no_overlay() -> bool:
     """Pass ``--no-overlay``? ``computer_use.no_overlay`` overrides; else off on
     macOS (cursor-overlay redraw loop can peg a core after a session), headless
@@ -111,12 +110,10 @@ def _cua_no_overlay() -> bool:
         pass
     return os.environ.get("XDG_SESSION_TYPE") != "wayland" and not os.environ.get("WAYLAND_DISPLAY")
 
-
 def _cua_telemetry_disabled() -> bool:
     """True unless ``computer_use.cua_telemetry`` opts in (unreadable config
     fails SAFE toward disabling telemetry)."""
     return not bool(_computer_use_cfg().get("cua_telemetry", False))
-
 
 def _cua_configured_permission_mode() -> str:
     """``computer_use.permission_mode``: ``standard`` (default) or ``bounded``;
@@ -126,13 +123,11 @@ def _cua_configured_permission_mode() -> str:
     raw = str(_computer_use_cfg().get("permission_mode", "standard") or "").strip().lower()
     return raw if raw in {"standard", "bounded"} else "standard"
 
-
 def _cua_capability_manifest() -> Optional[str]:
     """``computer_use.capability_manifest`` path, or None. Existence is
     validated by ``_EmbeddedCuaDaemon`` so a missing file fails loudly."""
     raw = _computer_use_cfg().get("capability_manifest")
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
-
 
 def _manifest_is_mode_independent(path: str) -> bool:
     """True when this manifest may accompany any permission mode: v1/v2 declare
@@ -151,7 +146,6 @@ def _manifest_is_mode_independent(path: str) -> bool:
     version = parsed.get("version") if isinstance(parsed, dict) else None
     return isinstance(version, int) and not isinstance(version, bool) and version >= 3
 
-
 def _computer_use_max_image_dimension() -> Optional[int]:
     """``computer_use.max_image_dimension`` longest-edge cap (default 1456,
     matching the aux-vision downscale); ``0``/negative -> None (unset)."""
@@ -161,7 +155,6 @@ def _computer_use_max_image_dimension() -> Optional[int]:
         return 1456
     return dim if dim > 0 else None
 
-
 def cua_driver_child_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Env for spawning cua-driver: ``base_env`` (default ``os.environ``) plus
     ``CUA_DRIVER_RS_TELEMETRY_ENABLED=0`` unless the user opted in. Used by
@@ -170,7 +163,6 @@ def cua_driver_child_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str,
     if _cua_telemetry_disabled():
         env[_CUA_TELEMETRY_ENV_VAR] = "0"
     return env
-
 
 def sanitized_cua_driver_env() -> Dict[str, str]:
     """``cua_driver_child_env()`` with Hermes provider secrets stripped —
@@ -183,7 +175,6 @@ def sanitized_cua_driver_env() -> Dict[str, str]:
         return _sanitize_subprocess_env(env)
     except Exception:
         return env
-
 
 def _run_driver(driver_cmd: str, *args: str, timeout: float) -> subprocess.CompletedProcess:
     """Run a short cua-driver verb with the sanitized env, hidden window and
@@ -231,7 +222,6 @@ def _linux_session_locked() -> Optional[bool]:
     except Exception:
         return None
 
-
 def _empty_discovery_reason() -> str:
     """One-line diagnosis for 'window discovery found nothing'."""
     if _linux_session_locked() is True:
@@ -268,7 +258,6 @@ _update_checked = False
 # failing installer can't loop — the second start() goes straight to the error.
 _contract_repair_attempted = False
 
-
 def _maybe_repair_runtime_contract(contract: Dict[str, Any]) -> Dict[str, Any]:
     """Try one automatic driver repair; return the post-repair contract (or the
     original when no repair was attempted / it failed). Never raises. An
@@ -300,7 +289,6 @@ def _maybe_repair_runtime_contract(contract: Dict[str, Any]) -> Dict[str, Any]:
         return cua_driver_runtime_contract_status()
     except Exception:
         return contract
-
 
 def _maybe_nudge_update() -> None:
     """Emit an update nudge at most once per process, off-thread so the

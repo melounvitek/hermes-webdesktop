@@ -23,7 +23,6 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 _RUNTIME_PLATFORMS = frozenset({"darwin", "win32", "linux"})
 _BOOLS = ("accessibility", "screen_recording", "screen_recording_capturable")
 
-
 def _resolve_driver_cmd(override: Optional[str]) -> Optional[str]:
     """Use the runtime resolver for UI status and permission commands too."""
     from tools.computer_use.cua_backend import resolve_cua_driver_cmd
@@ -75,7 +74,6 @@ def _mac_permissions(binary: str, out: Dict[str, Any]) -> None:
         if isinstance(data.get("source"), dict):
             out["source"] = data["source"]
 
-
 def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
     """Unified, OS-aware Computer Use readiness for the desktop card.
 
@@ -107,7 +105,6 @@ def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
     elif doctor is not None:
         out["ready"] = doctor["ok"]  # no TCC model off macOS
     return out
-
 
 def request_permissions_grant(driver_cmd: Optional[str] = None) -> int:
     """Run ``cua-driver permissions grant`` (macOS); stream its output.

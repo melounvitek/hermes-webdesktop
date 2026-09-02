@@ -67,7 +67,6 @@ class _AsyncBridge:
             self._thread.join(timeout=2.0)
         self._thread = self._loop = None
 
-
 # Fail-closed messages for calls whose effect on the remote screen is unknown. The action
 # MAY have landed, so it is never replayed; the caller decides after taking fresh state.
 _UNKNOWN_OUTCOME_MESSAGES = {
@@ -81,7 +80,6 @@ _UNKNOWN_OUTCOME_MESSAGES = {
         "whether to act again."),
 }
 
-
 def _outcome_unknown(name: str, exc: Exception, code: str) -> Dict[str, Any]:
     """Fail-closed ``isError`` result for *code* (see ``_UNKNOWN_OUTCOME_MESSAGES``)."""
     message = _UNKNOWN_OUTCOME_MESSAGES[code].format(name=name)
@@ -90,7 +88,6 @@ def _outcome_unknown(name: str, exc: Exception, code: str) -> Dict[str, Any]:
     return {"data": message, "images": [], "image_mime_types": [],
             "structuredContent": structured, "isError": True}
 
-
 def _tool_field(obj: Any, *names: str) -> Any:
     """``_mcp_field`` plus the ``model_extra`` fallback some MCP SDKs (Pydantic v2) forward custom fields via."""
     value = _mcp_field(obj, names[0], names[-1])
@@ -98,9 +95,7 @@ def _tool_field(obj: Any, *names: str) -> Any:
         value = (getattr(obj, "model_extra", None) or {}).get(names[-1])
     return value
 
-
 _CLI_ATTEMPTS = 4  # CLI fallback transport retries (backoff 0.5s doubling)
-
 
 def _cli_run_json(cmd: List[str], env: Dict[str, str], name: str, timeout: float) -> Any:
     """Run ``cua-driver call`` with backoff until it prints JSON; return the parsed value.
@@ -139,7 +134,6 @@ def _cli_run_json(cmd: List[str], env: Dict[str, str], name: str, timeout: float
             backoff *= 2
     raise RuntimeError(f"cua-driver CLI fallback for {name} returned no JSON after "
                        f"{_CLI_ATTEMPTS} attempts: {last_err}")
-
 
 def _cli_result(parsed: Any, shot_file: Optional[str]) -> Dict[str, Any]:
     """Remap a ``cua-driver call`` JSON body into the ``_extract_tool_result`` shape."""
