@@ -29,23 +29,16 @@ logger = logging.getLogger("hermes_cli.tools_config")
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 
-# ─── Post-Setup Hooks ─────────────────────────────────────────────────────────
-
-
 def _ensure_browser_use_cli(*, verbose_hints: bool = False) -> None:
     """Install the Browser Use CLI if it isn't already runnable.
 
-    The Browser Use CLI 3.0 is the primary driver engine for EVERY browser backend except Camofox
-    (which is Firefox-based with no CDP surface, so the CDP-only browser-use harness cannot drive
-    it).
-
-    MANAGED-FIRST: a browser-use on the user's PATH does NOT satisfy this check — only the Hermes-
-    managed ``$HERMES_HOME/bin`` copy does.
+    Primary driver engine for EVERY browser backend except Camofox (Firefox-based, no CDP surface).
+    MANAGED-FIRST: a browser-use on the user's PATH does NOT satisfy this check — only the
+    Hermes-managed ``$HERMES_HOME/bin`` copy does.
     """
     _print_info("    Ensuring browser-use CLI (managed install)...")
     try:
         from tools.browser_use_cli import install_cli
-
         ok, message = install_cli()
     except Exception as exc:  # pragma: no cover — defensive
         ok, message = False, f"install failed: {exc}"
@@ -64,22 +57,15 @@ def _ensure_browser_use_cli(*, verbose_hints: bool = False) -> None:
 
 
 def _post_setup_lightpanda() -> None:
-    # Browser Use mode drives Lightpanda directly (Hermes spawns
-    # ``lightpanda serve``); the built-in tools go through agent-browser.
-    # Neither needs a Chromium build.
+    # Browser Use mode spawns ``lightpanda serve``; built-in tools go through agent-browser. No Chromium needed.
     _ensure_browser_use_cli()
-    from tools.browser_lightpanda import (
-        LIGHTPANDA_INSTALL_HINT,
-        find_lightpanda_binary,
-    )
+    from tools.browser_lightpanda import LIGHTPANDA_INSTALL_HINT, find_lightpanda_binary
 
     lightpanda_bin = find_lightpanda_binary()
     if lightpanda_bin:
         _print_success(f"    Lightpanda found: {lightpanda_bin}")
     else:
-        _print_warning(
-            "    lightpanda binary not found on PATH, ~/.lightpanda or ~/.local/bin"
-        )
+        _print_warning("    lightpanda binary not found on PATH, ~/.lightpanda or ~/.local/bin")
         _print_info(f"    {LIGHTPANDA_INSTALL_HINT}")
         if os.name == "nt":
             _print_info("    Lightpanda has no native Windows build; run Hermes under WSL2.")
@@ -119,8 +105,7 @@ def _post_setup_agent_browser(post_setup_key: str) -> None:
     agent-browser is not a root package.json dependency — it resolves lazily via npx (or a
     global/Hermes-managed install), so there is no ``npm install`` step here.
     """
-    # Every non-Camofox backend drives through the Browser Use CLI when runnable — install it here
-    # too, not only on the explicit "Browser Use" picker row.
+    # Every non-Camofox backend drives through the Browser Use CLI — install it here too.
     _ensure_browser_use_cli()
     try:
         # Lazy import so the tools_config UI doesn't pull in browser_tool at import time.
@@ -141,9 +126,7 @@ def _post_setup_agent_browser(post_setup_key: str) -> None:
     try:
         browser_cmd = _find_agent_browser(validate=False)
     except FileNotFoundError:
-        _print_warning(
-            "    npx not found - browser tools require Node.js: https://nodejs.org"
-        )
+        _print_warning("    npx not found - browser tools require Node.js: https://nodejs.org")
         return
 
     # Only the local provider needs Chromium on disk; cloud providers host their own.
@@ -157,15 +140,9 @@ def _post_setup_agent_browser(post_setup_key: str) -> None:
         return
 
     if _running_in_docker():
-        _print_warning(
-            "    Chromium is missing but you're running in Docker."
-        )
-        _print_info(
-            "    Pull the latest image to get the bundled Chromium:"
-        )
-        _print_info(
-            "      docker pull ghcr.io/nousresearch/hermes-agent:latest"
-        )
+        _print_warning("    Chromium is missing but you're running in Docker.")
+        _print_info("    Pull the latest image to get the bundled Chromium:")
+        _print_info("      docker pull ghcr.io/nousresearch/hermes-agent:latest")
         return
 
     if _is_npx_agent_browser_sentinel(browser_cmd):
@@ -173,9 +150,7 @@ def _post_setup_agent_browser(post_setup_key: str) -> None:
         # would silently diverge and hand subprocess.run a None argument.
         npx_bin = _resolve_npx_bin()
         if not npx_bin:
-            _print_warning(
-                "    npx not found - install Chromium manually: npx agent-browser install --with-deps"
-            )
+            _print_warning("    npx not found - install Chromium manually: npx agent-browser install --with-deps")
             return
         install_cmd = [npx_bin, "--ignore-scripts", "-y", AGENT_BROWSER_NPX_SPEC, "install", "--with-deps"]
     else:
@@ -192,8 +167,7 @@ def _post_setup_camofox() -> None:
         _print_success("    Camofox already installed, nothing to do")
     elif _npm_bin:
         _print_info("    Installing Camofox browser server...")
-        # Absolute npm path so the .cmd shim executes on Windows; --workspaces=false avoids
-        # resolving apps/desktop.
+        # Absolute npm path so the .cmd shim executes on Windows; --workspaces=false avoids resolving apps/desktop.
         result = subprocess.run(
             [_npm_bin, "install", "--silent", "--workspaces=false"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(PROJECT_ROOT),
@@ -213,69 +187,46 @@ def _post_setup_camofox() -> None:
         _print_info("      docker run -p 9377:9377 -e CAMOFOX_PORT=9377 jo-inc/camofox-browser")
 
 
-_KITTENTTS_WHEEL_URL = (
-    "https://github.com/KittenML/KittenTTS/releases/download/"
-    "0.8.1/kittentts-0.8.1-py3-none-any.whl"
-)
+_KITTENTTS_WHEEL_URL = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl"
 
-# Post-setup hooks that only pip-install a Python package. Fields:
-#   module        import probe (already installed → skip the install)
-#   label         package name used in status lines
-#   installing    progress line printed before the install
-#   args          _pip_install arguments (keep in sync with
-#                 _RESTORABLE_PYTHON_TOOL_DEPENDENCIES)
-#   manual        the "Run manually:" command shown on failure/timeout
-#   on_install    info lines printed only after a fresh successful install
-#   always        info lines printed whenever the package ends up present
+# Post-setup hooks that only pip-install a Python package. Fields: module (import probe; present → skip
+# install), label (status lines), installing (progress line), args (_pip_install args — keep in sync with
+# _RESTORABLE_PYTHON_TOOL_DEPENDENCIES), manual ("Run manually:" command on failure/timeout),
+# on_install (info lines only after a fresh install), always (info lines whenever the package is present).
 _PIP_POST_SETUP_HOOKS: dict = {
     "faster_whisper": {
-        "module": "faster_whisper",
-        "label": "faster-whisper",
+        "module": "faster_whisper", "label": "faster-whisper",
         "installing": "Installing faster-whisper (model ~150MB downloads on first use)...",
-        "args": ["-U", "faster-whisper", "--quiet"],
-        "manual": "uv pip install -U faster-whisper",
-        "on_install": (
-            "Model sizes: tiny, base (default), small, medium, large-v3",
-            "Change via stt.local.model in ~/.hermes/config.yaml",
-        ),
+        "args": ["-U", "faster-whisper", "--quiet"], "manual": "uv pip install -U faster-whisper",
+        "on_install": ("Model sizes: tiny, base (default), small, medium, large-v3",
+                       "Change via stt.local.model in ~/.hermes/config.yaml"),
         "always": (),
     },
     "kittentts": {
-        "module": "kittentts",
-        "label": "kittentts",
+        "module": "kittentts", "label": "kittentts",
         "installing": "Installing kittentts (~25-80MB model, CPU-only)...",
         "args": ["-U", _KITTENTTS_WHEEL_URL, "soundfile", "--quiet"],
         "manual": f"uv pip install -U '{_KITTENTTS_WHEEL_URL}' soundfile",
-        "on_install": (
-            "Voices: Jasper, Bella, Luna, Bruno, Rosie, Hugo, Kiki, Leo",
-            "Models: KittenML/kitten-tts-nano-0.8-int8 (25MB), micro (41MB), mini (80MB)",
-        ),
+        "on_install": ("Voices: Jasper, Bella, Luna, Bruno, Rosie, Hugo, Kiki, Leo",
+                       "Models: KittenML/kitten-tts-nano-0.8-int8 (25MB), micro (41MB), mini (80MB)"),
         "always": (),
     },
     "piper": {
-        "module": "piper",
-        "label": "piper-tts",
+        "module": "piper", "label": "piper-tts",
         "installing": "Installing piper-tts (~14MB wheel, voices downloaded on first use)...",
-        "args": ["-U", "piper-tts", "--quiet"],
-        "manual": "uv pip install -U piper-tts",
+        "args": ["-U", "piper-tts", "--quiet"], "manual": "uv pip install -U piper-tts",
         "on_install": (),
-        "always": (
-            "Default voice: en_US-lessac-medium (downloaded on first TTS call)",
-            "Full voice list: https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/VOICES.md",
-            "Switch voices by setting tts.piper.voice in ~/.hermes/config.yaml",
-        ),
+        "always": ("Default voice: en_US-lessac-medium (downloaded on first TTS call)",
+                   "Full voice list: https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/VOICES.md",
+                   "Switch voices by setting tts.piper.voice in ~/.hermes/config.yaml"),
     },
     "ddgs": {
-        "module": "ddgs",
-        "label": "ddgs",
+        "module": "ddgs", "label": "ddgs",
         "installing": "Installing ddgs (DuckDuckGo search package)...",
-        "args": ["-U", "ddgs", "--quiet"],
-        "manual": "uv pip install -U ddgs",
+        "args": ["-U", "ddgs", "--quiet"], "manual": "uv pip install -U ddgs",
         "on_install": (),
-        "always": (
-            "No API key required. DuckDuckGo enforces server-side rate limits.",
-            "Pair with an extract provider if you also need web_extract.",
-        ),
+        "always": ("No API key required. DuckDuckGo enforces server-side rate limits.",
+                   "Pair with an extract provider if you also need web_extract."),
     },
 }
 
@@ -311,11 +262,8 @@ def _post_setup_pip(spec: dict) -> None:
 
 
 def _post_setup_spotify() -> None:
-    # Run the full `hermes auth spotify` flow — if the user has no
-    # client_id yet, this drops them into the interactive wizard
-    # (opens the Spotify dashboard, prompts for client_id, persists
-    # to ~/.hermes/.env), then continues straight into PKCE. If they
-    # already have an app, it skips the wizard and just does OAuth.
+    # Full `hermes auth spotify` flow: no client_id yet → interactive wizard (persists to ~/.hermes/.env)
+    # then PKCE; existing app → OAuth only.
     from types import SimpleNamespace
     try:
         from hermes_cli.auth import login_spotify_command
@@ -326,13 +274,11 @@ def _post_setup_spotify() -> None:
     _print_info("    Starting Spotify login...")
     try:
         login_spotify_command(SimpleNamespace(
-            client_id=None, redirect_uri=None, scope=None,
-            no_browser=False, timeout=None,
+            client_id=None, redirect_uri=None, scope=None, no_browser=False, timeout=None,
         ))
         _print_success("    Spotify authenticated")
     except SystemExit as exc:
-        # User aborted the wizard, or OAuth failed — don't fail the
-        # toolset enable; they can retry with `hermes auth spotify`.
+        # User aborted the wizard or OAuth failed — don't fail the toolset enable.
         _print_warning(f"    Spotify login did not complete: {exc}")
         _print_info("    Run later: hermes auth spotify")
     except Exception as exc:
@@ -341,7 +287,6 @@ def _post_setup_spotify() -> None:
 
 
 def _post_setup_langfuse() -> None:
-    # Install the langfuse SDK.
     try:
         __import__("langfuse")
         _print_success("    langfuse SDK already installed")
@@ -352,9 +297,7 @@ def _post_setup_langfuse() -> None:
             _print_success("    langfuse SDK installed")
         else:
             _print_warning("    langfuse SDK install failed — run manually: uv pip install langfuse")
-    # Opt the bundled observability/langfuse plugin into plugins.enabled.
-    # The plugin ships in the repo but doesn't load until the user enables
-    # it (standalone plugins are opt-in).
+    # The bundled observability/langfuse plugin is opt-in (standalone plugins don't load until enabled).
     try:
         from hermes_cli.plugins_cmd import _get_enabled_set, _save_enabled_set
         enabled = _get_enabled_set()
@@ -384,9 +327,7 @@ def _post_setup_xai_grok() -> None:
     existing_api_key = get_env_value("XAI_API_KEY")
 
     if oauth_logged_in:
-        _print_success(
-            "    xAI will use your xAI Grok OAuth (SuperGrok / Premium+) credentials"
-        )
+        _print_success("    xAI will use your xAI Grok OAuth (SuperGrok / Premium+) credentials")
         return
     if existing_api_key:
         _print_success("    xAI will use your existing XAI_API_KEY")
@@ -394,11 +335,7 @@ def _post_setup_xai_grok() -> None:
 
     _print_info("    xAI needs credentials. Choose one:")
     try:
-        from hermes_cli.setup import (
-            _run_xai_oauth_login_from_setup,
-            prompt_choice,
-            prompt as _setup_prompt,
-        )
+        from hermes_cli.setup import _run_xai_oauth_login_from_setup, prompt_choice, prompt as _setup_prompt
         from hermes_cli.config import save_env_value
     except Exception as exc:
         _print_warning(f"    Could not load setup helpers: {exc}")
@@ -416,29 +353,21 @@ def _post_setup_xai_grok() -> None:
     )
     if idx == 0:
         if _run_xai_oauth_login_from_setup():
-            _print_success(
-                "    Logged in — xAI will use these OAuth credentials"
-            )
+            _print_success("    Logged in — xAI will use these OAuth credentials")
         else:
-            _print_warning(
-                "    xAI Grok OAuth login did not complete. "
-                "Run later: hermes auth add xai-oauth"
-            )
+            _print_warning("    xAI Grok OAuth login did not complete. Run later: hermes auth add xai-oauth")
     elif idx == 1:
         api_key = _setup_prompt("    xAI API key", password=True)
         if api_key:
             save_env_value("XAI_API_KEY", api_key)
             _print_success("    XAI_API_KEY saved")
         else:
-            _print_warning(
-                "    No API key provided. Run later: hermes auth add xai-oauth"
-            )
+            _print_warning("    No API key provided. Run later: hermes auth add xai-oauth")
     else:
         _print_info("    xAI will remain inactive until credentials are configured.")
 
 
-# post_setup key -> hook. Unknown keys are a silent no-op (callers validate
-# against valid_post_setup_keys()).
+# post_setup key -> hook. Unknown keys are a silent no-op (callers validate against valid_post_setup_keys()).
 _POST_SETUP_HOOKS: dict = {
     "lightpanda": _post_setup_lightpanda,
     "agent_browser": lambda: _post_setup_agent_browser("agent_browser"),
@@ -461,11 +390,9 @@ def _run_post_setup(post_setup_key: str):
 
 
 def valid_post_setup_keys() -> Set[str]:
-    """Return the set of post-setup keys declared by any visible provider.
-
-    Collected from ``TOOL_CATEGORIES`` plus plugin-registered web/image/video/browser providers.
-    This is the allowlist the ``post-setup`` command and dashboard endpoint validate against, so a
-    caller cannot drive ``_run_post_setup`` with an arbitrary key.
+    """Return the set of post-setup keys declared by any visible provider (``TOOL_CATEGORIES`` plus
+    plugin-registered providers). This is the allowlist ``post-setup`` and the dashboard endpoint
+    validate against, so a caller cannot drive ``_run_post_setup`` with an arbitrary key.
     """
     from hermes_cli.tools_config import (
         TOOL_CATEGORIES,
@@ -481,12 +408,9 @@ def valid_post_setup_keys() -> Set[str]:
             ps = prov.get("post_setup")
             if ps:
                 keys.add(ps)
-    # Plugin-registered providers can declare their own post_setup hooks.
     for builder in (
-        _plugin_web_search_providers,
-        _plugin_image_gen_providers,
-        _plugin_video_gen_providers,
-        _plugin_browser_providers,
+        _plugin_web_search_providers, _plugin_image_gen_providers,
+        _plugin_video_gen_providers, _plugin_browser_providers,
     ):
         try:
             for prov in builder():
@@ -499,10 +423,8 @@ def valid_post_setup_keys() -> Set[str]:
 
 
 def run_post_setup_command(args) -> int:
-    """``hermes tools post-setup <key>`` — non-interactive post-setup runner.
-
-    Stable, scriptable target the dashboard spawns so the GUI can drive backend setup without
-    re-implementing install logic. Returns a process exit code (0 ok, 2 unknown key).
+    """``hermes tools post-setup <key>`` — non-interactive runner the dashboard spawns so the GUI can
+    drive backend setup without re-implementing install logic. Exit code: 0 ok, 2 unknown key.
     """
     key = getattr(args, "post_setup_key", None)
     if not key:
@@ -510,10 +432,7 @@ def run_post_setup_command(args) -> int:
         return 2
     valid = valid_post_setup_keys()
     if key not in valid:
-        _print_error(
-            f"Unknown post-setup key: {key!r}. "
-            f"Valid keys: {', '.join(sorted(valid)) or '(none)'}"
-        )
+        _print_error(f"Unknown post-setup key: {key!r}. Valid keys: {', '.join(sorted(valid)) or '(none)'}")
         return 2
     _print_info(f"Running post-setup hook: {key}")
     try:
@@ -527,20 +446,18 @@ def run_post_setup_command(args) -> int:
 
 # post_setup_key -> predicate(): True when the install side-effect is already satisfied. Used by
 # `_toolset_needs_configuration_prompt` to force provider setup when a no-key provider still needs a
-# binary/dependency install (otherwise toggling the toolset on is a silent no-op that skips the hook).
-# Only add an entry when the post_setup is the ONLY install side-effect for a no-key provider and the
-# check is local, bounded, and import-light; other hooks keep their existing behaviour.
+# binary/dependency install (otherwise toggling the toolset on silently skips the hook). Only add an
+# entry when the post_setup is the ONLY install side-effect for a no-key provider and the check is
+# local, bounded, and import-light.
 _POST_SETUP_INSTALLED: dict = {
     "cua_driver": lambda: _cua_driver_install_ready(),
 }
 
 
 def _post_setup_already_installed(post_setup_key: str) -> bool:
-    """Return True when the post_setup install side-effect is satisfied."""
+    """Return True when the post_setup install side-effect is satisfied (or no check is registered)."""
     predicate = _POST_SETUP_INSTALLED.get(post_setup_key)
     if predicate is None:
-        # No install-state check registered → assume satisfied (don't
-        # change behaviour for hooks we haven't explicitly opted in).
         return True
     try:
         return bool(predicate())
@@ -558,11 +475,9 @@ def _module_installed(module_name: str) -> bool:
         return False
 
 
-# Python dependencies installed explicitly through ``hermes tools`` are not
-# part of the managed runtime's locked ``all`` sync. A runtime replacement
-# therefore needs a small, static allowlist that can be snapshotted before the
-# old site-packages disappears and restored afterward. Keep these install
-# arguments in sync with the corresponding ``_run_post_setup`` branches.
+# Python deps installed via ``hermes tools`` aren't in the managed runtime's locked ``all`` sync, so a
+# runtime replacement snapshots this static allowlist before the old site-packages disappears and
+# restores it afterward. Keep install args in sync with the ``_run_post_setup`` hooks.
 _RESTORABLE_PYTHON_TOOL_DEPENDENCIES: dict[str, tuple[str, tuple[str, ...]]] = {
     "faster_whisper": ("faster_whisper", ("-U", "faster-whisper")),
     "kittentts": ("kittentts", ("-U", _KITTENTTS_WHEEL_URL, "soundfile")),
@@ -575,44 +490,33 @@ _RESTORABLE_PYTHON_TOOL_DEPENDENCIES: dict[str, tuple[str, tuple[str, ...]]] = {
 def active_restorable_python_tool_dependencies() -> list[str]:
     """Return ``hermes tools`` Python dependencies present in this runtime."""
     return [
-        name
-        for name, (module_name, _install_args) in (
-            _RESTORABLE_PYTHON_TOOL_DEPENDENCIES.items()
-        )
+        name for name, (module_name, _install_args) in _RESTORABLE_PYTHON_TOOL_DEPENDENCIES.items()
         if _module_installed(module_name)
     ]
 
 
-def restorable_python_tool_dependency(
-    name: str,
-) -> tuple[str, tuple[str, ...]] | None:
+def restorable_python_tool_dependency(name: str) -> tuple[str, tuple[str, ...]] | None:
     """Return the import probe and pip arguments for an allowlisted tool."""
     return _RESTORABLE_PYTHON_TOOL_DEPENDENCIES.get(name)
 
 
 def _agent_browser_installed() -> bool:
     """True when everything ``_run_post_setup("agent_browser")`` installs is present: the agent-browser
-    CLI *and* the Chromium build it drives (or the Lightpanda engine, which needs no Chromium).
-    Mirrors the hook so "Run setup" flips to an installed state only when re-running it would be a
-    no-op.
+    CLI *and* the Chromium build it drives (or the Lightpanda engine, which needs no Chromium), so
+    "Run setup" flips to installed only when re-running it would be a no-op.
     """
     from hermes_cli.nous_subscription import _local_browser_runnable
 
-    # The install hook runs in a spawned ``hermes tools post-setup`` process,
-    # but this probe runs in the long-lived web-server/CLI process, whose
-    # browser_tool module may have cached a stale "Chromium missing" result
-    # from before the install. Drop the cache (when the module is loaded) so
-    # the readiness pill flips to Ready right after a successful setup run.
+    # The hook runs in a spawned process; this probe runs in the long-lived web-server/CLI process whose
+    # browser_tool may have cached a stale "Chromium missing" result. Drop the cache so the pill flips to Ready.
     bt = sys.modules.get("tools.browser_tool")
     if bt is not None:
         bt._cached_chromium_installed = None
-
     return _local_browser_runnable()
 
 
 def _camofox_installed() -> bool:
-    """True when the Camofox npm package ``_run_post_setup("camofox")``
-    installs is already in node_modules."""
+    """True when the Camofox npm package ``_run_post_setup("camofox")`` installs is in node_modules."""
     return (PROJECT_ROOT / "node_modules" / "@askjo" / "camofox-browser").exists()
 
 
@@ -620,20 +524,15 @@ def _lightpanda_installed() -> bool:
     """True when a lightpanda binary is on PATH or in a known install dir."""
     try:
         from tools.browser_lightpanda import find_lightpanda_binary
-
         return find_lightpanda_binary() is not None
     except Exception:
         return False
 
 
 def _cloud_agent_browser_installed() -> bool:
-    """Installed-check for the ``browserbase`` hook (cloud provider rows).
-
-    Cloud providers host their own Chromium, so their hook only installs the agent-browser npm
-    package — presence of the CLI is the whole contract.
-    """
+    """Installed-check for the ``browserbase`` hook: cloud providers host their own Chromium, so
+    presence of the agent-browser CLI is the whole contract."""
     from hermes_cli.nous_subscription import _has_agent_browser
-
     return _has_agent_browser()
 
 
@@ -649,4 +548,3 @@ _POST_SETUP_READY: dict = {
     "lightpanda": lambda: _lightpanda_installed(),
     "cua_driver": lambda: _cua_driver_install_ready(),
 }
-

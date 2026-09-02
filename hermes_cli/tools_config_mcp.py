@@ -17,9 +17,6 @@ from hermes_cli.toolset_scope import (
 )
 
 
-# ─── MCP Tools Interactive Configuration ─────────────────────────────────────
-
-
 def _mcp_match_filter():
     """Runtime name-filter matcher (exact names or fnmatch globs), with a literal fallback.
 
@@ -29,7 +26,6 @@ def _mcp_match_filter():
     """
     try:
         from tools.mcp_tool import matches_name_filter
-
         return matches_name_filter
     except ImportError:  # pragma: no cover — defensive fallback
         return lambda tool_name, patterns: tool_name in patterns
@@ -50,30 +46,22 @@ def _apply_mcp_checklist(server_name: str, tools_cfg: dict, tool_names: List[str
     exclude_mode = bool(exclude_set) and not include_set
 
     if len(chosen) == len(tool_names) and not exclude_mode:
-        # All tools enabled — clear filters (cleanest config shape; the
-        # server's native tool set is the active set, and any tools the
-        # server adds later are auto-enabled).
+        # All tools enabled — clear filters so tools the server adds later are auto-enabled.
         tools_cfg.pop("exclude", None)
         tools_cfg.pop("include", None)
     elif exclude_mode:
-        # Exclude-mode server (catalog default_excluded / hand-written
-        # tools.exclude): stay in exclude mode — do NOT demote the
-        # dynamic filter to a frozen include list. Unchecked tools are
-        # added as literal excludes; re-checked literals are dropped;
-        # glob patterns are preserved (they intentionally keep matching
-        # tools the vendor ships later).
+        # Exclude-mode server (catalog default_excluded / hand-written tools.exclude): stay in exclude
+        # mode — do NOT demote the dynamic filter to a frozen include list. Unchecked tools become literal
+        # excludes; re-checked literals are dropped; glob patterns are preserved (they intentionally keep
+        # matching tools the vendor ships later).
         old_exclude = sorted(exclude_set or set())
         glob_entries = [p for p in old_exclude if "*" in p or "?" in p or "[" in p]
         literal_entries = {p for p in old_exclude if p not in glob_entries}
         unchecked = {tn for i, tn in enumerate(tool_names) if i not in chosen}
         checked = {tool_names[i] for i in chosen}
-        new_literals = (literal_entries - checked) | {
-            tn for tn in unchecked if not match(tn, set(old_exclude))
-        }
+        new_literals = (literal_entries - checked) | {tn for tn in unchecked if not match(tn, set(old_exclude))}
         new_exclude = glob_entries + sorted(new_literals)
-        glob_shadowed = sorted(
-            tn for tn in checked if glob_entries and match(tn, set(glob_entries))
-        )
+        glob_shadowed = sorted(tn for tn in checked if glob_entries and match(tn, set(glob_entries)))
         if glob_shadowed:
             _print_warning(
                 f"  {server_name}: {len(glob_shadowed)} re-enabled "
@@ -89,16 +77,12 @@ def _apply_mcp_checklist(server_name: str, tools_cfg: dict, tool_names: List[str
         tools_cfg.pop("include", None)
     else:
         tools_cfg["include"] = [tool_names[i] for i in sorted(chosen)]
-        # Drop any legacy exclude block — we're include-mode now.
-        tools_cfg.pop("exclude", None)
+        tools_cfg.pop("exclude", None)  # include-mode now; drop any legacy exclude block
 
 
 def _configure_mcp_tools_interactive(config: dict):
-    """Probe MCP servers for available tools and let user toggle them on/off.
-
-    Connects to each server, discovers tools, shows a per-server curses checklist, and writes the
-    result back as ``tools.exclude`` entries in config.yaml.
-    """
+    """Probe each MCP server for its tools, show a per-server curses checklist, and write the result
+    back as ``tools.exclude`` / ``tools.include`` entries in config.yaml."""
     from hermes_cli.tools_config import save_config
 
     from hermes_cli.curses_ui import curses_checklist
@@ -108,10 +92,7 @@ def _configure_mcp_tools_interactive(config: dict):
         _print_info("No MCP servers configured.")
         return
 
-    enabled_names = [
-        k for k, v in mcp_servers.items()
-        if v.get("enabled", True) not in {False, "false", "0", "no", "off"}
-    ]
+    enabled_names = [k for k, v in mcp_servers.items() if v.get("enabled", True) not in {False, "false", "0", "no", "off"}]
     if not enabled_names:
         _print_info("All MCP servers are disabled.")
         return
@@ -162,10 +143,7 @@ def _configure_mcp_tools_interactive(config: dict):
         pre_selected = _mcp_preselected(tool_names, include_set, exclude_set, match)
 
         chosen = curses_checklist(
-            f"MCP Server: {server_name}  ({len(tools)} tools)",
-            labels,
-            pre_selected,
-            cancel_returns=pre_selected,
+            f"MCP Server: {server_name}  ({len(tools)} tools)", labels, pre_selected, cancel_returns=pre_selected,
         )
 
         if chosen == pre_selected:
@@ -175,9 +153,7 @@ def _configure_mcp_tools_interactive(config: dict):
         tools_cfg = mcp_servers.setdefault(server_name, {}).setdefault("tools", {})
         _apply_mcp_checklist(server_name, tools_cfg, tool_names, chosen, include_set, exclude_set, match)
 
-        _print_success(
-            f"  {server_name}: {len(chosen)} enabled, {len(tools) - len(chosen)} disabled"
-        )
+        _print_success(f"  {server_name}: {len(chosen)} enabled, {len(tools) - len(chosen)} disabled")
         any_changes = True
 
     if any_changes:
@@ -188,18 +164,12 @@ def _configure_mcp_tools_interactive(config: dict):
         print(color("  No changes to MCP tools", Colors.DIM))
 
 
-# ─── Non-interactive disable/enable ──────────────────────────────────────────
-
-
 def _apply_toolset_change(config: dict, platform: str, toolset_names: List[str], action: str):
     """Add or remove built-in toolsets for a platform."""
     from hermes_cli.tools_config import _get_platform_tools, _save_platform_tools
 
     enabled = _get_platform_tools(config, platform, include_default_mcp_servers=False)
-    if action == "disable":
-        updated = enabled - set(toolset_names)
-    else:
-        updated = enabled | set(toolset_names)
+    updated = enabled - set(toolset_names) if action == "disable" else enabled | set(toolset_names)
     _save_platform_tools(config, platform, updated)
 
 
@@ -230,10 +200,7 @@ def _print_tools_list(enabled_toolsets: set, mcp_servers: dict, platform: str = 
     from hermes_cli.tools_config import CONFIGURABLE_TOOLSETS, _get_effective_configurable_toolsets
 
     effective_all = _get_effective_configurable_toolsets()
-    effective = [
-        (k, l, d) for (k, l, d) in effective_all
-        if _toolset_allowed_for_platform(k, platform)
-    ]
+    effective = [(k, l, d) for (k, l, d) in effective_all if _toolset_allowed_for_platform(k, platform)]
     builtin_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
 
     def _print_rows(entries):
@@ -267,12 +234,9 @@ def _print_tools_list(enabled_toolsets: set, mcp_servers: dict, platform: str = 
 
 
 def _known_tool_platforms() -> set[str]:
-    """Return built-in plus discovered plugin platform names.
-
-    Plugin platforms are registered at runtime rather than in the static CLI display registry. Tool
-    introspection/configuration must recognize those names too, otherwise an active plugin platform
-    cannot audit its authority.
-    """
+    """Return built-in plus discovered plugin platform names. Plugin platforms register at runtime, not
+    in the static CLI display registry, and must be recognized so an active plugin platform can audit
+    its authority."""
     from hermes_cli.tools_config import PLATFORMS
 
     known = set(PLATFORMS)
@@ -283,8 +247,7 @@ def _known_tool_platforms() -> set[str]:
         discover_plugins()  # idempotent
         known.update(platform_registry.registered_names())
     except Exception:
-        # Plugin discovery is optional. Preserve the built-in CLI path when a
-        # third-party plugin is malformed or its dependencies are unavailable.
+        # Plugin discovery is optional: keep the built-in path when a plugin is malformed or deps are missing.
         pass
     return known
 
@@ -319,17 +282,11 @@ def tools_disable_enable_command(args):
         toolset_targets = [t for t in toolset_targets if t in valid_toolsets]
 
     # Reject platform-scoped toolsets on platforms that don't allow them.
-    restricted_targets = [
-        t for t in toolset_targets
-        if not _toolset_allowed_for_platform(t, platform)
-    ]
+    restricted_targets = [t for t in toolset_targets if not _toolset_allowed_for_platform(t, platform)]
     if restricted_targets:
         for name in restricted_targets:
             allowed = sorted(_TOOLSET_PLATFORM_RESTRICTIONS.get(name) or set())
-            _print_error(
-                f"Toolset '{name}' is not available on platform '{platform}' "
-                f"(only: {', '.join(allowed)})"
-            )
+            _print_error(f"Toolset '{name}' is not available on platform '{platform}' (only: {', '.join(allowed)})")
         toolset_targets = [t for t in toolset_targets if t not in restricted_targets]
 
     if toolset_targets:
