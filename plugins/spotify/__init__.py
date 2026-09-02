@@ -1,25 +1,13 @@
 """Spotify integration plugin — bundled, auto-loaded.
 
-Registers 7 tools (playback, devices, queue, search, playlists, albums,
-library) into the ``spotify`` toolset. Each tool's handler is gated by
-``_check_spotify_available()`` — when the user has not run ``hermes auth
-spotify``, the tools remain registered (so they appear in ``hermes
-tools``) but the runtime check prevents dispatch.
+Registers 7 tools into the ``spotify`` toolset. Tools stay registered (so they
+appear in ``hermes tools``) but ``_check_spotify_available()`` gates dispatch
+until the user has run ``hermes auth spotify``.
 
-Why a plugin instead of a top-level ``tools/`` file?
-
-- ``plugins/`` is where third-party service integrations live (see
-  ``plugins/image_gen/`` for the backend-provider pattern, ``plugins/
-  disk-cleanup/`` for the standalone pattern). ``tools/`` is reserved
-  for foundational capabilities (terminal, read_file, web_search, etc.).
-- Mirroring the image_gen plugin layout (``plugins/<category>/<backend>/``
-  for categories, flat ``plugins/<name>/`` for standalones) makes new
-  service integrations a pattern contributors can copy.
-- Bundled + ``kind: backend`` auto-loads on startup just like image_gen
-  backends — no user opt-in needed, no ``plugins.enabled`` config.
-
-The Spotify auth flow (``hermes auth spotify``), CLI plumbing, and docs
-are unchanged. This move is purely structural.
+Why a plugin rather than a ``tools/`` module: ``tools/`` is reserved for
+foundational capabilities; third-party service integrations live under
+``plugins/`` (flat ``plugins/<name>/`` for standalones, like image_gen backends),
+and ``kind: backend`` bundled plugins auto-load with no ``plugins.enabled`` opt-in.
 """
 
 from __future__ import annotations
@@ -56,11 +44,4 @@ _TOOLS = (
 def register(ctx) -> None:
     """Register all Spotify tools. Called once by the plugin loader."""
     for name, schema, handler, emoji in _TOOLS:
-        ctx.register_tool(
-            name=name,
-            toolset="spotify",
-            schema=schema,
-            handler=handler,
-            check_fn=_check_spotify_available,
-            emoji=emoji,
-        )
+        ctx.register_tool(name=name, toolset="spotify", schema=schema, handler=handler, check_fn=_check_spotify_available, emoji=emoji)

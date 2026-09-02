@@ -1,18 +1,8 @@
-"""Alibaba Cloud Coding Plan provider profiles.
+"""Alibaba Cloud Coding Plan provider profiles (intl + CN): a dedicated endpoint
+and key tier separate from ``alibaba``. Names match models.dev catalog keys.
 
-Separate from the standard `alibaba` profile because it hits a different
-endpoint (coding-intl.dashscope.aliyuncs.com) with a dedicated API key tier.
-
-Region split, mirroring the base DashScope pair (#73265):
-  - ``alibaba-coding-plan``    → coding-intl.dashscope.aliyuncs.com (international)
-  - ``alibaba-coding-plan-cn`` → coding.dashscope.aliyuncs.com (mainland China)
-
-Profile names match the models.dev catalog keys exactly so model metadata
-lines up and ``model.provider: alibaba-coding-plan-cn`` resolves at runtime.
-
-The CN profile checks its own ``ALIBABA_CODING_PLAN_CN_API_KEY`` first (#101122,
-mirroring kimi-coding-cn) and keeps the shared vars as ordered fallbacks so
-existing CN users configured with the shared key keep working.
+The CN profile checks its own key first and keeps the shared vars as ordered
+fallbacks so existing CN users configured with the shared key keep working.
 """
 
 from providers import register_provider

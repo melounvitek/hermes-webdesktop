@@ -1,22 +1,15 @@
 """Declarative configuration schema for memory provider plugins.
 
-Each memory provider plugin *declares* its configurable surface in a
-``config_schema.py`` next to its ``__init__.py`` — the fields, their types,
-which values are secrets, and (for selects) the allowed options. A single
-generic renderer in the desktop UI and a single generic ``GET/PUT
-/api/memory/providers/{name}/config`` endpoint pair drive the whole
-experience, so adding a provider config surface is pure declaration with no
-bespoke UI components.
+Each provider *declares* its configurable surface in a ``config_schema.py`` next
+to its ``__init__.py`` (fields, kinds, secrets, select options); one generic
+renderer in the desktop UI and one generic ``GET/PUT
+/api/memory/providers/{name}/config`` endpoint pair drive the whole experience.
 
-Schema files are loaded by path (like the provider plugins themselves), never
-via package import: plugin ``__init__.py`` files pull in the agent runtime,
-which must not load into the web server. A ``config_schema.py`` may only
-import from this module.
-
-This module is intentionally pure data: it imports nothing from the
-config/env layer. ``web_server`` owns the generic read/write logic that
-interprets these declarations, dispatching on ``ProviderConfigSchema.storage``
-to the matching backend.
+Schema files are loaded by path, never via package import: plugin ``__init__.py``
+files pull in the agent runtime, which must not load into the web server. A
+``config_schema.py`` may only import from this module, and this module is pure
+data (nothing from the config/env layer). ``web_server`` owns the read/write
+logic, dispatching on ``ProviderConfigSchema.storage``.
 """
 
 from __future__ import annotations
@@ -53,17 +46,12 @@ class ProviderFieldOption:
 class ProviderField:
     """One configurable field on a memory provider.
 
-    A field is stored in exactly one place, decided by ``kind``:
-
-    * non-secret kinds — persisted to the provider's config via its storage
-      backend under ``key``.
-    * ``secret`` — persisted to the env store under ``env_key`` and never read
-      back out over the API (only an ``is_set`` flag is surfaced).
-
-    ``aliases`` and ``env_fallbacks`` let a field read legacy values written by
-    earlier CLI/env setup without re-introducing per-provider code. ``inline``
-    marks the curated subset shown in the compact panel; the rest surface only
-    in the full-config modal. ``group`` buckets fields within that modal.
+    Stored in exactly one place by ``kind``: non-secret kinds go to the provider's
+    storage backend under ``key``; ``secret`` goes to the env store under
+    ``env_key`` and is never read back over the API (only an ``is_set`` flag).
+    ``aliases``/``env_fallbacks`` read legacy values from earlier CLI/env setup.
+    ``inline`` marks the compact-panel subset; the rest appear only in the
+    full-config modal, bucketed by ``group``.
     """
 
     key: str
@@ -110,14 +98,11 @@ _SCHEMA_CACHE: dict[str, ProviderConfigSchema] = {}
 
 
 def get_provider_config_schema(name: str) -> ProviderConfigSchema | None:
-    """Return the ``CONFIG_SCHEMA`` declared by the provider plugin ``name``.
+    """``CONFIG_SCHEMA`` declared by provider ``name``; None (no panel) without a ``config_schema.py``.
 
-    Providers without a ``config_schema.py`` (e.g. ``builtin``) return ``None``
-    and simply render no config panel. The cache keys on the resolved schema
-    file, not the name: user-installed plugins are per-profile, so one
-    profile's lookup must never answer for another's.
+    The cache keys on the resolved schema file, not the name: user-installed
+    plugins are per-profile, so one profile's lookup must never answer for another's.
     """
-
     from plugins.memory import find_provider_dir
 
     provider_dir = find_provider_dir(name)

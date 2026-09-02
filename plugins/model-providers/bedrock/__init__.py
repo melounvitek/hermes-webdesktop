@@ -8,11 +8,7 @@ class BedrockProfile(ProviderProfile):
     """AWS Bedrock — no REST /v1/models endpoint; uses AWS SDK."""
 
     def fetch_models(
-        self,
-        *,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        timeout: float = 8.0,
+        self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
         """Bedrock model listing requires AWS SDK, not a REST call."""
         return None

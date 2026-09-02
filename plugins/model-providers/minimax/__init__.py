@@ -1,9 +1,8 @@
-"""MiniMax provider profiles (international + China).
+"""MiniMax provider profiles (international, China, OAuth).
 
-The default API-key routes use anthropic_messages because their base URLs end
-with /anthropic. Users can opt MiniMax-M3 into the OpenAI-compatible endpoint
-with base_url=https://api.minimax.io/v1; that route needs MiniMax-specific
-reasoning controls in extra_body.
+Default routes use anthropic_messages (base URLs end in /anthropic). Users can
+opt MiniMax-M3 into the OpenAI-compatible https://api.minimax.io/v1 route,
+which needs MiniMax-specific reasoning controls in extra_body.
 """
 
 from typing import Any
@@ -15,15 +14,7 @@ from providers.base import ProviderProfile
 
 def _is_minimax_global_openai_base_url(base_url: str | None) -> bool:
     parsed = urlparse(str(base_url or "").strip())
-    if (parsed.hostname or "").lower() != "api.minimax.io":
-        return False
-    path = parsed.path.rstrip("/").lower()
-    return path == "/v1"
-
-
-def _is_minimax_m3(model: str | None) -> bool:
-    normalized = str(model or "").strip().lower()
-    return normalized in {"minimax-m3", "minimax/minimax-m3"}
+    return (parsed.hostname or "").lower() == "api.minimax.io" and parsed.path.rstrip("/").lower() == "/v1"
 
 
 class MiniMaxProfile(ProviderProfile):
@@ -37,25 +28,16 @@ class MiniMaxProfile(ProviderProfile):
         base_url: str | None = None,
         **context: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Emit M3 reasoning controls for api.minimax.io/v1.
-
-        MiniMax-M3's OpenAI-compatible endpoint keeps thinking inline unless
-        ``reasoning_split`` is sent, so always request the split format on that
-        route. ``thinking`` controls the M3 mode; Hermes' effort levels are not
-        a MiniMax depth knob here, so they only select adaptive vs disabled.
-        """
-        if not _is_minimax_global_openai_base_url(base_url) or not _is_minimax_m3(model):
+        """M3 on api.minimax.io/v1 keeps thinking inline unless ``reasoning_split``
+        is sent; effort levels only select adaptive vs disabled ``thinking``."""
+        is_m3 = str(model or "").strip().lower() in {"minimax-m3", "minimax/minimax-m3"}
+        if not _is_minimax_global_openai_base_url(base_url) or not is_m3:
             return {}, {}
-
         extra_body: dict[str, Any] = {"reasoning_split": True}
-
         if isinstance(reasoning_config, dict) and reasoning_config.get("enabled") is False:
             extra_body["thinking"] = {"type": "disabled"}
-            return extra_body, {}
-
-        if reasoning_config is not None:
+        elif reasoning_config is not None:
             extra_body["thinking"] = {"type": "adaptive"}
-
         return extra_body, {}
 
 
