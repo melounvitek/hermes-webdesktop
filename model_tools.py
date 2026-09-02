@@ -263,57 +263,67 @@ def get_tool_definitions(
             every enabled tool). Only the tool_search bridge should use this so
             it reads the real catalog rather than the collapsed one.
     """
-    # Memo key covers every argument plus everything that changes the result
-    # without an argument changing: registry generation, config.yaml mtime/size
-    # (dynamic schemas: execute_code mode, discord allowlist), kanban context,
-    # profile scope. check_fn results are TTL-cached inside registry.get_definitions.
-    cache_key = None
-    if quiet_mode:
-        try:
-            from hermes_cli.config import get_config_path
-            cfg_stat = get_config_path().stat()
-            cfg_fp = (cfg_stat.st_mtime_ns, cfg_stat.st_size)
-        except (FileNotFoundError, OSError, ImportError):
-            cfg_fp = None
-        profile_scope = check_fn_cache_scope()
-        if profile_scope != CHECK_FN_CACHE_BYPASS:
-            cache_key = (
-                registry.current_scope_key(),
-                frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
-                frozenset(disabled_toolsets) if disabled_toolsets else None,
-                registry._generation,
-                cfg_fp,
-                bool(os.environ.get("HERMES_KANBAN_TASK")),
-                bool(skip_tool_search_assembly),
-                _is_delegated_child_context(),
-                _is_dispatcher_owned_worker(),
-                profile_scope,
-            )
-        with _tool_defs_cache_lock:
-            cached = _tool_defs_cache.get(cache_key) if cache_key is not None else None
-        if cached is not None:
-            global _last_resolved_tool_names
-            _last_resolved_tool_names = [t["function"]["name"] for t in cached]
-            return list(cached)
+    if not quiet_mode:
+        return _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
+                                         skip_tool_search_assembly=skip_tool_search_assembly)
 
-    result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
-                                       skip_tool_search_assembly=skip_tool_search_assembly)
-    if quiet_mode and cache_key is not None:
+    cache_key = _tool_defs_cache_key(enabled_toolsets, disabled_toolsets, skip_tool_search_assembly)
+    with _tool_defs_cache_lock:
+        cached = _tool_defs_cache.get(cache_key) if cache_key is not None else None
+    if cached is None:
+        result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
+                                           skip_tool_search_assembly=skip_tool_search_assembly)
+        if cache_key is None:
+            return list(result)
         with _tool_defs_cache_lock:
             # Another thread may have filled this key meanwhile; reuse it.
             cached = _tool_defs_cache.get(cache_key)
             if cached is None:
                 if len(_tool_defs_cache) >= _TOOL_DEFS_CACHE_MAX:
                     _tool_defs_cache.pop(next(iter(_tool_defs_cache)))
-                _tool_defs_cache[cache_key] = result
-                cached = result
-        return list(cached)
-    # Quiet callers always get a shallow copy: run_agent appends memory/LCM
-    # schemas to its list, and a shared list would accumulate duplicate tool
-    # names across agent inits (rejected with HTTP 400 by DeepSeek/Kimi/MiMo).
-    if quiet_mode:
-        return list(result)
-    return result
+                _tool_defs_cache[cache_key] = cached = result
+    else:
+        global _last_resolved_tool_names
+        _last_resolved_tool_names = [t["function"]["name"] for t in cached]
+    # Always a shallow copy: run_agent appends memory/LCM schemas to its list, and
+    # a shared list would accumulate duplicate tool names across agent inits
+    # (rejected with HTTP 400 by DeepSeek/Kimi/MiMo).
+    return list(cached)
+
+
+def _tool_defs_cache_key(
+    enabled_toolsets: Optional[List[str]],
+    disabled_toolsets: Optional[List[str]],
+    skip_tool_search_assembly: bool,
+) -> Optional[tuple]:
+    """Memo key for get_tool_definitions, or None when caching must be bypassed.
+
+    Covers every argument plus everything that changes the result without an
+    argument changing: registry generation, config.yaml mtime/size (dynamic
+    schemas: execute_code mode, discord allowlist), kanban context, profile
+    scope. check_fn results are TTL-cached inside registry.get_definitions.
+    """
+    profile_scope = check_fn_cache_scope()
+    if profile_scope == CHECK_FN_CACHE_BYPASS:
+        return None
+    try:
+        from hermes_cli.config import get_config_path
+        cfg_stat = get_config_path().stat()
+        cfg_fp = (cfg_stat.st_mtime_ns, cfg_stat.st_size)
+    except (FileNotFoundError, OSError, ImportError):
+        cfg_fp = None
+    return (
+        registry.current_scope_key(),
+        frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
+        frozenset(disabled_toolsets) if disabled_toolsets else None,
+        registry._generation,
+        cfg_fp,
+        bool(os.environ.get("HERMES_KANBAN_TASK")),
+        bool(skip_tool_search_assembly),
+        _is_delegated_child_context(),
+        _is_dispatcher_owned_worker(),
+        profile_scope,
+    )
 
 
 def _apply_toolset_selection(tools: set, names: List[str], quiet_mode: bool, *, disable: bool) -> None:
