@@ -270,6 +270,26 @@ def _singleton_as_row(path: Path) -> Optional[Dict[str, Any]]:
     }
 
 
+# ── One-time heal for installs that ALREADY forked a single-use grant ────────
+#
+# Fleets created before the clone-strip (``strip_cloned_single_use_oauth_grants``) / root-write-through have
+# profile-local copies of the root grant. Those copies are the same credential
+# with several owners: whichever profile rotated last holds the only live
+# refresh token and every other copy (root included) is spent. Upgrading alone
+# does not fix that — the first load in each profile would keep using its own
+# doomed copy. ``heal_forked_single_use_oauth_grants`` runs at profile
+# ``load_pool()`` time: it finds the profile rows that share LINEAGE with a
+# root row (same pool id — clone-all and the old borrowed-persist both kept
+# it — or the same account identity / token material), keeps the copy most
+# likely to still be live (freshest rotation), writes that copy into ROOT when
+# root's is older, and strips the profile's copy so the profile borrows root
+# from then on. Idempotent (a healed profile has no matched rows), never
+# touches API-key rows, never deletes a row that has no root counterpart
+# (an independent ``hermes -p <p> auth add`` grant, or the only surviving
+# copy), and reads only the two auth.json files the existing root fallback
+# already reads — no environ / secret-scope reads.
+
+
 def heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str, Any]]:
     """Consolidate a profile's forked copy of a single-use OAuth grant into root.
 

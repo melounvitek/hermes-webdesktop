@@ -1,5 +1,9 @@
 """OpenAI Codex OAuth: token store, refresh, quota probe, device-code login.
 
+Tokens live in ~/.hermes/auth.json, NOT ~/.codex/: Hermes keeps its own Codex OAuth session
+separate from the Codex CLI / VS Code extension so one app's refresh-token rotation cannot
+invalidate the other's session.
+
 Split out of ``hermes_cli/auth.py``; every moved name is re-imported there, so
 ``hermes_cli.auth.<name>`` keeps resolving (and monkeypatching) as before. Origin-internal
 helpers are imported lazily inside each function (no import cycle; patches on

@@ -391,6 +391,11 @@ def _nous_shared_auth_dir() -> Path:
     Honors ``HERMES_SHARED_AUTH_DIR`` so tests can redirect it. Defaults to
     ``<hermes-root>/shared/`` (``~/.hermes/shared/`` on POSIX, ``%LOCALAPPDATA%\\hermes\\shared\\``
     on Windows), outside any named profile so all profiles under one root share the store.
+
+    The store lets ``hermes --profile <name> auth add nous --type oauth`` one-tap import instead
+    of re-running device-code. It is written on login AND on every runtime refresh so the stored
+    refresh_token stays current when one profile rotates it; a server-side stale token just makes
+    the import fail gracefully and falls back to the device-code flow.
     """
     override = os.getenv("HERMES_SHARED_AUTH_DIR", "").strip()
     if override:

@@ -1,9 +1,17 @@
 """Multi-provider authentication system for Hermes Agent.
 
-Architecture: - ProviderConfig registry defines known OAuth providers - Auth store (auth.json) holds
-per-provider credential state - resolve_provider() picks the active provider via priority chain -
-resolve_*_runtime_credentials() handles token refresh and runtime keys - logout_command() is the CLI
-entry point for clearing auth
+Architecture:
+- ``ProviderConfig`` / ``PROVIDER_REGISTRY`` describe every known inference provider.
+- The auth store (``~/.hermes/auth.json``) holds per-provider credential state, the credential
+  pool and suppression markers; ``_auth_store_lock`` / ``_load_auth_store`` / ``_save_auth_store``
+  are the only I/O primitives (cross-process flock, atomic 0o600 writes).
+- ``resolve_provider()`` picks the active provider via the documented priority chain.
+- ``OAUTH_PROVIDER_FLOWS`` maps each OAuth provider to its runtime-credential resolver, status
+  builder and terminal-refresh error codes; the flows themselves live in sibling modules
+  (``auth_nous``, ``auth_codex``, ``auth_xai``, ``auth_qwen``, ``auth_minimax``, ``auth_spotify``)
+  and are re-imported here so ``hermes_cli.auth.<name>`` stays the public/patchable surface.
+- ``get_auth_status()`` / ``resolve_api_key_provider_credentials()`` / ``logout_command()`` are
+  the generic entry points the CLI, gateway and dashboard call.
 """
 
 from __future__ import annotations
@@ -683,9 +691,8 @@ def get_anthropic_key() -> str:
 
 
 # =============================================================================
-# Kimi Code Endpoint Detection
+# Secret validation
 # =============================================================================
-
 
 _PLACEHOLDER_SECRET_VALUES = {
     "*",
@@ -815,19 +822,7 @@ def _resolve_api_key_provider_secret(
 
 
 # =============================================================================
-# Z.AI Endpoint Detection
-# =============================================================================
-
-# Z.AI has separate billing for general vs coding plans, and global vs China
-# endpoints.  A key that works on one may return "Insufficient balance" on
-# another.  We probe at setup time and store the working endpoint.
-# Each entry lists candidate models to try in order — newer coding plan accounts
-# may only have access to recent models (glm-5.1, glm-5v-turbo) while older
-# ones still use glm-4.7.
-
-
-# =============================================================================
-# Error Types
+# Error formatting (AuthError itself lives in auth_constants)
 # =============================================================================
 
 def is_rate_limited_auth_error(error: Exception) -> bool:
@@ -1017,7 +1012,8 @@ def _file_lock(
 
     Reentrant per-thread via ``holder.depth``. Falls back to a depth-only guard when neither
     ``fcntl`` nor ``msvcrt`` is available (rare). Callers supply their own ``threading.local`` so
-    independent locks (e.g.
+    independent locks (e.g. the profile auth store vs the global root store vs the shared Nous
+    store) track reentrancy separately.
     """
     if getattr(holder, "depth", 0) > 0:
         holder.depth += 1
@@ -1253,6 +1249,15 @@ def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = N
     return auth_file
 
 
+def _store_section(auth_store: Dict[str, Any], key: str) -> Dict[str, Any]:
+    """Return ``auth_store[key]`` as a dict, replacing a missing/non-dict value in place."""
+    section = auth_store.get(key)
+    if not isinstance(section, dict):
+        section = {}
+        auth_store[key] = section
+    return section
+
+
 def _load_provider_state_with_source(
     auth_store: Dict[str, Any],
     provider_id: str,
@@ -1359,11 +1364,7 @@ def _store_provider_state(
     *,
     set_active: bool = True,
 ) -> None:
-    providers = auth_store.setdefault("providers", {})
-    if not isinstance(providers, dict):
-        auth_store["providers"] = {}
-        providers = auth_store["providers"]
-    providers[provider_id] = state
+    _store_section(auth_store, "providers")[provider_id] = state
     if set_active:
         auth_store["active_provider"] = provider_id
 
@@ -1431,26 +1432,6 @@ def is_runtime_provider_routable(provider_id: str) -> bool:
     except AuthError:
         return False
     return True
-
-
-# ── One-time heal for installs that ALREADY forked a single-use grant ────────
-#
-# Fleets created before the clone-strip / root-write-through above have
-# profile-local copies of the root grant. Those copies are the same credential
-# with several owners: whichever profile rotated last holds the only live
-# refresh token and every other copy (root included) is spent. Upgrading alone
-# does not fix that — the first load in each profile would keep using its own
-# doomed copy. ``heal_forked_single_use_oauth_grants`` runs at profile
-# ``load_pool()`` time: it finds the profile rows that share LINEAGE with a
-# root row (same pool id — clone-all and the old borrowed-persist both kept
-# it — or the same account identity / token material), keeps the copy most
-# likely to still be live (freshest rotation), writes that copy into ROOT when
-# root's is older, and strips the profile's copy so the profile borrows root
-# from then on. Idempotent (a healed profile has no matched rows), never
-# touches API-key rows, never deletes a row that has no root counterpart
-# (an independent ``hermes -p <p> auth add`` grant, or the only surviving
-# copy), and reads only the two auth.json files the existing root fallback
-# already reads — no environ / secret-scope reads.
 
 
 def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
@@ -1576,10 +1557,7 @@ def write_credential_pool(
     removed = {rid for rid in (removed_ids or ()) if rid}
     with _auth_store_lock():
         auth_store = _load_auth_store()
-        pool = auth_store.get("credential_pool")
-        if not isinstance(pool, dict):
-            pool = {}
-            auth_store["credential_pool"] = pool
+        pool = _store_section(auth_store, "credential_pool")
         sanitized_entries = [
             sanitize_borrowed_credential_payload(entry, provider_id)
             if isinstance(entry, dict) else entry
@@ -1625,14 +1603,10 @@ def suppress_credential_source(provider_id: str, source: str) -> None:
     """
     with _auth_store_lock():
         auth_store = _load_auth_store()
-        suppressed = auth_store.get("suppressed_sources")
-        if not isinstance(suppressed, dict):
-            suppressed = {}
-            auth_store["suppressed_sources"] = suppressed
+        suppressed = _store_section(auth_store, "suppressed_sources")
         provider_list = _suppressed_source_list(suppressed, provider_id)
         if provider_list is None:
-            provider_list = []
-            suppressed[provider_id] = provider_list
+            provider_list = suppressed[provider_id] = []
         if source not in provider_list:
             provider_list.append(source)
         _save_auth_store(auth_store)
@@ -1696,92 +1670,48 @@ def get_active_provider() -> Optional[str]:
     return auth_store.get("active_provider")
 
 
-def is_provider_explicitly_configured(provider_id: str) -> bool:
-    """Return True only if the user has explicitly configured this provider.
+def _active_provider_is(normalized: str) -> bool:
+    active = (_load_auth_store().get("active_provider") or "").strip().lower()
+    return bool(active) and active == normalized
 
-    Claude Code's ~/.claude/.credentials.json) so they are never used without the user's explicit
-    choice.
+
+def _config_selects_provider(normalized: str) -> bool:
+    """config.yaml ``model.provider``, or a MoA advisor/aggregator slot naming the provider.
+
+    MoA presets are explicit model selections too: a user who configured ``provider: anthropic``
+    as a MoA slot has opted into Anthropic credentials for that slot even when the main session
+    model is another provider. Without this, Claude Code OAuth entries are pruned by
+    ``credential_pool.load_pool("anthropic")`` and MoA Anthropic advisors fail with "no
+    ANTHROPIC_API_KEY" while the model picker says Anthropic is logged in.
     """
-    normalized = (provider_id or "").strip().lower()
-
-    # 1. Check auth.json active_provider
-    try:
-        auth_store = _load_auth_store()
-        active = (auth_store.get("active_provider") or "").strip().lower()
-        if active and active == normalized:
-            return True
-    except Exception:
-        pass
-
-    # 2. Check config.yaml model.provider and other explicit provider slots.
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
-        model_cfg = cfg.get("model")
-        if isinstance(model_cfg, dict):
-            cfg_provider = (model_cfg.get("provider") or "").strip().lower()
-            if cfg_provider == normalized:
-                return True
-
-        # MoA presets are explicit model selections too.  A user who configured
-        # ``provider: anthropic`` as a MoA advisor/aggregator has opted Hermes
-        # into using Anthropic credentials for that slot even when the main
-        # session model is another provider.  Without this, Claude Code OAuth
-        # entries are pruned/ignored by credential_pool.load_pool("anthropic"),
-        # so MoA Anthropic advisors fail with "no ANTHROPIC_API_KEY" while the
-        # normal model picker says Anthropic is logged in.
-        def _slot_matches_provider(slot):
-            return (
-                isinstance(slot, dict)
-                and (slot.get("provider") or "").strip().lower() == normalized
-            )
-
-        def _moa_block_matches(block: Any) -> bool:
-            return isinstance(block, dict) and (
-                any(_slot_matches_provider(s) for s in block.get("reference_models") or [])
-                or _slot_matches_provider(block.get("aggregator"))
-            )
-
-        moa_cfg = cfg.get("moa")
-        if isinstance(moa_cfg, dict):
-            if _moa_block_matches(moa_cfg):
-                return True
-            presets = moa_cfg.get("presets")
-            if isinstance(presets, dict) and any(_moa_block_matches(p) for p in presets.values()):
-                return True
-    except Exception:
-        pass
-
-    # 3. Provider-specific env vars (explicit secrets only).
-    if _explicit_env_credentials_present(normalized):
+    from hermes_cli.config import load_config
+    cfg = load_config()
+    model_cfg = cfg.get("model")
+    if isinstance(model_cfg, dict) and (model_cfg.get("provider") or "").strip().lower() == normalized:
         return True
 
-    # 4. Check persisted credential-pool entries that came from EXPLICIT flows
-    # the user initiated inside Hermes (manual add / device-code / PKCE), plus
-    # env-backed pool entries. This intentionally excludes ambient borrowed
-    # sources like gh_cli / claude_code / qwen-cli.
-    try:
-        if any(_pool_entry_is_explicit(entry) for entry in read_credential_pool(normalized)):
-            return True
-    except Exception:
-        pass
+    def _slot_matches(slot: Any) -> bool:
+        return isinstance(slot, dict) and (slot.get("provider") or "").strip().lower() == normalized
 
-    # 5. OAuth-token / cloud-SDK providers (Vertex AI, Bedrock) have NO API-key
-    # env var to detect in step 3 and mint short-lived tokens from ADC / a
-    # service account / the AWS SDK chain. The user "explicitly configures"
-    # them by writing non-secret routing settings into config.yaml
-    # (``vertex.project_id`` / a credentials path, ``bedrock.region``) rather
-    # than by pasting a key — so without this branch such a provider is only
-    # ever "explicitly configured" while it is the *current* provider, and it
-    # silently vanishes from explicit-only pickers (desktop chat model menu)
-    # otherwise. Treat the presence of that deliberate config as explicit.
-    try:
-        if _keyless_provider_has_explicit_config(normalized):
-            return True
-    except Exception as exc:
-        logger.debug("Failed checking keyless provider explicit config for %s: %s", provider_id, exc)
+    def _moa_block_matches(block: Any) -> bool:
+        return isinstance(block, dict) and (
+            any(_slot_matches(s) for s in block.get("reference_models") or [])
+            or _slot_matches(block.get("aggregator"))
+        )
 
-    return False
+    moa_cfg = cfg.get("moa")
+    if not isinstance(moa_cfg, dict):
+        return False
+    presets = moa_cfg.get("presets")
+    return _moa_block_matches(moa_cfg) or (
+        isinstance(presets, dict) and any(_moa_block_matches(p) for p in presets.values())
+    )
+
+
+def _explicit_pool_entry_present(normalized: str) -> bool:
+    """Pool rows from EXPLICIT Hermes flows (manual add / device-code / PKCE) or live env keys;
+    ambient borrowed sources (gh_cli / claude_code / qwen-cli) are deliberately excluded."""
+    return any(_pool_entry_is_explicit(entry) for entry in read_credential_pool(normalized))
 
 
 # Set by Claude Code itself, not by the user explicitly configuring anthropic in Hermes.
@@ -1856,6 +1786,38 @@ def _keyless_provider_has_explicit_config(normalized: str) -> bool:
     return False
 
 
+# Ordered explicit-configuration checks: ``(check, best_effort)``. Best-effort checks treat an
+# exception as "no"; the env-var check is NOT best-effort — a failure there must surface rather
+# than let a later, weaker signal decide.
+_EXPLICIT_CONFIG_CHECKS: Tuple[Tuple[Callable[[str], bool], bool], ...] = (
+    (_active_provider_is, True),
+    (_config_selects_provider, True),
+    (_explicit_env_credentials_present, False),
+    (_explicit_pool_entry_present, True),
+    (_keyless_provider_has_explicit_config, True),
+)
+
+
+def is_provider_explicitly_configured(provider_id: str) -> bool:
+    """Return True only if the user has explicitly configured this provider.
+
+    Explicit = auth.json ``active_provider``, config.yaml ``model.provider`` / MoA slots, a pasted
+    provider env var, a pool entry from a Hermes-initiated flow, or Hermes-scoped routing config
+    for keyless cloud-SDK providers. Ambient borrowed credentials (gh CLI, qwen-cli, Claude Code's
+    ~/.claude/.credentials.json) never count, so they are never used without the user's choice.
+    """
+    normalized = (provider_id or "").strip().lower()
+    for check, best_effort in _EXPLICIT_CONFIG_CHECKS:
+        try:
+            if check(normalized):
+                return True
+        except Exception as exc:
+            if not best_effort:
+                raise
+            logger.debug("explicit-config check %s failed for %s: %s", check.__name__, provider_id, exc)
+    return False
+
+
 def clear_provider_auth(provider_id: Optional[str] = None) -> bool:
     """Clear auth state for a provider. Used by `hermes logout`. If provider_id is None, clears the
     active provider. Returns True if something was cleared.
@@ -1866,28 +1828,15 @@ def clear_provider_auth(provider_id: Optional[str] = None) -> bool:
         if not target:
             return False
 
-        providers = auth_store.get("providers", {})
-        if not isinstance(providers, dict):
-            providers = {}
-            auth_store["providers"] = providers
-
-        pool = auth_store.get("credential_pool")
-        if not isinstance(pool, dict):
-            pool = {}
-            auth_store["credential_pool"] = pool
-
         cleared = False
-        if target in providers:
-            del providers[target]
-            cleared = True
-        if target in pool:
-            del pool[target]
-            cleared = True
-
+        for section in ("providers", "credential_pool"):
+            entries = _store_section(auth_store, section)
+            if target in entries:
+                del entries[target]
+                cleared = True
         if auth_store.get("active_provider") == target:
             auth_store["active_provider"] = None
             cleared = True
-
         if not cleared:
             return False
         _save_auth_store(auth_store)
@@ -1937,7 +1886,7 @@ def _refuse_env_adoption_if_config_corrupt() -> None:
     When ``~/.hermes/config.yaml`` EXISTS but fails to parse, ``load_config()`` falls back to
     ``DEFAULT_CONFIG`` — so the tier-2 config check above finds no ``model.provider`` and the env-
     var sniff / pool probe silently adopts the PAID openrouter provider, even though the user's real
-    (broken) config may name a completely different provider (e.g.
+    (broken) config may name a completely different provider (e.g. a free local one).
 
     This probe fires ONLY on the auto path — explicitly requested providers never reach it — and
     clears itself as soon as the file changes (a fixed config resolves normally on the next call).
@@ -2065,10 +2014,11 @@ def resolve_provider(
 ) -> str:
     """Determine which inference provider to use.
 
-    Priority (when requested="auto" or None) — explicit user intent wins over a stale logged-in
-    OAuth provider (#29285): 1. Explicit CLI api_key/base_url -> "openrouter" 2. config.yaml
-    `model.provider` 3. OPENAI_API_KEY / OPENROUTER_API_KEY env vars -> "openrouter" 4. OpenRouter
-    credential pool 5.
+    Priority when requested is "auto"/None — explicit user intent wins over a stale logged-in
+    OAuth provider (#29285): 1. explicit CLI api_key/base_url -> "openrouter"; 2. config.yaml
+    ``model.provider``; 3. OPENAI_API_KEY / OPENROUTER_API_KEY env -> "openrouter"; 4. OpenRouter
+    credential pool; 5. provider-specific env keys; 6. auth.json ``active_provider`` (OAuth);
+    7. AWS Bedrock credential chain; 8. AuthError(no_provider_configured).
     """
     normalized = (requested or "auto").strip().lower()
 
@@ -2105,12 +2055,7 @@ def resolve_provider(
     if explicit_api_key or explicit_base_url:
         return "openrouter"
 
-    # Provider precedence for the auto-path (#29285): explicit user intent must
-    # win over a stale logged-in OAuth `active_provider`. Order matches the
-    # docstring: 1. explicit CLI creds  2. config.yaml `model.provider`
-    # 3. OPENAI/OPENROUTER env keys  4. OpenRouter pool  5. provider-specific
-    # env keys  6. auth.json `active_provider` (OAuth)  7. Bedrock  8. error.
-    # The normal chat/gateway path resolves config.provider upstream in
+    # Tier 2. The normal chat/gateway path resolves config.provider upstream in
     # resolve_requested_provider() before ever reaching "auto"; this duplicate
     # check is the safety net for the lone direct caller (main.py resolve_provider
     # ("auto")) and any future bypass of that stage.
@@ -2297,64 +2242,6 @@ _NOUS_PORTAL_ALLOWED_HOSTS: FrozenSet[str] = frozenset({
     "localhost",
     "127.0.0.1",
 })
-
-
-# =============================================================================
-# Spotify auth — PKCE tokens stored in ~/.hermes/auth.json
-# =============================================================================
-
-
-# =============================================================================
-# SSH / remote session detection
-# =============================================================================
-
-
-# =============================================================================
-# OpenAI Codex auth — tokens stored in ~/.hermes/auth.json (not ~/.codex/)
-#
-# Hermes maintains its own Codex OAuth session separate from the Codex CLI
-# and VS Code extension. This prevents refresh token rotation conflicts
-# where one app's refresh invalidates the other's session.
-# =============================================================================
-
-
-# =============================================================================
-# xAI Grok OAuth — tokens stored in ~/.hermes/auth.json
-# =============================================================================
-
-
-# =============================================================================
-# TLS verification helper
-# =============================================================================
-
-
-# =============================================================================
-# OAuth Device Code Flow — generic, parameterized by provider
-# =============================================================================
-
-
-# =============================================================================
-# Nous Portal — token refresh and model discovery
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-# Shared Nous token store — lets OAuth credentials persist across profiles
-# so a new `hermes --profile <name> auth add nous --type oauth` can one-tap
-# import instead of running the full device-code flow every time.
-#
-# File lives at ${HERMES_SHARED_AUTH_DIR}/nous_auth.json, defaulting to
-# ``<hermes-root>/shared/nous_auth.json`` where ``<hermes-root>`` is what
-# ``get_default_hermes_root()`` returns — ``~/.hermes`` on Linux/macOS,
-# ``%LOCALAPPDATA%\hermes`` on native Windows, or the Docker/custom root.
-# It is OUTSIDE any named profile's HERMES_HOME so named profiles (which
-# typically live under ``<hermes-root>/profiles/<name>/``) all see the
-# same file.
-#
-# Written on successful login and on every runtime refresh so the stored
-# refresh_token stays current even if one profile refreshes and rotates it.
-# If ever the stored refresh_token does go stale server-side, import fails
-# gracefully and the user falls back to the normal device-code flow.
-# -----------------------------------------------------------------------------
 
 
 # Per-process memo for resolve_nous_access_token. Startup runs
@@ -3107,7 +2994,7 @@ def _update_config_for_provider(
     When *default_model* is provided the function also writes it as the ``model.default`` value.
     This prevents a race condition where the gateway (which re-reads config per-message) picks up
     the new provider before the caller has finished model selection, resulting in a mismatched
-    model/provider (e.g.
+    model/provider (e.g. an OpenRouter-style ``vendor/model`` name sent to a direct API).
     """
     # Set active_provider in auth.json so auto-resolution picks this provider
     with _auth_store_lock():
