@@ -105,15 +105,14 @@ def _response_total_tokens(response, default):
 
 
 class SamplingHandler:
-    """Handles sampling/createMessage requests for one MCP server.
+    """Handles sampling/createMessage requests for one MCP server; passed to
+    ``ClientSession`` as ``sampling_callback``. All state (rate-limit
+    timestamps, metrics, tool-loop counter) is per instance. Runs on the MCP
+    background loop; the sync LLM call is offloaded via ``asyncio.to_thread``.
 
     Deprecated upstream (MCP 2026-07-28, SEP-2577, 12-month window): stays fully
     functional because handshake-era servers still issue it, but do NOT grow new
     capability here — modern servers use MRTR, handled by the SDK session layer.
-
-    Callable; passed to ``ClientSession`` as ``sampling_callback``. All state
-    (rate-limit timestamps, metrics, tool-loop counter) is per instance. Runs on
-    the MCP background loop; the sync LLM call is offloaded via ``asyncio.to_thread``.
     """
 
     _STOP_REASON_MAP = {"stop": "endTurn", "length": "maxTokens", "tool_calls": "toolUse"}
@@ -135,8 +134,7 @@ class SamplingHandler:
     def _check_rate_limit(self) -> bool:
         """Sliding-window (60s) limiter; True if the request is allowed."""
         now = time.time()
-        window = now - 60
-        self._rate_timestamps[:] = [t for t in self._rate_timestamps if t > window]
+        self._rate_timestamps[:] = [t for t in self._rate_timestamps if t > now - 60]
         if len(self._rate_timestamps) >= self.max_rpm:
             return False
         self._rate_timestamps.append(now)
@@ -150,11 +148,6 @@ class SamplingHandler:
             if getattr(hint, "name", None):
                 return hint.name
         return None
-
-    @staticmethod
-    def _extract_tool_result_text(block) -> str:
-        """Extract text from a ToolResultContent block."""
-        return _tool_result_text(block)
 
     def _convert_messages(self, params) -> List[dict]:
         """Convert MCP SamplingMessages to OpenAI format (``content_as_list``
@@ -327,13 +320,11 @@ def _format_elicitation_schema_summary(schema: dict, server_name: str) -> str:
 
 
 class ElicitationHandler:
-    """Handles ``elicitation/create`` requests for one MCP server.
-
-    Callable; passed to ``ClientSession`` as ``elicitation_callback``. Form-mode
-    requests route through Hermes' approval system (CLI, TUI, Telegram, ...);
-    URL-mode is declined as unsupported. Fail-closed: any timeout, exception,
-    or unexpected state returns decline/cancel, never a silent accept.
-    """
+    """Handles ``elicitation/create`` requests for one MCP server; passed to
+    ``ClientSession`` as ``elicitation_callback``. Form-mode requests route
+    through Hermes' approval system (CLI, TUI, Telegram, ...); URL-mode is
+    declined as unsupported. Fail-closed: any timeout, exception or unexpected
+    state returns decline/cancel, never a silent accept."""
 
     # asyncio-side safety net over the approval's own input() timeout so the
     # MCP loop never blocks indefinitely if the inner timeout is bypassed.
