@@ -274,8 +274,8 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
     successfully, False otherwise.
     """
     from hermes_cli.setup import (
-        _OPENCLAW_SCRIPT, get_config_path, load_config, print_header, print_info,
-        print_success, print_warning, prompt_yes_no, save_config,
+        _OPENCLAW_SCRIPT, get_config_path, _info, load_config, print_header, print_info, print_success,
+        print_warning, prompt_yes_no, save_config,
     )
     openclaw_dir = Path.home() / ".openclaw"
     if not openclaw_dir.is_dir() or not _OPENCLAW_SCRIPT.exists():
@@ -283,9 +283,8 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
 
     print()
     print_header("OpenClaw Installation Detected")
-    print_info(f"Found OpenClaw data at {openclaw_dir}")
-    print_info("Hermes can preview what would be imported before making any changes.")
-    print()
+    _info(f"Found OpenClaw data at {openclaw_dir}",
+          "Hermes can preview what would be imported before making any changes.", None)
     if not prompt_yes_no("Would you like to see what can be imported?", default=True):
         print_info("Skipping migration. You can run it later with: hermes claw migrate --dry-run")
         return False
@@ -315,19 +314,17 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
 
     preview_count = preview_report.get("summary", {}).get("migrated", 0)
     if preview_count == 0:
-        print()
-        print_info("Nothing to import from OpenClaw.")
+        _info(None, "Nothing to import from OpenClaw.")
         return False
     print()
     print_header(f"Migration Preview — {preview_count} item(s) would be imported")
-    print_info("No changes have been made yet. Review the list below:")
-    print()
+    _info("No changes have been made yet. Review the list below:", None)
     _print_migration_preview(preview_report)
 
     # ── Phase 2: Confirm and execute ──
     if not prompt_yes_no("Proceed with migration?", default=False):
-        print_info("Migration cancelled. You can run it later with: hermes claw migrate")
-        print_info("Use --dry-run to preview again, or --preset minimal for a lighter import.")
+        _info("Migration cancelled. You can run it later with: hermes claw migrate",
+              "Use --dry-run to preview again, or --preset minimal for a lighter import.")
         return False
 
     # overwrite=False so existing Hermes configs are preserved. The user saw the

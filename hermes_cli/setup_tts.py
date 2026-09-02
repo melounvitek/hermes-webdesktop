@@ -106,7 +106,7 @@ def _run_xai_oauth_login_from_setup() -> bool:
     Returns True on success, False on any failure (the caller falls back
     to whatever the user picked next, e.g. Edge TTS).
     """
-    from hermes_cli.setup import print_info, print_warning
+    from hermes_cli.setup import _info, print_warning
     try:
         from hermes_cli.auth import (
             _is_remote_session, _save_xai_oauth_tokens, _xai_oauth_device_code_login,
@@ -117,8 +117,7 @@ def _run_xai_oauth_login_from_setup() -> bool:
         return False
 
     open_browser = not _is_remote_session()
-    print()
-    print_info("Signing in to xAI Grok OAuth (SuperGrok / Premium+)...")
+    _info(None, "Signing in to xAI Grok OAuth (SuperGrok / Premium+)...")
     try:
         creds = _xai_oauth_device_code_login(open_browser=open_browser)
         _save_xai_oauth_tokens(
@@ -276,16 +275,15 @@ def _tts_xai_step(config: dict) -> str:
 def _setup_tts_provider(config: dict):
     """Interactive TTS provider selection with install flow for local engines."""
     from hermes_cli.setup import (
-        get_env_value, get_nous_subscription_features, managed_nous_tools_enabled, print_header, print_info,
-        print_success, print_warning, prompt_choice, save_config,
+        get_env_value, get_nous_subscription_features, _info, managed_nous_tools_enabled, print_header,
+        print_info, print_success, print_warning, prompt_choice, save_config,
     )
     current_provider = config.get("tts", {}).get("provider", "edge")
     current_label = _TTS_PROVIDER_LABELS.get(current_provider, current_provider)
 
     print()
     print_header("Text-to-Speech Provider (optional)")
-    print_info(f"Current: {current_label}")
-    print()
+    _info(f"Current: {current_label}", None)
 
     options = list(_TTS_PROVIDER_CHOICES)
     if managed_nous_tools_enabled() and get_nous_subscription_features(config).nous_auth_present:

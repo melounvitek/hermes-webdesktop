@@ -23,20 +23,23 @@ def _reload_config_into(config: dict) -> None:
     config.update(_refreshed)
 
 
-def _prompt_env_var(var: dict):
-    """Prompt for one env-var value (masked when the var is a secret)."""
-    from hermes_cli.setup import prompt
-    return prompt(f"  {var.get('prompt', var['name'])}", password=bool(var.get("password")))
+def _prompt_and_save_env_var(var: dict, saved_msg: str, skipped_msg: str) -> None:
+    """Prompt for one env-var value (masked when secret); persist and confirm, or report the skip."""
+    from hermes_cli.setup import print_success, print_warning, prompt, save_env_value
+    value = prompt(f"  {var.get('prompt', var['name'])}", password=bool(var.get("password")))
+    if value:
+        save_env_value(var["name"], value)
+        print_success(saved_msg)
+    else:
+        print_warning(skipped_msg)
 
 
 def _run_portal_one_shot(config: dict) -> None:
-    """One-shot Nous Portal setup — OAuth + model pick + provider + Tool Gateway.
+    """One-shot Nous Portal setup (``hermes setup --portal`` / ``hermes portal``).
 
-    Wired into ``hermes setup --portal`` and ``hermes portal``: the Nous-Portal slice
-    of first-time quick setup as one shareable command. Login, model selection,
-    provider switch and Tool Gateway opt-in are all delegated to ``_model_flow_nous``
-    — the same flow ``_run_first_time_quick_setup`` and ``hermes model`` use for Nous —
-    so there is a single source of truth and ``hermes portal`` always offers a picker.
+    Login, model pick, provider switch and Tool Gateway opt-in are all delegated to
+    ``_model_flow_nous`` — the same flow quick setup and ``hermes model`` use for Nous — so
+    there is one source of truth and ``hermes portal`` always offers a picker.
     """
     from hermes_cli.setup import Colors, color, _info, load_config, print_error, print_info, print_success
     print()
@@ -48,16 +51,12 @@ def _run_portal_one_shot(config: dict) -> None:
           "    — all routed through your Nous Portal sub.", None,
           "  Sign up: https://portal.nousresearch.com/manage-subscription", None)
 
-    # Handles both the logged-out path (device-code OAuth, selects a model) and the
-    # logged-in path (curated picker), then Tool Gateway opt-in; sets provider=nous.
     try:
         from hermes_cli.main import _model_flow_nous
-
         _model_flow_nous(config)
     except (KeyboardInterrupt, EOFError, SystemExit):
-        # _login_nous raises SystemExit(130)/(1) on cancel/failure; the expired-
-        # session re-login path inside _model_flow_nous only catches Exception,
-        # so a SystemExit there would otherwise escape and kill the whole CLI.
+        # _login_nous raises SystemExit(130)/(1) on cancel/failure; the expired-session re-login
+        # path inside _model_flow_nous only catches Exception, so SystemExit would kill the CLI.
         _info(None, "  Setup cancelled.", "  You can retry later with `hermes portal`.")
         return
     except Exception as exc:
@@ -67,8 +66,7 @@ def _run_portal_one_shot(config: dict) -> None:
         print_info("  You can retry later with `hermes portal`.")
         return
 
-    # Re-sync from disk — _model_flow_nous writes via its own load/save cycle, so
-    # a later save_config(config) by a caller must not clobber those values.
+    # Re-sync from disk so a caller's later save_config(config) can't clobber the login save.
     try:
         _refreshed = load_config()
         if isinstance(_refreshed, dict):
@@ -79,8 +77,7 @@ def _run_portal_one_shot(config: dict) -> None:
 
     print()
     print_success("Portal setup complete.")
-    print_info("  Run `hermes portal info` to inspect routing.")
-    print_info("  Run `hermes` to start chatting.")
+    _info("  Run `hermes portal info` to inspect routing.", "  Run `hermes` to start chatting.")
 
 
 def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
@@ -104,8 +101,7 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
         from hermes_cli.main import _model_flow_nous
         _model_flow_nous(config)
     except (KeyboardInterrupt, EOFError):
-        print()
-        print_info("Nous Portal setup cancelled.")
+        _info(None, "Nous Portal setup cancelled.")
     except Exception as exc:
         logger.debug("_model_flow_nous error during quick setup: %s", exc)
         print_warning(f"Nous Portal setup encountered an error: {exc}")
@@ -137,8 +133,7 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
 
     print()
     print_success("Setup complete! You're ready to go.")
-    print()
-    print_info("  Configure all settings:    hermes setup")
+    _info(None, "  Configure all settings:    hermes setup")
     if gateway_choice != 0:
         print_info("  Connect Telegram/Discord:  hermes setup gateway")
     _print_macos_fda_tip()
@@ -379,8 +374,7 @@ def _blank_slate_walkthrough(config: dict, hermes_home):
 def _run_quick_setup(config: dict, hermes_home):
     """Quick setup — only configure items that are missing."""
     from hermes_cli.setup import (
-        Colors, color, _info, print_header, print_info, _print_setup_summary, print_success, print_warning,
-        _prompt_api_key, prompt_checklist, save_config, save_env_value,
+        Colors, color, _info, print_header, print_info, _print_setup_summary, print_success, _prompt_api_key, prompt_checklist, save_config,
     )
     from hermes_cli.config import (get_missing_env_vars, get_missing_config_fields, check_config_version)
     print()
@@ -398,94 +392,66 @@ def _run_quick_setup(config: dict, hermes_home):
               "or pick a specific section from the menu.")
         return
 
-    # Handle missing required env vars
     if missing_required:
-        print()
-        print_info(f"{len(missing_required)} required setting(s) missing:")
+        _info(None, f"{len(missing_required)} required setting(s) missing:")
         for var in missing_required:
             print(f"     • {var['name']}")
         print()
-
         for var in missing_required:
             print()
             print(color(f"  {var['name']}", Colors.CYAN))
             print_info(f"  {var.get('description', '')}")
             if var.get("url"):
                 print_info(f"  Get key at: {var['url']}")
+            _prompt_and_save_env_var(var, f"  Saved {var['name']}", f"  Skipped {var['name']}")
 
-            value = _prompt_env_var(var)
-            if value:
-                save_env_value(var["name"], value)
-                print_success(f"  Saved {var['name']}")
-            else:
-                print_warning(f"  Skipped {var['name']}")
-
-    # Split missing optional vars by category
     missing_tools = [v for v in missing_optional if v.get("category") == "tool"]
     missing_messaging = [
         v for v in missing_optional if v.get("category") == "messaging" and not v.get("advanced")
     ]
 
-    # Tool API keys (checklist)
-    if missing_tools:
+    if missing_tools:  # checklist, then the API-key screen for each pick
         print()
         print_header("Tool API Keys")
-
-        checklist_labels = []
+        labels = []
         for var in missing_tools:
             tools = var.get("tools", [])
             tools_str = f" → {', '.join(tools[:2])}" if tools else ""
-            checklist_labels.append(f"{var.get('description', var['name'])}{tools_str}")
-
-        for idx in prompt_checklist("Which tools would you like to configure?", checklist_labels):
+            labels.append(f"{var.get('description', var['name'])}{tools_str}")
+        for idx in prompt_checklist("Which tools would you like to configure?", labels):
             _prompt_api_key(missing_tools[idx])
 
-    # Messaging platforms (checklist then prompt for selected)
-    if missing_messaging:
+    if missing_messaging:  # checklist, then prompt for each selected platform's vars
         print()
         print_header("Messaging Platforms")
-        print_info("Connect Hermes to messaging apps to chat from anywhere.")
-        print_info("You can configure these later with 'hermes setup gateway'.")
-
-        # Group by platform (preserving order); vars matching no platform are dropped.
-        platform_order = []
-        platforms = {}
+        _info("Connect Hermes to messaging apps to chat from anywhere.",
+              "You can configure these later with 'hermes setup gateway'.")
+        # Group by platform in first-seen order; vars matching no platform are dropped.
+        grouped: dict[str, list] = {}
         emojis = {}
         for var in missing_messaging:
             for needle, plat, emoji in _MESSAGING_PLATFORMS:
                 if needle in var["name"]:
+                    grouped.setdefault(plat, []).append(var)
+                    emojis[plat] = emoji
                     break
-            else:
-                continue
-            if plat not in platforms:
-                platform_order.append(plat)
-                emojis[plat] = emoji
-            platforms.setdefault(plat, []).append(var)
-
-        platform_labels = [f"{emojis[p]} {p}" for p in platform_order]
-        selected_indices = prompt_checklist("Which platforms would you like to set up?", platform_labels)
-
-        for idx in selected_indices:
+        platform_order = list(grouped)
+        labels = [f"{emojis[p]} {p}" for p in platform_order]
+        for idx in prompt_checklist("Which platforms would you like to set up?", labels):
             plat = platform_order[idx]
             print()
             print(color(f"  ─── {emojis[plat]} {plat} ───", Colors.CYAN))
             print()
-            for var in platforms[plat]:
+            for var in grouped[plat]:
                 print_info(f"  {var.get('description', '')}")
                 if var.get("url"):
                     print_info(f"  {var['url']}")
-                value = _prompt_env_var(var)
-                if value:
-                    save_env_value(var["name"], value)
-                    print_success("  ✓ Saved")
-                else:
-                    print_warning("  Skipped")
+                _prompt_and_save_env_var(var, "  ✓ Saved", "  Skipped")
                 print()
 
     # Handle missing config fields
     if missing_config:
-        print()
-        print_info(f"Adding {len(missing_config)} new config option(s) with defaults...")
+        _info(None, f"Adding {len(missing_config)} new config option(s) with defaults...")
         for field in missing_config:
             print_success(f"  Added {field['key']} = {field['default']}")
 

@@ -306,8 +306,7 @@ def prompt_choice(question: str, choices: list, default: int = 0, description: s
     idx = _curses_prompt_choice(question, choices, default, description=description)
     if idx >= 0:
         if idx == default:
-            print_info("  Skipped (keeping current)")
-            print()
+            _info("  Skipped (keeping current)", None)
             return default
         print()
         return idx
@@ -436,16 +435,14 @@ def setup_model_provider(config: dict, *, quick: bool = False):
     """
     from hermes_cli.config import load_config, save_config
     print_header("Inference Provider")
-    print_info("Choose how to connect to your main chat model.")
-    print_info(f"   Guide: {_DOCS_BASE}/integrations/providers")
-    print()
+    _info("Choose how to connect to your main chat model.",
+          f"   Guide: {_DOCS_BASE}/integrations/providers", None)
 
     from hermes_cli.main import select_provider_and_model
     try:
         select_provider_and_model()
     except (SystemExit, KeyboardInterrupt):
-        print()
-        print_info("Provider setup skipped.")
+        _info(None, "Provider setup skipped.")
     except Exception as exc:
         logger.debug("select_provider_and_model error during setup: %s", exc)
         print_warning(f"Provider setup encountered an error: {exc}")
@@ -525,14 +522,13 @@ def setup_agent_settings(config: dict):
     """Configure agent behavior: iterations, progress display, compression, session reset."""
 
     print_header("Agent Settings")
-    print_info(f"   Guide: {_DOCS_BASE}/user-guide/configuration")
-    print()
+    _info(f"   Guide: {_DOCS_BASE}/user-guide/configuration", None)
 
     # ── Max Iterations ── (config.yaml is authoritative; never surface a stale legacy .env value)
     current_max = str(cfg_get(config, "agent", "max_turns", default=90))
-    print_info("Maximum tool-calling iterations per conversation.")
-    print_info("Higher = more complex tasks, but costs more tokens.")
-    print_info(f"Press Enter to keep {current_max}. Use 90 for most tasks or 150+ for open exploration.")
+    _info("Maximum tool-calling iterations per conversation.",
+          "Higher = more complex tasks, but costs more tokens.",
+          f"Press Enter to keep {current_max}. Use 90 for most tasks or 150+ for open exploration.")
 
     try:
         max_iter = int(prompt("Max iterations", current_max))
@@ -561,8 +557,8 @@ def setup_agent_settings(config: dict):
 
     # ── Context Compression ──
     print_header("Context Compression")
-    print_info("Automatically summarizes old messages when context gets too long.")
-    print_info("Higher threshold = compress later (use more context). Lower = compress sooner.")
+    _info("Automatically summarizes old messages when context gets too long.",
+          "Higher threshold = compress later (use more context). Lower = compress sooner.")
 
     config.setdefault("compression", {})["enabled"] = True
 
@@ -598,15 +594,15 @@ def setup_agent_settings(config: dict):
     if mode in ("both", "daily"):
         _prompt_int_setting(reset_cfg, "at_hour", "  Daily reset hour (0-23, local time)", current_hour, lambda v: 0 <= v <= 23)
     idle_now, hour_now = reset_cfg.get("idle_minutes", 1440), reset_cfg.get("at_hour", 4)
-    if mode == "both":
-        print_success(f"Sessions reset after {idle_now} min idle or daily at {hour_now}:00")
-    elif mode == "idle":
-        print_success(f"Sessions reset after {idle_now} min of inactivity")
-    elif mode == "daily":
-        print_success(f"Sessions reset daily at {hour_now}:00")
-    elif mode == "none":
+    if mode == "none":
         print_info("Sessions will never auto-reset. Context is managed only by compression.")
         print_warning("Long conversations will grow in cost. Use /reset manually when needed.")
+    elif mode is not None:
+        print_success({
+            "both": f"Sessions reset after {idle_now} min idle or daily at {hour_now}:00",
+            "idle": f"Sessions reset after {idle_now} min of inactivity",
+            "daily": f"Sessions reset daily at {hour_now}:00",
+        }[mode])
 
     save_config(config)
 
@@ -641,8 +637,8 @@ _SEND_CONSENT_EXPLAINER = (
 def setup_telemetry(config: dict):
     """Configure the local shared-metrics subscriber and optional sending."""
     print_header("Shared Metrics")
-    print_info("Shared metrics contain only bounded counters and histograms.")
-    print_info("Collection is local. Sending them to Nous is a separate opt-in.")
+    _info("Shared metrics contain only bounded counters and histograms.",
+          "Collection is local. Sending them to Nous is a separate opt-in.")
 
     telemetry = config.get("telemetry")
     if not isinstance(telemetry, dict):
@@ -742,8 +738,7 @@ def run_setup_wizard(args):
         try:
             return _run_setup_wizard_impl(args)
         except _SetupCancelled:
-            print()
-            print_info("Setup cancelled. Remaining sections were not changed.")
+            _info(None, "Setup cancelled. Remaining sections were not changed.")
             return None
 
 
@@ -779,12 +774,9 @@ def _run_setup_section(config: dict, section: str) -> None:
 def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_ran: bool) -> None:
     """Full Setup — run all sections, honoring post-migration skips."""
     print_header("Configuration Location")
-    print_info(f"Config file:  {get_config_path()}")
-    print_info(f"Secrets file: {get_env_path()}")
-    print_info(f"Data folder:  {hermes_home}")
-    print_info(f"Install dir:  {PROJECT_ROOT}")
-    print()
-    print_info("You can edit these files directly or use 'hermes config edit'")
+    _info(f"Config file:  {get_config_path()}", f"Secrets file: {get_env_path()}",
+          f"Data folder:  {hermes_home}", f"Install dir:  {PROJECT_ROOT}", None,
+          "You can edit these files directly or use 'hermes config edit'")
 
     if migration_ran:
         _info(None, "Settings were imported from OpenClaw.",
@@ -831,6 +823,16 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
     )
 
 
+# First-time mode picker: (menu label, runner) — a None runner falls through to Full Setup.
+_FIRST_TIME_MODES = (
+    ("Quick Setup (Nous Portal) — free OAuth login, no API keys, model + tools (recommended)",
+     lambda config, home, is_existing: _run_first_time_quick_setup(config, home, is_existing)),
+    ("Full setup — configure every provider, tool & option yourself (bring your own keys)", None),
+    ("Blank Slate — everything off except the bare minimum; opt in to each capability",
+     lambda config, home, is_existing: _run_blank_slate_setup(config, home, is_existing)),
+)
+
+
 def _run_setup_wizard_impl(args):
     """Run the interactive setup wizard: full/quick (auto-detected), ``--portal``, or one
     ``hermes setup <section>`` from SETUP_SECTIONS."""
@@ -840,43 +842,35 @@ def _run_setup_wizard_impl(args):
         return
     ensure_hermes_home()
 
-    if bool(getattr(args, "reset", False)):
+    if getattr(args, "reset", False):
         save_config(copy.deepcopy(DEFAULT_CONFIG))
         print_success("Configuration reset to defaults.")
-
     reconfigure_requested = bool(getattr(args, "reconfigure", False))
     quick_requested = bool(getattr(args, "quick", False))
 
     config = load_config()
     hermes_home = get_hermes_home()
-
     config_path = get_config_path()
     _backup_path = _backup_config_file(config_path)
 
-    # Detect non-interactive environments (headless SSH, Docker, CI/CD)
+    # Non-interactive environments (headless SSH, Docker, CI/CD)
     if getattr(args, 'non_interactive', False) or not is_interactive_stdin():
         print_noninteractive_setup_guidance("Running in a non-interactive environment (no TTY detected).")
         return
-
-    # --portal: one-shot Nous Portal setup. Skips the rest of the wizard.
-    if bool(getattr(args, "portal", False)):
+    if getattr(args, "portal", False):  # one-shot Nous Portal setup; skips the rest
         _run_portal_one_shot(config)
         return
-
     section = getattr(args, "section", None)
     if section:
         _run_setup_section(config, section)
         return
 
-    # Check if this is an existing installation with a provider configured
+    # Existing installation == a provider is configured
     from hermes_cli.auth import get_active_provider
 
-    is_existing = (
-        bool(get_env_value("OPENROUTER_API_KEY"))
-        or bool(get_env_value("OPENAI_BASE_URL"))
-        or get_active_provider() is not None
+    is_existing = bool(
+        get_env_value("OPENROUTER_API_KEY") or get_env_value("OPENAI_BASE_URL") or get_active_provider() is not None
     )
-
     _print_banner(
         "│             ⚕ Hermes Agent Setup Wizard                │",
         "├─────────────────────────────────────────────────────────┤",
@@ -885,14 +879,13 @@ def _run_setup_wizard_impl(args):
     )
 
     migration_ran = False
-
     if is_existing:
-        # Existing install — the full reconfigure wizard is the default (Enter keeps each current
-        # value); `--quick` narrows it to missing items (partial OpenClaw import, cleared key).
+        # Full reconfigure wizard is the default (Enter keeps each current value); `--quick`
+        # narrows it to missing items (partial OpenClaw import, cleared key). --reconfigure is a
+        # backwards-compatible no-op here.
         if quick_requested:
             _run_setup_steps([("Quick Setup", lambda: _run_quick_setup(config, hermes_home))])
             return
-
         print()
         print_header("Reconfigure")
         print_success("You already have Hermes configured.")
@@ -900,38 +893,18 @@ def _run_setup_wizard_impl(args):
               "Press Enter to keep it, or type a new value to change it.", "",
               "Tip: jump straight to a section with 'hermes setup model|terminal|",
               "     gateway|tools|agent', or fill only missing items with --quick.")
-        # --reconfigure is kept for backwards compatibility and is a no-op here.
     else:
-        # ── First-Time Setup ── (--reconfigure / --quick are meaningless here; fall through)
+        # First-time setup (--reconfigure / --quick are meaningless here; fall through)
         print()
         if reconfigure_requested or quick_requested:
-            print_info("No existing configuration found — running first-time setup.")
-            print()
-
-        # Offer OpenClaw migration before configuration begins
-        migration_ran = _offer_openclaw_migration(hermes_home)
+            _info("No existing configuration found — running first-time setup.", None)
+        migration_ran = _offer_openclaw_migration(hermes_home)  # before configuration begins
         if migration_ran:
             config = load_config()
-
-        setup_mode = prompt_choice(
-            "How would you like to set up Hermes?",
-            [
-                "Quick Setup (Nous Portal) — free OAuth login, no API keys, model + tools (recommended)",
-                "Full setup — configure every provider, tool & option yourself (bring your own keys)",
-                "Blank Slate — everything off except the bare minimum; opt in to each capability",
-            ],
-            0,
-        )
-
-        if setup_mode == 0:
-            _run_setup_steps(
-                [("Quick Setup", lambda: _run_first_time_quick_setup(config, hermes_home, is_existing))]
-            )
-            return
-        if setup_mode == 2:
-            _run_setup_steps(
-                [("Blank Slate", lambda: _run_blank_slate_setup(config, hermes_home, is_existing))]
-            )
+        setup_mode = prompt_choice("How would you like to set up Hermes?", [label for label, _ in _FIRST_TIME_MODES], 0)
+        label, runner = _FIRST_TIME_MODES[setup_mode]
+        if runner is not None:
+            _run_setup_steps([(label, lambda: runner(config, hermes_home, is_existing))])
             return
 
     _run_full_setup(config, hermes_home, is_existing=is_existing, migration_ran=migration_ran)
@@ -939,7 +912,7 @@ def _run_setup_wizard_impl(args):
     # Save and show summary
     save_config(config)
     if _backup_path and _backup_path.exists():
-        print_info(f"Previous config backed up to: {_backup_path}")
-        print_info("If setup changed a value you customized, restore it with:")
-        print_info(f"  cp {_backup_path} {config_path}")
+        _info(f"Previous config backed up to: {_backup_path}",
+              "If setup changed a value you customized, restore it with:",
+              f"  cp {_backup_path} {config_path}")
     _print_setup_summary(config, hermes_home)

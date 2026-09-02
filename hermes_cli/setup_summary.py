@@ -256,7 +256,7 @@ def _print_setup_summary(config: dict, hermes_home):
     """Print the setup completion summary."""
     from hermes_cli.setup import (
         Colors, color, get_config_path, get_env_path, get_nous_subscription_features, _info, print_header,
-        print_info, print_warning,
+        print_warning,
     )
     # Provider readiness — the one thing setup absolutely must produce. Previously a user
     # could cancel the API-key prompt mid-wizard (Enter → "Cancelled."), watch the wizard
@@ -289,8 +289,7 @@ def _print_setup_summary(config: dict, hermes_home):
             tool_status.append(row)
 
     available_count = sum(1 for _, avail, _ in tool_status if avail)
-    print_info(f"{available_count}/{len(tool_status)} tool categories available:")
-    print()
+    _info(f"{available_count}/{len(tool_status)} tool categories available:", None)
     for name, available, missing_var in tool_status:
         if available:
             print(f"   {color('✓', Colors.GREEN)} {name}")

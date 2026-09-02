@@ -238,10 +238,10 @@ def _setup_backend_daytona(config: dict) -> None:
 
 
 def _setup_backend_vercel(config: dict) -> None:
-    from hermes_cli.setup import print_info, print_success, print_warning
+    from hermes_cli.setup import _info, print_info, print_success, print_warning
     print_success("Terminal backend: Vercel Sandbox")
-    print_info("Cloud microVM sandboxes with snapshot-backed filesystem persistence.")
-    print_info("Requires the optional SDK: pip install 'hermes-agent[vercel]'")
+    _info("Cloud microVM sandboxes with snapshot-backed filesystem persistence.",
+          "Requires the optional SDK: pip install 'hermes-agent[vercel]'")
     try:
         __import__("vercel")
     except ImportError:
@@ -338,14 +338,14 @@ _TERMINAL_BACKEND_SETUP = {
 def setup_terminal_backend(config: dict):
     """Configure the terminal execution backend."""
     from hermes_cli.setup import (
-        _DOCS_BASE, cfg_get, print_header, print_info, print_success, prompt_choice, save_config, save_env_value,
+        _DOCS_BASE, cfg_get, _info, print_header, print_info, print_success, prompt_choice, save_config,
+        save_env_value,
     )
     import platform as _platform
     print_header("Terminal Backend")
-    print_info("Choose where Hermes runs shell commands and code.")
-    print_info("This affects tool execution, file access, and isolation.")
-    print_info(f"   Guide: {_DOCS_BASE}/user-guide/configuration#terminal-backend-configuration")
-    print()
+    _info("Choose where Hermes runs shell commands and code.",
+          "This affects tool execution, file access, and isolation.",
+          f"   Guide: {_DOCS_BASE}/user-guide/configuration#terminal-backend-configuration", None)
 
     current_backend = cfg_get(config, "terminal", "backend", default="local")
     backends = list(_BUILTIN_TERMINAL_BACKENDS)
