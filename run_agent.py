@@ -176,6 +176,7 @@ from agent.client_lifecycle import (  # noqa: F401  # _routermint_headers/_qwen_
 from agent.stream_delivery import StreamDeliveryMixin
 from agent.status_output import StatusOutputMixin
 from agent.api_request_hooks import ApiRequestHooksMixin
+from agent.api_error_summary import ApiErrorSummaryMixin
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static
 from agent.redact import redact_sensitive_text
 from agent.session_activity import ActivityProvenance
@@ -353,7 +354,13 @@ class _StreamErrorEvent(Exception):
         }
 
 
-class AIAgent(ClientLifecycleMixin, StreamDeliveryMixin, StatusOutputMixin, ApiRequestHooksMixin):
+class AIAgent(
+    ClientLifecycleMixin,
+    StreamDeliveryMixin,
+    StatusOutputMixin,
+    ApiRequestHooksMixin,
+    ApiErrorSummaryMixin,
+):
     """AI Agent with tool calling capabilities."""
 
     _TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER = (
@@ -1829,231 +1836,6 @@ class AIAgent(ClientLifecycleMixin, StreamDeliveryMixin, StatusOutputMixin, ApiR
 
         trajectory = self._convert_to_trajectory_format(messages, user_query, completed)
         _save_trajectory_to_file(trajectory, self.model, completed)
-
-    @staticmethod
-    def _is_entitlement_failure(
-        error_context: Optional[Dict[str, Any]],
-        status_code: Optional[int],
-    ) -> bool:
-        """Detect subscription/entitlement 401/403s that masquerade as auth failures.
-
-        Refreshing a token cannot fix an unsubscribed account, so callers surface the error instead of looping
-        the
-        pool. xAI returns the same permission-denied text for BOTH cases; a ``[WKE=unauthenticated:...]``
-        suffix (or
-        "access token could not be validated") means stale token → return False so the refresh path runs.
-        """
-        if status_code not in {401, 403, None}:
-            return False
-        if not isinstance(error_context, dict):
-            return False
-        # Single lowercase haystack over every field shape (message/reason and raw code/error).
-        message = str(error_context.get("message") or "").lower()
-        reason = str(error_context.get("reason") or "").lower()
-        code = str(error_context.get("code") or "").lower()
-        err = str(error_context.get("error") or "").lower()
-        haystack = f"{message} {reason} {code} {err}"
-        if not haystack.strip():
-            return False
-        # xAI's disambiguator for stale-token vs unsubscribed: same permission-denied text, only one carries
-        # this suffix. Bail out so a stale OAuth token takes the credential-refresh path (#29344).
-        if "[wke=unauthenticated:" in haystack:
-            return False
-        if "oauth2 access token could not be validated" in haystack:
-            return False
-        if "do not have an active grok subscription" in haystack:
-            return True
-        if "out of available resources" in haystack and "grok" in haystack:
-            return True
-        if "does not have permission" in haystack and "grok" in haystack:
-            return True
-        return False
-
-    @staticmethod
-    def _decorate_xai_entitlement_error(detail: str) -> str:
-        """Append a neutral hint when xAI's OAuth surface returns the permission-denied 403.
-
-        xAI's ``/v1/responses`` uses one body for several causes (no subscription, tier lacks the model, quota
-        exhausted). The least obvious: X Premium+ does NOT include API access — only SuperGrok does. Lead with
-        that, keep the raw text, point at https://grok.com/?_s=usage. Matched once per detail string.
-        """
-        if not detail:
-            return detail
-        lower = detail.lower()
-        is_entitlement = (
-            "do not have an active grok subscription" in lower
-            or ("out of available resources" in lower and "grok" in lower)
-            or ("does not have permission" in lower and "grok" in lower)
-        )
-        if not is_entitlement:
-            return detail
-        hint = (
-            " — xAI rejected this OAuth account. NOTE: X Premium+ does NOT "
-            "include xAI API access — only standalone SuperGrok subscribers "
-            "can use this provider. Other possible causes: no Grok "
-            "subscription, your tier doesn't include this model, or your "
-            "quota is exhausted. Check https://grok.com/?_s=usage to see "
-            "which, or run `/model` to switch providers."
-        )
-        # Idempotency: detect prior decoration by a substring unique to the
-        # hint (not present in xAI's own body text).
-        if "X Premium+ does NOT include" in detail:
-            return detail
-        return f"{detail}{hint}"
-
-    @staticmethod
-    def _coerce_api_error_detail(value: Any) -> str:
-        """Return a display-safe string for structured provider error fields."""
-        if isinstance(value, str):
-            return value
-        if isinstance(value, dict):
-            for key in ("message", "detail", "error", "code", "type"):
-                nested = value.get(key)
-                if isinstance(nested, str) and nested.strip():
-                    return nested
-            for key in ("message", "detail", "error", "code", "type"):
-                if key in value:
-                    nested_detail = AIAgent._coerce_api_error_detail(value[key])
-                    if nested_detail:
-                        return nested_detail
-            try:
-                return json.dumps(value, ensure_ascii=False, sort_keys=True)
-            except TypeError:
-                return str(value)
-        if isinstance(value, (list, tuple)):
-            parts = [
-                AIAgent._coerce_api_error_detail(item)
-                for item in value
-            ]
-            return "; ".join(part for part in parts if part)
-        if value is None:
-            return ""
-        return str(value)
-
-    @staticmethod
-    def _summarize_api_error(error: Exception) -> str:
-        """Extract a human-readable one-liner from an API error.
-
-        Cloudflare HTML pages → ``<title>``; network/DNS failures (even SDK-wrapped) → offline hint; else
-        truncated str(error).
-        """
-        raw = str(error)
-
-        # Offline DNS failures are wrapped in a generic "Connection error" by SDKs — inspect the chain.
-        network_resolution_markers = (
-            "temporary failure in name resolution",
-            "name or service not known",
-            "nodename nor servname provided, or not known",
-            "getaddrinfo failed",
-            "no address associated with hostname",
-            "network is unreachable",
-        )
-        current: Optional[BaseException] = error
-        seen: set[int] = set()
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-            if any(
-                marker in str(current).lower()
-                for marker in network_resolution_markers
-            ):
-                return (
-                    "Hermes can't reach the model provider. You may be offline. "
-                    "Check your internet connection and try again."
-                )
-            current = current.__cause__ or current.__context__
-
-        if (
-            isinstance(error, ValueError)
-            and "expected ident at line" in raw.lower()
-        ):
-            return f"Malformed provider streaming response: {raw[:300]}"
-
-        # Cloudflare / proxy HTML pages: grab the <title> for a clean summary
-        if "<!DOCTYPE" in raw or "<html" in raw:
-            m = re.search(r"<title[^>]*>([^<]+)</title>", raw, re.IGNORECASE)
-            title = m.group(1).strip() if m else "HTML error page (title not found)"
-            # Also grab Cloudflare Ray ID if present
-            ray = re.search(r"Cloudflare Ray ID:\s*<strong[^>]*>([^<]+)</strong>", raw)
-            ray_id = ray.group(1).strip() if ray else None
-            status_code = getattr(error, "status_code", None)
-            parts = []
-            if status_code:
-                parts.append(f"HTTP {status_code}")
-            parts.append(title)
-            if ray_id:
-                parts.append(f"Ray {ray_id}")
-            return " — ".join(parts)
-
-        # GeminiAPIError already composes a clean one-liner with guidance; don't re-extract the raw body.
-        if type(error).__name__ == "GeminiAPIError":
-            return redact_sensitive_text(raw[:1000])
-
-        # JSON body errors from OpenAI/Anthropic SDKs
-        body = getattr(error, "body", None)
-        if isinstance(body, dict):
-            msg = body.get("error", {}).get("message") if isinstance(body.get("error"), dict) else body.get("message")
-            if msg:
-                status_code = getattr(error, "status_code", None)
-                prefix = f"HTTP {status_code}: " if status_code else ""
-                msg = AIAgent._coerce_api_error_detail(msg)
-                return AIAgent._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
-
-        # SDK may leave body empty while httpx has the payload (#36109). Redact: the body is
-        # attacker-influenced and may echo Authorization / x-api-key / request JSON.
-        response = getattr(error, "response", None)
-        if response is not None:
-            try:
-                snippet = (getattr(response, "text", None) or "").strip()
-            except Exception:
-                snippet = ""
-            if snippet:
-                status_code = getattr(error, "status_code", None)
-                prefix = f"HTTP {status_code}: " if status_code else ""
-                try:
-                    payload = json.loads(snippet)
-                except (json.JSONDecodeError, TypeError):
-                    payload = None
-                if isinstance(payload, dict):
-                    err = payload.get("error")
-                    if isinstance(err, dict) and err.get("message"):
-                        return redact_sensitive_text(f"{prefix}{str(err['message'])[:300]}")
-                    if payload.get("message"):
-                        return redact_sensitive_text(f"{prefix}{str(payload['message'])[:300]}")
-                return redact_sensitive_text(f"{prefix}{snippet[:300]}")
-
-        # Fallback: truncate the raw string but give more room than 200 chars
-        status_code = getattr(error, "status_code", None)
-        prefix = f"HTTP {status_code}: " if status_code else ""
-        return AIAgent._decorate_xai_entitlement_error(f"{prefix}{raw[:500]}")
-
-    def _mask_api_key_for_logs(self, key: Any) -> Optional[str]:
-        # Azure Foundry Entra ID bearer providers are callables — never
-        # invoke them in log paths; identify the auth surface instead.
-        if callable(key) and not isinstance(key, str):
-            return "<entra-id-bearer>"
-        if not key:
-            return None
-        if len(key) <= 12:
-            return "***"
-        return f"{key[:8]}...{key[-4:]}"
-
-    def _clean_error_message(self, error_msg: str) -> str:
-        """Clean up error messages for user display, removing HTML content and truncating."""
-        if not error_msg:
-            return "Unknown error"
-
-        # Remove HTML content (common with CloudFlare and gateway error pages)
-        if error_msg.strip().startswith('<!DOCTYPE html') or '<html' in error_msg:
-            return "Service temporarily unavailable (HTML error page returned)"
-
-        # Remove newlines and excessive whitespace
-        cleaned = ' '.join(error_msg.split())
-
-        # Truncate if too long
-        if len(cleaned) > 150:
-            cleaned = cleaned[:150] + "..."
-
-        return cleaned
 
     _extract_api_error_context = _forward_static("agent.agent_runtime_helpers", "extract_api_error_context")
 
