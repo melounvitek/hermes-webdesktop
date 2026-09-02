@@ -116,6 +116,7 @@ def get_bundled_plugins_dir() -> Path:
         return Path(env_override)
     return Path(__file__).resolve().parent.parent / "plugins"
 
+
 class PluginToolOverrideError(PermissionError):
     """Plugin tried to override a built-in tool without ``plugins.entries.<id>.allow_tool_override``."""
 
@@ -1312,6 +1313,7 @@ for _row in _SCOPED_PROVIDER_REGISTRARS:
     setattr(PluginContext, _row[0], _make_scoped_provider_registrar(*_row))
 del _row
 
+
 def _resolve_hook_callback_timeout() -> float:
     """Effective hook-callback timeout from ``plugins.hook_callback_timeout`` (default 30s; ``<= 0``
     disables the threaded path; clamped to ``_MAX_HOOK_CALLBACK_TIMEOUT_SECS``)."""
@@ -1406,7 +1408,6 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._predeclared_tools: Dict[str, List[str]] = {}
         # Native platform handler factories keyed by lowercase platform name.
         self._platform_handler_factories: Dict[str, List[tuple]] = {}
-
 
     @property
     def has_gateway_message_injector(self) -> bool:
@@ -1668,7 +1669,6 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
     def _scan_entry_points(self) -> List[PluginManifest]:
         """Read installed plugin entry points (see :func:`discover_entrypoint_manifests`)."""
         return discover_entrypoint_manifests()
-
 
     def get_slack_action_handlers(self) -> List[tuple]:
         """``(action_id, callback, plugin_name)`` tuples for the Slack adapter to wire at connect."""
