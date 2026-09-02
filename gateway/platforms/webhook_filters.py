@@ -34,7 +34,6 @@ def _resolve_profile_path(path_value: Any) -> Optional[Path]:
     if not raw:
         return None
     from hermes_constants import get_hermes_home
-
     hermes_home = get_hermes_home()
     if raw == "~/.hermes":
         return hermes_home
@@ -51,7 +50,6 @@ def _resolve_script_path(script_value: Any) -> tuple[Optional[Path], Optional[st
     if not isinstance(script_value, str) or not script_value.strip():
         return None, "script path is empty"
     from hermes_constants import get_hermes_home
-
     scripts_root = (get_hermes_home() / "scripts").resolve()
     raw_text = os.path.expandvars(script_value.strip())
     if raw_text == "~/.hermes" or raw_text.startswith("~/.hermes/"):
@@ -94,32 +92,21 @@ def _load_filter_file_values(path_value: Any) -> list[Any]:
 class WebhookRouteProcessor:
     """Evaluate declarative filters and optional script transforms."""
 
-    def __init__(
-        self,
-        *,
-        script_timeout_seconds: int = DEFAULT_SCRIPT_TIMEOUT_SECONDS,
-    ) -> None:
+    def __init__(self, *, script_timeout_seconds: int = DEFAULT_SCRIPT_TIMEOUT_SECONDS) -> None:
         self.script_timeout_seconds = max(1, int(script_timeout_seconds))
 
-    def resolve_filter_field(
-        self,
-        field: Any,
-        payload: dict,
-        event_type: str,
-        headers: Any,
-    ) -> Any:
+    def resolve_filter_field(self, field: Any, payload: dict, event_type: str, headers: Any) -> Any:
         """Resolve a dotted filter field against payload/event/headers context."""
         if not isinstance(field, str) or not field.strip():
             return _MISSING
         parts = [part for part in field.strip().split(".") if part]
         if not parts:
             return _MISSING
-        header_dict = dict(headers or {})
         context = {
             "payload": payload.get("payload", payload),
             "event": event_type,
             "event_type": event_type,
-            "headers": header_dict,
+            "headers": dict(headers or {}),
         }
         if parts[0] in context:
             value: Any = context[parts[0]]
@@ -138,37 +125,24 @@ class WebhookRouteProcessor:
                 return _MISSING
         return value
 
-    def filter_matches(
-        self,
-        spec: Any,
-        payload: dict,
-        event_type: str,
-        headers: Any,
-    ) -> bool:
+    def filter_matches(self, spec: Any, payload: dict, event_type: str, headers: Any) -> bool:
         """Evaluate one declarative webhook filter spec."""
         if not isinstance(spec, dict):
             logger.warning("[webhook] Ignoring invalid filter spec: %r", spec)
             return False
 
+        def _sub(item) -> bool:
+            return self.filter_matches(item, payload, event_type, headers)
+
         if "all" in spec:
             items = spec.get("all")
-            return isinstance(items, list) and all(
-                self.filter_matches(item, payload, event_type, headers)
-                for item in items
-            )
+            return isinstance(items, list) and all(_sub(item) for item in items)
         if "any" in spec:
             items = spec.get("any")
-            return isinstance(items, list) and any(
-                self.filter_matches(item, payload, event_type, headers)
-                for item in items
-            )
+            return isinstance(items, list) and any(_sub(item) for item in items)
         if "not" in spec:
-            return not self.filter_matches(spec.get("not"), payload, event_type, headers)
-
-        value = self.resolve_filter_field(
-            spec.get("field"), payload, event_type, headers
-        )
-
+            return not _sub(spec.get("not"))
+        value = self.resolve_filter_field(spec.get("field"), payload, event_type, headers)
         if "exists" in spec:
             exists = value is not _MISSING
             return exists is bool(spec.get("exists"))
@@ -194,24 +168,14 @@ class WebhookRouteProcessor:
             if value is _MISSING:
                 return False
             try:
-                return (
-                    re.search(str(spec.get("regex")), _stringify_filter_value(value))
-                    is not None
-                )
+                return re.search(str(spec.get("regex")), _stringify_filter_value(value)) is not None
             except re.error as exc:
                 logger.warning("[webhook] Invalid webhook filter regex: %s", exc)
                 return False
-
         logger.warning("[webhook] Filter spec has no supported operator: %r", spec)
         return False
 
-    def route_filters_match(
-        self,
-        route_config: dict,
-        payload: dict,
-        event_type: str,
-        headers: Any,
-    ) -> bool:
+    def route_filters_match(self, route_config: dict, payload: dict, event_type: str, headers: Any) -> bool:
         filters = route_config.get("filters") or []
         if not filters:
             return True
@@ -220,10 +184,7 @@ class WebhookRouteProcessor:
         if not isinstance(filters, list):
             logger.warning("[webhook] filters must be a list or object")
             return False
-        return all(
-            self.filter_matches(spec, payload, event_type, headers)
-            for spec in filters
-        )
+        return all(self.filter_matches(spec, payload, event_type, headers) for spec in filters)
 
     def run_route_script(self, script_value: Any, payload: dict) -> tuple[bool, Optional[dict]]:
         """Run a route script and return (should_continue, transformed_payload)."""
@@ -231,22 +192,17 @@ class WebhookRouteProcessor:
         if error or path is None:
             logger.warning("[webhook] script ignored webhook: %s", error)
             return False, None
-
         suffix = path.suffix.lower()
         if suffix in {".sh", ".bash"}:
-            bash = shutil.which("bash") or (
-                "/bin/bash" if os.path.isfile("/bin/bash") else None
-            )
+            bash = shutil.which("bash") or ("/bin/bash" if os.path.isfile("/bin/bash") else None)
             if bash is None:
                 logger.warning("[webhook] script ignored webhook: bash not found")
                 return False, None
             argv = [bash, str(path)]
         else:
             argv = [sys.executable, str(path)]
-
         try:
             from tools.environments.local import build_subprocess_env
-
             popen_kwargs = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
             result = subprocess.run(
                 argv,
@@ -264,12 +220,10 @@ class WebhookRouteProcessor:
         except Exception as exc:
             logger.warning("[webhook] script execution failed: %s", exc)
             return False, None
-
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
         try:
             from agent.redact import redact_sensitive_text
-
             stdout = redact_sensitive_text(stdout)
             stderr = redact_sensitive_text(stderr)
         except Exception as exc:
@@ -279,14 +233,11 @@ class WebhookRouteProcessor:
         if result.returncode != 0:
             logger.info(
                 "[webhook] script ignored webhook path=%s code=%s stderr=%s",
-                path.name,
-                result.returncode,
-                stderr[:200],
+                path.name, result.returncode, stderr[:200],
             )
             return False, None
         if not stdout or stdout == "[SILENT]":
             return False, None
-
         try:
             transformed = json.loads(stdout)
         except json.JSONDecodeError:
@@ -294,9 +245,6 @@ class WebhookRouteProcessor:
         if not isinstance(transformed, dict):
             logger.warning("[webhook] script stdout must be a JSON object or text")
             return False, None
-        if (
-            transformed.get("[SILENT]") is True
-            or transformed.get("__hermes_ignore__") is True
-        ):
+        if transformed.get("[SILENT]") is True or transformed.get("__hermes_ignore__") is True:
             return False, None
         return True, transformed

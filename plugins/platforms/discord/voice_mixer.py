@@ -95,14 +95,8 @@ class MixerChild:
     )
 
     def __init__(
-        self,
-        name: str,
-        pcm: bytes,
-        *,
-        loop: bool = False,
-        gain: float = 1.0,
-        is_speech: bool = False,
-        fade_in_ms: int = 0,
+        self, name: str, pcm: bytes, *, loop: bool = False, gain: float = 1.0,
+        is_speech: bool = False, fade_in_ms: int = 0,
     ):
         # Pad to a whole number of frames so looping is seamless and the final
         # partial frame doesn't click.
@@ -134,20 +128,16 @@ class MixerChild:
             else:
                 self._finished = True
                 return None
-
         np = _require_numpy()
         chunk = self._pcm[self._pos:self._pos + FRAME_SIZE]
         self._pos += FRAME_SIZE
         if len(chunk) < FRAME_SIZE:
             chunk = chunk + b"\x00" * (FRAME_SIZE - len(chunk))
-
         samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
-
         gain = self.gain
         if self.fade_frames and self._fade_done < self.fade_frames:
             self._fade_done += 1
             gain *= self._fade_done / self.fade_frames
-
         if gain != 1.0:
             samples = samples * gain
         return samples
@@ -167,11 +157,7 @@ class VoiceMixer(discord.AudioSource):
         return False
 
     def __init__(
-        self,
-        *,
-        ambient_gain: float = 0.18,
-        duck_gain: float = 0.06,
-        speech_gain: float = 1.0,
+        self, *, ambient_gain: float = 0.18, duck_gain: float = 0.06, speech_gain: float = 1.0,
         duck_release_ms: int = 400,
     ):
         self._lock = threading.Lock()
@@ -202,8 +188,7 @@ class VoiceMixer(discord.AudioSource):
                 self._ambient = None
                 return
             self._ambient = MixerChild(
-                "ambient", pcm, loop=True,
-                gain=self._effective_ambient_gain(), fade_in_ms=200,
+                "ambient", pcm, loop=True, gain=self._effective_ambient_gain(), fade_in_ms=200,
             )
 
     def _effective_ambient_gain(self) -> float:
@@ -220,8 +205,7 @@ class VoiceMixer(discord.AudioSource):
             return
         with self._lock:
             child = MixerChild(
-                "speech", pcm, loop=False,
-                gain=self._speech_gain if gain is None else float(gain),
+                "speech", pcm, loop=False, gain=self._speech_gain if gain is None else float(gain),
                 is_speech=True, fade_in_ms=fade_in_ms,
             )
             self._speech.append(child)
@@ -259,10 +243,8 @@ class VoiceMixer(discord.AudioSource):
         with self._lock:
             if self._closed:
                 return SILENCE_FRAME
-
             np = _require_numpy()
             acc: "Optional[np.ndarray]" = None
-
             # Speech children (drop exhausted ones; release duck when last ends)
             if self._speech:
                 still_live: List[MixerChild] = []
@@ -275,7 +257,6 @@ class VoiceMixer(discord.AudioSource):
                 self._speech = still_live
                 if not self._speech and self._speech_active:
                     self._begin_duck_release_locked()
-
             # Ambient bed — ramp gain back up during duck-release.
             if self._ambient is not None:
                 if self._duck_release_left > 0 and not self._speech_active:
@@ -290,10 +271,8 @@ class VoiceMixer(discord.AudioSource):
                 amb = self._ambient.read_frame()
                 if amb is not None:
                     acc = amb if acc is None else acc + amb
-
             if acc is None:
                 return SILENCE_FRAME
-
             np.clip(acc, -32768, 32767, out=acc)
             return acc.astype(np.int16).tobytes()
 
@@ -315,16 +294,11 @@ def decode_to_pcm(path: str, *, timeout: float = 30.0) -> Optional[bytes]:
     requirement of the voice path (see ``VoiceReceiver.pcm_to_wav``).
     """
     import subprocess
-
     try:
         proc = subprocess.run(
             [
-                resolve_ffmpeg_executable(), "-y", "-loglevel", "error",
-                "-i", path,
-                "-f", "s16le",
-                "-ar", str(SAMPLE_RATE),
-                "-ac", str(CHANNELS),
-                "pipe:1",
+                resolve_ffmpeg_executable(), "-y", "-loglevel", "error", "-i", path, "-f", "s16le",
+                "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS), "pipe:1",
             ],
             capture_output=True,
             timeout=timeout,
@@ -353,35 +327,26 @@ def synth_ambient_pcm(seconds: float = 4.0) -> bytes:
     np = _require_numpy()
     n = int(SAMPLE_RATE * seconds)
     t = np.arange(n, dtype=np.float64) / SAMPLE_RATE
-
     # Choose base frequencies that complete whole cycles over the loop so the
     # wrap point is click-free.
     def _whole_cycle_freq(target: float) -> float:
         cycles = max(1, round(target * seconds))
         return cycles / seconds
-
     f1 = _whole_cycle_freq(110.0)
     f2 = _whole_cycle_freq(110.5)
     trem = _whole_cycle_freq(0.5)   # ~0.5 Hz tremolo
-
-    pad = (
-        0.55 * np.sin(2 * np.pi * f1 * t)
-        + 0.45 * np.sin(2 * np.pi * f2 * t)
-    )
+    pad = (0.55 * np.sin(2 * np.pi * f1 * t) + 0.45 * np.sin(2 * np.pi * f2 * t))
     tremolo = 0.6 + 0.4 * (0.5 * (1 + np.sin(2 * np.pi * trem * t)))
     signal = pad * tremolo
-
     # Smooth filtered noise for air, kept very low.
     rng = np.random.default_rng(7)
     noise = rng.standard_normal(n)
     kernel = np.ones(64) / 64.0
     noise = np.convolve(noise, kernel, mode="same")
     signal = signal + 0.08 * noise
-
     # Normalise to a modest peak (mixer applies the real ambient gain on top).
     peak = float(np.max(np.abs(signal))) or 1.0
     signal = (signal / peak) * 0.5
-
     mono16 = (signal * 32767.0).astype(np.int16)
     stereo16 = np.repeat(mono16[:, None], CHANNELS, axis=1).reshape(-1)
     return stereo16.tobytes()

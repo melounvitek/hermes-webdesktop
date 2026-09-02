@@ -1,16 +1,12 @@
 """
 Signal attachment rate-limit scheduler.
 
-Process-wide token-bucket simulator that mirrors the per-account
-attachment rate limit signal-cli/Signal-Server enforce. Producers
-(``SignalAdapter.send_multiple_images`` and the ``send_message`` tool's
-Signal path) call ``acquire(n)`` before an attachment send; on a 429
-they call ``feedback(retry_after, n)`` so the model recalibrates from
-the server's authoritative hint.
-
-The scheduler serializes concurrent calls through an ``asyncio.Lock``,
-giving FIFO fairness across agent sessions sharing one signal-cli
-daemon.
+Process-wide token-bucket simulator mirroring the per-account attachment rate
+limit signal-cli/Signal-Server enforce. Producers (``SignalAdapter.send_multiple_images``
+and the ``send_message`` tool's Signal path) call ``acquire(n)`` before an
+attachment send; on a 429 they call ``feedback(retry_after, n)`` so the model
+recalibrates from the server's authoritative hint. Concurrent calls serialize
+through an ``asyncio.Lock`` — FIFO fairness across sessions sharing one daemon.
 """
 
 from __future__ import annotations
@@ -25,11 +21,6 @@ from agent.retry_utils import parse_retry_after_seconds
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 SIGNAL_MAX_ATTACHMENTS_PER_MSG = 32  # per-message attachment cap (source: Signal-{Android,Desktop} source code)
 SIGNAL_RATE_LIMIT_BUCKET_CAPACITY = 50  # server-side token-bucket capacity for attachments rate limiting
 SIGNAL_RATE_LIMIT_DEFAULT_RETRY_AFTER = 4  # fallback token refill interval for signal-cli < v0.14.3
@@ -38,18 +29,11 @@ SIGNAL_BATCH_PACING_NOTICE_THRESHOLD = 10.0  # if estimated waiting time > 10s, 
 SIGNAL_RPC_ERROR_RATELIMIT = -5  # signal-cli (v0.14.3+) JSON-RPC error code for RateLimitException
 
 
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
-
 class SignalRateLimitError(Exception):
-    """
-    Raised by ``SignalAdapter._rpc`` for rate-limit responses when the
-    caller has opted in via ``raise_on_rate_limit=True``.
+    """Raised by ``SignalAdapter._rpc`` for rate-limit responses when ``raise_on_rate_limit=True``.
 
-    Carries the server-supplied per-token Retry-After (in seconds) on
-    signal-cli ≥ v0.14.3
-    ``retry_after`` is None when the version doesn't expose it.
+    ``retry_after`` is the server-supplied per-token Retry-After in seconds
+    (signal-cli ≥ v0.14.3), or None when the version doesn't expose it.
     """
 
     def __init__(self, message: str, retry_after: Optional[float] = None) -> None:
@@ -60,40 +44,27 @@ class SignalRateLimitError(Exception):
 class SignalSchedulerError(Exception):
     pass
 
-# ---------------------------------------------------------------------------
-# Detection helpers — used to fish a 429 out of signal-cli's various error
-# shapes (typed code, [429] substring, libsignal-net RetryLaterException
-# leaked through AttachmentInvalidException).
-# ---------------------------------------------------------------------------
 
-# "Retry after 4 seconds" / "retry after 4 second" — libsignal-net's
-# RetryLaterException string form, surfaced when 429s hit during
-# attachment upload (signal-cli wraps these as AttachmentInvalidException
-# rather than RateLimitException, so the typed path doesn't fire).
+# "Retry after 4 seconds" — libsignal-net's RetryLaterException string form, surfaced
+# when 429s hit during attachment upload (signal-cli wraps these as
+# AttachmentInvalidException rather than RateLimitException, so the typed path doesn't fire).
 _RETRY_AFTER_RE = re.compile(r"Retry after (\d+(?:\.\d+)?)\s*second", re.IGNORECASE)
+
+
+def _error_message(err: Any) -> str:
+    return str(err.get("message", "")) if isinstance(err, dict) else str(err)
 
 
 def _extract_retry_after_seconds(err: Any) -> Optional[float]:
     """Pull the per-token Retry-After window from a signal-cli rate-limit error.
 
-    Tries two sources, in order:
-    1. ``error.data.response.results[*].retryAfterSeconds`` — the
-       structured field signal-cli ≥ v0.14.3 surfaces for plain
-       RateLimitException.
-    2. ``"Retry after N seconds"`` parsed out of the message — covers
-       libsignal-net's RetryLaterException that gets wrapped as
-       AttachmentInvalidException during attachment upload, where the
-       structured field stays null.
-
-    Numeric parsing delegates to the shared
-    :func:`agent.retry_utils.parse_retry_after_seconds` core.
-    Returns None when neither source yields a value.
+    Sources, in order: ``error.data.response.results[*].retryAfterSeconds`` (structured
+    field, signal-cli ≥ v0.14.3), then ``"Retry after N seconds"`` parsed from the
+    message (libsignal-net RetryLaterException wrapped as AttachmentInvalidException,
+    where the structured field stays null). None when neither yields a value.
     """
-    msg = ""
     if isinstance(err, dict):
-        data = err.get("data") or {}
-        response = data.get("response") or {}
-        results = response.get("results") or []
+        results = ((err.get("data") or {}).get("response") or {}).get("results") or []
         candidates = [
             parse_retry_after_seconds(r.get("retryAfterSeconds")) for r in results
             if isinstance(r, dict) and r.get("retryAfterSeconds")
@@ -101,33 +72,21 @@ def _extract_retry_after_seconds(err: Any) -> Optional[float]:
         candidates = [c for c in candidates if c is not None]
         if candidates:
             return max(candidates)
-        msg = str(err.get("message", ""))
-    else:
-        msg = str(err)
-    match = _RETRY_AFTER_RE.search(msg)
+    match = _RETRY_AFTER_RE.search(_error_message(err))
     return parse_retry_after_seconds(match.group(1)) if match else None
 
 
 def _is_signal_rate_limit_error(err: Any) -> bool:
     """True if a signal-cli RPC error reflects a rate-limit failure.
 
-    Matches three layers:
-    - typed ``RATELIMIT_ERROR`` code (signal-cli ≥ v0.14.3, plain
-      RateLimitException)
-    - legacy ``[429] / RateLimitException`` substrings
-    - libsignal-net's ``RetryLaterException`` / ``Retry after N seconds``
-      surfaced inside ``AttachmentInvalidException`` when the rate
-      limit is hit during attachment upload — signal-cli never re-tags
-      these as RateLimitException, so substring is the only signal.
+    Matches the typed ``RATELIMIT_ERROR`` code (signal-cli ≥ v0.14.3), the legacy
+    ``[429]`` / ``RateLimitException`` substrings, and libsignal-net's
+    ``RetryLaterException`` / ``Retry after N seconds`` leaked through
+    AttachmentInvalidException during upload (substring is the only signal there).
     """
     if isinstance(err, dict) and err.get("code") == SIGNAL_RPC_ERROR_RATELIMIT:
         return True
-
-    message = (
-        str(err.get("message", ""))
-        if isinstance(err, dict)
-        else str(err)
-    )
+    message = _error_message(err)
     msg_lower = message.lower()
     return (
         "[429]" in message
@@ -136,10 +95,6 @@ def _is_signal_rate_limit_error(err: Any) -> bool:
         or "retry after" in msg_lower
     )
 
-
-# ---------------------------------------------------------------------------
-# Misc helpers
-# ---------------------------------------------------------------------------
 
 def _format_wait(seconds: float) -> str:
     """Human-friendly wait label for user-facing pacing notices."""
@@ -152,34 +107,22 @@ def _format_wait(seconds: float) -> str:
 def _signal_send_timeout(num_attachments: int) -> float:
     """HTTP timeout for a Signal ``send`` RPC.
 
-    signal-cli uploads attachments serially during the call, so the
-    server-side time scales with batch size. Default 30s is fine for
-    text-only sends but truncates large attachment batches mid-upload —
-    we then log a phantom failure even though signal-cli completes the
-    send a few seconds later. Scale at 5s/attachment with a 60s floor.
+    signal-cli uploads attachments serially inside the call, so the default 30s
+    truncates large batches mid-upload and we log a phantom failure even though the
+    send completes seconds later. Scale at 5s/attachment with a 60s floor.
     """
     if num_attachments <= 0:
         return 30.0
     return max(60.0, 5.0 * num_attachments)
 
 
-# ---------------------------------------------------------------------------
-# Scheduler
-# ---------------------------------------------------------------------------
-
 class SignalAttachmentScheduler:
     """Process-wide token-bucket simulator for Signal attachment sends.
 
-    The bucket holds up to ``capacity`` tokens (default 50, matching
-    Signal's server-side rate-limit bucket size). Each attachment consumes one
-    token. Tokens refill at ``refill_rate`` tokens/second, calibrated
-    from the per-token Retry-After hint we get from the server when a
-    429 fires. Until we've observed one, we use the documented default
-    (1 token / 4 seconds).
-
-    Concurrent ``acquire(n)`` calls serialize through an
-    ``asyncio.Lock`` — natural FIFO across agent sessions hitting the
-    same daemon.
+    Holds up to ``capacity`` tokens (default 50 = Signal's server bucket); each
+    attachment consumes one. Tokens refill at ``refill_rate``/s, calibrated from the
+    server's per-token Retry-After once a 429 has been observed (default 1 token / 4s).
+    ``acquire(n)`` calls serialize through an ``asyncio.Lock`` — FIFO across sessions.
     """
 
     def __init__(
@@ -193,9 +136,13 @@ class SignalAttachmentScheduler:
         self.last_refill = time.monotonic()
         self._lock = asyncio.Lock()
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
+    def _projected_tokens(self) -> float:
+        """Tokens the bucket would hold now, without mutating state."""
+        elapsed = time.monotonic() - self.last_refill
+        projected = self.tokens
+        if elapsed > 0 and projected < self.capacity:
+            projected = min(self.capacity, projected + elapsed * self.refill_rate)
+        return projected
 
     def _refill(self) -> None:
         now = time.monotonic()
@@ -204,43 +151,25 @@ class SignalAttachmentScheduler:
             self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
         self.last_refill = now
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def estimate_wait(self, n: int) -> float:
-        """Best-effort estimate of the seconds until ``n`` tokens would
-        be available. Used to decide whether to emit a user-facing
-        pacing notice *before* committing to an ``acquire`` that may
-        block silently. Lock-free; small races vs. concurrent acquires
-        are benign for an informational notice.
+        """Seconds until ``n`` tokens would be available (lock-free, informational).
+
+        Used to decide whether to emit a user-facing pacing notice *before* an
+        ``acquire`` that may block silently; races vs. concurrent acquires are benign.
         """
-        now = time.monotonic()
-        elapsed = now - self.last_refill
-        projected = self.tokens
-        if elapsed > 0 and projected < self.capacity:
-            projected = min(self.capacity, projected + elapsed * self.refill_rate)
-        deficit = n - projected
+        deficit = n - self._projected_tokens()
         if deficit <= 0:
             return 0.0
         return deficit / self.refill_rate
 
     async def acquire(self, n: int) -> float:
-        """Block until at least ``n`` tokens are available, return the
-        seconds slept.
+        """Block until at least ``n`` tokens are available; return the seconds slept.
 
-        Does **not** deduct tokens — the bucket is a read-only model of
-        server-side capacity.  Call ``report_rpc_duration()`` after the
-        RPC to synchronise the model with the server timeline.
-
-        Not perfect in case lots of coroutines try to acquire for big
-        uploads (``report_rpc_duration`` will take a long time to get hit)
-        but this is just a simulation. Signal server is ground truth and
-        will raise rate-limit exceptions triggering requeues.
-
-        The lock is released during ``asyncio.sleep`` so other callers
-        can interleave.  A retry loop re-checks after each sleep in
-        case the deadline was pessimistic.
+        Does **not** deduct tokens — the bucket is a read-only model of server-side
+        capacity; call ``report_rpc_duration()`` after the RPC to sync. The lock is
+        released during ``asyncio.sleep`` so other callers interleave, and the loop
+        re-checks after each sleep in case the deadline was pessimistic. Signal's
+        server is ground truth and will 429 (→ requeue) if the model drifts.
         """
         if n <= 0:
             return 0.0
@@ -249,7 +178,6 @@ class SignalAttachmentScheduler:
                 f"Signal scheduler was called requesting {n} tokens "
                 f"(max is {self.capacity})",
             )
-
         total_slept = 0.0
         first_pass = True
         while True:
@@ -277,20 +205,14 @@ class SignalAttachmentScheduler:
             total_slept += wait
 
     async def report_rpc_duration(self, rpc_duration: float, n_attachments: int) -> None:
-        """Record an attachment-send RPC that just completed.
+        """Deduct ``n_attachments`` tokens for a completed send RPC.
 
-        Deducts ``n_attachments`` tokens without crediting refill during
-        the upload window. Signal's server checks the bucket at RPC start
-        and does *not* refill during request processing — refill resumes
-        after the response. Crediting upload-time refill causes cumulative
-        drift that eventually triggers 429s.
-
-        Advances ``last_refill`` so the next ``acquire`` / ``_refill``
-        starts counting from this point.
+        No refill is credited for the upload window: Signal's server checks the bucket
+        at RPC start and resumes refill only after the response, so crediting it causes
+        cumulative drift that eventually triggers 429s. Advances ``last_refill``.
         """
         if n_attachments <= 0:
             return
-
         async with self._lock:
             now = time.monotonic()
             token_before = self.tokens
@@ -306,15 +228,8 @@ class SignalAttachmentScheduler:
         )
 
     def feedback(self, retry_after: Optional[float], n_attempted: int) -> None:
-        """Apply server feedback after a 429.
-
-        ``retry_after`` is the per-*token* refill window the server
-        reports (None when signal-cli is older than v0.14.3 and didn't
-        surface it).
-
-        When present we calibrate ``refill_rate`` from it:
-        the server is authoritative.
-        """
+        """Apply server feedback after a 429: empty the bucket and, when ``retry_after``
+        (per-token refill window) is present, calibrate ``refill_rate`` from it."""
         if retry_after and retry_after > 0:
             new_rate = 1.0 / float(retry_after)
             if new_rate != self.refill_rate:
@@ -328,27 +243,14 @@ class SignalAttachmentScheduler:
         self.last_refill = time.monotonic()
 
     def state(self) -> dict:
-        """Return current scheduler state for diagnostic logging (read-only).
-
-        Does not advance ``last_refill`` — safe to call from logging paths
-        without perturbing the bucket.
-        """
-        now = time.monotonic()
-        elapsed = now - self.last_refill
-        projected = self.tokens
-        if elapsed > 0 and projected < self.capacity:
-            projected = min(self.capacity, projected + elapsed * self.refill_rate)
+        """Current scheduler state for diagnostic logging (read-only, doesn't advance ``last_refill``)."""
         return {
-            "tokens": round(projected, 1),
+            "tokens": round(self._projected_tokens(), 1),
             "capacity": int(self.capacity),
             "refill_rate": round(self.refill_rate, 4),
             "refill_seconds_per_token": round(1.0 / self.refill_rate, 1) if self.refill_rate > 0 else float("inf"),
         }
 
-
-# ---------------------------------------------------------------------------
-# Process-wide singleton
-# ---------------------------------------------------------------------------
 
 _scheduler: Optional[SignalAttachmentScheduler] = None
 
@@ -368,7 +270,6 @@ def get_scheduler() -> SignalAttachmentScheduler:
 
 
 def _reset_scheduler() -> None:
-    """Drop the cached scheduler so the next ``get_scheduler`` call
-    builds a fresh one. Test-only — never call from production paths."""
+    """Drop the cached scheduler so the next ``get_scheduler`` builds a fresh one. Test-only."""
     global _scheduler
     _scheduler = None
