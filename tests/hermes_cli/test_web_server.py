@@ -2839,9 +2839,11 @@ class TestNewEndpoints:
             ),
         )
         # No xAI credentials → the Grok OAuth-backed row needs sign-in.
+        import hermes_cli.tools_config_post_setup as tools_config_post_setup
+
         monkeypatch.setattr(tools_config, "_xai_credentials_present", lambda: False)
         # Local TTS engines not installed → their rows need setup.
-        monkeypatch.setattr(tools_config, "_module_installed", lambda name: False)
+        monkeypatch.setattr(tools_config_post_setup, "_module_installed", lambda name: False)
         monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
 
         resp = self.client.get("/api/tools/toolsets/tts/config")
