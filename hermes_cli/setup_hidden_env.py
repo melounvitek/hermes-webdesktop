@@ -1,18 +1,8 @@
 """Which platform env vars the setup surfaces hide.
 
-Every messaging platform ships the same handful of knobs that are either set
-for the user later or already correct by default. Listing them on a setup form
-turns "paste your bot token" into a five-field interrogation where none of the
-answers are discoverable — the Discord card asked for a home channel ID you
-need Developer Mode to copy, next to a reply-threading preference.
-
-Hiding them is a *presentation* decision only. The env vars keep working
-through ``hermes config set``, ``.env``, and ``config.yaml``; the gateway reads
-them exactly as before. This module just says what a new user is asked during
-setup.
-
-Lives here rather than in ``web_server`` so the CLI wizard can share it without
-importing the dashboard's FastAPI surface.
+Hiding them is a *presentation* decision only. The env vars keep working through ``hermes config
+set``, ``.env``, and ``config.yaml``; the gateway reads them exactly as before. This module just
+says what a new user is asked during setup.
 """
 
 # Suffix match, so plugin adapters nobody enumerated (IRC, SimpleX, LINE, ntfy)
@@ -50,7 +40,7 @@ SETUP_HIDDEN_ENV_SUFFIXES = (
 def is_setup_hidden_env(name: str) -> bool:
     """True when a var is self-configuring and shouldn't appear in setup forms.
 
-    Callers must still keep any var a platform lists as *required* — hiding a
-    required credential would make that platform unconfigurable from the UI.
+    Callers must still keep any var a platform lists as *required* — hiding a required credential
+    would make that platform unconfigurable from the UI.
     """
     return name.endswith(SETUP_HIDDEN_ENV_SUFFIXES)

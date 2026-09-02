@@ -1,7 +1,7 @@
 """Default configuration data for Hermes Agent.
 
-Pure-data leaf module: DEFAULT_CONFIG and OPTIONAL_ENV_VARS, extracted
-verbatim from hermes_cli/config.py. Must not import from hermes_cli.config.
+Pure-data leaf module: DEFAULT_CONFIG and OPTIONAL_ENV_VARS, extracted verbatim from
+hermes_cli/config.py. Must not import from hermes_cli.config.
 """
 
 DEFAULT_CONFIG = {
@@ -2237,7 +2237,6 @@ DEFAULT_CONFIG = {
         "max_turns": 20,
     },
 
-
     # Loops — /loop recurring in-session wakeups (Claude Code parity).
     # A loop re-runs a prompt (or slash command) on a cadence inside the
     # live session. Fixed-interval mode fires on the user's clock;
@@ -3757,7 +3756,6 @@ DEFAULT_CONFIG = {
         "servers": {},
     },
 
-
     # X (Twitter) Search via xAI's built-in x_search Responses tool.
     # The tool registers when xAI credentials are available (SuperGrok
     # OAuth or XAI_API_KEY) AND the x_search toolset is enabled in
@@ -4055,7 +4053,6 @@ DEFAULT_CONFIG = {
             "max_attempts": 2,
         },
     },
-
 
     # Google Vertex AI provider (Gemini via the OpenAI-compatible endpoint).
     # Auth is OAuth2 (short-lived access tokens minted from a service-account

@@ -1,8 +1,4 @@
-"""Platform scope rules for configured toolsets.
-
-This module is intentionally independent of tool resolution and CLI setup so
-configuration validation and runtime resolution apply the same platform policy.
-"""
+"""Platform scope rules for configured toolsets."""
 
 from typing import Set
 

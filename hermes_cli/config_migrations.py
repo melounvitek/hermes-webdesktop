@@ -1,38 +1,10 @@
 """Table-driven config migration registry.
 
-This module holds the per-version migration steps that used to live as a
-768-line ladder of ``if current_ver < N:`` blocks inside
-``hermes_cli.config.migrate_config``. Each step is a function
-``_migrate_to_N(results, quiet)`` whose body is copied verbatim from the
-original block; only the shared skeleton (the version gate and the strict
-ascending ordering) lives in the :func:`run_migrations` driver.
+Each step is a function ``_migrate_to_N(results, quiet)`` whose body is copied verbatim from the
+original block; only the shared skeleton (the version gate and the strict ascending ordering) lives
+in the :func:`run_migrations` driver.
 
 Semantics preserved exactly from the original ladder:
-
-* ``current_ver`` is computed ONCE by the caller (``check_config_version``)
-  and never advances while the ladder runs — every step compares against the
-  same initial value. The driver replicates that: it applies every registry
-  entry whose target version is ``> current_ver``, in ascending order.
-* Each step re-reads the raw on-disk config itself (``read_raw_config``) and
-  persists via ``_persist_migration`` — steps therefore observe the writes of
-  earlier steps through the filesystem, which is why strict ascending order
-  is mandatory.
-* All ``results['config_added']`` / ``results['warnings']`` appends and all
-  conditional ``print`` output stay inside the step functions, byte-identical
-  to the original blocks.
-
-Import direction / cycle avoidance:
-
-``hermes_cli.config`` imports :func:`run_migrations` lazily (inside
-``migrate_config``), and every step function here resolves its helpers
-(``read_raw_config``, ``_persist_migration``, ``get_env_value``, …) lazily
-through the live ``hermes_cli.config`` module object at call time via
-:func:`_cfg`. There is deliberately NO module-level import of
-``hermes_cli.config`` here, so no circular import can form — and, just as
-importantly, tests that monkeypatch helpers on ``hermes_cli.config`` (e.g.
-``patch("hermes_cli.config.read_raw_config", ...)``) keep working, because
-the steps always go through the module attribute rather than a bound-early
-reference.
 """
 
 from __future__ import annotations
@@ -73,12 +45,48 @@ def _cfg():
     return config
 
 
+def read_raw_config():
+    return _cfg().read_raw_config()
+
+
+def _persist_migration(config):
+    _cfg()._persist_migration(config)
+
+
+def _rewrite_stale_default(
+    results: Dict[str, Any],
+    quiet: bool,
+    *,
+    section: str,
+    key: str,
+    old: Any,
+    new: Any,
+    added: str,
+    message: str,
+    extra_guard: Callable[[Dict[str, Any]], bool] = lambda _m: True,
+) -> None:
+    """Shared step shape: rewrite ``<section>.<key>`` only when it still equals the OLD default.
+
+    Never clobbers a value the user deliberately customized; unset keys inherit the new default at
+    read time. ``new=None`` deletes the key instead of assigning.
+    """
+    config = read_raw_config()
+    raw = config.get(section)
+    if isinstance(raw, dict) and raw.get(key) == old and extra_guard(raw):
+        if new is None:
+            del raw[key]
+        else:
+            raw[key] = new
+        config[section] = raw
+        _persist_migration(config)
+        results["config_added"].append(added)
+        if not quiet:
+            print(message)
+
+
 def _migrate_to_12(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 11 → 12: migrate custom_providers list → providers dict ──
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
-    _custom_provider_entry_to_provider_config = _c._custom_provider_entry_to_provider_config
+    _custom_provider_entry_to_provider_config = _cfg()._custom_provider_entry_to_provider_config
 
     config = read_raw_config()
     custom_list = config.get("custom_providers")
@@ -145,18 +153,14 @@ def _migrate_to_12(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_13(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 12 → 13: clear dead LLM_MODEL / OPENAI_MODEL from .env ──
-    # These env vars were written by the old setup wizard but nothing reads
-    # them anymore (config.yaml is the sole source of truth since March 2026).
-    # Stale entries cause user confusion — see issue report.
+    # Written by the old setup wizard; nothing reads them (config.yaml is the
+    # sole source of truth). Stale entries only confuse users.
     _c = _cfg()
-    get_env_value = _c.get_env_value
-    save_env_value = _c.save_env_value
-
     for dead_var in ("LLM_MODEL", "OPENAI_MODEL"):
         try:
-            old_val = get_env_value(dead_var)
+            old_val = _c.get_env_value(dead_var)
             if old_val:
-                save_env_value(dead_var, "")
+                _c.save_env_value(dead_var, "")
                 if not quiet:
                     print(f"  ✓ Cleared {dead_var} from .env (no longer used — config.yaml is source of truth)")
         except Exception:
@@ -165,14 +169,8 @@ def _migrate_to_13(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_14(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 13 → 14: migrate legacy flat stt.model to provider section ──
-    # Old configs (and cli-config.yaml.example) had a flat `stt.model` key
-    # that was provider-agnostic.  When the provider was "local" this caused
-    # OpenAI model names (e.g. "whisper-1") to be fed to faster-whisper,
-    # crashing with "Invalid model size".  Move the value into the correct
-    # provider-specific section and remove the flat key.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # A provider-agnostic `stt.model` fed OpenAI names to faster-whisper
+    # ("Invalid model size"). Move it into the provider's section; drop the flat key.
 
     # Read raw config (no defaults merged) to check what the user actually
     # wrote, then apply changes to the merged config for saving.
@@ -220,9 +218,6 @@ def _migrate_to_14(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_16(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 15 → 16: migrate tool_progress_overrides into display.platforms ──
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
 
     config = read_raw_config()
     display = config.get("display", {})
@@ -249,37 +244,24 @@ def _migrate_to_16(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_17(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 16 → 17: remove legacy compression.summary_* keys ──
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
 
     config = read_raw_config()
     comp = config.get("compression", {})
     if isinstance(comp, dict):
-        s_model = comp.pop("summary_model", None)
-        s_provider = comp.pop("summary_provider", None)
-        s_base_url = comp.pop("summary_base_url", None)
+        legacy = {k: comp.pop(f"summary_{k}", None) for k in ("model", "provider", "base_url")}
         migrated_keys = []
-        # Migrate non-empty, non-default values to auxiliary.compression
-        if s_model and str(s_model).strip():
-            aux = config.setdefault("auxiliary", {})
-            aux_comp = aux.setdefault("compression", {})
-            if not aux_comp.get("model"):
-                aux_comp["model"] = str(s_model).strip()
-                migrated_keys.append(f"model={s_model}")
-        if s_provider and str(s_provider).strip() not in {"", "auto"}:
-            aux = config.setdefault("auxiliary", {})
-            aux_comp = aux.setdefault("compression", {})
-            if not aux_comp.get("provider") or aux_comp.get("provider") == "auto":
-                aux_comp["provider"] = str(s_provider).strip()
-                migrated_keys.append(f"provider={s_provider}")
-        if s_base_url and str(s_base_url).strip():
-            aux = config.setdefault("auxiliary", {})
-            aux_comp = aux.setdefault("compression", {})
-            if not aux_comp.get("base_url"):
-                aux_comp["base_url"] = str(s_base_url).strip()
-                migrated_keys.append(f"base_url={s_base_url}")
-        if migrated_keys or s_model is not None or s_provider is not None or s_base_url is not None:
+        # Migrate non-empty, non-default values to auxiliary.compression, never
+        # overriding an explicit (non-"auto") aux value.
+        for k, raw in legacy.items():
+            val = str(raw).strip() if raw else ""
+            if not val or (k == "provider" and val == "auto"):
+                continue
+            aux_comp = config.setdefault("auxiliary", {}).setdefault("compression", {})
+            cur = aux_comp.get(k)
+            if not cur or (k == "provider" and cur == "auto"):
+                aux_comp[k] = val
+                migrated_keys.append(f"{k}={raw}")
+        if migrated_keys or any(v is not None for v in legacy.values()):
             config["compression"] = comp
             _persist_migration(config)
             if not quiet:
@@ -291,20 +273,11 @@ def _migrate_to_17(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_21(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 20 → 21: plugins are now opt-in; grandfather existing user plugins ──
-    # The loader now requires plugins to appear in ``plugins.enabled`` before
-    # loading. Existing installs had all discovered plugins loading by default
-    # (minus anything in ``plugins.disabled``). To avoid silently breaking
-    # those setups on upgrade, populate ``plugins.enabled`` with the set of
-    # currently-installed user plugins that aren't already disabled.
-    #
-    # Bundled plugins (shipped in the repo itself) are NOT grandfathered —
-    # they ship off for everyone, including existing users, so any user who
-    # wants one has to opt in explicitly.
+    # The loader requires ``plugins.enabled``; existing installs loaded every
+    # discovered plugin (minus ``plugins.disabled``). Populate the allow-list
+    # with installed user plugins not already disabled. Bundled plugins are NOT
+    # grandfathered — they ship off for everyone and need explicit opt-in.
     _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
-    get_hermes_home = _c.get_hermes_home
-    fast_safe_load = _c.fast_safe_load
 
     config = read_raw_config()
     plugins_cfg = config.get("plugins")
@@ -320,7 +293,7 @@ def _migrate_to_21(results: Dict[str, Any], quiet: bool) -> None:
         # Scan ``$HERMES_HOME/plugins/`` for currently installed user plugins.
         grandfathered: List[str] = []
         try:
-            user_plugins_dir = get_hermes_home() / "plugins"
+            user_plugins_dir = _c.get_hermes_home() / "plugins"
             if user_plugins_dir.is_dir():
                 for child in sorted(user_plugins_dir.iterdir()):
                     if not child.is_dir():
@@ -332,7 +305,7 @@ def _migrate_to_21(results: Dict[str, Any], quiet: bool) -> None:
                         continue
                     try:
                         with open(manifest_file, encoding="utf-8") as _mf:
-                            manifest = fast_safe_load(_mf) or {}
+                            manifest = _c.fast_safe_load(_mf) or {}
                     except Exception:
                         manifest = {}
                     name = manifest.get("name") or child.name
@@ -363,128 +336,77 @@ def _migrate_to_21(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_23(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 22 → 23: seed curator defaults + create logs/curator/ ──
-    # The curator (background skill maintenance) was added in PR #16049, but
-    # existing configs from before that PR (or before the April 2026
-    # unification under `auxiliary.curator`) never wrote the curator section
-    # to disk. The runtime deep-merge in `load_config()` fills defaults at
-    # read time, so the curator *functions*; but users can't see/edit the
-    # settings in their `config.yaml`, and `hermes curator status` has no
-    # stable logs dir to point at until the first run mkdir's it.
-    #
-    # This migration:
-    #   1. Writes the `curator` top-level section to config.yaml (enabled,
-    #      interval_hours, min_idle_hours, stale_after_days, archive_after_days)
-    #      — only keys the user hasn't already overridden.
-    #   2. Writes the `auxiliary.curator` aux-task slot (provider, model,
-    #      base_url, api_key, timeout, extra_body) — canonical slot for
-    #      routing the curator fork to a cheaper aux model.
-    #   3. Creates `~/.hermes/logs/curator/` if missing (belt-and-suspenders
-    #      on top of ensure_hermes_home() — old profiles that predate this
-    #      migration still benefit).
+    # Older configs never wrote the curator section; deep-merge makes it
+    # function, but users could not see/edit it and `hermes curator status`
+    # had no stable logs dir. Writes `curator` and the `auxiliary.curator`
+    # aux-task slot (only keys the user hasn't overridden) and mkdirs
+    # logs/curator/ (belt-and-suspenders over ensure_hermes_home()).
     _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
-    get_hermes_home = _c.get_hermes_home
     DEFAULT_CONFIG = _c.DEFAULT_CONFIG
 
     try:
-        curator_dir = get_hermes_home() / "logs" / "curator"
+        curator_dir = _c.get_hermes_home() / "logs" / "curator"
         curator_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         results["warnings"].append(f"Could not create {curator_dir}: {e}")
 
     config = read_raw_config()
-    touched = False
+
+    def _seed_missing(section: Dict[str, Any], defaults: Dict[str, Any]) -> List[str]:
+        added = [k for k in defaults if k not in section]
+        for k in added:
+            section[k] = copy.deepcopy(defaults[k])
+        return added
 
     # (1) Top-level curator section — only add missing keys
-    _curator_defaults = DEFAULT_CONFIG.get("curator", {})
     raw_curator = config.get("curator")
     if not isinstance(raw_curator, dict):
         raw_curator = {}
-    added_curator: List[str] = []
-    for k, v in _curator_defaults.items():
-        if k not in raw_curator:
-            raw_curator[k] = copy.deepcopy(v)
-            added_curator.append(k)
+    added_curator = _seed_missing(raw_curator, DEFAULT_CONFIG.get("curator", {}))
     if added_curator:
         config["curator"] = raw_curator
-        touched = True
 
     # (2) auxiliary.curator task slot
-    _aux_curator_defaults = (
-        DEFAULT_CONFIG.get("auxiliary", {}).get("curator", {})
-    )
     raw_aux = config.get("auxiliary")
     if not isinstance(raw_aux, dict):
         raw_aux = {}
     raw_aux_curator = raw_aux.get("curator")
     if not isinstance(raw_aux_curator, dict):
         raw_aux_curator = {}
-    added_aux: List[str] = []
-    for k, v in _aux_curator_defaults.items():
-        if k not in raw_aux_curator:
-            raw_aux_curator[k] = copy.deepcopy(v)
-            added_aux.append(k)
+    added_aux = _seed_missing(raw_aux_curator, DEFAULT_CONFIG.get("auxiliary", {}).get("curator", {}))
     if added_aux:
         raw_aux["curator"] = raw_aux_curator
         config["auxiliary"] = raw_aux
-        touched = True
 
-    if touched:
+    if added_curator or added_aux:
         _persist_migration(config)
-        if added_curator:
-            results["config_added"].append(
-                f"curator ({len(added_curator)} default key(s))"
-            )
+        for label, added in (("curator", added_curator), ("auxiliary.curator", added_aux)):
+            if not added:
+                continue
+            results["config_added"].append(f"{label} ({len(added)} default key(s))")
             if not quiet:
                 print(
-                    "  ✓ Curator settings now available "
-                    f"({', '.join(added_curator)}) — edit via `hermes config set`"
-                )
-        if added_aux:
-            results["config_added"].append(
-                f"auxiliary.curator ({len(added_aux)} default key(s))"
-            )
-            if not quiet:
-                print(
-                    "  ✓ auxiliary.curator settings now available "
-                    f"({', '.join(added_aux)}) — edit via `hermes config set`"
+                    f"  ✓ {'Curator' if label == 'curator' else label} settings now available "
+                    f"({', '.join(added)}) — edit via `hermes config set`"
                 )
 
 
 def _migrate_to_25(results: Dict[str, Any], quiet: bool) -> None:
-    # ── Version 24 → 25: lower model_catalog TTL 24h → 1h ──
-    # The model picker now refreshes its curated list hourly so freshly
-    # published model-catalog.json deploys reach users without a day-long
-    # stale window. Only rewrite the OLD default (24) — never clobber a
-    # value the user deliberately customized.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # ── Version 24 → 25: lower model_catalog TTL 24h → 1h (only the OLD default 24) ──
 
-    config = read_raw_config()
-    raw_mc = config.get("model_catalog")
-    if isinstance(raw_mc, dict) and raw_mc.get("ttl_hours") == 24:
-        raw_mc["ttl_hours"] = 1
-        config["model_catalog"] = raw_mc
-        _persist_migration(config)
-        results["config_added"].append("model_catalog.ttl_hours 24→1")
-        if not quiet:
-            print("  ✓ Lowered model_catalog.ttl_hours to 1 (hourly picker refresh)")
+    _rewrite_stale_default(
+        results, quiet, section="model_catalog", key="ttl_hours", old=24, new=1,
+        added="model_catalog.ttl_hours 24→1",
+        message="  ✓ Lowered model_catalog.ttl_hours to 1 (hourly picker refresh)",
+    )
 
 
 def _migrate_to_29(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 28 → 29: rename memory/skills write_mode → write_approval ──
-    # The tri-state write_mode (on|off|approve) was replaced by a clear boolean
-    # write_approval (default false = gate off, writes flow freely; true =
-    # require approval). Only an explicit "approve" carried gating intent, so
-    # it maps to true; everything else (on/off/unset) → false. The old
-    # "off = block all writes" mode is dropped — memory_enabled: false disables
-    # memory entirely. Only rewrite a key the user actually persisted; never
-    # invent one.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # Tri-state write_mode (on|off|approve) → boolean write_approval. Only
+    # "approve" carried gating intent → true; everything else → false (the old
+    # "off = block writes" mode is dropped; memory_enabled: false disables
+    # memory). Only rewrite a key the user actually persisted.
 
     config = read_raw_config()
     touched = False
@@ -507,28 +429,15 @@ def _migrate_to_29(results: Dict[str, Any], quiet: bool) -> None:
 
 
 # ── Version 29 → 30: curator.consolidate defaults to false ──
-# Consolidation (the LLM umbrella-building fork) is opt-in, OFF by default;
-# the deterministic inactivity prune still runs whenever the curator is
-# enabled. No write is needed: the schema default (curator.consolidate=false)
-# is supplied by load_config()'s deep-merge at read time, and persisting a
-# default-valued key would only bloat a lean config (it gets stripped on
-# save anyway). Existing installs that WANT the old always-consolidate
-# behavior set it to true explicitly via `hermes config set`.
-# (No registry entry: this version bump has no migration step.)
+# Schema-default-only change (deep-merge supplies it at read time; persisting
+# a default would only bloat a lean config). No registry entry.
 
 
 def _migrate_to_31(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 30 → 31: switch verify_on_stop OFF (one-time) ──
-    # verify_on_stop defaulted to the "auto" sentinel (surface-aware: on for
-    # interactive coding surfaces). In practice the verification narrative was
-    # more noise than signal — it even fired on doc/markdown/skill edits with
-    # nothing to verify. The new default is OFF. This migration switches
-    # existing installs off ONCE, but only when the user never expressed an
-    # explicit preference: we rewrite the value only if it's missing or still
-    # the "auto" sentinel. An explicit true/false the user set is preserved.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # The "auto" sentinel (surface-aware) was more noise than signal; the new
+    # default is OFF. Rewrite only when missing or still "auto" — an explicit
+    # true/false the user set is preserved.
 
     config = read_raw_config()
     raw_agent = config.get("agent")
@@ -554,47 +463,29 @@ def _migrate_to_31(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_32(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 31 → 32: flip the BAKED-IN literal true to OFF (one-time) ──
-    # The v30→v31 flip above only caught missing/"auto" values. But the very
-    # first ship of verify-on-stop (config v30, commit 2f1a47b90) defaulted
-    # DEFAULT_CONFIG["agent"]["verify_on_stop"] to a literal True, and
-    # migrate_config persists defaults with strip_defaults=False — so every
-    # install that updated through v30 got `verify_on_stop: true` written into
-    # config.yaml as a literal. v31's guard deliberately preserves an explicit
-    # bool, so it skipped that whole population and left them ON. That literal
-    # true was never a user choice: the feature had no off-switch worth setting
-    # it against until v31 introduced one, so a true persisted before v32 is
-    # always the old machine default. Flip it off once here. A true the user
-    # sets AFTER v32 (config already at version 32) is never touched.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # v31 only caught missing/"auto". The first ship (v30) defaulted
+    # verify_on_stop to a literal True and migrate_config persisted defaults,
+    # so every install that updated through v30 has `verify_on_stop: true`
+    # written literally — never a user choice (there was no off-switch until
+    # v31). Flip it once; a true set AFTER v32 is never touched.
 
-    config = read_raw_config()
-    raw_agent = config.get("agent")
-    if isinstance(raw_agent, dict) and raw_agent.get("verify_on_stop") is True:
-        raw_agent["verify_on_stop"] = False
-        config["agent"] = raw_agent
-        _persist_migration(config)
-        results["config_added"].append("agent.verify_on_stop=false")
-        if not quiet:
-            print(
-                "  ✓ Turned off verify-on-stop (agent.verify_on_stop: false) — "
-                "the old default was written into your config as a literal "
-                "true. Set it to true again to re-enable, or \"auto\" for the "
-                "legacy surface-aware behavior."
-            )
+    _rewrite_stale_default(
+        results, quiet, section="agent", key="verify_on_stop", old=True, new=False,
+        added="agent.verify_on_stop=false",
+        message=(
+            "  ✓ Turned off verify-on-stop (agent.verify_on_stop: false) — "
+            "the old default was written into your config as a literal "
+            "true. Set it to true again to re-enable, or \"auto\" for the "
+            "legacy surface-aware behavior."
+        ),
+        extra_guard=lambda raw: raw.get("verify_on_stop") is True,
+    )
 
 
 def _migrate_to_33(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 32 → 33: unify delegation concurrency caps ──
-    # delegation.max_async_children is deprecated: max_concurrent_children now
-    # caps both a single batch's parallelism and concurrent background
-    # delegation units. Fold a raised max_async_children into
-    # max_concurrent_children (take the max so nobody loses headroom), then
-    # drop the stale key.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # max_async_children is deprecated; fold a raised value into
+    # max_concurrent_children (take the max so nobody loses headroom), drop it.
 
     config = read_raw_config()
     raw_deleg = config.get("delegation")
@@ -626,25 +517,16 @@ def _migrate_to_33(results: Dict[str, Any], quiet: bool) -> None:
 
 
 def _migrate_to_34(results: Dict[str, Any], quiet: bool) -> None:
-    # ── Version 33 → 34: one-time personality reset (post-#81946 unification) ──
-    # Personality persistence used to be split per surface: the TUI/desktop
-    # wrote the NAME to display.personality while the CLI/gateway wrote the
-    # rendered TEXT into agent.system_prompt (and their "/personality none"
-    # only blanked the text, leaving the name behind). When #81946 made
-    # display.personality authoritative everywhere, stale names written years
-    # ago resurrected personalities users had already turned off ("kawaii
-    # defaults on after updating"). There is no way to know which of the two
-    # divergent fields reflects the user's intent, so reset the selection to
-    # none once and tell the user how to re-enable it. Two scrubs:
-    #
+    # ── Version 33 → 34: one-time personality reset (post-unification) ──
+    # Persistence used to be split: TUI/desktop wrote the NAME to
+    # display.personality, CLI/gateway wrote rendered TEXT to agent.system_prompt
+    # (and "/personality none" only blanked the text). Once display.personality
+    # became authoritative, stale names resurrected personalities users had
+    # turned off. Neither field is trustworthy, so reset once:
     # 1. display.personality → "" (announce the old name).
-    # 2. agent.system_prompt → "" ONLY when it verbatim-equals the rendered
-    #    text of a known personality — that shape was written by the old
-    #    CLI/gateway /personality, never typed by hand. Any other text is a
-    #    user-owned manual prompt and is never touched.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # 2. agent.system_prompt → "" ONLY when it verbatim-equals a known
+    #    personality's rendered text (written by the old /personality, never
+    #    typed by hand). Any other text is a user-owned prompt, never touched.
 
     from hermes_cli.personality import (
         available_personalities,
@@ -701,18 +583,9 @@ def _migrate_to_34(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_35(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 34 → 35: background process notifications → concise ──
-    # The old default mode 'all' pushed the raw output tail of every finished
-    # background process into the chat ("[Background process proc_x finished
-    # with exit code 0~ Here's the final output: ...]" walls). The new
-    # 'concise' mode renders a one-line status message instead (with a short
-    # output tail on failures) and is the new default. Move users still on
-    # 'all' — the old implicit default, almost never chosen on purpose — to
-    # 'concise'. Explicit non-default choices (result / error / off) are the
-    # user's own and are preserved. Users with the key unset inherit the new
-    # default automatically at read time (no write needed).
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # 'all' (old implicit default, rarely chosen on purpose) dumped raw output
+    # walls into chat; 'concise' is the new default. Move 'all' → 'concise';
+    # explicit result/error/off choices are preserved; unset inherits at read.
 
     config = read_raw_config()
     raw_display = config.get("display")
@@ -737,71 +610,41 @@ def _migrate_to_35(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_36(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 35 → 36: raise the subagent iteration cap default 50 → 250 ──
-    # delegation.max_iterations is the per-subagent tool-call budget. The old
-    # default of 50 truncated substantial delegated work (leaf agents spend
-    # ~15-20 turns on recon before producing output, then ran out mid-task).
-    # The shipped default is now 250. Configs still pinned at exactly the old
-    # default 50 — almost always the inherited default rather than a deliberate
-    # choice — are lifted to 250 so existing installs get the same headroom on
-    # update. Any OTHER explicit value (a deliberate override, high or low) is
-    # the user's own and is preserved; unset inherits 250 at read time.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # 50 truncated substantial delegated work; only a value still pinned at
+    # exactly the old default is lifted. Other explicit values are preserved.
 
-    config = read_raw_config()
-    raw_deleg = config.get("delegation")
-    if isinstance(raw_deleg, dict) and raw_deleg.get("max_iterations") == 50:
-        raw_deleg["max_iterations"] = 250
-        config["delegation"] = raw_deleg
-        _persist_migration(config)
-        results["config_added"].append("delegation.max_iterations=250 (was: 50)")
-        if not quiet:
-            print(
-                "  ✓ Raised delegation.max_iterations from 50 to 250 — subagents "
-                "now get a larger per-child tool-call budget so delegated work "
-                "finishes instead of truncating. Set delegation.max_iterations "
-                "back to 50 to restore the old cap."
-            )
+    _rewrite_stale_default(
+        results, quiet, section="delegation", key="max_iterations", old=50, new=250,
+        added="delegation.max_iterations=250 (was: 50)",
+        message=(
+            "  ✓ Raised delegation.max_iterations from 50 to 250 — subagents "
+            "now get a larger per-child tool-call budget so delegated work "
+            "finishes instead of truncating. Set delegation.max_iterations "
+            "back to 50 to restore the old cap."
+        ),
+    )
 
 
 def _migrate_to_37(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 36 → 37: raise the delegation concurrency default 3 → 10 ──
-    # delegation.max_concurrent_children caps how many children run in parallel
-    # per batch (and concurrent background delegation units). The old default of
-    # 3 needlessly serialized independent fan-outs (e.g. reviewing N PRs at
-    # once). The shipped default is now 10, which stays at/below the high-cost
-    # warning threshold. Configs still pinned at exactly the old default 3 —
-    # almost always the inherited default rather than a deliberate choice — are
-    # lifted to 10 so existing installs get the wider fan-out on update. Any
-    # OTHER explicit value (a deliberate override) is preserved; unset inherits
-    # 10 at read time.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # 3 serialized independent fan-outs; 10 stays at/below the high-cost
+    # warning threshold. Only a value still pinned at exactly 3 is lifted.
 
-    config = read_raw_config()
-    raw_deleg = config.get("delegation")
-    if isinstance(raw_deleg, dict) and raw_deleg.get("max_concurrent_children") == 3:
-        raw_deleg["max_concurrent_children"] = 10
-        config["delegation"] = raw_deleg
-        _persist_migration(config)
-        results["config_added"].append("delegation.max_concurrent_children=10 (was: 3)")
-        if not quiet:
-            print(
-                "  ✓ Raised delegation.max_concurrent_children from 3 to 10 — "
-                "independent delegated children now fan out wider in parallel. "
-                "Each child consumes API tokens independently; set "
-                "delegation.max_concurrent_children back to 3 to restore the old cap."
-            )
+    _rewrite_stale_default(
+        results, quiet, section="delegation", key="max_concurrent_children", old=3, new=10,
+        added="delegation.max_concurrent_children=10 (was: 3)",
+        message=(
+            "  ✓ Raised delegation.max_concurrent_children from 3 to 10 — "
+            "independent delegated children now fan out wider in parallel. "
+            "Each child consumes API tokens independently; set "
+            "delegation.max_concurrent_children back to 3 to restore the old cap."
+        ),
+    )
 
 
 def _migrate_to_38(results: Dict[str, Any], quiet: bool) -> None:
     # Version 37 → 38: the bundled observability/nemo_relay plugin was
     # removed when Relay lifecycle ownership moved into the agent core.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
 
     from hermes_cli.relay_plugin_cutover import legacy_relay_plugin_keys
 
@@ -829,16 +672,9 @@ def _migrate_to_38(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_39(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 38 → 39: remove the retired `bfl` toolset from saved lists ──
-    # The six bfl_flux3_* core tools shipped for a free FLUX 3 promotional
-    # period that has since ended server-side, leaving every Nous-signed-in
-    # install paying ~2.7K tokens of schema per API call for tools that can
-    # only refuse. They were removed in favor of the standard video_gen
-    # provider surface (`video_generate`, `hermes tools` → Video Generation).
-    # Strip the toolset key wherever the auto-backfill or a picker save wrote
-    # it, so stale config can't resurrect an unknown toolset.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # The FLUX 3 promo tools were removed in favor of the video_gen provider
+    # surface; strip the key wherever a backfill/picker save wrote it so stale
+    # config can't resurrect an unknown toolset.
 
     config = read_raw_config()
     changed = False
@@ -865,24 +701,15 @@ def _migrate_to_39(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_40(results: Dict[str, Any], quiet: bool) -> None:
     # ── Version 39 → 40: model_catalog.ttl_hours → ttl_minutes (default 20) ──
-    # The picker catalogs now refresh every 20 minutes (and the gateway
-    # refreshes them in the background on that cadence). Only the OLD default
-    # (ttl_hours: 1, written by the v25 migration) is dropped so the new
-    # default applies; any other explicit ttl_hours is a deliberate choice
-    # and stays honoured by the loader.
-    _c = _cfg()
-    read_raw_config = _c.read_raw_config
-    _persist_migration = _c._persist_migration
+    # Only the OLD default (ttl_hours: 1, written by v25) is dropped; any other
+    # explicit ttl_hours is a deliberate choice the loader still honours.
 
-    config = read_raw_config()
-    raw_mc = config.get("model_catalog")
-    if isinstance(raw_mc, dict) and raw_mc.get("ttl_hours") == 1 and "ttl_minutes" not in raw_mc:
-        del raw_mc["ttl_hours"]
-        config["model_catalog"] = raw_mc
-        _persist_migration(config)
-        results["config_added"].append("model_catalog.ttl_hours 1 → ttl_minutes 20 (default)")
-        if not quiet:
-            print("  ✓ Model catalog now refreshes every 20 minutes (model_catalog.ttl_minutes)")
+    _rewrite_stale_default(
+        results, quiet, section="model_catalog", key="ttl_hours", old=1, new=None,
+        added="model_catalog.ttl_hours 1 → ttl_minutes 20 (default)",
+        message="  ✓ Model catalog now refreshes every 20 minutes (model_catalog.ttl_minutes)",
+        extra_guard=lambda raw: "ttl_minutes" not in raw,
+    )
 
 
 #: Registry of (target_version, migration_fn), strictly ascending. The driver
@@ -919,14 +746,10 @@ MIGRATIONS: Tuple[Tuple[int, Callable[[Dict[str, Any], bool], None]], ...] = (
 def run_migrations(current_ver: int, results: Dict[str, Any], quiet: bool) -> None:
     """Apply every registered migration whose target version exceeds *current_ver*.
 
-    Replicates the original ladder's semantics exactly: *current_ver* is the
-    on-disk schema version captured ONCE (via ``check_config_version()``)
-    before any step runs, and it does not advance between steps — each step
-    is gated on the same initial value, exactly like the original sequential
-    ``if current_ver < N:`` blocks. Steps run in strict ascending registry
-    order and mutate ``results`` in place. The final ``_config_version`` bump
-    is NOT performed here; it stays in ``migrate_config`` (persisted once,
-    after the informational missing-config scan), matching the original flow.
+    Replicates the original ladder's semantics exactly: *current_ver* is the on-disk schema version
+    captured ONCE (via ``check_config_version()``) before any step runs, and it does not advance
+    between steps — each step is gated on the same initial value, exactly like the original
+    sequential ``if current_ver < N:`` blocks.
     """
     for target_ver, migration_fn in MIGRATIONS:
         if current_ver < target_ver:
