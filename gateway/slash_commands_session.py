@@ -1,4 +1,5 @@
-"""Gateway slash commands that rotate, switch, fork or rewrite the session transcript: /new, /resume, /sessions, /branch, /title, /save, /undo, /retry, /topic, /compress.
+"""Gateway slash commands that rotate, switch, fork or rewrite the session transcript:
+/new, /resume, /sessions, /branch, /title, /save, /undo, /retry, /topic, /compress.
 
 Split out of ``gateway/slash_commands.py``; bound onto ``GatewayRunner`` through
 ``GatewaySlashCommandsMixin``. Origin internals are imported lazily (``from gateway.slash_commands
@@ -62,6 +63,25 @@ def _manual_compression_reply_lines(summary: dict, compressor, focus_topic) -> l
     return lines
 
 
+def _compress_preview_reply(history, partial: bool, keep_last, focus_topic, agg_note: str) -> str:
+    """``/compress --preview``: report what WOULD be compressed — no agent, no writes."""
+    from agent.model_metadata import estimate_request_tokens_rough
+    from hermes_cli.partial_compress import summarize_compress_preview
+
+    pv_msgs = [
+        {"role": m.get("role"), "content": m.get("content")}
+        for m in history
+        if m.get("role") in {"user", "assistant"} and m.get("content")
+    ]
+    report = summarize_compress_preview(
+        pv_msgs, partial, keep_last, focus_topic, estimate_request_tokens_rough(pv_msgs)
+    )
+    lines = [f"🗜️ {line}" for line in report["lines"]]
+    if agg_note:
+        lines.append(agg_note)
+    return "\n".join(lines)
+
+
 def _reset_process_scoped_tool_state() -> None:
     """Drop env-passthrough and credential-file state at a conversation boundary (best-effort)."""
     try:
@@ -92,7 +112,7 @@ def _branch_row(msg: dict) -> dict:
 
 
 class GatewaySessionCommandsMixin:
-    """Gateway slash commands that rotate, switch, fork or rewrite the session transcript: /new, /resume, /sessions, /branch, /title, /save, /undo, /retry, /topic, /compress."""
+    """Session-transcript slash commands (/new, /resume, /sessions, /branch, /title, /save, /undo, /retry, /topic, /compress)."""
 
     async def _handle_reset_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /new or /reset command."""
@@ -683,7 +703,6 @@ class GatewaySessionCommandsMixin:
             parse_partial_compress_args,
             rejoin_compressed_head_and_tail,
             split_history_for_partial_compress,
-            summarize_compress_preview,
         )
         from agent.conversation_compression import (
             finalize_context_engine_compression_notification,
@@ -703,20 +722,7 @@ class GatewaySessionCommandsMixin:
                 return _agg_note
 
         if _preview:
-            # Report what WOULD be compressed — no agent, no writes.
-            from agent.model_metadata import estimate_request_tokens_rough
-            _pv_msgs = [
-                {"role": m.get("role"), "content": m.get("content")}
-                for m in history
-                if m.get("role") in {"user", "assistant"} and m.get("content")
-            ]
-            report = summarize_compress_preview(
-                _pv_msgs, partial, keep_last, focus_topic, estimate_request_tokens_rough(_pv_msgs)
-            )
-            lines = [f"🗜️ {line}" for line in report["lines"]]
-            if _aggressive:
-                lines.append(_agg_note)
-            return "\n".join(lines)
+            return _compress_preview_reply(history, partial, keep_last, focus_topic, _agg_note)
 
         try:
             from agent.manual_compression_feedback import summarize_manual_compression

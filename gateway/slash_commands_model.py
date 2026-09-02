@@ -1,4 +1,5 @@
-"""Gateway slash commands that switch or tune the model route: /model, /codex-runtime, /reasoning, /fast, /personality.
+"""Gateway slash commands that switch or tune the model route:
+/model, /codex-runtime, /reasoning, /fast, /personality.
 
 Split out of ``gateway/slash_commands.py``; bound onto ``GatewayRunner`` through
 ``GatewaySlashCommandsMixin``. Origin internals are imported lazily (``from gateway.slash_commands
@@ -143,7 +144,7 @@ def _model_provider_listing_lines(providers) -> list[str]:
 
 
 class GatewayModelCommandsMixin:
-    """Gateway slash commands that switch or tune the model route: /model, /codex-runtime, /reasoning, /fast, /personality."""
+    """Model-route slash commands (/model, /codex-runtime, /reasoning, /fast, /personality)."""
 
     async def _perform_model_switch(
         self,

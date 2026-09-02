@@ -381,39 +381,16 @@ class GatewaySlashCommandsMixin(
         scope = "DM" if chat_type.lower() in {"dm", "direct", "private", ""} else "group/channel"
         user_id = (source.user_id if source else None) or "?"
 
+        head = f"**You** — {platform} ({scope})\nUser ID: `{user_id}`\n"
         if not policy.enabled:
-            return (
-                f"**You** — {platform} ({scope})\n"
-                f"User ID: `{user_id}`\n"
-                f"Tier: unrestricted (no admin list configured for this scope)\n"
-                f"Slash commands: all available"
-            )
-
+            return head + "Tier: unrestricted (no admin list configured for this scope)\nSlash commands: all available"
         if policy.is_admin(user_id):
-            return (
-                f"**You** — {platform} ({scope})\n"
-                f"User ID: `{user_id}`\n"
-                f"Tier: **admin**\n"
-                f"Slash commands: all available"
-            )
-
-        # Non-admin user. Show what's actually reachable.
-        floor = ["help", "whoami"]  # mirrors slash_access._ALWAYS_ALLOWED_FOR_USERS
-        configured = sorted(policy.user_allowed_commands)
-        # Combine + dedupe, preserve order: floor first, then operator additions.
-        seen: set[str] = set()
-        runnable: list[str] = []
-        for c in floor + configured:
-            if c not in seen:
-                seen.add(c)
-                runnable.append(c)
+            return head + "Tier: **admin**\nSlash commands: all available"
+        # Non-admin user: show what's actually reachable. Floor first (mirrors
+        # slash_access._ALWAYS_ALLOWED_FOR_USERS), then operator additions, deduped in order.
+        runnable = list(dict.fromkeys(["help", "whoami"] + sorted(policy.user_allowed_commands)))
         runnable_str = ", ".join(f"/{c}" for c in runnable) if runnable else "(none)"
-        return (
-            f"**You** — {platform} ({scope})\n"
-            f"User ID: `{user_id}`\n"
-            f"Tier: user\n"
-            f"Slash commands you can run: {runnable_str}"
-        )
+        return head + f"Tier: user\nSlash commands you can run: {runnable_str}"
 
     async def _handle_kanban_command(self, event: MessageEvent) -> str:
         """Handle /kanban — delegate to the shared kanban CLI.
@@ -535,26 +512,20 @@ class GatewaySlashCommandsMixin(
         session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
 
+        async def _stop(key: str, invalidation_reason: str) -> None:
+            await self._interrupt_and_clear_session(
+                key, source, interrupt_reason=_INTERRUPT_REASON_STOP, invalidation_reason=invalidation_reason,
+            )
+
         agent = self._running_agents.get(session_key)
         if agent is _AGENT_PENDING_SENTINEL:
             # Force-clean the sentinel so the session is unlocked.
-            await self._interrupt_and_clear_session(
-                session_key,
-                source,
-                interrupt_reason=_INTERRUPT_REASON_STOP,
-                invalidation_reason="stop_command_pending",
-            )
+            await _stop(session_key, "stop_command_pending")
             logger.info("STOP (pending) for session %s — sentinel cleared", session_key)
             return EphemeralReply(t("gateway.stop.stopped_pending"))
         if agent:
-            # Force-clean the session lock so a truly hung agent doesn't
-            # keep it locked forever.
-            await self._interrupt_and_clear_session(
-                session_key,
-                source,
-                interrupt_reason=_INTERRUPT_REASON_STOP,
-                invalidation_reason="stop_command_handler",
-            )
+            # Force-clean the session lock so a truly hung agent doesn't keep it locked forever.
+            await _stop(session_key, "stop_command_handler")
             return EphemeralReply(t("gateway.stop.stopped"))
 
         # No run under the caller's own key. In a per-user thread (thread_sessions_per_user=True) a
@@ -563,12 +534,7 @@ class GatewaySlashCommandsMixin(
         sibling_keys = self._sibling_thread_run_keys(source, session_key)
         if sibling_keys and self._is_user_authorized(source):
             for sibling_key in sibling_keys:
-                await self._interrupt_and_clear_session(
-                    sibling_key,
-                    source,
-                    interrupt_reason=_INTERRUPT_REASON_STOP,
-                    invalidation_reason="stop_command_thread_sibling",
-                )
+                await _stop(sibling_key, "stop_command_thread_sibling")
             logger.info(
                 "STOP (thread sibling) by %s — interrupted %d run(s) in thread: %s",
                 session_key,
@@ -604,47 +570,27 @@ class GatewaySlashCommandsMixin(
         action = (parts[0] if parts else "list").lower()
         target = parts[1].lower() if len(parts) > 1 else ""
 
-        # Resolve platform name (case-insensitive, value match)
-        def _resolve_platform(name: str):
-            if not name:
-                return None
-            for p in Platform.__members__.values():
-                if p.value.lower() == name:
-                    return p
-            return None
-
+        failed = getattr(self, "_failed_platforms", {}) or {}
         if action == "list":
-            lines = ["**Gateway platforms**"]
             connected = sorted(p.value for p in self.adapters)
-            if connected:
-                lines.append("Connected: " + ", ".join(connected))
-            else:
-                lines.append("Connected: (none)")
-            failed = getattr(self, "_failed_platforms", {}) or {}
-            if failed:
-                for p, info in failed.items():
-                    if info.get("paused"):
-                        reason = info.get("pause_reason") or "paused"
-                        lines.append(
-                            f"  · {p.value} — PAUSED ({reason}). "
-                            f"Resume with `/platform resume {p.value}`."
-                        )
-                    else:
-                        attempts = info.get("attempts", 0)
-                        lines.append(
-                            f"  · {p.value} — retrying (attempt {attempts})"
-                        )
-            else:
+            lines = ["**Gateway platforms**", "Connected: " + (", ".join(connected) if connected else "(none)")]
+            for p, info in failed.items():
+                if info.get("paused"):
+                    reason = info.get("pause_reason") or "paused"
+                    lines.append(f"  · {p.value} — PAUSED ({reason}). Resume with `/platform resume {p.value}`.")
+                else:
+                    lines.append(f"  · {p.value} — retrying (attempt {info.get('attempts', 0)})")
+            if not failed:
                 lines.append("Failed/paused: (none)")
             return "\n".join(lines)
 
         if action in {"pause", "resume"}:
             if not target:
                 return f"Usage: /platform {action} <name>"
-            platform = _resolve_platform(target)
+            # Resolve platform name (case-insensitive, value match)
+            platform = next((p for p in Platform.__members__.values() if p.value.lower() == target), None)
             if platform is None:
                 return f"Unknown platform: {target}"
-            failed = getattr(self, "_failed_platforms", {}) or {}
             if action == "pause":
                 if platform not in failed:
                     return (
@@ -1288,7 +1234,6 @@ class GatewaySlashCommandsMixin(
         config_path = _gateway_config_home() / "config.yaml"
         platform_key = _platform_config_key(event.source.platform)
 
-        # --- check config gate ------------------------------------------------
         try:
             user_config = _load_gateway_config()
             gate_enabled = is_truthy_value(
@@ -1301,7 +1246,7 @@ class GatewaySlashCommandsMixin(
         if not gate_enabled:
             return t("gateway.verbose.not_enabled")
 
-        # --- cycle mode (per-platform) ----------------------------------------
+        # Cycle mode (per-platform).
         cycle = ["off", "new", "all", "verbose", "log"]
         # Read current effective mode for this platform via the resolver
         from gateway.display_config import resolve_display_setting
@@ -1311,7 +1256,6 @@ class GatewaySlashCommandsMixin(
         new_mode = cycle[(cycle.index(current) + 1) % len(cycle)]
         description = t(f"gateway.verbose.mode_{new_mode}")
 
-        # Save to display.platforms.<platform>.tool_progress
         try:
             _nested_dict(user_config, "display", "platforms", platform_key)["tool_progress"] = new_mode
             atomic_config_write(config_path, user_config)
@@ -1375,7 +1319,6 @@ class GatewaySlashCommandsMixin(
         config_path = _gateway_config_home() / "config.yaml"
         platform_key = _platform_config_key(event.source.platform)
 
-        # --- parse argument -------------------------------------------------
         arg = ""
         try:
             text = (getattr(event, "message", None) or "").strip()
@@ -1386,7 +1329,6 @@ class GatewaySlashCommandsMixin(
         except Exception:
             arg = ""
 
-        # --- load config ----------------------------------------------------
         try:
             user_config: dict = _load_gateway_config()
         except Exception as e:
@@ -1413,7 +1355,6 @@ class GatewaySlashCommandsMixin(
         else:
             return t("gateway.footer.usage")
 
-        # --- write global flag ---------------------------------------------
         try:
             _nested_dict(user_config, "display", "runtime_footer")["enabled"] = new_state
             atomic_config_write(config_path, user_config)
