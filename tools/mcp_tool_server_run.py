@@ -292,11 +292,8 @@ class MCPServerRunMixin:
                 self.name, self._recycled_reason,
             )
             self.session = None
-            await self._wait_for_lazy_reconnect()
-            if self._shutdown_event.is_set():
-                return False
-            self._reconnect_event.clear()
-            return True
+            # Dormant until a lazy call wakes it (untimed: nothing to self-probe).
+            return await self._wait_for_reconnect_or_shutdown() != "shutdown"
         # Per-cycle chatter stays DEBUG; WARNINGs mark state transitions.
         logger.debug(
             "MCP server '%s': reconnecting (OAuth recovery or "
@@ -569,15 +566,3 @@ class MCPServerRunMixin:
             registry.deregister(tool_name, scope=_core._server_registry_scope(self.name))
             _core._forget_mcp_tool_server(tool_name)
         self._registered_tool_names = []
-
-    async def _wait_for_lazy_reconnect(self) -> None:
-        """Wait while an intentionally recycled stdio server is dormant."""
-        shutdown_task = asyncio.create_task(self._shutdown_event.wait())
-        reconnect_task = asyncio.create_task(self._reconnect_event.wait())
-        try:
-            await asyncio.wait(
-                {shutdown_task, reconnect_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        finally:
-            await self._cancel_waiters(shutdown_task, reconnect_task)
