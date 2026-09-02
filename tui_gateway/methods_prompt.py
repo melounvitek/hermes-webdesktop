@@ -1737,68 +1737,33 @@ def _(rid, params: dict) -> dict:
     return _respond(rid, params, "answer", allow_expired=True)
 
 
-@method("terminal.read.respond")
-def _(rid, params: dict) -> dict:
-    # `text` is a JSON string of the serialized terminal buffer + line metadata.
-    # allow_expired=True: the read_terminal tool's _block() uses a short 30s
-    # timeout, so a slow renderer losing the race is the common case — a late
-    # response must not error after the tool already returned empty.
-    return _respond(rid, params, "text", allow_expired=True)
+# Late-answer RPCs for tool-driven UI cards. All use allow_expired=True: each
+# tool's bounded wait (read_terminal 30s, setup_mcp 10min, ...) can expire while
+# a slow renderer/page/OAuth round-trip is still in flight, and a late answer
+# must resolve gracefully instead of surfacing the raw 4009 "no pending answer
+# request". ``text``/``result`` carry a JSON string of the card's outcome.
+_LATE_RESPOND_KEYS = {
+    "terminal.read.respond": "text",
+    "preview.read.respond": "text",
+    "preview.act.respond": "text",
+    "window.read.respond": "text",
+    "tour.respond": "text",
+    "mcp.setup.respond": "result",
+    "sudo.respond": "password",
+    "secret.respond": "value",
+}
 
 
-@method("preview.read.respond")
-def _(rid, params: dict) -> dict:
-    # `text` is a JSON string of the active preview tab's serialized contents.
-    # allow_expired=True for the same reason as terminal.read: the tool's
-    # bounded wait can expire while a slow page extraction is still running.
-    return _respond(rid, params, "text", allow_expired=True)
+def _late_respond(key: str):
+    def handler(rid, params: dict) -> dict:
+        return _respond(rid, params, key, allow_expired=True)
+
+    return handler
 
 
-@method("preview.act.respond")
-def _(rid, params: dict) -> dict:
-    # `text` is a JSON string with the interaction's outcome (drive_preview
-    # tool) — what it acted on, the live url/title, and a refreshed element
-    # inventory. allow_expired=True for the same reason as preview.read: the
-    # settle-and-rescan can lose the race with the tool's bounded wait.
-    return _respond(rid, params, "text", allow_expired=True)
-
-
-@method("window.read.respond")
-def _(rid, params: dict) -> dict:
-    # `text` is a JSON string describing the OS window underneath the Hermes
-    # window (read_window_below tool). allow_expired=True for the same reason
-    # as terminal.read: the tool's bounded wait can expire while the renderer's
-    # round-trip to the main process is still in flight.
-    return _respond(rid, params, "text", allow_expired=True)
-
-
-@method("tour.respond")
-def _(rid, params: dict) -> dict:
-    # `text` is a JSON string with the tour action's outcome (tour tool) —
-    # matched targets, the active step, or an error naming the bad selector.
-    # allow_expired=True for the same reason as terminal.read: a preview tour
-    # injecting driver.js into a slow page can lose the race with the tool's
-    # bounded wait.
-    return _respond(rid, params, "text", allow_expired=True)
-
-
-@method("mcp.setup.respond")
-def _(rid, params: dict) -> dict:
-    # `result` is a JSON string of the setup card's outcome ({status, server,
-    # detail?, tools?}). allow_expired=True: the setup_mcp tool waits 10
-    # minutes, but an OAuth round-trip or a slow install can outlive that —
-    # a late answer must resolve gracefully, not surface a raw 4009.
-    return _respond(rid, params, "result", allow_expired=True)
-
-
-@method("sudo.respond")
-def _(rid, params: dict) -> dict:
-    return _respond(rid, params, "password", allow_expired=True)
-
-
-@method("secret.respond")
-def _(rid, params: dict) -> dict:
-    return _respond(rid, params, "value", allow_expired=True)
+for _name, _key in _LATE_RESPOND_KEYS.items():
+    method(_name)(_late_respond(_key))
+del _name, _key
 
 
 @method("approval.pending")

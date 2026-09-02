@@ -1,33 +1,12 @@
 """Shared helpers for the per-profile MCP lifecycle RPCs (mcp.servers.*).
 
-Kept out of methods_tools because its handlers are rebound onto
-``tui_gateway.server``'s globals at install time (method_ctx.HandlerRegistry),
-so a module-level def there would be unreachable from a rebound handler body.
-Handlers import these at call time instead.
+Published onto ``tui_gateway.server`` as ``_mcp_reset_profile`` /
+``_mcp_summarize_server`` so the rebound handler bodies in methods_tools resolve them.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
-
-
-def resolve_profile(rid, params, err_fn) -> Tuple[Optional[Any], Optional[dict]]:
-    """Resolve the optional ``profile`` param to a HERMES_HOME override token.
-
-    Returns ``(token, error)``: ``token`` is None for the launch profile or an
-    opaque reset token for :func:`reset_profile`; ``error`` is a JSON-RPC error
-    dict (via ``err_fn``) when the named profile doesn't exist.
-    """
-    profile = str(params.get("profile") or "").strip()
-    if not profile:
-        return None, None
-    from hermes_cli.profiles import get_profile_dir
-    from hermes_constants import set_hermes_home_override
-
-    profile_dir = get_profile_dir(profile)
-    if not profile_dir or not profile_dir.is_dir():
-        return None, err_fn(rid, 4064, f"profile '{profile}' not found")
-    return set_hermes_home_override(str(profile_dir)), None
+from typing import Any, Dict
 
 
 def reset_profile(token) -> None:
