@@ -16,7 +16,6 @@ from tools.process_registry import (
     ProcessSession,
     FINISHED_TTL_SECONDS,
     MAX_PROCESSES,
-    MAX_ACTIVE_PROCESS_AGE,
 )
 
 
@@ -2508,11 +2507,11 @@ def _make_delegation_batch_evt(results):
 def _patch_delegation_config(
     monkeypatch, model="upstage/solar-pro-4", provider="openrouter", **over
 ):
-    import tools.process_registry as _pr
+    import tools.process_registry_notifications as _prn
 
     cfg = {"model": model, "provider": provider}
     cfg.update(over)
-    monkeypatch.setattr(_pr, "_delegation_config", lambda: cfg)
+    monkeypatch.setattr(_prn, "_delegation_config", lambda: cfg)
     return cfg
 
 

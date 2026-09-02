@@ -327,7 +327,7 @@ class TestDevGate:
         import hermes_cli.auth as auth_mod
         monkeypatch.setattr(auth_mod, "resolve_nous_runtime_credentials",
                             lambda **kw: {"api_key": token, "base_url": "https://x"})
-        assert ssc.dev_gate_open() is False
+        assert ssc.resolve_identity()["nous_admin"] is False
 
     def test_maybe_push_inert_when_gate_closed(self, monkeypatch):
         token = _jwt({"sub": "u"})
@@ -882,7 +882,6 @@ class TestOrgIdentityGate:
                             lambda **kw: {"api_key": token, "base_url": "https://x"})
         with pytest.raises(ssc.SyncInertError):
             ssc.resolve_org_identity()
-        assert ssc.org_sync_available() is False
 
     def test_org_identity_with_role(self, monkeypatch):
         token = _jwt({"sub": "u", "org_id": "org-9", "org_role": "MEMBER"})
@@ -892,7 +891,6 @@ class TestOrgIdentityGate:
         ident = ssc.resolve_org_identity()
         assert ident["org_id"] == "org-9"
         assert ident["org_role"] == "MEMBER"
-        assert ssc.org_sync_available() is True
 
     def test_org_mirror_excluded_from_personal_sync(self, tmp_path, monkeypatch):
         # A skill under _org/<id>/ must never be personal-sync eligible.

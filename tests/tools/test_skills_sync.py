@@ -765,23 +765,22 @@ class TestOptOutToggleAndRemove:
         return bundled
 
     def test_marker_toggle(self, tmp_path):
-        from tools.skills_sync import (
-            set_bundled_skills_opt_out, is_bundled_skills_opt_out,
-        )
+        from tools.skills_sync import set_bundled_skills_opt_out
         home = tmp_path / "home"
         home.mkdir()
+        marker = home / ".no-bundled-skills"
         with patch("tools.skills_sync.HERMES_HOME", home):
-            assert is_bundled_skills_opt_out() is False
+            assert not marker.exists()
             r = set_bundled_skills_opt_out(True)
             assert r["ok"] and r["changed"]
-            assert is_bundled_skills_opt_out() is True
+            assert marker.exists()
             # idempotent
             r2 = set_bundled_skills_opt_out(True)
             assert r2["ok"] and r2["changed"] is False
             # opt back in
             r3 = set_bundled_skills_opt_out(False)
             assert r3["ok"] and r3["changed"]
-            assert is_bundled_skills_opt_out() is False
+            assert not marker.exists()
 
     def test_remove_keeps_user_modified(self, tmp_path):
         from tools.skills_sync import (

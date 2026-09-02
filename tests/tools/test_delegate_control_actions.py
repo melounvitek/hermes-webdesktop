@@ -199,7 +199,7 @@ def test_steer_closed_acceptance_is_refused():
 
 
 def test_stop_interrupts_owned_child(monkeypatch):
-    import tools.delegate_tool as dt
+    import tools.delegate_tool_registry as dt
 
     parent = _StubParent()
     child = _StubChild(parent)
@@ -219,7 +219,7 @@ def test_stop_interrupts_owned_child(monkeypatch):
 
 
 def test_stop_foreign_child_is_refused(monkeypatch):
-    import tools.delegate_tool as dt
+    import tools.delegate_tool_registry as dt
 
     parent = _StubParent()
     foreign = _StubChild(_StubParent())
