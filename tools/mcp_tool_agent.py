@@ -181,15 +181,14 @@ def restore_agent_tool_prefix(agent, saved_names: list) -> bool:
 
     fresh_defs = _agent_tool_defs(agent)
     fresh = {_def_name(t): t for t in fresh_defs}
-    saved_defs = []
-    for name in saved_names:
-        entry_def = fresh.get(name)
-        if entry_def is None:
-            entry = registry.get_entry(name)
-            if entry is None:
-                continue
-            entry_def = {"type": "function", "function": {**entry.schema, "name": entry.name}}
-        saved_defs.append(entry_def)
+
+    def _saved_def(name):
+        if name in fresh:
+            return fresh[name]
+        entry = registry.get_entry(name)
+        return None if entry is None else {"type": "function", "function": {**entry.schema, "name": entry.name}}
+
+    saved_defs = [d for d in map(_saved_def, saved_names) if d is not None]
     registered_names = {entry.name for entry in registry.get_all_entries()}
     merged, merged_names = _merge_preserving_prefix(saved_defs, fresh_defs, registered_names)
     with _agent_tools_lock:
@@ -235,11 +234,15 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
         name_set.add(name)
         return True
 
+    def _schema_getter(attr: str, method: str):
+        owner = getattr(agent, attr, None)
+        getter = getattr(owner, method, None) if owner else None
+        return getter if callable(getter) else None
+
     enabled = getattr(agent, "enabled_toolsets", None)
     try:
-        memory_manager = getattr(agent, "_memory_manager", None)
-        get_mem_schemas = getattr(memory_manager, "get_all_tool_schemas", None) if memory_manager else None
-        if callable(get_mem_schemas):
+        get_mem_schemas = _schema_getter("_memory_manager", "get_all_tool_schemas")
+        if get_mem_schemas is not None:
             # Same toolset gate inject_memory_provider_tools uses.
             from agent.memory_manager import memory_provider_tools_enabled
             if memory_provider_tools_enabled(
@@ -255,14 +258,10 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
     # restricted-toolset platform would re-leak tools the build excluded.
     staged_engine_names: set = set()
     try:
-        compressor = getattr(agent, "context_compressor", None)
-        get_schemas = getattr(compressor, "get_tool_schemas", None) if compressor else None
-        if (enabled is None or "context_engine" in enabled) and callable(get_schemas):
-            for schema in get_schemas():
-                # Claim the routing name only when WE appended the schema.
-                if _add(schema):
-                    staged_engine_names.add(schema["name"])
+        get_schemas = _schema_getter("context_compressor", "get_tool_schemas")
+        if (enabled is None or "context_engine" in enabled) and get_schemas is not None:
+            # Claim the routing name only when WE appended the schema.
+            staged_engine_names.update(s["name"] for s in get_schemas() if _add(s))
     except Exception:
         logger.debug("Context-engine tool re-injection skipped", exc_info=True)
-
     return staged_engine_names
