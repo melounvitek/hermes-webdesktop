@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
-"""
-SQLite State Store for Hermes Agent.
-
-Provides persistent session storage with FTS5 full-text search, replacing
-the per-session JSONL file approach. Stores session metadata, full message
-history, and model configuration for CLI and gateway sessions.
-
-Key design decisions:
-- WAL mode for concurrent readers + one writer (gateway multi-platform)
-- FTS5 virtual table for fast text search across all session messages
-- Compression-triggered session splitting via parent_session_id chains
-- Batch runner and RL trajectories are NOT stored here (separate systems)
-- Session source tagging ('cli', 'telegram', 'discord', etc.) for filtering
+"""SQLite state store for Hermes Agent: session metadata, message history, model
+config, FTS5 search. WAL mode (concurrent readers + one writer); compression
+splits sessions via parent_session_id chains; sessions are source-tagged
+('cli', 'telegram', ...). Batch-runner / RL trajectories live elsewhere.
 """
 
 import asyncio
@@ -36,12 +27,9 @@ from pathlib import Path
 
 from agent.session_activity import ActivityProvenance
 from agent.message_sanitization import _sanitize_surrogates
-# Intrinsic persistence marker stamped on message dicts that are known-durable
-# (#92231). One shared constant with agent.context_compressor (this module
-# already imports agent.* at module level, and context_compressor is a
-# transitive dependency via hermes_state_common). run_agent keeps its own
-# predating copy — hermes_state cannot import run_agent (circular) — guarded
-# by test_marker_constant_in_sync.
+# Known-durable message marker, shared with agent.context_compressor. run_agent
+# keeps its own copy (cannot import hermes_state: circular), guarded by
+# test_marker_constant_in_sync.
 from agent.context_compressor import (  # noqa: F401  (re-exported; tests import it from here)
     _DB_PERSISTED_MARKER as _DB_PERSISTED_MARKER_KEY,
 )
@@ -122,15 +110,9 @@ MAX_SAFE_EXPORT_MESSAGES = 20_000
 
 
 def _configured_transcript_limit(key: str, fallback: int) -> int:
-    """Resolve a transcript safety limit from config at call time.
-
-    Reads ``sessions.<key>`` from config.yaml lazily (avoiding a circular
-    import at module load) and falls back to the module constant when the
-    config subsystem is unavailable (scaffold installs, stripped test
-    environments). A value of 0 disables the guard entirely. No caching:
-    ``load_config_readonly`` is already mtime-cached, and resolving fresh
-    keeps tests that monkeypatch config or the module constants working.
-    """
+    """``sessions.<key>`` from config.yaml (lazy import: circular at load), else
+    *fallback*. 0 disables the guard. Not cached: load_config_readonly is
+    mtime-cached already, and fresh resolution keeps monkeypatching tests working."""
     try:
         from hermes_cli.config import load_config_readonly
 
@@ -189,16 +171,12 @@ def _system_prompt_hash(system_prompt: str) -> str:
 
 
 def _compression_lock_holder_process_is_dead(holder: str) -> bool:
-    """Return True only when a structured lock holder's local PID is gone.
+    """True only when a ``pid=<n>`` lock holder's local PID is provably gone.
 
-    Compression locks are stored in a host-local SQLite database and holder
-    IDs created by ``conversation_compression`` start with ``pid=<n>``. A
-    process killed during gateway shutdown cannot release its lease, so waiting
-    for the full TTL makes every new turn repeatedly attempt compaction. Reclaim
-    only when the kernel proves that PID no longer exists; legacy/unstructured
-    holders, same-process holders, permission errors, and any probe doubt
-    remain protected until normal TTL expiry (conservative: PID reuse must
-    never steal a live lease, and a wrongly-kept lease self-heals via TTL).
+    A process killed mid-compression cannot release its lease and every new
+    turn would re-attempt compaction until TTL expiry. Reclaim only on kernel
+    proof; unstructured/same-process holders and any probe doubt stay protected
+    (PID reuse must never steal a live lease; a wrongly-kept lease self-heals via TTL).
     """
     match = _COMPRESSION_LOCK_HOLDER_PID_RE.search(holder or "")
     if match is None:
@@ -213,16 +191,12 @@ def _compression_lock_holder_process_is_dead(holder: str) -> bool:
         return False
     if psutil is not None:
         try:
-            # psutil is the canonical cross-platform liveness answer
-            # (CONTRIBUTING.md "Critical rules" #1). pid_exists() reports
-            # recycled PIDs as alive — conservative, the TTL still applies.
+            # Canonical cross-platform liveness answer; recycled PIDs read as alive (conservative).
             return not psutil.pid_exists(pid)
         except Exception:
             return False  # any doubt → keep the lease until TTL expiry
-    # Scaffold-phase fallback only (psutil missing), and POSIX-only: stdlib
-    # os.kill(pid, 0) is NOT a no-op probe on Windows (bpo-14484 — sig=0 maps
-    # to CTRL_C_EVENT and can kill the target's console group). Without psutil
-    # a Windows host stays TTL-only; the lease TTL remains the recovery path.
+    # psutil-less fallback is POSIX-only: os.kill(pid, 0) is NOT a no-op probe on
+    # Windows (sig=0 maps to CTRL_C_EVENT and can kill the target's console group).
     if os.name == "nt":
         return False
     try:
@@ -235,25 +209,14 @@ def _compression_lock_holder_process_is_dead(holder: str) -> bool:
 
 
 def _scrub_surrogates(value: Any) -> Any:
-    """Replace lone surrogates when *value* is text; pass anything else through.
-
-    sqlite3 encodes bound ``str`` parameters as UTF-8 and raises
-    ``UnicodeEncodeError`` on lone surrogates (U+D800..U+DFFF), so a single
-    such code point anywhere in a message aborts the whole write. No-op for
-    well-formed text.
-    """
+    """Replace lone surrogates in text (sqlite3 raises UnicodeEncodeError on them,
+    aborting the whole write); pass anything else through."""
     return _sanitize_surrogates(value) if isinstance(value, str) else value
 
 
 def workspace_key(row: Dict[str, Any]) -> Optional[str]:
-    """A session's workspace grouping key: its git repo root when known, else
-    its cwd.
-
-    Branch is deliberately excluded so checking out a new branch doesn't
-    fragment a workspace's session history. Returns None for cwd-less (unbound)
-    sessions. Both fields are already recorded on ``sessions`` — this just picks
-    the coarser identity for grouping/filtering.
-    """
+    """Workspace grouping key: git repo root when known, else cwd, else None.
+    Branch is deliberately excluded so a checkout doesn't fragment history."""
     return (row.get("git_repo_root") or "").strip() or (row.get("cwd") or "").strip() or None
 
 
@@ -261,9 +224,8 @@ def _delegate_from_json(col: str = "model_config") -> str:
     return f"json_extract(COALESCE({col}, '{{}}'), '$._delegate_from')"
 
 
-# Sentinel returned by SessionDB._merge_model_config_json when the session row
-# doesn't exist and on_missing="skip" — distinguishes "no row" from the legal
-# None result ("merged config is empty → store NULL").
+# _merge_model_config_json's "no such row" result — distinct from the legal None
+# ("merged config is empty → store NULL").
 _MODEL_CONFIG_ROW_MISSING = object()
 
 
@@ -279,23 +241,19 @@ def _parse_model_config(raw: Any) -> Dict[str, Any]:
         return dict(raw)
     return {}
 
-# Billing-bucket classes that aren't a routable provider identity on their
-# own — used by session_gateway_runtime's billing_provider fallback and by
-# tui_gateway.server._stored_session_runtime_overrides. A session that
-# persisted only one of these (never ran /model) must fall back to the
-# ambient config default rather than restore a bare bucket. Shared here so
-# both consumers stay in sync (previously duplicated as a set in
-# tui_gateway/server.py).
+# Billing buckets that aren't a routable provider identity. A session that
+# persisted only one of these (never ran /model) falls back to the config
+# default rather than restoring a bare bucket. Shared by session_gateway_runtime
+# and tui_gateway.server so the two consumers cannot drift.
 _BARE_BILLING_PROVIDERS = frozenset({"auto", "custom"})
 
 
 def _cwd_prefix_clause(cwd_prefix: str) -> Tuple[str, List[str]]:
     prefix = cwd_prefix.rstrip("/\\") or cwd_prefix
-    # ``_`` and ``%`` are LIKE wildcards but ordinary characters in a path
-    # (``my_project``), so an unescaped prefix also matches sibling directories.
-    # Escape the needle and pair it with ESCAPE; the literal separator
-    # backslash in the Windows pattern needs escaping for the same reason. The
-    # ``=`` arm is an exact compare and keeps the raw prefix.
+    # ``_``/``%`` are LIKE wildcards but ordinary path characters (``my_project``):
+    # unescaped, a prefix also matches sibling directories. The ``=`` arm is an
+    # exact compare and keeps the raw prefix; the Windows separator backslash
+    # in the LIKE pattern needs escaping too.
     esc = _escape_like(prefix)
     return (
         "(s.cwd = ? OR s.cwd LIKE ? ESCAPE '\\' OR s.cwd LIKE ? ESCAPE '\\')",
@@ -304,15 +262,9 @@ def _cwd_prefix_clause(cwd_prefix: str) -> Tuple[str, List[str]]:
 
 
 def _workspace_key_clause(key: str) -> Tuple[str, List[str]]:
-    """Match sessions whose ``workspace_key(row)`` equals ``key``.
-
-    Mirrors :func:`workspace_key`: a session belongs to workspace ``key``
-    when its recorded ``git_repo_root`` equals ``key``, or — for rows that
-    predate per-session git metadata — when its ``cwd`` is at or under
-    ``key`` (so a session started in ``repo/src`` still groups with ``repo``).
-    Used by ``hermes -c``/``--resume`` to continue the most recent session in
-    the *current* workspace rather than the global MRU.
-    """
+    """WHERE for ``workspace_key(row) == key``: git_repo_root equals ``key``, or
+    (rows predating per-session git metadata) cwd is at/under ``key``. Used by
+    ``hermes -c``/``--resume`` to pick the current workspace's MRU, not the global one."""
     prefix = key.rstrip("/\\") or key
     cwd_clause, cwd_params = _cwd_prefix_clause(prefix)
     return (
@@ -386,22 +338,15 @@ def _session_filter_where(
 
 
 def _collect_delegate_child_ids(conn, parent_ids: List[str]) -> List[str]:
-    """Delegate-subagent ids to cascade-delete with *parent_ids*.
-
-    Only rows carrying the ``_delegate_from`` marker (set at creation, and
-    backfilled by the v16 migration) — generic untagged children keep the
-    orphan-don't-delete contract. Walks marker chains recursively so an
-    orchestrator subagent's own delegate children go too (FK safety).
-    """
+    """Delegate-subagent ids (``_delegate_from`` marker) to cascade-delete with
+    *parent_ids*; untagged children keep the orphan-don't-delete contract.
+    Walks marker chains recursively so an orchestrator's own delegates go too."""
     df = _delegate_from_json()
     seeds = {sid for sid in parent_ids if sid}
-    # Seed the visited set with the parents themselves. A delegation marker
-    # chain can loop back onto a parent — a cycle, or a parent that is also
-    # another parent's delegate child when several ids are deleted at once —
-    # and without this guard that parent would be collected as one of its own
-    # descendants and cascade-deleted along with all of its messages. Callers
-    # delete the parents separately, so parents must never appear in the
-    # returned child set. (#49148)
+    # Seed visited with the parents: a marker chain can loop back onto a parent
+    # (cycle, or a parent that is another parent's delegate child in one batch)
+    # and it would be collected as its own descendant and cascade-deleted.
+    # Callers delete parents separately; never return them as children.
     found: set[str] = set(seeds)
     frontier = list(seeds)
     while frontier:
@@ -413,7 +358,6 @@ def _collect_delegate_child_ids(conn, parent_ids: List[str]) -> List[str]:
         )
         frontier = [row["id"] for row in cursor.fetchall() if row["id"] not in found]
         found.update(frontier)
-    # Return only the discovered children — never the parents themselves.
     return [sid for sid in found if sid not in seeds]
 
 
@@ -435,84 +379,52 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-# How long SessionDB stops attempting read-only opens after one fails, before
-# probing again. Long enough that a genuinely unreadable file isn't retried per
-# query; short enough that transient fd pressure doesn't strand the read pool.
+# Back off from read-only opens for this long after one fails: long enough
+# that an unreadable file isn't retried per query, short enough that transient
+# fd pressure doesn't strand the read pool.
 _READ_OPEN_RETRY_SECONDS = 60.0
 
-# Transient SQLITE_IOERR retry budget for READ-ONLY opens (#100436). A WAL
-# database being actively written (checkpoint, WAL reset/truncate, frame
-# flush) can surface "disk I/O error" to a concurrent ``mode=ro`` reader in
-# a millisecond-wide transition window: the read-only connection cannot
-# perform the WAL recovery a read through a stale or mid-update -shm file
-# needs, because recovery requires writing the -shm index, which mode=ro
-# refuses. The window closes on its own (the writer finishes the transition),
-# so a bounded number of short retries makes the open succeed instead of
-# 500-ing the whole /api/sessions poll (or any other read-only opener).
-# Deliberately NOT attempted on writable opens: a writer owns the
-# transition, so an IOERR there means a real storage/fd problem.
+# Transient SQLITE_IOERR retry budget for READ-ONLY opens. A WAL writer's
+# checkpoint / reset / frame flush can surface "disk I/O error" to a concurrent
+# mode=ro reader for a millisecond-wide window (ro cannot do the -shm recovery
+# the read needs). NOT attempted on writable opens: a writer owns the
+# transition, so an IOERR there is a real storage/fd problem.
 _READ_ONLY_IOERR_RETRY_ATTEMPTS = 3
 _READ_ONLY_IOERR_RETRY_BACKOFF_S = 0.05
 
-# Hard ceiling on read-only connections ALIVE at once against one database
-# FILE — pooled idle ones and checked-out ones together, summed over every
-# SessionDB in this process that points at that file. See _PathReadBudget.
-#
-# Deliberately one constant for both the pool's maxsize and the permit count,
-# because bounding only the pool bounds the wrong thing. A LifoQueue caps how
-# many connections are *returned*; it says nothing about how many are *open*.
-# With an open-on-miss checkout, N readers arriving on an empty pool all miss,
-# all open, and peak at N — the surplus is closed on release, so nothing
-# accumulates forever, but EMFILE is a peak-instant condition and the burst
-# that empties the pool is exactly the burst that exhausts the fd table.
-#
-# So a connection holds a permit for its whole lifetime: acquired in
-# _get_read_conn() before the open, released in _close_read_conn() after the
-# close. Once permits are gone the read path degrades to the locked writer
-# connection instead of opening more descriptors — slower under load, which is
-# the correct trade against a process-wide wedge the supervisor cannot see.
+# Ceiling on read-only connections ALIVE at once against one database FILE
+# (idle pooled + checked out, summed over every SessionDB on that file). One
+# constant for both the pool maxsize and the permit count: a LifoQueue only caps
+# how many are *returned*; with open-on-miss, N readers hitting an empty pool
+# all open and peak at N, and EMFILE is a peak-instant condition. So a
+# connection holds a permit for its whole lifetime (_get_read_conn ->
+# _close_read_conn); once permits are gone reads degrade to the locked writer
+# connection — slower, but not a process-wide wedge the supervisor can't see.
 _READ_POOL_MAX = 8
 
-# Hard ceiling on read-only connections ALIVE at once in this PROCESS, across
-# every state.db it has open.
-#
-# _READ_POOL_MAX bounds one file. A multiplexed gateway serves N profiles from
-# one process and each profile has its OWN state.db, so a per-file ceiling
-# still lets the descriptor cost grow with the profile count — the same shape
-# as the per-instance bug, one level out (#98573).
-#
-# Three profiles' worth. Past it, readers on the (N+1)th file degrade to their
-# writer connection instead of opening descriptors, which is the same trade
-# _READ_POOL_MAX makes and for the same reason: a slow read path is
-# recoverable, a process-wide EMFILE is not.
+# Ceiling on read-only connections ALIVE in this PROCESS across every state.db
+# (a multiplexed gateway opens one per profile, so a per-file cap still scales
+# with profile count). Three profiles' worth; past it readers degrade to the
+# writer connection for the same reason as _READ_POOL_MAX.
 _READ_POOL_PROCESS_MAX = 24
 
-# Warn when one process accumulates more than this many SessionDB handles on a
-# single file. Not a limit — writer connections cannot be rationed the way read
-# connections can — a diagnostic for the duplicate-handle class of bug.
+# Warn past this many SessionDB handles on one file in one process. Diagnostic
+# only: writer connections cannot be rationed the way read connections can.
 _HANDLES_PER_PATH_WARN = 4
 
-# Descriptors kept in reserve for everything that is NOT this module: httpx
-# sockets, terminal subprocess pipes, log files.
-#
-# The ceilings above bound Hermes's SQLite descriptors, which is only ever part
-# of the fd table. The #98573 report is exactly that case: ~20 state.db
-# descriptors were not the whole 256, they were the share that pushed httpx and
-# terminal pipes over, and the EMFILE surfaced in tools/terminal_tool.py rather
-# than here. So the read pool also yields when the PROCESS is close to its
-# limit, whatever is consuming it.
+# Descriptors kept in reserve for everything that is NOT this module (httpx
+# sockets, terminal pipes, log files): SQLite's share is only part of the fd
+# table, and the EMFILE it pushes over surfaces elsewhere (terminal_tool).
 _FD_HEADROOM_RESERVE = 64
 
-# The fd count is a directory listing; cache it briefly so a burst of reads
-# does not turn one syscall per query. Stale by at most this long, which can
-# let through at most the ceiling's worth of opens — already bounded above.
+# The fd count is a directory listing; cache it briefly so a read burst isn't a
+# syscall per query. Staleness lets through at most the ceiling's worth of opens.
 _FD_USAGE_CACHE_SECONDS = 0.25
 
 _process_read_permits = threading.BoundedSemaphore(_READ_POOL_PROCESS_MAX)
 
-# Count of read opens refused because the process was low on descriptors. The
-# only externally visible signal that the guard is firing; guarded by
-# _read_budgets_lock.
+# Read opens refused for low descriptor headroom — the only visible signal the
+# guard fires. Guarded by _read_budgets_lock.
 _read_open_denied_fd_headroom = 0
 
 _fd_usage_lock = threading.Lock()
@@ -520,21 +432,15 @@ _fd_usage_cache: "tuple[float, Optional[int]]" = (0.0, None)
 
 
 def _open_fd_count() -> Optional[int]:
-    """Descriptors open in THIS process, or None when it cannot be measured.
-
-    ``/proc/self/fd`` on Linux, ``/dev/fd`` on macOS and the BSDs. Windows has
-    neither, and no RLIMIT_NOFILE to compare against, so the guard is inert
-    there — which is correct: the CRT limit is thousands of handles, not 256.
-    """
+    """Open descriptors in THIS process; None when unmeasurable (Windows: no fd
+    dir and no RLIMIT_NOFILE, correctly inert — its limit is thousands); -1 when
+    the probe itself hit EMFILE/ENFILE (that IS the answer: no headroom)."""
     for fd_dir in ("/proc/self/fd", "/dev/fd"):
         try:
             return len(os.listdir(fd_dir))
         except OSError as exc:
             if exc.errno in (errno.EMFILE, errno.ENFILE):
-                # The probe itself could not get a descriptor. That IS the
-                # answer: there is no headroom.
                 return -1
-            continue
     return None
 
 
@@ -554,14 +460,10 @@ def _fd_soft_limit() -> Optional[int]:
 
 
 def _fd_headroom_ok() -> bool:
-    """Whether the process can spare a descriptor for a new read connection.
-
-    Fails OPEN when the platform cannot be measured (Windows, no fd directory,
-    unlimited RLIMIT_NOFILE): an unmeasurable platform is not a tight one, and
-    refusing every read there would be a self-inflicted convoy. Fails CLOSED
-    only on evidence — a measured shortfall, or a probe that could not get a
-    descriptor of its own.
-    """
+    """Can the process spare a descriptor for a new read connection?
+    Fails OPEN when unmeasurable (refusing every read there would be a
+    self-inflicted convoy); fails CLOSED only on evidence (measured shortfall,
+    or a probe that couldn't get a descriptor itself)."""
     soft = _fd_soft_limit()
     if soft is None:
         return True
@@ -582,47 +484,29 @@ def _fd_headroom_ok() -> bool:
 
 
 def _reclaim_idle_read_conn_anywhere() -> bool:
-    """Close one idle read connection on ANY path in this process.
-
-    The process ceiling is shared across files, so the connection that has to
-    go to make room may belong to a different database entirely — a profile
-    that has been quiet for an hour should not hold descriptors the profile
-    being served right now needs.
-    """
+    """Close one idle read connection on ANY path: the process ceiling is shared
+    across files, so a quiet profile must not hold descriptors a busy one needs."""
     with _read_budgets_lock:
         budgets = list(_read_budgets.values())
     return any(budget.reclaim_idle() for budget in budgets)
 
 
 class _PathReadBudget:
-    """The read-connection permits for ONE database file, shared process-wide.
+    """Read-connection permits for ONE database file, shared process-wide.
 
-    ``_READ_POOL_MAX`` used to be enforced by a ``BoundedSemaphore`` owned by
-    each SessionDB, which bounded the wrong noun: the descriptors are spent on
-    a *file*, so N SessionDB objects on one state.db each got their own
-    allowance and peak scaled as ``N x (1 + _READ_POOL_MAX)``.  A long-lived
-    gateway holds at least two (``SessionStore`` and ``GatewayRunner`` open
-    independent handles per profile path) and the count grows with the profile
-    count, which is how a healthy process walked into EMFILE — #98573.
-
-    Holding the permits here instead makes the ceiling mean what its docstring
-    always claimed: read connections ALIVE at once against this path.
-
-    One consequence has to be handled rather than documented away.  A pooled
-    idle connection keeps its permit, so the first instance to warm up would
-    otherwise pin all eight and every later instance — a cron job's transient
-    handle, a second profile's store — would be permanently demoted to the
-    locked writer connection.  That is why a permit miss first reclaims an
-    IDLE connection from a peer instance on the same path: idle descriptors
-    are transferable, in-use ones are not.
+    Per-instance semaphores bounded the wrong noun: descriptors are spent on a
+    *file*, so N SessionDB objects on one state.db peaked at N x (1 + MAX) —
+    a gateway holds at least two per profile path — and walked into EMFILE.
+    A pooled idle connection keeps its permit, so the first instance to warm up
+    would pin all eight and demote every later instance to the writer lock;
+    hence a permit miss first reclaims an IDLE connection from a peer on the
+    same path (idle descriptors are transferable, in-use ones are not).
     """
 
     def __init__(self) -> None:
         self.permits = threading.BoundedSemaphore(_READ_POOL_MAX)
         self._lock = threading.Lock()
-        # Weak so a SessionDB that is dropped without close() cannot pin its
-        # peers' budget object; __del__ still runs close() and returns the
-        # permits.
+        # Weak: a SessionDB dropped without close() must not pin peers' budget.
         self._members: "weakref.WeakSet[SessionDB]" = weakref.WeakSet()
         self._duplicate_handles_warned = False
 
@@ -634,13 +518,9 @@ class _PathReadBudget:
             if warn:
                 self._duplicate_handles_warned = True
         if warn:
-            # The read connections are capped; the WRITER connection each
-            # handle holds is not, and cannot be — a SessionDB without one
-            # cannot write. The only real bound on writers is not opening
-            # redundant handles in the first place (which is what
-            # GatewayRunner borrowing SessionStore's handle does, #98573), so
-            # the next duplicate should be visible before it becomes an
-            # incident rather than inferred from an lsof after one.
+            # Writer connections cannot be capped (a SessionDB without one cannot
+            # write); the only bound is not opening redundant handles. Make the
+            # next duplicate visible before it becomes an incident.
             logger.warning(
                 "%d live SessionDB handles on %s in this process; each holds "
                 "its own writer connection (read connections are capped at %d "
@@ -652,13 +532,9 @@ class _PathReadBudget:
             )
 
     def acquire(self, requester: "SessionDB") -> bool:
-        """Take a permit for a new read connection, or refuse.
-
-        Three gates, broadest first: the process's descriptor headroom, the
-        process-wide read ceiling, then this file's ceiling. Refusing means
-        the caller serves the read from the locked writer connection — slower,
-        never an error.
-        """
+        """Take a permit for a new read connection, or refuse (caller then reads
+        via the locked writer connection — slower, never an error). Gates,
+        broadest first: fd headroom, process-wide ceiling, this file's ceiling."""
         if not _fd_headroom_ok():
             global _read_open_denied_fd_headroom
             with _read_budgets_lock:
@@ -689,21 +565,15 @@ class _PathReadBudget:
         )
 
     def reclaim_idle(self, exclude: "Optional[SessionDB]" = None) -> bool:
-        """Close one idle pooled connection held by a member. True if one went.
-
-        Closing it runs release(), which returns both the path permit and the
-        process permit, so this is the single reclaim primitive both ceilings
-        use.
-        """
+        """Close one idle pooled connection held by a member; True if one went.
+        Its release() returns both permits, so both ceilings reclaim through here."""
         with self._lock:
             members = [db for db in self._members if db is not exclude]
         return any(member._evict_one_idle_read_conn() for member in members)
 
 
-# canonical db path -> the permits for that file. Weak values: the budget
-# lives exactly as long as some SessionDB on that path holds a strong
-# reference to it, so a test that churns tmp_path databases does not grow
-# this map for the life of the process.
+# canonical db path -> permits for that file. Weak values: the budget lives as
+# long as some SessionDB on the path holds it, so tmp_path churn can't grow this.
 _read_budgets: "weakref.WeakValueDictionary[str, _PathReadBudget]" = (weakref.WeakValueDictionary())
 _read_budgets_lock = threading.Lock()
 
@@ -726,26 +596,16 @@ def _read_budget_for(db_path) -> _PathReadBudget:
         return budget
 
 
-# Import-time snapshot used by _default_db_path() to detect a deliberately
+# Import-time snapshot so _default_db_path() can detect a deliberately
 # re-pointed DEFAULT_DB_PATH (tests monkeypatch the constant directly).
 _IMPORT_DEFAULT_DB_PATH = DEFAULT_DB_PATH
 
 
 def _default_db_path() -> Path:
-    """Resolve the default state DB path at call time.
-
-    ``DEFAULT_DB_PATH`` is computed when this module is first imported, which
-    freezes the developer's real ``~/.hermes`` even when a test fixture later
-    redirects ``HERMES_HOME`` — importing this module during collection was
-    enough to point every default ``SessionDB()`` at the real state.db.
-
-    Precedence:
-
-    1. A deliberately re-pointed ``DEFAULT_DB_PATH`` (differs from the
-       import-time snapshot — the established test escape hatch) wins.
-    2. Otherwise resolve ``get_hermes_home()`` fresh so a runtime
-       ``HERMES_HOME`` redirect takes effect regardless of import order.
-    """
+    """Default state DB path at CALL time. A re-pointed ``DEFAULT_DB_PATH`` (the
+    test escape hatch) wins; otherwise ``get_hermes_home()`` is resolved fresh so
+    a runtime HERMES_HOME redirect works regardless of import order (the frozen
+    import-time value pointed every default SessionDB() at the real state.db)."""
     if DEFAULT_DB_PATH != _IMPORT_DEFAULT_DB_PATH:
         return DEFAULT_DB_PATH
     return get_hermes_home() / "state.db"
@@ -754,54 +614,38 @@ def _default_db_path() -> Path:
 # ---------------------------------------------------------------------------
 # Live-DB test-isolation guard
 # ---------------------------------------------------------------------------
-# Forensic evidence (Aug 2026, live developer machine): the production
-# ~/.hermes/state.db accumulated pytest fixture rows — sessions with
-# chat_id='chat-1'/'123'/'wx-chat' and gateway_routing scopes literally under
-# /tmp/pytest-of-*/ — and a pytest-spawned process flipped the journal mode
-# out from under the WAL-mode gateway writer, destroying committed
-# transcripts ("Persisted transcript lagged live cached history ... possible
-# FTS write corruption").  The hermetic conftest redirects HERMES_HOME per
-# test, but any escape (a session-scoped fixture running before the autouse
-# fixture, a subprocess child launched without HERMES_HOME, a stale worktree
-# without the re-pin, or a developer shell that exports HERMES_HOME to the
-# real home so the conftest session sandbox is skipped) silently fell
-# through to the real database.
+# Forensic evidence on a live developer machine: pytest fixture rows landed in
+# the production ~/.hermes/state.db and a pytest-spawned process flipped the
+# journal mode under the WAL-mode gateway writer, destroying committed
+# transcripts. The hermetic conftest redirects HERMES_HOME per test, but any
+# escape (session-scoped fixture before the autouse one, a subprocess child
+# without HERMES_HOME, a stale worktree, a shell exporting HERMES_HOME to the
+# real home) silently fell through to the real database.
 #
-# This guard is the single choke point: EVERY ``SessionDB`` construction
-# resolves its path here, so under pytest a resolution that lands on a
-# production state.db fails hard instead of corrupting live data.  It is
-# env-based (``PYTEST_CURRENT_TEST`` / ``PYTEST_VERSION`` are set by pytest
-# and inherited by subprocess children), so it also protects children that
-# never import the test conftest.
+# This is the single choke point: EVERY SessionDB construction resolves its
+# path here, so under pytest a production state.db fails hard. Env-based
+# (PYTEST_CURRENT_TEST / PYTEST_VERSION inherit into children), so it also
+# protects children that never import the conftest.
 
-#: Escape hatch for the rare legitimate case (a test that genuinely needs
-#: the real DB).  The in-tree conftest sets this for tests marked
-#: ``@pytest.mark.live_system_guard_bypass``; scripts may set it explicitly.
+#: Escape hatch for tests that genuinely need the real DB (conftest sets it for
+#: ``@pytest.mark.live_system_guard_bypass``); scripts may set it explicitly.
 _STATE_DB_GUARD_BYPASS = False
 
-#: Env-carried twin of ``_STATE_DB_GUARD_BYPASS``.  A module global cannot
-#: cross a process boundary, so a test that deliberately points a *child* at
-#: the live DB has no way to opt out once ancestry arms the guard there.
-#: Export this in the child's env instead.
+#: Env twin of ``_STATE_DB_GUARD_BYPASS`` for child processes (a module global
+#: cannot cross a process boundary, and ancestry arms the guard there).
 _STATE_DB_GUARD_BYPASS_ENV = "HERMES_STATE_DB_GUARD_BYPASS"
 
-#: Additional production roots to refuse (beyond the platform default
-#: ``~/.hermes``).  The test conftest injects the pre-sandbox production
-#: root here so custom-``HERMES_HOME`` deployments are covered too.
+#: Extra production roots to refuse; conftest injects the pre-sandbox root so
+#: custom-HERMES_HOME deployments are covered too.
 _STATE_DB_GUARD_EXTRA_DENY_ROOTS: Tuple[Path, ...] = ()
 
 
 def _real_platform_state_root() -> Optional[Path]:
-    """Resolve the REAL platform-default Hermes root for the guard.
-
-    Deliberately avoids ``Path.home()`` / ``hermes_constants``: tests
-    routinely monkeypatch ``Path.home`` to a tempdir, and ``hermes_state``
-    is often imported lazily *while* such a patch is active — resolving
-    through the patched callable would misidentify the test's own hermetic
-    home as "production" (false positive) or, worse, miss the real one
-    (false negative).  ``os.path.expanduser`` reads the HOME environment
-    variable / passwd entry, which the hermetic conftest never rewrites.
-    """
+    """The REAL platform-default Hermes root. Avoids ``Path.home()`` /
+    ``hermes_constants``: tests monkeypatch Path.home to a tempdir while this
+    module is imported lazily, which would misidentify the hermetic home as
+    production or miss the real one. ``expanduser`` reads HOME/passwd, which the
+    conftest never rewrites."""
     try:
         if sys.platform == "win32":
             base = os.environ.get("LOCALAPPDATA", "").strip()
@@ -817,15 +661,10 @@ def _real_platform_state_root() -> Optional[Path]:
         return None
 
 
-#: Env marker exported by the hermetic test conftest at the same moment it
-#: redirects ``HERMES_HOME`` to the per-session tmp isolation root.  Its
-#: value is that isolation root.  Unlike ``PYTEST_*`` (owned by pytest, and
-#: routinely scrubbed by tests that rebuild a child environment), this marker
-#: is OURS: it declares "this process tree is running under Hermes test
-#: isolation", and it inherits into subprocess children by default — so a
-#: child that received the patched ``HERMES_HOME`` also received the marker,
-#: and a child that resolves a production DB while carrying it is, by
-#: definition, an isolation escape (#82770).
+#: Exported by the hermetic conftest alongside the HERMES_HOME redirect (value:
+#: the isolation root). Unlike PYTEST_* (scrubbed by tests that rebuild a child
+#: env) it is OURS and inherits by default, so a child carrying it that resolves
+#: a production DB is by definition an isolation escape.
 _TEST_ISOLATION_MARKER_ENV = "HERMES_TEST_ISOLATION"
 
 
@@ -838,24 +677,18 @@ def _running_under_pytest() -> bool:
     )
 
 
-#: Names that identify a pytest launcher in a process command line.  Matched
-#: against the *basename* of each argv token so ``/tmp/pytest-of-dev/...``
-#: paths — which do show up in real argv — cannot false-positive.
+#: pytest launcher names, matched against each argv token's *basename* so
+#: ``/tmp/pytest-of-dev/...`` paths cannot false-positive.
 _PYTEST_LAUNCHER_NAMES = frozenset({"pytest", "py.test", "pytest.exe", "py.test.exe"})
 
-#: Memoised ancestry answer.  The process tree above us does not change in a
-#: way that matters here, and the walk must not cost anything on the hot path.
+#: Memoised ancestry answer: the tree above us doesn't change; keep the hot path free.
 _PYTEST_ANCESTOR: Optional[bool] = None
 
 
 def _process_looks_like_pytest(proc: Any) -> bool:
-    """True when *proc*'s command line is a pytest invocation.
-
-    Covers both ``pytest ...`` (launcher on argv[0]) and ``python -m pytest``
-    (launcher as a bare ``pytest`` token).  A process whose command line we
-    cannot read is treated as "not pytest": guessing the other way would
-    refuse production opens for unrelated reasons.
-    """
+    """True when *proc*'s command line is a pytest invocation (``pytest ...`` or
+    ``python -m pytest``). Unreadable cmdline => not pytest: guessing the other
+    way would refuse production opens for unrelated reasons."""
     try:
         cmdline = proc.cmdline() or []
     except Exception:
@@ -874,18 +707,10 @@ def _process_looks_like_pytest(proc: Any) -> bool:
 
 
 def _has_pytest_ancestor() -> bool:
-    """True when some ancestor process of this one is a pytest run.
-
-    ``_running_under_pytest`` reads ``PYTEST_*`` env vars, which a child
-    spawned with a rebuilt environment loses at the same moment it loses the
-    ``HERMES_HOME`` redirect: that child aims at the production DB *and*
-    disarms the guard in one step (#82770).  Ancestry is the one test-context
-    signal that survives an env rebuild, so it backs the env check up.
-
-    Fails open (``False``) when ``psutil`` is unavailable or the walk errors —
-    that restores the previous env-only behaviour rather than blocking real
-    user runs on a psutil hiccup.
-    """
+    """True when an ancestor process is a pytest run. A child spawned with a
+    rebuilt env loses PYTEST_* and the HERMES_HOME redirect together — aiming at
+    production AND disarming the guard in one step; ancestry survives that.
+    Fails open without psutil / on walk errors (never block real user runs)."""
     global _PYTEST_ANCESTOR
     if _PYTEST_ANCESTOR is not None:
         return _PYTEST_ANCESTOR
@@ -900,13 +725,8 @@ def _has_pytest_ancestor() -> bool:
 
 
 def _in_test_context() -> bool:
-    """True when this process is a test run, by environment or by ancestry.
-
-    Order matters for cost: the env probe is two dict lookups and covers the
-    common in-process case, so the ancestry walk only runs for processes the
-    environment claims are ordinary user runs — and its answer is memoised,
-    so a real ``hermes`` invocation pays for at most one walk.
-    """
+    """Test run by environment or ancestry. Env first (two dict lookups); the
+    memoised ancestry walk runs at most once per real ``hermes`` invocation."""
     return _running_under_pytest() or _has_pytest_ancestor()
 
 
@@ -924,14 +744,9 @@ def _production_state_roots() -> List[Path]:
 
 
 def _is_production_state_db(resolved: Path, root: Path) -> bool:
-    """True when *resolved* is a DB file of the real Hermes home *root*.
-
-    Matches files directly in the root (``<root>/state.db``) and profile
-    homes (``<root>/profiles/<name>/state.db``).  Deliberately does NOT
-    match deeper scratch paths (e.g. repo worktrees that happen to live
-    under ``~/.hermes/hermes-agent/...``) so hermetic tests using unusual
-    tempdirs cannot false-positive.
-    """
+    """*resolved* is ``<root>/state.db`` or ``<root>/profiles/<name>/state.db``.
+    Deeper scratch paths (repo worktrees under ~/.hermes/hermes-agent/...) are
+    deliberately NOT matched so hermetic tests cannot false-positive."""
     if resolved.parent == root:
         return True
     try:
@@ -942,17 +757,9 @@ def _is_production_state_db(resolved: Path, root: Path) -> bool:
 
 
 def _ensure_test_isolation(db_path: Path) -> None:
-    """Fail hard when a pytest-context process resolves a production DB.
-
-    Raises ``RuntimeError`` before any connection, mkdir, journal-mode
-    pragma, or byte probe can touch the live database.  No-op outside
-    pytest and for hermetic (tmp ``HERMES_HOME``) paths.
-
-    "pytest context" means environment *or* process ancestry — see
-    :func:`_in_test_context`.  Env alone is not enough: a child spawned with
-    a rebuilt environment loses ``PYTEST_*`` and ``HERMES_HOME`` together,
-    which is precisely the state in which it writes to production (#82770).
-    """
+    """Raise RuntimeError before any connection/mkdir/pragma/byte probe when a
+    pytest-context process (env OR ancestry, see :func:`_in_test_context`)
+    resolves a production DB. No-op outside pytest and for hermetic paths."""
     if _STATE_DB_GUARD_BYPASS or os.environ.get(_STATE_DB_GUARD_BYPASS_ENV):
         return
     if not _in_test_context():
@@ -976,47 +783,29 @@ def _ensure_test_isolation(db_path: Path) -> None:
             )
 
 
-# Last SessionDB() init error, per-process.  Surfaced in /resume and
-# related slash-command error strings so users know WHY the DB is
-# unavailable instead of getting a bare "Session database not available."
-# Only SessionDB.__init__ writes to this; kanban_db.connect() failures
-# do not update it (by design — kanban failures are reported via their
-# own caller's error handling, not via /resume-style slash commands).
+# Last SessionDB() init error, per-process; surfaced by /resume-style slash
+# commands so users know WHY. Only SessionDB.__init__ writes it (kanban_db
+# failures are reported via their own callers, by design).
 _last_init_error: Optional[str] = None
 _last_init_error_lock = threading.Lock()
 
 
 def _set_last_init_error(msg: Optional[str]) -> None:
-    """Record (or clear) the most recent state.db init failure.
-
-    Thread-safe via _last_init_error_lock.  Callers pass a message to
-    record a failure or None to clear.  SessionDB.__init__ only calls
-    this to SET on failure — it deliberately does NOT clear on success,
-    because in a multi-threaded caller (e.g. gateway / web_server per-
-    request SessionDB() instantiation), a concurrent successful open
-    racing past a different thread's failure would erase the cause
-    string that thread's /resume handler is about to format.  Explicit
-    clears (e.g. test fixtures) are still supported by passing None.
-    """
+    """Record (or clear with None) the most recent state.db init failure.
+    __init__ only SETs on failure and never clears on success: a concurrent
+    successful open would erase the cause another thread's /resume is about to format."""
     global _last_init_error
     with _last_init_error_lock:
         _last_init_error = msg
 
 
 def get_last_init_error() -> Optional[str]:
-    """Return the most recent state.db init failure, if any.
-
-    Slash-command handlers (``/resume``, ``/title``, ``/history``, ``/branch``)
-    call this to surface the underlying cause in their error messages when
-    ``_session_db is None``.  Returns ``None`` if SessionDB initialized
-    successfully (or hasn't been attempted).
-    """
+    """Most recent state.db init failure (None if none/never attempted)."""
     return _last_init_error
 
 
-# Distinctive opening shared by both background-review harness prompts
-# (_SKILL_REVIEW_PROMPT and _MEMORY_REVIEW_PROMPT in agent/background_review.py).
-# Matched case-sensitively against the leading content of a user/system message.
+# Openings of the background-review harness prompts (agent/background_review.py),
+# matched case-sensitively against leading user/system content.
 _REVIEW_HARNESS_PREFIXES = (
     "Review the conversation above and update the skill library",
     "Review the conversation above and consider saving to memory",
@@ -1024,13 +813,8 @@ _REVIEW_HARNESS_PREFIXES = (
 
 
 def _is_background_review_harness_message(msg: Dict[str, Any]) -> bool:
-    """True when ``msg`` is a persisted background-review harness prompt.
-
-    These are user/system turns the forked skill/memory review agent wrote into
-    a real session in older builds (before the ``_persist_disabled`` isolation
-    fix). They instruct the agent to act as the curator under a hard tool
-    restriction, so replaying them as live history hijacks the session.
-    """
+    """Persisted background-review harness prompt (older builds wrote the forked
+    curator's turns into real sessions; replaying them hijacks the session)."""
     if not isinstance(msg, dict) or msg.get("role") not in {"user", "system"}:
         return False
     content = msg.get("content")
@@ -1038,13 +822,8 @@ def _is_background_review_harness_message(msg: Dict[str, Any]) -> bool:
 
 
 def _strip_background_review_harness(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Drop background-review harness messages and the curator-mode assistant
-    reply that immediately followed each one.
-
-    Walk the list once; when a harness user/system message is found, skip it and
-    also skip the next message if it is the assistant turn that answered it.
-    Everything else passes through untouched and in order.
-    """
+    """Drop harness messages and the curator-mode assistant reply that
+    immediately followed each; everything else passes through in order."""
     if not messages:
         return messages
     out: List[Dict[str, Any]] = []
@@ -1066,15 +845,9 @@ _STALE_TOOL_CALL_MARKER_RE = re.compile(r"^\[[A-Za-z_][A-Za-z0-9_.-]*\]$")
 
 
 def _is_stale_tool_call_marker_message(msg: Dict[str, Any]) -> bool:
-    """True when ``msg`` is a persisted assistant turn whose content is a bare
-    bracketed marker (e.g. ``[memory]``) left over from a tool-call turn.
-
-    Before the #78148 fix in ``agent.conversation_loop``, a local tool-call
-    template could emit a bare marker as assistant content alongside a real
-    tool call. The loop cached that marker as a fallback and later replayed
-    it as the "final response", persisting it into the session. Sessions
-    written before the fix can still carry these rows.
-    """
+    """Assistant tool-call turn whose content is a bare ``[marker]`` — an older
+    conversation_loop cached a local template's marker and persisted it as the
+    "final response"; sessions written before the fix still carry these rows."""
     if not isinstance(msg, dict) or msg.get("role") != "assistant" or not msg.get("tool_calls"):
         return False
     content = msg.get("content")
@@ -1082,15 +855,9 @@ def _is_stale_tool_call_marker_message(msg: Dict[str, Any]) -> bool:
 
 
 def _strip_stale_tool_call_markers(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Clear bare protocol-marker content persisted before the #78148 fix.
-
-    Replaying "[memory]" as if the model had actually answered teaches the
-    model, by example, to keep emitting the same marker in later turns — the
-    exact symptom the issue reported. Only the stray ``content`` field is
-    blanked; the tool call and its result are left untouched so provider
-    tool_call/tool_result pairing stays intact. Sessions with no affected
-    rows pass through unchanged.
-    """
+    """Blank stale ``[marker]`` assistant content: replaying it teaches the model
+    to keep emitting the marker. Only ``content`` is blanked; tool_call/result
+    pairing stays intact."""
     repaired = 0
     for msg in filter(_is_stale_tool_call_marker_message, messages):
         msg["content"] = ""
@@ -1104,19 +871,8 @@ def _strip_stale_tool_call_markers(messages: List[Dict[str, Any]]) -> List[Dict[
 
 
 def format_session_db_unavailable(prefix: str = "Session database not available") -> str:
-    """Format a user-facing 'session DB unavailable' message with cause.
-
-    When ``SessionDB()`` init fails, callers set ``_session_db = None`` and
-    several slash commands (/resume, /title, /history, /branch) previously
-    responded with a bare ``"Session database not available."`` — no
-    indication of WHY.  This helper includes the captured cause (typically
-    ``"locking protocol"`` from NFS/SMB) and points users at the known
-    culprit so they can fix it themselves.
-
-    Example output:
-        Session database not available: locking protocol (state.db may be
-        on NFS/SMB — see https://www.sqlite.org/wal.html).
-    """
+    """User-facing "session DB unavailable" message with the captured init cause
+    (e.g. "locking protocol" from NFS/SMB, with a WAL-docs hint)."""
     cause = get_last_init_error()
     if not cause:
         return f"{prefix}."
@@ -1129,55 +885,40 @@ def format_session_db_unavailable(prefix: str = "Session database not available"
 # ---------------------------------------------------------------------------
 # Malformed-schema recovery
 # ---------------------------------------------------------------------------
-# A distinct, nastier failure class than a malformed FTS *inverted index*:
-# the ``sqlite_master`` schema table itself becomes inconsistent — most
-# commonly a DUPLICATE object definition, e.g. two ``CREATE VIRTUAL TABLE
-# messages_fts`` rows.  SQLite parses the entire schema while preparing the
-# FIRST statement on a connection, so on this class *every* statement raises
-# before it runs — including ``PRAGMA journal_mode`` (which is why this trips
-# in ``apply_wal_with_fallback`` during ``SessionDB.__init__``, long before
-# ``_init_schema`` is reached) and even ``PRAGMA integrity_check`` and a plain
-# ``DROP TABLE``.  The only operations that still work are
-# ``PRAGMA writable_schema=ON`` plus direct ``sqlite_master`` surgery.
-#
-# Symptom users hit (Desktop/Dashboard show "no sessions" while 200+ JSON
-# files sit on disk):
-#   sqlite3.DatabaseError: malformed database schema (messages_fts) -
-#   table messages_fts already exists
-#
-# The canonical ``sessions`` / ``messages`` data is intact in these cases —
-# only the derived schema is broken — so recovery preserves all transcripts
-# and merely rebuilds the FTS layer.
+# Nastier than a malformed FTS inverted index: ``sqlite_master`` itself is
+# inconsistent (typically a DUPLICATE object, e.g. two ``CREATE VIRTUAL TABLE
+# messages_fts`` rows). SQLite parses the whole schema while preparing the FIRST
+# statement, so EVERY statement raises — including ``PRAGMA journal_mode``
+# (hence it trips in apply_wal_with_fallback during __init__, before
+# _init_schema), ``PRAGMA integrity_check`` and plain ``DROP TABLE``. Only
+# ``PRAGMA writable_schema=ON`` + direct sqlite_master surgery still work.
+# Symptom: "malformed database schema (messages_fts) - table messages_fts
+# already exists" while Desktop shows "no sessions". Canonical sessions /
+# messages are intact; recovery rebuilds only the FTS layer.
 _MALFORMED_SCHEMA_MARKERS = ("malformed database schema",)
 _MALFORMED_DB_MARKERS = (*_MALFORMED_SCHEMA_MARKERS, "database disk image is malformed")
 
-# Process-global guard so auto-repair is attempted at most once per DB path
-# per process (prevents repair loops and serialises concurrent web_server /
-# gateway opens against the same malformed file).
+# Auto-repair at most once per DB path per process (no repair loops; serialises
+# concurrent web_server / gateway opens on the same malformed file).
 _repair_attempted_paths: set[str] = set()
 _repair_attempt_lock = threading.Lock()
 
 
 def is_malformed_db_error(exc: BaseException) -> bool:
-    """True for explicit malformed-schema or generic corrupt-image errors.
-
-    This broad classifier is for diagnostics and explicit offline recovery
-    dispatch. Runtime repair must use :func:`is_malformed_schema_error`, since
-    a generic corrupt-image error does not identify the damaged object.
-    """
+    """Malformed-schema OR generic corrupt-image error. Diagnostics / offline
+    recovery only — runtime repair must use :func:`is_malformed_schema_error`."""
     return isinstance(exc, sqlite3.DatabaseError) and any(
         marker in str(exc).lower() for marker in _MALFORMED_DB_MARKERS
     )
 
 
-# SQLITE_IOERR, matched as a plain substring so wrapped error strings still
-# classify. Shared by the read-only open retry and the write-path BEGIN retry.
+# SQLITE_IOERR as a substring (wrapped strings still classify); shared by the
+# read-only open retry and the write-path BEGIN retry.
 _DISK_IO_ERROR_MARKER = "disk i/o error"
 
-# Broader set for HTTP classification: a read that failed for one of these
-# reasons found the store BUSY, not gone. Callers map it to 503 (retry, the
-# list was not cleared) instead of 500. Corruption is deliberately absent —
-# a malformed store must surface, not be retried into a timeout.
+# "Store BUSY, not gone" — HTTP callers map these to 503 instead of 500.
+# Corruption deliberately absent: a malformed store must surface, not be
+# retried into a timeout.
 _TRANSIENT_SQLITE_MARKERS = (
     _DISK_IO_ERROR_MARKER,
     "database is locked",
@@ -1187,46 +928,30 @@ _TRANSIENT_SQLITE_MARKERS = (
 
 
 def is_transient_sqlite_error(exc: BaseException) -> bool:
-    """True when a SQLite failure means "busy right now", not "damaged".
-
-    One predicate so the read paths cannot drift apart on what counts as
-    recoverable: the read-only open retry, and the HTTP 503-vs-500 split on
-    the session-list endpoints, classify the same way.
-    """
+    """"Busy right now", not "damaged". One predicate so the read-only open
+    retry and the HTTP 503-vs-500 split cannot drift apart."""
     return isinstance(exc, sqlite3.OperationalError) and any(
         marker in str(exc).lower() for marker in _TRANSIENT_SQLITE_MARKERS
     )
 
 
 def _is_transient_read_only_ioerr(exc: sqlite3.OperationalError, *, attempt: int) -> bool:
-    """True when a read-only open should be retried rather than raised.
-
-    A ``mode=ro`` connection cannot perform WAL recovery (recovery needs to
-    write the -shm index, which read-only mode refuses), so a concurrent WAL
-    checkpoint / reset / frame-flush can surface ``SQLITE_IOERR`` ("disk I/O
-    error") to a reader on an otherwise healthy database (#100436). The
-    transition is millisecond-scale, so a bounded number of short retries
-    clears it without changing classification for genuine storage failures —
-    a persistent IOERR still exhausts the budget and propagates.
-    """
-    return (attempt < _READ_ONLY_IOERR_RETRY_ATTEMPTS and _DISK_IO_ERROR_MARKER in str(exc).lower())
+    """Retry a read-only open? See _READ_ONLY_IOERR_RETRY_ATTEMPTS: a
+    persistent IOERR still exhausts the budget and propagates."""
+    return attempt < _READ_ONLY_IOERR_RETRY_ATTEMPTS and _DISK_IO_ERROR_MARKER in str(exc).lower()
 
 
 def is_malformed_schema_error(exc: BaseException) -> bool:
-    """True only when SQLite explicitly reports malformed schema text.
-
-    A generic ``database disk image is malformed`` error is SQLITE_CORRUPT
-    and may come from any B-tree or freelist page.  It does not prove that
-    canonical rows are intact, so runtime schema/FTS repair must fail closed.
-    """
+    """Only SQLite's explicit malformed-schema text. A generic "disk image is
+    malformed" (SQLITE_CORRUPT) may be any B-tree/freelist page and does not
+    prove canonical rows intact, so runtime repair must fail closed on it."""
     return isinstance(exc, sqlite3.DatabaseError) and any(
         marker in str(exc).lower() for marker in _MALFORMED_SCHEMA_MARKERS
     )
 
 
-# Markers that mean the host filesystem cannot accept another write. Kept as
-# plain substrings so OSError, sqlite3.OperationalError, and wrapped RPC
-# error strings all match the same helper.
+# "Filesystem cannot accept another write" substrings (OSError, sqlite3, and
+# wrapped RPC strings all match the same helper).
 _DISK_FULL_MARKERS = (
     "no space left on device",
     "not enough space",
@@ -1238,13 +963,7 @@ _DISK_FULL_MARKERS = (
 
 
 def is_disk_full_error(exc: BaseException | str | None) -> bool:
-    """True when *exc* (or a stringified error) is a disk-full / ENOSPC failure.
-
-    Covers:
-      * ``OSError`` with ``errno.ENOSPC``
-      * SQLite ``OperationalError: database or disk is full`` (SQLITE_FULL)
-      * Plain English / errno strings that survive RPC wrapping
-    """
+    """Disk-full / ENOSPC: OSError(ENOSPC), SQLITE_FULL, or matching strings."""
     if exc is None:
         return False
     if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC:
@@ -1253,10 +972,8 @@ def is_disk_full_error(exc: BaseException | str | None) -> bool:
     return any(marker in lowered for marker in _DISK_FULL_MARKERS)
 
 
-# Every cause bucket classify_persistence_error can return. Consumers that
-# enumerate causes (e.g. the cron scheduler's explainer-variant suppression)
-# must iterate this tuple instead of hardcoding the list, so adding a bucket
-# can never silently desynchronize them.
+# Every classify_persistence_error bucket; consumers enumerate this tuple so a
+# new bucket can never silently desynchronize them.
 PERSISTENCE_ERROR_CAUSES = (
     "locked",
     "compression",
@@ -1269,13 +986,9 @@ PERSISTENCE_ERROR_CAUSES = (
 )
 
 
-# Markers that mean the database FILE itself is structurally damaged.  Kept
-# as plain substrings so sqlite3.DatabaseError, wrapped RPC strings, and
-# logged message text all match the same helper.  NOTE: "database disk image
-# is malformed" contains the word "disk", so this check MUST run before the
-# disk-full/readonly bucket in classify_persistence_error — otherwise real
-# B-tree corruption gets reported to the user as "free some disk space"
-# (the misdiagnosis documented on #77386).
+# "Database FILE structurally damaged" substrings. NOTE: "database disk image is
+# malformed" contains "disk", so this check MUST run before the disk bucket in
+# classify_persistence_error or B-tree corruption reads as "free some disk space".
 _DB_CORRUPTION_MARKERS = (
     "malformed",              # "database disk image is malformed" (SQLITE_CORRUPT)
     "file is not a database", # SQLITE_NOTADB (also connection-level poisoning)
@@ -1285,53 +998,28 @@ _DB_CORRUPTION_MARKERS = (
 
 
 def classify_persistence_error(exc_or_str) -> str:
-    """Classify a session-persistence failure into a coarse cause bucket.
+    """Coarse cause bucket for a session-persistence failure (PERSISTENCE_ERROR_CAUSES).
 
-    Fast-failing a turn on a SessionDB write error is deliberate (the
-    transcript would otherwise be lost on restart), but the *guidance* the
-    user gets must match the cause: sustained SQLite write-lock contention
-    ("database is locked" on a shared state.db) needs "storage was busy,
-    send it again", while a full disk or read-only database needs the
-    disk-space/permissions advice. Returns one of PERSISTENCE_ERROR_CAUSES:
-
-    * ``"locked"``  — SQLite lock/busy contention (another process holds the
-      database write lock); transient, retry-later guidance applies.
-    * ``"compression"`` — a live compression lease refused the transcript
-      write; the database itself is healthy and unlocked.
-    * ``"compression_closed"`` — the write targeted a session already
-      rotated (closed) by compression and no live continuation was adopted;
-      the store is healthy — the client must refresh/adopt the new session
-      id, so disk-space advice would be a misdiagnosis.
-    * ``"turn_lease"`` — a presented session-turn-lease holder no longer
-      owns the conversation (expired, released, or reclaimed); fail-fast
-      fencing, not a storage fault.
-    * ``"corrupt"`` — the database file itself is structurally damaged
-      (``database disk image is malformed`` / SQLITE_NOTADB).  Distinct from
-      ``"disk"``: freeing space cannot help, the user needs the repair path
-      (``hermes doctor`` / automatic schema surgery).
-    * ``"replaced"`` — the ``state.db`` path no longer names the file this
-      process opened (out-of-band ``cp``/``mv``/restore). In-file FTS repair
-      cannot help; writes to the live handle must stop.
-    * ``"disk"``    — disk full / read-only / permission-shaped failures
-      (delegates the disk-full patterns to :func:`is_disk_full_error` so the
-      two classifiers can never drift apart — e.g. ENOSPC).
-    * ``"unknown"`` — anything else (or no visible exception at all).
+    Fast-failing the turn is deliberate (the transcript would be lost on
+    restart), but the user's guidance must match the cause: "locked" (write-lock
+    contention: storage busy, retry) vs "disk" (full / read-only / permissions).
+    "compression" = a live lease refused the write; "compression_closed" = the
+    target was rotated by compression and the client must adopt the new id;
+    "turn_lease" = fail-fast fencing, not a storage fault; "corrupt" = file
+    damage (freeing space cannot help — repair path); "replaced" = the path no
+    longer names the opened file (writes on the live handle must stop).
     """
     if exc_or_str is None:
         return "unknown"
-    # A refused write during a live compression lease is contention, not
-    # storage damage — but its message ("is being compressed by another
-    # writer" / "Compression lease lost") contains neither "locked" nor
-    # "busy", so it must be matched by type and by phrase (for strings that
-    # survived RPC wrapping).
+    # Lease refusals contain neither "locked" nor "busy": match by type, then by
+    # phrase for strings that survived RPC wrapping.
     if isinstance(exc_or_str, SessionTurnLeaseLostError):
         return "turn_lease"
     if isinstance(exc_or_str, CompressionSessionClosedError):
         return "compression_closed"
     if isinstance(exc_or_str, CompressionSessionBusyError):
         return "compression"
-    if isinstance(exc_or_str, StateDbReplacedError):
-        # Includes DeletedWalGenerationError (subclass).
+    if isinstance(exc_or_str, StateDbReplacedError):  # incl. DeletedWalGenerationError
         return "replaced"
     if isinstance(exc_or_str, StateDbCorruptError):
         return "corrupt"
@@ -1346,10 +1034,8 @@ def classify_persistence_error(exc_or_str) -> str:
         return "replaced"
     if "deleted state.db-wal" in text or "deleted state.db-shm" in text:
         return "replaced"
-    # Structural corruption BEFORE the lock and disk buckets: "database disk
-    # image is malformed" contains "disk" (and some wrapped corruption
-    # strings mention "locked" recovery attempts), so later buckets would
-    # steal it and misdiagnose damage as space/contention.
+    # Corruption BEFORE the lock/disk buckets: "disk image is malformed"
+    # contains "disk" and some wrapped strings mention "locked" recovery.
     if any(marker in text for marker in _DB_CORRUPTION_MARKERS):
         return "corrupt"
     if "locked" in text or "busy" in text:
@@ -1359,74 +1045,50 @@ def classify_persistence_error(exc_or_str) -> str:
     return "unknown"
 
 
-# Cross-process serialisation for the schema-surgery paths below.  The
-# ``_repair_attempt_lock`` above is a ``threading.Lock`` — it only covers
-# threads inside ONE interpreter, yet a normal Hermes host runs several
-# independent processes against the same ``state.db``: the gateway service,
-# the Desktop app's own ``hermes serve`` backend, interactive CLI sessions,
-# and the TUI slash worker.  Two of those hitting a malformed DB at once each
-# ran the full ``writable_schema`` surgery + ``VACUUM`` on their own private
-# connection, with nothing serialising them.
-#
-# The timeout is sized for the slowest legitimate holder — a ``VACUUM`` over a
-# multi-GB DB in strategy 2.  Waiting that long is not a new stall: before this
-# lock the losing caller spent the same minutes running its own surgery, it
-# just did so on top of the winner's.
+# Cross-process serialisation for schema surgery: ``_repair_attempt_lock`` only
+# covers threads in ONE interpreter, but gateway, Desktop's ``hermes serve``,
+# CLI sessions and the TUI slash worker all share state.db and each used to run
+# the full writable_schema surgery + VACUUM on top of the winner's. Timeout
+# sized for the slowest legitimate holder (VACUUM over a multi-GB DB) — the
+# losing caller previously spent the same minutes on its own surgery.
 _REPAIR_LOCK_TIMEOUT_SECONDS = 120.0
 _IS_WINDOWS = sys.platform == "win32"
 
 
-# ── Repair-loop bounding + dead-backup hygiene (#86747) ─────────────────────
-#
-# ``_claim_repair_attempt`` above is an in-memory set: it bounds the loop
-# only WITHIN one process. A corruption class the strategies cannot heal
-# (b-tree page damage) failed repair on EVERY process start, and each pass
-# took a fresh ~900MB forensic backup — 105 attempts / 89GB of identical
-# dead copies in the reporting install. Two persistent bounds fix the class:
-#
-# * a sidecar attempt ledger (``<db>.repair-attempts.json``) that refuses
-#   further surgery after ``_MAX_PERSISTENT_REPAIR_ATTEMPTS`` failures on
-#   the SAME damaged file (fingerprint = size + a bounded content sample; any
-#   successful repair or replacement changes it and resets the count);
-# * backup dedupe + a retention cap in ``_backup_db_file`` — an identical
-#   damaged file is never copied twice, and only the newest
-#   ``_MAX_MALFORMED_BACKUPS`` forensic copies are kept.
-
+# Repair-loop bounding + dead-backup hygiene: ``_claim_repair_attempt`` bounds
+# the loop only WITHIN one process. Unhealable b-tree damage failed repair on
+# every process start and each pass took a fresh ~900MB forensic backup (105
+# attempts / 89GB of identical copies). Two persistent bounds: a sidecar attempt
+# ledger (``<db>.repair-attempts.json``, keyed by size + content-sample
+# fingerprint, reset by any successful repair/replacement) refusing surgery after
+# _MAX_PERSISTENT_REPAIR_ATTEMPTS; and backup dedupe + retention cap
+# (_MAX_MALFORMED_BACKUPS) in ``_backup_db_file``.
 
 # ── CJK-bigram FTS index (replaces the trigram index when available) ────
 #
-# The trigram tokenizer needs >=3 chars per query term, so 1-2 char CJK
-# terms (ubiquitous in Korean/Chinese: 일본, 구글, 项目, ...) fall through
-# to a LIKE full-table scan — measured 3-6s CPU per query on multi-GB
-# installs and the dominant base cost of session_search on CJK workloads.
+# The trigram tokenizer needs >=3 chars per term, so 1-2 char CJK terms (일본,
+# 项目, ...) fell through to a LIKE full-table scan — 3-6s CPU per query on
+# multi-GB installs. ``cjk_unicode61`` (native/fts5_cjk/, a small loadable FTS5
+# tokenizer) wraps unicode61 and re-emits maximal CJK runs as overlapping
+# character bigrams (Lucene CJKAnalyzer semantics); FTS5 phrase semantics then
+# give exact substring matching down to 2 chars at index speed.
 #
-# ``cjk_unicode61`` (native/fts5_cjk/, a ~250-line loadable FTS5 tokenizer
-# with no dependencies) wraps unicode61: maximal CJK runs are re-emitted as
-# overlapping character bigrams (Lucene CJKAnalyzer semantics), everything
-# else passes through unchanged. FTS5 phrase semantics turn a query term's
-# consecutive bigrams into exact substring matching down to 2 chars at
-# index speed. Contributed by Soju06 (PR #65544).
-#
-# Same v23 storage discipline as the trigram table it replaces:
-# external-content over a tool-row-excluding view (zero inline text
-# copies; tool rows stay searchable via ``messages_fts``), triggers gated
-# on a DEDICATED marker pair (``fts_cjk_rebuild_high_water`` /
-# ``fts_cjk_rebuild_progress``) so a cjk-only backfill — e.g. the
-# trigram→cjk upgrade on an already-optimized DB — never gates the
-# complete ``messages_fts`` index's triggers.
+# Same v23 storage discipline as the trigram table: external-content over a
+# tool-row-excluding view (tool rows stay searchable via messages_fts), triggers
+# gated on a DEDICATED marker pair (fts_cjk_rebuild_high_water /
+# fts_cjk_rebuild_progress) so a cjk-only backfill never gates the complete
+# messages_fts index's triggers.
 #
 # The table exists ONLY when the loadable tokenizer is available
-# (``~/.hermes/lib/libfts5_cjk.so``, built by ``native/fts5_cjk/build.sh``).
-# A process that cannot load it self-heals by dropping the cjk triggers
-# (message writes keep working; the index goes stale and is rebuilt by the
-# next ``hermes sessions optimize-storage`` on a capable host).
+# (~/.hermes/lib/libfts5_cjk.so, built by native/fts5_cjk/build.sh). A process
+# that cannot load it self-heals by dropping the cjk triggers (writes keep
+# working; the index goes stale and is rebuilt by the next optimize-storage).
 #
-# Split DDL: the table/view part is safe to ensure any time; the triggers
-# are created ONLY while the index is complete-or-marker-gated. A stale
-# index (trigger gap of unknown extent) must keep its triggers DROPPED —
-# an external-content 'delete' op for a rowid the index never held is the
-# canonical FTS5 index-corruption hazard the v23 marker gating exists to
-# prevent.
+# Split DDL: the table/view part is safe to ensure any time; the triggers are
+# created ONLY while the index is complete-or-marker-gated. A stale index
+# (trigger gap of unknown extent) must keep its triggers DROPPED — an
+# external-content 'delete' for a rowid the index never held is the canonical
+# FTS5 index-corruption hazard the v23 marker gating exists to prevent.
 FTS_CJK_TABLE_SQL = """
 CREATE VIEW IF NOT EXISTS messages_fts_cjk_src AS
     SELECT id, role, content, tool_name, tool_calls
@@ -1500,13 +1162,9 @@ def _cjk_fts_config_enabled() -> bool:
 
 
 def load_fts5_cjk_extension(conn: sqlite3.Connection) -> bool:
-    """Best-effort load of the cjk_unicode61 tokenizer into ``conn``.
-
-    Returns False (never raises) when the .so is absent, the feature is
-    disabled via ``sessions.cjk_fts``, or this Python build has extension
-    loading compiled out — every caller treats False as "behave exactly as
-    before the cjk index existed".
-    """
+    """Best-effort load of the cjk_unicode61 tokenizer. False (never raises)
+    when the .so is absent, ``sessions.cjk_fts`` is off, or extension loading
+    is compiled out — callers then behave as before the cjk index existed."""
     if not _cjk_fts_config_enabled():
         return False
     path = fts5_cjk_so_path()
@@ -1540,59 +1198,34 @@ class CompressionSessionBusyError(RuntimeError):
 
 
 class SessionCompressionInProgressError(CompressionSessionBusyError):
-    """A concurrent writer collided with a *live* compression lock.
-
-    Split out from :class:`CompressionSessionBusyError` because the two
-    conditions that class covers need opposite handling. This one is
-    transient: a healthy compressor holds the session for a few seconds and
-    the lock row carries its own ``expires_at``, so the write can simply wait
-    (see ``_execute_write``'s patience loop). The other case, a compressor
-    discovering its own lease is gone, is permanent and must fail fast rather
-    than spin out the whole patience budget.
-
-    Subclassing keeps every existing ``except CompressionSessionBusyError``
-    handler working unchanged.
-    """
+    """A concurrent writer collided with a *live* compression lock — transient
+    (the compressor publishes in seconds; ``_execute_write`` waits), unlike the
+    parent class's other case (a compressor whose own lease is gone: permanent,
+    fail fast). Subclassing keeps every existing handler working."""
 
 
 class SessionTurnLeaseLostError(RuntimeError):
     """A transcript write presented a turn-lease holder that no longer owns it.
-
-    Fail-fast fencing: do not retry inside ``_execute_write``. The caller
-    either still thinks it owns the conversation after expiry/reclaim, or
-    the lease row is gone. A later writer may already be persisting a
-    newer turn; landing this write would interleave a stale reply.
-    """
+    Fail-fast fencing (no ``_execute_write`` retry): a later writer may already
+    be persisting a newer turn, and landing this one would interleave a stale reply."""
 
 
 class StateDbReplacedError(RuntimeError):
-    """The state.db path no longer names the file this SessionDB opened.
-
-    Raised when an out-of-band ``cp``/``mv``/restore replaces the database
-    under a live gateway. In-place FTS repair and fail-open trigger
-    dropping cannot fix a generation mismatch; they amplify it.
-    """
+    """The state.db path no longer names the file this SessionDB opened
+    (out-of-band cp/mv/restore). In-place FTS repair and fail-open trigger
+    dropping cannot fix a generation mismatch; they amplify it."""
 
 
 class DeletedWalGenerationError(StateDbReplacedError):
-    """A live process holds a deleted state.db-wal / -shm generation.
-
-    Opening or writing through this handle would mint a second WAL inode
-    (or keep committing on the orphan) — the split-brain that produces
-    intermittent SQLITE_CORRUPT / SQLITE_IOERR. Stop the writers; do not
-    unlink the WAL yourself. ``database.journal_mode: delete`` is operator
-    containment, not a default change.
-
-    Subclasses :class:`StateDbReplacedError` so every downstream consumer
-    that already stops SQLite writes and diverts pending transcripts on a
-    replaced store (gateway retry queue, run_agent flush) handles the split
-    WAL generation identically — the correct response is the same: stop
-    writing, preserve the transcript tail on disk.
-    """
+    """A live process holds a deleted state.db-wal / -shm generation. Opening or
+    writing through this handle would mint a second WAL inode (split-brain ->
+    intermittent SQLITE_CORRUPT / IOERR). Stop the writers; never unlink the WAL
+    yourself. Subclasses StateDbReplacedError so every consumer that diverts
+    transcripts on a replaced store handles this identically."""
 
 
-# SQLite header: 4-byte big-endian application_id at offset 68. Distinct from
-# inode: ``cp`` onto the same path keeps st_ino and truncates+rewrites.
+# SQLite header application_id (offset 68). Distinct from inode: ``cp`` onto the
+# same path keeps st_ino and truncates+rewrites.
 _STATE_DB_APPLICATION_ID_OFFSET = 68
 _STATE_DB_GENERATION_KEY = "db_file_generation"
 _STATE_DB_REPLACED_MSG = (
@@ -1612,31 +1245,18 @@ _DELETED_WAL_GENERATION_MSG = (
 
 
 class StateDbCorruptError(sqlite3.DatabaseError):
-    """A live SessionDB observed structural (non-FTS) corruption and is quarantined.
+    """A live SessionDB observed structural (non-FTS, non-replaced) corruption
+    and is quarantined. Subclasses sqlite3.DatabaseError so every ``except
+    sqlite3.Error`` degrade path keeps working; sqlite_errorcode/name are copied.
 
-    Raised once a write on this handle reports bare ``SQLITE_CORRUPT`` /
-    ``SQLITE_NOTADB`` that is neither FTS-scoped (``_is_fts_write_corruption_error``)
-    nor a replaced-file case (``StateDbReplacedError``). Subclasses
-    ``sqlite3.DatabaseError`` so every existing ``except sqlite3.Error``
-    degrade path keeps working; ``sqlite_errorcode``/``sqlite_errorname``
-    are copied from the originating error.
-
-    The quarantine is sticky for the life of the handle: later writes fail
-    fast, the handle never reopens after ``close()``, and ``close()`` skips
-    its own WAL checkpoint. Field evidence (the #90837 lost/reordered-page
-    signature, the #90950 page-1 clobber): a handle that kept writing for ~50
-    minutes after the first structural error checkpointed 15 pages under the
-    wrong page numbers on shutdown, turning a still-readable file into
-    ``file is not a database``. Stopping the writes is what prevents that;
-    skipping the explicit checkpoint is the second line of defence. SQLite
-    still runs its own last-connection checkpoint inside ``close()`` (and
-    deletes the ``-wal`` sidecar) unless ``SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE``
-    is set — Python exposes it via ``Connection.setconfig()`` on 3.12+, so
-    quarantine disables the close-time checkpoint there and the WAL survives
-    on disk for forensics; on 3.11 the internal checkpoint is unavoidable
-    (post-quarantine it can only carry pre-corruption committed frames, since
-    no further writes are accepted). The
-    recovery boundary is a process restart on a repaired or restored file.
+    Sticky for the handle's life: later writes fail fast, no reopen after
+    close(), and close() skips its WAL checkpoint. Field evidence: a handle that
+    kept writing ~50 minutes after the first structural error checkpointed 15
+    pages under the wrong page numbers on shutdown, turning a readable file into
+    "file is not a database". SQLite's own close-time checkpoint is disabled via
+    SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE on Python 3.12+ (WAL survives for
+    forensics); on 3.11 it is unavoidable but can only carry pre-corruption
+    frames. Recovery boundary: process restart on a repaired/restored file.
     """
 
 
@@ -1651,12 +1271,8 @@ _STATE_DB_CORRUPT_MSG = (
 
 
 def divert_session_transcript_jsonl(session_id: str, messages) -> "Optional[Path]":
-    """Append pending messages as JSON lines under HERMES_HOME/sessions.
-
-    Used when state.db is replaced under a live process so the current
-    turn is not only in RAM. Returns the jsonl path, or None when there
-    is nothing to write.
-    """
+    """Append pending messages to HERMES_HOME/sessions/<id>.jsonl (state.db was
+    replaced under a live process). Returns the path, or None if nothing to write."""
     sid = str(session_id or "").strip()
     if not sid or not messages:
         return None
@@ -1672,40 +1288,24 @@ def divert_session_transcript_jsonl(session_id: str, messages) -> "Optional[Path
     return path
 
 
-# ── Process-wide shared SessionDB registry (#90837) ──
-#
-# The registry itself lives in hermes_state_registry.py — a bounded
-# module owning acquisition, generation identity, refcounting,
-# retirement, and teardown.  These re-exports keep the historical
-# import path (``from hermes_state import get_shared_session_db``)
-# working for every call site and test that imports from here.
-#
-# Routing rules (see hermes_state_registry for the full lifecycle):
-#   - Long-lived in-process callers (gateway, tui_gateway, cron,
-#     in-process tools) share ONE writer connection per resolved path
-#     via get_shared_session_db().
-#   - CLI one-shots, recovery flows, and read-only cross-profile opens
-#     keep using SessionDB() directly with their own close().
-
+# ── Process-wide shared SessionDB registry ──
+# Lives in hermes_state_registry.py; re-exported here for the historical import
+# path. Long-lived in-process callers (gateway, tui_gateway, cron, in-process
+# tools) share ONE writer connection per resolved path via
+# get_shared_session_db(); CLI one-shots, recovery flows and read-only
+# cross-profile opens use SessionDB() directly with their own close().
 from hermes_state_registry import (  # noqa: F401  (re-export)
     close_shared_session_dbs, get_shared_session_db, release_or_close, release_shared_session_db,
 )
 
-
-# ── Read-only health/stats probes (hermes doctor, dashboards) ──────────
-
-
-# Lifecycle statuses surfaced by session pickers. Classification looks ONLY at
-# a session's final message row — role, whether it carries tool_calls, and its
-# finish_reason — so it stays O(1) per session (see
-# SessionDB.session_lifecycle_statuses).
+# Lifecycle statuses surfaced by session pickers; classified from the final
+# message row ONLY (role, tool_calls, finish_reason) so it stays O(1) per session.
 SESSION_STATUS_COMPLETE = "complete"
 SESSION_STATUS_INTERRUPTED = "interrupted"
 SESSION_STATUS_ERROR = "error"
 SESSION_STATUS_EMPTY = "empty"
 
-# finish_reason values that mark the turn as having ended in a provider or
-# agent error (vs. a normal 'stop'/'length'/'tool_calls' completion).
+# finish_reason values meaning the turn ended in a provider/agent error.
 _ERROR_FINISH_REASONS = frozenset({"error", "agent_error", "content_filter"})
 
 
@@ -1714,34 +1314,23 @@ def classify_session_status(
     has_tool_calls: bool,
     finish_reason: Optional[str],
 ) -> str:
-    """Classify a session's lifecycle from the shape of its final message.
-
-    - assistant with a normal finish → ``complete``
-    - assistant that still has pending tool_calls (no tool result row ever
-      followed, or it would be the last row instead) → ``interrupted``
-    - user or tool as the last row → ``interrupted`` (the agent never got to
-      answer / never consumed the tool result)
-    - an error finish_reason on the last row → ``error``
-    - anything unrecognized → ``complete`` (benign default; pickers must not
-      alarm on unknown shapes)
-    """
+    """Lifecycle from the final message: error finish → ``error``; assistant
+    with pending tool_calls (result never landed), or a trailing user/tool row →
+    ``interrupted``; normal assistant finish or unknown shape → ``complete``
+    (benign default; pickers must not alarm on unknown shapes)."""
     if (finish_reason or "").strip().lower() in _ERROR_FINISH_REASONS:
         return SESSION_STATUS_ERROR
     r = (role or "").strip().lower()
     if r == "assistant":
-        # The last row being an assistant message WITH tool_calls means the
-        # matching tool result never landed — an interrupted tool turn.
         return SESSION_STATUS_INTERRUPTED if has_tool_calls else SESSION_STATUS_COMPLETE
     if r in {"user", "tool"}:
         return SESSION_STATUS_INTERRUPTED
     return SESSION_STATUS_COMPLETE
 
 
-# Parent→child ``profile_name`` inheritance fence (#88381). ``agent:<ns>:...``
-# gateway keys encode the profile namespace; a keyless row (CLI / subagent
-# lineage) carries none and inherits freely. Two keyed rows must agree on
-# ``agent:<ns>:`` — a default child (``agent:main:``) forked from a sibling
-# profile's row must not be durably mislabelled as that profile's.
+# Parent→child profile_name inheritance fence: keyless rows (CLI / subagent)
+# inherit freely; two ``agent:<ns>:...`` keyed rows must agree on the namespace
+# so a default child forked from a sibling profile's row isn't mislabelled.
 _SAME_KEY_NAMESPACE_SQL = (
     "p.session_key IS NULL OR sessions.session_key IS NULL"
     " OR substr(p.session_key, 1, instr(substr(p.session_key, 7), ':') + 6)"
