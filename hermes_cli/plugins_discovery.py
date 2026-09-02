@@ -19,6 +19,7 @@ from hermes_cli.plugin_capabilities import parse_declared_capabilities as _parse
 from hermes_cli.plugins_manifest import (
     PluginManifest,
     _detect_kind_from_source,
+    manifest_key,
     _resolve_module_source,
     parse_manifest_file,
     portable_plugin_manifest,
@@ -228,7 +229,7 @@ def gate_manifest(
     """Decide how one winning manifest is handled. Gate order matters: legacy relay refusal, explicit
     disable, category-owned kinds (exclusive / model-provider), bundled auto-loads (backend now,
     platform deferred), then ``plugins.enabled`` opt-in (path-derived key or legacy bare name)."""
-    lookup_key = manifest.key or manifest.name
+    lookup_key = manifest_key(manifest)
     name = manifest.name
     # Relay lifecycle is core-owned; an old plugin copy would compete for its registries.
     if lookup_key in LEGACY_RELAY_PLUGIN_KEYS or name in LEGACY_RELAY_PLUGIN_KEYS:

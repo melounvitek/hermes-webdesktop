@@ -373,6 +373,11 @@ def _resolve_module_source(module_name: str, limit: int = 8192) -> str:
     return _read_source_from_origin(resolve_module_origin(module_name), limit)
 
 
+def manifest_key(manifest: "PluginManifest") -> str:
+    """Registry id of a manifest: the path-derived ``key`` when set, else the bare ``name``."""
+    return manifest.key or manifest.name
+
+
 @dataclass
 class PluginManifest:
     """Parsed representation of a plugin.yaml manifest."""

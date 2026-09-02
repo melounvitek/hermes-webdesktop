@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
 from registration_lifecycle import replacement_coordinator
 from hermes_cli.plugins_discovery import ENTRY_POINTS_GROUP, _select_entry_point_group
-from hermes_cli.plugins_manifest import PluginManifest, validate_config_schema
+from hermes_cli.plugins_manifest import PluginManifest, manifest_key, validate_config_schema
 
 if TYPE_CHECKING:  # pragma: no cover
     from hermes_cli.plugins import LoadedPlugin
@@ -86,7 +86,7 @@ class PluginLoaderMixin:
         in ``hermes plugins list`` until then."""
         from hermes_cli.plugins import LoadedPlugin
 
-        lookup_key = manifest.key or manifest.name
+        lookup_key = manifest_key(manifest)
         platform_name = self._platform_name_from_manifest(manifest)
 
         loaded = LoadedPlugin(manifest=manifest, enabled=True)
@@ -150,7 +150,7 @@ class PluginLoaderMixin:
         if not manifest.provides_tools:
             return
 
-        lookup_key = manifest.key or manifest.name
+        lookup_key = manifest_key(manifest)
         plugin_dir = Path(manifest.path) if manifest.path else None
         if plugin_dir is None or not (plugin_dir / "tools.py").is_file():
             # Declared but undeliverable — staying quiet reproduces the very symptom this fixes.
@@ -225,7 +225,7 @@ class PluginLoaderMixin:
         deps = manifest.python_dependencies
         if not deps:
             return
-        key = manifest.key or manifest.name
+        key = manifest_key(manifest)
         missing: List[str] = []
         for req in deps:
             # Best-effort presence probe on the distribution name.
@@ -253,7 +253,7 @@ class PluginLoaderMixin:
         """Warn (never block) on plugins.entries.<id> settings that violate config_schema."""
         if not manifest.config_schema:
             return
-        plugin_id = manifest.key or manifest.name
+        plugin_id = manifest_key(manifest)
         settings: Mapping[str, Any] = {}
         try:
             from hermes_cli.config import load_config
@@ -285,7 +285,7 @@ class PluginLoaderMixin:
         loaded = LoadedPlugin(manifest=manifest)
         logger.debug(
             "Loading plugin '%s' (source=%s, kind=%s, path=%s)",
-            manifest.key or manifest.name, manifest.source, manifest.kind, manifest.path,
+            manifest_key(manifest), manifest.source, manifest.kind, manifest.path,
         )
 
         if manifest.portable:
@@ -293,7 +293,7 @@ class PluginLoaderMixin:
             return
 
         registration_start = len(self._registration_order)
-        plugin_key = manifest.key or manifest.name
+        plugin_key = manifest_key(manifest)
         _module_name = self._policy_module_name(manifest)
         self._track_tool_override_policy(manifest, _module_name)
         try:
@@ -336,7 +336,7 @@ class PluginLoaderMixin:
         # so discovery-time pre-registrations are gone too.
         if not loaded.enabled:
             self._predeclared_tools.pop(plugin_key, None)
-        self._plugins[manifest.key or manifest.name] = loaded
+        self._plugins[manifest_key(manifest)] = loaded
 
     def _track_tool_override_policy(self, manifest: PluginManifest, module_name: str) -> None:
         """Install the plugin's tool-override policy in tools.registry as a ledger-owned lease."""
@@ -406,7 +406,7 @@ class PluginLoaderMixin:
         """Load validated portable components without importing Python code."""
         from hermes_cli.plugins import PluginContext
 
-        lookup_key = manifest.key or manifest.name
+        lookup_key = manifest_key(manifest)
         try:
             from hermes_cli.agent_plugins import load_agent_plugin
 
@@ -455,7 +455,7 @@ class PluginLoaderMixin:
 
     def _directory_module_name(self, manifest: PluginManifest) -> str:
         """Return a profile-safe import namespace for a directory plugin."""
-        key = manifest.key or manifest.name
+        key = manifest_key(manifest)
         slug = key.replace("/", "__").replace("-", "_")
         bare_name = f"{_NS_PARENT}.{slug}"
         with _MODULE_NAMESPACE_LOCK:

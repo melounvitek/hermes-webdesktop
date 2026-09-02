@@ -39,6 +39,7 @@ from hermes_cli.plugin_capabilities import (  # noqa: F401 — re-exported
 )
 from hermes_cli.relay_plugin_cutover import RELAY_PLUGINS_CONFIG_ENV, legacy_relay_plugin_keys
 from hermes_cli.plugins_manifest import (  # noqa: F401 — re-exported
+    manifest_key,
     parse_manifest_file,
     portable_plugin_manifest,
     _CONFIG_SCHEMA_TYPES,
@@ -350,7 +351,7 @@ class PluginContext:
     @property
     def plugin_id(self) -> str:
         """Return the effective registry id used for this plugin's namespaces."""
-        return self.manifest.key or self.manifest.name
+        return manifest_key(self.manifest)
 
     def has_plugin(self, plugin_id: str) -> bool:
         """Return True when another plugin is loaded and enabled (runtime probe for advisory
@@ -536,8 +537,7 @@ class PluginContext:
         ``plugins.entries.<plugin_id>.llm.*``."""
         if self._llm is None:
             from agent.plugin_llm import PluginLlm
-            plugin_id = self.manifest.key or self.manifest.name
-            self._llm = PluginLlm(plugin_id=plugin_id)
+            self._llm = PluginLlm(plugin_id=self.plugin_id)
         return self._llm
 
     @property
@@ -604,7 +604,7 @@ class PluginContext:
         self._manager.register_approval_transport(
             name,
             present_fn,
-            plugin_id=self.manifest.key or self.manifest.name,
+            plugin_id=self.plugin_id,
         )
         # Record ownership so unload/force-reload removes this transport. Duplicate names are
         # rejected above (raise), so there is never a displaced previous entry to restore.
@@ -639,11 +639,10 @@ class PluginContext:
         could silently replace a privileged built-in like ``write_file``.
         """
         if override and not self._tool_override_allowed(name):
-            plugin_id = self.manifest.key or self.manifest.name
             raise PluginToolOverrideError(
                 f"Plugin {self.manifest.name!r} cannot override built-in tool "
                 f"{name!r}. Set "
-                f"plugins.entries.{plugin_id}.allow_tool_override: true "
+                f"plugins.entries.{self.plugin_id}.allow_tool_override: true "
                 f"in config.yaml to allow this plugin to replace built-in tools."
             )
 
@@ -702,8 +701,7 @@ class PluginContext:
         source = getattr(self.manifest, "source", "") or ""
         if source == "bundled" and capability == "tools.override":
             return True
-        plugin_id = self.manifest.key or self.manifest.name
-        return plugin_capability_granted(plugin_id, capability)
+        return plugin_capability_granted(self.plugin_id, capability)
 
     # -- capability-gated MCP access ----------------------------------------
 
@@ -721,13 +719,12 @@ class PluginContext:
         raise ``PermissionError``. ``timeout`` clamps to 1–600s. Returns ``{"ok": True, "result"}`` or
         ``{"ok": False, "error"}``; results over ~64KB are truncated with a marker.
         """
-        plugin_id = self.manifest.key or self.manifest.name
-        allowlist = self._mcp_allowlist(plugin_id)
+        allowlist = self._mcp_allowlist(self.plugin_id)
         if server not in allowlist:
             raise PermissionError(
                 f"Plugin {self.manifest.name!r} is not allowed to call MCP "
                 f"server {server!r}. Add it to "
-                f"plugins.entries.{plugin_id}.mcp_allowlist in config.yaml "
+                f"plugins.entries.{self.plugin_id}.mcp_allowlist in config.yaml "
                 f"to grant access (default is no MCP access)."
             )
 
@@ -811,10 +808,9 @@ class PluginContext:
                 cfg = load_config() or {}
         except Exception:
             return False  # fail closed: better to break the override than silently grant it
-        plugin_id = self.manifest.key or self.manifest.name
         # Pass THIS manager's profile-scoped config so a multi-profile process never consults the
         # active profile's consent state instead.
-        return plugin_capability_granted(plugin_id, "tools.override", config=cfg)
+        return plugin_capability_granted(self.plugin_id, "tools.override", config=cfg)
 
     # -- message injection --------------------------------------------------
 
@@ -846,12 +842,11 @@ class PluginContext:
             logger.warning("inject_message: gateway mode requires an existing session_key")
             return False
         if not self._gateway_injection_allowed():
-            plugin_id = self.manifest.key or self.manifest.name
             logger.warning(
                 "inject_message: gateway injection denied for plugin %s; set "
                 "plugins.entries.%s.allow_gateway_injection: true to allow it",
-                plugin_id,
-                plugin_id,
+                self.plugin_id,
+                self.plugin_id,
             )
             return False
 
@@ -859,19 +854,18 @@ class PluginContext:
             logger.warning("inject_message: no live gateway is available")
             return False
 
-        plugin_id = self.manifest.key or self.manifest.name
         try:
             return bool(
                 self._manager.inject_gateway_message(
                     session_key=session_key,
                     content=msg,
-                    plugin_id=plugin_id,
+                    plugin_id=self.plugin_id,
                 )
             )
         except Exception:
             logger.warning(
                 "inject_message: gateway scheduling failed for plugin %s",
-                plugin_id,
+                self.plugin_id,
                 exc_info=True,
             )
             return False
@@ -883,13 +877,12 @@ class PluginContext:
         except Exception:
             return False
 
-        plugin_id = self.manifest.key or self.manifest.name
         return (
             cfg_get(
                 cfg,
                 "plugins",
                 "entries",
-                plugin_id,
+                self.plugin_id,
                 "allow_gateway_injection",
                 default=False,
             )
@@ -917,7 +910,7 @@ class PluginContext:
             "setup_fn": setup_fn,
             "handler_fn": handler_fn,
             "plugin": self.manifest.name,
-            "plugin_key": self.manifest.key or self.manifest.name,
+            "plugin_key": self.plugin_id,
         }
         handle = self._track_mapping_entry(
             "cli_command", name, self._manager._cli_commands, entry, previous
@@ -972,7 +965,7 @@ class PluginContext:
             "handler": handler,
             "description": description or "Plugin command",
             "plugin": self.manifest.name,
-            "plugin_key": self.manifest.key or self.manifest.name,
+            "plugin_key": self.plugin_id,
             "args_hint": hint,
             "argument_mode": mode,
         }
@@ -1297,7 +1290,7 @@ class PluginContext:
             )
 
         # Owner is the canonical id ``ctx.llm`` is bound to, so agent/plugin_llm.py can match it.
-        owner_id = self.manifest.key or self.manifest.name
+        owner_id = self.plugin_id
 
         existing = self._manager._aux_tasks.get(key)
         if existing is not None and existing.get("plugin") != owner_id:
@@ -1416,13 +1409,12 @@ class PluginContext:
                 f"system prompt section {id!r} is already registered by "
                 f"plugin {existing.plugin!r}"
             )
-        plugin_id = self.manifest.key or self.manifest.name
         section = PluginSystemPromptSection(
             id=id,
             content=content,
             position=position,
             max_chars=max_chars,
-            plugin=plugin_id,
+            plugin=self.plugin_id,
         )
         handle = self._track_mapping_entry(
             "system_prompt_section", id, self._manager._system_prompt_sections, section, existing
@@ -1440,7 +1432,7 @@ class PluginContext:
         raises ``ValueError``. Delivery is fire-and-forget via a single-worker queue: order
         preserved, a blocking subscriber cannot stall the emitter.
         """
-        plugin_key = self.manifest.key or self.manifest.name
+        plugin_key = self.plugin_id
         if not event or not isinstance(event, str):
             logger.warning("Plugin '%s' tried to emit an invalid event name %r", plugin_key, event)
             raise ValueError(f"Plugin '{plugin_key}' emit() requires a non-empty event name")
@@ -1470,7 +1462,7 @@ class PluginContext:
                 f"Plugin '{self.manifest.name}' subscribe() requires a "
                 f"non-empty event name"
             )
-        plugin_key = self.manifest.key or self.manifest.name
+        plugin_key = self.plugin_id
         self._manager._subscribe_event(plugin_key, event, callback)
         logger.debug("Plugin %s subscribed to event: %s", self.manifest.name, event)
 
@@ -1517,7 +1509,7 @@ class PluginContext:
         entry = {
             "path": path,
             "plugin": namespace,
-            "plugin_key": self.manifest.key or self.manifest.name,
+            "plugin_key": self.plugin_id,
             "bare_name": name,
             "description": description,
             "frontmatter": dict(frontmatter or {}),
@@ -1737,7 +1729,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin):
         attribution but NOT in ``_registration_order``, so a routine unload cannot dispose them;
         the handle still releases on explicit ``dispose()``.
         """
-        plugin_key = manifest.key or manifest.name
+        plugin_key = manifest_key(manifest)
         registration = PluginRegistration(
             kind=kind,
             key=key,
@@ -1907,7 +1899,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin):
     @staticmethod
     def _resolve_plugin_key(plugin: Union[str, PluginManifest, LoadedPlugin]) -> str:
         if isinstance(plugin, LoadedPlugin):
-            return plugin.manifest.key or plugin.manifest.name
+            return manifest_key(plugin.manifest)
         if isinstance(plugin, PluginManifest):
             return plugin.key or plugin.name
         return str(plugin)
@@ -2158,7 +2150,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin):
             )
         # Later sources win on key collision (project > user > bundled); gate the winners, then
         # load survivors in requires_plugins order (see resolve_plugin_load_order).
-        winners = {m.key or m.name: m for m in manifests}
+        winners = {manifest_key(m): m for m in manifests}
         to_load = {
             key: manifest for key, manifest in winners.items()
             if self._gate_manifest(manifest, disabled, enabled)
@@ -2183,7 +2175,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin):
         loaded = LoadedPlugin(manifest=manifest, enabled=enabled)
         if error is not None:
             loaded.error = error
-        self._plugins[manifest.key or manifest.name] = loaded
+        self._plugins[manifest_key(manifest)] = loaded
 
     def _gate_manifest(
         self,
@@ -2265,11 +2257,11 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin):
         if not enabled:
             return False
 
-        winners = {m.key or m.name: m for m in self._collect_directory_manifests()}
+        winners = {manifest_key(m): m for m in self._collect_directory_manifests()}
         for manifest in winners.values():
             if not manifest.portable:
                 continue
-            lookup_key = manifest.key or manifest.name
+            lookup_key = manifest_key(manifest)
             if lookup_key in disabled or manifest.name in disabled:
                 continue
             if lookup_key not in enabled and manifest.name not in enabled:
@@ -2328,7 +2320,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin):
             result.append(
                 {
                     "name": loaded.manifest.name,
-                    "key": loaded.manifest.key or loaded.manifest.name,
+                    "key": manifest_key(loaded.manifest),
                     "kind": loaded.manifest.kind,
                     "version": loaded.manifest.version,
                     "description": loaded.manifest.description,
