@@ -23,6 +23,7 @@ the few loop-internal helpers are passed in or imported lazily.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.error_classifier import FailoverReason
@@ -39,6 +40,50 @@ from agent.message_sanitization import (
 from agent.turn_retry_state import TurnRetryState
 
 logger = logging.getLogger("agent.conversation_loop")
+
+
+def _image_error_max_dimension(error: Exception) -> Optional[int]:
+    """Extract a provider-reported image dimension ceiling, if present."""
+    parts = []
+    for value in (
+        error,
+        getattr(error, "message", None),
+        getattr(error, "body", None),
+    ):
+        if value:
+            try:
+                parts.append(str(value))
+            except Exception:
+                pass
+    text = " ".join(parts).lower()
+    if "image" not in text or "dimension" not in text or "max allowed size" not in text:
+        return None
+
+    match = re.search(r"max allowed size(?:\s+for [^:]+)?:\s*(\d{3,5})\s*pixels?", text)
+    if not match:
+        return None
+    try:
+        max_dimension = int(match.group(1))
+    except ValueError:
+        return None
+    if 512 <= max_dimension <= 8000:
+        return max_dimension
+    return None
+
+
+def _try_refresh_nous_paid_entitlement_credentials(agent) -> bool:
+    """Refresh Nous runtime credentials after a fresh paid-entitlement check."""
+    try:
+        from hermes_cli.nous_account import get_nous_portal_account_info
+
+        account_info = get_nous_portal_account_info(force_fresh=True)
+        if account_info.paid_service_access is not True:
+            return False
+        return agent._try_refresh_nous_client_credentials(
+            force=True,
+        )
+    except Exception:
+        return False
 
 
 def recover_before_classification(
@@ -238,3 +283,369 @@ def recover_before_classification(
         )
         return True, active_system_prompt
     return False, active_system_prompt
+
+
+def recover_after_classification(
+    agent: Any,
+    api_error: Exception,
+    classified: Any,
+    _retry: TurnRetryState,
+    *,
+    status_code: Optional[int],
+    error_context: Any,
+    messages: List[Dict[str, Any]],
+    api_messages: Any,
+) -> Tuple[bool, bool]:
+    """One-shot recovery chain that runs AFTER ``classify_api_error`` and before the
+    generic retry path. Order is load-bearing (each branch may ``return`` early):
+    Nous paid-entitlement refresh → credential-pool rotation → image shrink →
+    multimodal-tool-content strip → corrupt-image strip → Anthropic OAuth 1M-beta
+    disable → per-provider 401 credential refresh (codex/xai, vertex, nous, copilot,
+    anthropic, with user-facing diagnostics when refresh fails) → thinking-signature
+    strip → invalid-encrypted-content replay disable → native-compaction reject →
+    llama.cpp grammar strip. Returns ``(retry_now, recovered_with_pool)``;
+    ``recovered_with_pool`` is read later by the Nous rate-limit guard."""
+    # Shared with the billing/entitlement helpers that stay in the loop module;
+    # lazy so this module never imports agent.conversation_loop at load time.
+    from agent.conversation_loop import (
+        _is_copilot_provider,
+        _is_nous_inference_route,
+        _print_nous_entitlement_guidance,
+    )
+
+    if (
+        classified.reason == FailoverReason.billing
+        and _is_nous_inference_route(
+            getattr(agent, "provider", "") or "",
+            getattr(agent, "base_url", "") or "",
+        )
+        and not _retry.nous_paid_entitlement_refresh_attempted
+    ):
+        _retry.nous_paid_entitlement_refresh_attempted = True
+        if _try_refresh_nous_paid_entitlement_credentials(agent):
+            agent._vprint(
+                f"{agent.log_prefix}🔐 Nous paid access verified — "
+                "refreshed runtime credentials and retrying request...",
+                force=True,
+            )
+            return True, False
+
+    recovered_with_pool, _retry.has_retried_429 = agent._recover_with_credential_pool(
+        status_code=status_code,
+        has_retried_429=_retry.has_retried_429,
+        classified_reason=classified.reason,
+        error_context=error_context,
+        billing_unverified=classified.billing_unverified,
+    )
+    if recovered_with_pool:
+        return True, recovered_with_pool
+
+    # Image-too-large recovery: shrink oversized native image parts
+    # in-place and retry once; otherwise fall through to normal handling.
+    if (
+        classified.reason == FailoverReason.image_too_large
+        and not _retry.image_shrink_retry_attempted
+    ):
+        _retry.image_shrink_retry_attempted = True
+        image_max_dimension = _image_error_max_dimension(api_error) or 8000
+        if agent._try_shrink_image_parts_in_messages(
+            api_messages,
+            max_dimension=image_max_dimension,
+        ):
+            agent._vprint(
+                f"{agent.log_prefix}📐 Image(s) exceeded provider size limit — "
+                f"shrank and retrying...",
+                force=True,
+            )
+            return True, recovered_with_pool
+        else:
+            logger.info(
+                "image-shrink recovery: no data-URL image parts found "
+                "or shrink didn't reduce size; surfacing original error."
+            )
+
+    # Multimodal-tool-content recovery: strict OpenAI-spec providers 400
+    # on list-type tool content. Strip images, mark (provider, model)
+    # no-list-tool-content for the session, retry once (#27344).
+    if (
+        classified.reason == FailoverReason.multimodal_tool_content_unsupported
+        and not _retry.multimodal_tool_content_retry_attempted
+    ):
+        _retry.multimodal_tool_content_retry_attempted = True
+        if agent._try_strip_image_parts_from_tool_messages(api_messages):
+            agent._vprint(
+                f"{agent.log_prefix}📐 Provider rejected list-type tool content — "
+                f"downgraded screenshots to text and retrying...",
+                force=True,
+            )
+            return True, recovered_with_pool
+        else:
+            logger.info(
+                "multimodal-tool-content recovery: no list-type tool "
+                "messages with image parts found; surfacing original error."
+            )
+
+    # Image-corrupt recovery: provider rejected the image bytes; shrinking
+    # can't help, so strip image parts and retry once (#69078).
+    if classified.reason == FailoverReason.image_corrupt:
+        # Strip ONLY the per-call copy: replacing msg["content"] on the
+        # shallow api_messages rows keeps canonical history's images
+        # (copy-on-write; transient rejection must not erase history).
+        _imgs_removed = False
+        if isinstance(api_messages, list):
+            _imgs_removed = _strip_images_from_messages(api_messages)
+        if _imgs_removed:
+            agent._vprint(
+                f"{agent.log_prefix}⚠️  Provider rejected a corrupted image — "
+                f"stripped images from the retry payload and retrying...",
+                force=True,
+            )
+            return True, recovered_with_pool
+        else:
+            logger.info(
+                "image-corrupt recovery: no image parts found to "
+                "strip; surfacing original error."
+            )
+
+    # Anthropic OAuth subscription rejected the 1M-context beta: disable it
+    # for this session, rebuild the client, retry once. Reactive so capable
+    # subscriptions keep full 1M context (#17680).
+    if (
+        classified.reason == FailoverReason.oauth_long_context_beta_forbidden
+        and agent.api_mode == "anthropic_messages"
+        and agent._is_anthropic_oauth
+        and not _retry.oauth_1m_beta_retry_attempted
+    ):
+        _retry.oauth_1m_beta_retry_attempted = True
+        if not getattr(agent, "_oauth_1m_beta_disabled", False):
+            agent._oauth_1m_beta_disabled = True
+            try:
+                agent._anthropic_client.close()
+            except Exception:
+                pass
+            agent._rebuild_anthropic_client()
+            agent._vprint(
+                f"{agent.log_prefix}🔕 OAuth subscription doesn't support "
+                f"the 1M-context beta — disabled for this session and retrying...",
+                force=True,
+            )
+            return True, recovered_with_pool
+
+    if (
+        agent.api_mode == "codex_responses"
+        and agent.provider in {"openai-codex", "xai-oauth"}
+        and status_code == 401
+        and not _retry.codex_auth_retry_attempted
+    ):
+        _retry.codex_auth_retry_attempted = True
+        if agent._try_refresh_codex_client_credentials(force=True):
+            _label = "xAI OAuth" if agent.provider == "xai-oauth" else "Codex"
+            agent._buffer_vprint(f"🔐 {_label} auth refreshed after 401. Retrying request...")
+            return True, recovered_with_pool
+    if (
+        agent.api_mode == "chat_completions"
+        and agent.provider == "vertex"
+        and status_code == 401
+        and not _retry.vertex_auth_retry_attempted
+    ):
+        _retry.vertex_auth_retry_attempted = True
+        if agent._try_refresh_vertex_client_credentials():
+            agent._buffer_vprint("🔐 Vertex AI token refreshed after 401. Retrying request...")
+            return True, recovered_with_pool
+    if (
+        agent.api_mode in ("chat_completions", "anthropic_messages")
+        and agent.provider == "nous"
+        and status_code == 401
+        and not _retry.nous_auth_retry_attempted
+    ):
+        _retry.nous_auth_retry_attempted = True
+        if agent._try_refresh_nous_client_credentials(force=True):
+            agent._buffer_vprint("🔐 Nous agent key refreshed after 401. Retrying request...")
+            return True, recovered_with_pool
+        # Refresh didn't help: likely Portal OAuth expired/revoked,
+        # no credits, or agent key blocked.
+        from hermes_constants import display_hermes_home as _dhh_fn
+        _dhh = _dhh_fn()
+        _body_text = ""
+        try:
+            _body = getattr(api_error, "body", None) or getattr(api_error, "response", None)
+            if _body is not None:
+                _body_text = str(_body)[:200]
+        except Exception:
+            pass
+        print(f"{agent.log_prefix}🔐 Nous 401 — Portal authentication failed.")
+        if _body_text:
+            print(f"{agent.log_prefix}   Response: {_body_text}")
+        if not _print_nous_entitlement_guidance(agent, "Nous model access"):
+            print(f"{agent.log_prefix}   Most likely: Portal OAuth expired, account out of credits, or agent key revoked.")
+        print(f"{agent.log_prefix}   Troubleshooting:")
+        print(f"{agent.log_prefix}     • Re-authenticate: hermes auth add nous")
+        print(f"{agent.log_prefix}     • Check credits / billing: https://portal.nousresearch.com")
+        print(f"{agent.log_prefix}     • Verify stored credentials: {_dhh}/auth.json")
+        print(f"{agent.log_prefix}     • Switch providers temporarily: /model <model> --provider openrouter")
+    if (
+        _is_copilot_provider(agent)
+        and status_code == 401
+        and not _retry.copilot_auth_retry_attempted
+    ):
+        _retry.copilot_auth_retry_attempted = True
+        if agent._try_refresh_copilot_client_credentials():
+            agent._buffer_vprint("🔐 Copilot credentials refreshed after 401. Retrying request...")
+            return True, recovered_with_pool
+    if (
+        agent.api_mode == "anthropic_messages"
+        and status_code == 401
+        and hasattr(agent, '_anthropic_api_key')
+        and not _retry.anthropic_auth_retry_attempted
+    ):
+        _retry.anthropic_auth_retry_attempted = True
+        from agent.anthropic_adapter import _is_oauth_token
+        from agent.azure_identity_adapter import is_token_provider
+        if agent._try_refresh_anthropic_client_credentials():
+            print(f"{agent.log_prefix}🔐 Anthropic credentials refreshed after 401. Retrying request...")
+            return True, recovered_with_pool
+        # Credential refresh didn't help — show diagnostic info
+        key = agent._anthropic_api_key
+        print(f"{agent.log_prefix}🔐 Anthropic 401 — authentication failed.")
+        if is_token_provider(key):
+            # Azure Foundry Entra ID: JWT minted per-request by an httpx
+            # hook; 401 = Azure rejected it (RBAC, az login, IMDS).
+            print(f"{agent.log_prefix}   Auth method: Microsoft Entra ID (httpx event hook)")
+            print(f"{agent.log_prefix}   Run `hermes doctor` for credential-chain diagnostics, or")
+            print(f"{agent.log_prefix}   `az login` if your developer session expired.")
+        else:
+            auth_method = "Bearer (OAuth/setup-token)" if _is_oauth_token(key) else "x-api-key (API key)"
+            print(f"{agent.log_prefix}   Auth method: {auth_method}")
+            print(f"{agent.log_prefix}   Token prefix: {key[:12]}..." if isinstance(key, str) and len(key) > 12 else f"{agent.log_prefix}   Token: (empty or short)")
+        print(f"{agent.log_prefix}   Troubleshooting:")
+        from hermes_constants import display_hermes_home as _dhh_fn
+        _dhh = _dhh_fn()
+        print(f"{agent.log_prefix}     • Check ANTHROPIC_TOKEN in {_dhh}/.env for Hermes-managed OAuth/setup tokens")
+        print(f"{agent.log_prefix}     • Check ANTHROPIC_API_KEY in {_dhh}/.env for API keys or legacy token values")
+        print(f"{agent.log_prefix}     • For API keys: verify at https://platform.claude.com/settings/keys")
+        print(f"{agent.log_prefix}     • For Claude Code: run 'claude /login' to refresh, then retry")
+        print(f"{agent.log_prefix}     • Legacy cleanup: hermes config set ANTHROPIC_TOKEN \"\"")
+        print(f"{agent.log_prefix}     • Clear stale keys: hermes config set ANTHROPIC_API_KEY \"\"")
+
+    # Thinking block signature recovery: upstream mutation invalidates
+    # Anthropic's signature (400). Strip ``reasoning_details`` from
+    # ``api_messages`` only, never ``messages`` (state.db). One-shot.
+    if (
+        classified.reason == FailoverReason.thinking_signature
+        and not _retry.thinking_sig_retry_attempted
+    ):
+        _retry.thinking_sig_retry_attempted = True
+        _api_stripped = 0
+        for _m in api_messages:
+            if isinstance(_m, dict) and "reasoning_details" in _m:
+                _m.pop("reasoning_details", None)
+                _api_stripped += 1
+        agent._vprint(
+            f"{agent.log_prefix}⚠️  Thinking block signature invalid, "
+            f"stripped reasoning_details from api_messages for retry...",
+            force=True,
+        )
+        logger.warning(
+            "%sThinking block signature recovery: stripped "
+            "reasoning_details from %d api_messages "
+            "(canonical messages unchanged)",
+            agent.log_prefix, _api_stripped,
+        )
+        return True, recovered_with_pool
+
+    # ── Invalid encrypted reasoning replay recovery ───────
+    # 400 ``invalid_encrypted_content`` on a stale ``codex_reasoning_items``
+    # blob: disable replay for the session, strip cached items, retry once.
+    if (
+        classified.reason == FailoverReason.invalid_encrypted_content
+        and not _retry.invalid_encrypted_content_retry_attempted
+        and agent.api_mode == "codex_responses"
+        and bool(getattr(agent, "_codex_reasoning_replay_enabled", True))
+        and any(
+            isinstance(_m, dict)
+            and _m.get("role") == "assistant"
+            and isinstance(_m.get("codex_reasoning_items"), list)
+            and _m.get("codex_reasoning_items")
+            for _m in messages
+        )
+    ):
+        _retry.invalid_encrypted_content_retry_attempted = True
+        replay_stats = agent._disable_codex_reasoning_replay(messages)
+        agent._vprint(
+            f"{agent.log_prefix}⚠️  Encrypted reasoning replay was rejected by the provider — "
+            f"disabled replay and stripped {replay_stats['items']} item(s) from "
+            f"{replay_stats['messages']} message(s), retrying...",
+            force=True,
+        )
+        logger.warning(
+            "%sInvalid encrypted reasoning recovery: disabled replay and stripped %d items from %d messages",
+            agent.log_prefix,
+            replay_stats["items"],
+            replay_stats["messages"],
+        )
+        return True, recovered_with_pool
+
+    # ── Native compaction rejection recovery ──────────────
+    # Structured 400 naming ``context_management``: disable native
+    # compaction for the session, retry once; local compression takes over.
+    if (
+        agent.api_mode == "codex_responses"
+        and not _retry.native_compaction_reject_retry_attempted
+        and bool(getattr(agent, "codex_responses_native_compaction", False))
+    ):
+        from agent.native_compaction import is_native_compaction_rejection
+        if is_native_compaction_rejection(
+            api_error, getattr(api_error, "status_code", None)
+        ):
+            _retry.native_compaction_reject_retry_attempted = True
+            agent.codex_responses_native_compaction = False
+            agent._vprint(
+                f"{agent.log_prefix}⚠️  Provider rejected native compaction "
+                f"(context_management) — disabled for this session, "
+                f"local compression stays active. Retrying...",
+                force=True,
+            )
+            logger.warning(
+                "%sNative compaction rejection recovery: disabled "
+                "codex_responses_native for this session and retrying",
+                agent.log_prefix,
+            )
+            return True, recovered_with_pool
+
+    # ── llama.cpp grammar-parse recovery ──────────────────
+    # ``json-schema-to-grammar`` rejects regex escapes and most ``format``
+    # values: strip ``pattern``/``format`` from ``agent.tools``, retry once.
+    if (
+        classified.reason == FailoverReason.llama_cpp_grammar_pattern
+        and not _retry.llama_cpp_grammar_retry_attempted
+    ):
+        _retry.llama_cpp_grammar_retry_attempted = True
+        try:
+            from tools.schema_sanitizer import strip_pattern_and_format
+            _, _stripped = strip_pattern_and_format(agent.tools)
+        except Exception as _strip_exc:  # pragma: no cover — defensive
+            logger.warning(
+                "%sllama.cpp grammar recovery: strip helper failed: %s",
+                agent.log_prefix, _strip_exc,
+            )
+            _stripped = 0
+        if _stripped:
+            agent._vprint(
+                f"{agent.log_prefix}⚠️  llama.cpp rejected tool schema grammar — "
+                f"stripped {_stripped} pattern/format keyword(s), retrying...",
+                force=True,
+            )
+            logger.warning(
+                "%sllama.cpp grammar recovery: stripped %d "
+                "pattern/format keyword(s) from tool schemas",
+                agent.log_prefix, _stripped,
+            )
+            return True, recovered_with_pool
+        # No keywords found to strip — fall through to normal
+        # retry path rather than loop forever on the same error.
+        logger.warning(
+            "%sllama.cpp grammar error but no pattern/format "
+            "keywords to strip — falling through to normal retry",
+            agent.log_prefix,
+        )
+    return False, recovered_with_pool
