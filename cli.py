@@ -827,20 +827,12 @@ try:
 except Exception:
     pass
 
-# Neuter AsyncHttpxClientWrapper.__del__ before any AsyncOpenAI clients are
-# created.  The SDK's __del__ schedules aclose() on asyncio.get_running_loop()
-# which, during CLI idle time, finds prompt_toolkit's event loop and tries to
-# close TCP transports bound to dead worker loops — producing
-# "Event loop is closed" / "Press ENTER to continue..." errors.
-#
-# We install a sys.meta_path finder that defers the actual import + patch
-# until ``openai._base_client`` is first loaded by the rest of the codebase.
-# Eagerly importing it here (the old approach) cost ~166ms / ~30MB on every
-# cold CLI start because openai's type tree (responses/*, graders/*) is huge.
-# The finder approach pays nothing until the SDK is genuinely needed and
-# still guarantees the patch is applied before any AsyncOpenAI instance can
-# be constructed (the import-then-instantiate ordering is enforced by
-# Python's import system).
+# Neuter AsyncHttpxClientWrapper.__del__ before any AsyncOpenAI client exists: the
+# SDK's __del__ schedules aclose() on the running loop, which during CLI idle time is
+# prompt_toolkit's loop, closing transports bound to dead worker loops ("Event loop is
+# closed" / "Press ENTER to continue..."). A sys.meta_path finder applies the patch
+# when ``openai._base_client`` is first imported — eager import cost ~166ms/30MB per
+# cold start, and the import system guarantees the patch lands before instantiation.
 try:
     import sys as _httpx_neuter_sys
     import importlib.util as _httpx_neuter_imp_util
@@ -5042,19 +5034,11 @@ def save_config_value(key_path: str, value: any) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    # Runtime persistence ALWAYS targets the user's HERMES_HOME config.yaml,
-    # creating it if needed. Resolve HERMES_HOME live (not the import-time
-    # _hermes_home constant) so profile switches and test isolation land right.
-    #
-    # We deliberately do NOT fall back to the repo's project cli-config.yaml:
-    # that file is a shipped default/template, and most config readers
-    # (load_config → get_hermes_home()/config.yaml, including
-    # load_wake_word_config) never read it. Writing a user setting there means
-    # the reader never sees it. This was the "wake-word ear reverts to disabled
-    # after restart" bug — the toggle's persist wrote to cli-config.yaml (which
-    # exists in the checkout) while startup read HERMES_HOME/config.yaml, so the
-    # setting silently vanished every restart on any install whose
-    # HERMES_HOME/config.yaml didn't exist yet.
+    # Runtime persistence ALWAYS targets HERMES_HOME/config.yaml (created if needed),
+    # resolved live so profile switches and test isolation land right. Never fall back
+    # to the repo's cli-config.yaml: it is a shipped template that config readers
+    # (load_config, load_wake_word_config) never read, so a setting written there
+    # silently vanishes on the next start (the "wake-word reverts to disabled" bug).
     config_path = get_hermes_home() / 'config.yaml'
     
     try:
@@ -8114,24 +8098,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._app = app  # Store reference for clarify_callback
 
         # ── Fix ghost status-bar lines on terminal resize ──────────────
-        # Resize handling: monkey-patch prompt_toolkit's _output_screen_diff
-        # to suppress the deliberate "reserve vertical space" scroll-up.
-        #
-        # Background: prompt_toolkit's renderer (renderer.py L232-242)
-        # explicitly moves the cursor to the bottom of the canvas after
-        # painting "to make sure the terminal scrolls up, even when the
-        # lower lines of the canvas just contain whitespace".  In
-        # non-fullscreen mode this scrolls chrome content (status bar,
-        # input rules) into terminal scrollback on every render.  When
-        # the terminal column-shrinks, the emulator reflows the previously
-        # rendered full-width rows into multiple narrower rows that get
-        # pushed up — leaving ghost duplicates AND polluting scrollback.
-        # Same issue as pt #29 (open since 2014), #1675, #1933.
-        #
-        # Surgical fix: wrap _output_screen_diff so that when its internal
-        # `if current_height > previous_screen.height` branch fires (the
-        # one that does the bottom-cursor-move), we make it fall through
-        # by inflating previous_screen.height first.
+        # prompt_toolkit's renderer moves the cursor to the canvas bottom after
+        # painting so the terminal scrolls up; in non-fullscreen mode that pushes
+        # chrome (status bar, input rules) into scrollback on every render, and a
+        # column-shrink reflows the old full-width rows into ghost duplicates
+        # (pt #29/#1675/#1933). Wrap _output_screen_diff so its
+        # `current_height > previous_screen.height` branch never fires, by
+        # inflating previous_screen.height first.
         try:
             import prompt_toolkit.renderer as _pt_renderer
             from prompt_toolkit.renderer import _output_screen_diff as _orig_osd
@@ -8209,24 +8182,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             if hasattr(_signal, 'SIGHUP'):
                 _signal.signal(_signal.SIGHUP, self._tui_signal_handler)
 
-            # Windows: install a SIGINT handler that absorbs the signal
-            # instead of letting Python's default handler raise
-            # KeyboardInterrupt in MainThread. Windows Terminal / Win32
-            # delivers spurious CTRL_C_EVENT to the hermes process when
-            # child processes are spawned from background threads (agent
-            # subprocess Popen path). The default Python SIGINT handler
-            # would then unwind prompt_toolkit's app.run(), trigger
-            # _run_cleanup mid-turn, and close browser sessions mid-open
-            # — causing "Daemon process exited during startup" errors.
-            #
-            # The handler is a silent no-op. Real user Ctrl+C still works
-            # because prompt_toolkit binds c-c at the TUI layer and never
-            # reaches this OS-signal path. This matches how Claude Code
-            # handles the same Windows quirk (cancellation is driven by
-            # the TUI key handler, not by OS signals).
-            #
-            # POSIX: leave the default SIGINT handler alone. prompt_toolkit
-            # installs its own handler there and it works as expected.
+            # Windows: absorb SIGINT. Win32 delivers spurious CTRL_C_EVENT when
+            # child processes are spawned from background threads; Python's
+            # default handler would unwind app.run() and run _run_cleanup
+            # mid-turn ("Daemon process exited during startup"). Real Ctrl+C
+            # still works — prompt_toolkit binds c-c at the TUI layer and never
+            # reaches this path. POSIX keeps the default handler (prompt_toolkit
+            # installs its own).
             if sys.platform == "win32":
                 def _sigint_absorb(signum, frame):
                     # Absorb silently. Do NOT call agent.interrupt() here:
@@ -8734,21 +8696,12 @@ def _collect_kanban_task_images(single_query_images):
 
 def _install_single_query_signal_handlers(cli):
     """Route SIGINT/SIGTERM/SIGHUP through agent.interrupt() (worker threads see it) before unwinding; kanban workers hard-exit."""
-    # Also install signal handlers in single-query / `-q` mode.  Interactive
-    # mode registers its own inside HermesCLI.run(), but `-q` runs
-    # cli.agent.run_conversation() below and AIAgent spawns worker threads
-    # for tools — so when SIGTERM arrives on the main thread, raising
-    # KeyboardInterrupt only unwinds the main thread, not the worker
-    # running _wait_for_process.  Python then exits, the child subprocess
-    # (spawned with os.setsid, its own process group) is reparented to
-    # init and keeps running as an orphan.
-    #
-    # Fix: route SIGTERM/SIGHUP through agent.interrupt() which sets the
-    # per-thread interrupt flag the worker's poll loop checks every 200 ms.
-    # Give the worker a grace window to call _kill_process (SIGTERM to the
-    # process group, then SIGKILL after 1 s), then raise KeyboardInterrupt
-    # so main unwinds normally.  HERMES_SIGTERM_GRACE overrides the 1.5 s
-    # default for debugging.
+    # Single-query (`-q`) signal handling. Interactive mode registers its own in
+    # HermesCLI.run(); here AIAgent's tool worker threads would outlive a plain
+    # KeyboardInterrupt (only the main thread unwinds) and orphan the setsid child
+    # subprocess. So route SIGTERM/SIGHUP through agent.interrupt() (the worker
+    # poll loop checks it every 200 ms), give it a grace window to _kill_process,
+    # then raise KeyboardInterrupt. HERMES_SIGTERM_GRACE overrides the 1.5 s default.
     def _signal_handler_q(signum, frame):
         logger.debug("Received signal %s in single-query mode", signum)
         # Arm the exit backstop now that shutdown intent is unambiguous —
@@ -8767,18 +8720,11 @@ def _install_single_query_signal_handlers(cli):
                     time.sleep(_grace)
         except Exception:
             pass  # never block signal handling
-        # Kanban worker exit path (#28181): SIGTERM hits a dispatcher-spawned
-        # worker that's likely in a non-daemon thread waiting on a child
-        # subprocess in _wait_for_process. Raising KeyboardInterrupt only
-        # unwinds the main thread; the worker thread keeps running, the
-        # process gets reparented to init, and the dispatcher's _pid_alive
-        # check returns True forever — task stuck in 'running' indefinitely.
-        # Skip the controlled-unwind dance and call os._exit(0) so the kernel
-        # reclaims the PID immediately and detect_crashed_workers can reclaim
-        # the stale claim on the next tick. Flush logging + stdout/stderr
-        # first so the final debug trace isn't lost; SIGALRM deadman guards
-        # the flush against any rare blocking-I/O case (the reporter measured
-        # flush in <1ms; the alarm is a failsafe, not the common path).
+        # Kanban worker (#28181): a non-daemon worker thread blocked in
+        # _wait_for_process survives KeyboardInterrupt, so the PID stays alive and
+        # the dispatcher's _pid_alive sees 'running' forever. os._exit(0) instead,
+        # so detect_crashed_workers reclaims the claim next tick. Flush logging +
+        # stdio first (SIGALRM deadman guards a rare blocking flush).
         if os.environ.get("HERMES_KANBAN_TASK"):
             try:
                 import signal as _sig_mod
@@ -9195,19 +9141,9 @@ def main(
                 # Exit with error code if credentials or agent init fails
                 sys.exit(1)
             else:
-                # Single-query mode (`hermes chat -q "…"`): skip the welcome
-                # banner. Building the banner takes ~420 ms on cold start —
-                # ~200 ms of that is the version-update check, the rest is
-                # toolset / skill enumeration and Rich panel rendering. None
-                # of that is useful for a one-shot query: the user already
-                # picked the prompt, doesn't need a toolset reference, and
-                # gets the session ID + resume hint from
-                # ``_print_exit_summary()`` after the response prints.
-                #
-                # The fully-quiet ``-Q`` / ``--quiet`` machine-readable path
-                # above was already banner-free; this brings the human-
-                # facing single-query path in line so all non-interactive
-                # invocations are fast.
+                # Single-query (`-q`): skip the welcome banner (~420 ms cold —
+                # version check + toolset/skill enumeration + Rich render). The
+                # session id / resume hint come from _print_exit_summary().
                 _query_label = query or ("[image attached]" if single_query_images else "")
                 if _query_label:
                     cli.console.print(f"[bold blue]Query:[/] {_query_label}")
