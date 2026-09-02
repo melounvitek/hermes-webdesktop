@@ -6487,6 +6487,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._warn_if_docker_media_delivery_is_risky()
         _gateway_runner_ref = _weakref.ref(self)
 
+        self._init_runtime_settings()
+        self._init_session_store()
+        self._init_lifecycle_state()
+        self._init_runtime_caches()
+        self._init_startup_checks()
+        self._init_session_db()
+        self._init_registries_and_clocks()
+
+    def _init_runtime_settings(self) -> None:
+        """Load ephemeral per-call config (prefill, reasoning, busy modes, timeouts, routing)."""
         # Load ephemeral config from config.yaml / env vars.
         # Both are injected at API-call time only and never persisted.
         self._prefill_messages = self._load_prefill_messages()
@@ -6508,6 +6518,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._provider_routing = self._load_provider_routing()
         self._fallback_model = self._load_fallback_model()
 
+    def _init_session_store(self) -> None:
+        """Build the SessionStore (with process-registry reset guard), its async facade and the router."""
         # Wire process registry into session store for reset protection. A background process older
         # than session_reset.bg_process_max_age_hours (default 24h) is stale and no longer blocks
         # idle/daily reset. The process is NOT killed, only ignored by the reset guard.
@@ -6528,6 +6540,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # ``session_store`` directly; async gateway handlers call this facade and await every op.
         self._async_session_store = AsyncSessionStore(self.session_store)
         self.delivery_router = DeliveryRouter(self.config)
+
+    def _init_lifecycle_state(self) -> None:
+        """Initialise run/exit/restart flags, per-session state, and completion-delivery bookkeeping."""
         self._running = False
         self._gateway_loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_event = asyncio.Event()
@@ -6613,6 +6628,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._completion_notification_batch_window = 0.1
         self._completion_notification_batches_stopping = False
 
+    def _init_runtime_caches(self) -> None:
+        """Agent cache, profile identity, Teams runtime, failed-platform tracking, slash-confirm counter."""
         # Cache AIAgent instances per session to preserve prompt caching (a fresh agent per message
         # rebuilds the system prompt and breaks the prefix cache, ~10x cost on Anthropic). Value:
         # (AIAgent, config_signature_str). OrderedDict for LRU eviction in _enforce_agent_cache_cap();
@@ -6650,6 +6667,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         import itertools as _itertools
         self._slash_confirm_counter = _itertools.count(1)
 
+    def _init_startup_checks(self) -> None:
+        """Ensure tirith is installed and warn when manual approvals have no automated assessor."""
         # Persistent Honcho managers keyed by gateway session key: preserves write_frequency="session"
         # semantics across short-lived per-message AIAgent instances.
 
@@ -6683,6 +6702,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             logger.debug("approvals.mode startup check skipped", exc_info=True)
 
+    def _init_session_db(self) -> None:
+        """Open the session DB for the active scope and run opportunistic state.db / checkpoint maintenance."""
         # Session DB for session_search: a property caches one AsyncSessionDB per path (not a handle
         # bound here, which would pin the root home — /resume, /title, /history and search run inside
         # _profile_runtime_scope under multiplex); priming here keeps startup diagnostics at init.
@@ -6751,6 +6772,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as exc:
             logger.debug("checkpoint auto-maintenance skipped: %s", exc)
 
+    def _init_registries_and_clocks(self) -> None:
+        """Pairing stores, hook registry, voice modes, background-task set, liveness and idle clocks."""
         # DM pairing store for code-based user authorization. ``pairing_store`` is the global/default
         # store (``hermes pairing`` CLI, callers without profile context); ``pairing_stores`` is the
         # per-profile map ``authz_mixin._is_user_authorized`` routes through (one whitelist/profile).
@@ -29185,194 +29208,175 @@ def _looks_like_profile_conflict_from_cmdline(command: str, our_home) -> bool:
     return bool(home_value is not None and os.path.normcase(os.path.normpath(home_value)) != os.path.normcase(os.path.normpath(str(our_home))))
 
 
-async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
-    """Start the gateway and run until interrupted.
+async def _start_gateway_replace_existing_instance(existing_pid: int, replace: bool) -> bool:
+    """Handle a live gateway PID under this HERMES_HOME: replace it (``--replace``) or refuse.
 
-    Returns True if the gateway ran, False if it failed to start (non-zero exit so systemd can
-    auto-restart). ``replace`` kills any existing instance first — avoids systemd restart-loop
-    deadlocks when the previous process hasn't fully exited.
+    Returns False when startup must abort (refused, permission denied, target still alive).
     """
-    # Enable interactive exec approval on messaging platforms. Set here (not at module import) so
-    # incidental imports of gateway.run from CLI/tool code don't poison HERMES_EXEC_ASK.
-    os.environ["HERMES_EXEC_ASK"] = "1"
-
-    from hermes_cli.resource_limits import apply_nofile_soft_limit
-
-    apply_nofile_soft_limit()
-
-    # Snapshot the checkout revision now, while sys.modules still matches disk, so a later `git
-    # pull` under this long-lived process can be detected (and risky work like model switching
-    # refused) instead of crashing on a stale in-memory module.
-    from gateway.code_skew import record_boot_fingerprint
-    record_boot_fingerprint()
-
-    # Duplicate-instance guard: no two gateways under one HERMES_HOME. The PID file is scoped to
-    # HERMES_HOME, so multi-profile setups (distinct HERMES_HOME each) run concurrently untripped.
     from gateway.status import (
-        acquire_gateway_runtime_lock,
-        get_running_pid,
         get_process_start_time,
-        release_gateway_runtime_lock,
         remove_pid_file,
         terminate_pid,
     )
-    existing_pid = get_running_pid()
-    if existing_pid is not None and existing_pid != os.getpid():
-        if replace:
-            # Cross-profile ownership gate: never signal a live process we cannot prove belongs to
-            # this HERMES_HOME. A poisoned PID record steering --replace at another profile's
-            # gateway is exactly the restart-loop shape this flow must not allow.
-            if _replace_target_belongs_to_other_profile(existing_pid):
-                from gateway.status import _get_process_hermes_home
+    if replace:
+        # Cross-profile ownership gate: never signal a live process we cannot prove belongs to
+        # this HERMES_HOME. A poisoned PID record steering --replace at another profile's
+        # gateway is exactly the restart-loop shape this flow must not allow.
+        if _replace_target_belongs_to_other_profile(existing_pid):
+            from gateway.status import _get_process_hermes_home
 
-                logger.error(
-                    "Refusing --replace: PID %d cannot be proven to belong "
-                    "to this profile's gateway (HERMES_HOME %s). Remove the "
-                    "stale PID record or stop the owning profile explicitly.",
-                    existing_pid,
-                    _get_process_hermes_home(),
-                )
-                return False
-            existing_start_time = get_process_start_time(existing_pid)
-            logger.info(
-                "Replacing existing gateway instance (PID %d) with --replace.",
+            logger.error(
+                "Refusing --replace: PID %d cannot be proven to belong "
+                "to this profile's gateway (HERMES_HOME %s). Remove the "
+                "stale PID record or stop the owning profile explicitly.",
+                existing_pid,
+                _get_process_hermes_home(),
+            )
+            return False
+        existing_start_time = get_process_start_time(existing_pid)
+        logger.info(
+            "Replacing existing gateway instance (PID %d) with --replace.",
+            existing_pid,
+        )
+        # Record a takeover marker so the target's shutdown handler recognises its SIGTERM as a
+        # planned takeover and exits 0 (rather than exit 1, which would trigger systemd's
+        # Restart=on-failure and start a flap loop against us). Best-effort — proceed on failure.
+        try:
+            from gateway.status import write_takeover_marker
+            write_takeover_marker(existing_pid)
+        except Exception as e:
+            logger.debug("Could not write takeover marker: %s", e)
+        # Snapshot the old gateway's children BEFORE signalling it: once it exits, orphans are
+        # reparented and invisible to a parent walk. On POSIX, surviving adapter subprocesses hold
+        # scoped token locks and block the replacement (Windows already tree-kills). Best-effort.
+        try:
+            from gateway.status import _snapshot_gateway_children
+            _old_gateway_children = _snapshot_gateway_children(existing_pid)
+        except Exception:
+            _old_gateway_children = []
+        try:
+            terminate_pid(existing_pid, force=False)
+        except ProcessLookupError:
+            pass  # Already gone
+        except (PermissionError, OSError):
+            logger.error(
+                "Permission denied killing PID %d. Cannot replace.",
                 existing_pid,
             )
-            # Record a takeover marker so the target's shutdown handler recognises its SIGTERM as a
-            # planned takeover and exits 0 (rather than exit 1, which would trigger systemd's
-            # Restart=on-failure and start a flap loop against us). Best-effort — proceed on failure.
+            # Marker is scoped to a specific target; clean it up on
+            # give-up so it doesn't grief an unrelated future shutdown.
             try:
-                from gateway.status import write_takeover_marker
-                write_takeover_marker(existing_pid)
-            except Exception as e:
-                logger.debug("Could not write takeover marker: %s", e)
-            # Snapshot the old gateway's children BEFORE signalling it: once it exits, orphans are
-            # reparented and invisible to a parent walk. On POSIX, surviving adapter subprocesses hold
-            # scoped token locks and block the replacement (Windows already tree-kills). Best-effort.
-            try:
-                from gateway.status import _snapshot_gateway_children
-                _old_gateway_children = _snapshot_gateway_children(existing_pid)
+                from gateway.status import clear_takeover_marker
+                clear_takeover_marker()
             except Exception:
-                _old_gateway_children = []
+                pass
+            return False
+        # Wait up to 10s for the old process to exit. ``os.kill(pid, 0)`` on Windows is NOT a no-op —
+        # use the handle-based existence check instead.
+        from gateway.status import _pid_exists
+        old_gateway_exited = False
+        for _ in range(20):
+            if not _pid_exists(existing_pid):
+                old_gateway_exited = True
+                break  # Process is gone
+            # start_gateway is async: a blocking sleep here freezes the event loop (signal handlers,
+            # health checks, every coroutine) for up to 10s per replacement.
+            await asyncio.sleep(0.5)
+        else:
+            # Still alive after 10s — force kill
+            logger.warning(
+                "Old gateway (PID %d) did not exit after SIGTERM, sending SIGKILL.",
+                existing_pid,
+            )
             try:
-                terminate_pid(existing_pid, force=False)
+                terminate_pid(
+                    existing_pid,
+                    force=True,
+                    expected_start_time=existing_start_time,
+                )
             except ProcessLookupError:
-                pass  # Already gone
+                old_gateway_exited = True
             except (PermissionError, OSError):
+                pass
+            # Confirm the force-kill actually reaped the process before clearing its PID file /
+            # scoped locks: SIGKILL can fail to take (uninterruptible sleep, zombie), and blindly
+            # clearing metadata would leave two live gateways fighting over the same token.
+            if not old_gateway_exited:
+                for _ in range(20):
+                    if not _pid_exists(existing_pid):
+                        old_gateway_exited = True
+                        break
+                    # Async context — never block the loop (#36163).
+                    await asyncio.sleep(0.25)
+            if not old_gateway_exited:
                 logger.error(
-                    "Permission denied killing PID %d. Cannot replace.",
+                    "Old gateway (PID %d) still appears alive after SIGKILL; "
+                    "aborting replacement to avoid a duplicate gateway.",
                     existing_pid,
                 )
-                # Marker is scoped to a specific target; clean it up on
-                # give-up so it doesn't grief an unrelated future shutdown.
                 try:
                     from gateway.status import clear_takeover_marker
                     clear_takeover_marker()
                 except Exception:
                     pass
                 return False
-            # Wait up to 10s for the old process to exit. ``os.kill(pid, 0)`` on Windows is NOT a no-op —
-            # use the handle-based existence check instead.
-            from gateway.status import _pid_exists
-            old_gateway_exited = False
-            for _ in range(20):
-                if not _pid_exists(existing_pid):
-                    old_gateway_exited = True
-                    break  # Process is gone
-                # start_gateway is async: a blocking sleep here freezes the event loop (signal handlers,
-                # health checks, every coroutine) for up to 10s per replacement.
-                await asyncio.sleep(0.5)
-            else:
-                # Still alive after 10s — force kill
-                logger.warning(
-                    "Old gateway (PID %d) did not exit after SIGTERM, sending SIGKILL.",
-                    existing_pid,
-                )
-                try:
-                    terminate_pid(
-                        existing_pid,
-                        force=True,
-                        expected_start_time=existing_start_time,
-                    )
-                except ProcessLookupError:
-                    old_gateway_exited = True
-                except (PermissionError, OSError):
-                    pass
-                # Confirm the force-kill actually reaped the process before clearing its PID file /
-                # scoped locks: SIGKILL can fail to take (uninterruptible sleep, zombie), and blindly
-                # clearing metadata would leave two live gateways fighting over the same token.
-                if not old_gateway_exited:
-                    for _ in range(20):
-                        if not _pid_exists(existing_pid):
-                            old_gateway_exited = True
-                            break
-                        # Async context — never block the loop (#36163).
-                        await asyncio.sleep(0.25)
-                if not old_gateway_exited:
-                    logger.error(
-                        "Old gateway (PID %d) still appears alive after SIGKILL; "
-                        "aborting replacement to avoid a duplicate gateway.",
-                        existing_pid,
-                    )
-                    try:
-                        from gateway.status import clear_takeover_marker
-                        clear_takeover_marker()
-                    except Exception:
-                        pass
-                    return False
-            # Old gateway confirmed dead — reap any orphaned child processes it left behind (POSIX;
-            # mirrors Windows taskkill /T tree-kill). Orphaned adapter subprocesses would otherwise
-            # keep holding scoped token locks against us. Best-effort, never raises.
-            try:
-                from gateway.status import reap_gateway_children
-                reap_gateway_children(
-                    _old_gateway_children, parent_pid=existing_pid
-                )
-            except Exception:
-                logger.debug(
-                    "Child reap for replaced gateway PID %d failed",
-                    existing_pid,
-                    exc_info=True,
-                )
-            remove_pid_file()
-            # remove_pid_file() is a no-op when the PID doesn't match.
-            # Force-unlink to cover the old-process-crashed case.
-            with suppress(Exception):
-                (get_hermes_home() / "gateway.pid").unlink(missing_ok=True)
-            # Clean up any takeover marker the old process didn't consume
-            # (e.g. SIGKILL'd before its shutdown handler could read it).
-            try:
-                from gateway.status import clear_takeover_marker
-                clear_takeover_marker()
-            except Exception:
-                pass
-            # Release all scoped locks left by the old process: stopped (Ctrl+Z) processes don't release
-            # locks on exit, leaving stale lock files that block the new gateway.
-            try:
-                from gateway.status import release_all_scoped_locks
-                _released = release_all_scoped_locks(
-                    owner_pid=existing_pid,
-                    owner_start_time=existing_start_time,
-                )
-                if _released:
-                    logger.info("Released %d stale scoped lock(s) from old gateway.", _released)
-            except Exception:
-                pass
-        else:
-            hermes_home = str(get_hermes_home())
-            logger.error(
-                "Another gateway instance is already running (PID %d, HERMES_HOME=%s). "
-                "Use 'hermes gateway restart' to replace it, or 'hermes gateway stop' first.",
-                existing_pid, hermes_home,
+        # Old gateway confirmed dead — reap any orphaned child processes it left behind (POSIX;
+        # mirrors Windows taskkill /T tree-kill). Orphaned adapter subprocesses would otherwise
+        # keep holding scoped token locks against us. Best-effort, never raises.
+        try:
+            from gateway.status import reap_gateway_children
+            reap_gateway_children(
+                _old_gateway_children, parent_pid=existing_pid
             )
-            print(
-                f"\n❌ Gateway already running (PID {existing_pid}).\n"
-                f"   Use 'hermes gateway restart' to replace it,\n"
-                f"   or 'hermes gateway stop' to kill it first.\n"
-                f"   Or use 'hermes gateway run --replace' to auto-replace.\n"
+        except Exception:
+            logger.debug(
+                "Child reap for replaced gateway PID %d failed",
+                existing_pid,
+                exc_info=True,
             )
-            return False
+        remove_pid_file()
+        # remove_pid_file() is a no-op when the PID doesn't match.
+        # Force-unlink to cover the old-process-crashed case.
+        with suppress(Exception):
+            (get_hermes_home() / "gateway.pid").unlink(missing_ok=True)
+        # Clean up any takeover marker the old process didn't consume
+        # (e.g. SIGKILL'd before its shutdown handler could read it).
+        try:
+            from gateway.status import clear_takeover_marker
+            clear_takeover_marker()
+        except Exception:
+            pass
+        # Release all scoped locks left by the old process: stopped (Ctrl+Z) processes don't release
+        # locks on exit, leaving stale lock files that block the new gateway.
+        try:
+            from gateway.status import release_all_scoped_locks
+            _released = release_all_scoped_locks(
+                owner_pid=existing_pid,
+                owner_start_time=existing_start_time,
+            )
+            if _released:
+                logger.info("Released %d stale scoped lock(s) from old gateway.", _released)
+        except Exception:
+            pass
+    else:
+        hermes_home = str(get_hermes_home())
+        logger.error(
+            "Another gateway instance is already running (PID %d, HERMES_HOME=%s). "
+            "Use 'hermes gateway restart' to replace it, or 'hermes gateway stop' first.",
+            existing_pid, hermes_home,
+        )
+        print(
+            f"\n❌ Gateway already running (PID {existing_pid}).\n"
+            f"   Use 'hermes gateway restart' to replace it,\n"
+            f"   or 'hermes gateway stop' to kill it first.\n"
+            f"   Or use 'hermes gateway run --replace' to auto-replace.\n"
+        )
+        return False
+    return True
 
+
+def _start_gateway_configure_logging(verbosity: Optional[int]) -> None:
+    """Sync bundled skills, set up file logging + startup security audit, and the -v/-q stderr handler."""
     # Sync bundled skills on gateway start (fast -- skips unchanged)
     try:
         from tools.skills_sync import sync_skills
@@ -29416,21 +29420,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         if _stderr_level < logging.getLogger().level:
             logging.getLogger().setLevel(_stderr_level)
 
-    runner = GatewayRunner(config)
-    # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
-    # land in its own logs/. Must run after the runner resolved (possibly None) config and setup_logging.
-    _enable_multiplex_log_routing(runner.config)
-    # ``--replace`` is explicit startup authority, not a durable reconnect policy: GatewayRunner scopes
-    # it to cold adapter connects and clears it before the background reconnect watcher starts.
-    runner._platform_lock_takeover_on_start = bool(replace)
 
-    # Track whether an unexpected signal initiated shutdown: an unexpected SIGTERM exits non-zero so
-    # service managers revive us; planned stop paths write a marker first so they exit cleanly.
-    _signal_initiated_shutdown = False
-
-    # Set up signal handlers
+def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdown: list):
+    """Build the SIGINT/SIGTERM handler; ``_signal_initiated_shutdown[0]`` records an unplanned signal."""
     def shutdown_signal_handler(received_signal=None):
-        nonlocal _signal_initiated_shutdown
         # Planned --replace takeover: the sibling wrote a marker naming this PID before SIGTERM. Treat as
         # planned, exit 0 so systemd's Restart=on-failure doesn't revive us to flap-fight the replacer
         # (e.g. when both hermes.service and hermes-gateway.service are enabled).
@@ -29477,7 +29470,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 _shutdown_ctx["signal"] if _shutdown_ctx else "SIGTERM/SIGINT",
             )
         else:
-            _signal_initiated_shutdown = True
+            _signal_initiated_shutdown[0] = True
             # Mirror onto the runner so _stop_impl can suppress the gateway_state=stopped persist for
             # unexpected signals (container/s6 SIGTERM on restart, OOM, bare kill). Operator stops set a
             # planned-stop marker, take the `planned_stop` branch above and leave this False (DO persist).
@@ -29507,49 +29500,19 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             except Exception as _e:
                 logger.debug("spawn_async_diagnostic failed: %s", _e)
         asyncio.create_task(runner.stop())
+    return shutdown_signal_handler
 
-    def restart_signal_handler():
-        runner.request_restart(detached=False, via_service=True)
 
-    loop = asyncio.get_running_loop()
-
-    # Loop-level exception handler swallowing transient network errors from background tasks: an
-    # unhandled telegram TimedOut / NetworkError / httpx connection error in any awaited coroutine
-    # would kill the whole gateway. Deliberately narrow — everything else hits the default handler.
-    loop.set_exception_handler(_gateway_loop_exception_handler)
-
-    if threading.current_thread() is threading.main_thread():
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, shutdown_signal_handler, sig)  # windows-footgun: ok — wrapped in try/except NotImplementedError for Windows
-            except NotImplementedError:
-                pass
-        if hasattr(signal, "SIGUSR1"):
-            try:
-                loop.add_signal_handler(signal.SIGUSR1, restart_signal_handler)  # windows-footgun: ok — POSIX signal, guarded by hasattr above + try/except NotImplementedError
-            except NotImplementedError:
-                pass
-    else:
-        logger.info("Skipping signal handlers (not running in main thread).")
-
-    # Windows fallback: asyncio.add_signal_handler raises NotImplementedError there, so `hermes
-    # gateway stop`'s SIGTERM never reaches shutdown_signal_handler (no drain, sessions lost). A
-    # marker-polling thread notices the planned-stop marker written BEFORE the kill and drives the
-    # same shutdown path. Runs everywhere (cheap) so environments masking SIGTERM still drain cleanly.
-    _planned_stop_watcher_stop = threading.Event()
-    _planned_stop_watcher_thread = threading.Thread(
-        target=_run_planned_stop_watcher,
-        args=(_planned_stop_watcher_stop, runner, loop, shutdown_signal_handler),
-        daemon=True,
-        name="planned-stop-watcher",
-    )
-    _planned_stop_watcher_thread.start()
-
-    # Claim the PID file BEFORE bringing up any platform adapters: two concurrent `gateway run
-    # --replace` invocations both pass the termination-wait above, but only the O_CREAT|O_EXCL
-    # winner ever opens Telegram polling, Discord sockets, etc. The loser exits cleanly first.
+def _start_gateway_claim_pid_file() -> bool:
+    """Claim the runtime lock + PID file (O_EXCL winner is the authoritative gateway). False = lost."""
     import atexit
-    from gateway.status import write_pid_file, remove_pid_file, get_running_pid
+    from gateway.status import (
+        acquire_gateway_runtime_lock,
+        get_running_pid,
+        release_gateway_runtime_lock,
+        remove_pid_file,
+        write_pid_file,
+    )
     _current_pid = get_running_pid()
     if _current_pid is not None and _current_pid != os.getpid():
         logger.error(
@@ -29572,10 +29535,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         return False
     atexit.register(remove_pid_file)
     atexit.register(release_gateway_runtime_lock)
+    return True
 
-    # Control socket — the gateway-owned identify/status surface. Started right after the PID-file
-    # claim, since winning that O_EXCL race makes this process the authoritative gateway for its
-    # HERMES_HOME. Non-fatal: a bind failure just leaves consumers on the process-scan/state-file layer.
+
+async def _start_gateway_start_control_socket(runner):
+    """Start the gateway control socket (identify/status/pause-for-update); None when unavailable."""
+    import atexit
     _control_server = None
     try:
         from gateway.control_socket import GatewayControlServer
@@ -29624,79 +29589,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     except Exception as _cs_exc:
         logger.debug("Control socket startup failed (non-fatal): %s", _cs_exc)
         _control_server = None
+    return _control_server
 
-    # Lifecycle ledger: report if the previous life died uncleanly (SIGKILL / OOM / VM death), then
-    # claim the sentinel for this life. Placed after the PID-file/lock claim so only the
-    # authoritative gateway touches it — a --replace loser exiting above must not clobber it.
-    try:
-        from gateway.lifecycle_ledger import record_startup as _lifecycle_record_startup
-        _lifecycle_record_startup()
-    except Exception as _lc_exc:
-        logger.debug("Lifecycle ledger startup record failed: %s", _lc_exc)
 
-    try:
-        from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive
+def _start_gateway_start_cron_and_housekeeping(runner):
+    """Start the cron scheduler thread + gateway housekeeping thread.
 
-        start_nous_auth_keepalive()
-    except Exception as exc:
-        logger.debug("Nous auth keepalive did not start: %s", exc)
-
-    _ensure_windows_gateway_venv_imports()
-
-    # MCP tool discovery in an executor so the loop stays responsive when a configured MCP server is
-    # slow/unreachable: discover_mcp_tools() blocks up to 120s, which on the loop thread would freeze
-    # platform heartbeats (Discord shard, Telegram polling).
-    try:
-        await _discover_gateway_mcp_tools(runner.config)
-    except Exception as e:
-        logger.debug("MCP tool discovery failed: %s", e)
-
-    # Start the gateway
-    try:
-        success = await runner.start()
-    except BaseException:
-        _shutdown_gateway_health_export(runner)
-        raise
-    if not success:
-        _shutdown_gateway_health_export(runner)
-        return False
-    # Recover any pending messages flushed during a previous shutdown (#72680).
-    try:
-        from gateway.shutdown_flush import recover_pending_to_db
-        recovered = recover_pending_to_db()
-        if recovered:
-            logger.info(
-                "Recovered %d pending message(s) from shutdown flush", recovered,
-            )
-    except Exception:
-        pass
-    if runner.should_exit_cleanly:
-        _shutdown_gateway_health_export(runner)
-        if runner.exit_reason:
-            logger.error("Gateway exiting cleanly: %s", runner.exit_reason)
-        # A clean exit carrying an explicit exit code (e.g. GATEWAY_FATAL_CONFIG_EXIT_CODE) must
-        # propagate so the s6 finish script can translate it (78 → 125) and stop the restart loop;
-        # otherwise the early `return True` exits 0 and s6 crash-loops the gateway anyway.
-        if runner.exit_code is not None:
-            raise SystemExit(runner.exit_code)
-        return True
-    if not runner._running:
-        # Startup was intentionally aborted by restart/shutdown before entering
-        # running mode; preserve that lifecycle path without starting cron.
-        try:
-            await runner.wait_for_shutdown()
-            if runner.should_exit_with_failure:
-                if runner.exit_reason:
-                    logger.error("Gateway exiting with failure: %s", runner.exit_reason)
-                return False
-            with suppress(Exception):
-                await _shutdown_mcp_servers_nonblocking()
-            if runner.exit_code is not None:
-                raise SystemExit(runner.exit_code)
-            return True
-        finally:
-            _shutdown_gateway_health_export(runner)
-
+    Returns ``(cron_stop, cron_provider, cron_thread, housekeeping_thread)``.
+    """
     # Start the background cron scheduler via the resolved provider so scheduled jobs fire
     # automatically. Pass the event loop so cron delivery can use live adapters (E2EE support).
     from cron.scheduler_provider import (
@@ -29793,16 +29693,21 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         name="gateway-housekeeping",
     )
     housekeeping_thread.start()
+    return cron_stop, cron_provider, cron_thread, housekeeping_thread
 
-    # READY is emitted only after adapters, cron and housekeeping reach their running boundary;
-    # missing config/systemd runtime state leaves the watchdog disabled without changing behavior.
-    start_watchdog = getattr(runner, "_start_systemd_watchdog", None)
-    if callable(start_watchdog):
-        start_watchdog()
 
-    # Wait for shutdown
-    await runner.wait_for_shutdown()
-
+async def _start_gateway_shutdown_tail(
+    runner,
+    _control_server,
+    cron_stop: threading.Event,
+    cron_provider,
+    cron_thread: threading.Thread,
+    housekeeping_thread: threading.Thread,
+    _planned_stop_watcher_stop: threading.Event,
+    _planned_stop_watcher_thread: threading.Thread,
+    _signal_initiated_shutdown: list,
+) -> bool:
+    """Post-``wait_for_shutdown`` teardown; returns the process exit verdict (True = exit 0)."""
     # Stop the control socket first: once shutdown begins this process is no longer a truthful "the
     # gateway is serving here" answer, and a successor (--replace / supervisor respawn) must be able
     # to bind. Early-exit paths above don't reach this; their atexit cleanup_files hook runs, and a
@@ -29854,7 +29759,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # non-zero so systemd's Restart=on-failure revives the process (hermes update killing the
     # gateway mid-work, external kills, WSL2/container runtime signals). `hermes gateway stop` and
     # Ctrl+C are handled above as planned stops and must not trigger revival.
-    if _signal_initiated_shutdown and not runner._restart_requested:
+    if _signal_initiated_shutdown[0] and not runner._restart_requested:
         logger.info(
             "Exiting with code 1 (signal-initiated shutdown without restart "
             "request) so systemd Restart=on-failure can revive the gateway."
@@ -29871,6 +29776,200 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         raise SystemExit(75)
 
     return True
+
+
+async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
+    """Start the gateway and run until interrupted.
+
+    Returns True if the gateway ran, False if it failed to start (non-zero exit so systemd can
+    auto-restart). ``replace`` kills any existing instance first — avoids systemd restart-loop
+    deadlocks when the previous process hasn't fully exited.
+    """
+    # Enable interactive exec approval on messaging platforms. Set here (not at module import) so
+    # incidental imports of gateway.run from CLI/tool code don't poison HERMES_EXEC_ASK.
+    os.environ["HERMES_EXEC_ASK"] = "1"
+
+    from hermes_cli.resource_limits import apply_nofile_soft_limit
+
+    apply_nofile_soft_limit()
+
+    # Snapshot the checkout revision now, while sys.modules still matches disk, so a later `git
+    # pull` under this long-lived process can be detected (and risky work like model switching
+    # refused) instead of crashing on a stale in-memory module.
+    from gateway.code_skew import record_boot_fingerprint
+    record_boot_fingerprint()
+
+    # Duplicate-instance guard: no two gateways under one HERMES_HOME. The PID file is scoped to
+    # HERMES_HOME, so multi-profile setups (distinct HERMES_HOME each) run concurrently untripped.
+    from gateway.status import get_running_pid
+    existing_pid = get_running_pid()
+    if existing_pid is not None and existing_pid != os.getpid():
+        if not await _start_gateway_replace_existing_instance(existing_pid, replace):
+            return False
+
+    _start_gateway_configure_logging(verbosity)
+
+    runner = GatewayRunner(config)
+    # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
+    # land in its own logs/. Must run after the runner resolved (possibly None) config and setup_logging.
+    _enable_multiplex_log_routing(runner.config)
+    # ``--replace`` is explicit startup authority, not a durable reconnect policy: GatewayRunner scopes
+    # it to cold adapter connects and clears it before the background reconnect watcher starts.
+    runner._platform_lock_takeover_on_start = bool(replace)
+
+    # Track whether an unexpected signal initiated shutdown: an unexpected SIGTERM exits non-zero so
+    # service managers revive us; planned stop paths write a marker first so they exit cleanly.
+    _signal_initiated_shutdown = [False]
+
+    # Set up signal handlers
+    shutdown_signal_handler = _start_gateway_make_shutdown_signal_handler(
+        runner, _signal_initiated_shutdown
+    )
+
+    def restart_signal_handler():
+        runner.request_restart(detached=False, via_service=True)
+
+    loop = asyncio.get_running_loop()
+
+    # Loop-level exception handler swallowing transient network errors from background tasks: an
+    # unhandled telegram TimedOut / NetworkError / httpx connection error in any awaited coroutine
+    # would kill the whole gateway. Deliberately narrow — everything else hits the default handler.
+    loop.set_exception_handler(_gateway_loop_exception_handler)
+
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, shutdown_signal_handler, sig)  # windows-footgun: ok — wrapped in try/except NotImplementedError for Windows
+            except NotImplementedError:
+                pass
+        if hasattr(signal, "SIGUSR1"):
+            try:
+                loop.add_signal_handler(signal.SIGUSR1, restart_signal_handler)  # windows-footgun: ok — POSIX signal, guarded by hasattr above + try/except NotImplementedError
+            except NotImplementedError:
+                pass
+    else:
+        logger.info("Skipping signal handlers (not running in main thread).")
+
+    # Windows fallback: asyncio.add_signal_handler raises NotImplementedError there, so `hermes
+    # gateway stop`'s SIGTERM never reaches shutdown_signal_handler (no drain, sessions lost). A
+    # marker-polling thread notices the planned-stop marker written BEFORE the kill and drives the
+    # same shutdown path. Runs everywhere (cheap) so environments masking SIGTERM still drain cleanly.
+    _planned_stop_watcher_stop = threading.Event()
+    _planned_stop_watcher_thread = threading.Thread(
+        target=_run_planned_stop_watcher,
+        args=(_planned_stop_watcher_stop, runner, loop, shutdown_signal_handler),
+        daemon=True,
+        name="planned-stop-watcher",
+    )
+    _planned_stop_watcher_thread.start()
+
+    # Claim the PID file BEFORE bringing up any platform adapters: two concurrent `gateway run
+    # --replace` invocations both pass the termination-wait above, but only the O_CREAT|O_EXCL
+    # winner ever opens Telegram polling, Discord sockets, etc. The loser exits cleanly first.
+    if not _start_gateway_claim_pid_file():
+        return False
+
+    # Control socket — the gateway-owned identify/status surface. Started right after the PID-file
+    # claim, since winning that O_EXCL race makes this process the authoritative gateway for its
+    # HERMES_HOME. Non-fatal: a bind failure just leaves consumers on the process-scan/state-file layer.
+    _control_server = await _start_gateway_start_control_socket(runner)
+
+    # Lifecycle ledger: report if the previous life died uncleanly (SIGKILL / OOM / VM death), then
+    # claim the sentinel for this life. Placed after the PID-file/lock claim so only the
+    # authoritative gateway touches it — a --replace loser exiting above must not clobber it.
+    try:
+        from gateway.lifecycle_ledger import record_startup as _lifecycle_record_startup
+        _lifecycle_record_startup()
+    except Exception as _lc_exc:
+        logger.debug("Lifecycle ledger startup record failed: %s", _lc_exc)
+
+    try:
+        from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive
+
+        start_nous_auth_keepalive()
+    except Exception as exc:
+        logger.debug("Nous auth keepalive did not start: %s", exc)
+
+    _ensure_windows_gateway_venv_imports()
+
+    # MCP tool discovery in an executor so the loop stays responsive when a configured MCP server is
+    # slow/unreachable: discover_mcp_tools() blocks up to 120s, which on the loop thread would freeze
+    # platform heartbeats (Discord shard, Telegram polling).
+    try:
+        await _discover_gateway_mcp_tools(runner.config)
+    except Exception as e:
+        logger.debug("MCP tool discovery failed: %s", e)
+
+    # Start the gateway
+    try:
+        success = await runner.start()
+    except BaseException:
+        _shutdown_gateway_health_export(runner)
+        raise
+    if not success:
+        _shutdown_gateway_health_export(runner)
+        return False
+    # Recover any pending messages flushed during a previous shutdown (#72680).
+    try:
+        from gateway.shutdown_flush import recover_pending_to_db
+        recovered = recover_pending_to_db()
+        if recovered:
+            logger.info(
+                "Recovered %d pending message(s) from shutdown flush", recovered,
+            )
+    except Exception:
+        pass
+    if runner.should_exit_cleanly:
+        _shutdown_gateway_health_export(runner)
+        if runner.exit_reason:
+            logger.error("Gateway exiting cleanly: %s", runner.exit_reason)
+        # A clean exit carrying an explicit exit code (e.g. GATEWAY_FATAL_CONFIG_EXIT_CODE) must
+        # propagate so the s6 finish script can translate it (78 → 125) and stop the restart loop;
+        # otherwise the early `return True` exits 0 and s6 crash-loops the gateway anyway.
+        if runner.exit_code is not None:
+            raise SystemExit(runner.exit_code)
+        return True
+    if not runner._running:
+        # Startup was intentionally aborted by restart/shutdown before entering
+        # running mode; preserve that lifecycle path without starting cron.
+        try:
+            await runner.wait_for_shutdown()
+            if runner.should_exit_with_failure:
+                if runner.exit_reason:
+                    logger.error("Gateway exiting with failure: %s", runner.exit_reason)
+                return False
+            with suppress(Exception):
+                await _shutdown_mcp_servers_nonblocking()
+            if runner.exit_code is not None:
+                raise SystemExit(runner.exit_code)
+            return True
+        finally:
+            _shutdown_gateway_health_export(runner)
+
+    cron_stop, cron_provider, cron_thread, housekeeping_thread = (
+        _start_gateway_start_cron_and_housekeeping(runner)
+    )
+
+    # READY is emitted only after adapters, cron and housekeeping reach their running boundary;
+    # missing config/systemd runtime state leaves the watchdog disabled without changing behavior.
+    start_watchdog = getattr(runner, "_start_systemd_watchdog", None)
+    if callable(start_watchdog):
+        start_watchdog()
+
+    # Wait for shutdown
+    await runner.wait_for_shutdown()
+
+    return await _start_gateway_shutdown_tail(
+        runner,
+        _control_server,
+        cron_stop,
+        cron_provider,
+        cron_thread,
+        housekeeping_thread,
+        _planned_stop_watcher_stop,
+        _planned_stop_watcher_thread,
+        _signal_initiated_shutdown,
+    )
 
 
 def _guard_corrupt_user_config() -> None:
