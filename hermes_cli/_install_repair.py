@@ -126,7 +126,7 @@ def _default_hermes_root() -> Path | None:
 
 
 def _venv_is_relocatable(venv_dir: Path) -> bool:
-    """True when the venv's pyvenv.cfg declares ``relocatable = true``.
+    r"""True when the venv's pyvenv.cfg declares ``relocatable = true``.
 
     uv writes the flag; ``managed_uv`` builds replacement venvs ``--relocatable``. A relocatable
     venv's console-script trampolines embed a RELATIVE interpreter reference, so a copy placed
@@ -179,7 +179,7 @@ def ensure_windows_bin_launchers(
     windows: bool | None = None,
     user_path_entries: list[str] | None = None,
 ) -> list[str]:
-    """Re-stage the Windows ``hermes`` launchers when they vanish.
+    r"""Re-stage the Windows ``hermes`` launchers when they vanish.
 
     On Windows, ``hermes`` resolves through launchers derived from the venv console scripts — never
     ``venv\Scripts`` itself on PATH, which would shadow the user's ``python`` (#83797).

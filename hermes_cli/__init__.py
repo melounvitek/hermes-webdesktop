@@ -1,15 +1,4 @@
-"""
-Hermes CLI - Unified command-line interface for Hermes Agent.
-
-Provides subcommands for:
-- hermes chat          - Interactive chat (same as ./hermes)
-- hermes gateway       - Run gateway in foreground
-- hermes gateway start - Start gateway service
-- hermes gateway stop  - Stop gateway service
-- hermes setup         - Interactive setup wizard
-- hermes status        - Show status of all components
-- hermes cron          - Manage cron jobs
-"""
+"""Hermes CLI - Unified command-line interface for Hermes Agent."""
 
 import os
 import sys
@@ -21,33 +10,9 @@ __release_date__ = "2026.8.31"
 def _ensure_utf8():
     """Force UTF-8 stdout/stderr to prevent UnicodeEncodeError crashes.
 
-    Several environments select a legacy, non-UTF-8 encoding for the standard
-    streams:
-
-    - Windows services and terminals default to cp1252.
-    - Linux hosts with a latin-1 / C / POSIX locale (common on minimal Debian
-      installs and Raspberry Pi) select latin-1 or ASCII.
-
-    The CLI prints box-drawing characters (┌│├└─) and the ⚕ glyph in the setup
-    wizard, doctor, and status banners. Encoding those under a non-UTF-8 codec
-    raises an unhandled UnicodeEncodeError that crashes the command before it
-    can even start — e.g. `hermes setup` on a fresh Pi.
-
-    This runs at import time so it protects every CLI subcommand, on any
-    platform. It re-wraps stdout/stderr as UTF-8 when their encoding is not
-    already UTF-8, preferring TextIOWrapper.reconfigure() so the existing
-    stream object is fixed in place (cached `sys.stdout` references keep
-    working) and falling back to reopening the file descriptor with
-    closefd=False (the CPython-recommended safe variant).
-
-    No-op when the streams are already UTF-8: a healthy UTF-8 system sees no
-    stream change and no environment mutation.
-
-    Note: this is intentionally the earliest, platform-agnostic guard.
-    hermes_cli/stdio.py::configure_windows_stdio() runs later from the entry
-    points and layers on the Windows-only extras (console code-page flip,
-    EDITOR default, PATH augmentation); its stream reconfiguration is a
-    harmless idempotent no-op once we have already repaired the streams here.
+    The CLI prints box-drawing characters (┌│├└─) and the ⚕ glyph in the setup wizard, doctor, and
+    status banners. Encoding those under a non-UTF-8 codec raises an unhandled UnicodeEncodeError
+    that crashes the command before it can even start — e.g. `hermes setup` on a fresh Pi.
     """
     repaired = False
 

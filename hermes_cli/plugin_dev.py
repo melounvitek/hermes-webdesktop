@@ -1,9 +1,7 @@
 """Runtime-backed validation behind ``hermes plugins doctor``.
 
-The Doctor originated in #46456 / contributor PR #46457 by 峯岸 亮
-(@zapabob).  This core command keeps that contribution's manifest/import/
-registration validation intent while routing every check through the current
-runtime contracts instead of maintaining a parallel scanner.
+This core command keeps that contribution's manifest/import/ registration validation intent while
+routing every check through the current runtime contracts instead of maintaining a parallel scanner.
 """
 
 from __future__ import annotations
@@ -36,9 +34,8 @@ def _deny_network(*_args: Any, **_kwargs: Any) -> None:
 def _doctor_runtime(plugin_path: Path):
     """Load one plugin through the real runtime and restore global state.
 
-    This is deliberately private Doctor machinery, not a standalone plugin
-    test framework. Registration code executes under a temporary HERMES_HOME
-    with outbound socket connects blocked.
+    Deliberately private Doctor machinery, not a plugin test framework. Registration code runs
+    under a temporary HERMES_HOME with outbound socket connects blocked.
     """
     stack = ExitStack()
     try:
@@ -200,14 +197,10 @@ def _has_manifest(path: Path) -> bool:
 def _holds_plugin(path: Path) -> bool:
     """True when plugin discovery would find a manifest under *path*.
 
-    Mirrors ``PluginManager._scan_directory``: a manifest in *path* itself
-    (flat layout) or in one immediate subdirectory (category layout, where
-    the category directory carries no manifest of its own).
-
-    Doctor copies the resolved directory wholesale before the runtime gets
-    to reject it, so an unvalidated resolve is a disk-usage bug, not just a
-    confusing error: ``hermes plugins doctor`` with no argument defaults to
-    ``.``, and any directory used to satisfy that.
+    Mirrors ``PluginManager._scan_directory``: a manifest in *path* itself or in one immediate
+    subdirectory (category layout). Doctor copies the resolved directory wholesale before the
+    runtime can reject it, so an unvalidated resolve is a disk-usage bug: with no argument
+    Doctor defaults to ``.``, and any directory used to satisfy that.
     """
     if not path.is_dir():
         return False
@@ -223,10 +216,9 @@ def _holds_plugin(path: Path) -> bool:
 def _is_plugin_id(raw: str) -> bool:
     """True when *raw* can name an installed plugin rather than a path.
 
-    Ids are relative and may carry one category segment
-    (``image_gen/openai``). Dot components are excluded: joining ``.``
-    onto a plugins root yields the root itself, which would hand Doctor
-    every installed plugin at once instead of one.
+    Ids are relative and may carry one category segment (``image_gen/openai``). Dot components
+    are excluded: joining ``.`` onto a plugins root yields the root itself, handing Doctor every
+    installed plugin at once instead of one.
     """
     if not raw or PurePath(raw).is_absolute():
         return False

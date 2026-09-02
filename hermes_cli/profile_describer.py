@@ -1,27 +1,8 @@
 """Profile describer — auto-generate ``description`` for a profile.
 
-Used by ``hermes profile describe <name> --auto`` and the dashboard's
-"auto-generate description" button. Reads the profile's installed
-skills, model+provider, name, and optionally a small slice of memory,
-then asks the auxiliary LLM to produce a 1-2 sentence description of
-what the profile is good at.
-
-Result is written to ``<profile_dir>/profile.yaml`` with
-``description_auto: true`` so the dashboard can surface a "review"
-badge. User can edit afterward to confirm.
-
-Design notes
-------------
-- Mirrors the shape of ``hermes_cli/kanban_specify.py``: lazy aux
-  client import inside the function, lenient response parse, never
-  raises on expected failure modes.
-- Reads at most ``MAX_SKILLS_FOR_PROMPT`` skill names to keep the
-  prompt bounded. No skill body — names + categories are enough
-  signal and avoid blowing context on profiles with 100+ skills.
-- Memory is intentionally NOT read here. Memories are personal and
-  the orchestrator routes work to a *role* not a *biography*. If we
-  find later that memory adds signal we can wire it; for now,
-  skills + name + model is plenty.
+Design notes ------------ - Mirrors the shape of ``hermes_cli/kanban_specify.py``: lazy aux client
+import inside the function, lenient response parse, never raises on expected failure modes. - Reads
+at most ``MAX_SKILLS_FOR_PROMPT`` skill names to keep the prompt bounded.
 """
 
 from __future__ import annotations
@@ -98,11 +79,10 @@ class DescribeOutcome:
 
 
 def _collect_skills(profile_dir: Path) -> list[str]:
-    """Return a stable, capped list of skill names for the prompt.
+    """Return every (non-excluded) skill name in a profile, sorted.
 
-    Format: ``category/skill_name`` where category is the immediate
-    subdir under ``skills/`` (e.g. ``devops``, ``research``). Skills
-    that live directly under ``skills/`` show as bare ``skill_name``.
+    Format ``category/skill_name`` (category = immediate subdir under ``skills/``); skills
+    directly under ``skills/`` show as bare ``skill_name``.
     """
     skills_dir = profile_dir / "skills"
     if not skills_dir.is_dir():
@@ -118,21 +98,22 @@ def _collect_skills(profile_dir: Path) -> list[str]:
         parts = rel.parts[:-1]  # drop SKILL.md filename
         if not parts:
             continue
-        # parts[-1] is the skill dir name; parts[:-1] is the category path
-        if len(parts) == 1:
-            names.append(parts[0])
-        else:
-            names.append(f"{parts[0]}/{parts[-1]}")
+        # parts[-1] is the skill dir name; parts[0] is the top-level category
+        names.append(parts[0] if len(parts) == 1 else f"{parts[0]}/{parts[-1]}")
     names.sort()
-    # Keep within prompt budget. Skills earlier in alphabet aren't more
-    # important — we'll let the LLM see a sample. Pick evenly-spaced
-    # entries instead of just the head so a profile with skills A..Z
-    # doesn't get described as "starts with A".
+    return names
+
+
+def _sample_skills(names: list[str]) -> list[str]:
+    """Cap *names* to the prompt budget with evenly-spaced picks.
+
+    Skills earlier in the alphabet aren't more important, so sample across the whole list rather
+    than taking the head — a profile with skills A..Z must not be described as "starts with A".
+    """
     if len(names) <= MAX_SKILLS_FOR_PROMPT:
         return names
     step = len(names) / MAX_SKILLS_FOR_PROMPT
-    sampled = [names[int(i * step)] for i in range(MAX_SKILLS_FOR_PROMPT)]
-    return sampled
+    return [names[int(i * step)] for i in range(MAX_SKILLS_FOR_PROMPT)]
 
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
@@ -143,14 +124,11 @@ def _extract_json_blob(raw: str) -> Optional[dict]:
     last = stripped.rfind("}")
     if first == -1 or last == -1 or last <= first:
         return None
-    candidate = stripped[first : last + 1]
     try:
-        val = json.loads(candidate)
-    except (ValueError, json.JSONDecodeError):
+        val = json.loads(stripped[first : last + 1])
+    except ValueError:
         return None
-    if not isinstance(val, dict):
-        return None
-    return val
+    return val if isinstance(val, dict) else None
 
 
 def describe_profile(
@@ -161,15 +139,13 @@ def describe_profile(
 ) -> DescribeOutcome:
     """Auto-generate a description for one profile.
 
-    Returns an outcome describing what happened. Never raises for
-    expected failure modes (profile missing, no aux client configured,
-    API error, malformed response) — those surface via ``ok=False`` so
-    a sweep can continue past individual failures.
+    Returns an outcome describing what happened. Never raises for expected failure modes (profile
+    missing, no aux client configured, API error, malformed response) — those surface via
+    ``ok=False`` so a sweep can continue past individual failures.
 
-    ``overwrite`` controls whether an existing user-authored description
-    is replaced. By default we refuse to overwrite a description with
-    ``description_auto: false`` to protect curated text. Auto-generated
-    descriptions (``description_auto: true``) are always replaceable.
+    ``overwrite`` controls whether an existing user-authored description is replaced. By default we
+    refuse to overwrite a description with ``description_auto: false`` to protect curated text.
+    Auto-generated descriptions (``description_auto: true``) are always replaceable.
     """
     canon = profiles_mod.normalize_profile_name(profile_name)
     if not profiles_mod.profile_exists(canon):
@@ -196,12 +172,10 @@ def describe_profile(
             "(use --overwrite to replace)",
         )
 
-    skill_names = _collect_skills(profile_dir)
+    all_skills = _collect_skills(profile_dir)
+    skill_count = len(all_skills)
+    skill_names = _sample_skills(all_skills)
     skill_list = "\n".join(f"  - {n}" for n in skill_names) or "  (no skills installed)"
-    skill_count = sum(
-        1 for _ in (profile_dir / "skills").rglob("SKILL.md")
-        if not is_excluded_skill_path(_)
-    ) if (profile_dir / "skills").is_dir() else 0
 
     # Read model + provider from the profile's config.
     try:
@@ -277,12 +251,10 @@ def describe_profile(
 def list_describable_profiles(*, missing_only: bool = True) -> list[str]:
     """Return profile names that can be described.
 
-    ``missing_only=True`` (default) returns only profiles without a
-    description. ``missing_only=False`` returns every profile.
+    ``missing_only=True`` (default) returns only profiles without a description.
+    ``missing_only=False`` returns every profile.
     """
-    out: list[str] = []
-    for p in profiles_mod.list_profiles():
-        if missing_only and (p.description or "").strip() and not p.description_auto:
-            continue
-        out.append(p.name)
-    return out
+    return [
+        p.name for p in profiles_mod.list_profiles()
+        if not (missing_only and (p.description or "").strip() and not p.description_auto)
+    ]

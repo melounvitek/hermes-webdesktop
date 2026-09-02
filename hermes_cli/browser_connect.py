@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import ntpath
 import os
@@ -23,44 +24,61 @@ logger = logging.getLogger(__name__)
 DEFAULT_BROWSER_CDP_PORT = 9222
 DEFAULT_BROWSER_CDP_URL = f"http://127.0.0.1:{DEFAULT_BROWSER_CDP_PORT}"
 
-_DARWIN_APPS = (
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-    "/Applications/Brave Origin.app/Contents/MacOS/Brave Origin",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-)
+@dataclass(frozen=True)
+class _Browser:
+    """Per-browser install/profile locations for one Chromium-family product."""
 
-_WINDOWS_BROWSER_GROUPS = (
-    (("chrome.exe", "chrome"), (("Google", "Chrome", "Application", "chrome.exe"),)),
-    (
-        ("chromium.exe", "chromium"),
-        (("Chromium", "Application", "chrome.exe"), ("Chromium", "Application", "chromium.exe")),
-    ),
-    (("brave.exe", "brave"), (("BraveSoftware", "Brave-Browser", "Application", "brave.exe"),)),
-    (
-        ("brave-origin.exe", "brave-origin"),
-        (
-            ("BraveSoftware", "Brave-Origin", "Application", "brave.exe"),
-            ("BraveSoftware", "Brave-Origin", "Application", "brave-origin.exe"),
-        ),
-    ),
-    (("msedge.exe", "msedge"), (("Microsoft", "Edge", "Application", "msedge.exe"),)),
-)
+    key: str
+    mac_app: str
+    mac_support: tuple[str, ...]          # under ~/Library/Application Support
+    win_bins: tuple[str, ...]             # shutil.which names on Windows
+    win_install: tuple[tuple[str, ...], ...]  # under Program Files / LOCALAPPDATA
+    win_profile: tuple[str, ...]          # under LOCALAPPDATA
+    linux_bins: tuple[str, ...]           # shutil.which names on Linux
+    linux_paths: tuple[str, ...]          # known absolute install paths
+    linux_config: str                     # under $XDG_CONFIG_HOME
+    # PATH names tried by chromium_executable() when they differ from
+    # linux_bins (channel/alias binaries are launch candidates only).
+    linux_exec: tuple[str, ...] | None = None
 
-_WINDOWS_BIN_NAMES = tuple(name for names, _ in _WINDOWS_BROWSER_GROUPS for name in names)
-_WINDOWS_INSTALL_PARTS = tuple(parts for _, group in _WINDOWS_BROWSER_GROUPS for parts in group)
 
-_LINUX_BROWSER_GROUPS = (
-    (
+# Launch-candidate order (chrome, chromium, brave, brave-origin, edge) is the
+# tuple order. ``brave-origin`` is Brave's standalone paid build: same Chromium
+# core, but a fully distinct install identity (BraveSoftware/Brave-Origin
+# product path, ``BraveOHTML`` ProgId, ``com.brave.Browser.origin`` bundle id)
+# so it side-by-side installs with regular Brave — its profile is NOT under
+# Brave-Browser and must never be conflated with the ``brave`` key (a "brave"
+# lookup resolving to the Origin binary would drive the wrong browser's profile).
+_BROWSERS = (
+    _Browser(
+        "chrome",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ("Google", "Chrome"),
+        ("chrome.exe", "chrome"),
+        (("Google", "Chrome", "Application", "chrome.exe"),),
+        ("Google", "Chrome", "User Data"),
         ("google-chrome", "google-chrome-stable"),
         ("/opt/google/chrome/chrome", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"),
+        "google-chrome",
     ),
-    (
+    _Browser(
+        "chromium",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ("Chromium",),
+        ("chromium.exe", "chromium"),
+        (("Chromium", "Application", "chrome.exe"), ("Chromium", "Application", "chromium.exe")),
+        ("Chromium", "User Data"),
         ("chromium-browser", "chromium"),
         ("/usr/bin/chromium-browser", "/usr/bin/chromium"),
+        "chromium",
     ),
-    (
+    _Browser(
+        "brave",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ("BraveSoftware", "Brave-Browser"),
+        ("brave.exe", "brave"),
+        (("BraveSoftware", "Brave-Browser", "Application", "brave.exe"),),
+        ("BraveSoftware", "Brave-Browser", "User Data"),
         ("brave-browser", "brave-browser-stable", "brave"),
         (
             "/usr/bin/brave-browser",
@@ -71,21 +89,34 @@ _LINUX_BROWSER_GROUPS = (
             "/opt/brave.com/brave/brave",
             "/opt/brave-bin/brave",
         ),
+        "BraveSoftware/Brave-Browser",
     ),
-    # Brave Origin is a SEPARATE product identity (side-by-side installable
-    # with Brave), so it gets its own group: the executable fallback in
-    # chromium_executable() matches by group, and mixing Origin binaries into
-    # the brave group would let a "brave" lookup resolve to the Origin binary
-    # (or vice versa) — driving the wrong browser's profile.
-    (
+    _Browser(
+        "brave-origin",
+        "/Applications/Brave Origin.app/Contents/MacOS/Brave Origin",
+        ("BraveSoftware", "Brave-Origin"),
+        ("brave-origin.exe", "brave-origin"),
+        (
+            ("BraveSoftware", "Brave-Origin", "Application", "brave.exe"),
+            ("BraveSoftware", "Brave-Origin", "Application", "brave-origin.exe"),
+        ),
+        ("BraveSoftware", "Brave-Origin", "User Data"),
         ("brave-origin", "brave-origin-nightly"),
         (
             "/usr/bin/brave-origin",
             "/opt/brave.com/brave-origin/brave-origin",
             "/opt/brave.com/brave-origin-nightly/brave-origin",
         ),
+        "BraveSoftware/Brave-Origin",
+        linux_exec=("brave-origin",),
     ),
-    (
+    _Browser(
+        "edge",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ("Microsoft Edge",),
+        ("msedge.exe", "msedge"),
+        (("Microsoft", "Edge", "Application", "msedge.exe"),),
+        ("Microsoft", "Edge", "User Data"),
         ("microsoft-edge", "microsoft-edge-stable", "msedge"),
         (
             "/usr/bin/microsoft-edge",
@@ -93,11 +124,11 @@ _LINUX_BROWSER_GROUPS = (
             "/opt/microsoft/msedge/microsoft-edge",
             "/opt/microsoft/msedge/msedge",
         ),
+        "microsoft-edge",
+        linux_exec=("microsoft-edge", "microsoft-edge-stable"),
     ),
 )
-
-_LINUX_BIN_NAMES = tuple(name for names, _ in _LINUX_BROWSER_GROUPS for name in names)
-_LINUX_INSTALL_PATHS = tuple(path for _, paths in _LINUX_BROWSER_GROUPS for path in paths)
+_BROWSER_BY_KEY = {b.key: b for b in _BROWSERS}
 
 
 # ---------------------------------------------------------------------------
@@ -110,14 +141,6 @@ _LINUX_INSTALL_PATHS = tuple(path for _, paths in _LINUX_BROWSER_GROUPS for path
 # supported; a non-Chromium default (Firefox, Safari) resolves to None and the
 # caller fails closed with a clear message.
 # ---------------------------------------------------------------------------
-
-# Canonical Chromium browser keys we support for real-profile driving.
-# ``brave-origin`` is Brave's standalone paid build: same Chromium core, but a
-# fully distinct install identity (BraveSoftware/Brave-Origin product path,
-# ``BraveOHTML`` ProgId, ``com.brave.Browser.origin`` bundle id) so it
-# side-by-side installs with regular Brave — its profile is NOT under
-# Brave-Browser and must never be conflated with the ``brave`` key.
-_CHROMIUM_BROWSERS = ("chrome", "edge", "brave", "chromium", "brave-origin")
 
 # Windows UserChoice ProgId prefixes → canonical browser key. Matched
 # case-insensitively by prefix so version suffixes (e.g. ``ChromeHTML.X``)
@@ -220,131 +243,81 @@ _DARWIN_CHANNEL_BUNDLES = (
 UNSUPPORTED_CHANNEL = "__unsupported_channel__"
 
 
-def _real_profile_relparts(browser: str) -> tuple:
-    """(mac_support_subdir, windows_localappdata_parts, linux_config_name)."""
-    return {
-        "chrome": (
-            ("Google", "Chrome"),
-            ("Google", "Chrome", "User Data"),
-            "google-chrome",
-        ),
-        "edge": (
-            ("Microsoft Edge",),
-            ("Microsoft", "Edge", "User Data"),
-            "microsoft-edge",
-        ),
-        "brave": (
-            ("BraveSoftware", "Brave-Browser"),
-            ("BraveSoftware", "Brave-Browser", "User Data"),
-            "BraveSoftware/Brave-Browser",
-        ),
-        "chromium": (
-            ("Chromium",),
-            ("Chromium", "User Data"),
-            "chromium",
-        ),
-        "brave-origin": (
-            ("BraveSoftware", "Brave-Origin"),
-            ("BraveSoftware", "Brave-Origin", "User Data"),
-            "BraveSoftware/Brave-Origin",
-        ),
-    }[browser]
-
-
 def real_profile_data_dir(browser: str, system: str | None = None) -> str | None:
     """Return the default user-data-dir for a Chromium ``browser`` on ``system``.
 
-    Returns None for unknown browsers. On Linux the native ($XDG_CONFIG_HOME),
-    snap and Flatpak locations are tried and the first existing one wins; the
-    native path is returned when none exists so the caller's error names it.
-    Darwin/Windows paths are not stat'ed. Paths are built with the TARGET
-    system's separator (posix for Darwin/Linux, backslash for Windows) so an
-    explicit ``system`` argument resolves correctly regardless of the host OS.
+    Returns None for unknown browsers. On Linux the native ($XDG_CONFIG_HOME), snap and Flatpak
+    locations are tried and the first existing one wins; the native path is returned when none
+    exists so the caller's error names it. Darwin/Windows paths are not stat'ed.
     """
-    if browser not in _CHROMIUM_BROWSERS:
+    b = _BROWSER_BY_KEY.get(browser)
+    if b is None:
         return None
     system = system or platform.system()
-    mac_parts, win_parts, linux_name = _real_profile_relparts(browser)
     home = os.path.expanduser("~")
     if system == "Darwin":
-        return posixpath.join(home, "Library", "Application Support", *mac_parts)
+        return posixpath.join(home, "Library", "Application Support", *b.mac_support)
     if system == "Windows":
         local = os.environ.get("LOCALAPPDATA") or ntpath.join(home, "AppData", "Local")
-        return ntpath.join(local, *win_parts)
+        return ntpath.join(local, *b.win_profile)
     # Linux / other POSIX
     config = os.environ.get("XDG_CONFIG_HOME") or posixpath.join(home, ".config")
-    candidates = [posixpath.join(config, *linux_name.split("/"))]
+    linux_parts = b.linux_config.split("/")
+    candidates = [posixpath.join(config, *linux_parts)]
     snap_parts = _LINUX_SNAP_PROFILE_PARTS.get(browser)
     if snap_parts:
         candidates.append(posixpath.join(home, *snap_parts))
     flatpak_id = _LINUX_FLATPAK_IDS.get(browser)
     if flatpak_id:
-        candidates.append(
-            posixpath.join(home, ".var", "app", flatpak_id, "config", *linux_name.split("/"))
-        )
+        candidates.append(posixpath.join(home, ".var", "app", flatpak_id, "config", *linux_parts))
     for candidate in candidates:
         if os.path.isdir(candidate):
             return candidate
     return candidates[0]
 
 
+def _first_present(paths) -> str | None:
+    for p in paths:
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
 def chromium_executable(browser: str, system: str | None = None) -> str | None:
     """Return the first present executable for a Chromium ``browser``."""
-    if browser not in _CHROMIUM_BROWSERS:
+    b = _BROWSER_BY_KEY.get(browser)
+    if b is None:
         return None
     system = system or platform.system()
-
-    def first_present(paths: tuple) -> str | None:
-        for p in paths:
-            if p and os.path.isfile(p):
-                return p
-        return None
-
     if system == "Darwin":
-        app = {
-            "chrome": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "chromium": "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "brave": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            "brave-origin": "/Applications/Brave Origin.app/Contents/MacOS/Brave Origin",
-            "edge": "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        }[browser]
-        return app if os.path.isfile(app) else None
+        return _first_present((b.mac_app,))
     if system == "Windows":
-        groups = {
-            "chrome": (("Google", "Chrome", "Application", "chrome.exe"),),
-            "chromium": (("Chromium", "Application", "chrome.exe"), ("Chromium", "Application", "chromium.exe")),
-            "brave": (("BraveSoftware", "Brave-Browser", "Application", "brave.exe"),),
-            "brave-origin": (
-                ("BraveSoftware", "Brave-Origin", "Application", "brave.exe"),
-                ("BraveSoftware", "Brave-Origin", "Application", "brave-origin.exe"),
-            ),
-            "edge": (("Microsoft", "Edge", "Application", "msedge.exe"),),
-        }[browser]
         bases = [
             os.environ.get("PROGRAMFILES", r"C:\Program Files"),
             os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
             os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")),
         ]
-        cands = tuple(os.path.join(base, *parts) for base in bases for parts in groups)
-        return first_present(cands)
-    # Linux
-    linux = {
-        "chrome": ("google-chrome", "google-chrome-stable"),
-        "chromium": ("chromium-browser", "chromium"),
-        "brave": ("brave-browser", "brave-browser-stable", "brave"),
-        "brave-origin": ("brave-origin",),
-        "edge": ("microsoft-edge", "microsoft-edge-stable"),
-    }[browser]
-    for name in linux:
+        return _first_present(os.path.join(base, *parts) for base in bases for parts in b.win_install)
+    # Linux: PATH lookup first, then the known absolute install paths.
+    for name in b.linux_exec or b.linux_bins:
         found = shutil.which(name)
         if found:
             return found
-    # fall back to the known absolute paths from the launch tables
-    for names, paths in _LINUX_BROWSER_GROUPS:
-        if any(n in linux for n in names):
-            hit = first_present(tuple(paths))
-            if hit:
-                return hit
+    return _first_present(b.linux_paths)
+
+
+def _classify_default(value: str, channels, table, match) -> str | None:
+    """Map an OS default-browser identifier to a canonical key.
+
+    Channels are checked FIRST: a recognized Beta/Dev/Canary identifier must fail closed
+    (UNSUPPORTED_CHANNEL), never fall through to a stable match and drive the stable profile.
+    """
+    for chan in channels:
+        if match(value, chan):
+            return UNSUPPORTED_CHANNEL
+    for frag, browser in table:
+        if match(value, frag):
+            return browser
     return None
 
 
@@ -363,15 +336,16 @@ def _detect_default_windows() -> str | None:
     except Exception:
         return None
     low = str(prog_id or "").lower()
-    # Channels first: a recognized Beta/Dev/Canary ProgId must fail closed, not
-    # fall through to a stable prefix match and drive the stable profile.
-    for chan in _WINDOWS_CHANNEL_PROGIDS:
-        if low.startswith(chan):
-            return UNSUPPORTED_CHANNEL
-    for prefix, browser in _WINDOWS_PROGID_MAP:
-        if low.startswith(prefix):
-            return browser
-    return None
+    return _classify_default(low, _WINDOWS_CHANNEL_PROGIDS, _WINDOWS_PROGID_MAP, str.startswith)
+
+
+def _run_stdout(argv: list[str]) -> str | None:
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5
+        ).stdout
+    except Exception:
+        return None
 
 
 _LS_HANDLERS_READER = (
@@ -385,12 +359,9 @@ _LS_HANDLERS_READER = (
 def _launchservices_https_handler(dump: str) -> str | None:
     """Return the bundle id registered for the ``https`` URL scheme.
 
-    ``dump`` is the ``defaults read … LSHandlers`` output: an array of
-    ``{ … }`` dictionaries, one per handler. Only the entry whose
-    ``LSHandlerURLScheme`` is ``https`` counts — a browser registered for
-    another scheme or a file type must not be mistaken for the default.
-    Returns None when no https handler is recorded, which is what macOS
-    stores while Safari (the implicit default) has never been replaced.
+    ``dump`` is the ``defaults read … LSHandlers`` output: an array of ``{ … }`` dictionaries, one
+    per handler. Only the entry whose ``LSHandlerURLScheme`` is ``https`` counts — a browser
+    registered for another scheme or a file type must not be mistaken for the default.
     """
     entries: list[str] = []
     depth = 0
@@ -428,63 +399,27 @@ def _launchservices_https_handler(dump: str) -> str | None:
 
 
 def _detect_default_darwin() -> str | None:
-    try:
-        out = subprocess.run(
-            list(_LS_HANDLERS_READER),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-        ).stdout
-    except Exception:
+    out = _run_stdout(list(_LS_HANDLERS_READER))
+    if out is None:
         return None
     bundle = _launchservices_https_handler(out)
     if not bundle:
         return None
-    b = bundle.lower()
-    # Channels first (exact): a Beta/Dev/Canary bundle must fail closed.
-    if b in _DARWIN_CHANNEL_BUNDLES:
-        return UNSUPPORTED_CHANNEL
-    for frag, browser in _DARWIN_BUNDLE_MAP:
-        if b == frag:
-            return browser
-    # A non-Chromium https handler (Safari, Firefox, Arc, …) or an unknown
-    # channel bundle: fail closed. No "first installed Chromium wins" fallback
-    # — that would drive a browser the user never made their default.
-    return None
+    # Exact match. A non-Chromium https handler (Safari, Firefox, Arc, …) or an
+    # unknown channel bundle fails closed: no "first installed Chromium wins"
+    # fallback — that would drive a browser the user never made their default.
+    return _classify_default(bundle.lower(), _DARWIN_CHANNEL_BUNDLES, _DARWIN_BUNDLE_MAP, str.__eq__)
 
 
 def _detect_default_linux() -> str | None:
-    try:
-        out = subprocess.run(
-            ["xdg-settings", "get", "default-web-browser"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-        ).stdout.strip().lower()
-    except Exception:
-        out = ""
-    # Channels first: ``google-chrome-beta.desktop`` contains the stable
-    # ``google-chrome`` fragment, so a substring match would drive stable.
-    # Catch recognized channels and fail closed instead.
-    for frag in _LINUX_CHANNEL_FRAGMENTS:
-        if frag in out:
-            return UNSUPPORTED_CHANNEL
-    for frag, browser in _LINUX_DESKTOP_MAP:
-        if frag in out:
-            return browser
-    return None
+    out = (_run_stdout(["xdg-settings", "get", "default-web-browser"]) or "").strip().lower()
+    # Substring match; channels first because ``google-chrome-beta.desktop``
+    # contains the stable ``google-chrome`` fragment.
+    return _classify_default(out, _LINUX_CHANNEL_FRAGMENTS, _LINUX_DESKTOP_MAP, str.__contains__)
 
 
 def detect_default_chromium(system: str | None = None) -> str | None:
-    """Return the canonical key of the default Chromium browser, or None.
-
-    None means the default browser is non-Chromium (Firefox, Safari) or could
-    not be determined — the caller fails closed rather than guessing.
-    """
+    """Return the canonical key of the default Chromium browser, or None."""
     system = system or platform.system()
     if system == "Windows":
         return _detect_default_windows()
@@ -573,12 +508,9 @@ def real_profile_copy_dir(browser: str) -> str:
 def _last_used_profile(src: str) -> str:
     """Return the profile dir Chrome last used (``Local State`` → profile.last_used).
 
-    Chromium opens ``Default`` inside a user-data-dir unless told otherwise, but
-    the user's signed-in session usually lives in whichever profile they
-    actually browse (``Profile 6`` etc.). We read that here and mirror its auth
-    into the copy's ``Default`` so the launched browser is signed in. Falls back
-    to ``Default`` when Local State is missing/unreadable or names a profile
-    dir that doesn't exist.
+    Chromium opens ``Default`` inside a user-data-dir unless told otherwise, but the user's signed-
+    in session usually lives in whichever profile they actually browse (``Profile 6`` etc.). We read
+    that here and mirror its auth into the copy's ``Default`` so the launched browser is signed in.
     """
     import json
 
@@ -596,34 +528,26 @@ def _last_used_profile(src: str) -> str:
 def _secure_snapshot_root(path: str) -> None:
     """Lock down a snapshot dir through Hermes' canonical secret-store policy.
 
-    The snapshot holds copies of the user's Cookies / Login Data, so it is a
-    credential store and must get the same owner-only permissions (and
-    managed-mode / NixOS group-share carve-out, HERMES_UID/GID ownership) as
-    every other Hermes secret dir — via ``hermes_cli.config._secure_dir``,
-    not a bespoke chmod. Deferred import avoids a config↔browser import cycle.
+    The snapshot holds copies of the user's Cookies / Login Data, so it is a credential store and
+    must get the same owner-only permissions (and managed-mode / NixOS group-share carve-out,
+    HERMES_UID/GID ownership) as every other Hermes secret dir — via
+    ``hermes_cli.config._secure_dir``, not a bespoke chmod. Best-effort: never blocks a launch.
     """
     try:
         from hermes_cli.config import _secure_dir
 
         _secure_dir(path)
-    except Exception as e:  # never block a launch on a permissions best-effort
+    except Exception as e:
         logger.debug("could not secure real-profile snapshot dir %s: %s", path, e)
 
 
 def _secure_snapshot_contents(dst: str) -> None:
     """Owner-only modes for every file/dir INSIDE the snapshot (#96729).
 
-    ``_secure_snapshot_root`` covers the top-level dirs, but the copied files
-    inherit the umask: ``shutil.copy2`` preserves the source's mode (Chrome
-    keeps its own profile 0644 inside a 0700 dir) and ``sqlite3.connect`` on
-    the backup destination creates plain umask files — so Cookies / Login
-    Data / Web Data landed 0644 and any nested profile subdir 0755. The 0700
-    parents contain the damage by default, but the documented
-    ``HERMES_HOME_MODE`` hatch (nginx traversal) makes world-readable children
-    a real exposure — these are the user's live session cookies. Reconciled
-    through the house helpers (``_secure_dir`` / ``_secure_file``) on EVERY
-    snapshot pass, so older snapshots heal too; both helpers already carry the
-    managed-mode / container carve-outs. Best-effort: never blocks a launch.
+    ``_secure_snapshot_root`` covers the top-level dirs, but ``copy2`` preserves Chrome's 0644 file
+    modes and ``sqlite3`` backups create umask files, so live session cookies landed world-readable
+    — a real exposure under the ``HERMES_HOME_MODE`` hatch. Reconciled via ``_secure_dir`` /
+    ``_secure_file`` on EVERY pass so older snapshots heal too. Best-effort: never blocks a launch.
     """
     try:
         from hermes_cli.config import _secure_dir, _secure_file
@@ -633,7 +557,7 @@ def _secure_snapshot_contents(dst: str) -> None:
                 _secure_dir(os.path.join(root, d))
             for f in files:
                 _secure_file(os.path.join(root, f))
-    except Exception as e:  # best-effort, same policy as _secure_snapshot_root
+    except Exception as e:
         logger.debug("could not secure real-profile snapshot contents %s: %s", dst, e)
 
 
@@ -650,10 +574,10 @@ _SQLITE_AUTH_DBS = frozenset({
 def _copy_auth_file(src_file: str, dst_file: str) -> bool:
     """Copy one auth file, lock-aware. Returns True on success.
 
-    For SQLite DBs (Cookies/Login Data/…), use the online-backup API so the
-    copy works even while the browser holds the file's write lock (Windows).
-    Everything else is a plain copy. A DB whose backup fails falls through to a
-    raw copy attempt; only if BOTH fail do we report failure to the caller.
+    For SQLite DBs (Cookies/Login Data/…), use the online-backup API so the copy works even while
+    the browser holds the file's write lock (Windows). Everything else is a plain copy. A DB whose
+    backup fails falls through to a raw copy attempt; only if BOTH fail do we report failure to the
+    caller.
     """
     os.makedirs(os.path.dirname(dst_file), exist_ok=True)
     if os.path.basename(src_file) in _SQLITE_AUTH_DBS:
@@ -699,13 +623,10 @@ def _copy_auth_file(src_file: str, dst_file: str) -> bool:
 def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> int:
     """Copy ``source_profile``'s auth files into the copy's ``Default`` slot.
 
-    agent-browser launches ``Default`` in the copied user-data-dir; mirroring
-    the active source profile's cookies/logins/prefs there is what makes the
-    session actually signed in (the LinkedIn/Gmail "logged out" bug when the
-    real session lives in a non-Default profile). Lock-aware (Windows), so a
-    running Chrome doesn't block the cookie DBs.
-
-    Returns the number of DB auth files that could NOT be copied (0 = clean).
+    agent-browser launches ``Default`` in the copied user-data-dir, so mirroring the active
+    profile's cookies/logins/prefs there is what makes the session actually signed in when the real
+    session lives in a non-Default profile. Lock-aware on Windows. Returns the number of DB auth
+    files that could NOT be copied (0 = clean).
     """
     dst_default = os.path.join(dst, "Default")
     failed_dbs = 0
@@ -729,22 +650,17 @@ _PROFILE_LOCKED_PREFIX = "[profile-locked] "
 
 def _profile_cookie_db(src: str, source_profile: str) -> str | None:
     """Path to the active profile's cookie DB (modern Network/ first)."""
-    for rel in (os.path.join("Network", "Cookies"), "Cookies"):
-        cand = os.path.join(src, source_profile, rel)
-        if os.path.isfile(cand):
-            return cand
-    return None
+    return _first_present(
+        os.path.join(src, source_profile, rel) for rel in (os.path.join("Network", "Cookies"), "Cookies")
+    )
 
 
 def _profile_is_locked(src: str, source_profile: str) -> bool:
     """True when the active profile's cookie DB can't be opened (browser running).
 
-    A running browser holds Cookies with a deny-all share mode on Windows
-    (proven live: even CreateFile with all share flags fails), so a plain open
-    raises PermissionError. This is a FAST probe — one open attempt, no copy —
-    used to fail closed BEFORE the heavy snapshot so a locked profile can never
-    hang the launch on a blocking file op. POSIX has no mandatory locking, so
-    the open succeeds and this returns False (copy proceeds normally).
+    On Windows a running browser holds Cookies with a deny-all share mode, so a plain open raises
+    PermissionError. This is a FAST one-open probe used to fail closed BEFORE the heavy snapshot so
+    a locked profile can never hang the launch. POSIX has no mandatory locking, so it returns False.
     """
     db = _profile_cookie_db(src, source_profile)
     if not db:
@@ -759,37 +675,38 @@ def _profile_is_locked(src: str, source_profile: str) -> bool:
         return False
 
 
-def _real_profile_pin() -> str | None:
-    """Pinned source profile dir name from ``browser.real_profile_pin``.
-
-    Natively the snapshot follows Chrome's
-    ``profile.last_used`` — whichever profile the user touched last. On a
-    machine with a work profile (HM) and a personal profile, that roulette
-    can silently give the agent the wrong identity. When set (e.g.
-    ``"Profile 2"``), the snapshot ALWAYS copies that profile regardless of
-    last_used. Unset → native last_used behavior, unchanged.
-    """
+def _browser_setting(key: str):
+    """Read ``browser.<key>`` from raw config; None when unset/unreadable."""
     try:
         from hermes_cli.config import read_raw_config
 
-        cfg = read_raw_config()
-        browser_cfg = cfg.get("browser", {})
+        browser_cfg = read_raw_config().get("browser", {})
         if isinstance(browser_cfg, dict):
-            pin = browser_cfg.get("real_profile_pin")
-            if isinstance(pin, str) and pin.strip():
-                return pin.strip()
+            return browser_cfg.get(key)
     except Exception as e:
-        logger.debug("could not read real_profile_pin: %s", e)
+        logger.debug("could not read %s: %s", key, e)
+    return None
+
+
+def _real_profile_pin() -> str | None:
+    """Pinned source profile dir name from ``browser.real_profile_pin``.
+
+    Natively the snapshot follows Chrome's ``profile.last_used``, which on a machine with work and
+    personal profiles can silently hand the agent the wrong identity. When set (e.g. ``"Profile
+    2"``) that profile is ALWAYS copied; unset keeps the native last_used behavior.
+    """
+    pin = _browser_setting("real_profile_pin")
+    if isinstance(pin, str) and pin.strip():
+        return pin.strip()
     return None
 
 
 def _resolve_source_profile(src: str) -> tuple[str | None, str | None]:
     """Resolve which source profile to copy: pin first, else last_used.
 
-    Returns ``(profile_dir_name, error)``. A configured pin that does not
-    exist under ``src`` FAILS CLOSED with a fixable message — falling back
-    to last_used would silently browse as the wrong identity, which is the
-    exact wrong-principal bug this pin exists to prevent.
+    Returns ``(profile_dir_name, error)``. A configured pin that does not exist under ``src`` FAILS
+    CLOSED with a fixable message — falling back to last_used would silently browse as the wrong
+    identity, which is the exact wrong-principal bug this pin exists to prevent.
     """
     pin = _real_profile_pin()
     if pin:
@@ -806,30 +723,16 @@ def _resolve_source_profile(src: str) -> tuple[str | None, str | None]:
 
 
 def _real_profile_autoclose() -> bool:
-    """Whether browser.real_profile_autoclose consent is on (config read).
-
-    When true, snapshot_real_profile may terminate a running browser that locks
-    the profile. Destructive → default False; the agent gates it on user OK.
-    """
-    try:
-        from hermes_cli.config import read_raw_config
-
-        cfg = read_raw_config()
-        browser_cfg = cfg.get("browser", {})
-        if isinstance(browser_cfg, dict):
-            return bool(browser_cfg.get("real_profile_autoclose", False))
-    except Exception as e:
-        logger.debug("could not read real_profile_autoclose: %s", e)
-    return False
+    """Whether browser.real_profile_autoclose consent is on (config read)."""
+    return bool(_browser_setting("real_profile_autoclose") or False)
 
 
 def _processes_holding_profile(src: str):
     """Yield (psutil.Process) instances holding the user-data-dir ``src`` open.
 
-    Identity discipline mirrors the daemon reaper: a process qualifies only when
-    it's a Chromium-family binary AND its command line references THIS
-    user-data-dir — so we never terminate an unrelated same-PID process. Any
-    ambiguity (unreadable cmdline) is skipped, fail-closed.
+    Identity discipline mirrors the daemon reaper: a process qualifies only when it's a Chromium-
+    family binary AND its command line references THIS user-data-dir — so we never terminate an
+    unrelated same-PID process. Any ambiguity (unreadable cmdline) is skipped, fail-closed.
     """
     try:
         import psutil
@@ -864,12 +767,9 @@ def _processes_holding_profile(src: str):
 def close_browser_holding_profile(src: str, timeout: float = 15.0) -> tuple[bool, str]:
     """Terminate the browser process tree holding ``src`` and wait for release.
 
-    CONSENTED, DESTRUCTIVE. Only call after the user has agreed to close their
-    browser — it terminates every Chromium-family process bound to this exact
-    user-data-dir (graceful terminate, then kill), so unsaved tab/form state in
-    that browser is lost. Returns ``(True, msg)`` once the profile lock actually
-    releases, ``(False, msg)`` if processes couldn't be found/killed or the lock
-    never released within ``timeout``.
+    CONSENTED, DESTRUCTIVE. Only call after the user has agreed to close their browser — it
+    terminates every Chromium-family process bound to this exact user-data-dir (graceful terminate,
+    then kill), so unsaved tab/form state in that browser is lost.
     """
     try:
         import psutil
@@ -883,35 +783,28 @@ def close_browser_holding_profile(src: str, timeout: float = 15.0) -> tuple[bool
         return False, "no matching browser process found holding the profile."
 
     # Include child processes (renderers, GPU, crashpad) for a full tree kill.
+    gone_errs = (psutil.NoSuchProcess, psutil.AccessDenied)
     targets = []
     for p in procs:
         targets.append(p)
-        try:
+        with contextlib.suppress(*gone_errs):
             targets.extend(p.children(recursive=True))
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
     # Graceful terminate first.
     for p in targets:
-        try:
+        with contextlib.suppress(*gone_errs):
             p.terminate()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
-    gone, alive = psutil.wait_procs(targets, timeout=min(timeout, 8.0))
+    _gone, alive = psutil.wait_procs(targets, timeout=min(timeout, 8.0))
     for p in alive:
-        try:
+        with contextlib.suppress(*gone_errs):
             p.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
     psutil.wait_procs(alive, timeout=3.0)
 
     # The lock releases slightly after the process exits on Windows; poll.
-    source_profile, _resolve_err = _resolve_source_profile(src)
-    if not source_profile:
-        source_profile = _last_used_profile(src)
+    source_profile = _resolve_source_profile(src)[0] or _last_used_profile(src)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not _profile_is_locked(src, source_profile):
-            return True, f"closed the browser and the profile lock released."
+            return True, "closed the browser and the profile lock released."
         time.sleep(0.5)
     return False, (
         "closed the browser processes but the profile is still locked — "
@@ -919,24 +812,53 @@ def close_browser_holding_profile(src: str, timeout: float = 15.0) -> tuple[bool
     )
 
 
+def _sync_local_state(src: str, dst: str, source_profile: str) -> None:
+    """Copy ``Local State`` into the snapshot and rewrite it for the single ``Default`` profile.
+
+    Cheap; always re-synced so last_used etc. stay current. The copy contains ONLY the mirrored
+    Default dir, but a verbatim Local State still names the SOURCE profile (last_used="Profile 2",
+    info_cache listing Profile 2/4/7), so Chrome would open a missing profile dir and start SIGNED
+    OUT. CRITICAL: Default's identity entry must be the SOURCE profile's entry (name + Google
+    account), not the source's own "Default" entry — the Default DIR holds the source profile's
+    cookies. A mismatch makes Chrome demand a "Continue as <name>" reconciliation on every launch.
+    """
+    ls_src = os.path.join(src, "Local State")
+    ls_dst = os.path.join(dst, "Local State")
+    if os.path.isfile(ls_src):
+        try:
+            shutil.copy2(ls_src, ls_dst)
+        except OSError as e:
+            logger.debug("real-profile snapshot: skipped Local State: %s", e)
+    try:
+        import json as _json
+
+        with open(ls_dst, encoding="utf-8") as fh:
+            state = _json.load(fh)
+        prof = state.get("profile")
+        if isinstance(prof, dict):
+            cache = prof.get("info_cache")
+            if isinstance(cache, dict):
+                src_entry = cache.get(source_profile) or cache.get("Default")
+                if src_entry:
+                    prof["info_cache"] = {"Default": src_entry}
+            prof["last_used"] = "Default"
+            prof["last_active_profiles"] = ["Default"]
+        with open(ls_dst, "w", encoding="utf-8") as fh:
+            _json.dump(state, fh)
+    except (OSError, ValueError) as e:
+        logger.debug("real-profile snapshot: could not normalize Local State: %s", e)
+
+
 def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | None, str | None]:
     """Snapshot ``browser``'s real ACTIVE profile into the hermes copy dir.
 
-    Copies only what the launched browser needs: the user-data-dir's
-    ``Local State`` plus the auth-bearing files of the profile the user
-    actually browses (``Local State → profile.last_used``, e.g. ``Profile 6``),
-    mirrored into the copy's ``Default`` — which is what agent-browser opens.
-    We deliberately do NOT copy every profile dir: non-active profiles are
-    unused here and would just be stale credential copies sitting on disk.
+    Copies only what the launched browser needs: the user-data-dir's ``Local State`` plus the auth-
+    bearing files of the profile the user actually browses (``Local State → profile.last_used``,
+    e.g. ``Profile 6``), mirrored into the copy's ``Default`` — which is what agent-browser opens.
 
-    A ``.hermes-snapshot-complete`` marker is written only after a copy fully
-    succeeds; a torn/interrupted first copy (disk full, Ctrl+C) therefore never
-    looks "already populated" on the next run — it is redone from scratch.
-
-    Auth files are re-synced on every call so fresh logins from the user's own
-    browsing show up. Locked-file copy errors are tolerated best-effort.
-
-    Returns ``(copy_dir, None)`` on success, ``(None, error)`` on failure.
+    A ``.hermes-snapshot-complete`` marker is written only after a copy fully succeeds; a
+    torn/interrupted first copy (disk full, Ctrl+C) therefore never looks "already populated" on the
+    next run — it is redone from scratch.
     """
     src = src or real_profile_data_dir(browser)
     if not src or not os.path.isdir(src):
@@ -994,46 +916,7 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
             _secure_snapshot_root(parent)
         _secure_snapshot_root(dst)
 
-        # Base user-data-dir file the browser reads at startup. Cheap; always
-        # re-synced so last_used etc. stay current.
-        ls_src = os.path.join(src, "Local State")
-        ls_dst = os.path.join(dst, "Local State")
-        if os.path.isfile(ls_src):
-            try:
-                shutil.copy2(ls_src, ls_dst)
-            except OSError as e:
-                logger.debug("real-profile snapshot: skipped Local State: %s", e)
-
-        # The copy contains ONLY the mirrored Default dir (that is where the
-        # pinned/active profile's auth was mirrored into), but a verbatim
-        # Local State still names the SOURCE profile (e.g. last_used="Profile
-        # 2", info_cache listing Profile 2/4/7). Chrome therefore opens a
-        # missing profile dir and starts SIGNED OUT. Rewrite Local State so
-        # the copy's only profile is Default and it is the last-used one.
-        # CRITICAL: Default's identity entry must be the SOURCE profile's
-        # entry (name + Google account), not the source's own "Default"
-        # entry — the Default DIR holds the source profile's cookies. A
-        # mismatch (cookies belong to profile B, info_cache names profile A) makes Chrome
-        # demand a "Continue as <name>" profile-sign-in reconciliation on
-        # every launch and treat the profile as mid-sign-in.
-        try:
-            import json as _json
-
-            with open(ls_dst, encoding="utf-8") as fh:
-                state = _json.load(fh)
-            prof = state.get("profile")
-            if isinstance(prof, dict):
-                cache = prof.get("info_cache")
-                if isinstance(cache, dict):
-                    src_entry = cache.get(source_profile) or cache.get("Default")
-                    if src_entry:
-                        prof["info_cache"] = {"Default": src_entry}
-                prof["last_used"] = "Default"
-                prof["last_active_profiles"] = ["Default"]
-            with open(ls_dst, "w", encoding="utf-8") as fh:
-                _json.dump(state, fh)
-        except (OSError, ValueError) as e:
-            logger.debug("real-profile snapshot: could not normalize Local State: %s", e)
+        _sync_local_state(src, dst, source_profile)
 
         if not populated:
             # Fresh (or torn-and-rebuilding): drop any partial Default and copy
@@ -1076,10 +959,8 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
 
         # Never carry live-instance leftovers into the copy.
         for leftover in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(os.path.join(dst, leftover))
-            except OSError:
-                pass
         # Mark complete only after everything above succeeded.
         try:
             with open(marker, "w", encoding="utf-8") as fh:
@@ -1100,8 +981,8 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
 def cleanup_real_profile_snapshots() -> None:
     """Delete the whole real-profile snapshot store (all copied credentials).
 
-    Called when consent is OFF: the copied Cookies / Login Data must not
-    outlive the toggle. Best-effort and idempotent — missing dir is fine.
+    Called when consent is OFF: the copied Cookies / Login Data must not outlive the toggle. Best-
+    effort and idempotent — missing dir is fine.
     """
     root = str(get_hermes_home() / "browser-profile")
     try:
@@ -1125,21 +1006,9 @@ def get_chrome_debug_candidates(system: str) -> list[str]:
         candidates.append(path)
         seen.add(normalized)
 
-    def add_windows_install_paths(
-        bases: tuple[str | None, ...],
-        install_groups: tuple[tuple[tuple[str, ...], tuple[tuple[str, ...], ...]], ...],
-    ) -> None:
-        for _, group in install_groups:
-            for base in filter(None, bases):
-                for parts in group:
-                    # Only called with WSL ``/mnt/c/...`` bases — those are
-                    # POSIX paths regardless of the host OS, so join with
-                    # posixpath (os.path.join would emit backslashes on nt).
-                    add(posixpath.join(base, *parts))
-
     if system == "Darwin":
-        for app in _DARWIN_APPS:
-            add(app)
+        for b in _BROWSERS:
+            add(b.mac_app)
         return candidates
 
     if system == "Windows":
@@ -1148,20 +1017,25 @@ def get_chrome_debug_candidates(system: str) -> list[str]:
             os.environ.get("ProgramFiles(x86)"),
             os.environ.get("LOCALAPPDATA"),
         )
-        for names, install_parts in _WINDOWS_BROWSER_GROUPS:
-            for name in names:
+        for b in _BROWSERS:
+            for name in b.win_bins:
                 add(shutil.which(name))
             for base in filter(None, install_bases):
-                for parts in install_parts:
+                for parts in b.win_install:
                     add(os.path.join(base, *parts))
         return candidates
 
-    for names, paths in _LINUX_BROWSER_GROUPS:
-        for name in names:
+    for b in _BROWSERS:
+        for name in b.linux_bins:
             add(shutil.which(name))
-        for path in paths:
+        for path in b.linux_paths:
             add(path)
-    add_windows_install_paths(("/mnt/c/Program Files", "/mnt/c/Program Files (x86)"), _WINDOWS_BROWSER_GROUPS)
+    # WSL: Windows installs under ``/mnt/c/...`` are POSIX paths regardless of
+    # the host OS, so join with posixpath (os.path.join would emit backslashes on nt).
+    for b in _BROWSERS:
+        for base in ("/mnt/c/Program Files", "/mnt/c/Program Files (x86)"):
+            for parts in b.win_install:
+                add(posixpath.join(base, *parts))
     return candidates
 
 
@@ -1225,11 +1099,9 @@ _LOOPBACK_SOCKET_HOSTS = ("127.0.0.1", "::1")
 def discover_local_cdp_url(port: int, timeout: float = 1.0) -> str | None:
     """Return the first loopback URL (IPv4 first, then IPv6) speaking CDP.
 
-    Dual-stack discovery: when another application squats the IPv4
-    loopback on ``port``, a debug browser launched with
-    ``--remote-debugging-port`` may bind only ``[::1]``. Probing both
-    literals finds it either way. Returns ``None`` when neither
-    loopback exposes a CDP discovery endpoint.
+    Dual-stack discovery: when another application squats the IPv4 loopback on ``port``, a debug
+    browser launched with ``--remote-debugging-port`` may bind only ``[::1]``. Probing both literals
+    finds it either way. Returns ``None`` when neither loopback exposes a CDP discovery endpoint.
     """
     for host in _LOOPBACK_PROBE_HOSTS:
         url = f"http://{host}:{port}"
@@ -1241,9 +1113,8 @@ def discover_local_cdp_url(port: int, timeout: float = 1.0) -> str | None:
 def local_port_in_use(port: int, timeout: float = 0.5) -> bool:
     """Return True when either loopback accepts TCP on ``port``.
 
-    Callers use this AFTER a failed CDP probe to distinguish "port is
-    free, we can launch a browser on it" from "another application
-    (IDE debugger, dev server) is squatting the port and a launch
+    Callers use this AFTER a failed CDP probe to distinguish "port is free, we can launch a browser
+    on it" from "another application (IDE debugger, dev server) is squatting the port and a launch
     would fight it".
     """
     import socket
@@ -1260,11 +1131,9 @@ def local_port_in_use(port: int, timeout: float = 0.5) -> bool:
 def find_free_debug_port(preferred: int = DEFAULT_BROWSER_CDP_PORT, attempts: int = 10) -> int:
     """Return the first port after ``preferred`` bindable on both loopbacks.
 
-    Used when ``preferred`` is occupied by a non-CDP application: rather
-    than launching a browser into a bind conflict, pick a nearby free
-    port. Falls back to ``preferred + 1`` if nothing binds (the launch
-    will then fail with a clear browser-side error instead of silently
-    doing nothing).
+    Used when ``preferred`` is occupied by a non-CDP application: rather than launching a browser
+    into a bind conflict, pick a nearby free port. Falls back to ``preferred + 1`` if nothing binds
+    (the launch will then fail with a clear browser-side error instead of silently doing nothing).
     """
     import socket
 
@@ -1318,9 +1187,9 @@ def _wait_for_browser_debug_ready_or_exit(
 ) -> str:
     """Classify a launched browser as ready, exited, or still starting.
 
-    We only need to wait long enough to catch the common failure mode where a
-    candidate binary exists but exits immediately before exposing the CDP port.
-    Slower browsers can still finish starting after this grace window.
+    We only need to wait long enough to catch the common failure mode where a candidate binary
+    exists but exits immediately before exposing the CDP port. Slower browsers can still finish
+    starting after this grace window.
     """
     deadline = time.monotonic() + timeout
 
@@ -1354,10 +1223,9 @@ class LaunchAttempt:
 class ChromeDebugLaunch:
     """Structured result of ``launch_chrome_debug``.
 
-    ``launched`` mirrors the legacy boolean contract: a launch command was
-    executed and the browser is ready or still starting (it does NOT
-    guarantee the CDP port ever opens). ``attempts`` carries per-candidate
-    diagnostics so callers can explain *why* nothing came up.
+    ``launched`` mirrors the legacy boolean contract: a launch command was executed and the browser
+    is ready or still starting (it does NOT guarantee the CDP port ever opens). ``attempts`` carries
+    per-candidate diagnostics so callers can explain *why* nothing came up.
     """
 
     launched: bool = False
@@ -1398,10 +1266,9 @@ def launch_chrome_debug(
 ) -> ChromeDebugLaunch:
     """Launch a Chromium-family browser with remote debugging, with diagnostics.
 
-    Tries each detected candidate binary in turn. A candidate that exits
-    before the CDP port opens (crash, singleton forward to an existing
-    instance, bad profile dir) is logged — with exit code and a stderr tail —
-    and the next candidate is tried.
+    Tries each detected candidate binary in turn. A candidate that exits before the CDP port opens
+    (crash, singleton forward to an existing instance, bad profile dir) is logged — with exit code
+    and a stderr tail — and the next candidate is tried.
     """
     system = system or platform.system()
     result = ChromeDebugLaunch()

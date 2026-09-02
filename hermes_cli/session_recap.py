@@ -1,24 +1,11 @@
 """Session recap — summarize what's happened in the current session.
 
-Inspired by Claude Code's `/recap` command (v2.1.114, April 2026), which
-shows a one-line summary of what happened while a terminal was unfocused
-so users juggling multiple sessions can re-orient quickly.
-
-Source: https://code.claude.com/docs/en/whats-new/2026-w17
-
-Differences from Claude Code:
-    - Pure local computation from the in-memory conversation history. No
-      LLM call, no auxiliary model, no prompt-cache invalidation. A
-      recap should be instant and free.
-    - Works unchanged on CLI and every gateway platform (Telegram,
-      Discord, Slack, …) because both call into the same ``build_recap``
-      helper. Claude Code only shows this on the CLI.
-    - Tailored to hermes-agent's tool vocabulary (``terminal``, ``patch``,
-      ``write_file``, ``delegate_task``, ``browser_*``, ``web_*``) — the
-      recap surfaces which classes of work were most active.
+Differences from Claude Code: - Pure local computation from the in-memory conversation history. No
+LLM call, no auxiliary model, no prompt-cache invalidation. A recap should be instant and free.
 """
 from __future__ import annotations
 
+import json
 import os
 from collections import Counter
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -51,9 +38,8 @@ _FILE_EDIT_TOOLS: Mapping[str, str] = {
 def _coerce_text(value: Any) -> str:
     """Flatten assistant/user ``content`` into a plain string.
 
-    Content can be a string or a list of content blocks (for multimodal
-    or reasoning models). We concatenate every text-like block and
-    ignore the rest.
+    Content may be a string or a list of blocks (multimodal/reasoning models); text-like blocks
+    are concatenated and the rest ignored.
     """
     if value is None:
         return ""
@@ -64,8 +50,7 @@ def _coerce_text(value: Any) -> str:
         for block in value:
             if isinstance(block, str):
                 parts.append(block)
-                continue
-            if isinstance(block, Mapping):
+            elif isinstance(block, Mapping):
                 text = block.get("text")
                 if isinstance(text, str) and text:
                     parts.append(text)
@@ -76,28 +61,22 @@ def _coerce_text(value: Any) -> str:
 def _tool_call_name_and_args(tool_call: Any) -> Tuple[str, Mapping[str, Any]]:
     """Extract ``(name, arguments_dict)`` from a tool_call entry.
 
-    ``arguments`` may be a JSON string or a dict depending on provider.
-    Return an empty dict if it cannot be parsed.
+    ``arguments`` may be a JSON string or a dict depending on provider. Return an empty dict if it
+    cannot be parsed.
     """
     if not isinstance(tool_call, Mapping):
         return "", {}
     fn = tool_call.get("function") or {}
     if not isinstance(fn, Mapping):
         return "", {}
-    name = str(fn.get("name") or "") or ""
+    name = str(fn.get("name") or "")
     raw_args = fn.get("arguments")
-    if isinstance(raw_args, Mapping):
-        return name, raw_args
     if isinstance(raw_args, str) and raw_args:
         try:
-            import json
-
-            parsed = json.loads(raw_args)
-            if isinstance(parsed, Mapping):
-                return name, parsed
+            raw_args = json.loads(raw_args)
         except Exception:
             return name, {}
-    return name, {}
+    return name, raw_args if isinstance(raw_args, Mapping) else {}
 
 
 def _iter_assistant_tool_calls(
@@ -121,53 +100,25 @@ def _count_visible_turns(
     messages: Sequence[Mapping[str, Any]],
 ) -> Tuple[int, int, int]:
     """Return ``(user_turn_count, assistant_turn_count, tool_message_count)``."""
-    users = assistants = tools = 0
-    for msg in messages:
-        if not isinstance(msg, Mapping):
-            continue
-        role = msg.get("role")
-        if role == "user":
-            users += 1
-        elif role == "assistant":
-            assistants += 1
-        elif role == "tool":
-            tools += 1
-    return users, assistants, tools
+    roles = Counter(msg.get("role") for msg in messages if isinstance(msg, Mapping))
+    return roles["user"], roles["assistant"], roles["tool"]
 
 
-def _latest_user_prompt(
-    messages: Sequence[Mapping[str, Any]],
-) -> Optional[str]:
+def _latest_text(messages: Sequence[Mapping[str, Any]], role: str) -> Optional[str]:
+    """Most recent non-empty ``content`` text for *role*, or None."""
     for msg in reversed(messages):
-        if isinstance(msg, Mapping) and msg.get("role") == "user":
+        if isinstance(msg, Mapping) and msg.get("role") == role:
             text = _coerce_text(msg.get("content")).strip()
             if text:
                 return text
     return None
 
 
-def _latest_assistant_text(
-    messages: Sequence[Mapping[str, Any]],
-) -> Optional[str]:
-    for msg in reversed(messages):
-        if not isinstance(msg, Mapping):
-            continue
-        if msg.get("role") != "assistant":
-            continue
-        text = _coerce_text(msg.get("content")).strip()
-        if text:
-            return text
-    return None
-
-
 def _recent_window(
     messages: Sequence[Mapping[str, Any]], window: int = _RECENT_TURN_WINDOW
 ) -> List[Mapping[str, Any]]:
-    """Return the tail slice of ``messages`` covering at most ``window``
-    user+assistant turns (tool messages ride along inside the window).
-
-    Iterating from the end, we count user and assistant messages and
-    keep everything from the first message that falls within the window.
+    """Return the tail slice of ``messages`` covering at most ``window`` user+assistant turns (tool
+    messages ride along inside the window).
     """
     count = 0
     cut = 0
@@ -207,14 +158,13 @@ def _summarise_tool_activity(
 ) -> Tuple[List[Tuple[str, int]], List[str]]:
     """Return ``(tool_counts_sorted, recently_edited_files)``.
 
-    ``tool_counts_sorted`` is descending by count, keeping the full list
-    so callers can truncate for display. ``recently_edited_files`` lists
-    distinct paths (most recent first) from file-editing tools.
+    Counts are descending and kept in full so callers truncate for display; files are distinct
+    paths, most recent first, from file-editing tools.
     """
     counter: Counter[str] = Counter()
     files_seen: List[str] = []
     files_set: set[str] = set()
-    # Walk in reverse so "most recent first" drops out of order-preserved iteration.
+    # Walk in reverse so files_seen comes out newest→oldest (Counter ignores order).
     for name, args in reversed(list(tool_calls)):
         counter[name] += 1
         arg_key = _FILE_EDIT_TOOLS.get(name)
@@ -223,11 +173,15 @@ def _summarise_tool_activity(
             if isinstance(path, str) and path and path not in files_set:
                 files_set.add(path)
                 files_seen.append(_shortened_path(path))
-    # Restore "reverse of reverse" for correct counts; Counter ignores order
-    # so only files_seen needed the reversal. Fix ordering: currently
-    # files_seen is newest→oldest which is what we want for display.
     tool_counts = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
     return tool_counts, files_seen
+
+
+def _join_capped(items: List[str], limit: int) -> str:
+    """``a, b, c (+N more)`` — comma-join the first *limit* items and count the rest."""
+    text = ", ".join(items[:limit])
+    extra = len(items) - limit
+    return f"{text} (+{extra} more)" if extra > 0 else text
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -248,19 +202,10 @@ def build_recap(
     session_id: Optional[str] = None,
     platform: Optional[str] = None,
 ) -> str:
-    """Build a multi-line recap of recent activity.
+    """Build a multi-line recap of recent activity from chat-completion-style ``messages``.
 
-    Inputs:
-        messages: the full conversation history as a list of
-            chat-completion-style dicts (``role``, ``content``,
-            ``tool_calls``, …).
-        session_title: optional human title (from SessionDB).
-        session_id: optional session id.
-        platform: optional hint (``"cli"``, ``"telegram"``, …). Does not
-            change behavior today but is accepted for forward compat.
-
-    The output is plain text designed to render well in both a terminal
-    (with 80-col wrapping) and a gateway message bubble.
+    ``platform`` is accepted for forward compat but does not change behavior. Output is plain
+    text that renders well both in an 80-col terminal and in a gateway message bubble.
     """
     _ = platform  # reserved for future use
     lines: List[str] = []
@@ -291,24 +236,16 @@ def build_recap(
     tool_calls = list(_iter_assistant_tool_calls(window))
     tool_counts, files = _summarise_tool_activity(tool_calls)
     if tool_counts:
-        top = ", ".join(f"{name}×{count}" for name, count in tool_counts[:5])
-        extra = len(tool_counts) - 5
-        if extra > 0:
-            top += f" (+{extra} more)"
+        top = _join_capped([f"{name}×{count}" for name, count in tool_counts], 5)
         lines.append(f"  Tools used: {top}")
     if files:
-        shown = files[:_MAX_FILES_LISTED]
-        extra = len(files) - len(shown)
-        entry = ", ".join(shown)
-        if extra > 0:
-            entry += f" (+{extra} more)"
-        lines.append(f"  Files touched: {entry}")
+        lines.append(f"  Files touched: {_join_capped(files, _MAX_FILES_LISTED)}")
 
-    latest_user = _latest_user_prompt(window)
+    latest_user = _latest_text(window, "user")
     if latest_user:
         lines.append(f"  Last ask: {_truncate(latest_user, _PROMPT_PREVIEW_CHARS)}")
 
-    latest_reply = _latest_assistant_text(window)
+    latest_reply = _latest_text(window, "assistant")
     if latest_reply:
         lines.append(f"  Last reply: {_truncate(latest_reply, _ASSISTANT_PREVIEW_CHARS)}")
 

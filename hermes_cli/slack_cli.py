@@ -1,19 +1,8 @@
 """``hermes slack ...`` CLI subcommands.
 
-Today only ``hermes slack manifest`` is implemented — it generates the
-Slack app manifest JSON for registering every gateway command as a native
-Slack slash (``/btw``, ``/stop``, ``/model``, …) so users get the same
-first-class slash UX Discord and Telegram already have.
-
-Typical workflow::
-
-    $ hermes slack manifest > slack-manifest.json
-    # or:
-    $ hermes slack manifest --write
-
-Then paste the printed JSON into the Slack app config (Features → App
-Manifest → Edit) and click Save. Slack diffs the manifest and prompts
-for reinstall when scopes/commands change.
+Today only ``hermes slack manifest`` is implemented — it generates the Slack app manifest JSON for
+registering every gateway command as a native Slack slash (``/btw``, ``/stop``, ``/model``, …) so
+users get the same first-class slash UX Discord and Telegram already have.
 """
 from __future__ import annotations
 
@@ -36,19 +25,9 @@ def _build_full_manifest(
 ) -> dict:
     """Build a full Slack manifest merging display info + our slash list.
 
-    The slash-command list is always generated from ``COMMAND_REGISTRY`` so
-    it stays in sync with the rest of Hermes. Other manifest sections
-    (display info, OAuth scopes, socket mode) are set to sensible defaults
-    for a Hermes deployment — users can tweak them in the Slack UI after
-    pasting.
-
-    By default, this keeps Hermes on Slack's older Assistant messaging
-    experience (``assistant_view``) for backward compatibility. Pass
-    ``messaging_experience="agent"`` (``--agent-view``) to emit Slack's Agent
-    messaging experience (``agent_view`` + ``app_home_opened``). Pass
-    ``include_assistant=False`` or ``messaging_experience="none"``
-    (``--no-assistant``) to omit Slack AI messaging features and get a flat DM
-    surface where ``/help``, ``/new``, etc. work inline.
+    The slash-command list is always generated from ``COMMAND_REGISTRY`` so it stays in sync with
+    the rest of Hermes. Other manifest sections (display info, OAuth scopes, socket mode) are set to
+    sensible defaults for a Hermes deployment — users can tweak them in the Slack UI after pasting.
     """
     from hermes_cli.commands import slack_app_manifest
 
@@ -166,22 +145,14 @@ def _build_full_manifest(
 def slack_manifest_command(args) -> int:
     """Print or write a Slack app manifest JSON.
 
-    Flags (all parsed in ``hermes_cli/main.py``):
-      --write [PATH]  Write to file instead of stdout (default path:
-                      ``$HERMES_HOME/slack-manifest.json``)
-      --name NAME     Override the bot display name (default: "Hermes")
-      --description DESC  Override the bot description
-      --long-description TEXT  Override the long app description (175-4,000 characters)
-      --long-description-file PATH  Read the long app description from a UTF-8 file
-      --slashes-only  Emit only the ``features.slash_commands`` array (for
-                      merging into an existing manifest manually)
-      --no-assistant  Omit Slack AI Assistant mode (assistant_view feature,
-                      assistant:write scope, assistant_thread_* events) so
-                      DMs render as a flat chat where bare slash commands
-                      work inline instead of the Assistant thread pane.
-      --agent-view    Use Slack's Agent messaging experience (agent_view,
-                      app_home_opened + message.im) instead of the legacy
-                      Assistant messaging experience.
+    Flags (all parsed in ``hermes_cli/main.py``): --write [PATH] Write to file instead of stdout
+    (default path: ``$HERMES_HOME/slack-manifest.json``) --name NAME Override the bot display name
+    (default: "Hermes") --description DESC Override the bot description --long-description TEXT
+    Override the long app description (175-4,000 characters) --long-description-file PATH Read the
+    long app description from a UTF-8 file --slashes-only Emit only the ``features.slash_commands``
+    array (for merging into an existing manifest manually) --no-assistant Omit Slack AI Assistant
+    mode (assistant_view feature, assistant:write scope, assistant_thread_* events) so DMs render as
+    a flat chat where bare slash commands work inline instead of the Assistant thread pane.
     """
     name = getattr(args, "name", None) or "Hermes"
     description = getattr(args, "description", None) or "Your Hermes agent on Slack"

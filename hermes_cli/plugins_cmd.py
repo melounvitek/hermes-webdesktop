@@ -1,10 +1,7 @@
 """``hermes plugins`` CLI subcommand — install, update, remove, and list plugins.
 
-Plugins are installed from Git repositories into ``~/.hermes/plugins/``.
-Supports full URLs and ``owner/repo`` shorthand (resolves to GitHub).
-
-After install, if the plugin ships an ``after-install.md`` file it is
-rendered with Rich Markdown.  Otherwise a default confirmation is shown.
+After install, if the plugin ships an ``after-install.md`` file it is rendered with Rich Markdown.
+Otherwise a default confirmation is shown.
 """
 
 from __future__ import annotations
@@ -35,31 +32,21 @@ logger = logging.getLogger(__name__)
 
 @functools.lru_cache(maxsize=1)
 def _resolve_git_executable() -> Optional[str]:
-    """Resolve a git binary for subprocess use when ``PATH`` may be minimal.
-
-    Matches other Hermes subprocess resolution: :func:`shutil.which` first,
-    then common Git for Windows install paths and POSIX defaults.
-    """
+    """Resolve a git binary for subprocess use when ``PATH`` may be minimal."""
     found = shutil.which("git")
     if found:
         return found
     if os.name == "nt":
-        prog = os.environ.get("ProgramFiles", r"C:\Program Files")
-        prog_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-        local = os.environ.get("LOCALAPPDATA", "")
-        candidates = [
-            os.path.join(prog, "Git", "cmd", "git.exe"),
-            os.path.join(prog, "Git", "bin", "git.exe"),
-            os.path.join(prog_x86, "Git", "cmd", "git.exe"),
-            os.path.join(prog_x86, "Git", "bin", "git.exe"),
+        roots = [
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
         ]
+        local = os.environ.get("LOCALAPPDATA", "")
         if local:
-            candidates.extend(
-                (
-                    os.path.join(local, "Programs", "Git", "cmd", "git.exe"),
-                    os.path.join(local, "Programs", "Git", "bin", "git.exe"),
-                )
-            )
+            roots.append(os.path.join(local, "Programs"))
+        candidates = [
+            os.path.join(root, "Git", sub, "git.exe") for root in roots for sub in ("cmd", "bin")
+        ]
     else:
         candidates = ["/usr/bin/git", "/usr/local/bin/git", "/bin/git"]
     for c in candidates:
@@ -73,38 +60,88 @@ class PluginOperationError(Exception):
 
 
 class PluginScanBlocked(PluginOperationError):
-    """Plugin failed the security scan and was not installed.
-
-    Carries the ScanResult so callers (CLI, dashboard) can render the
-    findings report alongside the error message.
-    """
+    """Plugin failed the security scan and was not installed."""
 
     def __init__(self, message: str, scan_result=None):
         super().__init__(message)
         self.scan_result = scan_result
 
 
+def _console():
+    """A fresh Rich console (imported lazily; rich is not needed at import time)."""
+    from rich.console import Console
+
+    return Console()
+
+
+def _is_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _ask_yes(prompt: str, reader=input) -> bool:
+    """One y/N question; EOF / Ctrl-C count as "no"."""
+    try:
+        answer = reader(prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer in {"y", "yes"}
+
+
+def _sub_dict(parent: dict, key: str) -> dict:
+    """``parent[key]`` as a dict, replacing a missing or non-dict value with ``{}``."""
+    child = parent.get(key)
+    if not isinstance(child, dict):
+        child = {}
+        parent[key] = child
+    return child
+
+
+def _config_value(*keys: str, default: Any) -> Any:
+    """Read ``keys`` from config.yaml; *default* on a missing key or any load failure."""
+    try:
+        from hermes_cli.config import load_config
+        return cfg_get(load_config(), *keys, default=default)
+    except Exception:
+        return default
+
+
+def _config_name_set(*keys: str) -> set:
+    """Read a list-valued config key as a set (empty on any failure or non-list)."""
+    value = _config_value(*keys, default=[])
+    return set(value) if isinstance(value, list) else set()
+
+
+def _config_str(*keys: str, default: str) -> str:
+    """Read a string config key, coercing empty/missing/failed reads to *default*."""
+    return _config_value(*keys, default=default) or default
+
+
+def _write_config_value(section: str, key: str, value: Any) -> None:
+    """Persist ``config[section][key] = value`` to config.yaml (creating the section)."""
+    from hermes_cli.config import load_config, save_config
+    config = load_config()
+    if section not in config:
+        config[section] = {}
+    config[section][key] = value
+    save_config(config)
+
+
 def _scan_on_install_enabled() -> bool:
     """Whether install/update-time plugin security scanning is enabled.
 
-    On by default (inspired by Claude Cowork's skill & plugin security
-    scanning). Disable via ``plugins.scan_on_install: false`` in config.yaml.
+    On by default (inspired by Claude Cowork's skill & plugin security scanning). Disable via
+    ``plugins.scan_on_install: false`` in config.yaml.
     """
-    try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        return bool(cfg_get(config, "plugins", "scan_on_install", default=True))
-    except Exception:
-        return True
+    return bool(_config_value("plugins", "scan_on_install", default=True))
 
 
 def _scan_plugin_tree(plugin_dir: Path, identifier: str, *, force: bool, scan_decision_cb=None):
     """Scan *plugin_dir* and enforce the install policy.
 
-    Verdicts: safe → proceed; caution → needs confirmation (``force=True``
-    or a truthy ``scan_decision_cb(result)``); dangerous → always blocked.
-    Raises :class:`PluginScanBlocked` when the plugin may not be installed.
-    Returns the ScanResult (or None when scanning is disabled).
+    Verdicts: safe → proceed; caution → needs confirmation (``force=True`` or a truthy
+    ``scan_decision_cb(result)``); dangerous → always blocked. Raises :class:`PluginScanBlocked`
+    when the plugin may not be installed. Returns the ScanResult (or None when scanning is
+    disabled).
     """
     if not _scan_on_install_enabled():
         return None
@@ -160,25 +197,15 @@ def _sanitize_plugin_name(
 ) -> Path:
     """Validate a plugin name and return the safe target path inside *plugins_dir*.
 
-    Raises ``ValueError`` if the name contains path-traversal sequences or would
-    resolve outside the plugins directory.
-
-    ``allow_subdir=True`` permits a single forward slash inside *name* so
-    category-namespaced plugin keys like ``observability/langfuse`` or
-    ``image_gen/openai`` (the registry keys emitted by ``_discover_all_plugins``)
-    can be looked up. ``..`` and backslash are still rejected, leading and
-    trailing slashes are stripped, and the resolved target must still live
-    inside *plugins_dir*. Install paths leave this at the default ``False``
-    because a freshly-cloned plugin always lands top-level under
-    ``~/.hermes/plugins/<name>/``.
+    Raises ``ValueError`` on path-traversal sequences or a target outside the plugins directory.
+    ``allow_subdir=True`` permits one forward slash so category-namespaced registry keys like
+    ``observability/langfuse`` can be looked up; ``..`` and backslashes are still rejected.
+    Install paths keep the default ``False`` because a fresh clone always lands top-level.
     """
+    if allow_subdir and name:
+        name = name.strip("/")
     if not name:
         raise ValueError("Plugin name must not be empty.")
-
-    if allow_subdir:
-        name = name.strip("/")
-        if not name:
-            raise ValueError("Plugin name must not be empty.")
 
     if name in {".", ".."}:
         raise ValueError(
@@ -198,14 +225,10 @@ def _sanitize_plugin_name(
         raise ValueError(
             f"Invalid plugin name '{name}': resolves to the plugins directory itself."
         )
-
-    try:
-        target.relative_to(plugins_resolved)
-    except ValueError:
+    if plugins_resolved not in target.parents:
         raise ValueError(
             f"Invalid plugin name '{name}': resolves outside the plugins directory."
         )
-
     return target
 
 
@@ -226,28 +249,8 @@ _GITHUB_BROWSER_SEGMENTS = {
 def _resolve_git_url(identifier: str) -> tuple[str, Optional[str]]:
     """Turn an identifier into a cloneable Git URL and optional subdirectory.
 
-    Returns ``(git_url, subdir)`` where ``subdir`` is the path within the
-    cloned repository that contains the plugin (``None`` when the plugin lives
-    at the repo root).
-
-    Accepted formats:
-    - Full URL: https://github.com/owner/repo.git
-    - Full URL: git@github.com:owner/repo.git
-    - Full URL: ssh://git@github.com/owner/repo.git
-    - Browser URL: https://github.com/owner/repo/tree/main/path
-      →  (https://github.com/owner/repo.git, "path")
-    - Shorthand: owner/repo  →  https://github.com/owner/repo.git
-    - Shorthand w/ subdir: owner/repo/path/to/plugin
-      →  (https://github.com/owner/repo.git, "path/to/plugin")
-    - Full URL w/ subdir (``.git`` boundary):
-      https://github.com/owner/repo.git/path/to/plugin
-      →  (https://github.com/owner/repo.git, "path/to/plugin")
-    - Any URL w/ explicit subdir fragment (works for every scheme, incl.
-      ``file://`` and ssh): <url>#path/to/plugin
-      →  (<url>, "path/to/plugin")
-
-    NOTE: ``http://`` and ``file://`` schemes are accepted but will trigger a
-    security warning at install time.
+    NOTE: ``http://`` and ``file://`` schemes are accepted but will trigger a security warning at
+    install time.
     """
     # Already a URL.
     if identifier.startswith(("https://", "http://", "git@", "ssh://", "file://")):
@@ -267,12 +270,9 @@ def _resolve_git_url(identifier: str) -> tuple[str, Optional[str]]:
             git_url, _, frag = identifier.partition("#")
             return git_url, (frag.strip("/") or None)
         # Natural ``.git/`` boundary (GitHub-style URLs).
-        marker = ".git/"
-        idx = identifier.find(marker)
-        if idx != -1:
-            git_url = identifier[: idx + len(".git")]
-            subdir = identifier[idx + len(marker) :].strip("/")
-            return git_url, (subdir or None)
+        git_url, marker, subdir = identifier.partition(".git/")
+        if marker:
+            return git_url + ".git", (subdir.strip("/") or None)
         return identifier, None
 
     # owner/repo[/subdir...] shorthand
@@ -293,10 +293,8 @@ def _resolve_git_url(identifier: str) -> tuple[str, Optional[str]]:
 def _resolve_subdir_within(clone_root: Path, subdir: str) -> Path:
     """Resolve ``subdir`` inside ``clone_root``, rejecting path traversal.
 
-    Guards against ``..`` segments, absolute paths, and symlinks that would
-    escape the cloned repository. Returns the resolved directory path.
-    Raises ``PluginOperationError`` if the path escapes the clone, doesn't
-    exist, or is not a directory.
+    Guards against ``..`` segments, absolute paths, and symlinks that would escape the clone.
+    Raises ``PluginOperationError`` if the path escapes, doesn't exist, or is not a directory.
     """
     clone_root = clone_root.resolve()
     candidate = (clone_root / subdir).resolve()
@@ -321,90 +319,124 @@ def _resolve_subdir_within(clone_root: Path, subdir: str) -> Path:
 
 def _repo_name_from_url(url: str) -> str:
     """Extract the repo name from a Git URL for the plugin directory name."""
-    # Strip trailing .git and slashes
-    name = url.rstrip("/")
-    if name.endswith(".git"):
-        name = name[:-4]
-    # Get last path component
-    name = name.rsplit("/", 1)[-1]
-    # Handle ssh-style urls: git@github.com:owner/repo
+    # Last path component after stripping trailing slashes and ``.git``; ssh-style
+    # ``git@host:owner/repo`` has no slash to split on, hence the colon fallback.
+    name = url.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
     if ":" in name:
         name = name.rsplit(":", 1)[-1].rsplit("/", 1)[-1]
     return name
 
 
+def _native_manifest_file(plugin_dir: Path) -> Optional[Path]:
+    """``plugin.yaml`` (or ``plugin.yml``) under *plugin_dir*, or None when neither exists."""
+    for name in ("plugin.yaml", "plugin.yml"):
+        candidate = plugin_dir / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _has_portable_manifest(plugin_dir: Path) -> bool:
+    """True when ``plugin.json`` exists (or is a symlink, even dangling) under *plugin_dir*."""
+    portable_file = plugin_dir / "plugin.json"
+    return portable_file.exists() or portable_file.is_symlink()
+
+
+def _load_yaml_manifest(manifest_file: Path):
+    """``yaml.safe_load`` of *manifest_file* (``{}`` when empty); raises on any read/parse error."""
+    import yaml
+
+    with open(manifest_file, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _read_portable_manifest(plugin_dir: Path) -> dict:
+    """Validated Agent Plugins v1 ``plugin.json`` manifest (diagnostics dropped); raises on failure."""
+    from hermes_cli.agent_plugins import read_agent_plugin_manifest
+
+    manifest, _ = read_agent_plugin_manifest(plugin_dir)
+    return manifest
+
+
 def _read_manifest(plugin_dir: Path) -> dict:
     """Read a native or portable manifest, preferring native YAML."""
-    manifest_file = plugin_dir / "plugin.yaml"
-    if not manifest_file.exists():
-        manifest_file = plugin_dir / "plugin.yml"
-    if not manifest_file.exists():
-        portable_file = plugin_dir / "plugin.json"
-        if not portable_file.exists() and not portable_file.is_symlink():
+    manifest_file = _native_manifest_file(plugin_dir)
+    if manifest_file is None:
+        if not _has_portable_manifest(plugin_dir):
             return {}
         try:
-            from hermes_cli.agent_plugins import read_agent_plugin_manifest
-
-            manifest, _ = read_agent_plugin_manifest(plugin_dir)
-            return manifest
+            return _read_portable_manifest(plugin_dir)
         except Exception as e:
             logger.warning("Failed to read plugin.json in %s: %s", plugin_dir, e)
             return {}
     try:
-        import yaml
-
-        with open(manifest_file, encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+        return _load_yaml_manifest(manifest_file)
     except Exception as e:
         logger.warning("Failed to read plugin.yaml in %s: %s", plugin_dir, e)
         return {}
 
 
+def _looks_like_plugin_dir(target: Path) -> bool:
+    """True when *target* has a native/portable manifest or a package ``__init__.py``."""
+    return (
+        _native_manifest_file(target) is not None
+        or (target / "plugin.json").exists()
+        or (target / "__init__.py").exists()
+    )
+
+
 def _copy_example_files(plugin_dir: Path, console) -> None:
     """Copy any .example files to their real names if they don't already exist.
 
-    For example, ``config.yaml.example`` becomes ``config.yaml``.
-    Skips files that already exist to avoid overwriting user config on reinstall.
+    For example, ``config.yaml.example`` becomes ``config.yaml``. Skips files that already exist to
+    avoid overwriting user config on reinstall.
     """
     for example_file in plugin_dir.glob("*.example"):
         real_name = example_file.stem  # e.g. "config.yaml" from "config.yaml.example"
         real_path = plugin_dir / real_name
-        if not real_path.exists():
-            try:
-                shutil.copy2(example_file, real_path)
-                console.print(
-                    f"[dim]  Created {real_name} from {example_file.name}[/dim]"
-                )
-            except OSError as e:
-                console.print(
-                    f"[yellow]Warning:[/yellow] Failed to copy {example_file.name}: {e}"
-                )
+        if real_path.exists():
+            continue
+        try:
+            shutil.copy2(example_file, real_path)
+            console.print(f"[dim]  Created {real_name} from {example_file.name}[/dim]")
+        except OSError as e:
+            console.print(f"[yellow]Warning:[/yellow] Failed to copy {example_file.name}: {e}")
 
 
-def _missing_requires_env_names(manifest: dict) -> list[str]:
-    """Return declared ``requires_env`` names that are unset in ``~/.hermes/.env``."""
-    requires_env = manifest.get("requires_env") or []
-    if not requires_env:
-        return []
-
-    from hermes_cli.config import get_env_value
-
+def _requires_env_specs(manifest: dict) -> list[dict]:
+    """Normalise ``requires_env`` (plain names or ``{name, description, url, secret}`` dicts)
+    to a list of dicts; entries without a name are dropped."""
     env_specs: list[dict] = []
-    for entry in requires_env:
+    for entry in manifest.get("requires_env") or []:
         if isinstance(entry, str):
             env_specs.append({"name": entry})
         elif isinstance(entry, dict) and entry.get("name"):
             env_specs.append(entry)
+    return env_specs
 
-    return [s["name"] for s in env_specs if s.get("name") and not get_env_value(s["name"])]
+
+def _missing_env_specs(manifest: dict) -> list[dict]:
+    """Declared ``requires_env`` specs whose variable is unset in ``~/.hermes/.env``."""
+    env_specs = _requires_env_specs(manifest)
+    if not env_specs:
+        return []
+
+    from hermes_cli.config import get_env_value
+
+    return [s for s in env_specs if not get_env_value(s["name"])]
+
+
+def _missing_requires_env_names(manifest: dict) -> list[str]:
+    """Return declared ``requires_env`` names that are unset in ``~/.hermes/.env``."""
+    return [s["name"] for s in _missing_env_specs(manifest)]
 
 
 def _print_python_dependencies(manifest: dict, console) -> None:
     """Surface declared python_dependencies at install time (#64165).
 
-    Declaration seam ONLY — Hermes never auto-installs plugin pip
-    dependencies (isolation design deferred; see #64165 / #15220). We print
-    the declared requirements with a copy-pasteable install hint.
+    Declaration seam ONLY — Hermes never auto-installs plugin pip dependencies (isolation design
+    deferred; see #64165 / #15220). We print the declared requirements with a copy-pasteable install
+    hint.
     """
     deps = manifest.get("python_dependencies") or []
     if not isinstance(deps, list):
@@ -428,42 +460,16 @@ def _print_python_dependencies(manifest: dict, console) -> None:
 def _prompt_plugin_env_vars(manifest: dict, console) -> None:
     """Prompt for required environment variables declared in plugin.yaml.
 
-    ``requires_env`` accepts two formats:
-
-    Simple list (backwards-compatible)::
-
-        requires_env:
-          - MY_API_KEY
-
-    Rich list with metadata::
-
-        requires_env:
-          - name: MY_API_KEY
-            description: "API key for Acme service"
-            url: "https://acme.com/keys"
-            secret: true
-
-    Already-set variables are skipped.  Values are saved to the user's ``.env``.
+    ``requires_env`` accepts either a plain list of names or rich entries with ``name``,
+    ``description``, ``url`` and ``secret``. Already-set variables are skipped; values are saved
+    to the user's ``.env``.
     """
-    requires_env = manifest.get("requires_env") or []
-    if not requires_env:
-        return
-
-    from hermes_cli.config import get_env_value, save_env_value  # noqa: F811
-    from hermes_constants import display_hermes_home
-
-    # Normalise to list-of-dicts
-    env_specs: list[dict] = []
-    for entry in requires_env:
-        if isinstance(entry, str):
-            env_specs.append({"name": entry})
-        elif isinstance(entry, dict) and entry.get("name"):
-            env_specs.append(entry)
-
-    # Filter to only vars that aren't already set
-    missing = [s for s in env_specs if not get_env_value(s["name"])]
+    missing = _missing_env_specs(manifest)
     if not missing:
         return
+
+    from hermes_cli.config import save_env_value
+    from hermes_constants import display_hermes_home
 
     plugin_name = manifest.get("name", "this plugin")
     console.print(f"\n[bold]{plugin_name}[/bold] requires the following environment variables:\n")
@@ -482,10 +488,7 @@ def _prompt_plugin_env_vars(manifest: dict, console) -> None:
             console.print(f"  [dim]Get yours at: {url}[/dim]")
 
         try:
-            if secret:
-                value = masked_secret_prompt(f"  {name}: ").strip()
-            else:
-                value = line_input(f"  {name}: ").strip()
+            value = (masked_secret_prompt if secret else line_input)(f"  {name}: ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print(f"\n[dim]  Skipped (you can set these later in {display_hermes_home()}/.env)[/dim]")
             return
@@ -502,46 +505,30 @@ def _prompt_plugin_env_vars(manifest: dict, console) -> None:
 
 def _display_after_install(plugin_dir: Path, identifier: str) -> None:
     """Show after-install.md if it exists, otherwise a default message."""
-    from rich.console import Console
     from rich.markdown import Markdown
     from rich.panel import Panel
 
-    console = Console()
+    console = _console()
     after_install = plugin_dir / "after-install.md"
 
     if after_install.exists():
-        content = after_install.read_text(encoding="utf-8")
-        md = Markdown(content)
-        console.print()
-        console.print(Panel(md, border_style="green", expand=False))
-        console.print()
+        body, title = Markdown(after_install.read_text(encoding="utf-8")), None
     else:
-        console.print()
-        console.print(
-            Panel(
-                f"[green bold]Plugin installed:[/] {identifier}\n"
-                f"[dim]Location:[/] {plugin_dir}",
-                border_style="green",
-                title="✓ Installed",
-                expand=False,
-            )
-        )
-        console.print()
-
-
-def _display_removed(name: str, plugins_dir: Path) -> None:
-    """Show confirmation after removing a plugin."""
-    from rich.console import Console
-
-    console = Console()
+        body = f"[green bold]Plugin installed:[/] {identifier}\n[dim]Location:[/] {plugin_dir}"
+        title = "✓ Installed"
     console.print()
-    console.print(f"[red]✗[/red] Plugin [bold]{name}[/bold] removed from {plugins_dir}")
+    console.print(Panel(body, border_style="green", title=title, expand=False))
     console.print()
 
 
 def _require_installed_plugin(name: str, plugins_dir: Path, console) -> Path:
-    """Return the plugin path if it exists, or exit with an error listing installed plugins."""
-    target = _sanitize_plugin_name(name, plugins_dir, allow_subdir=True)
+    """Return the plugin path if it exists, or exit with an error (invalid name, or a listing of
+    installed plugins when missing)."""
+    try:
+        target = _sanitize_plugin_name(name, plugins_dir, allow_subdir=True)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
     if not target.exists():
         installed = ", ".join(d.name for d in plugins_dir.iterdir() if d.is_dir()) or "(none)"
         console.print(
@@ -604,68 +591,43 @@ def _safe_git_error(result: subprocess.CompletedProcess, source_url: str = "") -
     return redact_sensitive_text(error)
 
 
-def _git_head_revision(repo: Path, git_exe: str) -> str:
-    result = subprocess.run(
-        [git_exe, "rev-parse", "HEAD"],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=15,
-        stdin=subprocess.DEVNULL,
-        env=noninteractive_git_env(),
-    )
+def _git_or_raise(
+    git_exe: str, repo: Path, *args: str, failure_prefix: str, timeout: int = 60, source_url: str = ""
+) -> subprocess.CompletedProcess:
+    """Run git in *repo*; on a non-zero exit raise PluginOperationError(prefix + scrubbed error)."""
+    result = _run_plugin_git(git_exe, repo, *args, timeout=timeout)
     if result.returncode != 0:
-        err = _safe_git_error(result)
-        raise PluginOperationError(f"Could not determine installed Git revision:\n{err}")
+        raise PluginOperationError(failure_prefix + _safe_git_error(result, source_url))
+    return result
+
+
+def _git_head_revision(repo: Path, git_exe: str) -> str:
+    result = _git_or_raise(
+        git_exe, repo, "rev-parse", "HEAD", timeout=15,
+        failure_prefix="Could not determine installed Git revision:\n",
+    )
     return result.stdout.strip().lower()
 
 
 def _checkout_exact_revision(repo: Path, git_exe: str, revision: str) -> None:
     """Fetch and detach at one immutable commit, then verify the resulting HEAD."""
-    try:
-        fetched = subprocess.run(
-            [git_exe, "fetch", "--depth", "1", "origin", revision],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-            env=noninteractive_git_env(),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise PluginOperationError(
-            f"Git fetch of commit '{revision}' timed out after 60 seconds."
-        ) from exc
-    if fetched.returncode != 0:
-        err = _safe_git_error(fetched)
-        raise PluginOperationError(
-            f"Git commit '{revision}' could not be fetched:\n{err}"
-        )
-    try:
-        checked_out = subprocess.run(
-            [git_exe, "checkout", "--detach", revision],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-            env=noninteractive_git_env(),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise PluginOperationError(
-            f"Git checkout of commit '{revision}' timed out after 60 seconds."
-        ) from exc
-    if checked_out.returncode != 0:
-        err = _safe_git_error(checked_out)
-        raise PluginOperationError(
-            f"Git checkout of commit '{revision}' failed:\n{err}"
-        )
+    steps = (
+        (
+            ("fetch", "--depth", "1", "origin", revision),
+            f"Git fetch of commit '{revision}' timed out after 60 seconds.",
+            f"Git commit '{revision}' could not be fetched:\n",
+        ),
+        (
+            ("checkout", "--detach", revision),
+            f"Git checkout of commit '{revision}' timed out after 60 seconds.",
+            f"Git checkout of commit '{revision}' failed:\n",
+        ),
+    )
+    for args, timeout_msg, failure_prefix in steps:
+        try:
+            _git_or_raise(git_exe, repo, *args, failure_prefix=failure_prefix)
+        except subprocess.TimeoutExpired as exc:
+            raise PluginOperationError(timeout_msg) from exc
     actual = _git_head_revision(repo, git_exe)
     if actual != revision:
         raise PluginOperationError(
@@ -696,20 +658,98 @@ def _scrub_cloned_origin(repo: Path, git_exe: str, git_url: str) -> None:
     scrubbed = _scrub_git_url(git_url)
     if scrubbed == git_url:
         return
-    result = subprocess.run(
-        [git_exe, "remote", "set-url", "origin", scrubbed],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=15,
-        stdin=subprocess.DEVNULL,
-        env=noninteractive_git_env(),
+    _git_or_raise(
+        git_exe, repo, "remote", "set-url", "origin", scrubbed, timeout=15,
+        failure_prefix="Could not sanitize installed Git remote:\n", source_url=git_url,
     )
+
+
+def _check_manifest_version(manifest: dict, plugin_name: str) -> None:
+    """Reject manifests declaring a newer ``manifest_version`` than this installer supports."""
+    mv = manifest.get("manifest_version")
+    if mv is None:
+        return
+    try:
+        mv_int = int(mv)
+    except (ValueError, TypeError):
+        raise PluginOperationError(
+            f"Plugin '{plugin_name}' has invalid manifest_version "
+            f"'{mv}' (expected an integer).",
+        ) from None
+    if mv_int > _SUPPORTED_MANIFEST_VERSION:
+        from hermes_cli.config import recommended_update_command
+
+        raise PluginOperationError(
+            f"Plugin '{plugin_name}' requires manifest_version {mv}, "
+            f"but this installer only supports up to {_SUPPORTED_MANIFEST_VERSION}. "
+            f"Run {recommended_update_command()} to update Hermes.",
+        ) from None
+
+
+def _clone_plugin_repo(tmp_clone: Path, git_url: str, revision: Optional[str]) -> str:
+    """Shallow-clone *git_url* into *tmp_clone* (detached at *revision* when given), scrub any
+    credentials from the recorded origin, and return the installed HEAD SHA."""
+    git_exe = _resolve_git_executable()
+    if not git_exe:
+        raise PluginOperationError("git is not installed or not in PATH.")
+
+    clone_args = ["clone", "--depth", "1"]
+    if revision:
+        clone_args.append("--no-checkout")
+    clone_args.extend([git_url, str(tmp_clone)])
+    try:
+        result = _run_plugin_git(git_exe, tmp_clone.parent, *clone_args)
+    except FileNotFoundError as e:
+        raise PluginOperationError("git is not installed or not in PATH.") from e
+    except subprocess.TimeoutExpired as e:
+        raise PluginOperationError("Git clone timed out after 60 seconds.") from e
     if result.returncode != 0:
         err = _safe_git_error(result, git_url)
-        raise PluginOperationError(f"Could not sanitize installed Git remote:\n{err}")
+        raise PluginOperationError(f"Git clone failed:\n{err}")
+
+    _scrub_cloned_origin(tmp_clone, git_exe, git_url)
+    if revision:
+        _checkout_exact_revision(tmp_clone, git_exe, revision)
+    return _git_head_revision(tmp_clone, git_exe)
+
+
+def _read_manifest_for_install(plugin_dir: Path) -> dict:
+    """Manifest of a freshly cloned tree. Unlike :func:`_read_manifest`, a broken portable
+    ``plugin.json`` is an install error (not a silent ``{}``) and its diagnostics are logged."""
+    if _native_manifest_file(plugin_dir) is not None or not _has_portable_manifest(plugin_dir):
+        return _read_manifest(plugin_dir)
+    try:
+        from hermes_cli.agent_plugins import read_agent_plugin_manifest
+
+        manifest, diagnostics = read_agent_plugin_manifest(plugin_dir)
+    except Exception as exc:
+        raise PluginOperationError(
+            f"Portable plugin manifest validation failed: {exc}"
+        ) from exc
+    for diagnostic in diagnostics:
+        logger.warning("Agent Plugin install: %s", diagnostic.message)
+    return manifest
+
+
+def _swap_in_plugin(tmp_target: Path, target: Path, backup: Path, old_metadata: dict, new_metadata: dict) -> None:
+    """Move the validated clone into place and persist metadata; on any failure restore the
+    previous tree (if one was replaced) and the previous metadata sidecar, then re-raise."""
+    replaced_existing = target.exists()
+    if replaced_existing:
+        os.replace(target, backup)
+    try:
+        os.replace(tmp_target, target)
+        _write_install_metadata(new_metadata)
+    except Exception:
+        if target.exists():
+            shutil.rmtree(target)
+        if replaced_existing and backup.exists():
+            os.replace(backup, target)
+        if old_metadata:
+            _write_install_metadata(old_metadata)
+        else:
+            _install_metadata_path().unlink(missing_ok=True)
+        raise
 
 
 def _install_plugin_core(
@@ -738,65 +778,16 @@ def _install_plugin_core(
             for entry in old_metadata.values()
             if entry.get("source") == source and entry.get("pinned") is True
         ]
-        if len(matching_pins) == 1:
-            revision = matching_pins[0].get("revision")
-            if isinstance(revision, str):
-                requested_revision = _normalize_exact_revision(revision)
+        if len(matching_pins) == 1 and isinstance(matching_pins[0].get("revision"), str):
+            requested_revision = _normalize_exact_revision(matching_pins[0]["revision"])
 
     with tempfile.TemporaryDirectory(prefix=".install-", dir=plugins_dir) as tmp:
         tmp_clone = Path(tmp) / "plugin"
-        git_exe = _resolve_git_executable()
-        if not git_exe:
-            raise PluginOperationError("git is not installed or not in PATH.")
-
-        clone_args = [git_exe, "clone", "--depth", "1"]
-        if requested_revision:
-            clone_args.append("--no-checkout")
-        clone_args.extend([git_url, str(tmp_clone)])
-        try:
-            result = subprocess.run(
-                clone_args,
-                capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
-                timeout=60,
-                stdin=subprocess.DEVNULL,
-                env=noninteractive_git_env(),
-            )
-        except FileNotFoundError as e:
-            raise PluginOperationError("git is not installed or not in PATH.") from e
-        except subprocess.TimeoutExpired as e:
-            raise PluginOperationError("Git clone timed out after 60 seconds.") from e
-        if result.returncode != 0:
-            err = _safe_git_error(result, git_url)
-            raise PluginOperationError(f"Git clone failed:\n{err}")
-
-        _scrub_cloned_origin(tmp_clone, git_exe, git_url)
-        if requested_revision:
-            _checkout_exact_revision(tmp_clone, git_exe, requested_revision)
-        installed_revision = _git_head_revision(tmp_clone, git_exe)
-
+        installed_revision = _clone_plugin_repo(tmp_clone, git_url, requested_revision)
         tmp_target = (
             _resolve_subdir_within(tmp_clone, subdir) if subdir else tmp_clone
         )
-        has_native_manifest = (tmp_target / "plugin.yaml").exists() or (
-            tmp_target / "plugin.yml"
-        ).exists()
-        has_portable_manifest = (tmp_target / "plugin.json").exists() or (
-            tmp_target / "plugin.json"
-        ).is_symlink()
-        if not has_native_manifest and has_portable_manifest:
-            try:
-                from hermes_cli.agent_plugins import read_agent_plugin_manifest
-
-                manifest, diagnostics = read_agent_plugin_manifest(tmp_target)
-                for diagnostic in diagnostics:
-                    logger.warning("Agent Plugin install: %s", diagnostic.message)
-            except Exception as exc:
-                raise PluginOperationError(
-                    f"Portable plugin manifest validation failed: {exc}"
-                ) from exc
-        else:
-            manifest = _read_manifest(tmp_target)
+        manifest = _read_manifest_for_install(tmp_target)
         plugin_name = manifest.get("name") or (
             subdir.rstrip("/").rsplit("/", 1)[-1] if subdir else _repo_name_from_url(git_url)
         )
@@ -804,24 +795,7 @@ def _install_plugin_core(
             target = _sanitize_plugin_name(plugin_name, plugins_dir)
         except ValueError as e:
             raise PluginOperationError(str(e)) from e
-
-        mv = manifest.get("manifest_version")
-        if mv is not None:
-            try:
-                mv_int = int(mv)
-            except (ValueError, TypeError):
-                raise PluginOperationError(
-                    f"Plugin '{plugin_name}' has invalid manifest_version "
-                    f"'{mv}' (expected an integer).",
-                ) from None
-            if mv_int > _SUPPORTED_MANIFEST_VERSION:
-                from hermes_cli.config import recommended_update_command
-
-                raise PluginOperationError(
-                    f"Plugin '{plugin_name}' requires manifest_version {mv}, "
-                    f"but this installer only supports up to {_SUPPORTED_MANIFEST_VERSION}. "
-                    f"Run {recommended_update_command()} to update Hermes.",
-                ) from None
+        _check_manifest_version(manifest, plugin_name)
 
         # Security scan the clone BEFORE anything is moved into place
         # (see ``tools/plugin_guard.py``; inspired by Claude Cowork's skill
@@ -858,35 +832,15 @@ def _install_plugin_core(
             "revision": installed_revision,
             "source": source,
         }
-        backup = Path(tmp) / "previous-plugin"
-        replaced_existing = target.exists()
-        if replaced_existing:
-            os.replace(target, backup)
-        try:
-            os.replace(tmp_target, target)
-            _write_install_metadata(new_metadata)
-        except Exception:
-            if target.exists():
-                shutil.rmtree(target)
-            if replaced_existing and backup.exists():
-                os.replace(backup, target)
-            if old_metadata:
-                _write_install_metadata(old_metadata)
-            else:
-                _install_metadata_path().unlink(missing_ok=True)
-            raise
+        _swap_in_plugin(tmp_target, target, Path(tmp) / "previous-plugin", old_metadata, new_metadata)
 
-    has_yaml = (target / "plugin.yaml").exists() or (target / "plugin.yml").exists()
-    has_portable = (target / "plugin.json").exists()
-    if not has_yaml and not has_portable and not (target / "__init__.py").exists():
+    if not _looks_like_plugin_dir(target):
         logger.warning(
             "%s has no plugin.yaml / __init__.py; may not be a valid plugin",
             plugin_name,
         )
 
-    from rich.console import Console
-
-    _copy_example_files(target, Console())
+    _copy_example_files(target, _console())
     installed_manifest = _read_manifest(target)
     installed_name = installed_manifest.get("name") or target.name
     return target, installed_manifest, installed_name
@@ -895,8 +849,8 @@ def _install_plugin_core(
 def _looks_like_bare_index_name(identifier: str) -> bool:
     """True when *identifier* is a bare plugin name (no slash, not a URL).
 
-    Bare names are resolved through the community plugin index; anything with
-    a slash or URL scheme keeps the existing owner/repo / Git URL semantics.
+    Bare names are resolved through the community plugin index; anything with a slash or URL scheme
+    keeps the existing owner/repo / Git URL semantics.
     """
     if "/" in identifier or "\\" in identifier:
         return False
@@ -906,10 +860,9 @@ def _looks_like_bare_index_name(identifier: str) -> bool:
 def _resolve_index_name(identifier: str, console) -> tuple[str, Optional[str]]:
     """Resolve a bare plugin name to ``(install_identifier, pinned_ref)``.
 
-    Exits with an error when the name is unknown, or lists candidates and
-    exits when the name is ambiguous. The returned ref is only used when it
-    is an exact 40-character commit SHA (the pin format the installer
-    accepts); tag refs are surfaced as advisory output instead.
+    Exits with an error when the name is unknown, or lists candidates and exits when the name is
+    ambiguous. The returned ref is only used when it is an exact 40-character commit SHA (the pin
+    format the installer accepts); tag refs are surfaced as advisory output instead.
     """
     from hermes_cli.plugin_index import SECURITY_FOOTER, load_index, resolve_name
 
@@ -957,16 +910,13 @@ def cmd_install(
 ) -> None:
     """Install a plugin from a Git URL, owner/repo shorthand, or index name.
 
-    Bare names (no slash, no URL scheme) are resolved through the community
-    plugin index to ``owner/repo`` plus the index-pinned ref. An explicit
-    ``--ref`` always wins over the index pin.
+    Bare names (no slash, no URL scheme) are resolved through the community plugin index to
+    ``owner/repo`` plus the index-pinned ref. An explicit ``--ref`` always wins over the index pin.
 
-    After install, prompt "Enable now? [y/N]" unless *enable* is provided
-    (True = auto-enable without prompting, False = install disabled).
+    After install, prompt "Enable now? [y/N]" unless *enable* is provided (True = auto-enable
+    without prompting, False = install disabled).
     """
-    from rich.console import Console
-
-    console = Console()
+    console = _console()
 
     if _looks_like_bare_index_name(identifier):
         identifier, index_ref = _resolve_index_name(identifier, console)
@@ -985,10 +935,7 @@ def cmd_install(
             "Consider using https:// or git@ for production installs.",
         )
 
-    if _subdir:
-        console.print(f"[dim]Cloning {git_url} (subdir: {_subdir})...[/dim]")
-    else:
-        console.print(f"[dim]Cloning {git_url}...[/dim]")
+    console.print(f"[dim]Cloning {git_url}{f' (subdir: {_subdir})' if _subdir else ''}...[/dim]")
 
     def _interactive_scan_decision(scan_result) -> bool:
         """Prompt the user to accept a caution-verdict plugin (Cowork 'warn')."""
@@ -997,15 +944,9 @@ def cmd_install(
         console.print()
         console.print("[yellow]⚠ Security scan flagged this plugin:[/yellow]")
         console.print(format_scan_report(scan_result))
-        if not (sys.stdin.isatty() and sys.stdout.isatty()):
-            return False
-        try:
-            answer = input(
-                "  Install anyway? Only continue if you trust the source. [y/N]: ",
-            ).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return False
-        return answer in {"y", "yes"}
+        return _is_tty() and _ask_yes(
+            "  Install anyway? Only continue if you trust the source. [y/N]: "
+        )
 
     try:
         target, installed_manifest, installed_name = _install_plugin_core(
@@ -1014,16 +955,12 @@ def cmd_install(
             ref=ref,
             scan_decision_cb=_interactive_scan_decision,
         )
-    except PluginScanBlocked as e:
-        console.print(f"[red]Blocked:[/red] {e}")
-        sys.exit(1)
     except PluginOperationError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        label = "Blocked" if isinstance(e, PluginScanBlocked) else "Error"
+        console.print(f"[red]{label}:[/red] {e}")
         sys.exit(1)
 
-    if not (target / "plugin.yaml").exists() and not (target / "plugin.yml").exists() and not (target / "plugin.json").exists() and not (
-        target / "__init__.py"
-    ).exists():
+    if not _looks_like_plugin_dir(target):
         console.print(
             f"[yellow]Warning:[/yellow] {installed_name} doesn't contain plugin.yaml, "
             f"plugin.json, or __init__.py. It may not be a valid Hermes plugin.",
@@ -1037,24 +974,10 @@ def cmd_install(
 
     should_enable = enable
     if should_enable is None:
-        if sys.stdin.isatty() and sys.stdout.isatty():
-            try:
-                answer = input(
-                    f"  Enable '{installed_name}' now? [y/N]: ",
-                ).strip().lower()
-                should_enable = answer in {"y", "yes"}
-            except (EOFError, KeyboardInterrupt):
-                should_enable = False
-        else:
-            should_enable = False
+        should_enable = _is_tty() and _ask_yes(f"  Enable '{installed_name}' now? [y/N]: ")
 
     if should_enable:
-        enabled = _get_enabled_set()
-        disabled = _get_disabled_set()
-        enabled.add(installed_name)
-        disabled.discard(installed_name)
-        _save_enabled_set(enabled)
-        _save_disabled_set(disabled)
+        _set_plugin_enabled(installed_name, enable=True)
         console.print(
             f"[green]✓[/green] Plugin [bold]{installed_name}[/bold] enabled.",
         )
@@ -1067,110 +990,82 @@ def cmd_install(
     # Capability consent (#64228): if the manifest declares capabilities,
     # show the list once and record consent. Non-interactive installs (and
     # declines) proceed with capabilities ungranted — fail closed.
-    declared_caps = _declared_capabilities_from_manifest(
-        installed_manifest, installed_name
-    )
+    declared_caps = _declared_capabilities_from_manifest(installed_manifest, installed_name)
     if declared_caps:
-        _run_capability_consent(
-            console, installed_name, declared_caps, context="install"
-        )
+        _run_capability_consent(console, installed_name, declared_caps, context="install")
 
     console.print("[dim]Restart the gateway for the plugin to take effect:[/dim]")
     console.print("[dim]  hermes gateway restart[/dim]")
     console.print()
 
 
+def _pull_plugin_update(target: Path, pinned_msg, not_git_msg, before_pull=None) -> str:
+    """Shared ``update`` core: refuse pinned / non-git checkouts, ``git pull``, record the new
+    revision. Returns the pull output; raises :class:`PluginOperationError` on any refusal.
+    *pinned_msg(install_record)* / *not_git_msg()* build the caller-specific error text."""
+    metadata = _read_install_metadata()
+    install_record = metadata.get(target.name, {})
+    if install_record.get("pinned") is True:
+        raise PluginOperationError(pinned_msg(install_record))
+    if not (target / ".git").exists():
+        raise PluginOperationError(not_git_msg())
+    if before_pull is not None:
+        before_pull()
+    ok, output = _git_pull_plugin_dir(target)
+    if not ok:
+        raise PluginOperationError(output)
+    _record_pulled_revision(target, metadata, install_record)
+    return output
+
+
 def cmd_update(name: str) -> None:
     """Update an installed plugin by pulling latest from its git remote."""
-    from rich.console import Console
     from rich.markup import escape
 
-    console = Console()
+    console = _console()
     plugins_dir = _plugins_dir()
+    target = _require_installed_plugin(name, plugins_dir, console)
 
     try:
-        target = _require_installed_plugin(name, plugins_dir, console)
-    except ValueError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
-
-    try:
-        metadata = _read_install_metadata()
+        output = _pull_plugin_update(
+            target,
+            lambda rec: (
+                f"Plugin '{name}' is pinned to {rec.get('revision')}. To move it, run "
+                f"`hermes plugins install {escape(str(rec.get('source', '<source>')))} --force "
+                "--ref <40-character commit SHA>`."
+            ),
+            lambda: (
+                f"Plugin '{name}' was not installed from git (no .git directory). Cannot update."
+            ),
+            before_pull=lambda: console.print(f"[dim]Updating {name}...[/dim]"),
+        )
     except PluginOperationError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         sys.exit(1)
-    install_record = metadata.get(target.name, {})
-    if install_record.get("pinned") is True:
-        recorded_source = escape(str(install_record.get("source", "<source>")))
-        console.print(
-            f"[red]Error:[/red] Plugin '{name}' is pinned to "
-            f"{install_record.get('revision')}. To move it, run "
-            f"`hermes plugins install {recorded_source} --force "
-            "--ref <40-character commit SHA>`."
-        )
-        sys.exit(1)
-
-    if not (target / ".git").exists():
-        console.print(
-            f"[red]Error:[/red] Plugin '{name}' was not installed from git "
-            f"(no .git directory). Cannot update."
-        )
-        sys.exit(1)
-
-    console.print(f"[dim]Updating {name}...[/dim]")
-
-    ok, output = _git_pull_plugin_dir(target)
-    if not ok:
-        console.print(f"[red]Error:[/red] {output}")
-        sys.exit(1)
-
-    if install_record:
-        git_exe = _resolve_git_executable()
-        if git_exe:
-            install_record["revision"] = _git_head_revision(target, git_exe)
-            metadata[target.name] = install_record
-            _write_install_metadata(metadata)
 
     # Re-scan after update — Cowork re-scans skills/plugins on edit, and an
     # update can introduce malicious content into a previously clean plugin.
     # The pull has already mutated the tree, so a dangerous verdict disables
     # the plugin rather than leaving it active.
     if _scan_on_install_enabled():
-        from tools.plugin_guard import (
-            format_scan_report,
-            scan_plugin,
-            should_allow_plugin_install,
-        )
+        from tools.plugin_guard import format_scan_report, scan_plugin, should_allow_plugin_install
 
         scan_result = scan_plugin(target, source=name)
         allowed, reason = should_allow_plugin_install(scan_result)
         if allowed is not True:
             console.print()
-            console.print(
-                f"[yellow]⚠ Security scan flagged the updated plugin:[/yellow] {reason}",
-            )
+            console.print(f"[yellow]⚠ Security scan flagged the updated plugin:[/yellow] {reason}")
             console.print(format_scan_report(scan_result))
             if scan_result.verdict == "dangerous":
-                enabled = _get_enabled_set()
-                disabled = _get_disabled_set()
-                if name in enabled or name not in disabled:
-                    enabled.discard(name)
-                    disabled.add(name)
-                    _save_enabled_set(enabled)
-                    _save_disabled_set(disabled)
+                if name in _get_enabled_set() or name not in _get_disabled_set():
+                    _set_plugin_enabled(name, enable=False)
                 console.print(
                     f"[red]Plugin '{name}' has been disabled.[/red] Review the "
                     f"findings, then re-enable with `hermes plugins enable {name}` "
                     f"if you trust them.",
                 )
 
-    # Same stale-bytecode class as the main checkout (#6207/#60242): the
-    # pull just changed .py files under this plugin dir, so drop any
-    # __pycache__ compiled from the previous revision.
-    _clear_plugin_bytecode(target)
-
-    # Copy any new .example files
-    _copy_example_files(target, console)
+    _post_pull_housekeeping(target, console)
 
     # Update-time re-consent (#64228): if the new version declares
     # capabilities the granted set lacks, surface the diff and require
@@ -1179,20 +1074,14 @@ def cmd_update(name: str) -> None:
     # (non-interactive updates leave them ungranted — fail closed).
     updated_manifest = _read_manifest(target)
     plugin_id = updated_manifest.get("name") or target.name
-    declared_caps = _declared_capabilities_from_manifest(
-        updated_manifest, plugin_id
-    )
+    declared_caps = _declared_capabilities_from_manifest(updated_manifest, plugin_id)
     if declared_caps:
-        from hermes_cli.plugin_capabilities import (
-            declared_set_changed,
-            pending_capabilities,
-        )
+        from hermes_cli.plugin_capabilities import declared_set_changed, pending_capabilities
+
         if pending_capabilities(plugin_id, declared_caps) or declared_set_changed(
             plugin_id, declared_caps
         ):
-            _run_capability_consent(
-                console, plugin_id, declared_caps, context="update"
-            )
+            _run_capability_consent(console, plugin_id, declared_caps, context="update")
 
     out = output.strip()
     if "Already up to date" in out:
@@ -1202,6 +1091,24 @@ def cmd_update(name: str) -> None:
     else:
         console.print(f"[green]✓[/green] Plugin [bold]{name}[/bold] updated.")
         console.print(f"[dim]{out}[/dim]")
+
+
+def _post_pull_housekeeping(target: Path, console) -> None:
+    """After ``git pull``: drop ``__pycache__`` compiled from the previous revision (same stale-
+    bytecode class as the main checkout, #6207/#60242) and copy any new ``.example`` files."""
+    _clear_plugin_bytecode(target)
+    _copy_example_files(target, console)
+
+
+def _record_pulled_revision(target: Path, metadata: dict, install_record: dict) -> None:
+    """After a pull, store the new HEAD in the plugin's install-metadata record (if it has one)."""
+    if not install_record:
+        return
+    git_exe = _resolve_git_executable()
+    if git_exe:
+        install_record["revision"] = _git_head_revision(target, git_exe)
+        metadata[target.name] = install_record
+        _write_install_metadata(metadata)
 
 
 def _remove_plugin_core(target: Path) -> None:
@@ -1235,48 +1142,32 @@ def _remove_plugin_core(target: Path) -> None:
 
 def cmd_remove(name: str) -> None:
     """Remove an installed plugin by name."""
-    from rich.console import Console
-
-    console = Console()
+    console = _console()
     plugins_dir = _plugins_dir()
-
-    try:
-        target = _require_installed_plugin(name, plugins_dir, console)
-    except ValueError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
+    target = _require_installed_plugin(name, plugins_dir, console)
 
     try:
         _remove_plugin_core(target)
     except (OSError, PluginOperationError) as exc:
         console.print(f"[red]Error:[/red] Could not remove plugin '{name}': {exc}")
         sys.exit(1)
-    _display_removed(name, plugins_dir)
+    console.print()
+    console.print(f"[red]✗[/red] Plugin [bold]{name}[/bold] removed from {plugins_dir}")
+    console.print()
 
 
 def _get_disabled_set() -> set:
     """Read the disabled plugins set from config.yaml.
 
-    An explicit deny-list. A plugin name here never loads, even if also
-    listed in ``plugins.enabled``.
+    An explicit deny-list. A plugin name here never loads, even if also listed in
+    ``plugins.enabled``.
     """
-    try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        disabled = cfg_get(config, "plugins", "disabled", default=[])
-        return set(disabled) if isinstance(disabled, list) else set()
-    except Exception:
-        return set()
+    return _config_name_set("plugins", "disabled")
 
 
 def _save_disabled_set(disabled: set) -> None:
     """Write the disabled plugins list to config.yaml."""
-    from hermes_cli.config import load_config, save_config
-    config = load_config()
-    if "plugins" not in config:
-        config["plugins"] = {}
-    config["plugins"]["disabled"] = sorted(disabled)
-    save_config(config)
+    _write_config_value("plugins", "disabled", sorted(disabled))
 
 
 _BASIC_AUTH_PLUGIN_KEYS = frozenset({"basic", "dashboard_auth/basic"})
@@ -1285,94 +1176,85 @@ _BASIC_AUTH_PLUGIN_KEYS = frozenset({"basic", "dashboard_auth/basic"})
 def ensure_basic_auth_plugin_enabled_in_config(cfg: dict) -> bool:
     """Re-enable the bundled basic dashboard-auth plugin in *cfg*.
 
-    ``hermes setup`` / ``hermes plugins disable basic`` can park the plugin
-    in ``plugins.disabled`` while ``dashboard.basic_auth`` is configured.
-    The basic provider is a bundled backend that still respects the
-    deny-list, so password auth silently fails until the block is removed.
-
-    Returns True when ``plugins.disabled`` was modified.
+    ``hermes setup`` / ``hermes plugins disable basic`` can park the plugin in
+    ``plugins.disabled`` while ``dashboard.basic_auth`` is configured; the bundled provider
+    still respects the deny-list, so password auth silently fails until the block is removed.
+    Returns True when modified.
     """
     plugins_cfg = cfg.get("plugins")
-    if not isinstance(plugins_cfg, dict):
+    disabled = plugins_cfg.get("disabled") if isinstance(plugins_cfg, dict) else None
+    if not isinstance(disabled, list) or not (set(disabled) & _BASIC_AUTH_PLUGIN_KEYS):
         return False
-    disabled = plugins_cfg.get("disabled")
-    if not isinstance(disabled, list):
-        return False
-    if not (set(disabled) & _BASIC_AUTH_PLUGIN_KEYS):
-        return False
-    plugins_cfg["disabled"] = sorted(
-        set(disabled) - _BASIC_AUTH_PLUGIN_KEYS
-    )
+    plugins_cfg["disabled"] = sorted(set(disabled) - _BASIC_AUTH_PLUGIN_KEYS)
     return True
 
 
 def _get_enabled_set() -> set:
     """Read the enabled plugins allow-list from config.yaml.
 
-    Plugins are opt-in: only names here are loaded. Returns ``set()`` if
-    the key is missing (same behaviour as "nothing enabled yet").
+    Plugins are opt-in: only names here are loaded. Returns ``set()`` if the key is missing (same
+    behaviour as "nothing enabled yet").
     """
-    try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        plugins_cfg = config.get("plugins", {})
-        if not isinstance(plugins_cfg, dict):
-            return set()
-        enabled = plugins_cfg.get("enabled", [])
-        return set(enabled) if isinstance(enabled, list) else set()
-    except Exception:
-        return set()
+    return _config_name_set("plugins", "enabled")
 
 
 def _save_enabled_set(enabled: set) -> None:
     """Write the enabled plugins list to config.yaml."""
-    from hermes_cli.config import load_config, save_config
-    config = load_config()
-    if "plugins" not in config:
-        config["plugins"] = {}
-    config["plugins"]["enabled"] = sorted(enabled)
-    save_config(config)
+    _write_config_value("plugins", "enabled", sorted(enabled))
+
+
+def _discard_key_and_leaf(names: set, key: str) -> None:
+    """Drop *key* and its bare leaf (``observability/langfuse`` -> ``langfuse``) from *names*, so a
+    stale legacy bare-name entry can't keep vetoing the canonical key."""
+    names.discard(key)
+    names.discard(key.split("/")[-1])
+
+
+def _set_plugin_enabled(name: str, *, enable: bool) -> None:
+    """Move *name* between the enabled allow-list and the disabled deny-list and persist both."""
+    enabled = _get_enabled_set()
+    disabled = _get_disabled_set()
+    (enabled.add if enable else enabled.discard)(name)
+    (disabled.discard if enable else disabled.add)(name)
+    _save_enabled_set(enabled)
+    _save_disabled_set(disabled)
 
 
 def _resolve_plugin_key(name: str) -> Optional[str]:
     """Resolve a user-supplied plugin identifier to its canonical registry key.
 
-    Accepts either the bare manifest name (``langfuse``), the directory
-    name, or the full path-derived key (``observability/langfuse``) and
-    returns the canonical key the loader gates on (``manifest.key`` or, for a
-    flat plugin, the bare name). Returns ``None`` when no plugin matches.
-
-    This is the single normalization point so ``hermes plugins enable`` /
-    ``disable`` write the same key that ``PluginManager`` matches against —
-    nested category plugins (e.g. ``observability/langfuse``) included.
+    Accepts the bare manifest name, the directory name, or the path-derived key
+    (``observability/langfuse``) and returns the key the loader gates on; ``None`` when nothing
+    matches. Single normalization point so ``enable``/``disable`` write the same key that
+    ``PluginManager`` matches against, nested category plugins included.
     """
-    entries = _discover_all_plugins()
-    # 1. Exact match on canonical key or manifest name — always unambiguous.
-    for entry in entries:
-        # entry = (name, version, description, source, dir_path, key)
-        if name == entry[5] or name == entry[0]:
-            return entry[5]
-    # 2. Fall back to a bare leaf-name match (e.g. "langfuse" ->
-    #    "observability/langfuse"), but only when it resolves to exactly one
-    #    plugin so we never silently pick the wrong same-named nested plugin.
-    leaf_matches = [entry[5] for entry in entries if name == entry[5].split("/")[-1]]
-    if len(leaf_matches) == 1:
-        return leaf_matches[0]
-    return None
+    resolved = _resolve_plugin_key_and_source(name)
+    return resolved[0] if resolved else None
+
+
+def _find_plugin_entry(name: str) -> Optional[tuple]:
+    """First discovered ``(name, version, description, source, dir_path, key)`` entry whose
+    manifest name or canonical key equals *name*."""
+    return next(
+        (entry for entry in _discover_all_plugins() if name in (entry[0], entry[5])), None
+    )
 
 
 def _resolve_plugin_key_and_source(name: str) -> Optional[tuple]:
     """Resolve *name* to ``(canonical_key, source)`` or ``None`` if no match.
 
-    Mirrors :func:`_resolve_plugin_key`'s normalization but also returns the
-    plugin's source (``"bundled"``, ``"user"``, ``"project"``, ...) so the
-    enable path can tell whether a built-in-override consent prompt is needed.
+    Same normalization as :func:`_resolve_plugin_key` but also returns the plugin's source
+    (``"bundled"``, ``"user"``, ``"project"``, ...) so the enable path can tell whether a built-
+    in-override consent prompt is needed.
     """
     entries = _discover_all_plugins()
+    # 1. Exact match on canonical key or manifest name — always unambiguous.
     for entry in entries:
-        # entry = (name, version, description, source, dir_path, key)
-        if name == entry[5] or name == entry[0]:
+        if name in (entry[0], entry[5]):
             return (entry[5], entry[3])
+    # 2. Fall back to a bare leaf-name match (e.g. "langfuse" ->
+    #    "observability/langfuse"), but only when it resolves to exactly one
+    #    plugin so we never silently pick the wrong same-named nested plugin.
     leaf_matches = [
         (entry[5], entry[3]) for entry in entries
         if name == entry[5].split("/")[-1]
@@ -1386,18 +1268,7 @@ def _set_plugin_entry_flag(plugin_id: str, key: str, value: bool) -> None:
     """Write ``plugins.entries.<plugin_id>.<key> = value`` into config.yaml."""
     from hermes_cli.config import load_config, save_config
     config = load_config()
-    plugins_cfg = config.setdefault("plugins", {})
-    if not isinstance(plugins_cfg, dict):
-        plugins_cfg = {}
-        config["plugins"] = plugins_cfg
-    entries = plugins_cfg.setdefault("entries", {})
-    if not isinstance(entries, dict):
-        entries = {}
-        plugins_cfg["entries"] = entries
-    entry = entries.setdefault(plugin_id, {})
-    if not isinstance(entry, dict):
-        entry = {}
-        entries[plugin_id] = entry
+    entry = _sub_dict(_sub_dict(_sub_dict(config, "plugins"), "entries"), plugin_id)
     entry[key] = bool(value)
     save_config(config)
 
@@ -1405,26 +1276,27 @@ def _set_plugin_entry_flag(plugin_id: str, key: str, value: bool) -> None:
 def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
     """Add a plugin to the enabled allow-list (and remove it from disabled).
 
-    For non-bundled plugins, prompt the operator about granting the
-    privileged ``allow_tool_override`` capability (replacing built-in tools
-    like ``shell_exec`` / ``write_file``). ``allow_tool_override`` is a
-    tri-state: ``True`` grants without prompting, ``False`` declines without
-    prompting, ``None`` (default) asks interactively. Bundled plugins are
+    Non-bundled plugins are prompted about the privileged ``allow_tool_override`` capability
+    (replacing built-in tools). ``allow_tool_override`` is tri-state: ``True`` grants and
+    ``False`` declines without prompting, ``None`` asks interactively. Bundled plugins are
     trusted and never prompted.
     """
-    from rich.console import Console
     from hermes_cli.relay_plugin_cutover import (
         LEGACY_RELAY_PLUGIN_KEYS,
         RELAY_PLUGINS_CONFIG_ENV,
     )
 
-    console = Console()
-    if name in LEGACY_RELAY_PLUGIN_KEYS:
-        console.print(
-            f"[red]Plugin '{name}' was removed.[/red] Relay lifecycle is owned "
-            f"by Hermes core; configure {RELAY_PLUGINS_CONFIG_ENV} instead."
-        )
-        sys.exit(1)
+    console = _console()
+
+    def _refuse_legacy_relay(plugin: str) -> None:
+        if plugin in LEGACY_RELAY_PLUGIN_KEYS:
+            console.print(
+                f"[red]Plugin '{plugin}' was removed.[/red] Relay lifecycle is owned "
+                f"by Hermes core; configure {RELAY_PLUGINS_CONFIG_ENV} instead."
+            )
+            sys.exit(1)
+
+    _refuse_legacy_relay(name)
 
     # Discover the plugin — check installed (user) AND bundled, including
     # nested category plugins — and normalize to its canonical registry key.
@@ -1433,13 +1305,7 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
         console.print(f"[red]Plugin '{name}' is not installed or bundled.[/red]")
         sys.exit(1)
     key, source = resolved
-
-    if key in LEGACY_RELAY_PLUGIN_KEYS:
-        console.print(
-            f"[red]Plugin '{key}' was removed.[/red] Relay lifecycle is owned "
-            f"by Hermes core; configure {RELAY_PLUGINS_CONFIG_ENV} instead."
-        )
-        sys.exit(1)
+    _refuse_legacy_relay(key)
 
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
@@ -1448,7 +1314,6 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
 
     if not already_enabled:
         enabled.add(key)
-        disabled.discard(key)
         # Drop every alias of this plugin from the disabled list so an
         # explicit disable under a different form can't keep it off. The
         # loader's disable check matches on BOTH the canonical key
@@ -1456,9 +1321,7 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
         # a stale entry under either form makes "explicit disable wins"
         # (plugins.py) silently veto this enable. Discard the key, its
         # bare leaf, and the manifest name. (#40190 follow-up.)
-        bare = key.split("/")[-1]
-        if bare != key:
-            disabled.discard(bare)
+        _discard_key_and_leaf(disabled, key)
         for entry in _discover_all_plugins():
             # entry = (name, version, description, source, dir_path, key)
             if entry[5] == key:
@@ -1506,22 +1369,20 @@ def _declared_capabilities_from_manifest(manifest: dict, plugin_name: str = "?")
 
 def _declared_capabilities_for_key(key: str) -> list:
     """Read the declared capabilities for an installed/bundled plugin by key."""
-    for entry in _discover_all_plugins():
-        # entry = (name, version, description, source, dir_path, key)
-        if entry[5] == key or entry[0] == key:
-            if entry[3] == "entrypoint":
-                from hermes_cli.plugins import discover_entrypoint_manifests
+    entry = _find_plugin_entry(key)
+    if entry is None:
+        return []
+    if entry[3] == "entrypoint":
+        from hermes_cli.plugins import discover_entrypoint_manifests
 
-                for manifest in discover_entrypoint_manifests():
-                    if key in (manifest.key, manifest.name):
-                        return list(manifest.capabilities)
-                return []
-            dir_path = entry[4]
-            if not dir_path:
-                return []
-            manifest = _read_manifest(Path(dir_path))
-            return _declared_capabilities_from_manifest(manifest, entry[0])
-    return []
+        for manifest in discover_entrypoint_manifests():
+            if key in (manifest.key, manifest.name):
+                return list(manifest.capabilities)
+        return []
+    dir_path = entry[4]
+    if not dir_path:
+        return []
+    return _declared_capabilities_from_manifest(_read_manifest(Path(dir_path)), entry[0])
 
 
 def _print_capability_list(console, capabilities: list) -> None:
@@ -1543,18 +1404,12 @@ def _run_capability_consent(
 ) -> bool:
     """Show the capability consent screen and record the decision.
 
-    Prints the declared capability list with one-line risk descriptions and
-    asks a single Y/n. On consent, the *pending* capabilities are granted
-    (recorded under ``plugins.entries.<plugin_id>.granted_capabilities`` with
-    a consent hash of the declared set). On decline — or in ANY
-    non-interactive context — capabilities stay ungranted (fail closed) and
-    the plugin must degrade gracefully via ``ctx.has_capability()``.
-
-    The consent wording deliberately does not imply a code audit: granting a
-    capability trusts the plugin author. This is consent + audit, NOT a
-    sandbox — an in-process plugin can run arbitrary Python regardless.
-
-    Returns True when consent was granted.
+    Lists declared capabilities with risk descriptions and asks one Y/n. On consent the pending
+    capabilities are granted under ``plugins.entries.<id>.granted_capabilities`` with a hash of
+    the declared set. On decline — or in ANY non-interactive context — they stay ungranted (fail
+    closed) and the plugin must degrade via ``ctx.has_capability()``. This is consent + audit,
+    NOT a sandbox: an in-process plugin can run arbitrary Python regardless. Returns True when
+    granted.
     """
     from hermes_cli.plugin_capabilities import (
         pending_capabilities,
@@ -1581,7 +1436,7 @@ def _run_capability_consent(
         "in-process.[/dim]"
     )
 
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if not _is_tty():
         console.print(
             "  [yellow]Non-interactive session: capabilities NOT granted "
             "(fail closed).[/yellow] Run "
@@ -1590,11 +1445,7 @@ def _run_capability_consent(
         )
         return False
 
-    try:
-        answer = console.input("  Grant these capabilities? [y/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        answer = ""
-    if answer in {"y", "yes"}:
+    if _ask_yes("  Grant these capabilities? [y/N] ", console.input):
         record_consent(plugin_id, pending, declared)
         console.print(
             f"  [green]✓[/green] Granted: {', '.join(pending)} "
@@ -1612,11 +1463,13 @@ def _run_capability_consent(
 
 def cmd_capabilities(name: Optional[str] = None) -> None:
     """``hermes plugins capabilities [<id>]`` — declared vs granted."""
-    from rich.console import Console
+    from hermes_cli.plugin_capabilities import (
+        CAPABILITY_REGISTRY,
+        granted_capabilities,
+        plugin_capability_granted,
+    )
 
-    from hermes_cli.plugin_capabilities import granted_capabilities
-
-    console = Console()
+    console = _console()
 
     rows = []
     for entry in _discover_all_plugins():
@@ -1628,10 +1481,6 @@ def cmd_capabilities(name: Optional[str] = None) -> None:
         granted = granted_capabilities(key)
         # Legacy grants surface too: report capabilities live via deprecated
         # allow_* keys so `capabilities` shows the true effective state.
-        from hermes_cli.plugin_capabilities import (
-            CAPABILITY_REGISTRY,
-            plugin_capability_granted,
-        )
         effective = {
             cap for cap in CAPABILITY_REGISTRY
             if plugin_capability_granted(key, cap)
@@ -1670,11 +1519,7 @@ def cmd_capabilities(name: Optional[str] = None) -> None:
 def _resolve_tool_override_grant(
     console, key: str, allow_tool_override: Optional[bool]
 ) -> None:
-    """Resolve and persist the ``allow_tool_override`` grant for a plugin.
-
-    ``allow_tool_override`` tri-state: True grants, False declines, None
-    prompts interactively (defaulting to deny on a non-interactive stdin).
-    """
+    """Resolve and persist the ``allow_tool_override`` grant for a plugin."""
     if allow_tool_override is None:
         # Interactive consent. Default to NO so a blind Enter doesn't grant
         # a privileged capability, and a non-interactive stdin denies safely.
@@ -1685,19 +1530,14 @@ def _resolve_tool_override_grant(
             "everything the agent routes through that tool.\n"
             "  Grant it? [y/N] "
         )
-        try:
-            answer = console.input(prompt).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            answer = ""
-        allow_tool_override = answer in {"y", "yes"}
+        allow_tool_override = _ask_yes(prompt, console.input)
 
-    plugin_id = key
-    _set_plugin_entry_flag(plugin_id, "allow_tool_override", allow_tool_override)
+    _set_plugin_entry_flag(key, "allow_tool_override", allow_tool_override)
     if allow_tool_override:
         console.print(
             f"[green]✓[/green] Granted [bold]{key}[/bold] permission to "
             "override built-in tools "
-            f"([dim]plugins.entries.{plugin_id}.allow_tool_override: true[/dim])."
+            f"([dim]plugins.entries.{key}.allow_tool_override: true[/dim])."
         )
     else:
         console.print(
@@ -1709,9 +1549,7 @@ def _resolve_tool_override_grant(
 
 def cmd_disable(name: str) -> None:
     """Remove a plugin from the enabled allow-list (and add to disabled)."""
-    from rich.console import Console
-
-    console = Console()
+    console = _console()
     key = _resolve_plugin_key(name)
     if key is None:
         console.print(f"[red]Plugin '{name}' is not installed or bundled.[/red]")
@@ -1724,12 +1562,9 @@ def cmd_disable(name: str) -> None:
         console.print(f"[dim]Plugin '{key}' is already disabled.[/dim]")
         return
 
-    enabled.discard(key)
     # Drop any legacy bare-name entry from the allow-list too, so a stale
     # bare name can't keep a nested plugin loading after an explicit disable.
-    bare = key.split("/")[-1]
-    if bare != key:
-        enabled.discard(bare)
+    _discard_key_and_leaf(enabled, key)
     disabled.add(key)
     _save_enabled_set(enabled)
     _save_disabled_set(disabled)
@@ -1739,55 +1574,27 @@ def cmd_disable(name: str) -> None:
     )
 
 
-def _plugin_exists(name: str) -> bool:
-    """Return True if a plugin with *name* (bare name or key) exists."""
-    return _resolve_plugin_key(name) is not None
-
-
 def _read_manifest_info(d: Path, prefix: str):
-    """Read a native or portable manifest and return display metadata.
-
-    Returns None if no manifest file exists.
-    """
-    manifest_file = d / "plugin.yaml"
-    if not manifest_file.exists():
-        manifest_file = d / "plugin.yml"
-    if not manifest_file.exists():
-        portable_file = d / "plugin.json"
-        if not portable_file.exists() and not portable_file.is_symlink():
+    """Read a native or portable manifest and return display metadata."""
+    manifest_file = _native_manifest_file(d)
+    if manifest_file is None:
+        if not _has_portable_manifest(d):
             return None
         try:
-            from hermes_cli.agent_plugins import read_agent_plugin_manifest
-
-            manifest, _ = read_agent_plugin_manifest(d)
+            manifest = _read_portable_manifest(d)
             name = manifest["name"]
-            key = f"{prefix}/{d.name}" if prefix else name
-            return (
-                name,
-                manifest.get("version", ""),
-                manifest.get("description", ""),
-                key,
-            )
         except Exception:
             return None
-    try:
-        import yaml
-    except ImportError:
-        yaml = None
-    name = d.name
-    version = ""
-    description = ""
-    if yaml:
+    else:
+        # Unreadable YAML (or no yaml module) degrades to the directory name, silently.
         try:
-            with open(manifest_file, encoding="utf-8") as f:
-                manifest = yaml.safe_load(f) or {}
-            name = manifest.get("name", d.name)
-            version = manifest.get("version", "")
-            description = manifest.get("description", "")
+            manifest = _load_yaml_manifest(manifest_file)
         except Exception:
-            pass
+            manifest = {}
+        manifest = manifest if isinstance(manifest, dict) else {}
+        name = manifest.get("name", d.name)
     key = f"{prefix}/{d.name}" if prefix else name
-    return name, version, description, key
+    return name, manifest.get("version", ""), manifest.get("description", ""), key
 
 
 def _is_portable_plugin_dir(dir_path) -> bool:
@@ -1795,12 +1602,7 @@ def _is_portable_plugin_dir(dir_path) -> bool:
     only — a native ``plugin.yaml`` takes precedence, matching the loader)."""
     try:
         d = Path(dir_path)
-        if not d.is_dir():
-            return False
-        if (d / "plugin.yaml").exists() or (d / "plugin.yml").exists():
-            return False
-        portable_file = d / "plugin.json"
-        return portable_file.exists() or portable_file.is_symlink()
+        return d.is_dir() and _native_manifest_file(d) is None and _has_portable_manifest(d)
     except OSError:
         return False
 
@@ -1815,17 +1617,11 @@ def _bundled_default_on(dir_path) -> bool:
     """True when a bundled plugin at *dir_path* is active without an explicit
     ``plugins.enabled`` entry. Standalone/exclusive kinds stay opt-in, and
     portable packages (``plugin.json``) have no kind at all."""
-    manifest_file = Path(dir_path) / "plugin.yaml"
-    if not manifest_file.exists():
-        manifest_file = Path(dir_path) / "plugin.yml"
-    if not manifest_file.exists():
+    manifest_file = _native_manifest_file(Path(dir_path))
+    if manifest_file is None:
         return False
     try:
-        import yaml
-
-        with open(manifest_file, encoding="utf-8") as f:
-            manifest = yaml.safe_load(f) or {}
-        kind = str(manifest.get("kind", "standalone")).strip().lower()
+        kind = str(_load_yaml_manifest(manifest_file).get("kind", "standalone")).strip().lower()
         return kind in _BUNDLED_DEFAULT_ON_KINDS
     except Exception:
         return False
@@ -1839,10 +1635,7 @@ def _scan_level(
     depth: int,
     seen: dict,
 ) -> None:
-    """Recursive directory scan matching PluginManager._scan_directory_level.
-
-    Populates *seen* with key -> (name, version, description, source, dir, key).
-    """
+    """Recursive directory scan matching PluginManager._scan_directory_level."""
     if not base.is_dir():
         return
     for d in sorted(base.iterdir()):
@@ -1851,28 +1644,22 @@ def _scan_level(
         if depth == 0 and skip_names and d.name in skip_names:
             continue
         info = _read_manifest_info(d, prefix)
-        if info is not None:
-            name, version, description, key = info
-            if key in seen and source == "bundled":
-                continue
-            src_label = source
-            if source == "user" and (d / ".git").exists():
-                src_label = "git"
-            seen[key] = (name, version, description, src_label, d, key)
+        if info is None:
+            if depth == 0:
+                _scan_level(d, source, set(), f"{prefix}/{d.name}" if prefix else d.name, 1, seen)
             continue
-        if depth >= 1:
+        name, version, description, key = info
+        if key in seen and source == "bundled":
             continue
-        sub_prefix = f"{prefix}/{d.name}" if prefix else d.name
-        _scan_level(d, source, set(), sub_prefix, depth + 1, seen)
+        src_label = "git" if source == "user" and (d / ".git").exists() else source
+        seen[key] = (name, version, description, src_label, d, key)
 
 
 def _discover_all_plugins() -> list:
-    """Return a list of (name, version, description, source, dir_path, key) for
-    every plugin the loader can see — user + bundled + project + entry point.
+    """Return (name, version, description, source, dir_path, key) for every plugin the loader sees.
 
-    Matches the ordering/dedup of ``PluginManager.discover_and_load``:
-    bundled first, then user, then project, then entry points. Later sources
-    override earlier ones on key collision.
+    Matches the ordering/dedup of ``PluginManager.discover_and_load``: bundled, then user, then
+    project, then entry points; later sources override earlier ones on key collision.
     """
     seen: dict = {}  # key -> (name, version, description, source, path, key)
 
@@ -1897,9 +1684,9 @@ def _discover_all_plugins() -> list:
 def _discover_entrypoint_plugins() -> list[tuple[str, str, str, str]]:
     """Return plugin entries advertised through ``hermes_agent.plugins``.
 
-    Entry-point plugins are installed as Python packages, so they do not have a
-    plugin directory under ``~/.hermes/plugins``. Include package metadata here
-    so ``hermes plugins list`` can show and enable them.
+    Entry-point plugins are installed as Python packages, so they do not have a plugin directory
+    under ``~/.hermes/plugins``. Include package metadata here so ``hermes plugins list`` can show
+    and enable them.
     """
     from hermes_cli.plugins import ENTRY_POINTS_GROUP
 
@@ -1917,14 +1704,17 @@ def _discover_entrypoint_plugins() -> list[tuple[str, str, str, str]]:
 
     entries: list[tuple[str, str, str, str]] = []
     for ep in group_eps:
-        version = ""
-        description = ""
         dist = getattr(ep, "dist", None)
         metadata = getattr(dist, "metadata", None)
-        if metadata is not None:
-            version = str(getattr(dist, "version", "") or "")
-            description = str(metadata.get("Summary", "") or "")
-        entries.append((ep.name, version, description, ep.value))
+        if metadata is None:
+            entries.append((ep.name, "", "", ep.value))
+        else:
+            entries.append((
+                ep.name,
+                str(getattr(dist, "version", "") or ""),
+                str(metadata.get("Summary", "") or ""),
+                ep.value,
+            ))
     return entries
 
 
@@ -1950,12 +1740,14 @@ def _filter_plugin_entries(entries: list, args: Any, enabled: set, disabled: set
     return filtered
 
 
+_STATUS_MARKUP = {"disabled": "[red]disabled[/red]", "enabled": "[green]enabled[/green]"}
+
+
 def cmd_list(args: Any | None = None) -> None:
     """List all plugins (bundled + user) with enabled/disabled state."""
-    from rich.console import Console
     from rich.table import Table
 
-    console = Console()
+    console = _console()
     entries = _discover_all_plugins()
     if not entries:
         console.print("[dim]No plugins installed.[/dim]")
@@ -1966,24 +1758,20 @@ def cmd_list(args: Any | None = None) -> None:
     disabled = _get_disabled_set()
     entries = _filter_plugin_entries(entries, args, enabled, disabled)
 
+    # (name, status, version, description, source) per entry
+    rows = [
+        (name, _plugin_status(name, enabled, disabled, key=key), str(version), description, source)
+        for name, version, description, source, _dir, key in entries
+    ]
+
     if getattr(args, "json", False):
-        payload = [
-            {
-                "name": name,
-                "status": _plugin_status(name, enabled, disabled, key=key),
-                "version": str(version),
-                "description": description,
-                "source": source,
-            }
-            for name, version, description, source, _dir, key in entries
-        ]
-        print(json.dumps(payload, indent=2))
+        keys = ("name", "status", "version", "description", "source")
+        print(json.dumps([dict(zip(keys, row)) for row in rows], indent=2))
         return
 
     if getattr(args, "plain", False):
-        for name, version, _description, source, _dir, key in entries:
-            status = _plugin_status(name, enabled, disabled, key=key)
-            print(f"{status:12} {source:8} {str(version):8} {name}")
+        for name, status, version, _description, source in rows:
+            print(f"{status:12} {source:8} {version:8} {name}")
         return
 
     if not entries:
@@ -1997,15 +1785,9 @@ def cmd_list(args: Any | None = None) -> None:
     table.add_column("Description")
     table.add_column("Source", style="dim")
 
-    for name, version, description, source, _dir, key in entries:
-        status_name = _plugin_status(name, enabled, disabled, key=key)
-        if status_name == "disabled":
-            status = "[red]disabled[/red]"
-        elif status_name == "enabled":
-            status = "[green]enabled[/green]"
-        else:
-            status = "[yellow]not enabled[/yellow]"
-        table.add_row(name, status, str(version), description, source)
+    for name, status_name, version, description, source in rows:
+        status = _STATUS_MARKUP.get(status_name, "[yellow]not enabled[/yellow]")
+        table.add_row(name, status, version, description, source)
 
     console.print()
     console.print(table)
@@ -2033,20 +1815,15 @@ def _discover_memory_providers() -> list[tuple[str, str]]:
 def _discover_context_engines() -> list[tuple[str, str]]:
     """Return [(name, description), ...] for available context engines.
 
-    Includes repo-shipped engines from ``plugins/context_engine/`` AND
-    plugin-registered engines (third-party engines installed as Hermes
-    plugins via ``ctx.register_context_engine``). Repo-shipped descriptions
-    win when a plugin-registered engine collides on name.
+    Includes repo-shipped engines from ``plugins/context_engine/`` AND plugin-registered engines
+    (via ``ctx.register_context_engine``). Repo-shipped descriptions win on a name collision.
     """
-    engines: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    engines: dict[str, str] = {}
 
     try:
         from plugins.context_engine import discover_context_engines
         for name, desc, _avail in discover_context_engines():
-            if name not in seen:
-                engines.append((name, desc))
-                seen.add(name)
+            engines.setdefault(name, desc)
     except Exception:
         pass
 
@@ -2054,128 +1831,67 @@ def _discover_context_engines() -> list[tuple[str, str]]:
         from hermes_cli.plugins import discover_plugins, get_plugin_context_engine
         discover_plugins()
         plugin_engine = get_plugin_context_engine()
-        if plugin_engine and getattr(plugin_engine, "name", None) and plugin_engine.name not in seen:
-            engines.append((plugin_engine.name, "installed plugin"))
+        if plugin_engine and getattr(plugin_engine, "name", None):
+            engines.setdefault(plugin_engine.name, "installed plugin")
     except Exception:
         pass
 
-    return engines
+    return list(engines.items())
 
 
-def _get_current_memory_provider() -> str:
-    """Return the current memory.provider from config (empty = built-in)."""
-    try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        return cfg_get(config, "memory", "provider", default="") or ""
-    except Exception:
-        return ""
+# memory.provider ("" = built-in) and context.engine config accessors.
+_get_current_memory_provider = functools.partial(_config_str, "memory", "provider", default="")
+_get_current_context_engine = functools.partial(_config_str, "context", "engine", default="compressor")
+_save_memory_provider = functools.partial(_write_config_value, "memory", "provider")
+_save_context_engine = functools.partial(_write_config_value, "context", "engine")
 
 
-def _get_current_context_engine() -> str:
-    """Return the current context.engine from config."""
-    try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        return cfg_get(config, "context", "engine", default="compressor") or "compressor"
-    except Exception:
-        return "compressor"
-
-
-def _save_memory_provider(name: str) -> None:
-    """Persist memory.provider to config.yaml."""
-    from hermes_cli.config import load_config, save_config
-    config = load_config()
-    if "memory" not in config:
-        config["memory"] = {}
-    config["memory"]["provider"] = name
-    save_config(config)
-
-
-def _save_context_engine(name: str) -> None:
-    """Persist context.engine to config.yaml."""
-    from hermes_cli.config import load_config, save_config
-    config = load_config()
-    if "context" not in config:
-        config["context"] = {}
-    config["context"]["engine"] = name
-    save_config(config)
-
-
-def _configure_memory_provider() -> bool:
-    """Launch a radio picker for memory providers. Returns True if changed."""
+def _configure_provider_category(
+    title: str, default_label: str, default_name: str, current: str, choices, save
+) -> bool:
+    """Radio picker: the built-in default first, then *choices*; a current value not among
+    them is appended as ``(not found)``. Calls *save* and returns True when the choice changed."""
     from hermes_cli.curses_ui import curses_radiolist
 
-    current = _get_current_memory_provider()
-    providers = _discover_memory_providers()
-
-    # Build items: "built-in" first, then discovered providers
-    items = ["built-in (default)"]
-    names = [""]  # empty string = built-in
-    selected = 0
-
-    for name, desc in providers:
-        names.append(name)
-        label = f"{name} \u2014 {desc}" if desc else name
-        items.append(label)
-        if name == current:
-            selected = len(items) - 1
-
-    # If current provider isn't in discovered list, add it
-    if current and current not in names:
+    names = [default_name] + [name for name, _desc in choices]
+    items = [default_label] + [f"{name} \u2014 {desc}" if desc else name for name, desc in choices]
+    if current not in names:
         names.append(current)
         items.append(f"{current} (not found)")
-        selected = len(items) - 1
+    selected = max(i for i, name in enumerate(names) if name == current)
 
-    choice = curses_radiolist(
-        title="Memory Provider (select one)",
-        items=items,
-        selected=selected,
-    )
-
-    new_provider = names[choice]
-    if new_provider != current:
-        _save_memory_provider(new_provider)
+    new_value = names[curses_radiolist(title=title, items=items, selected=selected)]
+    if new_value != current:
+        save(new_value)
         return True
     return False
 
 
-def _configure_context_engine() -> bool:
-    """Launch a radio picker for context engines. Returns True if changed."""
-    from hermes_cli.curses_ui import curses_radiolist
+# (title, default label, default name, current-value reader, discovery fn, saver) per provider
+# category. Readers/savers are looked up at call time so module-level patching still applies.
+_PROVIDER_CATEGORY_SPECS = (
+    ("Memory Provider", "built-in", "", lambda: _get_current_memory_provider(),
+     lambda: _discover_memory_providers(), lambda v: _save_memory_provider(v)),
+    ("Context Engine", "compressor", "compressor", lambda: _get_current_context_engine(),
+     lambda: _discover_context_engines(), lambda v: _save_context_engine(v)),
+)
 
-    current = _get_current_context_engine()
-    engines = _discover_context_engines()
 
-    # Build items: "compressor" first (built-in), then discovered engines
-    items = ["compressor (default)"]
-    names = ["compressor"]
-    selected = 0
-
-    for name, desc in engines:
-        names.append(name)
-        label = f"{name} \u2014 {desc}" if desc else name
-        items.append(label)
-        if name == current:
-            selected = len(items) - 1
-
-    # If current engine isn't in discovered list and isn't compressor, add it
-    if current != "compressor" and current not in names:
-        names.append(current)
-        items.append(f"{current} (not found)")
-        selected = len(items) - 1
-
-    choice = curses_radiolist(
-        title="Context Engine (select one)",
-        items=items,
-        selected=selected,
+def _configure_category_spec(spec) -> bool:
+    """Launch the radio picker for one ``_PROVIDER_CATEGORY_SPECS`` row. Returns True if changed."""
+    title, default_label, default_name, current, discover, save = spec
+    return _configure_provider_category(
+        f"{title} (select one)", f"{default_label} (default)", default_name,
+        current(), discover(), save,
     )
 
-    new_engine = names[choice]
-    if new_engine != current:
-        _save_context_engine(new_engine)
-        return True
-    return False
+
+def _provider_categories() -> list:
+    """``[(title, current_label, configure_fn), ...]`` rows for the composite UI."""
+    return [
+        (spec[0], spec[3]() or spec[1], functools.partial(_configure_category_spec, spec))
+        for spec in _PROVIDER_CATEGORY_SPECS
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -2184,24 +1900,9 @@ def _configure_context_engine() -> bool:
 
 
 def cmd_show(name: str) -> None:
-    """Show details for a single plugin, including declared emits/listens.
-
-    Resolves *name* against every discoverable plugin (bundled + user +
-    entrypoint) by either its display name or its registry key, then reads
-    its ``plugin.yaml`` to surface the advisory event-bus declarations
-    (``emits`` / ``listens``) alongside the basic metadata.
-    """
-    from rich.console import Console
-
-    console = Console()
-    entries = _discover_all_plugins()
-    match = None
-    for entry in entries:
-        # entry = (name, version, description, source, dir_path, key)
-        if entry[0] == name or entry[5] == name:
-            match = entry
-            break
-
+    """Show details for a single plugin, including declared emits/listens."""
+    console = _console()
+    match = _find_plugin_entry(name)
     if match is None:
         console.print(f"[red]Plugin '{name}' not found.[/red]")
         console.print("[dim]List installed plugins:[/dim] hermes plugins list")
@@ -2234,9 +1935,7 @@ def cmd_show(name: str) -> None:
 
 def cmd_toggle() -> None:
     """Interactive composite UI — general plugins + provider plugin categories."""
-    from rich.console import Console
-
-    console = Console()
+    console = _console()
 
     # -- General plugins discovery (bundled + user) --
     entries = _discover_all_plugins()
@@ -2251,42 +1950,23 @@ def cmd_toggle() -> None:
     # plugins.disabled, but ``hermes plugins enable web/firecrawl`` cleared
     # only the key — so "explicit disable wins" kept a bundled backend off
     # forever (pi314's #40190 symptom). Keys keep every surface aligned.
-    plugin_keys = []
-    plugin_labels = []
-    plugin_selected = set()
-
-    for i, (name, _version, description, source, _d, key) in enumerate(entries):
-        label = f"{name} \u2014 {description}" if description else name
-        if source == "bundled":
-            label = f"{label} [bundled]"
-        plugin_keys.append(key)
-        plugin_labels.append(label)
-        # Selected (enabled) when in enabled-set AND not in disabled-set.
-        # Accept the legacy bare name on either side for back-compat with
-        # existing configs written before this normalization.
-        is_on = (
-            (key in enabled_set or name in enabled_set)
-            and key not in disabled_set
-            and name not in disabled_set
-        )
-        if is_on:
-            plugin_selected.add(i)
-
-    # -- Provider categories --
-    current_memory = _get_current_memory_provider() or "built-in"
-    current_context = _get_current_context_engine()
-    categories = [
-        ("Memory Provider", current_memory, _configure_memory_provider),
-        ("Context Engine", current_context, _configure_context_engine),
+    plugin_keys = [entry[5] for entry in entries]
+    plugin_labels = [
+        (f"{name} \u2014 {description}" if description else name)
+        + (" [bundled]" if source == "bundled" else "")
+        for name, _version, description, source, _d, _key in entries
     ]
+    # Selected (enabled) when in enabled-set AND not in disabled-set. Accept the
+    # legacy bare name on either side for back-compat with configs written
+    # before this normalization.
+    plugin_selected = {
+        i for i, (name, _v, _desc, _src, _d, key) in enumerate(entries)
+        if (key in enabled_set or name in enabled_set)
+        and key not in disabled_set
+        and name not in disabled_set
+    }
 
-    has_plugins = bool(plugin_keys)
-    has_categories = bool(categories)
-
-    if not has_plugins and not has_categories:
-        console.print("[dim]No plugins installed and no provider categories available.[/dim]")
-        console.print("[dim]Install with:[/dim] hermes plugins install owner/repo")
-        return
+    categories = _provider_categories()
 
     # Non-TTY fallback
     if not sys.stdin.isatty():
@@ -2303,6 +1983,31 @@ def cmd_toggle() -> None:
                                 disabled_set, categories, console)
 
 
+def _persist_plugin_selection(plugin_keys, chosen, disabled) -> tuple[bool, set]:
+    """Save the composite UI's checkbox state; returns ``(changed, new_enabled)``.
+
+    Persist by canonical key. Unchecked plugins are written to the disabled-list so they stay off
+    even if a future plugin auto-enables itself — but we ONLY ever write the canonical key (never
+    the bare manifest name), so the disabled-list can't drift out of sync with what ``cmd_enable``
+    clears or what PluginManager gates on (#40190). Re-checking a plugin also drops any stale
+    legacy bare-leaf disable so it is fully cleared from the disabled-list.
+    """
+    new_enabled: set = set()
+    new_disabled: set = set(disabled)  # preserve existing disabled state for unseen plugins
+    for i, key in enumerate(plugin_keys):
+        if i in chosen:
+            new_enabled.add(key)
+            _discard_key_and_leaf(new_disabled, key)
+        else:
+            new_disabled.add(key)
+
+    changed = new_enabled != _get_enabled_set() or new_disabled != disabled
+    if changed:
+        _save_enabled_set(new_enabled)
+        _save_disabled_set(new_disabled)
+    return changed, new_enabled
+
+
 def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected,
                       disabled, categories, console):
     """Custom curses screen with checkboxes + category action rows."""
@@ -2315,10 +2020,9 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected,
     n_categories = len(categories)
     total_items = n_plugins + n_categories  # navigable items
 
-    result_holder = {"plugins_changed": False, "providers_changed": False}
+    providers_changed = False
 
-    def _draw(stdscr):
-        curses.curs_set(0)
+    def _init_colors():
         if curses.has_colors():
             curses.start_color()
             curses.use_default_colors()
@@ -2326,6 +2030,49 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected,
             curses.init_pair(2, curses.COLOR_YELLOW, -1)
             curses.init_pair(3, curses.COLOR_CYAN, -1)
             curses.init_pair(4, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)  # dim gray
+
+    def _attr(base, pair):
+        attr = base
+        if curses.has_colors():
+            attr |= curses.color_pair(pair)
+        return attr
+
+    def _put(stdscr, y, x, text, max_x, attr):
+        try:
+            stdscr.addnstr(y, x, text, max_x - 1, attr)
+        except curses.error:
+            pass
+
+    def _configure_category(ci):
+        """Leave curses, run the category's picker, refresh its row, re-enter curses."""
+        curses.endwin()
+        nonlocal providers_changed
+        cat_name, _cat_cur, cat_fn = categories[ci]
+        if cat_fn():
+            providers_changed = True
+            categories[ci] = (cat_name, _provider_categories()[ci][1], cat_fn)
+        stdscr = curses.initscr()
+        curses.noecho()
+        curses.cbreak()
+        stdscr.keypad(True)
+        _init_colors()
+        curses.curs_set(0)
+        return stdscr
+
+    def _draw(stdscr):
+        curses.curs_set(0)
+        _init_colors()
+        # key -> new cursor, given (cursor, page_size)
+        nav = {}
+        for keys, move in (
+            ((curses.KEY_UP, ord("k")), lambda c, p: (c - 1) % total_items),
+            ((curses.KEY_DOWN, ord("j")), lambda c, p: (c + 1) % total_items),
+            ((curses.KEY_NPAGE, ord("f")), lambda c, p: min(total_items - 1, c + p)),
+            ((curses.KEY_PPAGE, ord("b")), lambda c, p: max(0, c - p)),
+            ((curses.KEY_HOME,), lambda c, p: 0),
+            ((curses.KEY_END,), lambda c, p: total_items - 1),
+        ):
+            nav.update(dict.fromkeys(keys, move))
         cursor = 0
         scroll_offset = 0
 
@@ -2334,222 +2081,66 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected,
             max_y, max_x = stdscr.getmaxyx()
 
             # Header
-            try:
-                hattr = curses.A_BOLD
-                if curses.has_colors():
-                    hattr |= curses.color_pair(2)
-                stdscr.addnstr(0, 0, "Plugins", max_x - 1, hattr)
-                stdscr.addnstr(
-                    1, 0,
-                    "  ↑↓/j/k navigate  PgUp/PgDn page  SPACE toggle  ENTER configure/confirm  ESC done",
-                    max_x - 1, curses.A_DIM,
-                )
-            except curses.error:
-                pass
+            _put(stdscr, 0, 0, "Plugins", max_x, _attr(curses.A_BOLD, 2))
+            _put(
+                stdscr, 1, 0,
+                "  ↑↓/j/k navigate  PgUp/PgDn page  SPACE toggle  ENTER configure/confirm  ESC done",
+                max_x, curses.A_DIM,
+            )
 
-            # Build display rows
-            # Row layout:
-            #   [plugins section header] (not navigable, skipped in scroll math)
-            #   plugin checkboxes (navigable, indices 0..n_plugins-1)
-            #   [separator] (not navigable)
-            #   [categories section header] (not navigable)
-            #   category action rows (navigable, indices n_plugins..total_items-1)
-
+            # Navigable indices: plugins 0..n_plugins-1, categories n_plugins..total_items-1;
+            # section headers / separator are drawn but skipped in scroll math.
             visible_rows = max_y - 4
             if cursor < scroll_offset:
                 scroll_offset = cursor
             elif cursor >= scroll_offset + visible_rows:
                 scroll_offset = cursor - visible_rows + 1
 
-            y = 3  # start drawing after header
-
-            # Determine which items are visible based on scroll
-            # We need to map logical cursor positions to screen rows
-            # accounting for non-navigable separator/headers
-
-
-            # --- General Plugins section ---
+            # Body rows as (text, attr); "" is a blank separator. Drawn from y=3
+            # and truncated at the last screen line.
+            lines = []
             if n_plugins > 0:
-                # Section header
-                if y < max_y - 1:
-                    try:
-                        sattr = curses.A_BOLD
-                        if curses.has_colors():
-                            sattr |= curses.color_pair(2)
-                        stdscr.addnstr(y, 0, "  General Plugins", max_x - 1, sattr)
-                    except curses.error:
-                        pass
-                    y += 1
-
-                plugin_start = scroll_offset
-                plugin_stop = min(n_plugins, scroll_offset + max(visible_rows, 0))
-                for i in range(plugin_start, plugin_stop):
-                    if y >= max_y - 1:
-                        break
+                lines.append(("  General Plugins", _attr(curses.A_BOLD, 2)))
+                for i in range(scroll_offset, min(n_plugins, scroll_offset + max(visible_rows, 0))):
                     check = "\u2713" if i in chosen else " "
                     arrow = "\u2192" if i == cursor else " "
-                    line = f" {arrow} [{check}] {plugin_labels[i]}"
-                    attr = curses.A_NORMAL
-                    if i == cursor:
-                        attr = curses.A_BOLD
-                        if curses.has_colors():
-                            attr |= curses.color_pair(1)
-                    try:
-                        stdscr.addnstr(y, 0, line, max_x - 1, attr)
-                    except curses.error:
-                        pass
-                    y += 1
-
-            # --- Separator ---
-            if y < max_y - 1:
-                y += 1  # blank line
-
-            # --- Provider Plugins section ---
-            if n_categories > 0 and y < max_y - 1:
-                try:
-                    sattr = curses.A_BOLD
-                    if curses.has_colors():
-                        sattr |= curses.color_pair(2)
-                    stdscr.addnstr(y, 0, "  Provider Plugins", max_x - 1, sattr)
-                except curses.error:
-                    pass
-                y += 1
-
+                    attr = _attr(curses.A_BOLD, 1) if i == cursor else curses.A_NORMAL
+                    lines.append((f" {arrow} [{check}] {plugin_labels[i]}", attr))
+            lines.append(("", curses.A_NORMAL))
+            if n_categories > 0:
+                lines.append(("  Provider Plugins", _attr(curses.A_BOLD, 2)))
                 for ci, (cat_name, cat_current, _cat_fn) in enumerate(categories):
-                    if y >= max_y - 1:
-                        break
                     cat_idx = n_plugins + ci
                     arrow = "\u2192" if cat_idx == cursor else " "
-                    line = f" {arrow}   {cat_name:<24} \u25b8 {cat_current}"
-                    attr = curses.A_NORMAL
-                    if cat_idx == cursor:
-                        attr = curses.A_BOLD
-                        if curses.has_colors():
-                            attr |= curses.color_pair(3)
-                    try:
-                        stdscr.addnstr(y, 0, line, max_x - 1, attr)
-                    except curses.error:
-                        pass
-                    y += 1
+                    attr = _attr(curses.A_BOLD, 3) if cat_idx == cursor else curses.A_NORMAL
+                    lines.append((f" {arrow}   {cat_name:<24} \u25b8 {cat_current}", attr))
+            for y, (text, attr) in enumerate(lines[: max(0, max_y - 4)], start=3):
+                if text:
+                    _put(stdscr, y, 0, text, max_x, attr)
 
             stdscr.refresh()
             key = stdscr.getch()
 
-            if key in {curses.KEY_UP, ord("k")}:
-                if total_items > 0:
-                    cursor = (cursor - 1) % total_items
-            elif key in {curses.KEY_DOWN, ord("j")}:
-                if total_items > 0:
-                    cursor = (cursor + 1) % total_items
-            elif key in {curses.KEY_NPAGE, ord("f")}:
-                if total_items > 0:
-                    cursor = min(total_items - 1, cursor + max(1, max_y - 5))
-            elif key in {curses.KEY_PPAGE, ord("b")}:
-                if total_items > 0:
-                    cursor = max(0, cursor - max(1, max_y - 5))
-            elif key == curses.KEY_HOME:
-                cursor = 0
-            elif key == curses.KEY_END:
-                cursor = max(0, total_items - 1)
-            elif key == ord(" "):
-                if cursor < n_plugins:
-                    # Toggle general plugin
+            if key in nav:
+                if total_items > 0:  # (with no rows, every motion leaves cursor at 0)
+                    cursor = nav[key](cursor, max(1, max_y - 5))
+            elif key == ord(" ") or key in {curses.KEY_ENTER, 10, 13}:
+                if cursor >= n_plugins:
+                    # Provider category — launch sub-screen (SPACE and ENTER alike)
+                    if cursor - n_plugins < n_categories:
+                        stdscr = _configure_category(cursor - n_plugins)
+                elif key == ord(" "):
                     chosen.symmetric_difference_update({cursor})
                 else:
-                    # Provider category — launch sub-screen
-                    ci = cursor - n_plugins
-                    if 0 <= ci < n_categories:
-                        curses.endwin()
-                        _cat_name, _cat_cur, cat_fn = categories[ci]
-                        changed = cat_fn()
-                        if changed:
-                            result_holder["providers_changed"] = True
-                            # Refresh current values
-                            categories[ci] = (
-                                _cat_name,
-                                _get_current_memory_provider() or "built-in" if ci == 0
-                                else _get_current_context_engine(),
-                                cat_fn,
-                            )
-                        # Re-enter curses
-                        stdscr = curses.initscr()
-                        curses.noecho()
-                        curses.cbreak()
-                        stdscr.keypad(True)
-                        if curses.has_colors():
-                            curses.start_color()
-                            curses.use_default_colors()
-                            curses.init_pair(1, curses.COLOR_GREEN, -1)
-                            curses.init_pair(2, curses.COLOR_YELLOW, -1)
-                            curses.init_pair(3, curses.COLOR_CYAN, -1)
-                            curses.init_pair(4, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)
-                        curses.curs_set(0)
-            elif key in {curses.KEY_ENTER, 10, 13}:
-                if cursor < n_plugins:
-                    # ENTER on a plugin checkbox — confirm and exit
-                    result_holder["plugins_changed"] = True
-                    return
-                else:
-                    # ENTER on a category — same as SPACE, launch sub-screen
-                    ci = cursor - n_plugins
-                    if 0 <= ci < n_categories:
-                        curses.endwin()
-                        _cat_name, _cat_cur, cat_fn = categories[ci]
-                        changed = cat_fn()
-                        if changed:
-                            result_holder["providers_changed"] = True
-                            categories[ci] = (
-                                _cat_name,
-                                _get_current_memory_provider() or "built-in" if ci == 0
-                                else _get_current_context_engine(),
-                                cat_fn,
-                            )
-                        stdscr = curses.initscr()
-                        curses.noecho()
-                        curses.cbreak()
-                        stdscr.keypad(True)
-                        if curses.has_colors():
-                            curses.start_color()
-                            curses.use_default_colors()
-                            curses.init_pair(1, curses.COLOR_GREEN, -1)
-                            curses.init_pair(2, curses.COLOR_YELLOW, -1)
-                            curses.init_pair(3, curses.COLOR_CYAN, -1)
-                            curses.init_pair(4, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)
-                        curses.curs_set(0)
+                    return  # ENTER on a plugin checkbox — confirm and exit
             elif key in {27, ord("q")}:
-                # Save plugin changes on exit
-                result_holder["plugins_changed"] = True
-                return
+                return  # plugin changes are saved on exit
 
     curses.wrapper(_draw)
     flush_stdin()
 
-    # Persist by canonical key. Unchecked plugins are written to the
-    # disabled-list so they stay off even if a future plugin auto-enables
-    # itself — but we ONLY ever write the canonical key (never the bare
-    # manifest name), so the disabled-list can't drift out of sync with
-    # what ``cmd_enable`` clears or what PluginManager gates on (#40190).
-    new_enabled: set = set()
-    new_disabled: set = set(disabled)  # preserve existing disabled state for unseen plugins
-    for i, key in enumerate(plugin_keys):
-        bare = key.split("/")[-1]
-        if i in chosen:
-            new_enabled.add(key)
-            new_disabled.discard(key)
-            # Drop any stale legacy bare-leaf disable so re-enabling here
-            # fully clears the plugin from the disabled-list.
-            if bare != key:
-                new_disabled.discard(bare)
-        else:
-            new_disabled.add(key)
-
-    prev_enabled = _get_enabled_set()
-    enabled_changed = new_enabled != prev_enabled
-    disabled_changed = new_disabled != disabled
-
-    if enabled_changed or disabled_changed:
-        _save_enabled_set(new_enabled)
-        _save_disabled_set(new_disabled)
+    changed, new_enabled = _persist_plugin_selection(plugin_keys, chosen, disabled)
+    if changed:
         console.print(
             f"\n[green]\u2713[/green] General plugins: {len(new_enabled)} enabled, "
             f"{len(plugin_keys) - len(new_enabled)} disabled."
@@ -2557,7 +2148,7 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected,
     elif n_plugins > 0:
         console.print("\n[dim]General plugins unchanged.[/dim]")
 
-    if result_holder["providers_changed"]:
+    if providers_changed:
         new_memory = _get_current_memory_provider() or "built-in"
         new_context = _get_current_context_engine()
         console.print(
@@ -2565,7 +2156,7 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected,
             f"Context engine: [bold]{new_context}[/bold]"
         )
 
-    if n_plugins > 0 or result_holder["providers_changed"]:
+    if n_plugins > 0 or providers_changed:
         console.print("[dim]Changes take effect on next session.[/dim]")
     console.print()
 
@@ -2599,24 +2190,7 @@ def _run_composite_fallback(plugin_keys, plugin_labels, plugin_selected,
                 return
             print()
 
-        # Persist by canonical key only — never the bare manifest name — so
-        # the disabled-list stays aligned with cmd_enable / PluginManager
-        # (#40190).
-        new_enabled: set = set()
-        new_disabled: set = set(disabled)
-        for i, key in enumerate(plugin_keys):
-            bare = key.split("/")[-1]
-            if i in chosen:
-                new_enabled.add(key)
-                new_disabled.discard(key)
-                if bare != key:
-                    new_disabled.discard(bare)
-            else:
-                new_disabled.add(key)
-        prev_enabled = _get_enabled_set()
-        if new_enabled != prev_enabled or new_disabled != disabled:
-            _save_enabled_set(new_enabled)
-            _save_disabled_set(new_disabled)
+        _persist_plugin_selection(plugin_keys, chosen, disabled)
 
     # Provider categories
     if categories:
@@ -2645,13 +2219,11 @@ def dashboard_install_plugin(
     """Non-interactive install for the web dashboard. Returns a JSON-serializable dict."""
     warnings: list[str] = []
     try:
-        git_url, _subdir = _resolve_git_url(identifier)
-        if git_url.startswith(("http://", "file://")):
-            warnings.append(
-                "Insecure URL scheme; prefer https:// or git@ for production installs.",
-            )
+        insecure = _resolve_git_url(identifier)[0].startswith(("http://", "file://"))
     except ValueError:
-        pass
+        insecure = False
+    if insecure:
+        warnings.append("Insecure URL scheme; prefer https:// or git@ for production installs.")
 
     try:
         target, installed_manifest, installed_name = _install_plugin_core(
@@ -2659,19 +2231,11 @@ def dashboard_install_plugin(
             force=force,
         )
     except PluginScanBlocked as exc:
-        findings = []
-        if exc.scan_result is not None:
-            findings = [
-                {
-                    "pattern_id": f.pattern_id,
-                    "severity": f.severity,
-                    "category": f.category,
-                    "file": f.file,
-                    "line": f.line,
-                    "description": f.description,
-                }
-                for f in exc.scan_result.findings
-            ]
+        fields = ("pattern_id", "severity", "category", "file", "line", "description")
+        findings = [
+            {k: getattr(f, k) for k in fields}
+            for f in (exc.scan_result.findings if exc.scan_result is not None else ())
+        ]
         return {
             "ok": False,
             "error": str(exc),
@@ -2684,17 +2248,10 @@ def dashboard_install_plugin(
 
     missing_env = _missing_requires_env_names(installed_manifest)
     if enable:
-        en = _get_enabled_set()
-        dis = _get_disabled_set()
-        en.add(installed_name)
-        dis.discard(installed_name)
-        _save_enabled_set(en)
-        _save_disabled_set(dis)
+        _set_plugin_enabled(installed_name, enable=True)
 
-    hint: str | None = None
     ap = target / "after-install.md"
-    if ap.exists():
-        hint = str(ap)
+    hint = str(ap) if ap.exists() else None
 
     return {
         "ok": True,
@@ -2709,46 +2266,47 @@ def dashboard_install_plugin(
 def _get_plugin_toolset_key(name: str) -> Optional[str]:
     """Return the toolset key a plugin registers its tools under, or None.
 
-    Queries the live tool registry — the plugin must already be loaded.
-    Falls back to reading ``provides_tools`` from plugin.yaml and looking
-    up the toolset from the registry for the first tool name found.
+    Queries the live tool registry — the plugin must already be loaded. Falls back to reading
+    ``provides_tools`` from plugin.yaml and looking up the toolset from the registry for the first
+    tool name found.
     """
     try:
         from tools.registry import registry
     except Exception:
         return None
 
-    # Check the plugin manager for tools this plugin registered
-    try:
+    def _first_toolset(tool_names) -> Optional[str]:
+        for tool_name in tool_names:
+            entry = registry.get_entry(tool_name)
+            if entry and entry.toolset:
+                return entry.toolset
+        return None
+
+    def _from_loaded_plugin() -> Optional[str]:
         from hermes_cli.plugins import discover_plugins, get_plugin_manager
         discover_plugins()  # idempotent — ensures plugins are loaded
-        manager = get_plugin_manager()
-        for _key, loaded in manager._plugins.items():
+        for _key, loaded in get_plugin_manager()._plugins.items():
             if loaded.manifest.name == name or _key == name:
-                for tool_name in loaded.tools_registered:
-                    entry = registry.get_entry(tool_name)
-                    if entry and entry.toolset:
-                        return entry.toolset
-                break
-    except Exception:
-        pass
+                return _first_toolset(loaded.tools_registered)
+        return None
 
-    # Fallback: read provides_tools from manifest on disk and query registry
-    try:
+    def _from_manifest_on_disk() -> Optional[str]:
         from hermes_cli.plugins import get_bundled_plugins_dir
         for base in (get_bundled_plugins_dir(), _plugins_dir()):
-            if not base.is_dir():
-                continue
             candidate = base / name
-            if candidate.is_dir():
-                manifest = _read_manifest(candidate)
-                for tool_name in manifest.get("provides_tools") or []:
-                    entry = registry.get_entry(tool_name)
-                    if entry and entry.toolset:
-                        return entry.toolset
-    except Exception:
-        pass
+            if base.is_dir() and candidate.is_dir():
+                toolset = _first_toolset(_read_manifest(candidate).get("provides_tools") or [])
+                if toolset:
+                    return toolset
+        return None
 
+    for lookup in (_from_loaded_plugin, _from_manifest_on_disk):
+        try:
+            toolset = lookup()
+        except Exception:
+            continue
+        if toolset:
+            return toolset
     return None
 
 
@@ -2764,10 +2322,7 @@ def _toggle_plugin_toolset(name: str, *, enable: bool) -> None:
     from hermes_cli.config import load_config, save_config
 
     config = load_config()
-    platform_toolsets = config.get("platform_toolsets")
-    if not isinstance(platform_toolsets, dict):
-        platform_toolsets = {}
-        config["platform_toolsets"] = platform_toolsets
+    platform_toolsets = _sub_dict(config, "platform_toolsets")
 
     changed = False
     for platform, ts_list in platform_toolsets.items():
@@ -2791,35 +2346,17 @@ def _toggle_plugin_toolset(name: str, *, enable: bool) -> None:
 
 
 def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str, Any]:
-    """Enable or disable a plugin in ``config.yaml`` (runtime allow/deny lists).
-
-    For plugins that provide tools (toolsets), also toggles the toolset in
-    ``platform_toolsets`` so the agent actually sees the tools in sessions.
-    """
-    if not _plugin_exists(name):
+    """Enable or disable a plugin in ``config.yaml`` (runtime allow/deny lists)."""
+    if _resolve_plugin_key(name) is None:
         return {"ok": False, "error": f"Plugin '{name}' is not installed or bundled."}
 
     en = _get_enabled_set()
     dis = _get_disabled_set()
-
-    if enabled:
-        if name in en and name not in dis:
-            return {"ok": True, "name": name, "unchanged": True}
-        en.add(name)
-        dis.discard(name)
-        _save_enabled_set(en)
-        _save_disabled_set(dis)
-        _toggle_plugin_toolset(name, enable=True)
-        return {"ok": True, "name": name, "unchanged": False}
-
-    if name not in en and name in dis:
+    already = (name in en and name not in dis) if enabled else (name not in en and name in dis)
+    if already:
         return {"ok": True, "name": name, "unchanged": True}
-
-    en.discard(name)
-    dis.add(name)
-    _save_enabled_set(en)
-    _save_disabled_set(dis)
-    _toggle_plugin_toolset(name, enable=False)
+    _set_plugin_enabled(name, enable=enabled)
+    _toggle_plugin_toolset(name, enable=enabled)
     return {"ok": True, "name": name, "unchanged": False}
 
 
@@ -2843,45 +2380,19 @@ def dashboard_update_user_plugin(name: str) -> dict[str, Any]:
         }
 
     try:
-        metadata = _read_install_metadata()
-    except PluginOperationError as exc:
-        return {"ok": False, "error": str(exc)}
-    install_record = metadata.get(target.name, {})
-    if install_record.get("pinned") is True:
-        recorded_source = install_record.get("source", "<source>")
-        return {
-            "ok": False,
-            "error": (
-                f"Plugin '{name}' is pinned to {install_record.get('revision')}; "
-                f"run `hermes plugins install {recorded_source} --force "
+        msg = _pull_plugin_update(
+            target,
+            lambda rec: (
+                f"Plugin '{name}' is pinned to {rec.get('revision')}; "
+                f"run `hermes plugins install {rec.get('source', '<source>')} --force "
                 "--ref <40-character commit SHA>` to move it."
             ),
-        }
+            lambda: f"Plugin '{name}' is not a git checkout; cannot pull updates.",
+        )
+    except PluginOperationError as exc:
+        return {"ok": False, "error": str(exc)}
 
-    if not (target / ".git").exists():
-        return {
-            "ok": False,
-            "error": f"Plugin '{name}' is not a git checkout; cannot pull updates.",
-        }
-
-    ok, msg = _git_pull_plugin_dir(target)
-    if not ok:
-        return {"ok": False, "error": msg}
-
-    if install_record:
-        git_exe = _resolve_git_executable()
-        if git_exe:
-            install_record["revision"] = _git_head_revision(target, git_exe)
-            metadata[target.name] = install_record
-            _write_install_metadata(metadata)
-
-    # Sibling of the CLI ``hermes plugins update`` path: drop bytecode
-    # compiled from the pre-pull plugin revision.
-    _clear_plugin_bytecode(target)
-
-    from rich.console import Console
-
-    _copy_example_files(target, Console())
+    _post_pull_housekeeping(target, _console())
     unchanged = "Already up to date" in msg
     return {"ok": True, "name": name, "output": msg, "unchanged": unchanged}
 
@@ -2889,22 +2400,20 @@ def dashboard_update_user_plugin(name: str) -> dict[str, Any]:
 def _clear_plugin_bytecode(target: Path) -> int:
     """Remove ``__pycache__`` dirs under a just-updated plugin checkout.
 
-    Plugin dirs live outside the main repo, so the launch-time checkout
-    fingerprint sweep in ``hermes_cli.main`` never covers them. After a
-    ``git pull`` changes a plugin's ``.py`` files, stale bytecode here can
-    produce the same ImportError class as #6207/#60242 in whichever
-    process imports the plugin next. Never raises.
+    Plugin dirs live outside the main repo, so the launch-time checkout fingerprint sweep in
+    ``hermes_cli.main`` never covers them. After a ``git pull`` changes a plugin's ``.py`` files,
+    stale bytecode here can produce the same ImportError class as #6207/#60242 in whichever process
+    imports the plugin next. Never raises.
     """
     removed = 0
     try:
         for cache_dir in target.rglob("__pycache__"):
-            if not cache_dir.is_dir():
-                continue
-            try:
-                shutil.rmtree(cache_dir)
-                removed += 1
-            except OSError:
-                pass
+            if cache_dir.is_dir():
+                try:
+                    shutil.rmtree(cache_dir)
+                    removed += 1
+                except OSError:
+                    pass
     except OSError:
         pass
     return removed
@@ -2931,22 +2440,23 @@ def _stash_ref(git_exe: str, target: Path) -> str:
     return probe.stdout.strip() if probe.returncode == 0 else ""
 
 
+def _reapply_stash(git_exe: str, target: Path) -> bool:
+    """``stash apply`` the autostash; drop it on a clean apply. False when it applied with
+    errors or left unmerged paths (the stash entry is kept in that case)."""
+    restore = _run_plugin_git(git_exe, target, "stash", "apply", "stash@{0}")
+    unmerged = _run_plugin_git(git_exe, target, "diff", "--name-only", "--diff-filter=U")
+    if restore.returncode != 0 or unmerged.stdout.strip():
+        return False
+    _run_plugin_git(git_exe, target, "stash", "drop", "stash@{0}")
+    return True
+
+
 def _git_pull_plugin_dir(target: Path) -> tuple[bool, str]:
     """``git pull --ff-only`` a plugin checkout, autostashing local edits.
 
-    Users tweak installed plugins in place (config constants, small patches),
-    and a plain ``pull --ff-only`` then aborts with "Your local changes ...
-    would be overwritten by merge" — making the plugin permanently
-    un-updatable until they hand-run git. Same UX class Factory Droid fixed
-    in v0.188 ("Updating a plugin marketplace now succeeds when its checkout
-    has local changes"), and the same autostash approach ``hermes update``
-    already uses for the main checkout (PR #70161).
-
-    Flow: clean tree → plain pull (unchanged). Dirty tree → stash push
-    (ref-compared, so "nothing saved" is distinguished from "saved but exit
-    1"), pull, stash apply. A clean re-apply drops the entry; a conflicted
-    re-apply resets the tree to the updated revision and KEEPS the stash so
-    the plugin still imports and no local work is lost.
+    Users tweak installed plugins in place (config constants, small patches), and a plain ``pull
+    --ff-only`` then aborts with "Your local changes ... would be overwritten by merge" — making the
+    plugin permanently un-updatable until they hand-run git.
     """
     git_exe = _resolve_git_executable()
     if not git_exe:
@@ -2983,33 +2493,23 @@ def _git_pull_plugin_dir(target: Path) -> tuple[bool, str]:
         result = _run_plugin_git(git_exe, target, "pull", "--ff-only")
 
         if result.returncode != 0:
-            err = _safe_git_error(result)
+            err = _safe_git_error(result) or "git pull failed."
             if stash_created:
                 # Put the user's edits back before reporting the failure.
-                restore = _run_plugin_git(git_exe, target, "stash", "apply", "stash@{0}")
-                if restore.returncode == 0:
-                    _run_plugin_git(git_exe, target, "stash", "drop", "stash@{0}")
+                if _reapply_stash(git_exe, target):
                     note = "Local changes were restored."
                 else:
                     note = (
                         "Local changes are preserved in git stash "
                         "(restore with: git stash pop)."
                     )
-                return False, (err or "git pull failed.") + f"\n{note}"
-            return False, err or "git pull failed."
+                return False, f"{err}\n{note}"
+            return False, err
 
         pulled = result.stdout.strip()
         if not stash_created:
             return True, pulled
-
-        restore = _run_plugin_git(git_exe, target, "stash", "apply", "stash@{0}")
-        unmerged = _run_plugin_git(
-            git_exe, target, "diff", "--name-only", "--diff-filter=U"
-        )
-        has_conflicts = bool(unmerged.stdout.strip())
-
-        if restore.returncode == 0 and not has_conflicts:
-            _run_plugin_git(git_exe, target, "stash", "drop", "stash@{0}")
+        if _reapply_stash(git_exe, target):
             return True, pulled + "\nLocal changes were re-applied on top of the update."
 
         # Conflicted re-apply: leave the plugin importable on the updated
@@ -3050,12 +2550,10 @@ def dashboard_remove_user_plugin(name: str) -> dict[str, Any]:
 
 def cmd_plugin_doctor(target: str = ".", *, ci: bool = False) -> None:
     """Validate one plugin through runtime discovery and registration."""
-    from rich.console import Console
-
     from hermes_cli.plugin_dev import doctor_plugin
 
     report = doctor_plugin(target)
-    Console().print(report.format_text())
+    _console().print(report.format_text())
     if ci and not report.ok:
         raise SystemExit(1)
 
@@ -3068,15 +2566,13 @@ def cmd_search(
     refresh: bool = False,
 ) -> None:
     """Search the community plugin index (fuzzy on name/description/tags)."""
-    from rich.console import Console
-
     from hermes_cli.plugin_index import (
         SECURITY_FOOTER,
         load_index,
         search_index,
     )
 
-    console = Console()
+    console = _console()
     entries, source = load_index(refresh=refresh)
     results = search_index(entries, term, capability=capability)
 
@@ -3118,61 +2614,60 @@ def cmd_search(
     console.print(f"[dim]{SECURITY_FOOTER}[/dim]")
 
 
+def _tri_state_flag(args, yes_attr: str, no_attr: str) -> Optional[bool]:
+    """Map an argparse ``--x`` / ``--no-x`` pair to True / False / None (neither given)."""
+    if getattr(args, yes_attr, False):
+        return True
+    if getattr(args, no_attr, False):
+        return False
+    return None
+
+
+def _action_pack(args):
+    from hermes_cli.plugin_packs import pack_command
+
+    pack_command(args)
+
+
+# Tri-state flags: neither --x nor --no-x given == None == interactive prompt.
+_PLUGIN_ACTIONS = {
+    "install": lambda args: cmd_install(
+        args.identifier,
+        force=getattr(args, "force", False),
+        enable=_tri_state_flag(args, "enable", "no_enable"),
+        ref=getattr(args, "ref", None),
+    ),
+    "search": lambda args: cmd_search(
+        getattr(args, "term", "") or "",
+        json_output=getattr(args, "json", False),
+        capability=getattr(args, "capability", None),
+        refresh=getattr(args, "refresh", False),
+    ),
+    "update": lambda args: cmd_update(args.name),
+    "remove": lambda args: cmd_remove(args.name),
+    "rm": lambda args: cmd_remove(args.name),
+    "uninstall": lambda args: cmd_remove(args.name),
+    "enable": lambda args: cmd_enable(
+        args.name,
+        allow_tool_override=_tri_state_flag(args, "allow_tool_override", "no_allow_tool_override"),
+    ),
+    "disable": lambda args: cmd_disable(args.name),
+    "capabilities": lambda args: cmd_capabilities(getattr(args, "name", None)),
+    "list": lambda args: cmd_list(args),
+    "ls": lambda args: cmd_list(args),
+    "doctor": lambda args: cmd_plugin_doctor(args.target, ci=getattr(args, "ci", False)),
+    "pack": _action_pack,
+    "show": lambda args: cmd_show(args.name),
+    "info": lambda args: cmd_show(args.name),
+    None: lambda args: cmd_toggle(),
+}
+
+
 def plugins_command(args) -> None:
     """Dispatch hermes plugins subcommands."""
     action = getattr(args, "plugins_action", None)
-
-    if action == "install":
-        # Map argparse tri-state: --enable=True, --no-enable=False, neither=None (prompt)
-        enable_arg = None
-        if getattr(args, "enable", False):
-            enable_arg = True
-        elif getattr(args, "no_enable", False):
-            enable_arg = False
-        cmd_install(
-            args.identifier,
-            force=getattr(args, "force", False),
-            enable=enable_arg,
-            ref=getattr(args, "ref", None),
-        )
-    elif action == "search":
-        cmd_search(
-            getattr(args, "term", "") or "",
-            json_output=getattr(args, "json", False),
-            capability=getattr(args, "capability", None),
-            refresh=getattr(args, "refresh", False),
-        )
-    elif action == "update":
-        cmd_update(args.name)
-    elif action in {"remove", "rm", "uninstall"}:
-        cmd_remove(args.name)
-    elif action == "enable":
-        # Tri-state: --allow-tool-override=True, --no-allow-tool-override=False,
-        # neither=None (interactive prompt for non-bundled plugins).
-        allow_override = None
-        if getattr(args, "allow_tool_override", False):
-            allow_override = True
-        elif getattr(args, "no_allow_tool_override", False):
-            allow_override = False
-        cmd_enable(args.name, allow_tool_override=allow_override)
-    elif action == "disable":
-        cmd_disable(args.name)
-    elif action == "capabilities":
-        cmd_capabilities(getattr(args, "name", None))
-    elif action in {"list", "ls"}:
-        cmd_list(args)
-    elif action == "doctor":
-        cmd_plugin_doctor(args.target, ci=getattr(args, "ci", False))
-    elif action == "pack":
-        from hermes_cli.plugin_packs import pack_command
-
-        pack_command(args)
-    elif action in {"show", "info"}:
-        cmd_show(args.name)
-    elif action is None:
-        cmd_toggle()
-    else:
-        from rich.console import Console
-
-        Console().print(f"[red]Unknown plugins action: {action}[/red]")
+    handler = _PLUGIN_ACTIONS.get(action)
+    if handler is None:
+        _console().print(f"[red]Unknown plugins action: {action}[/red]")
         sys.exit(1)
+    handler(args)

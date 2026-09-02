@@ -1,22 +1,12 @@
 """``hermes logs`` — view and filter Hermes log files.
 
-Supports tailing, following, session filtering, level filtering,
-component filtering, and relative time ranges.  All log files live
-under ``~/.hermes/logs/``.
-
-Usage examples::
-
-    hermes logs                    # last 50 lines of agent.log
-    hermes logs -f                 # follow agent.log in real time
-    hermes logs errors             # last 50 lines of errors.log
-    hermes logs gateway -n 100    # last 100 lines of gateway.log
-    hermes logs gui -f            # follow gui.log (dashboard/pty/ws)
-    hermes logs desktop -f        # follow desktop.log (Electron app boot/backend)
-    hermes logs --level WARNING    # only WARNING+ lines
-    hermes logs --session abc123   # filter by session ID substring
-    hermes logs --component tools  # only tool-related lines
-    hermes logs --since 1h         # lines from the last hour
-    hermes logs --since 30m -f     # follow, starting 30 min ago
+hermes logs # last 50 lines of agent.log hermes logs -f # follow agent.log in real time hermes logs
+errors # last 50 lines of errors.log hermes logs gateway -n 100 # last 100 lines of gateway.log
+hermes logs gui -f # follow gui.log (dashboard/pty/ws) hermes logs desktop -f # follow desktop.log
+(Electron app boot/backend) hermes logs --level WARNING # only WARNING+ lines hermes logs --session
+abc123 # filter by session ID substring hermes logs --component tools # only tool-related lines
+hermes logs --since 1h # lines from the last hour hermes logs --since 30m -f # follow, starting 30
+min ago
 """
 
 import re
@@ -69,15 +59,8 @@ def _parse_since(since_str: str) -> Optional[datetime]:
     match = re.match(r"^(\d+)\s*([smhd])$", since_str)
     if not match:
         return None
-    value = int(match.group(1))
-    unit = match.group(2)
-    delta = {
-        "s": timedelta(seconds=value),
-        "m": timedelta(minutes=value),
-        "h": timedelta(hours=value),
-        "d": timedelta(days=value),
-    }[unit]
-    return datetime.now() - delta
+    unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[match.group(2)]
+    return datetime.now() - timedelta(**{unit: int(match.group(1))})
 
 
 def _parse_line_timestamp(line: str) -> Optional[datetime]:
@@ -106,9 +89,7 @@ def _extract_logger_name(line: str) -> Optional[str]:
 def _line_matches_component(line: str, prefixes: Sequence[str]) -> bool:
     """Check if a log line's logger name starts with any of *prefixes*."""
     name = _extract_logger_name(line)
-    if name is None:
-        return False
-    return name.startswith(tuple(prefixes))
+    return name is not None and name.startswith(tuple(prefixes))
 
 
 def _matches_filters(
@@ -124,22 +105,13 @@ def _matches_filters(
         ts = _parse_line_timestamp(line)
         if ts is not None and ts < since:
             return False
-
     if min_level is not None:
         level = _extract_level(line)
-        if level is not None:
-            if _LEVEL_ORDER.get(level, 0) < _LEVEL_ORDER.get(min_level, 0):
-                return False
-
-    if session_filter is not None:
-        if session_filter not in line:
+        if level is not None and _LEVEL_ORDER.get(level, 0) < _LEVEL_ORDER.get(min_level, 0):
             return False
-
-    if component_prefixes is not None:
-        if not _line_matches_component(line, component_prefixes):
-            return False
-
-    return True
+    if session_filter is not None and session_filter not in line:
+        return False
+    return component_prefixes is None or _line_matches_component(line, component_prefixes)
 
 
 def tail_log(
@@ -152,25 +124,7 @@ def tail_log(
     since: Optional[str] = None,
     component: Optional[str] = None,
 ) -> None:
-    """Read and display log lines, optionally following in real time.
-
-    Parameters
-    ----------
-    log_name
-        Which log to read: ``"agent"``, ``"errors"``, ``"gateway"``, ``"gui"``.
-    num_lines
-        Number of recent lines to show (before follow starts).
-    follow
-        If True, keep watching for new lines (Ctrl+C to stop).
-    level
-        Minimum log level to show (e.g. ``"WARNING"``).
-    session
-        Session ID substring to filter on.
-    since
-        Relative time string (e.g. ``"1h"``, ``"30m"``).
-    component
-        Component name to filter by (e.g. ``"gateway"``, ``"tools"``).
-    """
+    """Read and display log lines, optionally following in real time."""
     filename = LOG_FILES.get(log_name)
     if filename is None:
         print(f"Unknown log: {log_name!r}. Available: {', '.join(sorted(LOG_FILES))}")
@@ -206,38 +160,26 @@ def tail_log(
             sys.exit(1)
         component_prefixes = COMPONENT_PREFIXES[component_lower]
 
-    has_filters = (
-        min_level is not None
-        or session is not None
-        or since_dt is not None
-        or component_prefixes is not None
-    )
+    filters = dict(min_level=min_level, session_filter=session,
+                   since=since_dt, component_prefixes=component_prefixes)
+    has_filters = any(v is not None for v in filters.values())
 
     # Read and display the tail
     try:
-        lines = _read_tail(log_path, num_lines, has_filters=has_filters,
-                           min_level=min_level, session_filter=session,
-                           since=since_dt, component_prefixes=component_prefixes)
+        lines = _read_tail(log_path, num_lines, has_filters=has_filters, **filters)
     except PermissionError:
         print(f"Permission denied: {log_path}")
         sys.exit(1)
 
     # Print header
-    filter_parts = []
-    if min_level:
-        filter_parts.append(f"level>={min_level}")
-    if session:
-        filter_parts.append(f"session={session}")
-    if component:
-        filter_parts.append(f"component={component}")
-    if since:
-        filter_parts.append(f"since={since}")
+    filter_parts = [
+        f"{label}={value}" for label, value in
+        (("level>", min_level), ("session", session), ("component", component), ("since", since))
+        if value
+    ]
     filter_desc = f" [{', '.join(filter_parts)}]" if filter_parts else ""
-
-    if follow:
-        print(f"--- {display_hermes_home()}/logs/{filename}{filter_desc} (Ctrl+C to stop) ---")
-    else:
-        print(f"--- {display_hermes_home()}/logs/{filename}{filter_desc} (last {num_lines}) ---")
+    mode = "Ctrl+C to stop" if follow else f"last {num_lines}"
+    print(f"--- {display_hermes_home()}/logs/{filename}{filter_desc} ({mode}) ---")
 
     for line in lines:
         print(line, end="")
@@ -247,8 +189,7 @@ def tail_log(
 
     # Follow mode — poll for new content
     try:
-        _follow_log(log_path, min_level=min_level, session_filter=session,
-                     since=since_dt, component_prefixes=component_prefixes)
+        _follow_log(log_path, **filters)
     except KeyboardInterrupt:
         print("\n--- stopped ---")
 
@@ -263,31 +204,27 @@ def _read_tail(
     since: Optional[datetime] = None,
     component_prefixes: Optional[Sequence[str]] = None,
 ) -> list:
-    """Read the last *num_lines* matching lines from a log file.
-
-    When filters are active, we read more raw lines to find enough matches.
-    """
-    if has_filters:
-        # Read more lines to ensure we get enough after filtering.
-        # For large files, read last 10K lines and filter down.
-        raw_lines = _read_last_n_lines(path, max(num_lines * 20, 2000))
-        filtered = [
-            l for l in raw_lines
-            if _matches_filters(l, min_level=min_level,
-                                session_filter=session_filter, since=since,
-                                component_prefixes=component_prefixes)
-        ]
-        return filtered[-num_lines:]
-    else:
+    """Read the last *num_lines* matching lines from a log file."""
+    if not has_filters:
         return _read_last_n_lines(path, num_lines)
+    # Read more lines to ensure we get enough after filtering.
+    # For large files, read last 10K lines and filter down.
+    raw_lines = _read_last_n_lines(path, max(num_lines * 20, 2000))
+    filtered = [
+        l for l in raw_lines
+        if _matches_filters(l, min_level=min_level, session_filter=session_filter,
+                            since=since, component_prefixes=component_prefixes)
+    ]
+    return filtered[-num_lines:]
+
+
+def _read_all_lines(path: Path) -> list:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.readlines()
 
 
 def _read_last_n_lines(path: Path, n: int) -> list:
-    """Efficiently read the last N lines from a file.
-
-    For files under 1MB, reads the whole file (fast, simple).
-    For larger files, reads chunks from the end.
-    """
+    """Efficiently read the last N lines from a file."""
     try:
         size = path.stat().st_size
         if size == 0:
@@ -295,9 +232,7 @@ def _read_last_n_lines(path: Path, n: int) -> list:
 
         # For files up to 1MB, just read the whole thing — simple and correct.
         if size <= 1_048_576:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = f.readlines()
-            return all_lines[-n:]
+            return _read_all_lines(path)[-n:]
 
         # For large files, read chunks from the end.
         with open(path, "rb") as f:
@@ -321,21 +256,12 @@ def _read_last_n_lines(path: Path, n: int) -> list:
                 chunk_size = min(chunk_size * 2, 65536)
 
             # Decode and return last N non-empty lines.
-            decoded = []
-            for raw in lines:
-                if not raw.strip():
-                    continue
-                try:
-                    decoded.append(raw.decode("utf-8", errors="replace") + "\n")
-                except Exception:
-                    decoded.append(raw.decode("latin-1") + "\n")
+            decoded = [raw.decode("utf-8", errors="replace") + "\n" for raw in lines if raw.strip()]
             return decoded[-n:]
 
     except Exception:
         # Fallback: read entire file
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
-        return all_lines[-n:]
+        return _read_all_lines(path)[-n:]
 
 
 def _follow_log(
@@ -373,21 +299,22 @@ def list_logs() -> None:
     found = False
     for entry in sorted(log_dir.iterdir()):
         if entry.is_file() and entry.suffix == ".log":
-            size = entry.stat().st_size
-            mtime = datetime.fromtimestamp(entry.stat().st_mtime)
+            st = entry.stat()
+            size = st.st_size
+            mtime = datetime.fromtimestamp(st.st_mtime)
             if size < 1024:
                 size_str = f"{size}B"
             elif size < 1024 * 1024:
                 size_str = f"{size / 1024:.1f}KB"
             else:
                 size_str = f"{size / (1024 * 1024):.1f}MB"
-            age = datetime.now() - mtime
-            if age.total_seconds() < 60:
+            age_s = (datetime.now() - mtime).total_seconds()
+            if age_s < 60:
                 age_str = "just now"
-            elif age.total_seconds() < 3600:
-                age_str = f"{int(age.total_seconds() / 60)}m ago"
-            elif age.total_seconds() < 86400:
-                age_str = f"{int(age.total_seconds() / 3600)}h ago"
+            elif age_s < 3600:
+                age_str = f"{int(age_s / 60)}m ago"
+            elif age_s < 86400:
+                age_str = f"{int(age_s / 3600)}h ago"
             else:
                 age_str = mtime.strftime("%Y-%m-%d")
             print(f"  {entry.name:<25} {size_str:>8}   {age_str}")

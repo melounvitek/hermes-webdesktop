@@ -1,18 +1,4 @@
-"""Shared time/filter parsing for `hermes sessions prune` / `archive`.
-
-Turns user-friendly CLI values into the epoch bounds and filter kwargs
-consumed by ``SessionDB.prune_sessions`` / ``archive_sessions`` /
-``list_prune_candidates``.
-
-Two value shapes are accepted anywhere a point in time is expected:
-
-* Durations (relative to now): ``5h``, ``30m``, ``2d``, ``1w`` — and, for
-  backward compatibility with the original ``--older-than N`` flag, a bare
-  integer which means **days**.
-* Absolute timestamps: ``2026-07-05``, ``2026-07-05 14:30``,
-  ``2026-07-05T14:30:00`` (any ISO-8601 form ``datetime.fromisoformat``
-  understands; naive values are interpreted in local time).
-"""
+"""Shared time/filter parsing for `hermes sessions prune` / `archive`."""
 
 from __future__ import annotations
 
@@ -51,9 +37,8 @@ def parse_duration_seconds(value: str) -> Optional[float]:
 def parse_point_in_time(value: str, flag: str) -> float:
     """Parse a CLI time value into an epoch timestamp.
 
-    Durations are interpreted as "that long ago" (``5h`` → now − 5 hours).
-    Absolute ISO timestamps are returned as-is (naive = local time).
-    Raises ``ValueError`` with a user-facing message on unparseable input.
+    Durations mean "that long ago" (``5h`` = now minus 5 hours); ISO timestamps are taken as-is
+    (naive = local time). Raises ``ValueError`` with a user-facing message on bad input.
     """
     s = str(value).strip()
     dur = parse_duration_seconds(s)
@@ -82,153 +67,102 @@ def format_epoch(ts: Optional[float]) -> str:
 def build_prune_filters(args: Any) -> Dict[str, Any]:
     """Translate argparse Namespace flags into SessionDB filter kwargs.
 
-    Understands: ``--older-than``, ``--newer-than``, ``--before``,
-    ``--after``, ``--source``, ``--title``, ``--end-reason``, ``--cwd``,
-    ``--min-messages``, ``--max-messages``, ``--archived``/``--no-archived``.
+    Understands: ``--older-than``, ``--newer-than``, ``--before``, ``--after``, ``--source``,
+    ``--title``, ``--end-reason``, ``--cwd``, ``--min-messages``, ``--max-messages``,
+    ``--archived``/``--no-archived``.
 
-    ``--older-than`` / ``--newer-than`` bound last activity, while
-    ``--before`` / ``--after`` explicitly bound session start time. Last
-    activity is the latest message timestamp, falling back to ``started_at``
-    for empty sessions.
-
-    Raises ``ValueError`` on unparseable values or an empty/inverted window.
+    ``--older-than`` / ``--newer-than`` bound last activity, while ``--before`` / ``--after``
+    explicitly bound session start time. Last activity is the latest message timestamp, falling back
+    to ``started_at`` for empty sessions.
     """
-    last_active_before: Optional[float] = None
-    last_active_after: Optional[float] = None
-    started_before: Optional[float] = None
-    started_after: Optional[float] = None
+    bounds: Dict[str, Optional[float]] = {}
+    for key, attr, flag in _TIME_BOUNDS:
+        raw = getattr(args, attr, None)
+        bounds[key] = None if raw is None else parse_point_in_time(raw, flag)
 
-    def _tighter(current: Optional[float], new: float, upper: bool) -> float:
-        if current is None:
-            return new
-        return min(current, new) if upper else max(current, new)
+    for lo, hi, label, lo_flag, hi_flag in _WINDOWS:
+        if bounds[hi] is not None and bounds[lo] is not None and bounds[lo] >= bounds[hi]:
+            raise ValueError(
+                f"Empty {label} window: the {lo_flag} bound "
+                f"({format_epoch(bounds[lo])}) is not earlier than the "
+                f"{hi_flag} bound ({format_epoch(bounds[hi])})."
+            )
 
-    older_than = getattr(args, "older_than", None)
-    if older_than is not None:
-        last_active_before = _tighter(
-            last_active_before,
-            parse_point_in_time(older_than, "--older-than"),
-            True,
-        )
-    newer_than = getattr(args, "newer_than", None)
-    if newer_than is not None:
-        last_active_after = _tighter(
-            last_active_after,
-            parse_point_in_time(newer_than, "--newer-than"),
-            False,
-        )
-    before = getattr(args, "before", None)
-    if before is not None:
-        started_before = _tighter(
-            started_before, parse_point_in_time(before, "--before"), True
-        )
-    after = getattr(args, "after", None)
-    if after is not None:
-        started_after = _tighter(
-            started_after, parse_point_in_time(after, "--after"), False
-        )
-
-    if (
-        started_before is not None
-        and started_after is not None
-        and started_after >= started_before
-    ):
-        raise ValueError(
-            "Empty start-time window: the --after bound "
-            f"({format_epoch(started_after)}) is not earlier than the "
-            f"--before bound ({format_epoch(started_before)})."
-        )
-    if (
-        last_active_before is not None
-        and last_active_after is not None
-        and last_active_after >= last_active_before
-    ):
-        raise ValueError(
-            "Empty activity window: the --newer-than bound "
-            f"({format_epoch(last_active_after)}) is not earlier than the "
-            f"--older-than bound ({format_epoch(last_active_before)})."
-        )
-
-    filters: Dict[str, Any] = {
-        # older_than_days=None: the epoch bounds above are the whole story.
-        # Without this, prune_sessions' default 90-day cutoff would silently
-        # cap an --after/--newer-than-only window.
-        "older_than_days": None,
-        "last_active_before": last_active_before,
-        "last_active_after": last_active_after,
-        "started_before": started_before,
-        "started_after": started_after,
-        "source": getattr(args, "source", None),
-        "title_like": getattr(args, "title", None),
-        "end_reason": getattr(args, "end_reason", None),
-        "cwd_prefix": getattr(args, "cwd", None),
-        "min_messages": getattr(args, "min_messages", None),
-        "max_messages": getattr(args, "max_messages", None),
-        "model_like": getattr(args, "model", None),
-        "provider": getattr(args, "provider", None),
-        "user_id": getattr(args, "user", None),
-        "chat_id": getattr(args, "chat_id", None),
-        "chat_type": getattr(args, "chat_type", None),
-        "branch_like": getattr(args, "branch", None),
-        "min_tokens": getattr(args, "min_tokens", None),
-        "max_tokens": getattr(args, "max_tokens", None),
-        "min_cost": getattr(args, "min_cost", None),
-        "max_cost": getattr(args, "max_cost", None),
-        "min_tool_calls": getattr(args, "min_tool_calls", None),
-        "max_tool_calls": getattr(args, "max_tool_calls", None),
-    }
+    # older_than_days=None: the epoch bounds above are the whole story.
+    # Without this, prune_sessions' default 90-day cutoff would silently
+    # cap an --after/--newer-than-only window.
+    filters: Dict[str, Any] = {"older_than_days": None, **bounds}
+    for key, attr in _ARG_FILTERS:
+        filters[key] = getattr(args, attr, None)
     return filters
+
+
+# (filter key, argparse attr, CLI flag) for the four epoch bounds.
+_TIME_BOUNDS = (
+    ("last_active_before", "older_than", "--older-than"),
+    ("last_active_after", "newer_than", "--newer-than"),
+    ("started_before", "before", "--before"),
+    ("started_after", "after", "--after"),
+)
+# (lower key, upper key, window label, lower flag, upper flag); checked in this order.
+_WINDOWS = (
+    ("started_after", "started_before", "start-time", "--after", "--before"),
+    ("last_active_after", "last_active_before", "activity", "--newer-than", "--older-than"),
+)
+_ARG_FILTERS = (
+    ("source", "source"),
+    ("title_like", "title"),
+    ("end_reason", "end_reason"),
+    ("cwd_prefix", "cwd"),
+    ("min_messages", "min_messages"),
+    ("max_messages", "max_messages"),
+    ("model_like", "model"),
+    ("provider", "provider"),
+    ("user_id", "user"),
+    ("chat_id", "chat_id"),
+    ("chat_type", "chat_type"),
+    ("branch_like", "branch"),
+    ("min_tokens", "min_tokens"),
+    ("max_tokens", "max_tokens"),
+    ("min_cost", "min_cost"),
+    ("max_cost", "max_cost"),
+    ("min_tool_calls", "min_tool_calls"),
+    ("max_tool_calls", "max_tool_calls"),
+)
+
+# (filter key, description template, include when: "set" == `is not None`, "truthy" == bool(v)).
+_DESCRIBE = (
+    ("last_active_before", "last active before {e}", "set"),
+    ("last_active_after", "last active after {e}", "set"),
+    ("started_before", "started before {e}", "set"),
+    ("started_after", "started after {e}", "set"),
+    ("source", "source '{v}'", "truthy"),
+    ("title_like", "title contains '{v}'", "truthy"),
+    ("end_reason", "end reason '{v}'", "truthy"),
+    ("cwd_prefix", "cwd under '{v}'", "truthy"),
+    ("min_messages", ">= {v} messages", "set"),
+    ("max_messages", "<= {v} messages", "set"),
+    ("model_like", "model contains '{v}'", "truthy"),
+    ("provider", "provider '{v}'", "truthy"),
+    ("user_id", "user '{v}'", "truthy"),
+    ("chat_id", "chat '{v}'", "truthy"),
+    ("chat_type", "chat type '{v}'", "truthy"),
+    ("branch_like", "git branch contains '{v}'", "truthy"),
+    ("min_tokens", ">= {v} tokens", "set"),
+    ("max_tokens", "<= {v} tokens", "set"),
+    ("min_cost", ">= ${v}", "set"),
+    ("max_cost", "<= ${v}", "set"),
+    ("min_tool_calls", ">= {v} tool calls", "set"),
+    ("max_tool_calls", "<= {v} tool calls", "set"),
+)
 
 
 def describe_filters(filters: Dict[str, Any]) -> str:
     """Human-readable summary of active filters for confirmation prompts."""
     parts = []
-    if filters.get("last_active_before") is not None:
-        parts.append(
-            f"last active before {format_epoch(filters['last_active_before'])}"
-        )
-    if filters.get("last_active_after") is not None:
-        parts.append(
-            f"last active after {format_epoch(filters['last_active_after'])}"
-        )
-    if filters.get("started_before") is not None:
-        parts.append(f"started before {format_epoch(filters['started_before'])}")
-    if filters.get("started_after") is not None:
-        parts.append(f"started after {format_epoch(filters['started_after'])}")
-    if filters.get("source"):
-        parts.append(f"source '{filters['source']}'")
-    if filters.get("title_like"):
-        parts.append(f"title contains '{filters['title_like']}'")
-    if filters.get("end_reason"):
-        parts.append(f"end reason '{filters['end_reason']}'")
-    if filters.get("cwd_prefix"):
-        parts.append(f"cwd under '{filters['cwd_prefix']}'")
-    if filters.get("min_messages") is not None:
-        parts.append(f">= {filters['min_messages']} messages")
-    if filters.get("max_messages") is not None:
-        parts.append(f"<= {filters['max_messages']} messages")
-    if filters.get("model_like"):
-        parts.append(f"model contains '{filters['model_like']}'")
-    if filters.get("provider"):
-        parts.append(f"provider '{filters['provider']}'")
-    if filters.get("user_id"):
-        parts.append(f"user '{filters['user_id']}'")
-    if filters.get("chat_id"):
-        parts.append(f"chat '{filters['chat_id']}'")
-    if filters.get("chat_type"):
-        parts.append(f"chat type '{filters['chat_type']}'")
-    if filters.get("branch_like"):
-        parts.append(f"git branch contains '{filters['branch_like']}'")
-    if filters.get("min_tokens") is not None:
-        parts.append(f">= {filters['min_tokens']} tokens")
-    if filters.get("max_tokens") is not None:
-        parts.append(f"<= {filters['max_tokens']} tokens")
-    if filters.get("min_cost") is not None:
-        parts.append(f">= ${filters['min_cost']}")
-    if filters.get("max_cost") is not None:
-        parts.append(f"<= ${filters['max_cost']}")
-    if filters.get("min_tool_calls") is not None:
-        parts.append(f">= {filters['min_tool_calls']} tool calls")
-    if filters.get("max_tool_calls") is not None:
-        parts.append(f"<= {filters['max_tool_calls']} tool calls")
+    for key, template, mode in _DESCRIBE:
+        value = filters.get(key)
+        if (value is not None) if mode == "set" else bool(value):
+            shown = format_epoch(value) if "{e}" in template else value
+            parts.append(template.replace("{e}", "{v}").format(v=shown))
     return ", ".join(parts) if parts else "no filters (all ended sessions)"

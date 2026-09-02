@@ -1,27 +1,12 @@
 """Security checks for user-configured MCP server entries.
 
-MCP stdio transports intentionally support arbitrary local commands so users can
-run custom servers. This module does not try to sandbox that capability. It
-blocks two high-signal abuse shapes seen in the wild:
+3. A hardcoded indicator-of-compromise (IOC) blocklist for that campaign — the attacker's
+``hermes-0day`` SSH public key and source IPs. Any entry whose command/args/env carry an IOC is
+refused outright, regardless of shape, so a pre-planted ``config.yaml`` cannot spawn it.
 
-1. The exfiltration shape from #45620: a shell interpreter whose inline script
-   invokes network egress tooling.
-2. The persistence shape from the June 2026 ``hermes-0day`` campaign: a shell
-   interpreter whose inline script writes to OS persistence surfaces
-   (``~/.ssh/authorized_keys``, ``/etc/ssh``, ``/etc/pam.d``, ``sudoers``,
-   crontab, shell rc files). The campaign planted ``command: bash`` MCP entries
-   whose payload appended an attacker SSH key to ``authorized_keys``; Hermes
-   re-executed them on every cron tick / startup, re-installing the backdoor.
-
-3. A hardcoded indicator-of-compromise (IOC) blocklist for that campaign — the
-   attacker's ``hermes-0day`` SSH public key and source IPs. Any entry whose
-   command/args/env carry an IOC is refused outright, regardless of shape, so a
-   pre-planted ``config.yaml`` cannot spawn it.
-
-These checks run BOTH at save time (``_save_mcp_server`` — dashboard API + CLI)
-and at spawn time (``tools.mcp_tool._filter_suspicious_mcp_servers`` — discovery
-/ cron / startup), so a hand-edited or pre-planted entry is also caught before
-it can execute.
+These checks run BOTH at save time (``_save_mcp_server`` — dashboard API + CLI) and at spawn time
+(``tools.mcp_tool._filter_suspicious_mcp_servers`` — discovery / cron / startup), so a hand-edited
+or pre-planted entry is also caught before it can execute.
 """
 from __future__ import annotations
 
@@ -121,14 +106,9 @@ def _entry_text(entry: dict[str, Any]) -> str:
 def validate_mcp_server_entry(name: str, entry: dict[str, Any]) -> list[str]:
     """Return security warnings for an MCP server entry.
 
-    Empty return means the entry is not suspicious. This is intentionally not a
-    whitelist: legitimate local MCPs can still use custom commands, Python
-    scripts, npx, uvx, etc. We block three narrow shapes only:
-
-    * a known hermes-0day IOC anywhere in command/args/env (hardcoded blocklist);
-    * a shell interpreter whose inline script invokes network egress (#45620);
-    * a shell interpreter whose inline script writes to an OS persistence
-      surface (June 2026 hermes-0day SSH/PAM/sudoers/cron shape).
+    Empty return means the entry is not suspicious. This is intentionally not a whitelist:
+    legitimate local MCPs can still use custom commands, Python scripts, npx, uvx, etc. We block
+    three narrow shapes only:
     """
     if not isinstance(entry, dict):
         return []
@@ -175,7 +155,3 @@ def validate_mcp_server_entry(name: str, entry: dict[str, Any]) -> list[str]:
         )
 
     return issues
-
-
-def is_mcp_server_entry_suspicious(name: str, entry: dict[str, Any]) -> bool:
-    return bool(validate_mcp_server_entry(name, entry))

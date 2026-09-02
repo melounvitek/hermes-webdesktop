@@ -1,34 +1,13 @@
 """``hermes approvals suggest`` — mine approval history into allowlist proposals.
 
-Hermes has no dedicated approval-decision ledger: ``always`` answers land in
-``command_allowlist`` (config.yaml) via :func:`tools.approval.save_permanent_allowlist`,
-while ``once``/``session`` approvals are in-memory only.  What *does* persist
-is the session DB (``~/.hermes/state.db``): every assistant ``terminal`` tool
-call is stored with its arguments, and the paired ``role='tool'`` result
-records whether the command was blocked/denied ("BLOCKED: User denied …",
-"Asking the user for approval") or actually executed.
+Hermes has no dedicated approval-decision ledger: ``always`` answers land in ``command_allowlist``
+(config.yaml) via :func:`tools.approval.save_permanent_allowlist`, while ``once``/``session``
+approvals are in-memory only.
 
-So this module mines *implied approvals*: a command that matches a
-dangerous-command class (the same :func:`tools.approval.detect_dangerous_command`
-classifier that triggers the prompt) AND whose tool result is not a
-block/denial marker must have been approved by the user (once, session,
-always, smart-approve, or yolo) before it ran.  Frequently re-approved
-patterns are exactly the prompts worth turning into one-time allowlist
-policy — the port of Claude Code's ``/fewer-permission-prompts``.
-
-Safety posture:
-
-* **Never auto-applies.** The default run is a dry proposal; only an explicit
-  ``--apply N[,M...]`` merges the chosen patterns into ``command_allowlist``
-  via the existing :func:`tools.approval.save_permanent_allowlist` path.
-* **Hardline commands are never proposed** — anything matched by
-  :func:`tools.approval.detect_hardline_command` is dropped outright.
-* **Destructive / privilege / credential / obfuscation classes are never
-  proposed**, no matter how often they were approved.  ``rm -rf build/``
-  approved 100 times still never yields an ``rm`` allowlist entry.  Only
-  benign, recoverable classes (container lifecycle, git force push, service
-  restarts, hermes self-management, …) are eligible.
-* **Dangerous root binaries never become globs** (``rm *``, ``sudo *`` …).
+So this module mines *implied approvals*: a command that matches a dangerous-command class (the same
+:func:`tools.approval.detect_dangerous_command` classifier that triggers the prompt) AND whose tool
+result is not a block/denial marker must have been approved by the user (once, session, always,
+smart-approve, or yolo) before it ran.
 """
 
 from __future__ import annotations
@@ -153,6 +132,15 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
     return sqlite3.connect(uri, uri=True)
 
 
+def _fetch_rows(cur) -> Iterator[tuple]:
+    """Stream cursor rows in 2000-row batches."""
+    while True:
+        rows = cur.fetchmany(2000)
+        if not rows:
+            return
+        yield from rows
+
+
 def _iter_terminal_calls(
     con: sqlite3.Connection, since_ts: float
 ) -> Iterator[tuple[str, str]]:
@@ -163,59 +151,49 @@ def _iter_terminal_calls(
         "AND tool_calls LIKE '%terminal%' AND timestamp >= ?",
         (since_ts,),
     )
-    while True:
-        rows = cur.fetchmany(2000)
-        if not rows:
-            break
-        for (raw,) in rows:
+    for (raw,) in _fetch_rows(cur):
+        try:
+            calls = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") or {}
+            if fn.get("name") != "terminal":
+                continue
             try:
-                calls = json.loads(raw)
+                args = json.loads(fn.get("arguments") or "{}")
             except (TypeError, ValueError):
                 continue
-            if not isinstance(calls, list):
-                continue
-            for call in calls:
-                if not isinstance(call, dict):
-                    continue
-                fn = call.get("function") or {}
-                if fn.get("name") != "terminal":
-                    continue
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except (TypeError, ValueError):
-                    continue
-                command = args.get("command")
-                if isinstance(command, str) and command.strip():
-                    yield (call.get("id") or "", command)
+            command = args.get("command")
+            if isinstance(command, str) and command.strip():
+                yield (call.get("id") or "", command)
 
 
 def _blocked_tool_call_ids(con: sqlite3.Connection, since_ts: float) -> set:
     """Collect tool_call_ids whose result shows the command never ran freely."""
-    blocked: set = set()
     cur = con.execute(
         "SELECT tool_call_id, content FROM messages "
         "WHERE role='tool' AND tool_call_id IS NOT NULL AND timestamp >= ? "
         "AND (content LIKE '%BLOCKED%' OR content LIKE '%approval%')",
         (since_ts,),
     )
-    while True:
-        rows = cur.fetchmany(2000)
-        if not rows:
-            break
-        for tool_call_id, content in rows:
-            if not content:
-                continue
-            if any(marker in content for marker in _BLOCK_MARKERS):
-                blocked.add(tool_call_id)
-    return blocked
+    return {
+        tool_call_id
+        for tool_call_id, content in _fetch_rows(cur)
+        if content and any(marker in content for marker in _BLOCK_MARKERS)
+    }
 
 
 def scan_approval_history(
     db_path: Optional[Path] = None, days: int = 90
 ) -> list[tuple[str, str]]:
-    """Return ``(command, dangerous_class_description)`` records mined from
-    the session DB — dangerous-classified terminal commands that actually
-    executed (i.e. carried an implied user approval).
+    """Return ``(command, dangerous_class_description)`` records mined from the session DB —
+    dangerous-classified terminal commands that actually executed (i.e. carried an implied user
+    approval).
     """
     from tools.approval import detect_dangerous_command, detect_hardline_command
 
@@ -251,11 +229,7 @@ def scan_approval_history(
 # ---------------------------------------------------------------------------
 
 def normalize_command(command: str) -> str:
-    """Fold user/hermes home prefixes and collapse whitespace.
-
-    Reuses tools.approval's home-folding machinery so proposals are portable
-    across machines/users (``/home/alice/x`` -> ``~/x``).
-    """
+    """Fold user/hermes home prefixes and collapse whitespace."""
     from tools.approval import (
         _rewrite_resolved_hermes_home,
         _rewrite_resolved_user_home,
@@ -272,17 +246,14 @@ def is_unsafe_class(description: str) -> bool:
 
 def _unsafe_root_binary(token: str) -> bool:
     tok = token.lower().rsplit("/", 1)[-1]
-    if tok in _UNSAFE_ROOT_BINARIES:
-        return True
-    return any(tok.startswith(p) for p in _UNSAFE_ROOT_PREFIXES)
+    return tok in _UNSAFE_ROOT_BINARIES or tok.startswith(_UNSAFE_ROOT_PREFIXES)
 
 
 def derive_glob(normalized: str) -> Optional[str]:
     """Derive a narrow command glob (``git push *``) from a simple command.
 
-    Returns None for compound commands (shell operators — the runtime
-    allowlist matcher refuses those anyway) and for commands anchored on an
-    unsafe root binary.
+    Returns None for compound commands (shell operators — the runtime allowlist matcher refuses
+    those anyway) and for commands anchored on an unsafe root binary.
     """
     from tools.approval import _has_allowlist_shell_operator
 
@@ -309,10 +280,9 @@ def build_proposals(
 ) -> list[Proposal]:
     """Aggregate scan records into a ranked, safety-filtered proposal list.
 
-    Grain: a command glob (``git push *``) for simple commands; the
-    dangerous-class description itself (the same key an interactive
-    ``[a]lways`` answer persists) for compound commands where no safe glob
-    can be derived.
+    Grain: a command glob (``git push *``) for simple commands; the dangerous-class description
+    itself (the same key an interactive ``[a]lways`` answer persists) for compound commands where no
+    safe glob can be derived.
     """
     existing = existing or set()
     by_pattern: dict[tuple[str, str], Proposal] = {}
@@ -322,10 +292,7 @@ def build_proposals(
             continue
         normalized = normalize_command(command)
         glob = derive_glob(normalized)
-        if glob is not None:
-            key = (glob, "glob")
-        else:
-            key = (description, "class")
+        key = (glob, "glob") if glob is not None else (description, "class")
         pattern, kind = key
         if pattern in existing:
             continue

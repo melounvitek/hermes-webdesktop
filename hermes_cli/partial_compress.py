@@ -1,42 +1,12 @@
 """Boundary-aware partial compression — "summarize up to here".
 
-Inspired by Claude Code's Rewind menu "Summarize up to here" action
-(v2.1.139–v2.1.142, Week 20, May 2026):
-https://code.claude.com/docs/en/whats-new/2026-w20
+* **Role alternation.** The compressed head ends with summary/handoff content (assistant- or user-
+role, possibly a trailing todo snapshot). The verbatim tail must begin with a ``user`` message so
+the rejoined history keeps the user↔assistant alternation that providers validate.
 
-Hermes already has ``/compress`` (full-history compaction) and an
-automatic token-budget tail-protection heuristic inside
-``ContextCompressor``. What was missing is *user-chosen* boundary
-control: "fold everything before this point into a summary, but keep
-my most recent N exchanges exactly as they are." That is the value of
-the Claude Code feature — the user decides the compression boundary
-instead of leaving it to the token-budget heuristic.
-
-This module owns the pure, side-effect-free split logic so both the
-CLI (``cli.py::_manual_compress``) and the gateway
-(``gateway/run.py::_handle_compress_command``) share one
-implementation. The slash-command surfaces handle compression of the
-*head* via the existing ``_compress_context`` pipeline (preserving all
-the session-rotation / lock / memory-notify machinery) and then
-re-append the verbatim *tail* returned here.
-
-Design notes / invariants honored:
-
-* **Role alternation.** The compressed head ends with summary/handoff
-  content (assistant- or user-role, possibly a trailing todo snapshot).
-  The verbatim tail must begin with a ``user`` message so the rejoined
-  history keeps the user↔assistant alternation that providers validate.
-  :func:`split_history_for_partial_compress` snaps the tail boundary
-  backwards to the nearest ``user`` turn so the rejoin is always legal.
-
-* **No silent context mutation.** This is a manual, user-invoked
-  action. It rotates the session exactly like ``/compress`` does (via
-  the caller), so the prompt-cache reset is explicit and expected, not
-  silent.
-
-* **Conservative defaults.** ``keep_last`` counts *exchanges* (a user
-  turn plus its following assistant/tool turns), defaulting to 2. The
-  split never compresses if doing so would leave nothing in the head.
+* **No silent context mutation.** This is a manual, user-invoked action. It rotates the session
+exactly like ``/compress`` does (via the caller), so the prompt-cache reset is explicit and
+expected, not silent.
 """
 
 from __future__ import annotations
@@ -57,26 +27,11 @@ def parse_partial_compress_args(
 ) -> Tuple[bool, int, Optional[str]]:
     """Parse the argument string after ``/compress``.
 
-    Recognizes the boundary-aware forms:
+    Anything else is treated as a focus topic for the existing full ``/compress <focus>`` behavior.
 
-    * ``here``            → partial compress, keep ``DEFAULT_KEEP_LAST``
-    * ``here 4``          → partial compress, keep 4 exchanges
-    * ``--keep 4``        → partial compress, keep 4 exchanges
-    * ``up to here``      → alias for ``here`` (matches Claude Code's
-                            menu label "Summarize up to here")
-
-    Anything else is treated as a focus topic for the existing full
-    ``/compress <focus>`` behavior.
-
-    Returns ``(partial, keep_last, focus_topic)``:
-
-    * ``partial`` — True when a boundary-aware form was requested.
-    * ``keep_last`` — exchanges to preserve verbatim (only meaningful
-      when ``partial`` is True).
-    * ``focus_topic`` — focus string for full compression, or None.
-      Always None when ``partial`` is True (the two modes are exclusive;
-      a focused partial compress is not a documented Claude Code
-      behavior and would muddy the UX).
+    * ``partial`` — True when a boundary-aware form was requested. * ``keep_last`` — exchanges to
+    preserve verbatim (only meaningful when ``partial`` is True). * ``focus_topic`` — focus string
+    for full compression, or None.
     """
     text = (raw_args or "").strip()
     if not text:
@@ -90,43 +45,32 @@ def parse_partial_compress_args(
         text = text[len("up to ") :]
 
     tokens = lowered.split()
+    head = tokens[0] if tokens else ""
 
     # Form: here [N]
-    if tokens and tokens[0] == "here":
-        keep = DEFAULT_KEEP_LAST
-        if len(tokens) >= 2:
-            keep = _coerce_keep(tokens[1])
+    if head == "here":
+        keep = _coerce_keep(tokens[1]) if len(tokens) >= 2 else DEFAULT_KEEP_LAST
         return True, keep, None
 
     # Form: --keep N  (or --keep=N)
-    if tokens and tokens[0] in ("--keep", "-k") and len(tokens) >= 2:
+    if head in ("--keep", "-k") and len(tokens) >= 2:
         return True, _coerce_keep(tokens[1]), None
-    if tokens and tokens[0].startswith("--keep="):
-        return True, _coerce_keep(tokens[0].split("=", 1)[1]), None
+    if head.startswith("--keep="):
+        return True, _coerce_keep(head.split("=", 1)[1]), None
 
     # Otherwise: full compression with this as the focus topic.
     return False, DEFAULT_KEEP_LAST, text or None
 
 
 def extract_compress_flags(raw_args: str) -> Tuple[str, bool, bool]:
-    """Strip ``--preview``/``--dry-run``/``--aggressive`` flags from the
-    argument string after ``/compress`` (or its ``/compact`` alias).
+    """Strip ``--preview``/``--dry-run``/``--aggressive`` from the ``/compress`` argument string.
 
-    Flags may appear anywhere and coexist with the positional forms
-    (``here [N]``, ``--keep N``, or a focus topic); the returned
-    remainder is what :func:`parse_partial_compress_args` should see.
-
-    Returns ``(remaining_args, preview, aggressive_requested)``:
-
-    * ``preview`` — True when ``--preview`` or ``--dry-run`` was given.
-      The caller must report what WOULD be compressed (message counts,
-      token estimate, boundary) and make **no changes**.
-    * ``aggressive_requested`` — True when ``--aggressive`` was given.
-      The current surfaces do not implement an LLM-free hard-truncate
-      path (it would need its own transcript-persistence branch outside
-      the guarded ``_compress_context`` rotation machinery), so callers
-      surface a "not supported" note instead of silently treating the
-      flag as a focus topic.
+    Flags may appear anywhere alongside the positional forms (``here [N]``, ``--keep N``, focus
+    topic); the remainder is what :func:`parse_partial_compress_args` should see. Returns
+    ``(remaining_args, preview, aggressive_requested)``. ``preview`` (``--preview``/``--dry-
+    run``) means report what WOULD be compressed and change nothing. No surface implements an
+    LLM-free hard-truncate path, so callers surface "not supported" for ``--aggressive`` instead
+    of treating it as a focus topic.
     """
     preview = False
     aggressive = False
@@ -151,12 +95,9 @@ def summarize_compress_preview(
 ) -> Dict[str, Any]:
     """Build the ``/compress --preview`` report — pure, no side effects.
 
-    Shared by the CLI (``cli.py::_manual_compress``) and the gateway
-    (``gateway/slash_commands.py::_handle_compress_command``) so both
-    surfaces report the same numbers the real run would use.
-
-    Returns a dict with ``head_count``/``tail_count``/``lines`` where
-    ``lines`` is a ready-to-print list of report strings.
+    Shared by the CLI and the gateway slash handler so both surfaces report the same numbers the
+    real run would use. Returns ``head_count``/``tail_count``/``lines`` (ready-to-print
+    strings).
     """
     total = len(history)
     head = list(history)
@@ -203,11 +144,7 @@ def _coerce_keep(value: str) -> int:
         n = int(value)
     except (TypeError, ValueError):
         return DEFAULT_KEEP_LAST
-    if n < 1:
-        return 1
-    if n > MAX_KEEP_LAST:
-        return MAX_KEEP_LAST
-    return n
+    return max(1, min(n, MAX_KEEP_LAST))
 
 
 def split_history_for_partial_compress(
@@ -216,20 +153,11 @@ def split_history_for_partial_compress(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Split ``history`` into ``(head, tail)`` for partial compression.
 
-    ``head`` is the earlier portion that will be summarized; ``tail`` is
-    the most recent ``keep_last`` exchanges, preserved verbatim.
-
-    An *exchange* is counted by ``user``-role messages: keeping N
-    exchanges means keeping everything from the Nth-most-recent ``user``
-    message onward. This guarantees the tail starts on a ``user`` turn,
-    so when the caller rejoins ``compressed_head + tail`` the
-    user↔assistant alternation stays valid (the compressed head's
-    trailing content is followed by a fresh user turn).
-
-    Returns ``(head, tail)``. If the split would leave the head empty
-    (not enough history to compress meaningfully), returns
-    ``(history, [])`` — signaling the caller to fall back to full
-    compression or report "nothing to do".
+    ``head`` is summarized; ``tail`` is the last ``keep_last`` exchanges kept verbatim.
+    Exchanges are counted by ``user`` messages so the tail always starts on a user turn and
+    rejoining ``compressed_head + tail`` keeps user↔assistant alternation valid. Returns
+    ``(history, [])`` when the head would be empty, signaling the caller to fall back to full
+    compression or "nothing to do".
     """
     if keep_last < 1:
         keep_last = 1
@@ -270,23 +198,14 @@ def rejoin_compressed_head_and_tail(
     compressed_head: List[Dict[str, Any]],
     tail: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Concatenate a compressed head with the verbatim tail, defending
-    the seam against an illegal user→user / assistant→assistant adjacency.
+    """Concatenate a compressed head with the verbatim tail, defending the seam's role alternation.
 
-    In normal operation the compressed head ends with the head's own
-    protected verbatim tail (the ``ContextCompressor`` always preserves a
-    recent window), which terminates on an ``assistant``/``tool`` turn —
-    so ``assistant → user`` at the seam is already valid. But the head
-    compressor's exact output shape is not contractually guaranteed (a
-    plugin context engine could return something that ends on a ``user``
-    turn, or a degenerate single-summary message). Rather than trust the
-    seam, this helper inspects the boundary and, if the last head message
-    and the first tail message share a ``user``/``assistant`` role, folds
-    the tail's first message content onto the head's last message so the
-    rejoined list never violates provider role-alternation rules.
-
-    ``tool`` messages are left alone — consecutive ``tool`` entries are
-    the one legal repetition (parallel tool results).
+    The compressed head normally ends on an assistant/tool turn, but the head compressor's
+    output shape isn't contractually guaranteed (a plugin engine could end on a user turn). If
+    the last head message and first tail message share a user/assistant role, the tail's first
+    content is folded onto the head's last message so provider role-alternation rules hold.
+    ``tool`` messages are left alone — consecutive tool entries are the one legal repetition
+    (parallel results).
     """
     if not tail:
         return list(compressed_head)

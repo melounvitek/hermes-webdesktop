@@ -57,8 +57,8 @@ def should_clear_context_pin(
 ) -> bool:
     """True when a configured ``model.context_length`` pin no longer matches its runtime route.
 
-    Fail-closed: any error during route comparison returns ``True`` (drop the pin)
-    so a stale window never silently inflates the compression threshold.
+    Fail-closed: any error during route comparison returns ``True`` (drop the pin) so a stale window
+    never silently inflates the compression threshold.
     """
     configured_model = str(configured_model or "").strip()
     if configured_model and configured_model != str(active_model or "").strip():
@@ -86,10 +86,9 @@ async def should_clear_context_pin_async(
 ) -> bool:
     """Async wrapper for ``should_clear_context_pin``.
 
-    Offloads the route comparison to a worker thread so async gateway
-    handlers never run it on the event loop — the resolution chain is
-    cache-only (``allow_network=False``) but can still do cold-start disk
-    I/O. Shares all logic with the sync version — no code duplication.
+    Offloads the route comparison to a worker thread so async gateway handlers never run it on the
+    event loop — the resolution chain is cache-only (``allow_network=False``) but can still do cold-
+    start disk I/O. Shares all logic with the sync version — no code duplication.
     """
     import asyncio
 

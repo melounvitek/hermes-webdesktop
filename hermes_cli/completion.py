@@ -1,9 +1,7 @@
 """Shell completion script generation for hermes CLI.
 
-Walks the live argparse parser tree to generate accurate, always-up-to-date
-completion scripts — no hardcoded subcommand lists, no extra dependencies.
-
-Supports bash, zsh, and fish.
+Walks the live argparse parser tree to generate accurate, always-up-to-date completion scripts — no
+hardcoded subcommand lists, no extra dependencies.
 """
 
 from __future__ import annotations
@@ -13,11 +11,7 @@ from typing import Any
 
 
 def _walk(parser: argparse.ArgumentParser) -> dict[str, Any]:
-    """Recursively extract subcommands and flags from a parser.
-
-    Uses _SubParsersAction._choices_actions to get canonical names (no aliases)
-    along with their help text.
-    """
+    """Recursively extract subcommands and flags from a parser."""
     flags: list[str] = []
     subcommands: dict[str, Any] = {}
 
@@ -78,19 +72,11 @@ def generate_bash(parser: argparse.ArgumentParser) -> str:
                 f"            esac\n"
                 f"            ;;"
             )
-        elif info["subcommands"]:
-            subcmds = " ".join(sorted(info["subcommands"]))
+        elif info["subcommands"] or info["flags"]:
+            words = " ".join(sorted(info["subcommands"]) if info["subcommands"] else info["flags"])
             cases.append(
                 f"        {cmd})\n"
-                f"            COMPREPLY=($(compgen -W \"{subcmds}\" -- \"$cur\"))\n"
-                f"            return\n"
-                f"            ;;"
-            )
-        elif info["flags"]:
-            flags = " ".join(info["flags"])
-            cases.append(
-                f"        {cmd})\n"
-                f"            COMPREPLY=($(compgen -W \"{flags}\" -- \"$cur\"))\n"
+                f"            COMPREPLY=($(compgen -W \"{words}\" -- \"$cur\"))\n"
                 f"            return\n"
                 f"            ;;"
             )
@@ -143,14 +129,17 @@ complete -F _hermes_completion hermes
 # Zsh
 # ---------------------------------------------------------------------------
 
+def _zsh_describe_lines(subcommands: dict[str, Any], indent: str) -> str:
+    """One ``'name:help'`` line per subcommand, sorted, at the given indent."""
+    return "\n".join(
+        f"{indent}'{sc}:{_clean(subcommands[sc].get('help', ''))}'"
+        for sc in sorted(subcommands)
+    )
+
+
 def generate_zsh(parser: argparse.ArgumentParser) -> str:
     tree = _walk(parser)
-
-    top_cmds_lines: list[str] = []
-    for cmd in sorted(tree["subcommands"]):
-        help_text = _clean(tree["subcommands"][cmd].get("help", ""))
-        top_cmds_lines.append(f"                '{cmd}:{help_text}'")
-    top_cmds_str = "\n".join(top_cmds_lines)
+    top_cmds_str = _zsh_describe_lines(tree["subcommands"], " " * 16)
 
     sub_cases: list[str] = []
     for cmd in sorted(tree["subcommands"]):
@@ -160,11 +149,7 @@ def generate_zsh(parser: argparse.ArgumentParser) -> str:
         if cmd == "profile":
             # Profile subcommand: complete actions, then profile names for
             # actions that accept a profile argument.
-            sub_lines: list[str] = []
-            for sc in sorted(info["subcommands"]):
-                sh = _clean(info["subcommands"][sc].get("help", ""))
-                sub_lines.append(f"                        '{sc}:{sh}'")
-            sub_str = "\n".join(sub_lines)
+            sub_str = _zsh_describe_lines(info["subcommands"], " " * 24)
             sub_cases.append(
                 f"                profile)\n"
                 f"                    case ${{line[2]}} in\n"
@@ -182,11 +167,7 @@ def generate_zsh(parser: argparse.ArgumentParser) -> str:
                 f"                    ;;"
             )
         else:
-            sub_lines = []
-            for sc in sorted(info["subcommands"]):
-                sh = _clean(info["subcommands"][sc].get("help", ""))
-                sub_lines.append(f"                    '{sc}:{sh}'")
-            sub_str = "\n".join(sub_lines)
+            sub_str = _zsh_describe_lines(info["subcommands"], " " * 20)
             safe = cmd.replace("-", "_")
             sub_cases.append(
                 f"                {cmd})\n"

@@ -1,29 +1,13 @@
 """PTY bridge for `hermes dashboard` chat tab.
 
-Wraps a child process behind a pseudo-terminal so its ANSI output can be
-streamed to a browser-side terminal emulator (xterm.js) and typed
-keystrokes can be fed back in.  The only caller today is the
+Wraps a child process behind a pseudo-terminal so its ANSI output can be streamed to a browser-side
+terminal emulator (xterm.js) and typed keystrokes can be fed back in. The only caller today is the
 ``/api/pty`` WebSocket endpoint in ``hermes_cli.web_server``.
 
-Design constraints:
-
-* **POSIX-only.**  This module depends on ``fcntl``, ``termios``, and
-  ``ptyprocess``, none of which exist on native Windows Python.  Native
-  Windows ConPTY is a different API (Windows 10 build 17763+) and would
-  need a separate Windows implementation (``pywinpty``) — that's tracked
-  as a future enhancement.  On native Windows, importing this module
-  raises :class:`ImportError` and the dashboard's ``/chat`` tab shows a
-  WSL-recommended banner instead of crashing.  Every other feature in the
-  dashboard (sessions, jobs, metrics, config editor) works natively.
-* **Zero Node dependency on the server side.**  We use :mod:`ptyprocess`,
-  which is a pure-Python wrapper around the OS calls.  The browser talks
-  to the same ``hermes --tui`` binary it would launch from the CLI, so
-  every TUI feature (slash popover, model picker, tool rows, markdown,
-  skin engine, clarify/sudo/approval prompts) ships automatically.
-* **Byte-safe I/O.**  Reads and writes go through the PTY master fd
-  directly — we avoid :class:`ptyprocess.PtyProcessUnicode` because
-  streaming ANSI is inherently byte-oriented and UTF-8 boundaries may land
-  mid-read.
+* **POSIX-only.** This module depends on ``fcntl``, ``termios``, and ``ptyprocess``, none of which
+exist on native Windows Python. Native Windows ConPTY is a different API (Windows 10 build 17763+)
+and would need a separate Windows implementation (``pywinpty``) — that's tracked as a future
+enhancement.
 """
 
 from __future__ import annotations
@@ -63,38 +47,29 @@ _MAX_ROWS = 1000
 def _clamp_dimension(value: int, maximum: int) -> int:
     """Clamp a reported terminal dimension into ``[_MIN_DIMENSION, maximum]``.
 
-    Non-integer / non-finite values fall back to ``_MIN_DIMENSION`` so a bad
-    probe can never reach ``struct.pack`` and raise ``struct.error``.
+    Non-integer / non-finite values fall back to ``_MIN_DIMENSION`` so a bad probe can never reach
+    ``struct.pack`` and raise ``struct.error``.
     """
     try:
         n = int(value)
     except (TypeError, ValueError, OverflowError):
         return _MIN_DIMENSION
-    if n < _MIN_DIMENSION:
-        return _MIN_DIMENSION
-    if n > maximum:
-        return maximum
-    return n
+    return max(_MIN_DIMENSION, min(n, maximum))
 
 
 class PtyUnavailableError(RuntimeError):
     """Raised when a PTY cannot be created on this platform.
 
-    Today this means native Windows (no ConPTY bindings) or a dev
-    environment missing the ``ptyprocess`` dependency.  The dashboard
-    surfaces the message to the user as a chat-tab banner.
+    Today this means native Windows (no ConPTY bindings) or a dev environment missing
+    ``ptyprocess``. The dashboard surfaces the message as a chat-tab banner.
     """
 
 
 class PtyBridge:
     """Thin wrapper around ``ptyprocess.PtyProcess`` for byte streaming.
 
-    Not thread-safe.  A single bridge is owned by the WebSocket handler
-    that spawned it; the reader runs in an executor thread while writes
-    happen on the event-loop thread.  Both sides are OK because the
-    kernel PTY is the actual synchronization point — we never call
-    :mod:`ptyprocess` methods concurrently, we only call ``os.read`` and
-    ``os.write`` on the master fd, which is safe.
+    Not thread-safe. A single bridge is owned by the WebSocket handler that spawned it; the reader
+    runs in an executor thread while writes happen on the event-loop thread.
     """
 
     def __init__(self, proc: "ptyprocess.PtyProcess"):  # type: ignore[name-defined]
@@ -119,12 +94,7 @@ class PtyBridge:
         cols: int = 80,
         rows: int = 24,
     ) -> "PtyBridge":
-        """Spawn ``argv`` behind a new PTY and return a bridge.
-
-        Raises :class:`PtyUnavailableError` if the platform can't host a
-        PTY.  Raises :class:`FileNotFoundError` or :class:`OSError` for
-        ordinary exec failures (missing binary, bad cwd, etc.).
-        """
+        """Spawn ``argv`` behind a new PTY and return a bridge."""
         if not _PTY_AVAILABLE:
             if sys.platform.startswith("win"):
                 raise PtyUnavailableError(
@@ -134,8 +104,7 @@ class PtyBridge:
             if ptyprocess is None:
                 raise PtyUnavailableError(
                     "The `ptyprocess` package is missing. "
-                    "Install with: pip install ptyprocess "
-                    "(or pip install -e '.[pty]')."
+                    "Install with: pip install ptyprocess (or pip install -e '.[pty]')."
                 )
             raise PtyUnavailableError("Pseudo-terminals are unavailable.")
         # PTY-hosted programs expect TERM to describe the terminal type.
@@ -154,10 +123,7 @@ class PtyBridge:
         if not spawn_env.get("TERM"):
             spawn_env["TERM"] = "xterm-256color"
         proc = ptyprocess.PtyProcess.spawn(  # type: ignore[union-attr]
-            list(argv),
-            cwd=cwd,
-            env=spawn_env,
-            dimensions=(rows, cols),
+            list(argv), cwd=cwd, env=spawn_env, dimensions=(rows, cols)
         )
         return cls(proc)
 
@@ -178,13 +144,8 @@ class PtyBridge:
     def read(self, timeout: float = 0.2) -> Optional[bytes]:
         """Read up to 64 KiB of raw bytes from the PTY master.
 
-        Returns:
-            * bytes — zero or more bytes of child output
-            * empty bytes (``b""``) — no data available within ``timeout``
-            * None — child has exited and the master fd is at EOF
-
-        Never blocks longer than ``timeout`` seconds.  Safe to call after
-        :meth:`close`; returns ``None`` in that case.
+        Never blocks longer than ``timeout`` seconds. Safe to call after :meth:`close`; returns
+        ``None`` in that case.
         """
         if self._closed:
             return None
@@ -201,9 +162,7 @@ class PtyBridge:
             if exc.errno in {errno.EIO, errno.EBADF}:
                 return None
             raise
-        if not data:
-            return None
-        return data
+        return data or None
 
     def write(self, data: bytes) -> None:
         """Write raw bytes to the PTY master (i.e. the child's stdin)."""
@@ -225,21 +184,17 @@ class PtyBridge:
     def resize(self, cols: int, rows: int) -> None:
         """Forward a terminal resize to the child via ``TIOCSWINSZ``.
 
-        Dimensions are clamped to a sane range first.  Some hosts report
-        garbage window sizes — the motivating case is WSL2, where xterm.js
-        in the dashboard ``/chat`` tab can pick up ``columns=131072,
-        rows=1`` from a broken winsize probe.  ``struct winsize`` packs each
-        field as an unsigned short (max 65535), so an unclamped 131072 would
-        raise ``struct.error`` (not ``OSError``) and break the resize path,
-        leaving the TUI laid out for a one-row / absurdly-wide screen —
-        which is what shows up as blank / disappearing text.
+        Dimensions are clamped first: some hosts (WSL2 via xterm.js) report garbage like
+        ``columns=131072, rows=1``, and ``struct winsize`` packs unsigned shorts, so an unclamped
+        value raises ``struct.error`` (not ``OSError``), breaks resizing and leaves the TUI laid out
+        for a one-row screen — the blank/disappearing-text symptom.
         """
         if self._closed:
             return
-        cols = _clamp_dimension(cols, _MAX_COLS)
-        rows = _clamp_dimension(rows, _MAX_ROWS)
         # struct winsize: rows, cols, xpixel, ypixel (all unsigned short)
-        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+        winsize = struct.pack(
+            "HHHH", _clamp_dimension(rows, _MAX_ROWS), _clamp_dimension(cols, _MAX_COLS), 0, 0
+        )
         try:
             fcntl.ioctl(self._fd, termios.TIOCSWINSZ, winsize)
         except OSError:
@@ -250,8 +205,8 @@ class PtyBridge:
     def close(self) -> None:
         """Terminate the child (SIGTERM → 0.5s grace → SIGKILL) and close fds.
 
-        Idempotent.  Reaping the child is important so we don't leak
-        zombies across the lifetime of the dashboard process.
+        Idempotent. Reaping the child is important so we don't leak zombies across the lifetime of
+        the dashboard process.
         """
         if self._closed:
             return

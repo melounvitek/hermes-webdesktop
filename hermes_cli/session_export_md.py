@@ -1,8 +1,8 @@
 """Markdown/QMD export helpers for Hermes sessions.
 
-This module is intentionally filesystem-only: it formats already-exported
-SessionDB dictionaries and writes them to user-selected export directories. It
-must not mutate state.db or call delete/prune/archive APIs.
+This module is intentionally filesystem-only: it formats already-exported SessionDB dictionaries and
+writes them to user-selected export directories. It must not mutate state.db or call
+delete/prune/archive APIs.
 """
 
 from __future__ import annotations
@@ -219,12 +219,9 @@ def verify_export_file(path: Path | str, session: dict[str, Any]) -> tuple[bool,
 def redact_session_data(session: dict[str, Any]) -> dict[str, Any]:
     """Return a deep copy of a session export dict with secrets redacted.
 
-    Runs every message's content and tool-call arguments through the
-    force-mode redaction pass (``agent.redact.redact_sensitive_text``), so
-    API keys, tokens, and credentials that appeared in tool output never
-    land in plaintext export files. Force mode ignores the user's global
-    ``security.redact_secrets`` preference — an explicit ``--redact`` export
-    must never emit raw secrets.
+    Runs every message's content and tool-call arguments through the force-mode redaction pass
+    (``agent.redact.redact_sensitive_text``), so API keys, tokens, and credentials that appeared in
+    tool output never land in plaintext export files.
     """
     from agent.redact import redact_sensitive_text
 
@@ -247,10 +244,7 @@ def redact_session_data(session: dict[str, Any]) -> dict[str, Any]:
 def write_session_markdown(
     session: dict[str, Any], output_dir: Path | str, *, fmt: str = "md", force: bool = False
 ) -> Path:
-    """Write a Markdown/QMD export file and return its path.
-
-    Raises FileExistsError when the destination exists and force=False.
-    """
+    """Write a Markdown/QMD export file and return its path."""
     out_dir = Path(output_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / safe_session_filename(session, fmt=fmt)

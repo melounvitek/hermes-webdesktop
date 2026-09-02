@@ -1,32 +1,7 @@
 """Capability-gated platform action facade for plugins (#64176, action half).
 
-``ctx.platform_actions`` gives a plugin a *minimal*, versioned verb set for
-acting on connected chat platforms through the live gateway adapter registry —
-no adapter handles, bot clients, or raw SDK objects are ever exposed.
-
-Gating (fail closed, default OFF)
----------------------------------
-Every verb checks ``plugin_capability_granted(plugin_id,
-"gateway.platform_actions")`` at call time. The capability maps to the
-``plugins.entries.<id>.allow_platform_actions`` legacy key and the #64228
-consent registry (``granted_capabilities``). No grant → structured
-``capability_not_granted`` error, never an exception.
-
-v1 verb set
------------
-* ``add_reaction(platform, chat_id, message_id, emoji)``
-* ``set_thread_title(platform, chat_id, thread_id, title)``
-
-Both return a structured result dict — ``{"ok": True, ...}`` on success,
-``{"ok": False, "error": <code>, "detail": <str>}`` on failure — and never
-raise into hook dispatch. Error codes are part of the v1 contract:
-``capability_not_granted``, ``invalid_argument``, ``gateway_unavailable``,
-``unknown_platform``, ``adapter_not_registered``, ``adapter_disconnected``,
-``unsupported_platform_action``, ``action_failed``.
-
-Raw SDK payload/handle access is deliberately NOT part of this surface; per
-the #64176 round-2 correction it requires its own capability
-(``gateway.raw_events``, #64228) and design.
+Both return a structured result dict — ``{"ok": True, ...}`` on success, ``{"ok": False, "error":
+<code>, "detail": <str>}`` on failure — and never raise into hook dispatch.
 """
 
 from __future__ import annotations
@@ -57,10 +32,9 @@ def _ok(**fields: Any) -> Dict[str, Any]:
 class PlatformActions:
     """Per-plugin facade over the live gateway adapter registry.
 
-    Instances are cheap and hold only the owning plugin id; the gateway
-    runner and adapters are resolved at call time so a facade created
-    before the gateway starts (plugin ``register()`` runs first) still
-    works once adapters connect.
+    Instances are cheap and hold only the owning plugin id; the gateway runner and adapters are
+    resolved at call time so a facade created before the gateway starts (plugin ``register()`` runs
+    first) still works once adapters connect.
     """
 
     def __init__(self, plugin_id: str):
@@ -166,11 +140,7 @@ class PlatformActions:
     async def add_reaction(
         self, platform: str, chat_id: str, message_id: str, emoji: str
     ) -> Dict[str, Any]:
-        """Add/set an emoji reaction on a platform message.
-
-        Telegram note: the Bot API *sets* the bot's reaction (replacing a
-        previous one) rather than stacking, per ``set_message_reaction``.
-        """
+        """Add/set an emoji reaction on a platform message."""
         adapter, error = self._gate(
             platform, chat_id=chat_id, message_id=message_id, emoji=emoji
         )
@@ -202,11 +172,7 @@ class PlatformActions:
     async def set_thread_title(
         self, platform: str, chat_id: str, thread_id: str, title: str
     ) -> Dict[str, Any]:
-        """Rename a thread / forum topic.
-
-        Discord ignores ``chat_id`` (thread ids are globally addressable);
-        Telegram requires it (``edit_forum_topic`` is chat-scoped).
-        """
+        """Rename a thread / forum topic."""
         adapter, error = self._gate(
             platform, chat_id=chat_id, thread_id=thread_id, title=title
         )

@@ -1,35 +1,13 @@
-"""
-Interactive setup wizard for the WhatsApp Cloud API adapter.
+"""Interactive setup wizard for the WhatsApp Cloud API adapter.
 
-Entry point: ``hermes whatsapp-cloud`` (dispatched from
-``cmd_whatsapp_cloud`` in ``hermes_cli/main.py``).
+Walks the user through the 6 credentials Meta requires + recipient allowlist, auto-generates the
+verify token, and prints exact follow-up instructions for the parts that can't happen inside the
+wizard process (starting cloudflared, starting the gateway, configuring Meta's webhook dashboard,
+adding their phone to the recipient list).
 
-Walks the user through the 6 credentials Meta requires + recipient
-allowlist, auto-generates the verify token, and prints exact follow-up
-instructions for the parts that can't happen inside the wizard process
-(starting cloudflared, starting the gateway, configuring Meta's
-webhook dashboard, adding their phone to the recipient list).
-
-Heavy emphasis on field-shape validation to catch the most common
-configuration mistakes:
-
-- Putting the actual phone number in ``WHATSAPP_CLOUD_PHONE_NUMBER_ID``
-  (the field expects Meta's 15-17 digit internal ID, not a phone number).
-  This is the #1 trap — caught us during Phase 3 live testing.
-- Pasting tokens with trailing whitespace.
-- Pasting an OpenAI / Slack / GitHub key by mistake.
-- Confusing App ID with WABA ID with Phone Number ID.
-
-Each prompt has contextual help showing exactly where to find the value
-in Meta's App Dashboard, with a one-line description and the field's
-expected shape ("starts with EAA", "15-17 digits", "32 hex chars", etc.).
-
-The wizard intentionally does NOT smoke-test the webhook itself — the
-Hermes gateway and the cloudflared tunnel both run in separate
-processes the user starts AFTER this wizard exits, so any in-wizard
-probe would fail by design. Instead the final SETUP COMPLETE block
-prints the exact curl command the user can run from a third terminal
-to verify the loop end-to-end once everything's running.
+The wizard intentionally does NOT smoke-test the webhook itself — the Hermes gateway and the
+cloudflared tunnel both run in separate processes the user starts AFTER this wizard exits, so any
+in-wizard probe would fail by design.
 """
 
 from __future__ import annotations
@@ -53,10 +31,9 @@ from typing import Optional
 def _validate_phone_number_id(value: str) -> tuple[bool, Optional[str]]:
     """Phone Number ID is a 15-17 digit numeric ID assigned by Meta.
 
-    It's NOT a phone number. The #1 setup mistake is pasting the actual
-    phone number (e.g. ``15556422442``) into this field — that's only
-    10-11 digits and gets rejected by Graph as "Object with ID does
-    not exist."
+    It's NOT a phone number. The #1 setup mistake is pasting the actual phone number (e.g.
+    ``15556422442``) into this field — that's only 10-11 digits and gets rejected by Graph as
+    "Object with ID does not exist."
     """
     if not value:
         return False, "Phone Number ID is required"
@@ -81,28 +58,33 @@ def _validate_phone_number_id(value: str) -> tuple[bool, Optional[str]]:
     return True, None
 
 
-def _validate_waba_id(value: str) -> tuple[bool, Optional[str]]:
-    """WABA ID is numeric, similar length range as Phone Number ID."""
-    if not value:
-        return False, "WABA ID is required"
-    s = value.strip()
-    if not s.isdigit():
-        return False, "WABA ID must be numeric"
-    if len(s) < 10 or len(s) > 25:
-        return False, "WABA ID looks wrong (expected 10-25 digits)"
-    return True, None
+def _numeric_id_validator(label: str, lo: int, hi: int, expected: str):
+    """Validator for a numeric Meta ID whose digit count must fall in [lo, hi]."""
+    def validate(value: str) -> tuple[bool, Optional[str]]:
+        if not value:
+            return False, f"{label} is required"
+        s = value.strip()
+        if not s.isdigit():
+            return False, f"{label} must be numeric"
+        if len(s) < lo or len(s) > hi:
+            return False, f"{label} looks wrong (expected {expected})"
+        return True, None
+    return validate
 
 
-def _validate_app_id(value: str) -> tuple[bool, Optional[str]]:
-    """Meta App ID is numeric, typically 15-16 digits."""
-    if not value:
-        return False, "App ID is required"
-    s = value.strip()
-    if not s.isdigit():
-        return False, "App ID must be numeric"
-    if len(s) < 13 or len(s) > 20:
-        return False, "App ID looks wrong (expected 15-16 digits)"
-    return True, None
+# WABA ID: similar length range as Phone Number ID. App ID: typically 15-16 digits.
+_validate_waba_id = _numeric_id_validator("WABA ID", 10, 25, "10-25 digits")
+_validate_app_id = _numeric_id_validator("App ID", 13, 20, "15-16 digits")
+
+# Common paste mistakes for the access-token field: (prefixes, what it actually is).
+_FOREIGN_TOKEN_PREFIXES = (
+    (("sk-",), "That's an OpenAI key (starts with 'sk-'), not a Meta "
+               "WhatsApp access token. Meta tokens start with 'EAA'."),
+    (("xoxb-", "xoxp-"), "That's a Slack token, not a Meta WhatsApp access token. "
+                         "Meta tokens start with 'EAA'."),
+    (("ghp_", "gho_"), "That's a GitHub token, not a Meta WhatsApp access "
+                       "token. Meta tokens start with 'EAA'."),
+)
 
 
 def _validate_app_secret(value: str) -> tuple[bool, Optional[str]]:
@@ -124,29 +106,17 @@ def _validate_app_secret(value: str) -> tuple[bool, Optional[str]]:
 def _validate_access_token(value: str) -> tuple[bool, Optional[str]]:
     """Meta access tokens start with ``EAA`` and are 100-300+ characters.
 
-    Both temp tokens (24h) and System User permanent tokens share this
-    prefix. We don't try to distinguish them.
+    Both temp tokens (24h) and System User permanent tokens share this prefix. We don't try to
+    distinguish them.
     """
     if not value:
         return False, "Access token is required"
     s = value.strip()
     if not s.startswith("EAA"):
         # Diagnose common paste mistakes
-        if s.startswith("sk-"):
-            return False, (
-                "That's an OpenAI key (starts with 'sk-'), not a Meta "
-                "WhatsApp access token. Meta tokens start with 'EAA'."
-            )
-        if s.startswith("xoxb-") or s.startswith("xoxp-"):
-            return False, (
-                "That's a Slack token, not a Meta WhatsApp access token. "
-                "Meta tokens start with 'EAA'."
-            )
-        if s.startswith("ghp_") or s.startswith("gho_"):
-            return False, (
-                "That's a GitHub token, not a Meta WhatsApp access "
-                "token. Meta tokens start with 'EAA'."
-            )
+        for prefixes, reason in _FOREIGN_TOKEN_PREFIXES:
+            if s.startswith(prefixes):
+                return False, reason
         return False, (
             "Meta WhatsApp access tokens start with 'EAA'. Check that "
             "you're copying from the right place (API Setup → 'Generate "
@@ -166,13 +136,9 @@ def _validate_access_token(value: str) -> tuple[bool, Optional[str]]:
 def _prompt(message: str, default: Optional[str] = None, secret: bool = False) -> str:
     """Read one line of input. Returns "" on EOF / Ctrl+C / empty input.
 
-    The ``default`` parameter is shown to the user but NOT auto-applied
-    on empty input — callers handle the "user kept existing" case
-    explicitly so they can distinguish between a real value and a
-    display preview (e.g. ``"abc12345..."`` for masked secrets).
-
-    ``secret=True`` reads via ``getpass`` so credentials are not echoed
-    to the terminal (or left in scrollback).
+    ``default`` is shown but NOT auto-applied on empty input: callers handle "kept existing"
+    explicitly so a real value is distinguishable from a display preview (masked secrets).
+    ``secret=True`` reads via ``getpass`` so credentials are not echoed or left in scrollback.
     """
     try:
         suffix = f" [{default}]" if default else ""
@@ -198,9 +164,8 @@ def _prompt_validated(
 ) -> Optional[str]:
     """Repeat the prompt until the user enters a valid value or aborts.
 
-    Returns the validated value, or None if the user gave up (empty
-    response after an error, or Ctrl+C). ``current`` is shown as a
-    default for re-runs of the wizard with existing config.
+    Returns the validated value, or None if the user gave up (empty response after an error, or
+    Ctrl+C). ``current`` is shown as a default for re-runs of the wizard with existing config.
     """
     if help_text:
         for line in help_text.strip().splitlines():
@@ -230,11 +195,27 @@ def _prompt_validated(
 # ---------------------------------------------------------------------------
 
 
+def _header(title: str) -> None:
+    print("─" * 50)
+    print(title)
+    print("─" * 50)
+
+
+def _save_optional(key: str, value: Optional[str], current: Optional[str]) -> None:
+    from hermes_cli.config import save_env_value
+
+    if value:
+        save_env_value(key, value)
+        print(f"  ✓ Saved: {value}")
+    elif current:
+        print(f"  ✓ Keeping existing: {current}")
+
+
 def run_whatsapp_cloud_setup() -> int:
     """Interactive wizard for the WhatsApp Cloud API adapter.
 
-    Returns 0 on full success, 1 on user abort, 2 on partial completion
-    (some fields written but the user bailed before finishing).
+    Returns 0 on full success, 1 on user abort, 2 on partial completion (some fields written but the
+    user bailed before finishing).
     """
     from hermes_cli.config import get_env_value, save_env_value
 
@@ -261,15 +242,13 @@ def run_whatsapp_cloud_setup() -> int:
     print("     start; switch to a System User permanent token later)")
     print()
     try:
-        proceed = input("Press Enter to continue, or Ctrl+C to abort... ").strip()
+        input("Press Enter to continue, or Ctrl+C to abort... ")
     except (EOFError, KeyboardInterrupt):
         print("\nSetup cancelled.")
         return 1
 
     print()
-    print("─" * 50)
-    print("STEP 1 — Phone Number ID")
-    print("─" * 50)
+    _header("STEP 1 — Phone Number ID")
     current_phone_id = get_env_value("WHATSAPP_CLOUD_PHONE_NUMBER_ID") or None
     phone_id = _prompt_validated(
         "Phone Number ID",
@@ -296,9 +275,7 @@ def run_whatsapp_cloud_setup() -> int:
         print(f"  ✓ Saved: {phone_id}")
     print()
 
-    print("─" * 50)
-    print("STEP 2 — Access Token")
-    print("─" * 50)
+    _header("STEP 2 — Access Token")
     current_token = get_env_value("WHATSAPP_CLOUD_ACCESS_TOKEN") or None
     current_display = (current_token[:15] + "...") if current_token else None
     token = _prompt_validated(
@@ -337,9 +314,7 @@ def run_whatsapp_cloud_setup() -> int:
         print("  ✓ Saved (token hidden)")
     print()
 
-    print("─" * 50)
-    print("STEP 3 — App Secret (required for webhook signature verification)")
-    print("─" * 50)
+    _header("STEP 3 — App Secret (required for webhook signature verification)")
     current_secret = get_env_value("WHATSAPP_CLOUD_APP_SECRET") or None
     current_secret_display = (current_secret[:8] + "...") if current_secret else None
     app_secret = _prompt_validated(
@@ -368,9 +343,7 @@ def run_whatsapp_cloud_setup() -> int:
         print("  ✓ Saved (secret hidden)")
     print()
 
-    print("─" * 50)
-    print("STEP 4 — App ID & WABA ID (optional, for analytics)")
-    print("─" * 50)
+    _header("STEP 4 — App ID & WABA ID (optional, for analytics)")
     current_app_id = get_env_value("WHATSAPP_CLOUD_APP_ID") or None
     app_id = _prompt_validated(
         "App ID (optional, press Enter to skip)",
@@ -382,11 +355,7 @@ def run_whatsapp_cloud_setup() -> int:
             "Not required for messaging — useful only for analytics later."
         ),
     )
-    if app_id:
-        save_env_value("WHATSAPP_CLOUD_APP_ID", app_id)
-        print(f"  ✓ Saved: {app_id}")
-    elif current_app_id:
-        print(f"  ✓ Keeping existing: {current_app_id}")
+    _save_optional("WHATSAPP_CLOUD_APP_ID", app_id, current_app_id)
 
     current_waba_id = get_env_value("WHATSAPP_CLOUD_WABA_ID") or None
     waba_id = _prompt_validated(
@@ -400,16 +369,10 @@ def run_whatsapp_cloud_setup() -> int:
             "Not required for messaging — useful for analytics."
         ),
     )
-    if waba_id:
-        save_env_value("WHATSAPP_CLOUD_WABA_ID", waba_id)
-        print(f"  ✓ Saved: {waba_id}")
-    elif current_waba_id:
-        print(f"  ✓ Keeping existing: {current_waba_id}")
+    _save_optional("WHATSAPP_CLOUD_WABA_ID", waba_id, current_waba_id)
     print()
 
-    print("─" * 50)
-    print("STEP 5 — Verify Token (auto-generated)")
-    print("─" * 50)
+    _header("STEP 5 — Verify Token (auto-generated)")
     current_verify = get_env_value("WHATSAPP_CLOUD_VERIFY_TOKEN") or None
     if current_verify:
         print(f"  An existing verify token is already set ({current_verify[:8]}...).")
@@ -433,17 +396,14 @@ def run_whatsapp_cloud_setup() -> int:
     print("    configuration dialog (next step).")
     print()
 
-    print("─" * 50)
-    print("STEP 6 — Recipient Allowlist")
-    print("─" * 50)
+    _header("STEP 6 — Recipient Allowlist")
     print()
     print("  Who is allowed to message the bot? (Comma-separated phone")
     print("  numbers with country code, no '+' / spaces / dashes. Use '*'")
     print("  to allow anyone — only safe if you've also configured Meta's")
     print("  recipient whitelist for app-development mode.)")
     print()
-    current_allow = get_env_value("WHATSAPP_CLOUD_ALLOWED_USERS") or None
-    allow_default = current_allow if current_allow else None
+    allow_default = get_env_value("WHATSAPP_CLOUD_ALLOWED_USERS") or None
     try:
         allowed = line_input(
             f"  → Allowed users{' [' + allow_default + ']' if allow_default else ''}: "
@@ -462,9 +422,7 @@ def run_whatsapp_cloud_setup() -> int:
         print("    Re-run this wizard or set WHATSAPP_CLOUD_ALLOWED_USERS manually.")
     print()
 
-    print("─" * 50)
-    print("SETUP COMPLETE — Next steps")
-    print("─" * 50)
+    _header("SETUP COMPLETE — Next steps")
     print()
     print("  Hermes needs a public HTTPS URL to receive WhatsApp messages.")
     print("  The recommended path is Cloudflare Tunnel (free, no port")
@@ -509,9 +467,7 @@ def run_whatsapp_cloud_setup() -> int:
     print()
     print("    7. DM the bot's test number from your phone.")
     print()
-    print("─" * 50)
-    print("Optional: polish your bot's WhatsApp profile")
-    print("─" * 50)
+    _header("Optional: polish your bot's WhatsApp profile")
     print()
     print("  WhatsApp shows a display name and profile picture for your bot")
     print("  in every chat header and contact list. These are set in Meta's")
@@ -519,13 +475,10 @@ def run_whatsapp_cloud_setup() -> int:
     print("  it once you're up and running:")
     print()
     effective_waba = waba_id or current_waba_id
-    if effective_waba:
-        print("    • Display name + profile picture:")
-        print("        https://business.facebook.com/wa/manage/phone-numbers/"
-              f"?waba_id={effective_waba}")
-    else:
-        print("    • Display name + profile picture:")
-        print("        https://business.facebook.com/wa/manage/phone-numbers/")
+    print("    • Display name + profile picture:")
+    print("        https://business.facebook.com/wa/manage/phone-numbers/"
+          + (f"?waba_id={effective_waba}" if effective_waba else ""))
+    if not effective_waba:
         print("        (select your WhatsApp Business Account on that page)")
     print("        Display-name changes go through a ~24-48h Meta review.")
     print()

@@ -1,22 +1,14 @@
 """Oneshot (-z) mode: send a prompt, get the final content block, exit.
 
-Bypasses cli.py entirely.  No banner, no spinner, no session_id line,
-no stderr chatter.  Just the agent's final text to stdout.
+Toolsets = explicit --toolsets when provided, otherwise whatever the user has configured for "cli"
+in `hermes tools`. Rules / memory / AGENTS.md / preloaded skills = same as a normal chat turn.
+Approvals = auto-bypassed (HERMES_YOLO_MODE=1 is set for the call). Working directory = the user's
+CWD (AGENTS.md etc.
 
-Toolsets = explicit --toolsets when provided, otherwise whatever the user has
-configured for "cli" in `hermes tools`.
-Rules / memory / AGENTS.md / preloaded skills = same as a normal chat turn.
-Approvals = auto-bypassed (HERMES_YOLO_MODE=1 is set for the call).
-Working directory = the user's CWD (AGENTS.md etc. resolve from there as usual).
-
-Model / provider selection mirrors `hermes chat`:
-    - Both optional. If omitted, use the user's configured default.
-    - If both given, pair them exactly as given.
-    - If only --model given, auto-detect the provider that serves it.
-    - If only --provider given, error out (ambiguous — caller must pick a model).
-
-Env var fallbacks (used when the corresponding arg is not passed):
-    - HERMES_INFERENCE_MODEL
+Model / provider selection mirrors `hermes chat`: - Both optional. If omitted, use the user's
+configured default. - If both given, pair them exactly as given. - If only --model given, auto-
+detect the provider that serves it. - If only --provider given, error out (ambiguous — caller must
+pick a model).
 """
 
 from __future__ import annotations
@@ -159,8 +151,8 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
 def _write_usage_file(path: Optional[str], result: dict, failure: Optional[str] = None) -> None:
     """Best-effort JSON usage report for pipelines (``-z --usage-file``).
 
-    Written even on failure so callers can always account for spend. Never
-    raises — a broken usage write must not mask the run's own outcome.
+    Written even on failure so callers can always account for spend. Never raises — a broken usage
+    write must not mask the run's own outcome.
     """
     if not path:
         return
@@ -209,20 +201,9 @@ def run_oneshot(
 ) -> int:
     """Execute a single prompt and print only the final content block.
 
-    Args:
-        prompt: The user message to send.
-        model: Optional model override. Falls back to HERMES_INFERENCE_MODEL
-            env var, then config.yaml's model.default / model.model.
-        provider: Optional provider override. Falls back to config.yaml's
-            model.provider, then "auto".
-        toolsets: Optional comma-separated string or iterable of toolsets.
-        skills: Optional repeated/comma-separated skill identifiers to preload.
-        usage_file: Optional path; when set, a JSON usage report (estimated
-            cost, token counts, model, api_calls) is written there after the
-            run — even when the run fails — so pipelines can account for
-            spend per invocation.
-
-    Returns the exit code.  The caller owns process termination.
+    Model/provider fall back to ``HERMES_INFERENCE_MODEL`` and config.yaml. ``usage_file`` gets a
+    JSON usage report (cost, tokens, model, api_calls) even when the run fails, so pipelines can
+    account for spend per invocation. Returns the exit code; the caller owns process termination.
     """
     # Silence every stdlib logger for the duration.  AIAgent, tools, and
     # provider adapters all log to stderr through the root logger; file
@@ -341,9 +322,9 @@ def run_oneshot(
 def _create_session_db_for_oneshot():
     """Best-effort SessionDB for ``hermes -z`` / oneshot mode.
 
-    Oneshot bypasses ``HermesCLI._init_agent()``, so it must wire the SQLite
-    session store itself. Without this, the ``session_search``/recall tool is
-    advertised but every call returns "Session database not available.".
+    Oneshot bypasses ``HermesCLI._init_agent()``, so it must wire the SQLite session store itself.
+    Without this, the ``session_search``/recall tool is advertised but every call returns "Session
+    database not available.".
     """
     try:
         from hermes_state import SessionDB

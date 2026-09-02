@@ -1,41 +1,7 @@
 """Plugin packs — declarative, shareable plugin sets (#64166).
 
-A pack is a single YAML file (``hermes-pack.yaml``) that pins a set of
-plugins (source + exact commit SHA + optional non-secret config seeds).
-Installing a pack is nothing new at runtime: it fans out to N ordinary
-plugin installs through the existing pinned-ref install path, then seeds
-``plugins.entries.<id>`` config keys.
-
-Format (canonical)::
-
-    name: voice-assistant-pack
-    description: STT + streaming TTS + approval relay
-    author: hyper
-    version: 1.0.0
-    plugins:
-      - name: hermes-media-studio          # bare community-index name…
-        ref: e8d59971d2b7901405b39dac7b03bdd616272d0d
-      - repo: owner/approval-relay         # …or explicit owner/repo / git URL
-        ref: 8f3c2d1a9b4e5f6071829304a5b6c7d8e9f00112
-        subdir: plugins/relay              # optional path within the repo
-    config:                                # optional plugins.entries seeds
-      hermes-media-studio:
-        default_model: flux-3
-    skills: []                             # declared seam — NOT auto-installed
-
-Supply-chain posture:
-
-* Every plugin entry MUST pin an exact 40-character commit SHA in ``ref``.
-  Tags and branch names are rejected with an error naming the entry.
-* ``config`` seeds are limited to ``plugins.entries.<id>.*`` keys and may
-  never carry secrets (secret-shaped key names are rejected) nor
-  capability-grant keys (a pack cannot pre-consent capabilities).
-* Capability consent is NEVER bulk-granted: after each plugin installs,
-  its declared capabilities ride the exact same per-plugin consent flow
-  as a normal ``hermes plugins install`` (#64228).
-
-``skills:`` is parsed and displayed but not installed — wiring skill-hub
-ids into the skills installer is a documented follow-up seam.
+* Every plugin entry MUST pin an exact 40-character commit SHA in ``ref``. Tags and branch names are
+rejected with an error naming the entry.
 """
 
 from __future__ import annotations
@@ -146,11 +112,10 @@ def _entry_label(item: Any, index: int) -> str:
 
 
 def validate_config_seed(plugin_id: str, seed: Any) -> dict[str, Any]:
-    """Validate one plugin's config seed mapping.
+    """Validate one plugin's config seed mapping and return it.
 
-    Rejects non-dict seeds, reserved consent/capability keys, deprecated
-    ``allow_*`` trust gates, and secret-shaped key names. Returns the
-    validated dict.
+    Rejects non-dict seeds, reserved consent/capability keys, deprecated ``allow_*`` trust gates,
+    and secret-shaped key names -- a pack must not be able to grant itself trust or ship secrets.
     """
     if not isinstance(seed, dict):
         raise PackError(
@@ -178,11 +143,7 @@ def validate_config_seed(plugin_id: str, seed: Any) -> dict[str, Any]:
 
 
 def parse_pack(text: str, *, source: str = "<pack>") -> PluginPack:
-    """Parse and validate a pack YAML document.
-
-    Raises :class:`PackError` with an actionable message on any problem —
-    including refs that are not exact 40-character commit SHAs.
-    """
+    """Parse and validate a pack YAML document."""
     import yaml
 
     try:
@@ -307,8 +268,8 @@ class ResolvedPackPlugin:
 def resolve_pack_plugins(pack: PluginPack) -> List[ResolvedPackPlugin]:
     """Resolve every entry; bare names go through the community index.
 
-    Resolution failures do not raise — they are carried per-entry so the
-    review screen can show them and install can report partial failure.
+    Resolution failures do not raise — they are carried per-entry so the review screen can show them
+    and install can report partial failure.
     """
     resolved: List[ResolvedPackPlugin] = []
     index_entries = None
@@ -454,11 +415,9 @@ def install_pack_plugins(
 ) -> List[PackInstallResult]:
     """Fan a pack out to N ordinary pinned installs; never raises per-plugin.
 
-    Each plugin goes through the existing exact-ref install path, then its
-    declared capabilities go through the SAME per-plugin consent flow as a
-    single install (:func:`hermes_cli.plugins_cmd._run_capability_consent`).
-    Successful installs are enabled (the user consented via the review
-    screen) and their pack config seed is applied.
+    Each plugin uses the existing exact-ref install path and then the SAME per-plugin capability
+    consent flow as a single install. Successful installs are enabled (the user consented via the
+    review screen) and their pack config seed is applied.
     """
     from hermes_cli.plugins_cmd import (
         PluginOperationError,
@@ -573,9 +532,7 @@ def _sanitized_entry_config(plugin_id: str) -> dict[str, Any]:
             continue
         if _SECRET_KEY_RE.search(key):
             continue
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            out[key] = value
-        elif isinstance(value, (list, dict)):
+        if isinstance(value, (str, int, float, bool)) or value is None or isinstance(value, (list, dict)):
             out[key] = value
     return out
 
@@ -583,9 +540,9 @@ def _sanitized_entry_config(plugin_id: str) -> dict[str, Any]:
 def export_pack(*, enabled_only: bool = False, pack_name: str = "my-hermes-pack") -> tuple[str, List[str]]:
     """Build pack YAML from the current install.
 
-    Returns ``(yaml_text, warnings)``. Plugins whose Git provenance is
-    unknown (local-only, no install metadata) are listed in the warnings
-    and included as comments in the YAML, never as installable entries.
+    Returns ``(yaml_text, warnings)``. Plugins whose Git provenance is unknown (local-only, no
+    install metadata) are listed in the warnings and included as comments in the YAML, never as
+    installable entries.
     """
     import yaml
 
@@ -674,10 +631,9 @@ def cmd_pack_show(source: str) -> None:
 def cmd_pack_install(source: str, *, force: bool = False) -> None:
     """``hermes plugins pack install <path-or-url>``.
 
-    Mandatory review screen → one summary consent for the pack contents →
-    fan-out installs with pinned refs → per-plugin capability consent via
-    the standard flow. Partial failures are reported per plugin; exits
-    non-zero when any plugin failed.
+    Mandatory review screen -> one summary consent for the pack -> pinned fan-out installs ->
+    per-plugin capability consent via the standard flow. Partial failures are reported per plugin
+    and the exit code is non-zero when any plugin failed.
     """
     from rich.console import Console
 

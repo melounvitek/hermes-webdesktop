@@ -1,13 +1,10 @@
 """Offline, non-destructive recovery for a damaged Hermes session database.
 
-The recovery path deliberately avoids in-place repair:
-
-* the supplied source database is never opened by SQLite;
-* the source file and any WAL/SHM/rollback-journal sidecars are copied into a
-  disposable working directory first;
-* canonical rows are copied into a newly initialized current-schema database;
-* derived FTS tables and migration bookkeeping are rebuilt, not copied; and
-* the recovered database is never installed over the active database.
+* the supplied source database is never opened by SQLite; * the source file and any
+WAL/SHM/rollback-journal sidecars are copied into a disposable working directory first; * canonical
+rows are copied into a newly initialized current-schema database; * derived FTS tables and migration
+bookkeeping are rebuilt, not copied; and * the recovered database is never installed over the active
+database.
 """
 
 from __future__ import annotations
@@ -17,8 +14,9 @@ import os
 import shutil
 import sqlite3
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from hermes_state import (
     FTS_STORAGE_VERSION,
@@ -44,7 +42,6 @@ _TOPIC_TABLES = (
     "telegram_dm_topic_mode",
     "telegram_dm_topic_bindings",
 )
-
 
 
 def _init_delivery_ledger_schema(conn: sqlite3.Connection) -> None:
@@ -128,10 +125,7 @@ def _validate_paths(
     output: Optional[Path] = None
     if output_path is not None:
         output = _resolved_output_path(output_path)
-        protected = {
-            _sidecar_path(source, suffix).resolve(strict=False)
-            for suffix in _SIDECAR_SUFFIXES
-        }
+        protected = {_sidecar_path(source, suffix).resolve(strict=False) for suffix in _SIDECAR_SUFFIXES}
         if output.resolve(strict=False) in protected:
             raise SessionRecoverySafetyError(
                 "The recovery output must not be the source database or one of "
@@ -163,10 +157,7 @@ def _source_fingerprint(source: Path) -> dict[str, dict[str, int]]:
         if not path.exists():
             continue
         stat = path.stat()
-        fingerprint[suffix or "main"] = {
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-        }
+        fingerprint[suffix or "main"] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
     return fingerprint
 
 
@@ -205,10 +196,7 @@ def _disk_space_preflight(
     # a legacy database, but using the complete source bundle as the estimate
     # avoids betting the user's disk on that expectation.
     output_allowance = bundle_bytes if output_parent is not None else 0
-    headroom = max(
-        _MINIMUM_SPACE_HEADROOM,
-        int((bundle_bytes + output_allowance) * 0.05),
-    )
+    headroom = max(_MINIMUM_SPACE_HEADROOM, int((bundle_bytes + output_allowance) * 0.05))
 
     work_free = int(shutil.disk_usage(work_root).free)
     report: dict[str, Any] = {
@@ -268,17 +256,12 @@ def _disk_space_preflight(
 def _copy_source_bundle(source: Path, snapshot_dir: Path) -> tuple[Path, list[str]]:
     """Copy the source DB bundle aside so SQLite never opens the original.
 
-    The whole copy runs inside ``offline_file_access``, which holds the
-    connection-lifecycle lock for its duration. Checking for a live connection
-    and *then* copying would be a check/use race: a connection could open in
-    that window, and the copy's ``close()`` would cancel its POSIX advisory
-    locks -- the failure class ``hermes_cli.sqlite_safe_read`` exists to
-    prevent (see #71724). Holding the lock means no connection can appear
-    mid-copy, across the main file and every sidecar.
+    The whole copy runs inside ``offline_file_access``, which holds the connection-lifecycle lock
+    for its duration.
 
-    Recovery normally runs as its own short-lived CLI process against an
-    offline/quarantined file, so the refusal should never fire; the guard
-    keeps this path consistent with ``hermes_state._backup_db_file``.
+    Recovery normally runs as its own short-lived CLI process against an offline/quarantined file,
+    so the refusal should never fire; the guard keeps this path consistent with
+    ``hermes_state._backup_db_file``.
     """
     from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
 
@@ -302,6 +285,91 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')]
 
 
+def _count_rows(conn: sqlite3.Connection, table: str) -> int:
+    return int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+
+
+def _connect(path: Path) -> sqlite3.Connection:
+    """Autocommit connection with a short busy timeout (source snapshot or fresh output)."""
+    return sqlite3.connect(str(path), isolation_level=None, timeout=1.0)
+
+
+@contextmanager
+def _immediate_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """``BEGIN IMMEDIATE`` ... ``COMMIT``, rolling back on any exception."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def _compatible_columns(
+    source: sqlite3.Connection,
+    destination: sqlite3.Connection,
+    table: str,
+    result: dict[str, Any],
+) -> Optional[list[str]]:
+    """Columns shared by source and destination; sets a terminal status and returns None otherwise."""
+    source_columns = _table_columns(source, table)
+    columns = [column for column in _table_columns(destination, table) if column in source_columns]
+    result["columns"] = columns
+    if not source_columns:
+        result["status"] = "missing"
+        return None
+    if not columns:
+        result["status"] = "failed"
+        result["error"] = "source and destination have no compatible columns"
+        return None
+    return columns
+
+
+def _quoted_columns(columns: list[str]) -> tuple[str, str]:
+    """``("a", "b")`` column list and matching ``?, ?`` placeholders."""
+    return ", ".join(f'"{column}"' for column in columns), ", ".join("?" for _ in columns)
+
+
+def _copy_rows(
+    source: sqlite3.Connection,
+    destination: sqlite3.Connection,
+    select_sql: str,
+    params: tuple[Any, ...],
+    insert_sql: str,
+    *,
+    table: str,
+    chunk_size: int,
+    progress_cb: Optional[ProgressCallback],
+    expected_rows: Optional[int],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Chunked straight copy; fills ``status``/``error`` on ``result``."""
+    try:
+        cursor = source.execute(select_sql, params)
+        while True:
+            rows = cursor.fetchmany(chunk_size)
+            if not rows:
+                break
+            with _immediate_transaction(destination):
+                destination.executemany(insert_sql, rows)
+            result["copied_rows"] += len(rows)
+            if progress_cb is not None:
+                progress_cb(
+                    {"table": table, "copied_rows": result["copied_rows"], "source_rows": expected_rows}
+                )
+    except sqlite3.DatabaseError as exc:
+        result["status"] = "partial" if result["copied_rows"] else "failed"
+        result["error"] = str(exc)
+        return result
+
+    complete = expected_rows is None or result["copied_rows"] == expected_rows
+    result["status"] = "complete" if complete else "partial"
+    if result["status"] == "partial":
+        result["error"] = f"copied {result['copied_rows']} of {expected_rows} readable rows"
+    return result
+
+
 def _table_inventory(
     conn: sqlite3.Connection,
     table: str,
@@ -313,20 +381,22 @@ def _table_inventory(
             return result
         result["available"] = True
         result["columns"] = columns
-        result["rows"] = int(
-            conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-        )
+        result["rows"] = _count_rows(conn, table)
     except sqlite3.DatabaseError as exc:
         result["error"] = str(exc)
     return result
+
+
+def _journal_mode(conn: sqlite3.Connection) -> Optional[str]:
+    row = conn.execute("PRAGMA journal_mode").fetchone()
+    return str(row[0]).lower() if row else None
 
 
 def _inspect_connection(conn: sqlite3.Connection) -> dict[str, Any]:
     conn.execute("PRAGMA writable_schema=ON")
     report: dict[str, Any] = {"tables": {}, "errors": [], "warnings": []}
     try:
-        row = conn.execute("PRAGMA journal_mode").fetchone()
-        report["journal_mode"] = str(row[0]).lower() if row else None
+        report["journal_mode"] = _journal_mode(conn)
     except sqlite3.DatabaseError as exc:
         report["journal_mode"] = None
         # Journal metadata is useful context but not canonical session data.
@@ -339,9 +409,7 @@ def _inspect_connection(conn: sqlite3.Connection) -> dict[str, Any]:
     for required in ("sessions", "messages"):
         table_report = report["tables"][required]
         if not table_report.get("available") or table_report.get("rows") is None:
-            report["errors"].append(
-                f"required table {required} is not completely readable"
-            )
+            report["errors"].append(f"required table {required} is not completely readable")
     report["recoverable"] = not report["errors"]
     return report
 
@@ -373,11 +441,7 @@ def _snapshot_and_inspect(
                 "database."
             )
 
-        conn = sqlite3.connect(
-            str(snapshot_source),
-            isolation_level=None,
-            timeout=1.0,
-        )
+        conn = _connect(snapshot_source)
         try:
             inspection = _inspect_connection(conn)
         finally:
@@ -406,8 +470,7 @@ def inspect_session_database(
             "source": str(source),
             "disk_space": disk_space,
             **inspection,
-            "source_unchanged": _source_fingerprint(source)
-            == inspection["source_fingerprint"],
+            "source_unchanged": _source_fingerprint(source) == inspection["source_fingerprint"],
         }
     finally:
         temp_dir.cleanup()
@@ -419,17 +482,28 @@ def _ensure_auxiliary_destination_schema(
 ) -> None:
     """Create a lazy auxiliary table on the recovered destination.
 
-    Recovery initializes the destination through base ``SessionDB``, which
-    does not create gateway-owned tables. Copying into a missing dest table
-    would report ``missing`` / ``no compatible columns`` and drop the rows.
+    Recovery initializes the destination via base ``SessionDB``, which does not create gateway-owned
+    tables; copying into a missing table would report ``missing``/``no compatible columns`` and drop
+    the rows.
     """
 
     initialize = _AUXILIARY_TABLE_SCHEMAS.get(table)
     if initialize is None:
-        raise SessionRecoverySafetyError(
-            f"no destination schema initializer registered for table {table!r}"
-        )
+        raise SessionRecoverySafetyError(f"no destination schema initializer registered for table {table!r}")
     initialize(destination)
+
+
+def _fresh_destination(output: Path, *, topic_tables: bool = False) -> sqlite3.Connection:
+    """Initialize a current-schema database at ``output`` and open it with foreign keys off."""
+    destination_db = SessionDB(db_path=output)
+    try:
+        if topic_tables:
+            destination_db.apply_telegram_topic_migration()
+    finally:
+        destination_db.close()
+    conn = _connect(output)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    return conn
 
 
 def _copy_table(
@@ -441,63 +515,28 @@ def _copy_table(
     progress_cb: Optional[ProgressCallback],
     source_rows: Optional[int],
 ) -> dict[str, Any]:
-    source_columns = _table_columns(source, table)
-    destination_columns = _table_columns(destination, table)
-    columns = [column for column in destination_columns if column in source_columns]
     result: dict[str, Any] = {
         "source_rows": source_rows,
         "copied_rows": 0,
-        "columns": columns,
     }
-    if not source_columns:
-        result["status"] = "missing"
-        return result
-    if not columns:
-        result["status"] = "failed"
-        result["error"] = "source and destination have no compatible columns"
+    columns = _compatible_columns(source, destination, table, result)
+    if columns is None:
         return result
 
-    quoted = ", ".join(f'"{column}"' for column in columns)
-    placeholders = ", ".join("?" for _ in columns)
-    select_sql = f'SELECT {quoted} FROM "{table}"'
+    quoted, placeholders = _quoted_columns(columns)
     insert_prefix = "INSERT OR REPLACE" if table == "state_meta" else "INSERT"
-    insert_sql = f'{insert_prefix} INTO "{table}" ({quoted}) VALUES ({placeholders})'
-
-    try:
-        cursor = source.execute(select_sql)
-        while True:
-            rows = cursor.fetchmany(chunk_size)
-            if not rows:
-                break
-            destination.execute("BEGIN IMMEDIATE")
-            try:
-                destination.executemany(insert_sql, rows)
-                destination.execute("COMMIT")
-            except BaseException:
-                destination.execute("ROLLBACK")
-                raise
-            result["copied_rows"] += len(rows)
-            if progress_cb is not None:
-                progress_cb({
-                    "table": table,
-                    "copied_rows": result["copied_rows"],
-                    "source_rows": source_rows,
-                })
-    except sqlite3.DatabaseError as exc:
-        result["status"] = "partial" if result["copied_rows"] else "failed"
-        result["error"] = str(exc)
-        return result
-
-    result["status"] = (
-        "complete"
-        if source_rows is None or result["copied_rows"] == source_rows
-        else "partial"
+    return _copy_rows(
+        source,
+        destination,
+        f'SELECT {quoted} FROM "{table}"',
+        (),
+        f'{insert_prefix} INTO "{table}" ({quoted}) VALUES ({placeholders})',
+        table=table,
+        chunk_size=chunk_size,
+        progress_cb=progress_cb,
+        expected_rows=source_rows,
+        result=result,
     )
-    if result["status"] == "partial":
-        result["error"] = (
-            f"copied {result['copied_rows']} of {source_rows} readable rows"
-        )
-    return result
 
 
 def _append_skipped_range(
@@ -508,11 +547,7 @@ def _append_skipped_range(
 ) -> None:
     """Record skipped rowid ranges without producing one entry per row."""
 
-    if (
-        ranges
-        and ranges[-1]["high"] + 1 == low
-        and ranges[-1]["error"] == error
-    ):
+    if ranges and ranges[-1]["high"] + 1 == low and ranges[-1]["error"] == error:
         ranges[-1]["high"] = high
         return
     ranges.append({"low": low, "high": high, "error": error})
@@ -529,19 +564,14 @@ def _salvage_rowid_bounds(
     directions = (("low", "ASC"), ("high", "DESC"))
     for edge, direction in directions:
         try:
-            row = source.execute(
-                f'SELECT rowid FROM "{table}" ORDER BY rowid {direction} LIMIT 1'
-            ).fetchone()
+            row = source.execute(f'SELECT rowid FROM "{table}" ORDER BY rowid {direction} LIMIT 1').fetchone()
             if row is not None:
                 rows[edge] = int(row[0])
         except sqlite3.DatabaseError as exc:
             result["errors"].append(f"{edge} rowid: {exc}")
 
-    if rows["low"] is None and rows["high"] is None and not result["errors"]:
-        result["empty"] = True
-        return result
     if rows["low"] is None and rows["high"] is None:
-        result["unavailable"] = True
+        result["empty" if not result["errors"] else "unavailable"] = True
         return result
 
     # A damaged edge can prevent one of the ordered probes from completing.
@@ -555,8 +585,19 @@ def _salvage_rowid_bounds(
         rows["high"] = _MAX_SQLITE_ROWID
         result["fallback_edges"].append("high")
 
-    result["low"] = rows["low"]
-    result["high"] = rows["high"]
+    result.update(rows)
+    # Issue #80205: a damaged ordered edge probe used to substitute the whole
+    # SQLite rowid domain, and bisecting that synthetic tail exhausted the
+    # range-query budget while readable tail rows were still waiting to be
+    # copied. Gallop outward from the surviving edge for a finite bound first.
+    if result["fallback_edges"]:
+        result["edge_probes"] = []
+        for edge, anchor_edge in (("high", "low"), ("low", "high")):
+            if edge in result["fallback_edges"]:
+                probe = _probe_populated_edge(source, table, edge=edge, anchor=int(result[anchor_edge]))
+                result["edge_probes"].append(probe)
+                if probe["capped"]:
+                    result[edge] = int(probe["bound"])
     return result
 
 
@@ -569,17 +610,10 @@ def _probe_populated_edge(
 ) -> dict[str, Any]:
     """Find a finite bound for a damaged rowid edge (issue #80205).
 
-    When an ordered edge probe fails, :func:`_salvage_rowid_bounds` used to
-    substitute the whole SQLite rowid domain. Range bisection then burned the
-    entire ``_MAX_SALVAGE_RANGE_QUERIES`` budget subdividing an enormous
-    synthetic tail that could not contain real rows — and once the budget was
-    gone, rows that were still readable were silently recorded as skipped.
-
-    This gallops outward from the readable ``anchor`` edge with exponentially
-    growing offsets. A probe that cleanly reports "no rows beyond X" caps the
-    domain at X; a probe that errors (its b-tree path crosses the damage) or
-    finds a row keeps growing. At most ~64 probes per edge, so the cap costs
-    a bounded, tiny slice of the salvage budget instead of all of it.
+    Substituting the whole rowid domain for a failed edge probe made range bisection burn the entire
+    salvage budget on an empty synthetic tail, after which readable rows were silently skipped.
+    Instead gallop outward from the readable ``anchor`` with exponential offsets: a clean "no rows
+    beyond X" caps the domain, an error or hit keeps growing. At most ~64 probes per edge.
     """
 
     ascending = edge == "high"
@@ -637,25 +671,18 @@ def _copy_table_salvage(
 ) -> dict[str, Any]:
     """Best-effort rowid-range copy that continues past damaged source pages."""
 
-    source_columns = _table_columns(source, table)
-    destination_columns = _table_columns(destination, table)
-    columns = [column for column in destination_columns if column in source_columns]
     result: dict[str, Any] = {
         "mode": "rowid_range_salvage",
         "source_rows": source_rows,
         "copied_rows": 0,
         "excluded_rows": 0,
-        "columns": columns,
+        "columns": [],
         "range_queries": 0,
         "exact_lookup_recovered": 0,
         "skipped_rowid_ranges": [],
     }
-    if not source_columns:
-        result["status"] = "missing"
-        return result
-    if not columns:
-        result["status"] = "failed"
-        result["error"] = "source and destination have no compatible columns"
+    columns = _compatible_columns(source, destination, table, result)
+    if columns is None:
         return result
 
     bounds = _salvage_rowid_bounds(source, table)
@@ -671,30 +698,7 @@ def _copy_table_salvage(
             result["error"] += f": {details}"
         return result
 
-    # Issue #80205: a damaged ordered edge probe used to substitute the whole
-    # SQLite rowid domain, and bisecting that synthetic tail exhausted the
-    # range-query budget while readable tail rows were still waiting to be
-    # copied. Gallop outward from the surviving edge for a finite bound first.
-    fallback_edges = bounds.get("fallback_edges") or []
-    if fallback_edges:
-        bounds["edge_probes"] = []
-        if "high" in fallback_edges and bounds.get("low") is not None:
-            probe = _probe_populated_edge(
-                source, table, edge="high", anchor=int(bounds["low"])
-            )
-            bounds["edge_probes"].append(probe)
-            if probe["capped"]:
-                bounds["high"] = int(probe["bound"])
-        if "low" in fallback_edges and bounds.get("high") is not None:
-            probe = _probe_populated_edge(
-                source, table, edge="low", anchor=int(bounds["high"])
-            )
-            bounds["edge_probes"].append(probe)
-            if probe["capped"]:
-                bounds["low"] = int(probe["bound"])
-
-    quoted = ", ".join(f'"{column}"' for column in columns)
-    placeholders = ", ".join("?" for _ in columns)
+    quoted, placeholders = _quoted_columns(columns)
     select_sql = (
         f'SELECT rowid, {quoted} FROM "{table}" '
         "WHERE rowid BETWEEN ? AND ? ORDER BY rowid"
@@ -709,14 +713,9 @@ def _copy_table_salvage(
     def recover_exact_rowid(rowid: int) -> bool:
         """Issue #80205: salvage one row by exact-key lookup.
 
-        A singleton range scan (``rowid BETWEEN x AND x ORDER BY rowid``)
-        must advance the cursor past ``x`` to prove the range is exhausted;
-        when the *next* cell or page is damaged that advance raises AFTER the
-        row was produced, and the driver discards the already-fetched row. An
-        equality lookup on the rowid stops at the hit, so the boundary row
-        directly before a damaged page — readable in the field case and by
-        SQLite's page-level ``.recover`` — is recovered instead of being
-        recorded as skipped.
+        A singleton range scan (``rowid BETWEEN x AND x ORDER BY rowid``) must advance the cursor
+        past ``x`` to prove the range is exhausted; when the *next* cell or page is damaged that
+        advance raises AFTER the row was produced, and the driver discards the already-fetched row.
         """
         result["range_queries"] += 1
         try:
@@ -729,13 +728,8 @@ def _copy_table_salvage(
         if row_filter is not None and not row_filter(value, column_names):
             result["excluded_rows"] += 1
             return True
-        destination.execute("BEGIN IMMEDIATE")
-        try:
+        with _immediate_transaction(destination):
             destination.execute(insert_sql, value)
-            destination.execute("COMMIT")
-        except BaseException:
-            destination.execute("ROLLBACK")
-            raise
         result["copied_rows"] += 1
         result["exact_lookup_recovered"] += 1
         return True
@@ -747,10 +741,7 @@ def _copy_table_salvage(
         if result["range_queries"] >= _MAX_SALVAGE_RANGE_QUERIES:
             stopped_at_query_limit = True
             _append_skipped_range(
-                result["skipped_rowid_ranges"],
-                low,
-                high,
-                "salvage range query limit reached",
+                result["skipped_rowid_ranges"], low, high, "salvage range query limit reached"
             )
             return
 
@@ -774,13 +765,8 @@ def _copy_table_salvage(
                     excluded_count = 0
 
                 if included:
-                    destination.execute("BEGIN IMMEDIATE")
-                    try:
+                    with _immediate_transaction(destination):
                         destination.executemany(insert_sql, included)
-                        destination.execute("COMMIT")
-                    except BaseException:
-                        destination.execute("ROLLBACK")
-                        raise
 
                 result["copied_rows"] += len(included)
                 result["excluded_rows"] += excluded_count
@@ -793,21 +779,12 @@ def _copy_table_salvage(
                         "skipped_ranges": len(result["skipped_rowid_ranges"]),
                     })
         except sqlite3.DatabaseError as exc:
-            retry_low = (
-                last_committed_rowid + 1
-                if last_committed_rowid is not None
-                else low
-            )
+            retry_low = last_committed_rowid + 1 if last_committed_rowid is not None else low
             if retry_low > high:
                 return
             if retry_low == high:
                 if not recover_exact_rowid(retry_low):
-                    _append_skipped_range(
-                        result["skipped_rowid_ranges"],
-                        retry_low,
-                        high,
-                        str(exc),
-                    )
+                    _append_skipped_range(result["skipped_rowid_ranges"], retry_low, high, str(exc))
                 return
             midpoint = retry_low + (high - retry_low) // 2
             copy_range(retry_low, midpoint)
@@ -815,16 +792,12 @@ def _copy_table_salvage(
 
     copy_range(int(bounds["low"]), int(bounds["high"]))
     skipped_ranges = result["skipped_rowid_ranges"]
-    result["skipped_rowid_span"] = sum(
-        item["high"] - item["low"] + 1 for item in skipped_ranges
-    )
+    result["skipped_rowid_span"] = sum(item["high"] - item["low"] + 1 for item in skipped_ranges)
     result["query_limit_reached"] = stopped_at_query_limit
 
     if skipped_ranges:
         result["status"] = "partial" if result["copied_rows"] else "failed"
-        result["error"] = (
-            f"{len(skipped_ranges)} rowid range(s) skipped"
-        )
+        result["error"] = f"{len(skipped_ranges)} rowid range(s) skipped"
     elif (
         source_rows is not None
         and result["copied_rows"] + result["excluded_rows"] != source_rows
@@ -839,6 +812,53 @@ def _copy_table_salvage(
     return result
 
 
+def _state_meta_result(source_rows: Optional[int], **extra: Any) -> dict[str, Any]:
+    return {
+        "source_meta_rows": source_rows,
+        "copied_rows": 0,
+        "columns": ["key", "value"],
+        "excluded_keys": sorted(_GENERATED_META_KEYS),
+        **extra,
+    }
+
+
+def _state_meta_precheck(
+    source: sqlite3.Connection,
+    destination: sqlite3.Connection,
+    source_rows: Optional[int],
+    *,
+    salvage: bool,
+) -> Optional[dict[str, Any]]:
+    """Terminal ``state_meta`` result when the key/value schema is unusable, else ``None``.
+
+    Status matters here. In salvage mode an unusable-but-PRESENT table reports ``failed``, not
+    ``missing``: verification only escalates ``failed``/``partial`` into a warning +
+    ``loss_detected``, so reporting ``missing`` would silently drop real metadata and still claim
+    ``complete=True``.
+    """
+    extra = {"mode": "rowid_range_salvage"} if salvage else {}
+    source_columns = _table_columns(source, "state_meta")
+    if not {"key", "value"}.issubset(source_columns):
+        if salvage and source_columns:
+            # Present but unusable: this IS data loss and must be reported.
+            return _state_meta_result(
+                source_rows,
+                **extra,
+                status="failed",
+                error=(
+                    "source state_meta exists but is missing the key/value "
+                    f"columns (found: {', '.join(source_columns) or 'none'})"
+                ),
+            )
+        # Genuinely absent from the source — nothing was lost.
+        return _state_meta_result(source_rows, **extra, status="missing")
+    if not {"key", "value"}.issubset(_table_columns(destination, "state_meta")):
+        return _state_meta_result(
+            source_rows, **extra, status="failed", error="destination state_meta schema is incomplete"
+        )
+    return None
+
+
 def _copy_state_meta(
     source: sqlite3.Connection,
     destination: sqlite3.Connection,
@@ -847,76 +867,36 @@ def _copy_state_meta(
     progress_cb: Optional[ProgressCallback],
     source_rows: Optional[int],
 ) -> dict[str, Any]:
-    source_columns = _table_columns(source, "state_meta")
-    destination_columns = _table_columns(destination, "state_meta")
-    result: dict[str, Any] = {
-        "source_meta_rows": source_rows,
-        "copied_rows": 0,
-        "columns": ["key", "value"],
-        "excluded_keys": sorted(_GENERATED_META_KEYS),
-    }
-    if not {"key", "value"}.issubset(source_columns):
-        result["status"] = "missing"
-        return result
-    if not {"key", "value"}.issubset(destination_columns):
-        result["status"] = "failed"
-        result["error"] = "destination state_meta schema is incomplete"
-        return result
+    problem = _state_meta_precheck(source, destination, source_rows, salvage=False)
+    if problem is not None:
+        return problem
 
     placeholders = ", ".join("?" for _ in _GENERATED_META_KEYS)
+    params = tuple(_GENERATED_META_KEYS)
     filtered_source_rows: Optional[int] = None
     try:
         filtered_source_rows = int(
             source.execute(
                 f"SELECT COUNT(*) FROM state_meta WHERE key NOT IN ({placeholders})",
-                tuple(_GENERATED_META_KEYS),
+                params,
             ).fetchone()[0]
         )
     except sqlite3.DatabaseError:
         # The copy loop below will return the concrete read error.
         pass
 
-    try:
-        cursor = source.execute(
-            f"SELECT key, value FROM state_meta WHERE key NOT IN ({placeholders})",
-            tuple(_GENERATED_META_KEYS),
-        )
-        while True:
-            rows = cursor.fetchmany(chunk_size)
-            if not rows:
-                break
-            destination.execute("BEGIN IMMEDIATE")
-            try:
-                destination.executemany(
-                    "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)",
-                    rows,
-                )
-                destination.execute("COMMIT")
-            except BaseException:
-                destination.execute("ROLLBACK")
-                raise
-            result["copied_rows"] += len(rows)
-            if progress_cb is not None:
-                progress_cb({
-                    "table": "state_meta",
-                    "copied_rows": result["copied_rows"],
-                    "source_rows": filtered_source_rows,
-                })
-    except sqlite3.DatabaseError as exc:
-        result["status"] = "partial" if result["copied_rows"] else "failed"
-        result["error"] = str(exc)
-        return result
-
-    result["status"] = (
-        "complete"
-        if filtered_source_rows is None or result["copied_rows"] == filtered_source_rows
-        else "partial"
+    return _copy_rows(
+        source,
+        destination,
+        f"SELECT key, value FROM state_meta WHERE key NOT IN ({placeholders})",
+        params,
+        "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)",
+        table="state_meta",
+        chunk_size=chunk_size,
+        progress_cb=progress_cb,
+        expected_rows=filtered_source_rows,
+        result=_state_meta_result(source_rows),
     )
-    if result["status"] == "partial":
-        result["error"] = (
-            f"copied {result['copied_rows']} of {filtered_source_rows} readable rows"
-        )
-    return result
 
 
 def _copy_state_meta_salvage(
@@ -927,64 +907,12 @@ def _copy_state_meta_salvage(
     progress_cb: Optional[ProgressCallback],
     source_rows: Optional[int],
 ) -> dict[str, Any]:
-    """Salvage readable user metadata while regenerating derived FTS state.
+    """Salvage readable user metadata while regenerating derived FTS state."""
+    problem = _state_meta_precheck(source, destination, source_rows, salvage=True)
+    if problem is not None:
+        return problem
 
-    Requires both ``key`` and ``value``, matching the non-partial
-    :func:`_copy_state_meta`. A damaged ``state_meta`` can retain one column
-    and lose the other; without this check a missing ``key`` raised
-    ``ValueError`` from ``columns.index("key")`` and aborted the entire
-    partial recovery, and a missing ``value`` would have copied key-only rows
-    while reporting the table complete.
-
-    Status matters here. An unusable-but-PRESENT table reports ``failed``, not
-    ``missing``: verification only escalates ``failed``/``partial`` into a
-    warning + ``loss_detected``, so reporting ``missing`` would silently drop
-    real metadata and still claim ``complete=True``. ``missing`` is reserved
-    for a table that genuinely is not there. Either way ``state_meta`` is
-    optional, so ``--allow-partial`` records the loss and carries on
-    recovering sessions and messages.
-    """
-    source_columns = _table_columns(source, "state_meta")
-    destination_columns = _table_columns(destination, "state_meta")
-    if not source_columns:
-        # Genuinely absent from the source — nothing was lost.
-        return {
-            "mode": "rowid_range_salvage",
-            "source_meta_rows": source_rows,
-            "copied_rows": 0,
-            "columns": ["key", "value"],
-            "excluded_keys": sorted(_GENERATED_META_KEYS),
-            "status": "missing",
-        }
-    if not {"key", "value"}.issubset(source_columns):
-        # Present but unusable: this IS data loss and must be reported.
-        return {
-            "mode": "rowid_range_salvage",
-            "source_meta_rows": source_rows,
-            "copied_rows": 0,
-            "columns": ["key", "value"],
-            "excluded_keys": sorted(_GENERATED_META_KEYS),
-            "status": "failed",
-            "error": (
-                "source state_meta exists but is missing the key/value "
-                f"columns (found: {', '.join(source_columns) or 'none'})"
-            ),
-        }
-    if not {"key", "value"}.issubset(destination_columns):
-        return {
-            "mode": "rowid_range_salvage",
-            "source_meta_rows": source_rows,
-            "copied_rows": 0,
-            "columns": ["key", "value"],
-            "excluded_keys": sorted(_GENERATED_META_KEYS),
-            "status": "failed",
-            "error": "destination state_meta schema is incomplete",
-        }
-
-    def keep_user_meta(
-        row: tuple[Any, ...],
-        columns: tuple[str, ...],
-    ) -> bool:
+    def keep_user_meta(row: tuple[Any, ...], columns: tuple[str, ...]) -> bool:
         return str(row[columns.index("key")]) not in _GENERATED_META_KEYS
 
     result = _copy_table_salvage(
@@ -1007,25 +935,17 @@ def _reconstruct_missing_sessions(
 ) -> dict[str, Any]:
     """Recreate placeholder session rows for salvaged orphaned messages.
 
-    When the ``sessions`` b-tree is damaged worse than ``messages``, salvage
-    can recover the conversation text while recovering few or none of the
-    session rows that own it. Deleting those messages as "orphans" throws away
-    the only readable copy of the user's data — the exact opposite of what
-    ``--allow-partial`` is for. A real report (July 2026) copied 20,817 of
-    20,824 messages and then removed every one of them, producing an output
-    with 0 sessions and 0 messages.
+    When the ``sessions`` b-tree is damaged worse than ``messages``, salvage can recover the
+    conversation text while recovering few or none of the session rows that own it. Deleting those
+    messages as "orphans" throws away the only readable copy of the user's data — the exact opposite
+    of what ``--allow-partial`` is for.
 
-    Instead, synthesize a minimal session row per orphaned ``session_id``
-    (only ``id``/``source``/``started_at`` are NOT NULL) so the messages stay
-    reachable and foreign keys hold. ``started_at`` is taken from the earliest
-    surviving message so ordering stays sane. Rows are marked with
-    ``source='recovered'`` and a ``title`` that says so, because a fabricated
-    session must never be mistaken for an original.
+    Instead, synthesize a minimal session row per orphaned ``session_id`` (only
+    ``id``/``source``/``started_at`` are NOT NULL) so the messages stay reachable and foreign keys
+    hold. ``started_at`` is taken from the earliest surviving message so ordering stays sane.
     """
     result: dict[str, Any] = {"sessions_reconstructed": 0, "messages_retained": 0}
-    if not _table_columns(destination, "sessions"):
-        return result
-    if not _table_columns(destination, "messages"):
+    if not (_table_columns(destination, "sessions") and _table_columns(destination, "messages")):
         return result
 
     orphaned = destination.execute(
@@ -1042,38 +962,40 @@ def _reconstruct_missing_sessions(
     for session_id, first_timestamp, message_count in orphaned:
         started_at = float(first_timestamp) if first_timestamp is not None else 0.0
         while True:
-            title = (
-                f"[recovered {title_sequence}] "
-                "session metadata was unreadable"
-            )
+            title = f"[recovered {title_sequence}] session metadata was unreadable"
             title_sequence += 1
-            if (
-                destination.execute(
-                    "SELECT 1 FROM sessions WHERE title = ? LIMIT 1",
-                    (title,),
-                ).fetchone()
-                is None
-            ):
+            taken = destination.execute("SELECT 1 FROM sessions WHERE title = ? LIMIT 1", (title,)).fetchone()
+            if taken is None:
                 break
 
         cursor = destination.execute(
             "INSERT INTO sessions "
             "(id, source, started_at, title, message_count) "
             "VALUES (?, 'recovered', ?, ?, ?)",
-            (
-                session_id,
-                started_at,
-                title,
-                int(message_count),
-            ),
+            (session_id, started_at, title, int(message_count)),
         )
         if cursor.rowcount != 1:
-            raise sqlite3.IntegrityError(
-                f"failed to reconstruct missing session {session_id!r}"
-            )
+            raise sqlite3.IntegrityError(f"failed to reconstruct missing session {session_id!r}")
         result["sessions_reconstructed"] += 1
         result["messages_retained"] += int(message_count)
     return result
+
+
+def _reconcile(destination: sqlite3.Connection, table: str, where: str, mutation: str) -> int:
+    """Count rows of ``table`` matching ``where``; run ``mutation WHERE where`` only when there are any."""
+    count = int(destination.execute(f'SELECT COUNT(*) FROM "{table}" WHERE {where}').fetchone()[0])
+    if count:
+        destination.execute(f"{mutation} WHERE {where}")
+    return count
+
+
+_DEPENDENT_TABLES = (
+    "messages",
+    "session_model_usage",
+    "compression_locks",
+    "telegram_dm_topic_bindings",
+)
+_RELINK_COUNTERS = ("session_prompt_refs_cleared", "sessions_parent_cleared")
 
 
 def _cleanup_partial_orphans(
@@ -1081,11 +1003,9 @@ def _cleanup_partial_orphans(
 ) -> dict[str, Any]:
     """Reconcile references to sessions that could not be salvaged.
 
-    Messages are never discarded for lack of a session row: their owning
-    session is reconstructed as a placeholder first (see
-    :func:`_reconstruct_missing_sessions`). Only rows that remain orphaned
-    after that — and rows in tables carrying no recoverable user content —
-    are removed.
+    Messages are never discarded for lack of a session row: their owning session is reconstructed as
+    a placeholder first (see :func:`_reconstruct_missing_sessions`). Only rows that remain orphaned
+    after that — and rows in tables carrying no recoverable user content — are removed.
     """
 
     result: dict[str, Any] = {
@@ -1094,116 +1014,47 @@ def _cleanup_partial_orphans(
         "sessions_parent_cleared": 0,
         "sessions_reconstructed": 0,
         "messages_retained": 0,
-        "messages_removed": 0,
-        "session_model_usage_removed": 0,
-        "compression_locks_removed": 0,
-        "telegram_dm_topic_bindings_removed": 0,
+        **{f"{table}_removed": 0 for table in _DEPENDENT_TABLES},
     }
-    destination.execute("BEGIN IMMEDIATE")
-    try:
+    with _immediate_transaction(destination):
         # Rebuild owners BEFORE any orphan deletion so salvaged conversation
         # text is never dropped for want of a session row.
-        rebuilt = _reconstruct_missing_sessions(destination)
-        result["sessions_reconstructed"] = rebuilt["sessions_reconstructed"]
-        result["messages_retained"] = rebuilt["messages_retained"]
+        result.update(_reconstruct_missing_sessions(destination))
 
-        parent_count = int(
-            destination.execute(
-                "SELECT COUNT(*) FROM sessions AS child "
-                "WHERE child.parent_session_id IS NOT NULL "
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM sessions AS parent "
-                "WHERE parent.id = child.parent_session_id)"
-            ).fetchone()[0]
+        result["sessions_parent_cleared"] = _reconcile(
+            destination,
+            "sessions",
+            "parent_session_id IS NOT NULL AND NOT EXISTS ("
+            "SELECT 1 FROM sessions AS parent WHERE parent.id = sessions.parent_session_id)",
+            "UPDATE sessions SET parent_session_id = NULL",
         )
-        if parent_count:
-            destination.execute(
-                "UPDATE sessions SET parent_session_id = NULL "
-                "WHERE parent_session_id IS NOT NULL "
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM sessions AS parent "
-                "WHERE parent.id = sessions.parent_session_id)"
-            )
-        result["sessions_parent_cleared"] = parent_count
-
-        prompt_ref_count = int(
-            destination.execute(
-                "SELECT COUNT(*) FROM sessions "
-                "WHERE system_prompt_hash IS NOT NULL "
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM system_prompts "
-                "WHERE system_prompts.hash = sessions.system_prompt_hash)"
-            ).fetchone()[0]
+        result["session_prompt_refs_cleared"] = _reconcile(
+            destination,
+            "sessions",
+            "system_prompt_hash IS NOT NULL AND NOT EXISTS ("
+            "SELECT 1 FROM system_prompts WHERE system_prompts.hash = sessions.system_prompt_hash)",
+            "UPDATE sessions SET system_prompt_hash = NULL",
         )
-        if prompt_ref_count:
-            destination.execute(
-                "UPDATE sessions SET system_prompt_hash = NULL "
-                "WHERE system_prompt_hash IS NOT NULL "
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM system_prompts "
-                "WHERE system_prompts.hash = sessions.system_prompt_hash)"
-            )
-        result["session_prompt_refs_cleared"] = prompt_ref_count
-
-        unreferenced_prompt_count = int(
-            destination.execute(
-                "SELECT COUNT(*) FROM system_prompts "
-                "WHERE NOT EXISTS ("
-                "SELECT 1 FROM sessions "
-                "WHERE sessions.system_prompt_hash = system_prompts.hash)"
-            ).fetchone()[0]
+        result["system_prompts_removed"] = _reconcile(
+            destination,
+            "system_prompts",
+            "NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.system_prompt_hash = system_prompts.hash)",
+            "DELETE FROM system_prompts",
         )
-        if unreferenced_prompt_count:
-            destination.execute(
-                "DELETE FROM system_prompts "
-                "WHERE NOT EXISTS ("
-                "SELECT 1 FROM sessions "
-                "WHERE sessions.system_prompt_hash = system_prompts.hash)"
-            )
-        result["system_prompts_removed"] = unreferenced_prompt_count
-
-        dependent_tables = (
-            ("messages", "messages_removed"),
-            ("session_model_usage", "session_model_usage_removed"),
-            ("compression_locks", "compression_locks_removed"),
-            (
-                "telegram_dm_topic_bindings",
-                "telegram_dm_topic_bindings_removed",
-            ),
-        )
-        for table, report_key in dependent_tables:
+        for table in _DEPENDENT_TABLES:
             if not _table_columns(destination, table):
                 continue
-            orphan_count = int(
-                destination.execute(
-                    f'SELECT COUNT(*) FROM "{table}" AS dependent '
-                    "WHERE NOT EXISTS ("
-                    "SELECT 1 FROM sessions "
-                    "WHERE sessions.id = dependent.session_id)"
-                ).fetchone()[0]
+            result[f"{table}_removed"] = _reconcile(
+                destination,
+                table,
+                f'NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.id = "{table}".session_id)',
+                f'DELETE FROM "{table}"',
             )
-            if orphan_count:
-                destination.execute(
-                    f'DELETE FROM "{table}" '
-                    "WHERE NOT EXISTS ("
-                    "SELECT 1 FROM sessions "
-                    f'WHERE sessions.id = "{table}".session_id)'
-                )
-            result[report_key] = orphan_count
-        destination.execute("COMMIT")
-    except BaseException:
-        destination.execute("ROLLBACK")
-        raise
     # Only destructive/relinking actions belong in this total. The
     # reconstruction counters describe data RETAINED, so summing them here
     # would report saving the user's messages as if it were losing them.
-    result["total_removed_or_relinked"] = (
-        int(result["session_prompt_refs_cleared"])
-        + int(result["sessions_parent_cleared"])
-        + int(result["messages_removed"])
-        + int(result["session_model_usage_removed"])
-        + int(result["compression_locks_removed"])
-        + int(result["telegram_dm_topic_bindings_removed"])
+    result["total_removed_or_relinked"] = sum(
+        int(result[key]) for key in (*_RELINK_COUNTERS, *(f"{table}_removed" for table in _DEPENDENT_TABLES))
     )
     return result
 
@@ -1222,6 +1073,14 @@ def _verify_recovered_database(
         "loss_detected": False,
     }
 
+    def flag(message: str, *, soft: bool) -> None:
+        """Record data loss as a warning (``soft``) or as a verification error."""
+        if soft:
+            verification["warnings"].append(message)
+            verification["loss_detected"] = True
+        else:
+            verification["errors"].append(message)
+
     open_error = _db_opens_cleanly(output)
     verification["opens_cleanly"] = open_error is None
     if open_error is not None:
@@ -1229,30 +1088,19 @@ def _verify_recovered_database(
 
     conn = sqlite3.connect(str(output), isolation_level=None)
     try:
-        integrity_rows = [
-            str(row[0]) for row in conn.execute("PRAGMA integrity_check").fetchall()
-        ]
+        integrity_rows = [str(row[0]) for row in conn.execute("PRAGMA integrity_check").fetchall()]
         verification["integrity_check"] = integrity_rows
         if integrity_rows != ["ok"]:
-            verification["errors"].append(
-                "PRAGMA integrity_check did not return exactly 'ok'"
-            )
+            verification["errors"].append("PRAGMA integrity_check did not return exactly 'ok'")
 
-        foreign_key_rows = [
-            list(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()
-        ]
+        foreign_key_rows = [list(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()]
         verification["foreign_key_check"] = foreign_key_rows
         if foreign_key_rows:
             verification["errors"].append("foreign key violations remain")
 
-        journal_row = conn.execute("PRAGMA journal_mode").fetchone()
-        verification["journal_mode"] = (
-            str(journal_row[0]).lower() if journal_row else None
-        )
+        verification["journal_mode"] = _journal_mode(conn)
 
-        schema_row = conn.execute(
-            "SELECT version FROM schema_version LIMIT 1"
-        ).fetchone()
+        schema_row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         verification["schema_version"] = int(schema_row[0]) if schema_row else None
         if verification["schema_version"] != SCHEMA_VERSION:
             verification["errors"].append(
@@ -1262,53 +1110,30 @@ def _verify_recovered_database(
 
         meta = {
             str(row[0]): row[1]
-            for row in conn.execute(
-                "SELECT key, value FROM state_meta WHERE key LIKE 'fts_%'"
-            ).fetchall()
+            for row in conn.execute("SELECT key, value FROM state_meta WHERE key LIKE 'fts_%'").fetchall()
         }
         verification["fts_meta"] = meta
         if meta.get("fts_storage_version") != str(FTS_STORAGE_VERSION):
-            verification["errors"].append(
-                "fresh FTS storage version was not established"
-            )
+            verification["errors"].append("fresh FTS storage version was not established")
         pending_keys = sorted(
             key
-            for key in (
-                "fts_optimize_available",
-                "fts_rebuild_high_water",
-                "fts_rebuild_progress",
-                "fts_cjk_stale",
-                "fts_cjk_rebuild_high_water",
-                "fts_cjk_rebuild_progress",
-            )
-            if key in meta
+            for key in _GENERATED_META_KEYS
+            if key.startswith("fts_") and key != "fts_storage_version" and key in meta
         )
         verification["pending_fts_keys"] = pending_keys
         if pending_keys:
-            verification["errors"].append(
-                "derived FTS transition markers remain in the recovered database"
-            )
+            verification["errors"].append("derived FTS transition markers remain in the recovered database")
 
         counts: dict[str, int] = {}
         for table in _INVENTORY_TABLES:
-            columns = _table_columns(conn, table)
-            if columns:
-                counts[table] = int(
-                    conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-                )
+            if _table_columns(conn, table):
+                counts[table] = _count_rows(conn, table)
         verification["table_counts"] = counts
 
         for table in ("sessions", "messages", *_AUXILIARY_TABLES):
             expected = expected_counts.get(table)
             if expected is not None and counts.get(table) != expected:
-                message = (
-                    f"{table} count is {counts.get(table)}, expected {expected}"
-                )
-                if allow_partial:
-                    verification["warnings"].append(message)
-                    verification["loss_detected"] = True
-                else:
-                    verification["errors"].append(message)
+                flag(f"{table} count is {counts.get(table)}, expected {expected}", soft=allow_partial)
 
         cleanup = orphan_cleanup or {}
         rebuilt_sessions = int(cleanup.get("sessions_reconstructed") or 0)
@@ -1328,44 +1153,30 @@ def _verify_recovered_database(
             status = table_report.get("status")
             if status not in {"failed", "partial"}:
                 continue
-            message = f"{table} copy status is {status}"
-            if allow_partial and (
-                status == "partial"
-                or table not in {"sessions", "messages"}
-                or (
-                    table == "sessions"
-                    and status == "failed"
-                    and sessions_fully_reconstructed
-                )
-            ):
-                verification["warnings"].append(message)
-                verification["loss_detected"] = True
-            else:
-                verification["errors"].append(message)
+            flag(
+                f"{table} copy status is {status}",
+                soft=allow_partial
+                and (
+                    status == "partial"
+                    or table not in {"sessions", "messages"}
+                    or (table == "sessions" and sessions_fully_reconstructed)
+                ),
+            )
 
         if orphan_cleanup:
-            orphan_count = int(
-                orphan_cleanup.get("total_removed_or_relinked") or 0
-            )
+            orphan_count = int(orphan_cleanup.get("total_removed_or_relinked") or 0)
             if orphan_count:
-                verification["warnings"].append(
-                    f"{orphan_count} orphaned reference(s) were removed or relinked"
-                )
-                verification["loss_detected"] = True
-            rebuilt_sessions = int(
-                orphan_cleanup.get("sessions_reconstructed") or 0
-            )
+                flag(f"{orphan_count} orphaned reference(s) were removed or relinked", soft=True)
             if rebuilt_sessions:
-                retained = int(orphan_cleanup.get("messages_retained") or 0)
                 # Not a clean recovery: the conversation text survived but its
                 # session metadata did not, so these rows are placeholders.
-                verification["warnings"].append(
+                flag(
                     f"{rebuilt_sessions} session(s) could not be salvaged and "
                     f"were reconstructed as placeholders to retain "
-                    f"{retained} message(s); their metadata (title, model, "
-                    "timestamps, cost) is lost"
+                    f"{retained_messages} message(s); their metadata (title, model, "
+                    "timestamps, cost) is lost",
+                    soft=True,
                 )
-                verification["loss_detected"] = True
 
         fts_checks: dict[str, str] = {}
         for table in ("messages_fts", "messages_fts_trigram", "messages_fts_cjk"):
@@ -1389,9 +1200,7 @@ def _verify_recovered_database(
         conn.close()
 
     verification["healthy"] = not verification["errors"]
-    verification["complete"] = bool(
-        verification["healthy"] and not verification["loss_detected"]
-    )
+    verification["complete"] = bool(verification["healthy"] and not verification["loss_detected"])
     return verification
 
 
@@ -1412,8 +1221,7 @@ def _finalize_derived_metadata(destination: sqlite3.Connection) -> dict[str, Any
 
     fts_keys = tuple(key for key in _GENERATED_META_KEYS if key.startswith("fts_"))
     placeholders = ", ".join("?" for _ in fts_keys)
-    destination.execute("BEGIN IMMEDIATE")
-    try:
+    with _immediate_transaction(destination):
         destination.execute(
             f"DELETE FROM state_meta WHERE key IN ({placeholders})",
             fts_keys,
@@ -1423,10 +1231,6 @@ def _finalize_derived_metadata(destination: sqlite3.Connection) -> dict[str, Any
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             ("fts_storage_version", str(FTS_STORAGE_VERSION)),
         )
-        destination.execute("COMMIT")
-    except BaseException:
-        destination.execute("ROLLBACK")
-        raise
     result["finalized"] = True
     return result
 
@@ -1443,10 +1247,9 @@ def _recover_via_lost_and_found(
 ) -> dict[str, Any]:
     """Best-effort page-level salvage when table schemas are unreadable.
 
-    Shells out to the sqlite3 CLI's ``.recover`` (a shell-only feature, not
-    part of Python's ``sqlite3`` module) to rebuild rows into a scratch
-    lost_and_found database, then heuristically maps them into a fresh
-    current-schema database. The result is explicitly labeled best-effort.
+    Shells out to the sqlite3 CLI's ``.recover`` (a shell-only feature, not part of Python's
+    ``sqlite3`` module) to rebuild rows into a scratch lost_and_found database, then heuristically
+    maps them into a fresh current-schema database. The result is explicitly labeled best-effort.
     """
 
     from hermes_cli.session_lost_and_found import (
@@ -1469,9 +1272,7 @@ def _recover_via_lost_and_found(
 
     lf_path = snapshot_dir / "lost_and_found.db"
     try:
-        cli_report = run_cli_lost_and_found_recover(
-            snapshot_source, lf_path, sqlite3_bin
-        )
+        cli_report = run_cli_lost_and_found_recover(snapshot_source, lf_path, sqlite3_bin)
     except (LostAndFoundError, OSError) as exc:
         raise SessionRecoverySourceError(
             "Partial recovery could not read the table schemas for: "
@@ -1479,15 +1280,9 @@ def _recover_via_lost_and_found(
             + f", and page-level .recover salvage failed: {exc}"
         ) from exc
 
-    destination_db = SessionDB(db_path=output)
-    destination_db.close()
-
     lf_conn = sqlite3.connect(str(lf_path), isolation_level=None)
-    destination_conn = sqlite3.connect(
-        str(output), isolation_level=None, timeout=1.0
-    )
+    destination_conn = _fresh_destination(output)
     try:
-        destination_conn.execute("PRAGMA foreign_keys=OFF")
         mapping = map_lost_and_found_rows(lf_conn, destination_conn)
         stubbing = stub_missing_parent_sessions(destination_conn)
         fts = rebuild_fts_indexes(destination_conn)
@@ -1510,17 +1305,18 @@ def _recover_via_lost_and_found(
         for table in ("sessions", "messages", "session_model_usage")
     }
 
+    orphan_cleanup = {
+        "sessions_reconstructed": stubbing["sessions_stubbed"],
+        "messages_retained": stubbing["messages_retained"],
+        "messages_removed": 0,
+        "total_removed_or_relinked": 0,
+    }
     verification = _verify_recovered_database(
         output,
         expected_counts={"sessions": None, "messages": None},
         copy_report=copy_report,
         allow_partial=True,
-        orphan_cleanup={
-            "sessions_reconstructed": stubbing["sessions_stubbed"],
-            "messages_retained": stubbing["messages_retained"],
-            "messages_removed": 0,
-            "total_removed_or_relinked": 0,
-        },
+        orphan_cleanup=orphan_cleanup,
     )
     verification["loss_detected"] = True
     verification["warnings"].append(
@@ -1530,20 +1326,48 @@ def _recover_via_lost_and_found(
     )
     verification["complete"] = False
 
-    source_unchanged = (
-        _source_fingerprint(source) == inspection["source_fingerprint"]
+    return _recovery_report(
+        source,
+        output,
+        inspection,
+        disk_space,
+        verification,
+        on_source_change="healthy",
+        allow_partial=True,
+        mode="lost_and_found_salvage",
+        best_effort=True,
+        unreadable_schemas=missing_required,
+        sqlite3_cli=cli_report,
+        lost_and_found=mapping,
+        session_stubs=stubbing,
+        fts_rebuild=fts,
+        copy=copy_report,
+        orphan_cleanup=orphan_cleanup,
+        derived_metadata=derived_metadata,
     )
-    if not source_unchanged:
-        verification["errors"].append(
-            "the source database bundle changed during recovery"
-        )
-        verification["healthy"] = False
 
+
+def _recovery_report(
+    source: Path,
+    output: Path,
+    inspection: dict[str, Any],
+    disk_space: dict[str, Any],
+    verification: dict[str, Any],
+    *,
+    on_source_change: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    """The ``recover`` report: shared header, mode-specific ``fields``, then the verdict.
+
+    A source bundle that changed during recovery is a verification error and additionally clears
+    ``verification[on_source_change]``.
+    """
+    source_unchanged = _source_fingerprint(source) == inspection["source_fingerprint"]
+    if not source_unchanged:
+        verification["errors"].append("the source database bundle changed during recovery")
+        verification[on_source_change] = False
     return {
         "operation": "recover",
-        "allow_partial": True,
-        "mode": "lost_and_found_salvage",
-        "best_effort": True,
         "source": str(source),
         "output": str(output),
         "source_bundle": inspection["source_bundle"],
@@ -1556,22 +1380,10 @@ def _recover_via_lost_and_found(
             "errors": inspection["errors"],
             "warnings": inspection["warnings"],
         },
-        "unreadable_schemas": missing_required,
-        "sqlite3_cli": cli_report,
-        "lost_and_found": mapping,
-        "session_stubs": stubbing,
-        "fts_rebuild": fts,
-        "copy": copy_report,
-        "orphan_cleanup": {
-            "sessions_reconstructed": stubbing["sessions_stubbed"],
-            "messages_retained": stubbing["messages_retained"],
-            "messages_removed": 0,
-            "total_removed_or_relinked": 0,
-        },
-        "derived_metadata": derived_metadata,
+        **fields,
         "verification": verification,
-        "complete": False,
-        "partial": True,
+        "complete": bool(verification.get("complete") and source_unchanged),
+        "partial": bool(verification.get("loss_detected")),
         "verified": bool(verification.get("healthy") and source_unchanged),
         "installed": False,
     }
@@ -1588,8 +1400,8 @@ def recover_session_database(
 ) -> dict[str, Any]:
     """Recover canonical rows into a separate current-schema database.
 
-    The source path and its sidecars are copied before SQLite opens anything.
-    ``output_path`` must not exist and is never swapped into place.
+    The source path and its sidecars are copied before SQLite opens anything. ``output_path`` must
+    not exist and is never swapped into place.
     """
 
     if chunk_size <= 0:
@@ -1632,167 +1444,65 @@ def recover_session_database(
                     missing_required=missing_required,
                 )
 
-        source_conn = sqlite3.connect(
-            str(snapshot_source),
-            isolation_level=None,
-            timeout=1.0,
-        )
+        source_conn = _connect(snapshot_source)
         source_conn.execute("PRAGMA writable_schema=ON")
-        destination_db: Optional[SessionDB] = None
         destination_conn: Optional[sqlite3.Connection] = None
         try:
-            has_topic_tables = any(
-                inspection["tables"][table].get("available") for table in _TOPIC_TABLES
+            destination_conn = _fresh_destination(
+                output,
+                topic_tables=any(inspection["tables"][table].get("available") for table in _TOPIC_TABLES),
             )
 
-            destination_db = SessionDB(db_path=output)
-            if has_topic_tables:
-                destination_db.apply_telegram_topic_migration()
-            destination_db.close()
-            destination_db = None
-
-            destination_conn = sqlite3.connect(
-                str(output),
-                isolation_level=None,
-                timeout=1.0,
+            copy_meta, copy_rows = (
+                (_copy_state_meta_salvage, _copy_table_salvage) if allow_partial else (_copy_state_meta, _copy_table)
             )
-            destination_conn.execute("PRAGMA foreign_keys=OFF")
-
             copy_report: dict[str, dict[str, Any]] = {}
-            for table in _CANONICAL_TABLES:
-                table_inspection = inspection["tables"][table]
-                copy_function = (
-                    _copy_table_salvage if allow_partial else _copy_table
-                )
-                copy_report[table] = copy_function(
-                    source_conn,
-                    destination_conn,
-                    table,
-                    chunk_size=chunk_size,
-                    progress_cb=progress_cb,
-                    source_rows=table_inspection.get("rows"),
-                )
-
-            state_meta_inspection = inspection["tables"]["state_meta"]
-            if state_meta_inspection.get("available"):
-                state_meta_copy_function = (
-                    _copy_state_meta_salvage
-                    if allow_partial
-                    else _copy_state_meta
-                )
-                copy_report["state_meta"] = state_meta_copy_function(
-                    source_conn,
-                    destination_conn,
-                    chunk_size=chunk_size,
-                    progress_cb=progress_cb,
-                    source_rows=state_meta_inspection.get("rows"),
-                )
-            else:
-                copy_report["state_meta"] = {"status": "missing", "copied_rows": 0}
-
-            for table in _TOPIC_TABLES:
-                table_inspection = inspection["tables"][table]
-                if not table_inspection.get("available"):
-                    copy_report[table] = {
-                        "status": "missing",
-                        "copied_rows": 0,
-                    }
+            for table in (*_CANONICAL_TABLES, "state_meta", *_TOPIC_TABLES, *_AUXILIARY_TABLES):
+                if table not in _CANONICAL_TABLES and not inspection["tables"][table].get("available"):
+                    copy_report[table] = {"status": "missing", "copied_rows": 0}
                     continue
-                copy_function = (
-                    _copy_table_salvage if allow_partial else _copy_table
-                )
+                if table in _AUXILIARY_TABLES:
+                    _ensure_auxiliary_destination_schema(destination_conn, table)
+                copy_function, args = (copy_meta, ()) if table == "state_meta" else (copy_rows, (table,))
                 copy_report[table] = copy_function(
                     source_conn,
                     destination_conn,
-                    table,
+                    *args,
                     chunk_size=chunk_size,
                     progress_cb=progress_cb,
-                    source_rows=table_inspection.get("rows"),
+                    source_rows=inspection["tables"][table].get("rows"),
                 )
-
-            for table in _AUXILIARY_TABLES:
-                table_inspection = inspection["tables"][table]
-                if not table_inspection.get("available"):
-                    copy_report[table] = {
-                        "status": "missing",
-                        "copied_rows": 0,
-                    }
-                    continue
-                _ensure_auxiliary_destination_schema(destination_conn, table)
-                copy_function = (
-                    _copy_table_salvage if allow_partial else _copy_table
-                )
-                copy_report[table] = copy_function(
-                    source_conn,
-                    destination_conn,
-                    table,
-                    chunk_size=chunk_size,
-                    progress_cb=progress_cb,
-                    source_rows=table_inspection.get("rows"),
-                )
-            orphan_cleanup = (
-                _cleanup_partial_orphans(destination_conn)
-                if allow_partial
-                else None
-            )
+            orphan_cleanup = _cleanup_partial_orphans(destination_conn) if allow_partial else None
             derived_metadata = _finalize_derived_metadata(destination_conn)
         finally:
             source_conn.close()
             if destination_conn is not None:
                 destination_conn.close()
-            if destination_db is not None:
-                destination_db.close()
 
         verification = _verify_recovered_database(
             output,
             expected_counts={
-                **{
-                    table: inspection["tables"][table].get("rows")
-                    for table in _CANONICAL_TABLES
-                },
-                **{
-                    table: inspection["tables"][table].get("rows")
-                    for table in _AUXILIARY_TABLES
-                    if inspection["tables"].get(table, {}).get("available")
-                },
+                table: inspection["tables"][table].get("rows")
+                for table in (*_CANONICAL_TABLES, *_AUXILIARY_TABLES)
+                if table in _CANONICAL_TABLES
+                or inspection["tables"].get(table, {}).get("available")
             },
             copy_report=copy_report,
             allow_partial=allow_partial,
             orphan_cleanup=orphan_cleanup,
         )
-        source_unchanged = (
-            _source_fingerprint(source) == inspection["source_fingerprint"]
+        return _recovery_report(
+            source,
+            output,
+            inspection,
+            disk_space,
+            verification,
+            on_source_change="complete",
+            allow_partial=allow_partial,
+            copy=copy_report,
+            orphan_cleanup=orphan_cleanup,
+            derived_metadata=derived_metadata,
         )
-        if not source_unchanged:
-            verification["errors"].append(
-                "the source database bundle changed during recovery"
-            )
-            verification["complete"] = False
-
-        return {
-            "operation": "recover",
-            "allow_partial": allow_partial,
-            "source": str(source),
-            "output": str(output),
-            "source_bundle": inspection["source_bundle"],
-            "source_fingerprint": inspection["source_fingerprint"],
-            "source_unchanged": source_unchanged,
-            "disk_space": disk_space,
-            "inspection": {
-                "journal_mode": inspection.get("journal_mode"),
-                "tables": inspection["tables"],
-                "errors": inspection["errors"],
-                "warnings": inspection["warnings"],
-            },
-            "copy": copy_report,
-            "orphan_cleanup": orphan_cleanup,
-            "derived_metadata": derived_metadata,
-            "verification": verification,
-            "complete": bool(verification.get("complete") and source_unchanged),
-            "partial": bool(verification.get("loss_detected")),
-            "verified": bool(verification.get("healthy") and source_unchanged),
-            "installed": False,
-        }
     finally:
         temp_dir.cleanup()
 

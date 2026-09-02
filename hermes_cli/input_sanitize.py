@@ -16,12 +16,9 @@ _DESKTOP_PASTE_ARTIFACT = "~[[e"
 def strip_leaked_bracketed_paste_wrappers(text: str) -> str:
     """Strip leaked bracketed-paste wrapper markers from user-visible text.
 
-    Defensive normalization for cases where terminal/prompt_toolkit parsing
-    fails and bracketed-paste markers end up in the buffer as literal text.
-
-    Canonical wrappers are stripped unconditionally. Degraded visible forms like
-    ``[200~`` / ``[201~`` and ``00~`` / ``01~`` are removed only at boundaries
-    so embedded literals such as ``literal[200~tag`` stay intact.
+    Canonical wrappers are stripped unconditionally. Degraded visible forms like ``[200~`` /
+    ``[201~`` and ``00~`` / ``01~`` are removed only at boundaries so embedded literals such as
+    ``literal[200~tag`` stay intact.
     """
     if not text:
         return text

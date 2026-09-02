@@ -1,20 +1,8 @@
 """Registry-owned slash command execution (thin slice).
 
-Shared, surface-independent executors for informational slash commands.
-``CommandDef.execute`` (hermes_cli/commands.py) names a key in
-:data:`EXECUTORS`; each surface (CLI REPL, gateway, TUI slash worker via the
-CLI) resolves that key through :func:`run_execute` and applies only its own
-decoration (Rich markup, emoji/markdown, ``_telegramize_command_mentions``)
-to the canonical :class:`CommandReply`.
-
-Invariant: an executor's output depends only on ``ctx.args`` / ``ctx.options``
-— never on ``ctx.surface`` — so the core text is identical across surfaces
-for a fixed context (enforced by tests/hermes_cli/test_commands_execute.py).
-
-Import discipline: this module imports nothing heavy at module level and
-``hermes_cli.commands`` does NOT import this module (the ``execute`` field is
-a plain string), so the gateway can keep importing ``commands.py`` without
-prompt_toolkit and without cycles.
+Invariant: an executor's output depends only on ``ctx.args`` / ``ctx.options`` — never on
+``ctx.surface`` — so the core text is identical across surfaces for a fixed context (enforced by
+tests/hermes_cli/test_commands_execute.py).
 """
 
 from __future__ import annotations
@@ -51,10 +39,9 @@ class CommandContext:
 class CommandReply:
     """Canonical result of a shared executor.
 
-    ``text`` is the surface-independent core text.  ``data`` carries the
-    structured values the executor derived so a surface may re-render them
-    with its own decoration (Rich columns, markdown bullets) without
-    duplicating the computation.  ``format`` is a rendering hint only.
+    ``text`` is the surface-independent core text. ``data`` carries the structured values the
+    executor derived so a surface may re-render them with its own decoration (Rich columns, markdown
+    bullets) without duplicating the computation. ``format`` is a rendering hint only.
     """
 
     text: str
@@ -83,10 +70,9 @@ def _exec_egress(ctx: CommandContext) -> CommandReply:
 def _exec_profile(ctx: CommandContext) -> CommandReply:
     """Core /profile data — active profile name + home directory.
 
-    A multiplexed gateway may pre-resolve the per-source profile/home and pass
-    them via ``options`` (``profile_name`` / ``home_display``); otherwise the
-    process-level values are used (identical to the old CLI + non-multiplex
-    gateway behavior).
+    A multiplexed gateway may pre-resolve the per-source profile/home and pass them via
+    ``options`` (``profile_name`` / ``home_display``); otherwise process-level values are used,
+    matching the old CLI and non-multiplex gateway behavior.
     """
     profile_name = str(ctx.options.get("profile_name") or "").strip()
     home_display = str(ctx.options.get("home_display") or "").strip()
@@ -155,6 +141,16 @@ def _exec_bundles(ctx: CommandContext) -> CommandReply:
     )
 
 
+def _skill_commands() -> dict:
+    """Registered skill commands, or ``{}`` when the skill subsystem is unavailable."""
+    try:
+        from agent.skill_commands import get_skill_commands
+
+        return get_skill_commands() or {}
+    except Exception:
+        return {}
+
+
 def _exec_help(ctx: CommandContext) -> CommandReply:
     """Core gateway /help body (pre platform mention decoration)."""
     from agent.i18n import t
@@ -164,9 +160,8 @@ def _exec_help(ctx: CommandContext) -> CommandReply:
         t("gateway.help.header"),
         *gateway_help_lines(),
     ]
+    skill_cmds = _skill_commands()
     try:
-        from agent.skill_commands import get_skill_commands
-        skill_cmds = get_skill_commands()
         if skill_cmds:
             lines.append(t("gateway.help.skill_header", count=len(skill_cmds)))
             # Show first 10, then point to /commands for the rest
@@ -183,8 +178,8 @@ def _exec_help(ctx: CommandContext) -> CommandReply:
 def _exec_commands(ctx: CommandContext) -> CommandReply:
     """Core gateway /commands body — paginated command + skill listing.
 
-    ``ctx.options["page_size"]`` is a surface parameter (Telegram uses 15,
-    everything else 20) — for a fixed context the text is surface-invariant.
+    ``ctx.options["page_size"]`` is a surface parameter (Telegram uses 15, everything else 20) — for
+    a fixed context the text is surface-invariant.
     """
     from agent.i18n import t
     from hermes_cli.commands import gateway_help_lines
@@ -200,12 +195,10 @@ def _exec_commands(ctx: CommandContext) -> CommandReply:
 
     # Build combined entry list: built-in commands + skill commands
     entries = list(gateway_help_lines())
+    skill_cmds = _skill_commands()
     try:
-        from agent.skill_commands import get_skill_commands
-        skill_cmds = get_skill_commands()
         if skill_cmds:
-            entries.append("")
-            entries.append(t("gateway.commands.skill_header"))
+            entries.extend(["", t("gateway.commands.skill_header")])
             for cmd in sorted(skill_cmds):
                 desc = skill_cmds[cmd].get("description", "").strip() or t("gateway.commands.default_desc")
                 entries.append(f"`{cmd}` — {desc}")
@@ -258,25 +251,20 @@ EXECUTORS: dict[str, Callable[[CommandContext], CommandReply]] = {
 
 def resolve_executor(cmd_def: Any) -> Callable[[CommandContext], CommandReply] | None:
     """Return the shared executor for ``cmd_def`` (or None when not migrated)."""
-    key = getattr(cmd_def, "execute", None)
-    if not key:
-        return None
-    return EXECUTORS.get(key)
+    return EXECUTORS.get(getattr(cmd_def, "execute", None) or "")
 
 
 def run_execute(cmd_def: Any, ctx: CommandContext) -> CommandReply | None:
     """Run ``cmd_def``'s registry-owned executor, if any."""
     fn = resolve_executor(cmd_def)
-    if fn is None:
-        return None
-    return fn(ctx)
+    return None if fn is None else fn(ctx)
 
 
 def execute_command(name: str, ctx: CommandContext) -> CommandReply:
     """Run the shared executor for the command named ``name``.
 
-    Raises ``LookupError`` when the command is unknown or not migrated —
-    call sites use this only for commands they know carry ``execute``.
+    Raises ``LookupError`` when the command is unknown or not migrated — call sites use this only
+    for commands they know carry ``execute``.
     """
     from hermes_cli.commands import resolve_command
 

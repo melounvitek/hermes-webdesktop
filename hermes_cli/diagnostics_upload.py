@@ -1,23 +1,11 @@
 """Client for uploading ``hermes debug share`` bundles to Nous-internal S3.
 
-This is the opt-in (``--nous``) destination for ``hermes debug share``.
-Unlike the public paste.rs path, bundles uploaded here go to a Nous-owned
-S3 bucket via a short-lived signed URL minted by the Nous account service
-(NAS).  The bucket auto-expires objects after 14 days, and the contents are
-only viewable by Nous staff (and allowlisted Discord mods) through a
-Google-OAuth-gated viewer.
+1. POST {NAS_BASE}/api/diagnostics/upload-url → {uploadUrl, viewUrl, id, ...} (the request body
+carries ``sizeBytes``; NAS signs it into the presigned URL's ``ContentLength``, so the PUT must send
+exactly that many bytes) 2. PUT <uploadUrl> (the gzipped bundle, Content-Type application/gzip)
 
-Flow:
-
-    1. POST {NAS_BASE}/api/diagnostics/upload-url  → {uploadUrl, viewUrl, id, ...}
-       (the request body carries ``sizeBytes``; NAS signs it into the presigned
-       URL's ``ContentLength``, so the PUT must send exactly that many bytes)
-    2. PUT <uploadUrl>  (the gzipped bundle, Content-Type application/gzip)
-
-NAS is stateless — the object's existence in S3 is the only state, so there is
-no confirm/callback step.
-
-Uses stdlib ``urllib`` only, matching ``debug.py`` style — no third-party deps.
+NAS is stateless — the object's existence in S3 is the only state, so there is no confirm/callback
+step.
 """
 
 import json
@@ -39,17 +27,24 @@ _UPLOAD_TIMEOUT = 120
 _USER_AGENT = "hermes-agent/debug-share"
 
 
+def _urlopen_checked(req: urllib.request.Request, *, timeout: int, what: str):
+    """Open *req*; raise ``RuntimeError`` on non-2xx and return the response body bytes."""
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        status = getattr(resp, "status", None)
+        if status is None:
+            status = resp.getcode()
+        if not (200 <= status < 300):
+            raise RuntimeError(f"{what} failed: HTTP {status}")
+        return resp.read()
+
+
 def request_upload_url(
     content_type: str = "application/gzip",
     size_bytes: int | None = None,
 ) -> dict:
     """Ask NAS to mint a presigned PUT URL for a diagnostics bundle.
 
-    POSTs a small JSON body to ``{NAS_BASE}/api/diagnostics/upload-url`` and
-    returns the parsed JSON response, expected to contain at least
-    ``uploadUrl``, ``viewUrl`` and ``id`` (plus optional ``expiresAt`` /
-    ``uploadExpiresInSeconds``).
-
+    Returns the parsed JSON, expected to carry at least ``uploadUrl``, ``viewUrl`` and ``id``.
     Raises on non-2xx responses or unparseable JSON.
     """
     payload: dict = {"contentType": content_type}
@@ -67,15 +62,9 @@ def request_upload_url(
             "User-Agent": _USER_AGENT,
         },
     )
-    with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-        status = getattr(resp, "status", None)
-        if status is None:
-            status = resp.getcode()
-        if not (200 <= status < 300):
-            raise RuntimeError(
-                f"diagnostics upload-url request failed: HTTP {status}"
-            )
-        body = resp.read().decode("utf-8")
+    body = _urlopen_checked(
+        req, timeout=_REQUEST_TIMEOUT, what="diagnostics upload-url request"
+    ).decode("utf-8")
 
     try:
         result = json.loads(body)
@@ -99,8 +88,8 @@ def put_bundle(
 ) -> None:
     """PUT the gzipped *data* bundle to a presigned *upload_url*.
 
-    Sets the ``Content-Type`` header (must match what NAS pinned when signing
-    the URL, otherwise S3 rejects the signature). Raises on non-2xx.
+    Sets the ``Content-Type`` header (must match what NAS pinned when signing the URL, otherwise S3
+    rejects the signature). Raises on non-2xx.
     """
     req = urllib.request.Request(
         upload_url,
@@ -111,23 +100,15 @@ def put_bundle(
             "User-Agent": _USER_AGENT,
         },
     )
-    with urllib.request.urlopen(req, timeout=_UPLOAD_TIMEOUT) as resp:
-        status = getattr(resp, "status", None)
-        if status is None:
-            status = resp.getcode()
-        if not (200 <= status < 300):
-            raise RuntimeError(f"diagnostics bundle PUT failed: HTTP {status}")
+    _urlopen_checked(req, timeout=_UPLOAD_TIMEOUT, what="diagnostics bundle PUT")
 
 
 def share_to_nous(report_bundle: bytes) -> dict:
     """Orchestrate the full Nous-S3 upload of a gzipped *report_bundle*.
 
-    Two steps: mint a presigned PUT URL (sending the exact ``sizeBytes`` NAS
-    signs into the URL's ``ContentLength``), then PUT the bundle. NAS is
-    stateless — the object's existence in S3 is the only state, so there is no
-    confirm/callback step. Returns the dict from :func:`request_upload_url`
-    (which carries ``viewUrl`` / ``id`` / expiry metadata) so the caller can
-    print the viewer link. Raises on any failure of either step.
+    Two steps: mint a presigned PUT URL (sending the exact ``sizeBytes`` NAS signs into the URL's
+    ``ContentLength``), then PUT the bundle. NAS is stateless — the object's existence in S3 is the
+    only state, so there is no confirm/callback step.
     """
     size_bytes = len(report_bundle)
     info = request_upload_url(

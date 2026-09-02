@@ -1,14 +1,4 @@
-"""Warn when an in-session model switch will trigger preflight compression on the next turn.
-
-Addresses part of #23767 ("user-facing guardrail when switching from a
-high-context provider to a substantially lower-context provider"). The other
-proposed fixes from that issue (hard preflight token guard, metadata cache
-invalidation on switch, compression safety invariant, oversized tool-output
-handling) are tracked separately.
-
-Mirrors the expensive-model guard pattern: merge into ``ModelSwitchResult.warning_message``
-so Herm TUI, CLI, and gateway surfaces that already show switch warnings pick it up.
-"""
+"""Warn when an in-session model switch will trigger preflight compression on the next turn."""
 
 from __future__ import annotations
 

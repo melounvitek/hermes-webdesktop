@@ -1,14 +1,4 @@
-"""``hermes verify`` — detect a project's run recipe and smoke-test it.
-
-Scoped port of superagent-ai/grok-cli's verify subsystem entrypoint.
-Statically detects the project kind (or loads the saved manifest at
-``.hermes/environment.json``), then runs bootstrap/build/test phases and an
-optional background start + readiness poll, printing an evidence summary.
-
-Completed runs are recorded into the coding verification evidence ledger
-(:mod:`agent.verification_evidence`), so a passing ``hermes verify`` satisfies
-the verify-on-stop guard the same way a passing canonical test command does.
-"""
+"""``hermes verify`` — detect a project's run recipe and smoke-test it."""
 
 from __future__ import annotations
 
@@ -88,17 +78,8 @@ def run_verify_command(args) -> int:
 def _merge_project_facts_commands(root: Path, recipe) -> None:
     """Fold ``detect_project_facts`` verify commands into a detected recipe.
 
-    Layer ownership: ``agent.coding_context`` owns the cheap prompt-time facts
-    (test/lint/build commands surfaced in the workspace snapshot and the
-    verify-on-stop nudge); ``agent.verify.recipes`` owns the deep runtime
-    recipe (framework, start command, port, readiness). When the two disagree
-    the runtime recipe must not *lose* commands the prompt layer already
-    promised the model — e.g. ``scripts/run_tests.sh`` or a ``pytest`` config
-    the recipe detector doesn't know about — so any project-facts verify
-    command not already covered is appended to the recipe's test list.
-
-    Never applied to a saved manifest (the user-edited manifest is the source
-    of truth) and never raises: this is a best-effort union.
+    Never applied to a saved manifest (the user-edited manifest is the source of truth) and never
+    raises: this is a best-effort union.
     """
     try:
         from agent.coding_context import detect_project_facts
@@ -117,10 +98,9 @@ def _merge_project_facts_commands(root: Path, recipe) -> None:
 def _record_evidence(root: Path, recipe, result, *, partial: bool) -> None:
     """Record the completed run into the verification evidence ledger.
 
-    Best-effort and fail-silent: a ledger problem must never change the CLI's
-    exit code or output. ``partial`` (an explicit ``--phase`` subset or
-    ``--skip-start``) downgrades the scope to ``targeted`` so a partial pass
-    is never presented as a full workspace green.
+    Best-effort and fail-silent: a ledger problem must never change the CLI's exit code or output.
+    ``partial`` (an explicit ``--phase`` subset or ``--skip-start``) downgrades the scope to
+    ``targeted`` so a partial pass is never presented as a full workspace green.
     """
     try:
         from agent.verification_evidence import record_verify_run

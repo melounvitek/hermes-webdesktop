@@ -1,19 +1,7 @@
 """``hermes doctor --live`` — opt-in bounded real-call tool-backend probes.
 
-Design invariants:
-
-- **Opt-in only.** These probes make real (cheap, metadata/read-only) network
-  calls and may spend a trivial amount of quota. They run ONLY when the user
-  passes ``hermes doctor --live``.
-- **Bounded.** One probe per configured backend, sequential, each with a
-  ~10s timeout (configurable via ``doctor.live_probe_timeout`` in
-  config.yaml).
-- **Read-only.** Metadata GETs only — no generation, no scrapes that spend
-  credits, no state mutation anywhere.
-- **Failure-isolated.** A probe crashing must never crash the doctor run;
-  every probe is wrapped in a catch-all.
-- **Configured-only.** Backends without credentials / config are skipped with
-  a note, never failed.
+- **Opt-in only.** These probes make real (cheap, metadata/read-only) network calls and may spend a
+trivial amount of quota. They run ONLY when the user passes ``hermes doctor --live``.
 """
 
 from __future__ import annotations
@@ -41,6 +29,11 @@ ELEVENLABS_VOICES_URL = "https://api.elevenlabs.io/v1/voices"
 
 # TTS/STT providers that never touch the network (nothing to probe).
 _LOCAL_AUDIO_PROVIDERS = {"", "local", "edge", "neutts", "kittentts", "piper"}
+_AUDIO_PROBES = {
+    "openai": (OPENAI_MODELS_URL, "OPENAI_API_KEY", "Bearer"),
+    "groq": (GROQ_MODELS_URL, "GROQ_API_KEY", "Bearer"),
+    "elevenlabs": (ELEVENLABS_VOICES_URL, "ELEVENLABS_API_KEY", "xi"),
+}
 
 
 @dataclass
@@ -113,8 +106,8 @@ def _browser_available() -> bool:
 def _launch_browser_probe(timeout: float) -> tuple:
     """Launch a browser, open about:blank, close. Returns (ok, detail).
 
-    Uses Playwright directly (what agent-browser drives underneath) so the
-    probe owns the full lifecycle and always cleans up.
+    Uses Playwright directly (what agent-browser drives underneath) so the probe owns the full
+    lifecycle and always cleans up.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -133,10 +126,7 @@ def _launch_browser_probe(timeout: float) -> tuple:
 
 
 def _probe_mcp_server(name: str, config: dict, timeout: float):
-    """initialize + tools/list against one configured MCP server.
-
-    Reuses the exact machinery behind ``hermes mcp test``.
-    """
+    """initialize + tools/list against one configured MCP server."""
     from hermes_cli.mcp_config import _probe_single_server
 
     return _probe_single_server(name, config, connect_timeout=timeout)
@@ -157,25 +147,23 @@ def _classify_http(name: str, resp, key_hint: str) -> ProbeResult:
     return ProbeResult(name, "fail", f"(HTTP {code})")
 
 
-def _probe_firecrawl(timeout: float) -> ProbeResult:
-    key = os.getenv("FIRECRAWL_API_KEY", "").strip()
+def _keyed_probe(name: str, url: str, env_var: str, scheme: str,
+                 timeout: float) -> ProbeResult:
+    """Metadata GET authenticated by one env var (never a generation call)."""
+    key = os.getenv(env_var, "").strip()
     if not key:
-        return ProbeResult("Firecrawl", "skip", "(not configured)")
-    resp = _http_get(FIRECRAWL_HEALTH_URL,
-                     headers={"Authorization": f"Bearer {key}"},
+        return ProbeResult(name, "skip", "(not configured)")
+    resp = _http_get(url, headers={"Authorization": f"{scheme} {key}"},
                      timeout=timeout)
-    return _classify_http("Firecrawl", resp, "FIRECRAWL_API_KEY")
+    return _classify_http(name, resp, env_var)
+
+
+def _probe_firecrawl(timeout: float) -> ProbeResult:
+    return _keyed_probe("Firecrawl", FIRECRAWL_HEALTH_URL, "FIRECRAWL_API_KEY", "Bearer", timeout)
 
 
 def _probe_fal(timeout: float) -> ProbeResult:
-    key = os.getenv("FAL_KEY", "").strip()
-    if not key:
-        return ProbeResult("FAL", "skip", "(not configured)")
-    # Metadata GET only — never a generation call.
-    resp = _http_get(FAL_MODELS_URL,
-                     headers={"Authorization": f"Key {key}"},
-                     timeout=timeout)
-    return _classify_http("FAL", resp, "FAL_KEY")
+    return _keyed_probe("FAL", FAL_MODELS_URL, "FAL_KEY", "Key", timeout)
 
 
 def _probe_browser(timeout: float) -> ProbeResult:
@@ -195,12 +183,7 @@ def _audio_provider_probe(kind: str, provider: str,
                            f"(provider '{provider or 'local'}' — no remote "
                            "backend to probe)")
 
-    probes = {
-        "openai": (OPENAI_MODELS_URL, "OPENAI_API_KEY", "Bearer"),
-        "groq": (GROQ_MODELS_URL, "GROQ_API_KEY", "Bearer"),
-        "elevenlabs": (ELEVENLABS_VOICES_URL, "ELEVENLABS_API_KEY", "xi"),
-    }
-    entry = probes.get(provider)
+    entry = _AUDIO_PROBES.get(provider)
     if entry is None:
         return ProbeResult(name, "skip",
                            f"(provider '{provider}' — no live probe "
@@ -221,30 +204,26 @@ def _audio_provider_probe(kind: str, provider: str,
     return result
 
 
-def _probe_tts(config: dict, timeout: float) -> ProbeResult:
-    provider = ((config.get("tts") or {}).get("provider")) or ""
-    return _audio_provider_probe("tts", provider, timeout)
-
-
-def _probe_stt(config: dict, timeout: float) -> ProbeResult:
-    provider = ((config.get("stt") or {}).get("provider")) or ""
-    return _audio_provider_probe("stt", provider, timeout)
+def _probe_audio(kind: str, config: dict, timeout: float) -> ProbeResult:
+    provider = ((config.get(kind) or {}).get("provider")) or ""
+    return _audio_provider_probe(kind, provider, timeout)
 
 
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
+_REPORTERS = {"pass": check_ok, "warn": check_warn, "fail": check_fail}
+
+
 def _report(result: ProbeResult, issues: List[str]) -> None:
-    if result.status == "pass":
-        check_ok(result.name, result.detail)
-    elif result.status == "warn":
-        check_warn(result.name, result.detail)
-    elif result.status == "fail":
-        check_fail(result.name, result.detail)
-        issues.append(f"Live probe failed: {result.name} {result.detail}")
-    else:  # skip
+    reporter = _REPORTERS.get(result.status)
+    if reporter is None:  # skip
         check_info(f"{result.name} {result.detail} — skipped")
+        return
+    reporter(result.name, result.detail)
+    if result.status == "fail":
+        issues.append(f"Live probe failed: {result.name} {result.detail}")
 
 
 def _run_one(name: str, fn: Callable[[], ProbeResult],
@@ -267,9 +246,8 @@ def _run_one(name: str, fn: Callable[[], ProbeResult],
 def run_live_checks(issues: List[str]) -> List[ProbeResult]:
     """Run one bounded, read-only probe per configured tool backend.
 
-    Sequential by design (bounded, predictable output ordering). Appends a
-    remediation line to ``issues`` for each failed probe. Skipped backends
-    never fail and never append issues.
+    Sequential by design (bounded, predictable output ordering). Appends a remediation line to
+    ``issues`` for each failed probe. Skipped backends never fail and never append issues.
     """
     config = _load_config()
     try:
@@ -309,10 +287,9 @@ def run_live_checks(issues: List[str]) -> List[ProbeResult]:
         results.append(ProbeResult("MCP", "skip", "(no servers configured)"))
         _report(results[-1], issues)
 
-    results.append(_run_one(
-        "TTS", lambda: _probe_tts(config, timeout), issues))
-    results.append(_run_one(
-        "STT", lambda: _probe_stt(config, timeout), issues))
+    for kind in ("tts", "stt"):
+        results.append(_run_one(
+            kind.upper(), lambda k=kind: _probe_audio(k, config, timeout), issues))
 
     return results
 
@@ -320,8 +297,8 @@ def run_live_checks(issues: List[str]) -> List[ProbeResult]:
 def maybe_run_live_checks(args, issues: List[str]):
     """Entry point called from ``run_doctor`` after the static checks.
 
-    No-ops (returns None) unless the user explicitly passed ``--live``.
-    A crash anywhere in the live subsystem must never break doctor.
+    No-ops (returns None) unless the user explicitly passed ``--live``. A crash anywhere in the live
+    subsystem must never break doctor.
     """
     if not getattr(args, "live", False):
         return None

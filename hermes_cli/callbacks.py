@@ -1,10 +1,4 @@
-"""Interactive prompt callbacks for terminal_tool integration.
-
-These bridge terminal_tool's interactive prompts (clarify, sudo, approval)
-into prompt_toolkit's event loop. Each function takes the HermesCLI instance
-as its first argument and uses its state (queues, app reference) to coordinate
-with the TUI.
-"""
+"""Interactive prompt callbacks for terminal_tool integration."""
 
 import queue
 import time as _time
@@ -15,14 +9,51 @@ from hermes_cli.secret_prompt import masked_secret_prompt
 from hermes_constants import display_hermes_home
 
 
+def _invalidate(cli) -> None:
+    if hasattr(cli, "_app") and cli._app:
+        cli._app.invalidate()
+
+
+def _clear_secret_input(cli) -> None:
+    """Drop stale draft input so Enter never stores it as the secret."""
+    if hasattr(cli, "_clear_secret_input_buffer"):
+        try:
+            cli._clear_secret_input_buffer()
+        except Exception:
+            pass
+    elif hasattr(cli, "_app") and cli._app:
+        try:
+            cli._app.current_buffer.reset()
+        except Exception:
+            pass
+
+
+def _secret_result(var_name: str, value: str) -> dict:
+    """Store ``value`` (or report a skip when empty) and build the callback result dict."""
+    if not value:
+        cprint(f"\n{_DIM}  ⏭ Secret entry skipped{_RST}")
+        return {
+            "success": True,
+            "reason": "cancelled",
+            "stored_as": var_name,
+            "validated": False,
+            "skipped": True,
+            "message": "Secret setup was skipped.",
+        }
+    stored = save_env_value_secure(var_name, value)
+    cprint(f"\n{_DIM}  ✓ Stored secret in {display_hermes_home()}/.env as {var_name}{_RST}")
+    return {
+        **stored,
+        "skipped": False,
+        "message": "Secret stored securely. The secret value was not exposed to the model.",
+    }
+
+
 def clarify_callback(cli, question, choices, multi_select=False):
     """Prompt for clarifying question through the TUI.
 
-    Sets up the interactive selection UI, then blocks until the user
-    responds. Returns the user's choice or a timeout message.
-
-    When ``multi_select`` is True, shows checkboxes and the user can
-    select multiple options with Space, confirming with Enter.
+    Blocks until the user responds; returns the choice or a timeout message. ``multi_select``
+    shows checkboxes (Space to toggle, Enter to confirm).
     """
     from cli import CLI_CONFIG
     from tools.clarify_gateway import resolve_clarify_timeout
@@ -44,9 +75,7 @@ def clarify_callback(cli, question, choices, multi_select=False):
     }
     cli._clarify_deadline = None if timeout <= 0 else _time.monotonic() + timeout
     cli._clarify_freetext = is_open_ended
-
-    if hasattr(cli, "_app") and cli._app:
-        cli._app.invalidate()
+    _invalidate(cli)
 
     while True:
         try:
@@ -55,18 +84,14 @@ def clarify_callback(cli, question, choices, multi_select=False):
             return result
         except queue.Empty:
             # None deadline = unlimited: never auto-skip, just keep polling.
-            if cli._clarify_deadline is not None:
-                remaining = cli._clarify_deadline - _time.monotonic()
-                if remaining <= 0:
-                    break
-            if hasattr(cli, "_app") and cli._app:
-                cli._app.invalidate()
+            if cli._clarify_deadline is not None and cli._clarify_deadline - _time.monotonic() <= 0:
+                break
+            _invalidate(cli)
 
     cli._clarify_state = None
     cli._clarify_freetext = False
     cli._clarify_deadline = None
-    if hasattr(cli, "_app") and cli._app:
-        cli._app.invalidate()
+    _invalidate(cli)
     cprint(f"\n{_DIM}(clarify timed out after {timeout}s — agent will decide){_RST}")
     return (
         "The user did not provide a response within the time limit. "
@@ -77,8 +102,8 @@ def clarify_callback(cli, question, choices, multi_select=False):
 def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
     """Prompt for a secret value through the TUI (e.g. API keys for skills).
 
-    Returns a dict with keys: success, stored_as, validated, skipped, message.
-    The secret is stored in ~/.hermes/.env and never exposed to the model.
+    Returns a dict with keys: success, stored_as, validated, skipped, message. The secret is stored
+    in ~/.hermes/.env and never exposed to the model.
     """
     if not getattr(cli, "_app", None):
         if not hasattr(cli, "_secret_state"):
@@ -89,26 +114,7 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
             value = masked_secret_prompt(f"{prompt} (hidden, ESC or empty Enter to skip): ")
         except (EOFError, KeyboardInterrupt):
             value = ""
-
-        if not value:
-            cprint(f"\n{_DIM}  ⏭ Secret entry skipped{_RST}")
-            return {
-                "success": True,
-                "reason": "cancelled",
-                "stored_as": var_name,
-                "validated": False,
-                "skipped": True,
-                "message": "Secret setup was skipped.",
-            }
-
-        stored = save_env_value_secure(var_name, value)
-        _dhh = display_hermes_home()
-        cprint(f"\n{_DIM}  ✓ Stored secret in {_dhh}/.env as {var_name}{_RST}")
-        return {
-            **stored,
-            "skipped": False,
-            "message": "Secret stored securely. The secret value was not exposed to the model.",
-        }
+        return _secret_result(var_name, value)
 
     timeout = 120
     response_queue = queue.Queue()
@@ -122,69 +128,26 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
     cli._secret_deadline = _time.monotonic() + timeout
     if hasattr(cli, "_ring_bell"):
         cli._ring_bell(prompt=True, context=f"secret needed ({var_name})")
-    # Avoid storing stale draft input as the secret when Enter is pressed.
-    if hasattr(cli, "_clear_secret_input_buffer"):
-        try:
-            cli._clear_secret_input_buffer()
-        except Exception:
-            pass
-    elif hasattr(cli, "_app") and cli._app:
-        try:
-            cli._app.current_buffer.reset()
-        except Exception:
-            pass
-
-    if hasattr(cli, "_app") and cli._app:
-        cli._app.invalidate()
+    _clear_secret_input(cli)
+    _invalidate(cli)
 
     while True:
         try:
             value = response_queue.get(timeout=1)
-            cli._secret_state = None
-            cli._secret_deadline = 0
-            if hasattr(cli, "_app") and cli._app:
-                cli._app.invalidate()
-
-            if not value:
-                cprint(f"\n{_DIM}  ⏭ Secret entry skipped{_RST}")
-                return {
-                    "success": True,
-                    "reason": "cancelled",
-                    "stored_as": var_name,
-                    "validated": False,
-                    "skipped": True,
-                    "message": "Secret setup was skipped.",
-                }
-
-            stored = save_env_value_secure(var_name, value)
-            _dhh = display_hermes_home()
-            cprint(f"\n{_DIM}  ✓ Stored secret in {_dhh}/.env as {var_name}{_RST}")
-            return {
-                **stored,
-                "skipped": False,
-                "message": "Secret stored securely. The secret value was not exposed to the model.",
-            }
         except queue.Empty:
-            remaining = cli._secret_deadline - _time.monotonic()
-            if remaining <= 0:
+            if cli._secret_deadline - _time.monotonic() <= 0:
                 break
-            if hasattr(cli, "_app") and cli._app:
-                cli._app.invalidate()
+            _invalidate(cli)
+            continue
+        cli._secret_state = None
+        cli._secret_deadline = 0
+        _invalidate(cli)
+        return _secret_result(var_name, value)
 
     cli._secret_state = None
     cli._secret_deadline = 0
-    if hasattr(cli, "_clear_secret_input_buffer"):
-        try:
-            cli._clear_secret_input_buffer()
-        except Exception:
-            pass
-    elif hasattr(cli, "_app") and cli._app:
-        try:
-            cli._app.current_buffer.reset()
-        except Exception:
-            pass
-    if hasattr(cli, "_app") and cli._app:
-        cli._app.invalidate()
+    _clear_secret_input(cli)
+    _invalidate(cli)
     cprint(f"\n{_DIM}  ⏱ Timeout — secret capture cancelled{_RST}")
     return {
         "success": True,
@@ -199,12 +162,9 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
 def approval_callback(cli, command: str, description: str) -> str:
     """Prompt for dangerous command approval through the TUI.
 
-    Shows a selection UI with choices: once / session / always / deny.
-    When the command is longer than 70 characters, a "view" option is
-    included so the user can reveal the full text before deciding.
-
-    Uses cli._approval_lock to serialize concurrent requests (e.g. from
-    parallel delegation subtasks) so each prompt gets its own turn.
+    Shows a selection UI with choices: once / session / always / deny. When the command is longer
+    than 70 characters, a "view" option is included so the user can reveal the full text before
+    deciding.
     """
     lock = getattr(cli, "_approval_lock", None)
     if lock is None:
@@ -228,28 +188,23 @@ def approval_callback(cli, command: str, description: str) -> str:
             "response_queue": response_queue,
         }
         cli._approval_deadline = _time.monotonic() + timeout
-
-        if hasattr(cli, "_app") and cli._app:
-            cli._app.invalidate()
+        _invalidate(cli)
 
         while True:
             try:
                 result = response_queue.get(timeout=1)
-                cli._approval_state = None
-                cli._approval_deadline = 0
-                if hasattr(cli, "_app") and cli._app:
-                    cli._app.invalidate()
-                return result
             except queue.Empty:
-                remaining = cli._approval_deadline - _time.monotonic()
-                if remaining <= 0:
+                if cli._approval_deadline - _time.monotonic() <= 0:
                     break
-                if hasattr(cli, "_app") and cli._app:
-                    cli._app.invalidate()
+                _invalidate(cli)
+                continue
+            cli._approval_state = None
+            cli._approval_deadline = 0
+            _invalidate(cli)
+            return result
 
         cli._approval_state = None
         cli._approval_deadline = 0
-        if hasattr(cli, "_app") and cli._app:
-            cli._app.invalidate()
+        _invalidate(cli)
         cprint(f"\n{_DIM}  ⏱ Timeout — denying command{_RST}")
         return "timeout"

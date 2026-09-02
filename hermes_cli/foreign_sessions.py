@@ -1,35 +1,9 @@
 """Import sessions from foreign coding agents (Claude Code, Codex CLI).
 
-``hermes sessions import`` (and ``--resume @claude`` / ``--resume @codex``)
-let a user pull a conversation they started in another agent CLI into
-Hermes and continue it here.
-
 Sources (read-only — foreign files are never modified):
 
-* **Claude Code** stores one JSONL file per session under
-  ``~/.claude/projects/<encoded-cwd>/<uuid>.jsonl``.  Each line is a JSON
-  object; ``type: "user"`` / ``type: "assistant"`` lines carry an
-  Anthropic-format ``message`` payload whose ``content`` is either a string
-  or a list of blocks (``text``, ``tool_use``, ``tool_result``, ...).
-  ``type: "summary"`` lines carry a human title for the thread.
-
-* **Codex CLI** stores rollout JSONL under
-  ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``.  The first line is a
-  ``session_meta`` record (cwd, session id); conversation turns are
-  ``response_item`` records whose payload is ``{"type": "message",
-  "role": user|assistant|developer, "content": [{"type": "input_text"|
-  "output_text", "text": ...}]}`` plus ``custom_tool_call`` /
-  ``function_call`` payloads for tool activity.  (Schema verified against
-  real rollout files, Codex CLI 0.147.)
-
-Conversion contract — imported history must satisfy the provider
-role-alternation invariant Hermes enforces everywhere else:
-
-* only plain ``user`` / ``assistant`` text messages are produced (tool
-  calls become short bracketed summaries inside the assistant text; we
-  never fabricate ``tool_calls`` structures);
-* consecutive same-role turns are merged rather than stubbed;
-* system/developer payloads are never imported.
+Conversion contract — imported history must satisfy the provider role-alternation invariant Hermes
+enforces everywhere else:
 """
 
 from __future__ import annotations
@@ -52,6 +26,7 @@ _WRAPPER_TAG_RE = re.compile(
 )
 
 _TITLE_MAX = 60
+_SOURCE_LABELS = {"claude": "Claude Code", "codex": "Codex CLI"}
 
 
 @dataclass
@@ -68,9 +43,7 @@ class ForeignSession:
 
     @property
     def label(self) -> str:
-        name = {"claude": "Claude Code", "codex": "Codex CLI"}.get(
-            self.source, self.source
-        )
+        name = _SOURCE_LABELS.get(self.source, self.source)
         title = (self.title_guess or "").strip() or self.path.stem
         return f"[{name}] {title[:_TITLE_MAX]}"
 
@@ -80,12 +53,9 @@ def _read_json_lines(path: Path):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
-                line = line.strip()
-                if not line:
-                    continue
                 try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                    obj = json.loads(line) if line.strip() else None
+                except ValueError:  # JSONDecodeError subclasses ValueError
                     continue
                 if isinstance(obj, dict):
                     yield obj
@@ -93,35 +63,26 @@ def _read_json_lines(path: Path):
         return
 
 
-def _flatten_blocks(content: Any, *, source: str) -> str:
-    """Flatten a message ``content`` (string or block list) to plain text.
-
-    Tool activity becomes a short bracketed summary; unknown block types
-    are skipped rather than guessed at.
-    """
+def _flatten_blocks(content: Any) -> str:
+    """Flatten a message ``content`` (string or block list) to plain text."""
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
         return ""
     parts: List[str] = []
     for block in content:
-        if not isinstance(block, dict):
-            if isinstance(block, str):
-                parts.append(block)
+        if isinstance(block, str):
+            parts.append(block)
+        elif not isinstance(block, dict):
             continue
-        btype = block.get("type")
-        if btype in ("text", "input_text", "output_text"):
+        # tool_result (tool output echoed into a user message — not typed input),
+        # thinking / redacted_thinking / reasoning and unknown types are skipped.
+        elif (btype := block.get("type")) in ("text", "input_text", "output_text"):
             text = block.get("text")
             if isinstance(text, str) and text:
                 parts.append(text)
         elif btype == "tool_use":  # Claude Code assistant block
-            name = block.get("name") or "tool"
-            parts.append(f"[ran tool: {name}]")
-        elif btype == "tool_result":
-            # Tool output echoed into a user message — not typed input.
-            continue
-        elif btype in ("thinking", "redacted_thinking", "reasoning"):
-            continue
+            parts.append(f"[ran tool: {block.get('name') or 'tool'}]")
         elif btype == "image":
             parts.append("[image]")
     return "\n\n".join(p for p in (s.strip() for s in parts) if p)
@@ -134,9 +95,8 @@ def _is_wrapper_text(text: str) -> bool:
 def _merge_turns(raw_turns: List[Tuple[str, str]]) -> List[Dict[str, str]]:
     """Merge consecutive same-role turns; guarantee strict alternation.
 
-    A leading assistant turn (session began before the log window) gets a
-    minimal user stub so the first message is always ``user``; this is the
-    only place a stub is ever inserted.
+    A leading assistant turn (session began before the log window) gets a minimal user stub so the
+    first message is always ``user``; this is the only place a stub is ever inserted.
     """
     merged: List[Dict[str, str]] = []
     for role, text in raw_turns:
@@ -148,17 +108,28 @@ def _merge_turns(raw_turns: List[Tuple[str, str]]) -> List[Dict[str, str]]:
         else:
             merged.append({"role": role, "content": text})
     if merged and merged[0]["role"] == "assistant":
-        merged.insert(
-            0,
-            {
-                "role": "user",
-                "content": "(imported conversation begins with an assistant reply)",
-            },
-        )
+        merged.insert(0, {"role": "user", "content": "(imported conversation begins with an assistant reply)"})
     return merged
 
 
-# ── Claude Code ──────────────────────────────────────────────────────────
+def _message_turn(role: Any, content: Any) -> Optional[Tuple[str, str]]:
+    """Normalize one message into a ``(role, text)`` turn, or None when it is not importable."""
+    if role not in ("user", "assistant"):
+        return None
+    text = _flatten_blocks(content)
+    if not text or (role == "user" and _is_wrapper_text(text)):
+        return None
+    return (role, text)
+
+
+def _parsed(turns: List[Tuple[str, str]], cwd: Optional[str], session_id: Optional[str],
+            title: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "turns": _merge_turns(turns),
+        "cwd": cwd,
+        "title_guess": title or _first_user_line(turns),
+        "session_id": session_id,
+    }
 
 
 def parse_claude_session(path: Path) -> Dict[str, Any]:
@@ -185,51 +156,10 @@ def parse_claude_session(path: Path) -> Dict[str, Any]:
         message = obj.get("message")
         if not isinstance(message, dict):
             continue
-        role = message.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        text = _flatten_blocks(message.get("content"), source="claude")
-        if not text or (role == "user" and _is_wrapper_text(text)):
-            continue
-        turns.append((role, text))
-    return {
-        "turns": _merge_turns(turns),
-        "cwd": cwd,
-        "title_guess": summary or _first_user_line(turns),
-        "session_id": session_id,
-    }
-
-
-def list_claude_sessions(root: Optional[Path] = None) -> List[ForeignSession]:
-    """Discover Claude Code sessions under ``~/.claude/projects``."""
-    root = Path(root) if root else Path.home() / ".claude" / "projects"
-    results: List[ForeignSession] = []
-    if not root.is_dir():
-        return results
-    for jsonl in sorted(root.glob("*/*.jsonl")):
-        try:
-            mtime = jsonl.stat().st_mtime
-        except OSError:
-            continue
-        parsed = parse_claude_session(jsonl)
-        if not parsed["turns"]:
-            continue
-        results.append(
-            ForeignSession(
-                source="claude",
-                path=jsonl,
-                mtime=mtime,
-                cwd=parsed["cwd"],
-                title_guess=parsed["title_guess"],
-                turn_count=len(parsed["turns"]),
-                session_id=parsed["session_id"],
-            )
-        )
-    results.sort(key=lambda s: s.mtime, reverse=True)
-    return results
-
-
-# ── Codex CLI ────────────────────────────────────────────────────────────
+        turn = _message_turn(message.get("role"), message.get("content"))
+        if turn:
+            turns.append(turn)
+    return _parsed(turns, cwd, session_id, summary)
 
 
 def parse_codex_session(path: Path) -> Dict[str, Any]:
@@ -253,53 +183,55 @@ def parse_codex_session(path: Path) -> Dict[str, Any]:
             continue
         ptype = payload.get("type")
         if ptype == "message":
-            role = payload.get("role")
-            if role not in ("user", "assistant"):
-                continue  # developer/system payloads never imported
-            text = _flatten_blocks(payload.get("content"), source="codex")
-            if not text or (role == "user" and _is_wrapper_text(text)):
-                continue
-            turns.append((role, text))
+            # developer/system payloads never imported
+            turn = _message_turn(payload.get("role"), payload.get("content"))
+            if turn:
+                turns.append(turn)
         elif ptype in ("custom_tool_call", "function_call", "local_shell_call"):
             name = payload.get("name") or payload.get("tool") or "tool"
             # Attach as assistant activity; merged into neighbors later.
             turns.append(("assistant", f"[ran tool: {name}]"))
         # tool outputs / reasoning / web_search etc. are skipped
-    return {
-        "turns": _merge_turns(turns),
-        "cwd": cwd,
-        "title_guess": _first_user_line(turns),
-        "session_id": session_id,
-    }
+    return _parsed(turns, cwd, session_id)
 
 
-def list_codex_sessions(root: Optional[Path] = None) -> List[ForeignSession]:
-    """Discover Codex CLI rollouts under ``~/.codex/sessions``."""
-    root = Path(root) if root else Path.home() / ".codex" / "sessions"
+# source -> (default root under ~, glob pattern, recursive, parser)
+_SOURCES = {
+    "claude": ((".claude", "projects"), "*/*.jsonl", False, parse_claude_session),
+    "codex": ((".codex", "sessions"), "rollout-*.jsonl", True, parse_codex_session),
+}
+
+
+def _list_sessions(source: str, root: Optional[Path]) -> List[ForeignSession]:
+    default_root, pattern, recursive, parse = _SOURCES[source]
+    root = Path(root) if root else Path.home().joinpath(*default_root)
     results: List[ForeignSession] = []
     if not root.is_dir():
         return results
-    for jsonl in sorted(root.rglob("rollout-*.jsonl")):
+    for jsonl in sorted(root.rglob(pattern) if recursive else root.glob(pattern)):
         try:
             mtime = jsonl.stat().st_mtime
         except OSError:
             continue
-        parsed = parse_codex_session(jsonl)
-        if not parsed["turns"]:
-            continue
-        results.append(
-            ForeignSession(
-                source="codex",
-                path=jsonl,
-                mtime=mtime,
-                cwd=parsed["cwd"],
-                title_guess=parsed["title_guess"],
-                turn_count=len(parsed["turns"]),
+        parsed = parse(jsonl)
+        if parsed["turns"]:
+            results.append(ForeignSession(
+                source=source, path=jsonl, mtime=mtime, cwd=parsed["cwd"],
+                title_guess=parsed["title_guess"], turn_count=len(parsed["turns"]),
                 session_id=parsed["session_id"],
-            )
-        )
+            ))
     results.sort(key=lambda s: s.mtime, reverse=True)
     return results
+
+
+def list_claude_sessions(root: Optional[Path] = None) -> List[ForeignSession]:
+    """Discover Claude Code sessions under ``~/.claude/projects``."""
+    return _list_sessions("claude", root)
+
+
+def list_codex_sessions(root: Optional[Path] = None) -> List[ForeignSession]:
+    """Discover Codex CLI rollouts under ``~/.codex/sessions``."""
+    return _list_sessions("codex", root)
 
 
 def _first_user_line(turns: List[Tuple[str, str]]) -> Optional[str]:
@@ -313,16 +245,14 @@ def _first_user_line(turns: List[Tuple[str, str]]) -> Optional[str]:
 
 # ── Import ───────────────────────────────────────────────────────────────
 
-_SOURCE_LABELS = {"claude": "Claude Code", "codex": "Codex CLI"}
 _SOURCE_DB_NAMES = {"claude": "claude-code", "codex": "codex-cli"}
 
 
 def import_foreign_session(source: str, path, db=None) -> str:
     """Import one foreign session into the Hermes SessionDB.
 
-    Returns the new Hermes session id.  The foreign file is only read.
-    Raises ``ValueError`` on unknown source or a session with no usable
-    conversation turns.
+    Returns the new Hermes session id. The foreign file is only read. Raises ``ValueError`` on
+    unknown source or a session with no usable conversation turns.
     """
     source = (source or "").strip().lower().lstrip("@")
     if source not in _SOURCE_LABELS:
@@ -331,24 +261,17 @@ def import_foreign_session(source: str, path, db=None) -> str:
     if not path.is_file():
         raise ValueError(f"Session file not found: {path}")
 
-    parsed = (
-        parse_claude_session(path)
-        if source == "claude"
-        else parse_codex_session(path)
-    )
+    parsed = _SOURCES[source][3](path)
     turns = parsed["turns"]
     if not turns:
         raise ValueError(
             f"No user/assistant conversation turns found in {path}"
         )
 
-    label = _SOURCE_LABELS[source]
-    first_user = _first_user_line(
-        [(t["role"], t["content"]) for t in turns]
-    ) or path.stem
+    first_user = _first_user_line([(t["role"], t["content"]) for t in turns]) or path.stem
     if len(first_user) > _TITLE_MAX:
         first_user = first_user[: _TITLE_MAX - 1] + "…"
-    title = f"Imported from {label}: {first_user}"
+    title = f"Imported from {_SOURCE_LABELS[source]}: {first_user}"
 
     owns_db = db is None
     if owns_db:
@@ -356,9 +279,7 @@ def import_foreign_session(source: str, path, db=None) -> str:
 
         db = SessionDB()
     try:
-        session_id = (
-            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-        )
+        session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         origin = {
             "imported_from": {
                 "tool": _SOURCE_DB_NAMES[source],
@@ -367,10 +288,7 @@ def import_foreign_session(source: str, path, db=None) -> str:
             }
         }
         db.create_session(
-            session_id,
-            source=_SOURCE_DB_NAMES[source],
-            cwd=parsed.get("cwd"),
-            origin_json=json.dumps(origin),
+            session_id, source=_SOURCE_DB_NAMES[source], cwd=parsed.get("cwd"), origin_json=json.dumps(origin)
         )
         for turn in turns:
             db.append_message(session_id, turn["role"], turn["content"])
@@ -399,10 +317,9 @@ def gather_foreign_sessions(
 ) -> List[ForeignSession]:
     """List foreign sessions across sources, newest first."""
     sessions: List[ForeignSession] = []
-    if source in (None, "claude"):
-        sessions.extend(list_claude_sessions(claude_root))
-    if source in (None, "codex"):
-        sessions.extend(list_codex_sessions(codex_root))
+    for name, root in (("claude", claude_root), ("codex", codex_root)):
+        if source in (None, name):
+            sessions.extend(_list_sessions(name, root))
     sessions.sort(key=lambda s: s.mtime, reverse=True)
     return sessions[:limit] if limit else sessions
 
@@ -422,9 +339,7 @@ def pick_foreign_session(
     print("Foreign sessions (newest first):")
     for i, s in enumerate(sessions, 1):
         when = datetime.fromtimestamp(s.mtime).strftime("%Y-%m-%d %H:%M")
-        ws = ""
-        if s.cwd:
-            ws = f"  ({os.path.basename(s.cwd.rstrip('/')) or s.cwd})"
+        ws = f"  ({os.path.basename(s.cwd.rstrip('/')) or s.cwd})" if s.cwd else ""
         print(f"  {i:>2}. {when}  {s.label}{ws}  [{s.turn_count} turns]")
     if not sys.stdin.isatty():
         print(
@@ -436,8 +351,7 @@ def pick_foreign_session(
         raw = input(f"Import which session? [1-{len(sessions)}, empty to cancel] ")
     except (EOFError, KeyboardInterrupt):
         return None
-    raw = raw.strip()
-    if not raw:
+    if not (raw := raw.strip()):
         return None
     try:
         idx = int(raw)

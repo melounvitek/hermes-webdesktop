@@ -1,13 +1,8 @@
-"""
-Top-level argparse construction for the hermes CLI.
+"""Top-level argparse construction for the hermes CLI.
 
-Lives in its own module so other modules (e.g. ``relaunch.py``) can
-introspect the parser to discover which flags exist without running the
-``main`` fn.
-
-Only the top-level parser and the ``chat`` subparser live here. Every other
-subparser (model, gateway, sessions, …) is built inline in ``main.py``
-because its dispatch is tightly coupled to module-level ``cmd_*`` functions.
+Only the top-level parser and the ``chat`` subparser live here. Every other subparser (model,
+gateway, sessions, …) is built inline in ``main.py`` because its dispatch is tightly coupled to
+module-level ``cmd_*`` functions.
 """
 
 import argparse
@@ -46,17 +41,12 @@ _OPTIONAL_VALUE_FLAGS_FALLBACK: frozenset[str] = frozenset({"-c", "--continue"})
 
 @lru_cache(maxsize=1)
 def top_level_value_flag_sets() -> tuple[frozenset[str], frozenset[str]]:
-    """(required-value, optional-value) top-level flags, derived from the
-    REAL parser.
+    """(required-value, optional-value) top-level flags, derived from the REAL parser.
 
-    Introspects ``build_top_level_parser()`` (every option with nargs != 0)
-    so the argv scanners in ``main.py`` (``_first_positional_argv``,
-    ``_apply_profile_override``) can never drift from the argparse surface —
-    the exact drift that made ``hermes --reasoning high chat …`` misread
-    ``high`` as the subcommand and forced eager plugin discovery (#93530).
-    Mirrors the ``update_cmd._holder_value_flags`` precedent, including the
-    handwritten-snapshot fallback for a broken parser import. Cached per
-    process.
+    Introspects ``build_top_level_parser()`` (every option with nargs != 0) so the argv scanners in
+    ``main.py`` (``_first_positional_argv``, ``_apply_profile_override``) can never drift from the
+    argparse surface — the exact drift that made ``hermes --reasoning high chat …`` misread ``high``
+    as the subcommand and forced eager plugin discovery (#93530).
     """
     try:
         parser = build_top_level_parser()[0]
@@ -73,13 +63,10 @@ def top_level_value_flag_sets() -> tuple[frozenset[str], frozenset[str]]:
 
 
 def _inherited_flag(parser, *args, **kwargs):
-    """Register a flag that ``hermes_cli.relaunch`` should carry over when
-    the CLI re-execs itself (e.g. after ``sessions browse`` picks a session,
-    or after the setup wizard launches chat).
+    """Register a flag that ``hermes_cli.relaunch`` carries over when the CLI re-execs itself.
 
-    Equivalent to ``parser.add_argument(...)`` plus tagging the resulting
-    Action with ``inherit_on_relaunch = True`` so the relaunch table builder
-    can find it via introspection.
+    ``parser.add_argument(...)`` plus tagging the Action with ``inherit_on_relaunch = True`` so
+    the relaunch table builder can find it via introspection.
     """
     action = parser.add_argument(*args, **kwargs)
     action.inherit_on_relaunch = True
@@ -136,9 +123,9 @@ For more help on a command:
 def build_top_level_parser():
     """Build the top-level parser, the subparsers action, and the ``chat`` subparser.
 
-    Returns ``(parser, subparsers, chat_parser)``. The caller wires
-    ``chat_parser.set_defaults(func=cmd_chat)`` and continues registering
-    other subparsers via ``subparsers.add_parser(...)``.
+    Returns ``(parser, subparsers, chat_parser)``; the caller wires
+    ``chat_parser.set_defaults(func= cmd_chat)`` and registers further subparsers via
+    ``subparsers.add_parser(...)``.
     """
     parser = argparse.ArgumentParser(
         prog="hermes",

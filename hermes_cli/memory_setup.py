@@ -1,9 +1,4 @@
-"""hermes memory setup|status — configure memory provider plugins.
-
-Auto-detects installed memory providers via the plugin system.
-Interactive curses-based UI for provider selection, then walks through
-the provider's config schema. Writes config to config.yaml + .env.
-"""
+"""hermes memory setup|status — configure memory provider plugins."""
 
 from __future__ import annotations
 
@@ -21,13 +16,8 @@ _CANCELLED = -1
 def _provider_pip_dependencies(provider_name: str, declared: list) -> list:
     """Return the pip deps a provider actually needs on THIS install.
 
-    ``plugin.yaml`` declares the provider's baseline bridge packages, but
-    some providers install mode-dependent extras at setup time that the
-    manifest can't express. Hindsight's ``local_embedded`` mode installs
-    ``hindsight-all`` (daemon + embedder + client) during
-    ``hermes memory setup`` — if the update-time refresh only reinstalled
-    the declared ``hindsight-client``, the embedded daemon would stay
-    broken after a venv rebuild stripped ``hindsight-embed`` (#70636).
+    ``plugin.yaml`` declares the provider's baseline bridge packages, but some providers install
+    mode-dependent extras at setup time that the manifest can't express.
     """
     deps = list(declared or [])
     if provider_name == "hindsight":
@@ -55,11 +45,7 @@ def _curses_select(
     *,
     cancel_returns: int | None = None,
 ) -> int:
-    """Interactive single-select with arrow keys.
-
-    items: list of (label, description) tuples.
-    Returns selected index, or cancel_returns/default on escape/quit.
-    """
+    """Interactive single-select with arrow keys."""
     from hermes_cli.curses_ui import curses_radiolist
 
     if cancel_returns is None:
@@ -106,12 +92,9 @@ def _prompt(label: str, default: str | None = None, secret: bool = False) -> str
 def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
     """Install pip dependencies declared in ``plugin.yaml``.
 
-    When ``force`` is true, every declared dependency is handed to the
-    installer even if its import currently succeeds — the resolver then
-    reinstalls anything missing or version-drifted and no-ops on satisfied
-    ranges. This is how ``hermes update`` heals the active memory provider
-    after a venv rebuild/sync removed or downgraded its bridge packages
-    (#53272, #70636).
+    With ``force`` every declared dependency goes to the installer even if it imports; the resolver
+    reinstalls anything missing or version-drifted and no-ops otherwise. This is how ``hermes
+    update`` heals the active memory provider after a venv rebuild removed its bridge packages.
     """
     import subprocess
     from plugins.memory import find_provider_dir
@@ -202,10 +185,7 @@ def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
 
 
 def _get_available_providers() -> list:
-    """Discover memory providers from plugins/memory/.
-
-    Returns list of (name, description, provider_instance) tuples.
-    """
+    """Discover memory providers from plugins/memory/."""
     try:
         from plugins.memory import discover_memory_providers, load_memory_provider
         raw = discover_memory_providers()
@@ -429,32 +409,12 @@ def _write_env_vars(
 ) -> None:
     """Persist memory-provider env vars through the canonical ``.env`` writer.
 
-    Delegates to ``hermes_cli.config.save_env_value`` so every key flows
-    through the same input-validation gate as every other ``.env`` writer:
-    the ``_ENV_VAR_NAME_RE`` regex (no malformed identifiers), the
-    ``_ENV_VAR_NAME_DENYLIST`` (no ``LD_PRELOAD`` / ``PYTHONPATH`` /
-    ``HERMES_HOME`` / etc.), CR/LF stripping on the value, and the atomic
-    0o600-from-creation write (no TOCTOU permission window). This function
-    previously wrote via ``Path.write_text`` directly, bypassing all of
-    that: a memory-provider plugin schema declaring ``env_var: "LD_PRELOAD"``
-    would land in ``.env`` verbatim and load via the ``env_loader.py``
-    ``.env`` -> ``os.environ`` chain on the next Hermes startup, and the
-    file existed at the default umask between the write and the later
-    ``chmod`` regardless of key legitimacy.
-
-    Validation failures (``ValueError`` from ``save_env_value`` — a
-    denylisted name or an identifier rejected by ``_ENV_VAR_NAME_RE``) are
-    surfaced and skipped rather than aborting the wizard, so a single bad
-    key from one schema field doesn't take down the rest of the batch.
-    Non-validation errors (filesystem failures, permission errors) are
-    intentionally NOT caught — those indicate the wizard cannot safely
-    persist any subsequent key either and should propagate.
-
-    ``hermes_home`` may be supplied by plugin ``post_setup`` hooks that
-    already received an explicit home directory (e.g. a non-default
-    profile). It is applied through the context-local Hermes home override
-    so ``save_env_value`` still owns the validation, sanitization, and
-    atomic-write path without mutating global ``os.environ``.
+    Delegates to ``save_env_value`` so keys pass the same gate as every other ``.env`` writer: name
+    regex, denylist (``LD_PRELOAD``/``PYTHONPATH``/``HERMES_HOME``…), CR/LF stripping and atomic
+    0o600 writes. A direct write previously let a plugin schema inject ``LD_PRELOAD`` into ``.env``.
+    ``ValueError`` from validation is reported and skipped so one bad key doesn't sink the batch;
+    filesystem errors propagate since later keys can't be persisted safely either. ``hermes_home``
+    is applied via the context-local home override, not by mutating ``os.environ``.
     """
     from hermes_cli.config import save_env_value
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override

@@ -1,9 +1,6 @@
-"""
-HTML Export generator for Hermes sessions.
-Generates a standalone, beautiful HTML file with all messages embedded.
-Supports single and multi-session exports with a professional sidebar.
-No remote dependencies.
-Enhanced with UI-UX-PRO-MAX design intelligence.
+"""HTML Export generator for Hermes sessions. Generates a standalone, beautiful HTML file with all
+messages embedded. Supports single and multi-session exports with a professional sidebar. No remote
+dependencies. Enhanced with UI-UX-PRO-MAX design intelligence.
 """
 
 import datetime
@@ -657,6 +654,40 @@ def _format_timestamp(ts: float) -> str:
     if not ts: return "N/A"
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
+_ROLE_ICONS = {"user": ICON_USER, "assistant": ICON_BOT, "system": ICON_SHIELD}
+_CHEVRON_HTML = ICON_CHEVRON_RIGHT.replace('class="', 'class="chevron ')
+
+
+def _content_text(content: Any) -> str:
+    """Flatten multimodal/complex content parts into display text."""
+    if not isinstance(content, list):
+        return content
+    parts = []
+    for part in content:
+        if not isinstance(part, dict):
+            parts.append(str(part))
+        elif part.get("type") == "text":
+            parts.append(part.get("text", ""))
+        elif part.get("type") == "image_url":
+            parts.append("[Image Attachment]")
+    return "\n".join(parts)
+
+
+def _collapsible(kind: str, icon: str, title: str, inner: str, indent: str, outer_class: str = "") -> str:
+    """A chevron-headed collapsible block (tool-call / reasoning / system-prompt)."""
+    return f'''
+{indent}<div class="{outer_class or kind}">
+{indent}    <div class="{kind}-header">
+{indent}        {_CHEVRON_HTML}
+{indent}        {icon} {title}
+{indent}    </div>
+{indent}    <div class="{kind}-content">
+{indent}        {inner}
+{indent}    </div>
+{indent}</div>
+{indent}'''
+
+
 def _generate_messages_html(messages: List[Dict[str, Any]]) -> str:
     html_list = []
     for i, msg in enumerate(messages):
@@ -666,30 +697,9 @@ def _generate_messages_html(messages: List[Dict[str, Any]]) -> str:
         if role == "session_meta":
             continue
             
-        content = msg.get("content") or ""
+        content = _content_text(msg.get("content") or "")
         timestamp = _format_timestamp(msg.get("timestamp", 0))
-        
-        # Icon selection
-        role_icon = ICON_TERMINAL
-        if role == "user":
-            role_icon = ICON_USER
-        elif role == "assistant":
-            role_icon = ICON_BOT
-        elif role == "system":
-            role_icon = ICON_SHIELD
-
-        # Handle multimodal or complex content
-        if isinstance(content, list):
-            content_parts = []
-            for part in content:
-                if isinstance(part, dict):
-                    if part.get("type") == "text":
-                        content_parts.append(part.get("text", ""))
-                    elif part.get("type") == "image_url":
-                        content_parts.append("[Image Attachment]")
-                else:
-                    content_parts.append(str(part))
-            content = "\n".join(content_parts)
+        role_icon = _ROLE_ICONS.get(role, ICON_TERMINAL)
 
         # Build message HTML. The role feeds two sinks and for tool/MCP messages
         # is externally influenced, so treat each sink on its own terms:
@@ -704,54 +714,33 @@ def _generate_messages_html(messages: List[Dict[str, Any]]) -> str:
         # Delay animation for initial items
         delay_style = f' style="animation-delay: {min(i * 0.05, 1.0)}s"' if i < 10 else ""
         
-        chevron_html = ICON_CHEVRON_RIGHT.replace('class="', 'class="chevron ')
-        
         html = f'<div class="{msg_class}"{delay_style}>'
         html += f'  <div class="message-header">'
-        html += f'    <div class="role-badge">{chevron_html} {role_icon} {safe_role}</div>'
+        html += f'    <div class="role-badge">{_CHEVRON_HTML} {role_icon} {safe_role}</div>'
         html += f'    <div class="timestamp">{timestamp}</div>'
         html += '  </div>'
         html += '  <div class="message-body">'
         
-        # Tool Calls
-        tool_calls = msg.get("tool_calls")
-        if tool_calls:
-            for tc in tool_calls:
-                fn_name = tc.get("function", {}).get("name", "unknown")
-                args = tc.get("function", {}).get("arguments", "{}")
-                html += f'''
-                <div class="tool-call">
-                    <div class="tool-call-header">
-                        {ICON_CHEVRON_RIGHT.replace('class="', 'class="chevron ')}
-                        {ICON_WRENCH} Tool Call: {_escape_html(fn_name)}
-                    </div>
-                    <div class="tool-call-content">
-                        <pre><code>{_escape_html(args)}</code></pre>
-                    </div>
-                </div>
-                '''
+        for tc in msg.get("tool_calls") or ():
+            fn_name = tc.get("function", {}).get("name", "unknown")
+            args = tc.get("function", {}).get("arguments", "{}")
+            html += _collapsible(
+                "tool-call", ICON_WRENCH, f"Tool Call: {_escape_html(fn_name)}",
+                f"<pre><code>{_escape_html(args)}</code></pre>", " " * 16,
+            )
 
-        # Content
         if content:
             if role == "tool":
                 html += f'  <div class="content"><pre><code>{_escape_html(content)}</code></pre></div>'
             else:
                 html += f'  <div class="content">{_escape_html(content)}</div>'
         
-        # Reasoning
         reasoning = msg.get("reasoning") or msg.get("reasoning_content")
         if reasoning:
-            html += f'''
-            <div class="reasoning">
-                <div class="reasoning-header">
-                    {ICON_CHEVRON_RIGHT.replace('class="', 'class="chevron ')}
-                    {ICON_SPARKLES} Reasoning
-                </div>
-                <div class="reasoning-content">
-                    <div class="content">{_escape_html(reasoning)}</div>
-                </div>
-            </div>
-            '''
+            html += _collapsible(
+                "reasoning", ICON_SPARKLES, "Reasoning",
+                f'<div class="content">{_escape_html(reasoning)}</div>', " " * 12,
+            )
             
         html += '  </div>'
         html += '</div>'
@@ -812,32 +801,20 @@ def generate_multi_session_html_export(sessions: List[Dict[str, Any]]) -> str:
         title = s.get("title") or "Hermes Session"
         model = s.get("model") or "Unknown"
         started_at = _format_timestamp(s.get("started_at", 0))
-        messages = s.get("messages", [])
-        
-        messages_html = _generate_messages_html(messages)
-        
-        view_class = "session-view"
-        if not is_multi: view_class += " active"
-        
-        session_view_id = f"view-{escaped_sid}"
+        messages_html = _generate_messages_html(s.get("messages", []))
+        view_class = "session-view" if is_multi else "session-view active"
         
         system_prompt = s.get("system_prompt")
         system_html = ""
         if system_prompt:
-            system_html = f'''
-            <div class="system-prompt-section active">
-                <div class="system-prompt-header">
-                    {ICON_CHEVRON_RIGHT.replace('class="', 'class="chevron ')}
-                    {ICON_SHIELD} System Prompt (Persona)
-                </div>
-                <div class="system-prompt-content">
-                    <div class="content">{_escape_html(system_prompt)}</div>
-                </div>
-            </div>
-            '''
+            system_html = _collapsible(
+                "system-prompt", ICON_SHIELD, "System Prompt (Persona)",
+                f'<div class="content">{_escape_html(system_prompt)}</div>', " " * 12,
+                outer_class="system-prompt-section active",
+            )
         
         session_html = f'''
-        <div class="{view_class}" id="{session_view_id}">
+        <div class="{view_class}" id="view-{escaped_sid}">
             <header class="fade-in">
                 <h1>{_escape_html(title)}</h1>
                 <div class="meta">
@@ -854,7 +831,6 @@ def generate_multi_session_html_export(sessions: List[Dict[str, Any]]) -> str:
         '''
         sessions_html_list.append(session_html)
 
-    script_nonce = secrets.token_urlsafe(16)
     return HTML_TEMPLATE.format(
         page_title="Hermes Session Export" if is_multi else _escape_html(sessions[0].get("title") or "Hermes Session"),
         sidebar_html=sidebar_html,
@@ -862,7 +838,7 @@ def generate_multi_session_html_export(sessions: List[Dict[str, Any]]) -> str:
         main_margin="var(--sidebar-width)" if is_multi else "0",
         layout_class="layout-multi" if is_multi else "layout-single",
         generated_at=generated_at,
-        script_nonce=script_nonce,
+        script_nonce=secrets.token_urlsafe(16),
     )
 
 def generate_html_export(session_data: Dict[str, Any]) -> str:

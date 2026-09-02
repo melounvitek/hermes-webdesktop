@@ -1205,7 +1205,7 @@ def wsl_unc_path_to_posix(path: str) -> str | None:
 
 
 def translate_cwd_for_wsl_backend(cwd: str) -> str:
-    """Normalize a cross-boundary cwd when Hermes itself runs inside WSL.
+    r"""Normalize a cross-boundary cwd when Hermes itself runs inside WSL.
 
     A Windows-host UI (native picker / drive path / ``\\wsl.localhost\`` UNC) can hand the WSL
     backend a path it can't ``chdir`` into. Map it to the POSIX equivalent so the picker, sidebar,

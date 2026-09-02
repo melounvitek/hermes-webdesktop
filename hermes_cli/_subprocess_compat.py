@@ -340,7 +340,7 @@ def _process_start_time(pid: int) -> int | None:
 
 
 def _text_names_hermes(text: str) -> bool:
-    """True when *text* names Hermes at a path-segment / token boundary.
+    r"""True when *text* names Hermes at a path-segment / token boundary.
 
     A bare ``"hermes" in text`` substring test would also match unrelated processes whose paths
     merely contain the letters (``...\shermesa\...``), which is exactly the false-positive class

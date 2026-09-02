@@ -1,27 +1,9 @@
 #!/usr/bin/env python3
 """``/init`` — build the prompt that generates or updates a project AGENTS.md.
 
-Port of Codex ``/init`` (Claude Code has the same for CLAUDE.md). Hermes
-already *loads* AGENTS.md / CLAUDE.md / .cursorrules as project context, but
-had no command to bootstrap one. ``/init`` hands the live agent ONE
-guidance-laden prompt instructing it to:
-
-  1. Inspect the project with its own read-only tools (``read_file`` /
-     ``search_files`` on manifests, CI configs, lockfiles, existing docs) to
-     learn the layout, toolchain, and the exact build/test/lint commands.
-  2. Write a CONCISE ``AGENTS.md`` (target under 100 lines) with the sections
-     an agent actually needs — overview, setup, commands, conventions,
-     pitfalls — not an essay.
-  3. If an AGENTS.md already exists, UPDATE it: preserve the user's existing
-     content and merge in what's missing, never blow it away.
-
-There is no engine and no model-tool footprint: the agent does the work with
-its existing toolset, so this works identically on local, Docker, and remote
-terminal backends. Every surface (CLI ``/init``, gateway ``/init``, TUI
-``/init``) calls :func:`build_init_prompt` and feeds the result to the agent
-as a normal user turn — the same prompt-injection pattern as ``/learn`` and
-``/blueprint``, which preserves prompt-cache invariants (no system-prompt or
-history mutation).
+1. Inspect the project with its own read-only tools (``read_file`` / ``search_files`` on manifests,
+CI configs, lockfiles, existing docs) to learn the layout, toolchain, and the exact build/test/lint
+commands. 2.
 """
 
 from __future__ import annotations
@@ -57,17 +39,9 @@ def build_init_prompt(
 ) -> str:
     """Build the agent prompt for a ``/init`` request.
 
-    Args:
-        cwd: the project directory the agent should scan and write
-            ``AGENTS.md`` into (usually the session working directory).
-        existing_file: the current content of ``AGENTS.md`` if one already
-            exists, else ``None``. When present the prompt switches to
-            update-and-merge discipline instead of fresh generation.
-        extra: free-text the user gave after ``/init`` — emphasis or notes to
-            honor while authoring (e.g. "focus on the test setup").
-
-    Returns:
-        A complete instruction the agent runs as a normal turn.
+    When ``existing_file`` (current ``AGENTS.md`` content) is given, the prompt switches to
+    update-and-merge discipline instead of fresh generation. ``extra`` is the user's free text
+    after ``/init`` to honor while authoring.
     """
     extra = (extra or "").strip()
 
@@ -131,11 +105,7 @@ def build_init_prompt(
 
 
 def build_init_prompt_for_cwd(cwd: str | None = None, extra: str = "") -> str:
-    """Convenience wrapper used by the dispatch surfaces.
-
-    Resolves ``cwd`` (defaults to the process working directory), reads an
-    existing ``AGENTS.md`` there if present, and returns the full prompt.
-    """
+    """Convenience wrapper used by the dispatch surfaces."""
     import os
 
     resolved = os.path.abspath(cwd or os.getcwd())

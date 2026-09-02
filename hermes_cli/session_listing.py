@@ -8,15 +8,11 @@ from typing import Any
 def parse_session_listing_args(raw_args: str) -> tuple[bool, bool, str, str | None]:
     """Parse `/sessions`-style args into listing flags, a resume target, and a search query.
 
-    Returns ``(include_all_sources, include_unnamed, target, search_query)``.
-    ``list``/``ls`` and ``browse`` are display aliases; ``all``/``--all`` widens
-    source scope; ``full``/``--full`` keeps unnamed sessions in the listing.
-    ``search``/``find`` makes the remaining words a search query —
-    ``search_query`` is ``None`` when search wasn't requested and ``""`` when it
-    was requested without a query. Flags are only honored before the first
-    positional word, so titles containing e.g. "all" aren't misparsed. Anything
-    else is treated as a target so `/sessions <id-or-title>` can delegate to
-    `/resume`.
+    Returns ``(include_all_sources, include_unnamed, target, search_query)``. ``all`` widens
+    source scope, ``full`` keeps unnamed sessions, ``search``/``find`` makes the rest a query
+    (``None`` = not requested, ``""`` = requested with no terms). Flags are honored only before
+    the first positional word so titles containing "all" aren't misparsed; anything else is a
+    target so `/sessions <id-or-title>` can delegate to `/resume`.
     """
     import shlex
 
@@ -57,15 +53,11 @@ def query_session_listing(
 ) -> list[dict[str, Any]]:
     """Return session rows for interactive listing surfaces.
 
-    This is the shared selection policy behind CLI/gateway session browsing:
-    source-scoped by default, optionally global, hide unnamed sessions unless
-    the caller asks for a full listing, and hide the current session unless the
-    caller asks to show it with an ``is_current_session`` marker.
-    ``session_key`` further restricts gateway callers to one exact conversation
-    lane before the database applies its result limit.
-    With ``search_query``, rows are filtered by title/id match (SQL-level, see
-    ``SessionDB.list_sessions_rich``) and ordered by most-recent activity;
-    unnamed sessions stay visible since an id match may be the only handle.
+    Shared CLI/gateway policy: source-scoped unless global is requested, unnamed hidden unless a
+    full listing is asked for, current session hidden unless requested (then marked
+    ``is_current_session``); ``session_key`` restricts gateway callers to one lane before the DB
+    limit applies. With ``search_query`` rows are filtered by title/id in SQL, ordered by recent
+    activity, and unnamed sessions stay visible since an id match may be the only handle.
     """
     query_source = None if include_all_sources else source
     fetch_limit = max(limit * 4, limit)
@@ -103,9 +95,8 @@ def format_gateway_session_listing(
 ) -> str:
     """Render a compact Markdown-ish session list for gateway messengers.
 
-    ``notice`` appends an explanatory line above the footer — used e.g. when
-    a requested scope widening (``all``) was declined so the caller isn't
-    left guessing why sessions are missing.
+    ``notice`` appends an explanatory line above the footer — used e.g. when a requested scope
+    widening (``all``) was declined so the caller isn't left guessing why sessions are missing.
     """
     if not rows:
         parts = [

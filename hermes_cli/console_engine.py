@@ -1,9 +1,4 @@
-"""Safe Hermes Console command engine.
-
-This module backs ``hermes console`` and is intentionally narrower than the
-full Hermes CLI. It exposes a curated set of native adapters that can later be
-shared by the dashboard console websocket without becoming a raw shell.
-"""
+"""Safe Hermes Console command engine."""
 
 from __future__ import annotations
 
@@ -14,7 +9,6 @@ import functools
 import importlib
 import io
 import json
-import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -194,14 +188,10 @@ def _choice_help(action: argparse._SubParsersAction, name: str) -> str:
 
 
 def _clean_summary(text: str | None) -> str:
-    if not text:
-        return ""
-    if text is argparse.SUPPRESS:
+    if not text or text is argparse.SUPPRESS:
         return ""
     summary = " ".join(str(text).split())
-    if not summary:
-        return ""
-    if summary.startswith("Run `hermes "):
+    if not summary or summary.startswith("Run `hermes "):
         return ""
     return summary
 
@@ -228,66 +218,58 @@ def _noop_console_command(_args: argparse.Namespace) -> None:
     return None
 
 
+@dataclass(frozen=True)
+class _CliSurface:
+    """How a CLI subcommand module hangs its argparse tree off a root subparsers action.
+
+    ``kind`` selects the wiring convention:
+      * ``extracted``  — ``builder(subparsers, <handler>=fn)`` (hermes_cli.subcommands.*; fn from hermes_cli.main)
+      * ``registered`` — ``register(subparsers.add_parser(root))``; optional module-level ``handler`` as func
+      * ``builder``    — ``top = builder(subparsers)``; func = ``handler`` from hermes_cli.main
+      * ``adder``      — ``add(subparsers)`` wires its own func
+    """
+
+    kind: Literal["extracted", "registered", "builder", "adder"]
+    module: str
+    builder: str
+    handler: str | None = None
+
+    def build(self, root: str, *, live: bool) -> _ArgumentParser:
+        """Build a throwaway parser. ``live=False`` wires no-op handlers (summary extraction only)."""
+        parser, subparsers = _parser_root()
+        module = importlib.import_module(self.module)
+        entry = getattr(module, self.builder)
+        if self.kind == "extracted":
+            fn = (
+                getattr(importlib.import_module("hermes_cli.main"), self.handler)
+                if live
+                else _noop_console_command
+            )
+            entry(subparsers, **{self.handler: fn})
+        elif self.kind == "registered":
+            top_parser = subparsers.add_parser(root)
+            entry(top_parser)
+            if live and self.handler:
+                top_parser.set_defaults(func=getattr(module, self.handler))
+        elif self.kind == "builder":
+            main_module = importlib.import_module("hermes_cli.main") if live else None
+            top_parser = entry(subparsers)
+            if live:
+                top_parser.set_defaults(func=getattr(main_module, self.handler))
+        else:
+            entry(subparsers)
+        return parser
+
+
 # The CLI surface these helpers reflect is process-static: they import a
 # subcommand module and build a throwaway argparse tree purely to extract help
 # summaries. Nothing about the result changes across engine instances, but the
 # dashboard opens a fresh HermesConsoleEngine per /api/console connection, so
 # without memoization every reconnect re-imports + re-parses the whole surface.
-# Cache by args (all hashable strings); callers only read the returned map.
 @functools.lru_cache(maxsize=None)
-def _extracted_summaries(
-    module_name: str,
-    builder_name: str,
-    main_handler_name: str,
-) -> dict[tuple[str, ...], str]:
+def _surface_summaries(surface: _CliSurface, root: str) -> dict[tuple[str, ...], str]:
     try:
-        parser, subparsers = _parser_root()
-        module = importlib.import_module(module_name)
-        builder = getattr(module, builder_name)
-        builder(subparsers, **{main_handler_name: _noop_console_command})
-        return _summaries_from_parser(parser)
-    except Exception:
-        return {}
-
-
-@functools.lru_cache(maxsize=None)
-def _registered_summaries(
-    root: str,
-    module_name: str,
-    register_name: str,
-) -> dict[tuple[str, ...], str]:
-    try:
-        parser, subparsers = _parser_root()
-        module = importlib.import_module(module_name)
-        top_parser = subparsers.add_parser(root)
-        register = getattr(module, register_name)
-        register(top_parser)
-        return _summaries_from_parser(parser)
-    except Exception:
-        return {}
-
-
-@functools.lru_cache(maxsize=None)
-def _builder_summaries(
-    module_name: str,
-    builder_name: str,
-) -> dict[tuple[str, ...], str]:
-    try:
-        parser, subparsers = _parser_root()
-        module = importlib.import_module(module_name)
-        getattr(module, builder_name)(subparsers)
-        return _summaries_from_parser(parser)
-    except Exception:
-        return {}
-
-
-@functools.lru_cache(maxsize=None)
-def _adder_summaries(module_name: str, add_name: str) -> dict[tuple[str, ...], str]:
-    try:
-        parser, subparsers = _parser_root()
-        module = importlib.import_module(module_name)
-        getattr(module, add_name)(subparsers)
-        return _summaries_from_parser(parser)
+        return _summaries_from_parser(surface.build(root, live=False))
     except Exception:
         return {}
 
@@ -299,207 +281,196 @@ def _invoke_namespace(args: argparse.Namespace) -> object:
     return func(args)
 
 
-def _set_attrs(args: argparse.Namespace, **attrs: object) -> argparse.Namespace:
-    for name, value in attrs.items():
-        setattr(args, name, value)
-    return args
-
-
-def _dispatch_extracted_subcommand(
-    *,
+def _dispatch(
+    surface: _CliSurface,
     root: str,
     fixed: Sequence[str],
     args: Sequence[str],
-    module_name: str,
-    builder_name: str,
-    main_handler_name: str,
     namespace_update: Callable[[argparse.Namespace], None] | None = None,
 ) -> str:
-    parser, subparsers = _parser_root()
-    module = importlib.import_module(module_name)
-    main_module = importlib.import_module("hermes_cli.main")
-    builder = getattr(module, builder_name)
-    main_handler = getattr(main_module, main_handler_name)
-    builder(subparsers, **{main_handler_name: main_handler})
+    parser = surface.build(root, live=True)
     namespace = parser.parse_args([root, *fixed, *args])
     if namespace_update:
         namespace_update(namespace)
     return _capture_output(lambda: _invoke_namespace(namespace))
 
 
-def _dispatch_registered_subcommand(
-    *,
-    root: str,
-    fixed: Sequence[str],
-    args: Sequence[str],
-    module_name: str,
-    register_name: str,
-    handler_name: str | None = None,
-    namespace_update: Callable[[argparse.Namespace], None] | None = None,
-) -> str:
-    parser, subparsers = _parser_root()
-    module = importlib.import_module(module_name)
-    top_parser = subparsers.add_parser(root)
-    register = getattr(module, register_name)
-    register(top_parser)
-    if handler_name:
-        top_parser.set_defaults(func=getattr(module, handler_name))
-    namespace = parser.parse_args([root, *fixed, *args])
-    if namespace_update:
-        namespace_update(namespace)
-    return _capture_output(lambda: _invoke_namespace(namespace))
+def _paths(spec: str) -> list[tuple[str, ...]]:
+    """``"list, snapshot export"`` -> ``[("list",), ("snapshot", "export")]``; ``"."`` is the bare root."""
+    return [() if item.strip() == "." else tuple(item.split()) for item in spec.split(",") if item.strip()]
 
 
-def _dispatch_builder_subcommand(
-    *,
-    root: str,
-    fixed: Sequence[str],
-    args: Sequence[str],
-    module_name: str,
-    builder_name: str,
-    main_handler_name: str,
-    namespace_update: Callable[[argparse.Namespace], None] | None = None,
-) -> str:
-    parser, subparsers = _parser_root()
-    module = importlib.import_module(module_name)
-    main_module = importlib.import_module("hermes_cli.main")
-    top_parser = getattr(module, builder_name)(subparsers)
-    top_parser.set_defaults(func=getattr(main_module, main_handler_name))
-    namespace = parser.parse_args([root, *fixed, *args])
-    if namespace_update:
-        namespace_update(namespace)
-    return _capture_output(lambda: _invoke_namespace(namespace))
+def _sub(module: str, builder: str, handler: str) -> _CliSurface:
+    return _CliSurface("extracted", f"hermes_cli.subcommands.{module}", builder, handler)
 
 
-def _dispatch_adder_subcommand(
-    *,
-    root: str,
-    fixed: Sequence[str],
-    args: Sequence[str],
-    module_name: str,
-    add_name: str,
-    namespace_update: Callable[[argparse.Namespace], None] | None = None,
-) -> str:
-    parser, subparsers = _parser_root()
-    module = importlib.import_module(module_name)
-    getattr(module, add_name)(subparsers)
-    namespace = parser.parse_args([root, *fixed, *args])
-    if namespace_update:
-        namespace_update(namespace)
-    return _capture_output(lambda: _invoke_namespace(namespace))
+def _reg(module: str, handler: str | None = None) -> _CliSurface:
+    return _CliSurface("registered", f"hermes_cli.{module}", "register_cli", handler)
 
 
-def _extracted_handler(
-    root: str,
-    fixed: Sequence[str],
-    module_name: str,
-    builder_name: str,
-    main_handler_name: str,
-    namespace_update: Callable[[argparse.Namespace], None] | None = None,
-) -> Callable[["HermesConsoleEngine", list[str]], str]:
-    def handler(_engine: HermesConsoleEngine, args: list[str]) -> str:
-        return _dispatch_extracted_subcommand(
-            root=root,
-            fixed=fixed,
-            args=args,
-            module_name=module_name,
-            builder_name=builder_name,
-            main_handler_name=main_handler_name,
-            namespace_update=namespace_update,
-        )
+# root -> (surface, paths, mutating paths). Registered in this order.
+_CLI_FAMILIES: dict[str, tuple[_CliSurface, str, str]] = {
+    "dump": (_sub("dump", "build_dump_parser", "cmd_dump"), ".", ""),
+    "debug": (_sub("debug", "build_debug_parser", "cmd_debug"), "share, delete", "share, delete"),
+    "prompt-size": (_sub("prompt_size", "build_prompt_size_parser", "cmd_prompt_size"), ".", ""),
+    "insights": (_sub("insights", "build_insights_parser", "cmd_insights"), ".", ""),
+    "security": (_sub("security", "build_security_parser", "cmd_security"), "audit", ""),
+    "backup": (_sub("backup", "build_backup_parser", "cmd_backup"), ".", "."),
+    "import": (_sub("import_cmd", "build_import_cmd_parser", "cmd_import"), ".", "."),
+    "config": (_sub("config", "build_config_parser", "cmd_config"), "env-path, check", ""),
+    "tools": (
+        _sub("tools", "build_tools_parser", "cmd_tools"),
+        "list, enable, disable, post-setup",
+        "enable, disable, post-setup",
+    ),
+    "plugins": (
+        _sub("plugins", "build_plugins_parser", "cmd_plugins"),
+        "list, enable, disable, install, update, remove",
+        "enable, disable, install, update, remove",
+    ),
+    "skills": (
+        _sub("skills", "build_skills_parser", "cmd_skills"),
+        "browse, search, inspect, list, check, list-modified, diff, install, update, audit, "
+        "uninstall, reset, opt-in, opt-out, repair-official, snapshot export, snapshot import, "
+        "tap list, tap add, tap remove",
+        "install, update, audit, uninstall, reset, opt-in, opt-out, repair-official, "
+        "snapshot export, snapshot import, tap add, tap remove",
+    ),
+    "mcp": (
+        _sub("mcp", "build_mcp_parser", "cmd_mcp"),
+        "list, catalog, test, add, remove, install, login, reauth, configure, picker",
+        "add, remove, install, login, reauth, configure, picker",
+    ),
+    "memory": (_sub("memory", "build_memory_parser", "cmd_memory"), "status, off, reset", "off, reset"),
+    "auth": (
+        _sub("auth", "build_auth_parser", "cmd_auth"),
+        "list, status, reset, add, remove, logout, spotify status, spotify login, spotify logout",
+        "reset, add, remove, logout, spotify login, spotify logout",
+    ),
+    "pairing": (
+        _sub("pairing", "build_pairing_parser", "cmd_pairing"),
+        "list, approve, revoke, clear-pending",
+        "approve, revoke, clear-pending",
+    ),
+    "webhook": (
+        _sub("webhook", "build_webhook_parser", "cmd_webhook"),
+        "list, subscribe, remove, test",
+        "subscribe, remove",
+    ),
+    "hooks": (
+        _sub("hooks", "build_hooks_parser", "cmd_hooks"),
+        "list, test, doctor, revoke",
+        "test, doctor, revoke",
+    ),
+    "slack": (_sub("slack", "build_slack_parser", "cmd_slack"), "manifest", ""),
+    "profile": (
+        _sub("profile", "build_profile_parser", "cmd_profile"),
+        "list, show, info, create, use, describe, rename, delete, export, import, install, update",
+        "create, use, describe, rename, delete, export, import, install, update",
+    ),
+    "cron": (
+        _sub("cron", "build_cron_parser", "cmd_cron"),
+        "create, edit, remove, tick",
+        "create, edit, remove, tick",
+    ),
+    "portal": (_CliSurface("adder", "hermes_cli.portal_cli", "add_parser"), "info, tools", ""),
+    "project": (
+        _CliSurface("builder", "hermes_cli.projects_cmd", "build_parser", "cmd_project"),
+        "list, show, create, add-folder, remove-folder, rename, set-primary, use, archive, "
+        "restore, bind-board",
+        "create, add-folder, remove-folder, rename, set-primary, use, archive, restore, bind-board",
+    ),
+    "kanban": (
+        _CliSurface("builder", "hermes_cli.kanban", "build_parser", "cmd_kanban"),
+        "init, boards list, boards create, boards rm, boards switch, boards current, "
+        "boards rename, boards set-workdir, create, list, show, assign, reclaim, reassign, "
+        "diagnose, link, unlink, claim, comment, complete, edit, block, schedule, unblock, "
+        "promote, archive, stats, runs, heartbeat, assignments, context",
+        "init, boards create, boards rm, boards switch, boards rename, boards set-workdir, "
+        "create, assign, reclaim, reassign, link, unlink, claim, comment, complete, edit, "
+        "block, schedule, unblock, promote, archive",
+    ),
+    "bundles": (
+        _reg("bundles", "bundles_command"),
+        "list, show, create, delete, reload",
+        "create, delete, reload",
+    ),
+    "checkpoints": (
+        _reg("checkpoints"),
+        "status, list, prune, clear, clear-legacy",
+        "prune, clear, clear-legacy",
+    ),
+    "curator": (
+        _reg("curator"),
+        "status, run, pause, resume, pin, unpin, restore, list-archived, archive, prune, "
+        "backup, rollback",
+        "run, pause, resume, pin, unpin, restore, archive, prune, backup, rollback",
+    ),
+    "pets": (
+        _reg("pets"),
+        "list, install, select, show, off, scale, remove, doctor",
+        "install, select, off, scale, remove",
+    ),
+}
 
-    return handler
+# Only extracted/registered families skip nested prompts after console confirmation
+# (builder/adder families never did).
+_CONFIRMED_KINDS = {"extracted", "registered"}
 
-
-def _registered_handler(
-    root: str,
-    fixed: Sequence[str],
-    module_name: str,
-    register_name: str,
-    handler_name: str | None = None,
-    namespace_update: Callable[[argparse.Namespace], None] | None = None,
-) -> Callable[["HermesConsoleEngine", list[str]], str]:
-    def handler(_engine: HermesConsoleEngine, args: list[str]) -> str:
-        return _dispatch_registered_subcommand(
-            root=root,
-            fixed=fixed,
-            args=args,
-            module_name=module_name,
-            register_name=register_name,
-            handler_name=handler_name,
-            namespace_update=namespace_update,
-        )
-
-    return handler
-
-
-def _builder_handler(
-    root: str,
-    fixed: Sequence[str],
-    module_name: str,
-    builder_name: str,
-    main_handler_name: str,
-    namespace_update: Callable[[argparse.Namespace], None] | None = None,
-) -> Callable[["HermesConsoleEngine", list[str]], str]:
-    def handler(_engine: HermesConsoleEngine, args: list[str]) -> str:
-        return _dispatch_builder_subcommand(
-            root=root,
-            fixed=fixed,
-            args=args,
-            module_name=module_name,
-            builder_name=builder_name,
-            main_handler_name=main_handler_name,
-            namespace_update=namespace_update,
-        )
-
-    return handler
-
-
-def _adder_handler(
-    root: str,
-    fixed: Sequence[str],
-    module_name: str,
-    add_name: str,
-    namespace_update: Callable[[argparse.Namespace], None] | None = None,
-) -> Callable[["HermesConsoleEngine", list[str]], str]:
-    def handler(_engine: HermesConsoleEngine, args: list[str]) -> str:
-        return _dispatch_adder_subcommand(
-            root=root,
-            fixed=fixed,
-            args=args,
-            module_name=module_name,
-            add_name=add_name,
-            namespace_update=namespace_update,
-        )
-
-    return handler
+_SEND_SURFACE = _CliSurface("adder", "hermes_cli.send_cmd", "register_send_subparser")
 
 
 def _register_command_family(
     engine: "HermesConsoleEngine",
-    *,
     root: str,
-    paths: Iterable[Sequence[str]],
-    handler_factory: Callable[[Sequence[str]], Callable[["HermesConsoleEngine", list[str]], str]],
-    mutating: Iterable[Sequence[str]] = (),
-    summary: str = "",
-    summaries: dict[tuple[str, ...], str] | None = None,
-    confirmation: str = "",
+    surface: _CliSurface,
+    paths: str,
+    mutating: str,
 ) -> None:
-    mutating_paths = {tuple(path) for path in mutating}
-    for child_path in paths:
-        child_key = tuple(child_path)
-        full_path = (root, *tuple(child_path))
+    summaries = _surface_summaries(surface, root)
+    mutating_paths = set(_paths(mutating))
+    namespace_update = _apply_confirmed_defaults if surface.kind in _CONFIRMED_KINDS else None
+    for child_path in _paths(paths):
+        full_path = (root, *child_path)
         usage = " ".join(full_path)
-        command_summary = summary or (summaries or {}).get(full_path) or f"Run `hermes {usage}`."
+
+        def handler(_engine: HermesConsoleEngine, args: list[str], fixed=child_path) -> str:
+            return _dispatch(surface, root, fixed, args, namespace_update)
+
         engine.register(
             full_path,
             usage,
-            command_summary,
-            handler_factory(tuple(child_path)),
-            mutating=child_key in mutating_paths,
-            confirmation=confirmation or f"Run `hermes {usage}`?",
+            summaries.get(full_path) or f"Run `hermes {usage}`.",
+            handler,
+            mutating=child_path in mutating_paths,
+            confirmation=f"Run `hermes {usage}`?",
         )
+
+
+_BLOCKED_TOP = frozenset(
+    "acp chat claw completion dashboard desktop fallback gateway gui login logout model moa "
+    "oneshot proxy serve setup uninstall update whatsapp whatsapp-cloud".split()
+)
+
+_BLOCKED_PAIRS = {
+    ("config", "edit"): "`config edit` opens an editor and is not available in Hermes Console.",
+    ("mcp", "serve"): "`mcp serve` starts a server and is not available in Hermes Console.",
+    ("profile", "alias"): "`profile alias` creates shell wrappers and is not available in Hermes Console.",
+    ("skills", "config"): "`skills config` is interactive and is not available in Hermes Console.",
+    ("skills", "publish"): "`skills publish` is not available in Hermes Console.",
+    ("portal", "login"): "`portal login` is interactive and is not available in Hermes Console.",
+    ("portal", "open"): "`portal open` opens a browser and is not available in Hermes Console.",
+    ("kanban", "tail"): "`kanban tail` streams output and is not available in Hermes Console.",
+    ("kanban", "watch"): "`kanban watch` streams output and is not available in Hermes Console.",
+    ("kanban", "daemon"): "`kanban daemon` starts a service and is not available in Hermes Console.",
+    ("kanban", "dispatcher"): "`kanban dispatcher` starts a worker and is not available in Hermes Console.",
+    ("kanban", "swarm"): "`kanban swarm` starts agent work and is not available in Hermes Console.",
+    ("kanban", "decompose"): "`kanban decompose` starts agent work and is not available in Hermes Console.",
+    ("kanban", "specify"): "`kanban specify` starts agent work and is not available in Hermes Console.",
+    ("kanban", "gc"): "`kanban gc` is not available in Hermes Console.",
+    ("sessions", "delete"): "`sessions delete` and `sessions prune` are not available in Hermes Console.",
+    ("sessions", "prune"): "`sessions delete` and `sessions prune` are not available in Hermes Console.",
+}
 
 
 class HermesConsoleEngine:
@@ -521,7 +492,7 @@ class HermesConsoleEngine:
             if tokens and tokens[0] == "hermes":
                 tokens = tokens[1:]
             if not tokens:
-                return self._help_result()
+                return ConsoleResult("ok", output=self.help_text())
 
             if _contains_shell_syntax(raw_line, tokens):
                 raise ConsoleCommandError(
@@ -575,554 +546,20 @@ class HermesConsoleEngine:
         return "\n".join(lines)
 
     def _register_defaults(self) -> None:
-        self.register(("status",), "status", "Show Hermes component status.", _status)
-        self.register(("version",), "version", "Show Hermes version information.", _version)
-        self.register(("doctor",), "doctor", "Run diagnostics without auto-fix.", _doctor)
-        self.register(("logs",), "logs [name] [-n N]", "Show recent Hermes logs.", _logs)
-        self.register(("sessions", "list"), "sessions list [--limit N]", "List recent sessions.", _sessions_list)
-        self.register(("sessions", "stats"), "sessions stats", "Show session store statistics.", _sessions_stats)
-        self.register(("config", "show"), "config show", "Show current configuration.", _config_show)
-        self.register(("config", "path"), "config path", "Print config.yaml path.", _config_path)
-        self.register(
-            ("config", "set"),
-            "config set <key> <value>",
-            "Set a configuration value.",
-            _config_set,
-            mutating=True,
-            confirmation="Update Hermes configuration?",
-        )
-        self.register(("cron", "list"), "cron list [--all]", "List scheduled jobs.", _cron_list)
-        self.register(("cron", "status"), "cron status", "Show cron scheduler status.", _cron_status)
-        self.register(
-            ("cron", "pause"),
-            "cron pause <job>",
-            "Pause a scheduled job.",
-            _cron_pause,
-            mutating=True,
-            confirmation="Pause this cron job?",
-        )
-        self.register(
-            ("cron", "resume"),
-            "cron resume <job>",
-            "Resume a paused cron job.",
-            _cron_resume,
-            mutating=True,
-            confirmation="Resume this cron job?",
-        )
-        self.register(
-            ("cron", "run"),
-            "cron run <job>",
-            "Run a job on the next scheduler tick.",
-            _cron_run,
-            mutating=True,
-            confirmation="Trigger this cron job?",
-        )
-        self._register_broad_cli_surface()
-
-    def _register_broad_cli_surface(self) -> None:
-        """Register non-admin CLI commands that are safe for Hermes Console."""
-
-        extracted = {
-            "dump": (
-                "hermes_cli.subcommands.dump",
-                "build_dump_parser",
-                "cmd_dump",
-                [()],
-                set(),
-            ),
-            "debug": (
-                "hermes_cli.subcommands.debug",
-                "build_debug_parser",
-                "cmd_debug",
-                [("share",), ("delete",)],
-                {("share",), ("delete",)},
-            ),
-            "prompt-size": (
-                "hermes_cli.subcommands.prompt_size",
-                "build_prompt_size_parser",
-                "cmd_prompt_size",
-                [()],
-                set(),
-            ),
-            "insights": (
-                "hermes_cli.subcommands.insights",
-                "build_insights_parser",
-                "cmd_insights",
-                [()],
-                set(),
-            ),
-            "security": (
-                "hermes_cli.subcommands.security",
-                "build_security_parser",
-                "cmd_security",
-                [("audit",)],
-                set(),
-            ),
-            "backup": (
-                "hermes_cli.subcommands.backup",
-                "build_backup_parser",
-                "cmd_backup",
-                [()],
-                {()},
-            ),
-            "import": (
-                "hermes_cli.subcommands.import_cmd",
-                "build_import_cmd_parser",
-                "cmd_import",
-                [()],
-                {()},
-            ),
-            "config": (
-                "hermes_cli.subcommands.config",
-                "build_config_parser",
-                "cmd_config",
-                [("env-path",), ("check",)],
-                set(),
-            ),
-            "tools": (
-                "hermes_cli.subcommands.tools",
-                "build_tools_parser",
-                "cmd_tools",
-                [("list",), ("enable",), ("disable",), ("post-setup",)],
-                {("enable",), ("disable",), ("post-setup",)},
-            ),
-            "plugins": (
-                "hermes_cli.subcommands.plugins",
-                "build_plugins_parser",
-                "cmd_plugins",
-                [("list",), ("enable",), ("disable",), ("install",), ("update",), ("remove",)],
-                {("enable",), ("disable",), ("install",), ("update",), ("remove",)},
-            ),
-            "skills": (
-                "hermes_cli.subcommands.skills",
-                "build_skills_parser",
-                "cmd_skills",
-                [
-                    ("browse",),
-                    ("search",),
-                    ("inspect",),
-                    ("list",),
-                    ("check",),
-                    ("list-modified",),
-                    ("diff",),
-                    ("install",),
-                    ("update",),
-                    ("audit",),
-                    ("uninstall",),
-                    ("reset",),
-                    ("opt-in",),
-                    ("opt-out",),
-                    ("repair-official",),
-                    ("snapshot", "export"),
-                    ("snapshot", "import"),
-                    ("tap", "list"),
-                    ("tap", "add"),
-                    ("tap", "remove"),
-                ],
-                {
-                    ("install",),
-                    ("update",),
-                    ("audit",),
-                    ("uninstall",),
-                    ("reset",),
-                    ("opt-in",),
-                    ("opt-out",),
-                    ("repair-official",),
-                    ("snapshot", "export"),
-                    ("snapshot", "import"),
-                    ("tap", "add"),
-                    ("tap", "remove"),
-                },
-            ),
-            "mcp": (
-                "hermes_cli.subcommands.mcp",
-                "build_mcp_parser",
-                "cmd_mcp",
-                [
-                    ("list",),
-                    ("catalog",),
-                    ("test",),
-                    ("add",),
-                    ("remove",),
-                    ("install",),
-                    ("login",),
-                    ("reauth",),
-                    ("configure",),
-                    ("picker",),
-                ],
-                {
-                    ("add",),
-                    ("remove",),
-                    ("install",),
-                    ("login",),
-                    ("reauth",),
-                    ("configure",),
-                    ("picker",),
-                },
-            ),
-            "memory": (
-                "hermes_cli.subcommands.memory",
-                "build_memory_parser",
-                "cmd_memory",
-                [("status",), ("off",), ("reset",)],
-                {("off",), ("reset",)},
-            ),
-            "auth": (
-                "hermes_cli.subcommands.auth",
-                "build_auth_parser",
-                "cmd_auth",
-                [
-                    ("list",),
-                    ("status",),
-                    ("reset",),
-                    ("add",),
-                    ("remove",),
-                    ("logout",),
-                    ("spotify", "status"),
-                    ("spotify", "login"),
-                    ("spotify", "logout"),
-                ],
-                {
-                    ("reset",),
-                    ("add",),
-                    ("remove",),
-                    ("logout",),
-                    ("spotify", "login"),
-                    ("spotify", "logout"),
-                },
-            ),
-            "pairing": (
-                "hermes_cli.subcommands.pairing",
-                "build_pairing_parser",
-                "cmd_pairing",
-                [("list",), ("approve",), ("revoke",), ("clear-pending",)],
-                {("approve",), ("revoke",), ("clear-pending",)},
-            ),
-            "webhook": (
-                "hermes_cli.subcommands.webhook",
-                "build_webhook_parser",
-                "cmd_webhook",
-                [("list",), ("subscribe",), ("remove",), ("test",)],
-                {("subscribe",), ("remove",)},
-            ),
-            "hooks": (
-                "hermes_cli.subcommands.hooks",
-                "build_hooks_parser",
-                "cmd_hooks",
-                [("list",), ("test",), ("doctor",), ("revoke",)],
-                {("test",), ("doctor",), ("revoke",)},
-            ),
-            "slack": (
-                "hermes_cli.subcommands.slack",
-                "build_slack_parser",
-                "cmd_slack",
-                [("manifest",)],
-                set(),
-            ),
-            "profile": (
-                "hermes_cli.subcommands.profile",
-                "build_profile_parser",
-                "cmd_profile",
-                [
-                    ("list",),
-                    ("show",),
-                    ("info",),
-                    ("create",),
-                    ("use",),
-                    ("describe",),
-                    ("rename",),
-                    ("delete",),
-                    ("export",),
-                    ("import",),
-                    ("install",),
-                    ("update",),
-                ],
-                {
-                    ("create",),
-                    ("use",),
-                    ("describe",),
-                    ("rename",),
-                    ("delete",),
-                    ("export",),
-                    ("import",),
-                    ("install",),
-                    ("update",),
-                },
-            ),
-            "cron": (
-                "hermes_cli.subcommands.cron",
-                "build_cron_parser",
-                "cmd_cron",
-                [("create",), ("edit",), ("remove",), ("tick",)],
-                {("create",), ("edit",), ("remove",), ("tick",)},
-            ),
-        }
-
-        for root, (module, builder, main_handler, paths, mutating) in extracted.items():
-            summaries = _extracted_summaries(module, builder, main_handler)
-            _register_command_family(
-                self,
-                root=root,
-                paths=paths,
-                mutating=mutating,
-                summaries=summaries,
-                handler_factory=lambda fixed, root=root, module=module, builder=builder, main_handler=main_handler: _extracted_handler(
-                    root,
-                    fixed,
-                    module,
-                    builder,
-                    main_handler,
-                    namespace_update=_apply_confirmed_defaults,
-                ),
-            )
-
-        self.register(
-            ("config", "migrate"),
-            "config migrate",
-            "Update config with new options.",
-            _config_migrate,
-            mutating=True,
-            confirmation="Update Hermes configuration with missing defaults?",
-        )
-        self.register(
-            ("sessions", "export"),
-            "sessions export <output> [--source SOURCE] [--session-id ID]",
-            "Export sessions to JSONL.",
-            _sessions_export,
-            mutating=True,
-            confirmation="Export session data?",
-        )
-        self.register(
-            ("sessions", "rename"),
-            "sessions rename <session> <title>",
-            "Rename a session.",
-            _sessions_rename,
-            mutating=True,
-            confirmation="Rename this session?",
-        )
-        self.register(
-            ("sessions", "optimize"),
-            "sessions optimize",
-            "Optimize the session store.",
-            _sessions_optimize,
-            mutating=True,
-            confirmation="Optimize the session database?",
-        )
-        self.register(
-            ("sessions", "repair"),
-            "sessions repair [--check-only] [--no-backup]",
-            "Repair a malformed session database schema.",
-            _sessions_repair,
-            mutating=True,
-            confirmation="Repair the session database?",
-        )
-
-        self.register(
-            ("profile",),
-            "profile",
-            "Show active profile status.",
-            _profile_status,
-        )
+        for path, usage, summary, handler in _READONLY_COMMANDS:
+            self.register(path, usage, summary, handler)
+        for path, usage, summary, handler, confirmation in _MUTATING_COMMANDS:
+            self.register(path, usage, summary, handler, mutating=True, confirmation=confirmation)
+        for root, (surface, paths, mutating) in _CLI_FAMILIES.items():
+            _register_command_family(self, root, surface, paths, mutating)
         self.register(
             ("send",),
             "send --to <target> <message>",
             "Send a message to a configured platform.",
-            _adder_handler("send", (), "hermes_cli.send_cmd", "register_send_subparser"),
+            lambda _engine, args: _dispatch(_SEND_SURFACE, "send", (), args),
             mutating=True,
             confirmation="Send this message?",
         )
-
-        portal_paths = [("info",), ("tools",)]
-        _register_command_family(
-            self,
-            root="portal",
-            paths=portal_paths,
-            summaries=_adder_summaries("hermes_cli.portal_cli", "add_parser"),
-            handler_factory=lambda fixed: _adder_handler(
-                "portal",
-                fixed,
-                "hermes_cli.portal_cli",
-                "add_parser",
-            ),
-        )
-
-        _register_command_family(
-            self,
-            root="project",
-            paths=[
-                ("list",),
-                ("show",),
-                ("create",),
-                ("add-folder",),
-                ("remove-folder",),
-                ("rename",),
-                ("set-primary",),
-                ("use",),
-                ("archive",),
-                ("restore",),
-                ("bind-board",),
-            ],
-            summaries=_builder_summaries("hermes_cli.projects_cmd", "build_parser"),
-            mutating=[
-                ("create",),
-                ("add-folder",),
-                ("remove-folder",),
-                ("rename",),
-                ("set-primary",),
-                ("use",),
-                ("archive",),
-                ("restore",),
-                ("bind-board",),
-            ],
-            handler_factory=lambda fixed: _builder_handler(
-                "project",
-                fixed,
-                "hermes_cli.projects_cmd",
-                "build_parser",
-                "cmd_project",
-            ),
-        )
-
-        _register_command_family(
-            self,
-            root="kanban",
-            paths=[
-                ("init",),
-                ("boards", "list"),
-                ("boards", "create"),
-                ("boards", "rm"),
-                ("boards", "switch"),
-                ("boards", "current"),
-                ("boards", "rename"),
-                ("boards", "set-workdir"),
-                ("create",),
-                ("list",),
-                ("show",),
-                ("assign",),
-                ("reclaim",),
-                ("reassign",),
-                ("diagnose",),
-                ("link",),
-                ("unlink",),
-                ("claim",),
-                ("comment",),
-                ("complete",),
-                ("edit",),
-                ("block",),
-                ("schedule",),
-                ("unblock",),
-                ("promote",),
-                ("archive",),
-                ("stats",),
-                ("runs",),
-                ("heartbeat",),
-                ("assignments",),
-                ("context",),
-            ],
-            summaries=_builder_summaries("hermes_cli.kanban", "build_parser"),
-            mutating=[
-                ("init",),
-                ("boards", "create"),
-                ("boards", "rm"),
-                ("boards", "switch"),
-                ("boards", "rename"),
-                ("boards", "set-workdir"),
-                ("create",),
-                ("assign",),
-                ("reclaim",),
-                ("reassign",),
-                ("link",),
-                ("unlink",),
-                ("claim",),
-                ("comment",),
-                ("complete",),
-                ("edit",),
-                ("block",),
-                ("schedule",),
-                ("unblock",),
-                ("promote",),
-                ("archive",),
-            ],
-            handler_factory=lambda fixed: _builder_handler(
-                "kanban",
-                fixed,
-                "hermes_cli.kanban",
-                "build_parser",
-                "cmd_kanban",
-            ),
-        )
-
-        registered = {
-            "bundles": (
-                "hermes_cli.bundles",
-                "register_cli",
-                "bundles_command",
-                [("list",), ("show",), ("create",), ("delete",), ("reload",)],
-                {("create",), ("delete",), ("reload",)},
-            ),
-            "checkpoints": (
-                "hermes_cli.checkpoints",
-                "register_cli",
-                None,
-                [("status",), ("list",), ("prune",), ("clear",), ("clear-legacy",)],
-                {("prune",), ("clear",), ("clear-legacy",)},
-            ),
-            "curator": (
-                "hermes_cli.curator",
-                "register_cli",
-                None,
-                [
-                    ("status",),
-                    ("run",),
-                    ("pause",),
-                    ("resume",),
-                    ("pin",),
-                    ("unpin",),
-                    ("restore",),
-                    ("list-archived",),
-                    ("archive",),
-                    ("prune",),
-                    ("backup",),
-                    ("rollback",),
-                ],
-                {
-                    ("run",),
-                    ("pause",),
-                    ("resume",),
-                    ("pin",),
-                    ("unpin",),
-                    ("restore",),
-                    ("archive",),
-                    ("prune",),
-                    ("backup",),
-                    ("rollback",),
-                },
-            ),
-            "pets": (
-                "hermes_cli.pets",
-                "register_cli",
-                None,
-                [("list",), ("install",), ("select",), ("show",), ("off",), ("scale",), ("remove",), ("doctor",)],
-                {("install",), ("select",), ("off",), ("scale",), ("remove",)},
-            ),
-        }
-        for root, (module, register, handler_name, paths, mutating) in registered.items():
-            summaries = _registered_summaries(root, module, register)
-            _register_command_family(
-                self,
-                root=root,
-                paths=paths,
-                mutating=mutating,
-                summaries=summaries,
-                handler_factory=lambda fixed, root=root, module=module, register=register, handler_name=handler_name: _registered_handler(
-                    root,
-                    fixed,
-                    module,
-                    register,
-                    handler_name=handler_name,
-                    namespace_update=_apply_confirmed_defaults,
-                ),
-            )
 
     def register(
         self,
@@ -1143,7 +580,6 @@ class HermesConsoleEngine:
             mutating=mutating,
             confirmation=confirmation,
         )
-
 
     def _execute_builtin(self, tokens: list[str]) -> ConsoleResult | None:
         head = tokens[0]
@@ -1183,59 +619,9 @@ class HermesConsoleEngine:
         first = tokens[0]
         if first.startswith("-"):
             return f"{first} is not available in Hermes Console."
-        blocked_top = {
-            "acp",
-            "chat",
-            "claw",
-            "completion",
-            "dashboard",
-            "desktop",
-            "fallback",
-            "gateway",
-            "gui",
-            "login",
-            "logout",
-            "model",
-            "moa",
-            "oneshot",
-
-            "proxy",
-            "serve",
-            "setup",
-            "uninstall",
-            "update",
-            "whatsapp",
-            "whatsapp-cloud",
-        }
-        if first in blocked_top:
+        if first in _BLOCKED_TOP:
             return f"`hermes {first}` is not available in Hermes Console."
-        blocked_pairs = {
-            ("config", "edit"): "`config edit` opens an editor and is not available in Hermes Console.",
-            ("mcp", "serve"): "`mcp serve` starts a server and is not available in Hermes Console.",
-            ("profile", "alias"): "`profile alias` creates shell wrappers and is not available in Hermes Console.",
-            ("skills", "config"): "`skills config` is interactive and is not available in Hermes Console.",
-            ("skills", "publish"): "`skills publish` is not available in Hermes Console.",
-            ("portal", "login"): "`portal login` is interactive and is not available in Hermes Console.",
-            ("portal", "open"): "`portal open` opens a browser and is not available in Hermes Console.",
-            ("kanban", "tail"): "`kanban tail` streams output and is not available in Hermes Console.",
-            ("kanban", "watch"): "`kanban watch` streams output and is not available in Hermes Console.",
-            ("kanban", "daemon"): "`kanban daemon` starts a service and is not available in Hermes Console.",
-            ("kanban", "dispatcher"): "`kanban dispatcher` starts a worker and is not available in Hermes Console.",
-            ("kanban", "swarm"): "`kanban swarm` starts agent work and is not available in Hermes Console.",
-            ("kanban", "decompose"): "`kanban decompose` starts agent work and is not available in Hermes Console.",
-            ("kanban", "specify"): "`kanban specify` starts agent work and is not available in Hermes Console.",
-            ("kanban", "gc"): "`kanban gc` is not available in Hermes Console.",
-        }
-        if len(tokens) >= 2:
-            pair = (tokens[0], tokens[1])
-            if pair in blocked_pairs:
-                return blocked_pairs[pair]
-        if tuple(tokens[:2]) in {("sessions", "delete"), ("sessions", "prune")}:
-            return "`sessions delete` and `sessions prune` are not available in Hermes Console."
-        return ""
-
-    def _help_result(self) -> ConsoleResult:
-        return ConsoleResult("ok", output=self.help_text())
+        return _BLOCKED_PAIRS.get(tuple(tokens[:2]), "")
 
     def _cap_output(self, output: str) -> str:
         if len(output) <= self.output_limit:
@@ -1262,9 +648,12 @@ def _apply_confirmed_defaults(args: argparse.Namespace) -> None:
     # _confirm() for its orphan preview, and the console never redirects stdin.
     if getattr(args, "checkpoints_command", None) in {"prune", "clear", "clear-legacy"}:
         setattr(args, "force", True)
-    if getattr(args, "plugins_action", None) == "install":
-        if not getattr(args, "enable", False) and not getattr(args, "no_enable", False):
-            setattr(args, "no_enable", True)
+    if (
+        getattr(args, "plugins_action", None) == "install"
+        and not getattr(args, "enable", False)
+        and not getattr(args, "no_enable", False)
+    ):
+        setattr(args, "no_enable", True)
     if getattr(args, "auth_action", None) == "add":
         auth_type = getattr(args, "auth_type", None)
         if auth_type in {"api-key", "api_key"} and not getattr(args, "api_key", None):
@@ -1568,14 +957,7 @@ def _sessions_repair(_engine: HermesConsoleEngine, args: list[str]) -> str:
 
 def _profile_status(_engine: HermesConsoleEngine, args: list[str]) -> str:
     _expect_no_args(args, "profile")
-    return _dispatch_extracted_subcommand(
-        root="profile",
-        fixed=(),
-        args=(),
-        module_name="hermes_cli.subcommands.profile",
-        builder_name="build_profile_parser",
-        main_handler_name="cmd_profile",
-    )
+    return _dispatch(_CLI_FAMILIES["profile"][0], "profile", (), ())
 
 
 def _cron_list(_engine: HermesConsoleEngine, args: list[str]) -> str:
@@ -1594,18 +976,28 @@ def _cron_status(_engine: HermesConsoleEngine, args: list[str]) -> str:
     return _capture_output(cron_status)
 
 
-def _cron_pause(_engine: HermesConsoleEngine, args: list[str]) -> str:
+def _cron_job_action(args: list[str], usage: str, action: str, run) -> str:
+    """Shared body for single-job cron commands: ``run(job_ref) -> job | None``."""
     if len(args) != 1:
-        raise ConsoleCommandError("Usage: cron pause <job>")
-    from cron.jobs import AmbiguousJobReference, pause_job
+        raise ConsoleCommandError(f"Usage: {usage}")
+    from cron.jobs import AmbiguousJobReference
 
     try:
-        job = pause_job(args[0], reason="paused from hermes console")
+        job = run(args[0])
     except AmbiguousJobReference as exc:
         raise ConsoleCommandError(str(exc)) from exc
     if not job:
         raise ConsoleCommandError(f"Job not found: {args[0]}")
-    return _format_job(job, "Paused")
+    return _format_job(job, action)
+
+
+def _cron_pause(_engine: HermesConsoleEngine, args: list[str]) -> str:
+    from cron.jobs import pause_job
+
+    return _cron_job_action(
+        args, "cron pause <job>", "Paused",
+        lambda ref: pause_job(ref, reason="paused from hermes console"),
+    )
 
 
 def _cron_resume(_engine: HermesConsoleEngine, args: list[str]) -> str:
@@ -1623,9 +1015,7 @@ def _cron_resume(_engine: HermesConsoleEngine, args: list[str]) -> str:
             job = rearm_oneshot(ns.job, _hermes_now().isoformat() if ns.run_now else ns.at)
         else:
             job = resume_job(ns.job)
-    except AmbiguousJobReference as exc:
-        raise ConsoleCommandError(str(exc)) from exc
-    except ValueError as exc:
+    except (AmbiguousJobReference, ValueError) as exc:
         raise ConsoleCommandError(str(exc)) from exc
     if not job:
         raise ConsoleCommandError(f"Job not found: {ns.job}")
@@ -1633,17 +1023,44 @@ def _cron_resume(_engine: HermesConsoleEngine, args: list[str]) -> str:
 
 
 def _cron_run(_engine: HermesConsoleEngine, args: list[str]) -> str:
-    if len(args) != 1:
-        raise ConsoleCommandError("Usage: cron run <job>")
-    from cron.jobs import AmbiguousJobReference, trigger_job
+    from cron.jobs import trigger_job
 
-    try:
-        job = trigger_job(args[0])
-    except AmbiguousJobReference as exc:
-        raise ConsoleCommandError(str(exc)) from exc
-    if not job:
-        raise ConsoleCommandError(f"Job not found: {args[0]}")
-    return _format_job(job, "Triggered")
+    return _cron_job_action(args, "cron run <job>", "Triggered", trigger_job)
+
+
+_READONLY_COMMANDS = (
+    (("status",), "status", "Show Hermes component status.", _status),
+    (("version",), "version", "Show Hermes version information.", _version),
+    (("doctor",), "doctor", "Run diagnostics without auto-fix.", _doctor),
+    (("logs",), "logs [name] [-n N]", "Show recent Hermes logs.", _logs),
+    (("sessions", "list"), "sessions list [--limit N]", "List recent sessions.", _sessions_list),
+    (("sessions", "stats"), "sessions stats", "Show session store statistics.", _sessions_stats),
+    (("config", "show"), "config show", "Show current configuration.", _config_show),
+    (("config", "path"), "config path", "Print config.yaml path.", _config_path),
+    (("cron", "list"), "cron list [--all]", "List scheduled jobs.", _cron_list),
+    (("cron", "status"), "cron status", "Show cron scheduler status.", _cron_status),
+    (("profile",), "profile", "Show active profile status.", _profile_status),
+)
+
+# (path, usage, summary, handler, confirmation prompt)
+_MUTATING_COMMANDS = (
+    (("config", "set"), "config set <key> <value>", "Set a configuration value.", _config_set,
+     "Update Hermes configuration?"),
+    (("cron", "pause"), "cron pause <job>", "Pause a scheduled job.", _cron_pause, "Pause this cron job?"),
+    (("cron", "resume"), "cron resume <job>", "Resume a paused cron job.", _cron_resume, "Resume this cron job?"),
+    (("cron", "run"), "cron run <job>", "Run a job on the next scheduler tick.", _cron_run,
+     "Trigger this cron job?"),
+    (("config", "migrate"), "config migrate", "Update config with new options.", _config_migrate,
+     "Update Hermes configuration with missing defaults?"),
+    (("sessions", "export"), "sessions export <output> [--source SOURCE] [--session-id ID]",
+     "Export sessions to JSONL.", _sessions_export, "Export session data?"),
+    (("sessions", "rename"), "sessions rename <session> <title>", "Rename a session.", _sessions_rename,
+     "Rename this session?"),
+    (("sessions", "optimize"), "sessions optimize", "Optimize the session store.", _sessions_optimize,
+     "Optimize the session database?"),
+    (("sessions", "repair"), "sessions repair [--check-only] [--no-backup]",
+     "Repair a malformed session database schema.", _sessions_repair, "Repair the session database?"),
+)
 
 
 def run_console_repl(

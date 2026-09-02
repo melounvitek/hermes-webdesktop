@@ -1,24 +1,13 @@
-"""CLI handlers for ``hermes egress ...``.
-
-Subcommands:
-    install  — download the pinned iron-proxy binary
-    setup    — interactive wizard: install binary, generate CA, mint tokens, write config
-    start    — launch the proxy as a managed subprocess
-    stop     — terminate the managed proxy
-    status   — show binary version + config presence + listen state + mappings
-    disable  — flip ``proxy.enabled`` to False (does not stop a running proxy)
-    config   — print the generated proxy.yaml path (for debugging / external review)
-
-The top-level command is ``hermes egress``.  Note that the inbound OAuth
-reverse-proxy command (``hermes proxy``) lives elsewhere in
-``hermes_cli/main.py`` — different direction, different purpose.
-"""
+"""CLI handlers for ``hermes egress ...``."""
 
 from __future__ import annotations
 
 import argparse
 import os
-from typing import List
+import shutil
+import sys
+from datetime import datetime
+from typing import List, Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -34,11 +23,7 @@ from hermes_cli.config import load_config, save_config
 
 
 def register_cli(parent_parser: argparse.ArgumentParser) -> None:
-    """Attach the egress subcommand tree to a parent parser.
-
-    Called from ``hermes_cli.main`` as part of building the top-level
-    ``hermes egress`` parser.
-    """
+    """Attach the egress subcommand tree to a parent parser."""
 
     # dest='egress_command' — keeps this subparser tree disjoint from the
     # inbound OAuth ``hermes proxy`` subparser (which uses dest='proxy_command').
@@ -46,87 +31,60 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
     # but a future grep-and-refactor on ``proxy_command`` would otherwise
     # hit both handlers.
     sub = parent_parser.add_subparsers(dest="egress_command")
-
-    install = sub.add_parser(
-        "install",
-        help=f"Download iron-proxy binary (v{ip._IRON_PROXY_VERSION})",
-    )
-    install.add_argument(
-        "--force", action="store_true",
-        help="Re-download even if a managed copy already exists",
-    )
-    install.set_defaults(func=cmd_install)
-
-    setup = sub.add_parser(
-        "setup",
-        help="Interactive wizard: install + CA + mint tokens + write config",
-    )
-    setup.add_argument(
-        "--tunnel-port", type=int, default=None,
-        help=f"Override the tunnel port (default {ip._DEFAULT_TUNNEL_PORT})",
-    )
-    setup.add_argument(
-        "--from-bitwarden", action="store_true",
-        help="Treat secrets as managed by Bitwarden — discover provider keys "
-             "from secrets.bitwarden config instead of the current env.  Fails "
-             "loudly if BW is unreachable rather than silently falling back.",
-    )
-    setup.add_argument(
-        "--no-bitwarden", action="store_true",
-        help="Explicitly switch credential_source back to env on re-setup "
-             "(only meaningful when the previous setup used --from-bitwarden).",
-    )
-    setup.add_argument(
-        "--rotate-tokens", action="store_true",
-        help="Mint fresh proxy tokens for every provider (default is to "
-             "preserve tokens for providers that already had one — avoids "
-             "401-ing already-running sandboxes on re-setup).",
-    )
-    setup.add_argument(
-        "--restart", dest="restart", action="store_true", default=None,
-        help="If a daemon is already running, restart it automatically after "
-             "writing the new config/tokens (non-interactive default on a tty "
-             "is to ask).",
-    )
-    setup.add_argument(
-        "--no-restart", dest="restart", action="store_false",
-        help="Do not restart a running daemon after setup; you'll need to run "
-             "`hermes egress restart` yourself for changes to take effect.",
-    )
-    setup.set_defaults(func=cmd_setup)
-
-    start = sub.add_parser("start", help="Start the managed iron-proxy")
-    start.set_defaults(func=cmd_start)
-
-    stop = sub.add_parser("stop", help="Stop the managed iron-proxy")
-    stop.set_defaults(func=cmd_stop)
-
-    restart = sub.add_parser(
-        "restart",
-        help="Restart the managed iron-proxy (stop if running, then start)",
-    )
-    restart.set_defaults(func=cmd_restart)
-
-    reload_p = sub.add_parser(
-        "reload",
-        help="Hot-reload the running daemon's ruleset from proxy.yaml "
-             "(management API — no restart, no dropped connections)",
-    )
-    reload_p.set_defaults(func=cmd_reload)
-
-    status = sub.add_parser("status", help="Show proxy state and mappings")
-    status.add_argument(
-        "--show-tokens", action="store_true",
-        help="Print the proxy tokens (default: redacted prefix only). "
-             "Beware: tokens may persist in your shell history.",
-    )
-    status.set_defaults(func=cmd_status)
-
-    disable = sub.add_parser("disable", help="Turn off the proxy integration")
-    disable.set_defaults(func=cmd_disable)
-
-    cfg = sub.add_parser("config", help="Print the generated proxy.yaml path")
-    cfg.set_defaults(func=cmd_config)
+    # (name, help, handler, [(flag, add_argument kwargs), ...]) — declaration order is the
+    # ``--help`` order, so keep it stable.
+    commands = [
+        ("install", f"Download iron-proxy binary (v{ip._IRON_PROXY_VERSION})", cmd_install, [
+            ("--force", dict(action="store_true",
+                             help="Re-download even if a managed copy already exists")),
+        ]),
+        ("setup", "Interactive wizard: install + CA + mint tokens + write config", cmd_setup, [
+            ("--tunnel-port", dict(
+                type=int, default=None,
+                help=f"Override the tunnel port (default {ip._DEFAULT_TUNNEL_PORT})")),
+            ("--from-bitwarden", dict(
+                action="store_true",
+                help="Treat secrets as managed by Bitwarden — discover provider keys "
+                     "from secrets.bitwarden config instead of the current env.  Fails "
+                     "loudly if BW is unreachable rather than silently falling back.")),
+            ("--no-bitwarden", dict(
+                action="store_true",
+                help="Explicitly switch credential_source back to env on re-setup "
+                     "(only meaningful when the previous setup used --from-bitwarden).")),
+            ("--rotate-tokens", dict(
+                action="store_true",
+                help="Mint fresh proxy tokens for every provider (default is to "
+                     "preserve tokens for providers that already had one — avoids "
+                     "401-ing already-running sandboxes on re-setup).")),
+            ("--restart", dict(
+                dest="restart", action="store_true", default=None,
+                help="If a daemon is already running, restart it automatically after "
+                     "writing the new config/tokens (non-interactive default on a tty "
+                     "is to ask).")),
+            ("--no-restart", dict(
+                dest="restart", action="store_false",
+                help="Do not restart a running daemon after setup; you'll need to run "
+                     "`hermes egress restart` yourself for changes to take effect.")),
+        ]),
+        ("start", "Start the managed iron-proxy", cmd_start, []),
+        ("stop", "Stop the managed iron-proxy", cmd_stop, []),
+        ("restart", "Restart the managed iron-proxy (stop if running, then start)", cmd_restart, []),
+        ("reload", "Hot-reload the running daemon's ruleset from proxy.yaml "
+                   "(management API — no restart, no dropped connections)", cmd_reload, []),
+        ("status", "Show proxy state and mappings", cmd_status, [
+            ("--show-tokens", dict(
+                action="store_true",
+                help="Print the proxy tokens (default: redacted prefix only). "
+                     "Beware: tokens may persist in your shell history.")),
+        ]),
+        ("disable", "Turn off the proxy integration", cmd_disable, []),
+        ("config", "Print the generated proxy.yaml path", cmd_config, []),
+    ]
+    for name, help_text, func, arguments in commands:
+        parser = sub.add_parser(name, help=help_text)
+        for flag, kwargs in arguments:
+            parser.add_argument(flag, **kwargs)
+        parser.set_defaults(func=func)
 
 
 # ---------------------------------------------------------------------------
@@ -189,56 +147,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     available_env_names: List[str] = []
     if args.from_bitwarden:
-        cfg = load_config()
-        bw_cfg = (cfg.get("secrets") or {}).get("bitwarden") or {}
-        if not bw_cfg.get("enabled"):
-            console.print(
-                "  [red]✗ --from-bitwarden requested but "
-                "secrets.bitwarden.enabled is false.[/red]"
-            )
-            console.print(
-                "  Run `hermes secrets bitwarden setup` first, or omit "
-                "--from-bitwarden."
-            )
-            return 1
-        try:
-            from agent.secret_sources import bitwarden as bw
-            access_token = os.environ.get(
-                bw_cfg.get("access_token_env", "BWS_ACCESS_TOKEN"), ""
-            ).strip()
-            if not access_token:
-                console.print(
-                    f"  [red]✗ --from-bitwarden requested but "
-                    f"{bw_cfg.get('access_token_env', 'BWS_ACCESS_TOKEN')} "
-                    "is not set in the environment.[/red]"
-                )
-                return 1
-            secrets, _ = bw.fetch_bitwarden_secrets(
-                access_token=access_token,
-                project_id=bw_cfg.get("project_id", ""),
-                cache_ttl_seconds=0,
-                use_cache=False,
-            )
-            available_env_names = list(secrets.keys())
-            if not available_env_names:
-                console.print(
-                    "  [red]✗ Bitwarden returned an empty secrets list.[/red]\n"
-                    "  Check the project_id in secrets.bitwarden and the "
-                    "BWS access-token's project scope."
-                )
-                return 1
-            console.print(
-                f"  Pulled {len(available_env_names)} env names from Bitwarden."
-            )
-        except Exception as exc:  # noqa: BLE001 — explicit user-facing error
-            console.print(
-                f"  [red]✗ Could not enumerate Bitwarden secrets: {exc}[/red]"
-            )
-            console.print(
-                "  Either fix the Bitwarden config and retry, or rerun setup "
-                "without --from-bitwarden (the proxy will read secrets from "
-                "the host process env at start time)."
-            )
+        available_env_names = _bitwarden_env_names(console)
+        if available_env_names is None:
             return 1
     else:
         # Env-based discovery reads os.environ.  Operators commonly keep their
@@ -272,19 +182,13 @@ def cmd_setup(args: argparse.Namespace) -> int:
     # when stdin isn't a tty (CI / non-interactive use), in which case
     # the operator passed the flag deliberately.
     if rotate and existing:
-        import sys as _sys
-        from datetime import datetime as _dt
-        if _sys.stdin.isatty():
+        if sys.stdin.isatty():
             console.print(
                 "[yellow]⚠[/yellow]  --rotate-tokens will invalidate proxy "
                 "tokens in every running Hermes sandbox.  They will start "
                 "401-ing against upstreams until restarted."
             )
-            try:
-                ans = input("Type 'rotate' to confirm: ").strip().lower()
-            except EOFError:
-                ans = ""
-            if ans != "rotate":
+            if _prompt("Type 'rotate' to confirm: ") != "rotate":
                 console.print("[yellow]Cancelled.[/yellow]")
                 return 1
         # Backup the existing mappings before we overwrite.  The
@@ -292,13 +196,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
         # the operator manually recover tokens if they realise the
         # rotation was a mistake.
         try:
-            import shutil as _shutil
             state_dir = ip._proxy_state_dir()
             mappings_src = state_dir / "mappings.json"
             if mappings_src.exists():
-                ts = _dt.now().strftime("%Y%m%dT%H%M%S")
+                ts = datetime.now().strftime("%Y%m%dT%H%M%S")
                 backup = state_dir / f"mappings.json.rotated-{ts}"
-                _shutil.copy2(str(mappings_src), str(backup))
+                shutil.copy2(str(mappings_src), str(backup))
                 console.print(f"  [dim]backup: {backup}[/dim]")
         except OSError as exc:
             console.print(
@@ -478,23 +381,16 @@ def cmd_setup(args: argparse.Namespace) -> int:
     #   neither + !tty → restart when a daemon was running; otherwise no-op
     #                    (first-time setup never auto-starts — matches the
     #                    "configured, now run start" flow)
-    import sys as _sys
     restart_pref = getattr(args, "restart", None)
-    if restart_pref is True:
-        do_restart = True
-    elif restart_pref is False:
-        do_restart = False
+    if restart_pref is True or restart_pref is False:
+        do_restart = restart_pref
     elif was_running:
-        if _sys.stdin.isatty():
-            try:
-                ans = input(
-                    "  Restart the running proxy now with the new config? [Y/n] "
-                ).strip().lower()
-            except EOFError:
-                ans = ""
-            do_restart = ans in ("", "y", "yes")
-        else:
-            do_restart = True
+        do_restart = (
+            _prompt("  Restart the running proxy now with the new config? [Y/n] ")
+            in ("", "y", "yes")
+            if sys.stdin.isatty()
+            else True
+        )
     else:
         do_restart = False
 
@@ -675,10 +571,9 @@ def cmd_stop(args: argparse.Namespace) -> int:
 def cmd_restart(args: argparse.Namespace) -> int:
     """Stop the running daemon (if any) and start it with the current config.
 
-    The one-command way to apply config changes (new allowlist hosts, rotated
-    tokens, a Bitwarden key rotation) without making the operator remember the
-    stop/start dance.  Delegates to ``cmd_start`` so all the credential-source
-    guards run exactly as they do for ``start``.
+    The one-command way to apply config changes (new allowlist hosts, rotated tokens, a
+    Bitwarden key rotation). Delegates to ``cmd_start`` so all credential-source guards run
+    exactly as for ``start``.
     """
     console = Console()
     was_running = ip.stop_proxy()
@@ -690,13 +585,10 @@ def cmd_restart(args: argparse.Namespace) -> int:
 def cmd_reload(args: argparse.Namespace) -> int:
     """Hot-reload the running daemon's ruleset via the management API.
 
-    Applies allowlist / token / mapping changes already written to
-    proxy.yaml WITHOUT restarting the daemon — no dropped connections, no
-    restart window.  When the change involves new upstream SECRETS (a
-    Bitwarden rotation, a newly added provider key), use
-    ``hermes egress restart`` instead: the daemon reads real credentials
-    from its own environment at spawn time, and a reload does not
-    re-populate that env.
+    Applies allowlist/token/mapping changes already written to proxy.yaml WITHOUT restarting —
+    no dropped connections. For new upstream SECRETS (a Bitwarden rotation, a new provider key)
+    use ``hermes egress restart`` instead: the daemon reads credentials from its own environment
+    at spawn time and a reload does not re-populate that env.
     """
     console = Console()
     try:
@@ -722,24 +614,14 @@ def format_status_text(*, show_tokens: bool = False) -> str:
     proxy_cfg = cfg.get("proxy") or {}
     status = ip.get_status()
 
-    def yn(value: bool) -> str:
-        return "yes" if value else "no"
-
-    lines = [
-        "Egress proxy status",
-        "",
-        f"Enabled: {yn(bool(proxy_cfg.get('enabled')))}",
-        f"Binary: {status.binary_path or '(missing)'}",
-        f"Binary version: {status.binary_version or '(unknown)'}",
-        f"Config: {status.config_path or '(not generated)'}",
-        f"CA cert: {status.ca_cert_path or '(not generated)'}",
-        f"Tunnel port: {status.tunnel_port}",
-        f"Process: pid {status.pid}" if status.pid else "Process: (stopped)",
-        f"Listening: {yn(status.listening)}",
-        f"Credential src: {proxy_cfg.get('credential_source', 'env')}",
-        f"Docker enforce: {yn(bool(proxy_cfg.get('enforce_on_docker', True)))}",
-        "Scope: Docker backend only in this release",
-    ]
+    lines = ["Egress proxy status", ""]
+    lines.extend(
+        f"{label}: {value}"
+        for label, value in _status_rows(
+            proxy_cfg, status, yn=lambda v: "yes" if v else "no", dim=lambda t: t
+        )
+    )
+    lines.append("Scope: Docker backend only in this release")
 
     mappings = ip.load_mappings()
     if mappings:
@@ -774,16 +656,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("", style="bold")
     table.add_column("")
-    table.add_row("Enabled",        _yn(bool(proxy_cfg.get("enabled"))))
-    table.add_row("Binary",         str(status.binary_path or "[dim](missing)[/dim]"))
-    table.add_row("Binary version", status.binary_version or "[dim](unknown)[/dim]")
-    table.add_row("Config",         str(status.config_path or "[dim](not generated)[/dim]"))
-    table.add_row("CA cert",        str(status.ca_cert_path or "[dim](not generated)[/dim]"))
-    table.add_row("Tunnel port",    str(status.tunnel_port))
-    table.add_row("Process",        f"pid {status.pid}" if status.pid else "[dim](stopped)[/dim]")
-    table.add_row("Listening",      _yn(status.listening))
-    table.add_row("Credential src", str(proxy_cfg.get("credential_source", "env")))
-    table.add_row("Docker enforce", _yn(bool(proxy_cfg.get("enforce_on_docker", True))))
+    for label, value in _status_rows(proxy_cfg, status, yn=_yn, dim=lambda t: f"[dim]{t}[/dim]"):
+        table.add_row(label, value)
     console.print(table)
 
     mappings = ip.load_mappings()
@@ -860,18 +734,72 @@ def cmd_config(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _bitwarden_env_names(console: Console) -> Optional[List[str]]:
+    """Secret names from Bitwarden for ``setup --from-bitwarden``; prints the error and returns
+    ``None`` on any failure so the wizard aborts loudly instead of falling back to the host env.
+    """
+    cfg = load_config()
+    bw_cfg = (cfg.get("secrets") or {}).get("bitwarden") or {}
+    if not bw_cfg.get("enabled"):
+        console.print(
+            "  [red]✗ --from-bitwarden requested but "
+            "secrets.bitwarden.enabled is false.[/red]"
+        )
+        console.print(
+            "  Run `hermes secrets bitwarden setup` first, or omit "
+            "--from-bitwarden."
+        )
+        return None
+    try:
+        from agent.secret_sources import bitwarden as bw
+        access_token = os.environ.get(
+            bw_cfg.get("access_token_env", "BWS_ACCESS_TOKEN"), ""
+        ).strip()
+        if not access_token:
+            console.print(
+                f"  [red]✗ --from-bitwarden requested but "
+                f"{bw_cfg.get('access_token_env', 'BWS_ACCESS_TOKEN')} "
+                "is not set in the environment.[/red]"
+            )
+            return None
+        secrets, _ = bw.fetch_bitwarden_secrets(
+            access_token=access_token,
+            project_id=bw_cfg.get("project_id", ""),
+            cache_ttl_seconds=0,
+            use_cache=False,
+        )
+        names = list(secrets.keys())
+        if not names:
+            console.print(
+                "  [red]✗ Bitwarden returned an empty secrets list.[/red]\n"
+                "  Check the project_id in secrets.bitwarden and the "
+                "BWS access-token's project scope."
+            )
+            return None
+        console.print(f"  Pulled {len(names)} env names from Bitwarden.")
+        return names
+    except Exception as exc:  # noqa: BLE001 — explicit user-facing error
+        console.print(
+            f"  [red]✗ Could not enumerate Bitwarden secrets: {exc}[/red]"
+        )
+        console.print(
+            "  Either fix the Bitwarden config and retry, or rerun setup "
+            "without --from-bitwarden (the proxy will read secrets from "
+            "the host process env at start time)."
+        )
+        return None
+
+
 def _load_env_file_into_environ() -> int:
     """Backfill provider keys from ``~/.hermes/.env`` into ``os.environ``.
 
-    ``hermes egress setup`` discovers providers by reading ``os.environ``, but
-    many operators keep their keys ONLY in ``~/.hermes/.env`` (which the agent
-    loads at runtime but which is NOT exported into an interactive shell).
-    Without this, ``setup`` reports "no provider keys found" even though the
-    keys plainly exist — a confusing first-run papercut.
+    ``hermes egress setup`` discovers providers by reading ``os.environ``, but many operators keep
+    their keys ONLY in ``~/.hermes/.env`` (which the agent loads at runtime but which is NOT
+    exported into an interactive shell).
 
-    Only fills names that aren't already set in the process env (an exported
-    value always wins), and only for known bearer-provider names so we don't
-    slurp unrelated secrets into the process. Returns the count of names added.
+    Only fills names that aren't already set in the process env (an exported value always wins), and
+    only for known bearer-provider names so we don't slurp unrelated secrets into the process.
+    Returns the count of names added.
     """
     try:
         from hermes_cli.config import load_env
@@ -895,6 +823,33 @@ def _load_env_file_into_environ() -> int:
 
 def _yn(value: bool) -> str:
     return "[green]yes[/green]" if value else "[dim]no[/dim]"
+
+
+def _prompt(text: str) -> str:
+    """``input()`` lowered+stripped; EOF (closed stdin) reads as an empty answer."""
+    try:
+        return input(text).strip().lower()
+    except EOFError:
+        return ""
+
+
+def _status_rows(proxy_cfg: dict, status, *, yn, dim) -> list[tuple[str, str]]:
+    """``(label, value)`` pairs shared by the rich ``status`` table and the plain-text variant.
+
+    ``yn`` renders booleans; ``dim`` wraps placeholder text for missing values.
+    """
+    return [
+        ("Enabled", yn(bool(proxy_cfg.get("enabled")))),
+        ("Binary", str(status.binary_path or dim("(missing)"))),
+        ("Binary version", status.binary_version or dim("(unknown)")),
+        ("Config", str(status.config_path or dim("(not generated)"))),
+        ("CA cert", str(status.ca_cert_path or dim("(not generated)"))),
+        ("Tunnel port", str(status.tunnel_port)),
+        ("Process", f"pid {status.pid}" if status.pid else dim("(stopped)")),
+        ("Listening", yn(status.listening)),
+        ("Credential src", str(proxy_cfg.get("credential_source", "env"))),
+        ("Docker enforce", yn(bool(proxy_cfg.get("enforce_on_docker", True)))),
+    ]
 
 
 def _redact_token(token: str) -> str:

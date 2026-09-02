@@ -1,15 +1,12 @@
 """Clipboard image extraction for macOS, Windows, Linux, and WSL2.
 
-Provides a single function `save_clipboard_image(dest)` that checks the
-system clipboard for image data, saves it to *dest* as PNG, and returns
-True on success.  No external Python dependencies — uses only OS-level
-CLI tools that ship with the platform (or are commonly installed).
+Provides a single function `save_clipboard_image(dest)` that checks the system clipboard for image
+data, saves it to *dest* as PNG, and returns True on success. No external Python dependencies — uses
+only OS-level CLI tools that ship with the platform (or are commonly installed).
 
-Platform support:
-  macOS   — osascript (always available), pngpaste (if installed)
-  Windows — PowerShell via WinForms, Get-Clipboard, file-drop fallback
-  WSL2    — powershell.exe via WinForms, Get-Clipboard, file-drop fallback
-  Linux   — wl-paste (Wayland), xclip (X11)
+Platform support: macOS — osascript (always available), pngpaste (if installed) Windows — PowerShell
+via WinForms, Get-Clipboard, file-drop fallback WSL2 — powershell.exe via WinForms, Get-Clipboard,
+file-drop fallback Linux — wl-paste (Wayland), xclip (X11)
 """
 
 import base64
@@ -23,6 +20,33 @@ from hermes_constants import is_wsl as _is_wsl
 
 logger = logging.getLogger(__name__)
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_TEXT = dict(capture_output=True, text=True, encoding='utf-8', errors='replace')
+
+
+def _nonempty(path: Path) -> bool:
+    return path.exists() and path.stat().st_size > 0
+
+
+def _probe(argv: list, timeout: int, ok, *, missing: str | None = None) -> bool:
+    """Run a text-mode probe; True when it ran and ``ok(result)`` holds.
+    A missing executable logs *missing* (when given); every other failure is silent."""
+    try:
+        return bool(ok(subprocess.run(argv, timeout=timeout, **_TEXT)))
+    except FileNotFoundError:
+        if missing:
+            logger.debug(missing)
+    except Exception:
+        pass
+    return False
+
+
+def _linux_backends():
+    """(enabled, has_image, save) in Linux fallthrough order: WSL → Wayland → X11."""
+    return (
+        (_is_wsl(), _wsl_has_image, _wsl_save),
+        (bool(os.environ.get("WAYLAND_DISPLAY")), _wayland_has_image, _wayland_save),
+        (True, _xclip_has_image, _xclip_save),
+    )
 
 
 def save_clipboard_image(dest: Path) -> bool:
@@ -39,20 +63,12 @@ def save_clipboard_image(dest: Path) -> bool:
 
 
 def has_clipboard_image() -> bool:
-    """Quick check: does the clipboard currently contain an image?
-
-    Lighter than save_clipboard_image — doesn't extract or write anything.
-    """
+    """Quick check: does the clipboard currently contain an image?"""
     if sys.platform == "darwin":
         return _macos_has_image()
     if sys.platform == "win32":
         return _windows_has_image()
-    # Match _linux_save fallthrough order: WSL → Wayland → X11
-    if _is_wsl() and _wsl_has_image():
-        return True
-    if os.environ.get("WAYLAND_DISPLAY") and _wayland_has_image():
-        return True
-    return _xclip_has_image()
+    return any(enabled and has() for enabled, has, _ in _linux_backends())
 
 
 # ── Text write (native tools, mirrors ui-tui/src/lib/clipboard.ts) ──────
@@ -87,10 +103,9 @@ def _write_clipboard_commands() -> list:
 def is_remote_shell_session(env=None) -> bool:
     """True when running inside an SSH session.
 
-    Mirrors ui-tui/src/lib/terminalSetup.ts isRemoteShellSession().  Over
-    SSH, native clipboard tools write the REMOTE machine's clipboard (or
-    an X-forwarded one), which is almost never what the user wants —
-    OSC 52 reaches the LOCAL terminal emulator instead.
+    Mirrors ui-tui/src/lib/terminalSetup.ts isRemoteShellSession(). Over SSH, native clipboard tools
+    write the REMOTE machine's clipboard (or an X-forwarded one), which is almost never what the
+    user wants — OSC 52 reaches the LOCAL terminal emulator instead.
     """
     e = os.environ if env is None else env
     return bool(
@@ -101,26 +116,21 @@ def is_remote_shell_session(env=None) -> bool:
 def write_clipboard_text(text: str) -> bool:
     """Write *text* to the system clipboard via native platform tools.
 
-    Fallback order matches the TUI (ui-tui/src/lib/clipboard.ts):
-    macOS pbcopy → Windows/WSL PowerShell Set-Clipboard → wl-copy →
-    xclip → xsel.  Returns True if any backend succeeded; callers should
-    fall back to OSC 52 on False.
+    Fallback order matches the TUI (ui-tui/src/lib/clipboard.ts): macOS pbcopy → Windows/WSL
+    PowerShell Set-Clipboard → wl-copy → xclip → xsel. Returns True if any backend succeeded;
+    callers should fall back to OSC 52 on False.
     """
+    data = text.encode("utf-8")
+    quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for argv, use_stdin in _write_clipboard_commands():
         try:
             if use_stdin:
-                proc = subprocess.run(
-                    argv, input=text.encode("utf-8"),
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    timeout=10,
-                )
+                proc = subprocess.run(argv, input=data, timeout=10, **quiet)
             else:
-                b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+                b64 = base64.b64encode(data).decode("ascii")
                 proc = subprocess.run(
                     argv + ["-Command", _powershell_write_script(b64)],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    timeout=10,
+                    stdin=subprocess.DEVNULL, timeout=10, **quiet,
                 )
             if proc.returncode == 0:
                 return True
@@ -138,24 +148,15 @@ def _macos_save(dest: Path) -> bool:
 
 def _macos_has_image() -> bool:
     """Check if macOS clipboard contains image data."""
-    try:
-        info = subprocess.run(
-            ["osascript", "-e", "clipboard info"],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=3,
-        )
-        return "«class PNGf»" in info.stdout or "«class TIFF»" in info.stdout
-    except Exception:
-        return False
+    return _probe(["osascript", "-e", "clipboard info"], 3,
+                  lambda r: "«class PNGf»" in r.stdout or "«class TIFF»" in r.stdout)
 
 
 def _macos_pngpaste(dest: Path) -> bool:
     """Use pngpaste (brew install pngpaste) — fastest, cleanest."""
     try:
-        r = subprocess.run(
-            ["pngpaste", str(dest)],
-            capture_output=True, timeout=3,
-        )
-        if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+        r = subprocess.run(["pngpaste", str(dest)], capture_output=True, timeout=3)
+        if r.returncode == 0 and _nonempty(dest):
             return True
     except FileNotFoundError:
         pass  # pngpaste not installed
@@ -181,11 +182,8 @@ def _macos_osascript(dest: Path) -> bool:
         'end try\n'
     )
     try:
-        r = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
-        )
-        if r.returncode == 0 and "fail" not in r.stdout and dest.exists() and dest.stat().st_size > 0:
+        r = subprocess.run(["osascript", "-e", script], timeout=5, **_TEXT)
+        if r.returncode == 0 and "fail" not in r.stdout and _nonempty(dest):
             return True
     except Exception as e:
         logger.debug("osascript clipboard extract failed: %s", e)
@@ -238,22 +236,22 @@ _PS_EXTRACT_IMAGE_GET_CLIPBOARD = (
 )
 
 _FILEDROP_IMAGE_EXTS = "'.png','.jpg','.jpeg','.gif','.webp','.bmp','.tiff','.tif'"
-
-_PS_CHECK_FILEDROP_IMAGE = (
+_PS_FILEDROP_HIT = (
     "try { "
     "$files = Get-Clipboard -Format FileDropList -ErrorAction Stop;"
     f"$exts = @({_FILEDROP_IMAGE_EXTS});"
     "$hit = $files | Where-Object { $exts -contains ([System.IO.Path]::GetExtension($_).ToLowerInvariant()) } | Select-Object -First 1;"
-    "if ($null -ne $hit) { 'True' } else { 'False' }"
+)
+
+_PS_CHECK_FILEDROP_IMAGE = (
+    _PS_FILEDROP_HIT
+    + "if ($null -ne $hit) { 'True' } else { 'False' }"
     "} catch { 'False' }"
 )
 
 _PS_EXTRACT_FILEDROP_IMAGE = (
-    "try { "
-    "$files = Get-Clipboard -Format FileDropList -ErrorAction Stop;"
-    f"$exts = @({_FILEDROP_IMAGE_EXTS});"
-    "$hit = $files | Where-Object { $exts -contains ([System.IO.Path]::GetExtension($_).ToLowerInvariant()) } | Select-Object -First 1;"
-    "if ($null -eq $hit) { exit 1 }"
+    _PS_FILEDROP_HIT
+    + "if ($null -eq $hit) { exit 1 }"
     "[System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($hit))"
     "} catch { exit 1 }"
 )
@@ -273,15 +271,13 @@ _POWERSHELL_EXTRACT_IMAGE_SCRIPTS = (
 
 def _run_powershell(exe: str, script: str, timeout: int) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [exe, "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
+        [exe, "-NoProfile", "-NonInteractive", "-Command", script], timeout=timeout, **_TEXT,
     )
 
 
 def _write_base64_image(dest: Path, b64_data: str) -> bool:
-    image_bytes = base64.b64decode(b64_data, validate=True)
-    dest.write_bytes(image_bytes)
-    return dest.exists() and dest.stat().st_size > 0
+    dest.write_bytes(base64.b64decode(b64_data, validate=True))
+    return _nonempty(dest)
 
 
 def _powershell_has_image(exe: str, *, timeout: int, label: str) -> bool:
@@ -304,12 +300,8 @@ def _powershell_save_image(exe: str, dest: Path, *, timeout: int, label: str) ->
             r = _run_powershell(exe, script, timeout=timeout)
             if r.returncode != 0:
                 continue
-
             b64_data = r.stdout.strip()
-            if not b64_data:
-                continue
-
-            if _write_base64_image(dest, b64_data):
+            if b64_data and _write_base64_image(dest, b64_data):
                 return True
         except FileNotFoundError:
             logger.debug("%s not found — clipboard unavailable", exe)
@@ -330,14 +322,9 @@ def _find_powershell() -> str | None:
     """Return the first available PowerShell executable, or None."""
     for name in ("powershell", "pwsh"):
         try:
-            r = subprocess.run(
-                [name, "-NoProfile", "-NonInteractive", "-Command", "echo ok"],
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
-            )
+            r = _run_powershell(name, "echo ok", timeout=5)
             if r.returncode == 0 and "ok" in r.stdout:
                 return name
-        except FileNotFoundError:
-            continue
         except Exception:
             continue
     return None
@@ -374,17 +361,9 @@ def _windows_save(dest: Path) -> bool:
 # ── Linux ────────────────────────────────────────────────────────────────
 
 def _linux_save(dest: Path) -> bool:
-    """Try clipboard backends in priority order: WSL → Wayland → X11."""
-    if _is_wsl():
-        if _wsl_save(dest):
-            return True
-        # Fall through — WSLg might have wl-paste or xclip working
-
-    if os.environ.get("WAYLAND_DISPLAY"):
-        if _wayland_save(dest):
-            return True
-
-    return _xclip_save(dest)
+    """Try clipboard backends in priority order: WSL → Wayland → X11
+    (a failed WSL probe falls through — WSLg might have wl-paste or xclip working)."""
+    return any(enabled and save(dest) for enabled, _, save in _linux_backends())
 
 
 # ── WSL2 (powershell.exe) ────────────────────────────────────────────────
@@ -402,69 +381,50 @@ def _wsl_save(dest: Path) -> bool:
 
 # ── Wayland (wl-paste) ──────────────────────────────────────────────────
 
+_WAYLAND_MIME_PREFERENCE = ("image/png", "image/jpeg", "image/bmp", "image/gif", "image/webp")
+_WL_LIST_TYPES = ["wl-paste", "--list-types"]
+_WL_MISSING = "wl-paste not installed — Wayland clipboard unavailable"
+
+
 def _wayland_has_image() -> bool:
     """Check if Wayland clipboard has image content."""
-    try:
-        r = subprocess.run(
-            ["wl-paste", "--list-types"],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=3,
-        )
-        return r.returncode == 0 and any(
-            t.startswith("image/") for t in r.stdout.splitlines()
-        )
-    except FileNotFoundError:
-        logger.debug("wl-paste not installed — Wayland clipboard unavailable")
-    except Exception:
-        pass
-    return False
+    return _probe(_WL_LIST_TYPES, 3, lambda r: r.returncode == 0 and any(
+        t.startswith("image/") for t in r.stdout.splitlines()), missing=_WL_MISSING)
+
+
+def _pipe_to_file(argv: list, dest: Path) -> bool:
+    """Run *argv* with stdout redirected into *dest*; True when a non-empty file resulted."""
+    with open(dest, "wb") as f:
+        subprocess.run(argv, stdout=f, stderr=subprocess.DEVNULL, timeout=5, check=True)
+    return _nonempty(dest)
 
 
 def _wayland_save(dest: Path) -> bool:
     """Use wl-paste to extract clipboard image (Wayland sessions)."""
     try:
-        # Check available MIME types
-        types_r = subprocess.run(
-            ["wl-paste", "--list-types"],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=3,
-        )
+        types_r = subprocess.run(_WL_LIST_TYPES, timeout=3, **_TEXT)
         if types_r.returncode != 0:
             return False
         types = types_r.stdout.splitlines()
-
         # Prefer PNG, fall back to other image formats
-        mime = None
-        for preferred in ("image/png", "image/jpeg", "image/bmp",
-                          "image/gif", "image/webp"):
-            if preferred in types:
-                mime = preferred
-                break
-
+        mime = next((m for m in _WAYLAND_MIME_PREFERENCE if m in types), None)
         if not mime:
             return False
 
-        # Extract the image data
-        with open(dest, "wb") as f:
-            subprocess.run(
-                ["wl-paste", "--type", mime],
-                stdout=f, stderr=subprocess.DEVNULL, timeout=5, check=True,
-            )
-
-        if not dest.exists() or dest.stat().st_size == 0:
+        if not _pipe_to_file(["wl-paste", "--type", mime], dest):
             dest.unlink(missing_ok=True)
             return False
 
         # save_clipboard_image() promises a PNG output path. Wayland can offer
         # JPEG/GIF/WebP/BMP payloads, so normalize every non-PNG result before
         # returning success.
-        if mime != "image/png":
-            if not _convert_to_png(dest) or not _is_png_file(dest):
-                dest.unlink(missing_ok=True)
-                return False
-
+        if mime != "image/png" and (not _convert_to_png(dest) or not _is_png_file(dest)):
+            dest.unlink(missing_ok=True)
+            return False
         return True
 
     except FileNotFoundError:
-        logger.debug("wl-paste not installed — Wayland clipboard unavailable")
+        logger.debug(_WL_MISSING)
     except Exception as e:
         logger.debug("wl-paste clipboard extraction failed: %s", e)
         dest.unlink(missing_ok=True)
@@ -492,23 +452,21 @@ def _convert_to_png(path: Path) -> bool:
             ["convert", str(tmp), "png:" + str(path)],
             capture_output=True, timeout=5,
         )
-        if r.returncode == 0 and path.exists() and path.stat().st_size > 0:
+        if r.returncode == 0 and _nonempty(path):
             tmp.unlink(missing_ok=True)
             return True
-        else:
-            # Convert failed — restore the original file
-            tmp.rename(path)
-    except FileNotFoundError:
-        logger.debug("ImageMagick not installed — cannot convert BMP to PNG")
-        if tmp.exists() and not path.exists():
-            tmp.rename(path)
+        # Convert failed — restore the original file
+        tmp.rename(path)
     except Exception as e:
-        logger.debug("ImageMagick BMP→PNG conversion failed: %s", e)
+        if isinstance(e, FileNotFoundError):
+            logger.debug("ImageMagick not installed — cannot convert BMP to PNG")
+        else:
+            logger.debug("ImageMagick BMP→PNG conversion failed: %s", e)
         if tmp.exists() and not path.exists():
             tmp.rename(path)
 
     # Can't convert — BMP is still usable as-is for most APIs
-    return path.exists() and path.stat().st_size > 0
+    return _nonempty(path)
 
 
 def _is_png_file(path: Path) -> bool:
@@ -522,45 +480,24 @@ def _is_png_file(path: Path) -> bool:
 
 # ── X11 (xclip) ─────────────────────────────────────────────────────────
 
+_XCLIP_TARGETS = ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"]
+
+
 def _xclip_has_image() -> bool:
     """Check if X11 clipboard has image content."""
-    try:
-        r = subprocess.run(
-            ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=3,
-        )
-        return r.returncode == 0 and "image/png" in r.stdout
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
-    return False
+    return _probe(_XCLIP_TARGETS, 3, lambda r: r.returncode == 0 and "image/png" in r.stdout)
 
 
 def _xclip_save(dest: Path) -> bool:
     """Use xclip to extract clipboard image (X11 sessions)."""
     # Check if clipboard has image content
-    try:
-        targets = subprocess.run(
-            ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=3,
-        )
-        if "image/png" not in targets.stdout:
-            return False
-    except FileNotFoundError:
-        logger.debug("xclip not installed — X11 clipboard image paste unavailable")
-        return False
-    except Exception:
+    if not _probe(_XCLIP_TARGETS, 3, lambda r: "image/png" in r.stdout,
+                  missing="xclip not installed — X11 clipboard image paste unavailable"):
         return False
 
     # Extract PNG data
     try:
-        with open(dest, "wb") as f:
-            subprocess.run(
-                ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
-                stdout=f, stderr=subprocess.DEVNULL, timeout=5, check=True,
-            )
-        if dest.exists() and dest.stat().st_size > 0:
+        if _pipe_to_file(["xclip", "-selection", "clipboard", "-t", "image/png", "-o"], dest):
             return True
     except Exception as e:
         logger.debug("xclip image extraction failed: %s", e)

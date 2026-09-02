@@ -1,9 +1,4 @@
-"""Nous Portal upstream adapter.
-
-Reads the user's Nous OAuth state from ``~/.hermes/auth.json`` through the
-shared runtime resolver, validates or refreshes the inference JWT, then exposes
-the upstream base URL plus bearer for the proxy server to forward to.
-"""
+"""Nous Portal upstream adapter."""
 
 from __future__ import annotations
 
@@ -63,11 +58,9 @@ class NousPortalAdapter(UpstreamAdapter):
         return _ALLOWED_PATHS
 
     def is_authenticated(self) -> bool:
-        state = self._read_state()
-        if state is None:
-            return False
         # We need either a usable inference JWT OR (refresh_token + access_token)
         # to recover. The refresh helper validates and refreshes as needed.
+        state = self._read_state() or {}
         return bool(
             state.get("agent_key")
             or (state.get("refresh_token") and state.get("access_token"))
@@ -86,9 +79,7 @@ class NousPortalAdapter(UpstreamAdapter):
         if status_code != 401:
             return None
         logger.info("proxy: Nous upstream rejected bearer; force-refreshing invoke JWT")
-        return self._get_credential(
-            force_refresh=True,
-        )
+        return self._get_credential(force_refresh=True)
 
     def _get_credential(
         self,
@@ -103,25 +94,15 @@ class NousPortalAdapter(UpstreamAdapter):
                 )
 
             try:
-                refreshed = resolve_nous_runtime_credentials(
-                    force_refresh=force_refresh,
-                )
-            except AuthError as exc:
-                if _is_terminal_nous_refresh_error(exc):
-                    _quarantine_nous_oauth_state(
-                        state,
-                        exc,
-                        reason="proxy_refresh_failure",
-                    )
+                refreshed = resolve_nous_runtime_credentials(force_refresh=force_refresh)
+            except Exception as exc:
+                if isinstance(exc, AuthError) and _is_terminal_nous_refresh_error(exc):
+                    _quarantine_nous_oauth_state(state, exc, reason="proxy_refresh_failure")
                     self._save_state(
                         state,
                         quarantine_error=exc,
                         quarantine_reason="proxy_refresh_failure",
                     )
-                raise RuntimeError(
-                    f"Failed to refresh Nous Portal credentials: {exc}"
-                ) from exc
-            except Exception as exc:
                 raise RuntimeError(
                     f"Failed to refresh Nous Portal credentials: {exc}"
                 ) from exc
@@ -166,11 +147,9 @@ class NousPortalAdapter(UpstreamAdapter):
         except Exception as exc:
             logger.warning("proxy: failed to load auth store: %s", exc)
             return None
-        providers = store.get("providers") or {}
-        state = providers.get("nous")
-        if not isinstance(state, dict):
-            return None
-        return dict(state)  # copy so the refresh helper can mutate freely
+        state = (store.get("providers") or {}).get("nous")
+        # copy so the refresh helper can mutate freely
+        return dict(state) if isinstance(state, dict) else None
 
     def _save_state(
         self,
