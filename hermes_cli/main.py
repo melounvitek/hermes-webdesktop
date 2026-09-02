@@ -426,9 +426,6 @@ from pathlib import Path
 from typing import Optional
 
 
-import functools as _functools
-
-from hermes_cli.subcommands._shared import add_accept_hooks_flag as _add_accept_hooks_flag
 from hermes_cli.subcommands.cron import build_cron_parser
 from hermes_cli.subcommands.sync import build_sync_parser
 from hermes_cli.subcommands.gateway import build_gateway_parser
@@ -8079,6 +8076,166 @@ def _register_linux_desktop_entry() -> None:
         print(f"⚠ Could not install the desktop launcher entry: {exc}")
 
 
+def _build_desktop_app(desktop_dir: Path, *, source_mode: bool, npm: str, env: dict) -> Optional[Path]:
+    """npm-install + build the desktop app; stage-and-swap the packaged tree.
+
+    Returns the freshly installed packaged executable (non-source mode) or
+    None (source mode builds ``dist/`` in place). Exits the process on any
+    unrecoverable build failure, leaving the previous packaged app untouched.
+    """
+    from hermes_constants import with_hermes_node_path
+
+    print("→ Installing desktop workspace dependencies...")
+    # Put the Hermes-managed Node on PATH so npm's child scripts (which
+    # shell out to bare `node`, e.g. electron-winstaller's
+    # select-7z-arch.js) resolve it even when the parent PATH is
+    # stripped — the desktop updater chain (Desktop → hermes-setup →
+    # hermes update) loses shell PATH customizations. Wrapping the
+    # NixOS build env keeps its PYTHON hint while restoring managed Node
+    # ahead of a bare PATH (same idiom as the `hermes update` path).
+    nixos_env = with_hermes_node_path(_nixos_build_env())
+    install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False, env=nixos_env)
+    if install_result.returncode != 0:
+        if not _electron_pkg_staged_missing_dist(PROJECT_ROOT):
+            print("✗ Desktop dependency install failed")
+            print(f"  Run manually:  cd {PROJECT_ROOT} && npm ci")
+            sys.exit(install_result.returncode or 1)
+        repaired = _try_redownload_electron_dist(PROJECT_ROOT, env)
+        if repaired:
+            print("  ⚠ Dependency install failed with a missing Electron dist; "
+                  "repopulated it and continuing.")
+        else:
+            print("  ⚠ Dependency install failed with a missing Electron dist; "
+                  "continuing to the build so electron-builder can attempt "
+                  "the Electron fetch itself.")
+
+    build_label = "source build" if source_mode else "packaged app"
+    print(f"→ Building desktop {build_label}...")
+    build_script = "build" if source_mode else "pack"
+    if _force_adhoc_macos_signing(env, source_mode=source_mode):
+        print("  → No Developer ID configured; ad-hoc signing this local rebuild "
+              "(CSC_IDENTITY_AUTO_DISCOVERY=false)")
+    npm_build_env = _npm_lifecycle_env(env)
+    # Stage-and-swap (#86443): electron-builder packs IN PLACE and
+    # before-pack.mjs wipes release/<unpacked> first, so a pack that
+    # fails afterwards used to leave the user with NO app. Build into
+    # a fresh staging output dir instead; the live release/ tree is
+    # only replaced — by rename — after the staged result verifies.
+    staging_dir: Optional[Path] = None
+    build_cmd = [npm, "run", build_script]
+    if not source_mode:
+        staging_dir = _desktop_staging_dir(desktop_dir)
+        build_cmd += ["--", f"-c.directories.output={staging_dir}"]
+        # A running desktop instance launched from release/win-unpacked
+        # holds Hermes.exe locked on Windows, so the pack can't replace
+        # it ("Access is denied" / ERR_ELECTRON_BUILDER_CANNOT_EXECUTE).
+        # Stop it first so the rebuild — including the installer's
+        # headless --update rebuild — succeeds instead of failing cryptically.
+        stopped = _stop_desktop_processes_locking_build(desktop_dir)
+        if stopped:
+            print(f"  ⚠ Stopped running desktop app to free the build output (pid {', '.join(map(str, stopped))})")
+
+    def _staged_exe() -> Optional[Path]:
+        return _desktop_packaged_executable_in(staging_dir) if staging_dir else None
+
+    build_result = subprocess.run(
+        build_cmd, cwd=desktop_dir, env=npm_build_env, check=False
+    )
+    if (
+        build_result.returncode != 0
+        and not source_mode
+        and _staged_exe() is None
+    ):
+        # Corrupt cached Electron zip → partial unpack → ENOENT on rename.
+        # stdlib zipfile won't catch the common concat-junk case, so purge
+        # and retry once; @electron/get SHASUM is the real gate.
+        #
+        # Gate on a MISSING packaged executable: that is the signature of
+        # the corrupt-download class this recovery exists for. A late
+        # failure such as macOS code signing leaves the executable in
+        # place — redownloading Electron can't repair it, so the purge +
+        # retry would only add another slow, identical failure (#40187).
+        purged: list[Path] = []
+        restored = False
+        if not _electron_dist_ok(PROJECT_ROOT):
+            purged = _purge_electron_build_cache(desktop_dir, release_dir=staging_dir)
+            restored = _redownload_electron_dist(PROJECT_ROOT, env)
+        if restored:
+            print("  ⚠ Desktop build failed; refreshed the Electron download and retrying once...")
+            for p in purged:
+                print(f"    - {p}")
+            # The purge can't remove a win-unpacked tree whose Hermes.exe
+            # is still locked by a running instance; stop it before retry.
+            _stop_desktop_processes_locking_build(desktop_dir)
+            build_result = subprocess.run(
+                build_cmd, cwd=desktop_dir, env=npm_build_env, check=False
+            )
+    if (
+        build_result.returncode != 0
+        and not source_mode
+        and not env.get("ELECTRON_MIRROR")
+        and _staged_exe() is None
+    ):
+        print("  ⚠ Desktop build still failing; the Electron download from "
+              "GitHub looks blocked. Re-downloading via a public mirror "
+              "(npmmirror.com)... (set ELECTRON_MIRROR to use another mirror)")
+        mirror = _ELECTRON_FALLBACK_MIRROR
+        mirror_env = dict(npm_build_env)
+        mirror_env["ELECTRON_MIRROR"] = mirror
+        if not _electron_dist_ok(PROJECT_ROOT):
+            _redownload_electron_dist(PROJECT_ROOT, env, mirror=mirror)
+        _stop_desktop_processes_locking_build(desktop_dir)
+        build_result = subprocess.run(build_cmd, cwd=desktop_dir, env=mirror_env, check=False)
+    if build_result.returncode != 0:
+        print("✗ Desktop GUI build failed")
+        if staging_dir is not None:
+            _discard_desktop_staging(staging_dir)
+            if _desktop_packaged_executable(desktop_dir) is not None:
+                print("  ↩ The previous desktop app was left untouched and still works.")
+        print(f"  Run manually:  cd apps/desktop && npm run {build_script}")
+        if sys.platform == "win32":
+            print("  If this says \"Access is denied\" on Hermes.exe, close any")
+            print("  running Hermes desktop window and retry.")
+        print("  If the log shows Electron download retries, rebuild via a mirror:")
+        print("    ELECTRON_MIRROR=<mirror-base-url> hermes desktop --force-build")
+        sys.exit(build_result.returncode or 1)
+    if not source_mode:
+        assert staging_dir is not None
+        staged_executable = _staged_exe()
+        # Locally-built apps are ad-hoc signed; make them relaunchable after
+        # an in-place self-update (otherwise macOS reports "Hermes is
+        # damaged"). No-op on non-macOS and on real-identity builds.
+        # Signs the STAGED bundle so the live app is never half-signed.
+        _desktop_macos_relaunchable_fixup(desktop_dir, release_dir=staging_dir)
+
+        # Windows integrity gate (#69179): never declare the rebuild a
+        # success on a Hermes.exe Windows cannot load (truncated PE from
+        # a corrupt cached Electron zip, wrong-arch tree, interrupted
+        # rcedit rewrite). Verified on the STAGED exe: a failure here
+        # simply discards the staging dir — the live app was never
+        # touched — and fails loudly so the updater's retry-once
+        # rebuilds from a fresh Electron download.
+        verified_executable, rolled_back = _ensure_desktop_exe_launchable(
+            desktop_dir, staged_executable
+        )
+        if staged_executable is None or rolled_back or verified_executable is None:
+            _discard_desktop_staging(staging_dir)
+            if staged_executable is None:
+                print(f"✗ Desktop build produced no launchable app in {staging_dir}")
+            print("  ↩ The previous desktop app was left untouched and still works.")
+            sys.exit(1)
+        # Verified: swap the staged tree over the live one (rename).
+        packaged_executable = _swap_staged_desktop_app(desktop_dir, staging_dir)
+        if packaged_executable is None:
+            print(f"✗ Could not install the rebuilt desktop app into {desktop_dir / 'release'}")
+            print("  ↩ The previous desktop app was left untouched and still works.")
+            sys.exit(1)
+
+    # Build succeeded — write the stamp so next run can skip
+    _write_desktop_build_stamp(PROJECT_ROOT, source_mode=source_mode)
+    return packaged_executable if not source_mode else None
+
+
 def cmd_gui(args: argparse.Namespace):
     """Build and launch the native Electron desktop GUI."""
     desktop_dir = PROJECT_ROOT / "apps" / "desktop"
@@ -8190,154 +8347,9 @@ def cmd_gui(args: argparse.Namespace):
             build_label = "source build" if source_mode else "packaged app"
             print(f"✓ Desktop {build_label} is up to date (content stamp matches)")
         else:
-            print("→ Installing desktop workspace dependencies...")
-            # Put the Hermes-managed Node on PATH so npm's child scripts (which
-            # shell out to bare `node`, e.g. electron-winstaller's
-            # select-7z-arch.js) resolve it even when the parent PATH is
-            # stripped — the desktop updater chain (Desktop → hermes-setup →
-            # hermes update) loses shell PATH customizations. Wrapping the
-            # NixOS build env keeps its PYTHON hint while restoring managed Node
-            # ahead of a bare PATH (same idiom as the `hermes update` path).
-            nixos_env = with_hermes_node_path(_nixos_build_env())
-            install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False, env=nixos_env)
-            if install_result.returncode != 0:
-                if not _electron_pkg_staged_missing_dist(PROJECT_ROOT):
-                    print("✗ Desktop dependency install failed")
-                    print(f"  Run manually:  cd {PROJECT_ROOT} && npm ci")
-                    sys.exit(install_result.returncode or 1)
-                repaired = _try_redownload_electron_dist(PROJECT_ROOT, env)
-                if repaired:
-                    print("  ⚠ Dependency install failed with a missing Electron dist; "
-                          "repopulated it and continuing.")
-                else:
-                    print("  ⚠ Dependency install failed with a missing Electron dist; "
-                          "continuing to the build so electron-builder can attempt "
-                          "the Electron fetch itself.")
-
-            build_label = "source build" if source_mode else "packaged app"
-            print(f"→ Building desktop {build_label}...")
-            build_script = "build" if source_mode else "pack"
-            if _force_adhoc_macos_signing(env, source_mode=source_mode):
-                print("  → No Developer ID configured; ad-hoc signing this local rebuild "
-                      "(CSC_IDENTITY_AUTO_DISCOVERY=false)")
-            npm_build_env = _npm_lifecycle_env(env)
-            # Stage-and-swap (#86443): electron-builder packs IN PLACE and
-            # before-pack.mjs wipes release/<unpacked> first, so a pack that
-            # fails afterwards used to leave the user with NO app. Build into
-            # a fresh staging output dir instead; the live release/ tree is
-            # only replaced — by rename — after the staged result verifies.
-            staging_dir: Optional[Path] = None
-            build_cmd = [npm, "run", build_script]
+            built = _build_desktop_app(desktop_dir, source_mode=source_mode, npm=npm, env=env)
             if not source_mode:
-                staging_dir = _desktop_staging_dir(desktop_dir)
-                build_cmd += ["--", f"-c.directories.output={staging_dir}"]
-                # A running desktop instance launched from release/win-unpacked
-                # holds Hermes.exe locked on Windows, so the pack can't replace
-                # it ("Access is denied" / ERR_ELECTRON_BUILDER_CANNOT_EXECUTE).
-                # Stop it first so the rebuild — including the installer's
-                # headless --update rebuild — succeeds instead of failing cryptically.
-                stopped = _stop_desktop_processes_locking_build(desktop_dir)
-                if stopped:
-                    print(f"  ⚠ Stopped running desktop app to free the build output (pid {', '.join(map(str, stopped))})")
-
-            def _staged_exe() -> Optional[Path]:
-                return _desktop_packaged_executable_in(staging_dir) if staging_dir else None
-
-            build_result = subprocess.run(
-                build_cmd, cwd=desktop_dir, env=npm_build_env, check=False
-            )
-            if (
-                build_result.returncode != 0
-                and not source_mode
-                and _staged_exe() is None
-            ):
-                # Corrupt cached Electron zip → partial unpack → ENOENT on rename.
-                # stdlib zipfile won't catch the common concat-junk case, so purge
-                # and retry once; @electron/get SHASUM is the real gate.
-                #
-                # Gate on a MISSING packaged executable: that is the signature of
-                # the corrupt-download class this recovery exists for. A late
-                # failure such as macOS code signing leaves the executable in
-                # place — redownloading Electron can't repair it, so the purge +
-                # retry would only add another slow, identical failure (#40187).
-                purged: list[Path] = []
-                restored = False
-                if not _electron_dist_ok(PROJECT_ROOT):
-                    purged = _purge_electron_build_cache(desktop_dir, release_dir=staging_dir)
-                    restored = _redownload_electron_dist(PROJECT_ROOT, env)
-                if restored:
-                    print("  ⚠ Desktop build failed; refreshed the Electron download and retrying once...")
-                    for p in purged:
-                        print(f"    - {p}")
-                    # The purge can't remove a win-unpacked tree whose Hermes.exe
-                    # is still locked by a running instance; stop it before retry.
-                    _stop_desktop_processes_locking_build(desktop_dir)
-                    build_result = subprocess.run(
-                        build_cmd, cwd=desktop_dir, env=npm_build_env, check=False
-                    )
-            if (
-                build_result.returncode != 0
-                and not source_mode
-                and not env.get("ELECTRON_MIRROR")
-                and _staged_exe() is None
-            ):
-                print("  ⚠ Desktop build still failing; the Electron download from "
-                      "GitHub looks blocked. Re-downloading via a public mirror "
-                      "(npmmirror.com)... (set ELECTRON_MIRROR to use another mirror)")
-                mirror = _ELECTRON_FALLBACK_MIRROR
-                mirror_env = dict(npm_build_env)
-                mirror_env["ELECTRON_MIRROR"] = mirror
-                if not _electron_dist_ok(PROJECT_ROOT):
-                    _redownload_electron_dist(PROJECT_ROOT, env, mirror=mirror)
-                _stop_desktop_processes_locking_build(desktop_dir)
-                build_result = subprocess.run(build_cmd, cwd=desktop_dir, env=mirror_env, check=False)
-            if build_result.returncode != 0:
-                print("✗ Desktop GUI build failed")
-                if staging_dir is not None:
-                    _discard_desktop_staging(staging_dir)
-                    if _desktop_packaged_executable(desktop_dir) is not None:
-                        print("  ↩ The previous desktop app was left untouched and still works.")
-                print(f"  Run manually:  cd apps/desktop && npm run {build_script}")
-                if sys.platform == "win32":
-                    print("  If this says \"Access is denied\" on Hermes.exe, close any")
-                    print("  running Hermes desktop window and retry.")
-                print("  If the log shows Electron download retries, rebuild via a mirror:")
-                print("    ELECTRON_MIRROR=<mirror-base-url> hermes desktop --force-build")
-                sys.exit(build_result.returncode or 1)
-            if not source_mode:
-                assert staging_dir is not None
-                staged_executable = _staged_exe()
-                # Locally-built apps are ad-hoc signed; make them relaunchable after
-                # an in-place self-update (otherwise macOS reports "Hermes is
-                # damaged"). No-op on non-macOS and on real-identity builds.
-                # Signs the STAGED bundle so the live app is never half-signed.
-                _desktop_macos_relaunchable_fixup(desktop_dir, release_dir=staging_dir)
-
-                # Windows integrity gate (#69179): never declare the rebuild a
-                # success on a Hermes.exe Windows cannot load (truncated PE from
-                # a corrupt cached Electron zip, wrong-arch tree, interrupted
-                # rcedit rewrite). Verified on the STAGED exe: a failure here
-                # simply discards the staging dir — the live app was never
-                # touched — and fails loudly so the updater's retry-once
-                # rebuilds from a fresh Electron download.
-                verified_executable, rolled_back = _ensure_desktop_exe_launchable(
-                    desktop_dir, staged_executable
-                )
-                if staged_executable is None or rolled_back or verified_executable is None:
-                    _discard_desktop_staging(staging_dir)
-                    if staged_executable is None:
-                        print(f"✗ Desktop build produced no launchable app in {staging_dir}")
-                    print("  ↩ The previous desktop app was left untouched and still works.")
-                    sys.exit(1)
-                # Verified: swap the staged tree over the live one (rename).
-                packaged_executable = _swap_staged_desktop_app(desktop_dir, staging_dir)
-                if packaged_executable is None:
-                    print(f"✗ Could not install the rebuilt desktop app into {desktop_dir / 'release'}")
-                    print("  ↩ The previous desktop app was left untouched and still works.")
-                    sys.exit(1)
-
-            # Build succeeded — write the stamp so next run can skip
-            _write_desktop_build_stamp(PROJECT_ROOT, source_mode=source_mode)
+                packaged_executable = built
 
     # Linux: register the app in the desktop launcher, so Hermes shows up
     # in the application menu with its icon. Best-effort and idempotent.
