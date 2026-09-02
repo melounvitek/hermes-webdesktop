@@ -1831,7 +1831,8 @@ def _model_flow_named_custom(config, provider_info):
 
 def _model_flow_copilot(config, current_model=""):
     """GitHub Copilot flow using env vars, gh CLI, or OAuth device code."""
-    from hermes_cli.main import _current_reasoning_effort, _prompt_reasoning_effort_selection, _set_reasoning_effort
+    from hermes_cli.main import _prompt_reasoning_effort_selection
+    from hermes_cli.setup import _current_reasoning_effort, _set_reasoning_effort
     from hermes_cli.auth import (
         PROVIDER_REGISTRY,
         _prompt_model_selection,

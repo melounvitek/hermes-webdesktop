@@ -5292,21 +5292,6 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def _current_reasoning_effort(config) -> str:
-    agent_cfg = config.get("agent")
-    if isinstance(agent_cfg, dict):
-        return str(agent_cfg.get("reasoning_effort") or "").strip().lower()
-    return ""
-
-
-def _set_reasoning_effort(config, effort: str) -> None:
-    agent_cfg = config.get("agent")
-    if not isinstance(agent_cfg, dict):
-        agent_cfg = {}
-        config["agent"] = agent_cfg
-    agent_cfg["reasoning_effort"] = effort
-
-
 def _prompt_reasoning_effort_selection(efforts, current_effort=""):
     """Prompt for a reasoning effort. Returns effort, 'none', or None to keep current."""
     deduped = list(
