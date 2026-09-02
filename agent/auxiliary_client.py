@@ -4695,17 +4695,15 @@ def _fallback_destination(
     attached = getattr(fb_client, "_hermes_fallback_destination", None)
     if isinstance(attached, _FallbackDestination):
         return attached
-
-    provider = _fallback_provider_from_label(fb_label)
-    base_url = str(getattr(fb_client, "base_url", "") or "")
-    api_mode = None
-    model = fb_model
-
     entry = _fallback_chain_entry(task, fb_label)
     if entry is not None:
         return _fallback_destination_from_entry(entry, fb_client, fb_model)
-
-    return _complete_fallback_destination(provider, base_url, api_mode, model)
+    return _complete_fallback_destination(
+        _fallback_provider_from_label(fb_label),
+        str(getattr(fb_client, "base_url", "") or ""),
+        None,
+        fb_model,
+    )
 
 
 def _replan_synchronous_cache_sections(
