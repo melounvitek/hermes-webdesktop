@@ -875,45 +875,7 @@ class GatewaySlashCommandsMixin:
             if m:
                 task_id = m.group(1)
                 try:
-                    source = event.source
-                    platform = getattr(source, "platform", None)
-                    platform_str = (
-                        platform.value if hasattr(platform, "value") else str(platform or "")
-                    ).lower()
-                    chat_id = str(getattr(source, "chat_id", "") or "")
-                    chat_type = str(getattr(source, "chat_type", "") or "") or None
-                    thread_id = str(getattr(source, "thread_id", "") or "")
-                    user_id = str(getattr(source, "user_id", "") or "") or None
-                    # Also persist the stable alt id (Signal UUID, Feishu union_id): build_session_key
-                    # keys the participant on ``user_id_alt or user_id``, so a replayed wake rebuilds
-                    # the same session key only when the alt id survives the round-trip.
-                    user_id_alt = str(getattr(source, "user_id_alt", "") or "") or None
-                    delivery_metadata = self._reply_metadata(event) or None
-                    if isinstance(delivery_metadata, dict):
-                        chat_type = str(getattr(source, "chat_type", "") or "")
-                        if chat_type:
-                            delivery_metadata.setdefault("chat_type", chat_type)
-                    if platform_str and chat_id:
-                        def _sub():
-                            from hermes_cli import kanban_db as _kb
-                            conn = _kb.connect(board=requested_board)
-                            try:
-                                _kb.add_notify_sub(
-                                    conn, task_id=task_id,
-                                    platform=platform_str, chat_id=chat_id,
-                                    chat_type=chat_type,
-                                    thread_id=thread_id or None,
-                                    user_id=user_id,
-                                    user_id_alt=user_id_alt,
-                                    notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
-                                    # Subscribing from chat: deliver the passive
-                                    # message and wake the destination agent.
-                                    delivery_mode="notify+wake",
-                                    delivery_metadata=delivery_metadata,
-                                )
-                            finally:
-                                conn.close()
-                        await asyncio.to_thread(_sub)
+                    if await self._kanban_auto_subscribe(event, task_id, requested_board):
                         output = (
                             output.rstrip()
                             + "\n"
@@ -927,6 +889,49 @@ class GatewaySlashCommandsMixin:
         if len(output) > 3800:
             output = output[:3800] + "\n" + t("gateway.kanban.truncated_suffix")
         return output or t("gateway.kanban.no_output")
+
+    async def _kanban_auto_subscribe(self, event: MessageEvent, task_id: str, requested_board) -> bool:
+        """Subscribe the event's chat to *task_id* notifications (notify+wake). False when the
+        source has no platform/chat to route back to."""
+        source = event.source
+        platform = getattr(source, "platform", None)
+        platform_str = (platform.value if hasattr(platform, "value") else str(platform or "")).lower()
+        chat_id = str(getattr(source, "chat_id", "") or "")
+        chat_type = str(getattr(source, "chat_type", "") or "") or None
+        thread_id = str(getattr(source, "thread_id", "") or "")
+        user_id = str(getattr(source, "user_id", "") or "") or None
+        # Also persist the stable alt id (Signal UUID, Feishu union_id): build_session_key keys the
+        # participant on ``user_id_alt or user_id``, so a replayed wake rebuilds the same session
+        # key only when the alt id survives the round-trip.
+        user_id_alt = str(getattr(source, "user_id_alt", "") or "") or None
+        delivery_metadata = self._reply_metadata(event) or None
+        if isinstance(delivery_metadata, dict):
+            chat_type = str(getattr(source, "chat_type", "") or "")
+            if chat_type:
+                delivery_metadata.setdefault("chat_type", chat_type)
+        if not (platform_str and chat_id):
+            return False
+
+        def _sub():
+            from hermes_cli import kanban_db as _kb
+            conn = _kb.connect(board=requested_board)
+            try:
+                _kb.add_notify_sub(
+                    conn, task_id=task_id,
+                    platform=platform_str, chat_id=chat_id,
+                    chat_type=chat_type,
+                    thread_id=thread_id or None,
+                    user_id=user_id,
+                    user_id_alt=user_id_alt,
+                    notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
+                    # Subscribing from chat: deliver the passive message and wake the destination agent.
+                    delivery_mode="notify+wake",
+                    delivery_metadata=delivery_metadata,
+                )
+            finally:
+                conn.close()
+        await asyncio.to_thread(_sub)
+        return True
 
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
@@ -2036,6 +2041,35 @@ class GatewaySlashCommandsMixin:
             lines.append(t("gateway.model.session_only_hint"))
         return "\n".join(lines)
 
+    async def _send_model_picker(self, event: MessageEvent, source, adapter, session_key: str, listing_kwargs: dict, on_model_selected) -> bool:
+        """Send the interactive /model picker; False when nothing was sent (text fallback).
+
+        *source* is the session-key-normalized source (Telegram topic recovery), so the picker's
+        thread metadata lands where the next turn reads.
+        """
+        from hermes_cli.model_switch import list_picker_providers
+
+        try:
+            # Offload blocking provider-listing (can fall through to a synchronous urllib HTTP fetch
+            # on a stale cache) off the event loop so the gateway doesn't freeze. See #41289.
+            providers = await asyncio.to_thread(
+                list_picker_providers, max_models=50, include_moa=True, **listing_kwargs
+            )
+        except Exception:
+            providers = []
+        if not providers:
+            return False
+        result = await adapter.send_model_picker(
+            chat_id=source.chat_id,
+            providers=providers,
+            current_model=listing_kwargs["current_model"],
+            current_provider=listing_kwargs["current_provider"],
+            session_key=session_key,
+            on_model_selected=on_model_selected,
+            metadata=self._thread_metadata_for_source(source, self._reply_anchor_for_event(event)),
+        )
+        return bool(result.success)
+
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /model command — switch model."""
         from gateway.run import _hermes_home, _load_gateway_config
@@ -2043,7 +2077,6 @@ class GatewaySlashCommandsMixin:
             switch_model as _switch_model, parse_model_switch_args,
             resolve_persist_behavior,
             list_authenticated_providers,
-            list_picker_providers,
         )
         from hermes_cli.providers import get_label
 
@@ -2145,82 +2178,35 @@ class GatewaySlashCommandsMixin:
 
         # No args: show interactive picker (Telegram/Discord) or text list
         if not model_input and not explicit_provider:
+            listing_kwargs = dict(
+                current_provider=current_provider,
+                current_base_url=current_base_url,
+                current_model=current_model,
+                user_providers=user_provs,
+                custom_providers=custom_provs,
+                excluded_providers=excluded_provs,
+            )
             # Try interactive picker if the platform supports it
             adapter = self._adapter_for_source(source)
-            has_picker = (
-                adapter is not None
-                and getattr(type(adapter), "send_model_picker", None) is not None
-            )
+            if adapter is not None and getattr(type(adapter), "send_model_picker", None) is not None:
+                async def _on_model_selected(_chat_id: str, model_id: str, provider_slug: str) -> str:
+                    """Perform the model switch and return confirmation text."""
+                    if _command_profile_home is None:
+                        return await switch_and_commit(model_id, provider_slug, picker=True)
+                    from gateway.run import _profile_runtime_scope
 
-            if has_picker:
-                try:
-                    # Offload blocking provider-listing (can fall through to a
-                    # synchronous urllib HTTP fetch on a stale cache) off the
-                    # event loop so the gateway doesn't freeze. See #41289.
-                    providers = await asyncio.to_thread(
-                        list_picker_providers,
-                        current_provider=current_provider,
-                        current_base_url=current_base_url,
-                        current_model=current_model,
-                        user_providers=user_provs,
-                        custom_providers=custom_provs,
-                        max_models=50,
-                        include_moa=True,
-                        excluded_providers=excluded_provs,
-                    )
-                except Exception:
-                    providers = []
-
-                if providers:
-                    # Callback for when the user picks a model; captures the switch locals.
-                    async def _on_model_selected_scoped(
-                        _chat_id: str, model_id: str, provider_slug: str
-                    ) -> str:
-                        """Perform the model switch and return confirmation text."""
+                    with _profile_runtime_scope(_command_profile_home):
                         return await switch_and_commit(model_id, provider_slug, picker=True)
 
-                    async def _on_model_selected(
-                        _chat_id: str, model_id: str, provider_slug: str
-                    ) -> str:
-                        if _command_profile_home is None:
-                            return await _on_model_selected_scoped(
-                                _chat_id, model_id, provider_slug
-                            )
-                        from gateway.run import _profile_runtime_scope
-
-                        with _profile_runtime_scope(_command_profile_home):
-                            return await _on_model_selected_scoped(
-                                _chat_id, model_id, provider_slug
-                            )
-
-                    metadata = self._reply_metadata(event)
-                    result = await adapter.send_model_picker(
-                        chat_id=source.chat_id,
-                        providers=providers,
-                        current_model=current_model,
-                        current_provider=current_provider,
-                        session_key=session_key,
-                        on_model_selected=_on_model_selected,
-                        metadata=metadata,
-                    )
-                    if result.success:
-                        return None  # Picker sent — adapter handles the response
+                if await self._send_model_picker(event, source, adapter, session_key, listing_kwargs, _on_model_selected):
+                    return None  # Picker sent — adapter handles the response
 
             # Fallback: text list (for platforms without picker or if picker failed)
             lines = [t("gateway.model.current_label", model=current_model or "unknown", provider=get_label(current_provider)), ""]
             try:
                 # Offload blocking provider-listing off the event loop so the
                 # gateway doesn't freeze on a stale-cache HTTP fetch. See #41289.
-                providers = await asyncio.to_thread(
-                    list_authenticated_providers,
-                    current_provider=current_provider,
-                    current_base_url=current_base_url,
-                    current_model=current_model,
-                    user_providers=user_provs,
-                    custom_providers=custom_provs,
-                    max_models=5,
-                    excluded_providers=excluded_provs,
-                )
+                providers = await asyncio.to_thread(list_authenticated_providers, max_models=5, **listing_kwargs)
                 lines.extend(_model_provider_listing_lines(providers))
             except Exception:
                 pass
@@ -2712,6 +2698,21 @@ class GatewaySlashCommandsMixin:
             "elapsed. Lives while the gateway runs — use `hermes cron` for durable schedules."
         )
 
+    def _idle_cached_agent_or_error(self, event: MessageEvent, verb: str):
+        """``(session_key, cached_agent, None)`` for /refine and /review, or ``(_, _, error_text)``.
+
+        Both need a cached agent from a completed turn and refuse while a run is in flight.
+        """
+        quick_key = self._session_key_for_source(event.source) if event.source else None
+        if not quick_key:
+            return None, None, f"{verb.capitalize()} unavailable (no session)."
+        if quick_key in self._running_agents:
+            return quick_key, None, f"Agent is running — wait for the turn to finish, then /{verb}."
+        agent = self._cached_agent_for(quick_key)
+        if agent is None:
+            return quick_key, None, f"Nothing to {verb} yet — send a message first."
+        return quick_key, agent, None
+
     async def _handle_refine_command(self, event: "MessageEvent") -> str:
         """Handle /refine — run the memory/skill review fork on demand.
 
@@ -2719,15 +2720,9 @@ class GatewaySlashCommandsMixin:
         session and prompt cache are untouched. Requires at least one completed turn.
         """
         args = (event.get_command_args() or "").strip()
-        quick_key = self._session_key_for_source(event.source) if event.source else None
-        if not quick_key:
-            return "Refine unavailable (no session)."
-        if quick_key in self._running_agents:
-            return "Agent is running — wait for the turn to finish, then /refine."
-
-        agent = self._cached_agent_for(quick_key)
-        if agent is None:
-            return "Nothing to refine yet — send a message first."
+        quick_key, agent, error = self._idle_cached_agent_or_error(event, "refine")
+        if error:
+            return error
 
         snapshot = list(getattr(agent, "_session_messages", None) or [])
         if not snapshot:
@@ -2756,15 +2751,9 @@ class GatewaySlashCommandsMixin:
         here or the completion event carries no gateway route and never re-enters this chat.
         """
         args = (event.get_command_args() or "").strip()
-        quick_key = self._session_key_for_source(event.source) if event.source else None
-        if not quick_key:
-            return "Review unavailable (no session)."
-        if quick_key in self._running_agents:
-            return "Agent is running — wait for the turn to finish, then /review."
-
-        agent = self._cached_agent_for(quick_key)
-        if agent is None:
-            return "Nothing to review yet — send a message first."
+        quick_key, agent, error = self._idle_cached_agent_or_error(event, "review")
+        if error:
+            return error
 
         snapshot = list(getattr(agent, "_session_messages", None) or [])
 
@@ -5337,24 +5326,32 @@ class GatewaySlashCommandsMixin:
         lines.append("Invoke a bundle with `/<slug>` to load all its skills.")
         return "\n".join(lines)
 
+    def _blocking_approval_or_stale(self, event: MessageEvent, stale_key: str, none_key: str):
+        """``(session_key, None)`` when an agent thread is blocked on approval, else the reply to send.
+
+        A pending-approvals entry with no blocked thread is a stale prompt: drop it and say so.
+        """
+        from tools.approval import has_blocking_approval
+
+        session_key = self._session_key_for_source(event.source)
+        if has_blocking_approval(session_key):
+            return session_key, None
+        if session_key in self._pending_approvals:
+            self._pending_approvals.pop(session_key)
+            return session_key, t(stale_key)
+        return session_key, t(none_key)
+
     async def _handle_approve_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /approve command — unblock waiting agent thread(s).
 
         Agent threads block inside tools/approval.py; signalling the event resumes them so the
         command executes inline — same flow as the CLI's synchronous approval.
         """
-        source = event.source
-        session_key = self._session_key_for_source(source)
+        from tools.approval import resolve_gateway_approval
 
-        from tools.approval import (
-            resolve_gateway_approval, has_blocking_approval,
-        )
-
-        if not has_blocking_approval(session_key):
-            if session_key in self._pending_approvals:
-                self._pending_approvals.pop(session_key)
-                return t("gateway.approval_expired")
-            return t("gateway.approve.no_pending")
+        session_key, stale = self._blocking_approval_or_stale(event, "gateway.approval_expired", "gateway.approve.no_pending")
+        if stale:
+            return stale
 
         # Parse args: support "all", "all session", "all always", "session", "always"
         args = event.get_command_args().strip().lower().split()
@@ -5383,18 +5380,11 @@ class GatewaySlashCommandsMixin:
         Signals blocked thread(s) with a 'deny' result so they get a definitive BLOCKED message,
         as in the CLI. ``/deny`` denies the oldest; ``/deny all`` denies everything.
         """
-        source = event.source
-        session_key = self._session_key_for_source(source)
+        from tools.approval import resolve_gateway_approval
 
-        from tools.approval import (
-            resolve_gateway_approval, has_blocking_approval,
-        )
-
-        if not has_blocking_approval(session_key):
-            if session_key in self._pending_approvals:
-                self._pending_approvals.pop(session_key)
-                return t("gateway.deny.stale")
-            return t("gateway.deny.no_pending")
+        session_key, stale = self._blocking_approval_or_stale(event, "gateway.deny.stale", "gateway.deny.no_pending")
+        if stale:
+            return stale
 
         # Parse args: a leading "all" token denies every pending command;
         # anything after it (or the whole arg string when "all" is absent) is
