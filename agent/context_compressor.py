@@ -681,6 +681,23 @@ _TERMINAL_SUMMARY_FAILURES = (
     ),
 )
 
+# Timeouts escalate 60s -> 300s -> 900s: structural repeat offenders back off longer.
+_TIMEOUT_COOLDOWN_LADDER = (60, 300, 900)
+
+
+def _next_timeout_cooldown(compressor: Any) -> int:
+    """Bump ``compressor._consecutive_timeout_failures`` and return the ladder rung for it.
+
+    Module-level (not a method) so callers that bind a single real method onto a stub still
+    exercise the ladder.
+    """
+    compressor._consecutive_timeout_failures = (
+        getattr(compressor, "_consecutive_timeout_failures", 0) + 1
+    )
+    return _TIMEOUT_COOLDOWN_LADDER[
+        min(compressor._consecutive_timeout_failures, len(_TIMEOUT_COOLDOWN_LADDER)) - 1
+    ]
+
 _MIN_SUMMARY_TOKENS = 2000
 _SUMMARY_RATIO = 0.20
 # Summaries above ~10K tokens are themselves a context-pressure source.
@@ -2034,9 +2051,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     def _reset_session_compaction_state(self) -> None:
         """Shared per-session reset for /new, /reset and session end."""
         self._previous_summary = None
+        # A handoff may carry role="user" only for alternation, so role alone can't prove a human turn existed.
         self._summary_has_user_turn = None
         self._last_summary_error = None
         self._consecutive_timeout_failures = 0
+        # Turns unrecoverably dropped by a static fallback, so callers can warn.
         self._last_summary_dropped_count = 0
         self._last_summary_fallback_used = False
         self._last_feasibility_skip = False
@@ -2044,14 +2063,22 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._last_aux_model_failure_model = None
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
+        # Wall-clock probe deadline; 0.0 = unarmed (durable copy re-read via _load_anti_thrash_recovery_deadline).
         self._anti_thrash_recovery_deadline = 0.0
         self._structural_no_op_backoff_until = 0.0
+        # Observability only; never feeds the strike latch or the fallback streak.
         self._prellm_skip_count = 0
+        # Only a healthy completed summary resets this; ordinary fitting responses do not.
         self._fallback_compression_streak = 0
+        # Armed at a completed boundary; consumed by the next real prompt count in update_from_response().
         self._verify_compaction_cleared_threshold = False
+        # Lets the boundary wrapper tell a completed rewrite from a no-op without inferring from length.
         self._last_compression_made_progress = False
+        # Transient summary errors must not block a fresh session.
         self._summary_failure_cooldown_until = 0.0
+        # True while the local cooldown failed to persist: an empty durable row then means unknown, not cleared.
         self._cooldown_persist_failed = False
+        # Callers read this to know compression was attempted but aborted (freeze until manual /compress).
         self._last_compress_aborted = False
         self._last_compress_refused_would_grow = False
         self._context_probed = False
@@ -2409,15 +2436,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         strategy = getattr(self, "tail_mode", None) or "unknown"
         kind = failure_kind or "timeout"
         stamped = f"backoff:{kind}:strategy={strategy}: {error}"
-        _TIMEOUT_COOLDOWN_LADDER = (60, 300, 900)
-        self._consecutive_timeout_failures = (
-            getattr(self, "_consecutive_timeout_failures", 0) + 1
-        )
-        cooldown = _TIMEOUT_COOLDOWN_LADDER[
-            min(self._consecutive_timeout_failures,
-                len(_TIMEOUT_COOLDOWN_LADDER)) - 1
-        ]
-        self._record_compression_failure_cooldown(float(cooldown), stamped)
+        self._record_compression_failure_cooldown(float(_next_timeout_cooldown(self)), stamped)
 
     def _clear_compression_failure_cooldown(self) -> None:
         # Fence check BEFORE cooldown-clear: a late cancelled worker must not undo the host's timeout cooldown.
@@ -2718,32 +2737,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._session_db: Any = None
         self._session_id: str = ""
 
-        self._previous_summary: Optional[str] = None
-        # A handoff may carry role="user" only for alternation, so role alone can't prove a human turn existed.
-        self._summary_has_user_turn: Optional[bool] = None
-        self._last_compression_savings_pct: float = 100.0
-        self._ineffective_compression_count: int = 0
-        # Monotonic probe deadline; 0.0 = unarmed. Not durable: a restart waits a full fresh window.
-        self._anti_thrash_recovery_deadline: float = 0.0
-        # Observability only; never feeds the strike latch or the fallback streak.
-        self._prellm_skip_count: int = 0
-        # Only a healthy completed summary resets this; ordinary fitting responses do not.
-        self._fallback_compression_streak: int = 0
-        # Armed at a completed boundary; consumed by the next real prompt count in update_from_response().
-        self._verify_compaction_cleared_threshold: bool = False
-        # Lets the boundary wrapper tell a completed rewrite from a no-op without inferring from length.
-        self._last_compression_made_progress: bool = False
-        self._summary_failure_cooldown_until: float = 0.0
-        self._structural_no_op_backoff_until: float = 0.0
-        # True while the local cooldown failed to persist: an empty durable row then means unknown, not cleared.
-        self._cooldown_persist_failed: bool = False
-        self._last_summary_error: Optional[str] = None
-        # Turns unrecoverably dropped by a static fallback, so callers can warn.
-        self._last_summary_dropped_count: int = 0
-        self._last_summary_fallback_used: bool = False
-        self._last_feasibility_skip: bool = False
-        # Callers read this to know compression was attempted but aborted (freeze until manual /compress).
-        self._last_compress_aborted: bool = False
+        # Per-session state (also reset by /new, /reset and session end).
+        self._reset_session_compaction_state()
         # Auth failure (401/403) on the summary call: compress() must ABORT regardless of abort_on_summary_failure.
         self._last_summary_auth_failure: bool = False
         # Transient network failure: ABORT and preserve the session; retrying later beats discarding context.
@@ -2752,12 +2747,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._last_summary_empty_content_failure: bool = False
         # finish_reason == "length": the summary is PARTIAL and must never become a checkpoint; ABORT.
         self._last_summary_truncated_failure: bool = False
-        # Aux-model failure recovered on the main model: record it so callers can still warn.
-        self._last_aux_model_failure_error: Optional[str] = None
-        self._last_aux_model_failure_model: Optional[str] = None
-        self._last_compression_telemetry: Optional[Dict[str, Any]] = None
-        self._active_compression_telemetry: Optional[Dict[str, Any]] = None
-        self._compression_telemetry_seed: Optional[Dict[str, Any]] = None
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
@@ -3341,16 +3330,14 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             if role == "assistant" and content:
                 content = strip_think_blocks(None, content)
 
+            if len(content) > self._CONTENT_MAX:
+                content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
+
             if role == "tool":
-                tool_id = msg.get("tool_call_id", "")
-                if len(content) > self._CONTENT_MAX:
-                    content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
-                parts.append(f"[TOOL RESULT {tool_id}]: {content}")
+                parts.append(f"[TOOL RESULT {msg.get('tool_call_id', '')}]: {content}")
                 continue
 
             if role == "assistant":
-                if len(content) > self._CONTENT_MAX:
-                    content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
                 tool_calls = msg.get("tool_calls", [])
                 if tool_calls:
                     tc_parts = []
@@ -3370,8 +3357,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 parts.append(f"[ASSISTANT]: {content}")
                 continue
 
-            if len(content) > self._CONTENT_MAX:
-                content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
             parts.append(f"[{role.upper()}]: {content}")
 
         return "\n\n".join(parts)
@@ -4234,14 +4219,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         # Transient errors: short cooldown for JSON-decode/streaming-closed. Timeouts escalate
         # 60s→300s→900s (structural repeat offenders) and take precedence over the short rung.
         if _is_timeout:
-            self._consecutive_timeout_failures = (
-                getattr(self, "_consecutive_timeout_failures", 0) + 1
-            )
-            _TIMEOUT_COOLDOWN_LADDER = (60, 300, 900)
-            _transient_cooldown = _TIMEOUT_COOLDOWN_LADDER[
-                min(self._consecutive_timeout_failures,
-                    len(_TIMEOUT_COOLDOWN_LADDER)) - 1
-            ]
+            _transient_cooldown = _next_timeout_cooldown(self)
         elif _is_json_decode or _is_streaming_closed or _is_empty_content or _is_truncated_summary:
             _transient_cooldown = 30
         else:
@@ -4339,12 +4317,9 @@ This compaction should PRIORITISE preserving all information related to the focu
         """Recognize internal user-role rows by content marker (SessionDB drops metadata)."""
         if not isinstance(message, dict) or message.get("role") != "user":
             return False
-        if cls._has_compressed_summary_metadata(message):
+        if cls._is_context_summary_message(message):
             return True
-        content = message.get("content")
-        if cls._is_context_summary_content(content):
-            return True
-        text = _content_text_for_contains(content).strip()
+        text = _content_text_for_contains(message.get("content")).strip()
         # Recovery nudges are scaffolding, not human turns; lazy import avoids an import cycle.
         from agent.conversation_loop import (
             _CODEX_ACK_CONTINUATION_NUDGE,
@@ -4409,11 +4384,9 @@ This compaction should PRIORITISE preserving all information related to the focu
         """Return whether *message* is an empty, non-summary user-role echo."""
         if not isinstance(message, dict) or message.get("role") != "user":
             return False
-        if cls._has_compressed_summary_metadata(message):
+        if cls._is_context_summary_message(message):
             return False
         content = message.get("content")
-        if cls._is_context_summary_content(content):
-            return False
         if content is None or (isinstance(content, str) and not content.strip()):
             return True
         if not isinstance(content, list):
@@ -4439,12 +4412,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             return False
         # display_kind rows (internal notifications, hidden scaffolding) are not human input
         # and must not anchor the tail or seed auto-focus. Mirrors is_user_originated_turn.
-        if message.get("display_kind"):
-            return False
-        if cls._has_compressed_summary_metadata(message):
-            return False
-        content = message.get("content")
-        if cls._is_context_summary_content(content):
+        if message.get("display_kind") or cls._is_context_summary_message(message):
             return False
         return not cls._is_blank_user_turn(message)
 
@@ -4867,11 +4835,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         last_any = -1
         for i in range(len(messages) - 1, head_end - 1, -1):
             msg = messages[i]
-            if msg.get("role") != "assistant" or self._is_context_summary_content(
-                msg.get("content")
-            ):
-                continue
-            if self._is_context_summary_message(msg):
+            if msg.get("role") != "assistant" or self._is_context_summary_message(msg):
                 continue
             if last_any < 0:
                 last_any = i
@@ -5729,12 +5693,8 @@ def is_compaction_summary_message(message: Any) -> bool:
     is stripped by wire sanitizers and some session-store round-trips.
     """
     if isinstance(message, dict):
-        if message.get(COMPRESSED_SUMMARY_METADATA_KEY):
-            return True
-        content = message.get("content")
-    else:
-        content = message
-    return ContextCompressor._is_context_summary_content(content)
+        return ContextCompressor._is_context_summary_message(message)
+    return ContextCompressor._is_context_summary_content(message)
 
 
 # Display metadata that survives projection; other metadata may describe synthetic events and must
