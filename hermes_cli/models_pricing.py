@@ -1,4 +1,8 @@
-"""Live model pricing: OpenRouter-compatible /v1/models pricing fetch + per-endpoint/credential cache, Nous Portal sale chrome and org-policy filtering, Vercel AI Gateway / Novita / Fireworks / DeepInfra pricing adapters.
+"""Live model pricing.
+
+OpenRouter-compatible ``/v1/models`` pricing fetch with a per-endpoint/per-credential cache,
+Nous Portal sale chrome and org-policy filtering, and the Vercel AI Gateway / Novita / Fireworks /
+DeepInfra pricing adapters.
 
 Split out of ``hermes_cli.models``; every moved name is re-imported there, so
 ``hermes_cli.models.<name>`` keeps resolving (and monkeypatching) as before.

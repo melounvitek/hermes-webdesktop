@@ -1,4 +1,7 @@
-"""Static provider/model catalog tables: curated per-provider model lists, canonical provider registry, display groups, alias maps.
+"""Static provider/model catalog tables.
+
+Curated per-provider model lists, the canonical provider registry, display groups, and the
+alias maps. Data only — no network.
 
 Split out of ``hermes_cli.models``; every moved name is re-imported there, so
 ``hermes_cli.models.<name>`` keeps resolving (and monkeypatching) as before.

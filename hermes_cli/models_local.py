@@ -1,4 +1,8 @@
-"""Local / self-hosted model servers: Ollama (native /api/tags probe, headers, base-url resolution), LM Studio (/api/v1/models, load-on-demand), Ollama Cloud (merged live + models.dev catalog with disk cache).
+"""Local / self-hosted model servers.
+
+Ollama (native ``/api/tags`` probe, request headers, base-url resolution), LM Studio
+(``/api/v1/models``, load-on-demand), and Ollama Cloud (live + models.dev merged catalog with a
+disk cache).
 
 Split out of ``hermes_cli.models``; every moved name is re-imported there, so
 ``hermes_cli.models.<name>`` keeps resolving (and monkeypatching) as before.

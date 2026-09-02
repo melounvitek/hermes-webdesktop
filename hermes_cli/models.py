@@ -1,4 +1,14 @@
-"""Canonical model catalogs and lightweight validation helpers."""
+"""Provider/model catalogs: discovery, caching, and identity helpers.
+
+This is the origin module; cohesive clusters live in siblings and are re-imported here so
+``hermes_cli.models.<name>`` stays the stable import/monkeypatch surface:
+
+- ``models_catalog_static``  — curated tables, canonical provider registry, aliases (data only)
+- ``models_reasoning_caps``  — per-model reasoning capabilities (OpenRouter / Nous catalogs)
+- ``models_local``           — Ollama / LM Studio / Ollama Cloud probing
+- ``models_pricing``         — live pricing + Nous policy filtering
+- ``models_validate``        — ``validate_requested_model`` (the ``/model`` verdict ladder)
+"""
 
 from __future__ import annotations
 
@@ -783,16 +793,11 @@ def ai_gateway_model_ids(*, force_refresh: bool = False) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Pricing helpers — fetch live pricing from OpenRouter-compatible /v1/models
+# Provider identity: ``provider:model`` parsing, auto-detection, labels
 # ---------------------------------------------------------------------------
 
-
-# All provider IDs and aliases that are valid for the provider:model syntax.
-_KNOWN_PROVIDER_NAMES: set[str] = (
-    set(_PROVIDER_LABELS.keys())
-    | set(_PROVIDER_ALIASES.keys())
-    | {"openrouter", "custom"}
-)
+# All provider IDs and aliases valid on the left of the ``provider:model`` syntax.
+_KNOWN_PROVIDER_NAMES: set[str] = set(_PROVIDER_LABELS) | set(_PROVIDER_ALIASES) | {"openrouter", "custom"}
 
 
 def _configured_custom_provider_ids() -> set[str]:
@@ -817,6 +822,21 @@ def _configured_custom_provider_ids() -> set[str]:
         pass
     return ids
 
+
+def _provider_has_credentials(pid: str) -> bool:
+    try:
+        from hermes_cli.auth import get_auth_status, has_usable_secret
+
+        if pid == "custom":
+            return bool((_get_custom_base_url() or "").strip())
+        if pid == "openrouter":
+            return has_usable_secret(os.getenv("OPENROUTER_API_KEY", ""))
+        status = get_auth_status(pid)
+        return bool(status.get("logged_in") or status.get("configured"))
+    except Exception:
+        return False
+
+
 def list_available_providers() -> list[dict[str, str]]:
     """Return info about all providers the user could use with ``provider:model``.
 
@@ -824,39 +844,18 @@ def list_available_providers() -> list[dict[str, str]]:
     configured. Derived from :data:`CANONICAL_PROVIDERS`, the single source of truth shared with
     ``hermes model`` and ``/model``.
     """
-    # Derive display order from canonical list + custom
-    provider_order = [p.slug for p in CANONICAL_PROVIDERS] + ["custom"]
-
-    # Build reverse alias map
     aliases_for: dict[str, list[str]] = {}
     for alias, canonical in _PROVIDER_ALIASES.items():
         aliases_for.setdefault(canonical, []).append(alias)
-
-    result = []
-    for pid in provider_order:
-        label = _PROVIDER_LABELS.get(pid, pid)
-        alias_list = aliases_for.get(pid, [])
-        # Check if this provider has credentials available
-        has_creds = False
-        try:
-            from hermes_cli.auth import get_auth_status, has_usable_secret
-            if pid == "custom":
-                custom_base_url = _get_custom_base_url() or ""
-                has_creds = bool(custom_base_url.strip())
-            elif pid == "openrouter":
-                has_creds = has_usable_secret(os.getenv("OPENROUTER_API_KEY", ""))
-            else:
-                status = get_auth_status(pid)
-                has_creds = bool(status.get("logged_in") or status.get("configured"))
-        except Exception:
-            pass
-        result.append({
+    return [
+        {
             "id": pid,
-            "label": label,
-            "aliases": alias_list,
-            "authenticated": has_creds,
-        })
-    return result
+            "label": _PROVIDER_LABELS.get(pid, pid),
+            "aliases": aliases_for.get(pid, []),
+            "authenticated": _provider_has_credentials(pid),
+        }
+        for pid in [p.slug for p in CANONICAL_PROVIDERS] + ["custom"]
+    ]
 
 
 def parse_model_input(raw: str, current_provider: str) -> tuple[str, str]:
@@ -873,27 +872,19 @@ def parse_model_input(raw: str, current_provider: str) -> tuple[str, str]:
         model_part = stripped[colon + 1:].strip()
         if provider_part and model_part and provider_part in _KNOWN_PROVIDER_NAMES:
             if provider_part == "custom":
+                # Longest configured ``custom:<name>`` id that prefixes the input wins.
                 lowered = stripped.lower()
-                for custom_id in sorted(
-                    _configured_custom_provider_ids() - {"custom"},
-                    key=len,
-                    reverse=True,
-                ):
-                    prefix = f"{custom_id.lower()}:"
-                    if lowered.startswith(prefix):
+                for custom_id in sorted(_configured_custom_provider_ids() - {"custom"}, key=len, reverse=True):
+                    if lowered.startswith(f"{custom_id.lower()}:"):
                         return custom_id, stripped[len(custom_id) + 1 :].strip()
-            # Support custom:name:model triple syntax for named custom
-            # providers.  ``custom:local:qwen`` → ("custom:local", "qwen").
-            # Single colon ``custom:qwen`` → ("custom", "qwen") as before.
-            if provider_part == "custom" and ":" in model_part:
-                second_colon = model_part.find(":")
-                custom_name = model_part[:second_colon].strip()
-                actual_model = model_part[second_colon + 1:].strip()
-                if custom_name and actual_model:
-                    custom_id = f"custom:{custom_name.lower()}"
-                    if custom_id in _configured_custom_provider_ids():
-                        return (custom_id, actual_model)
-                    return ("custom", model_part)
+                # ``custom:local:qwen`` → ("custom:local", "qwen") for a configured named provider;
+                # single-colon ``custom:qwen`` → ("custom", "qwen") as before.
+                if ":" in model_part:
+                    custom_name, actual_model = (part.strip() for part in model_part.split(":", 1))
+                    if custom_name and actual_model:
+                        if f"custom:{custom_name.lower()}" in _configured_custom_provider_ids():
+                            return (f"custom:{custom_name.lower()}", actual_model)
+                        return ("custom", model_part)
             return (normalize_provider(provider_part), model_part)
     return (current_provider, stripped)
 
@@ -2870,29 +2861,22 @@ def _fetch_deepinfra_models_by_tag(
     matched: list[dict] = []
     for item in data:
         mid = item.get("id")
-        if not mid:
-            continue
-        # ``metadata is None`` means DeepInfra returns a stub without
-        # pricing/context — typically a model that's listed but not
-        # served. Skip those for every surface.
         raw_metadata = item.get("metadata")
-        if raw_metadata is None:
+        # ``metadata is None`` is a stub without pricing/context — listed but not served. Skip
+        # those for every surface.
+        if not mid or raw_metadata is None:
             continue
         metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
         raw_tags = metadata.get("tags")
         tags = raw_tags if isinstance(raw_tags, list) else []
-        has_surface_tag = any(t in _DEEPINFRA_SURFACE_TAGS for t in tags)
-
-        if has_surface_tag:
-            if tag in tags:
-                matched.append({"id": mid, "metadata": metadata})
-            continue
-        # Surface-tag rollout incomplete — fall back to id-regex inference.
-        # Only meaningful for the chat surface; embed/image-gen/tts/stt
-        # cannot be safely inferred from an id alone.
-        if tag == "chat" and not _DEEPINFRA_EXCLUDE_RE.search(mid):
+        if any(t in _DEEPINFRA_SURFACE_TAGS for t in tags):
+            hit = tag in tags
+        else:
+            # Surface-tag rollout incomplete — id-regex inference, meaningful only for the chat
+            # surface (embed/image-gen/tts/stt cannot be inferred from an id alone).
+            hit = tag == "chat" and not _DEEPINFRA_EXCLUDE_RE.search(mid)
+        if hit:
             matched.append({"id": mid, "metadata": metadata})
-
     return matched
 
 
@@ -2907,9 +2891,7 @@ def _fetch_deepinfra_models(
     :func:`provider_model_ids` keep their string-list contract. Returns ``None`` on network failure,
     an empty list if the catalog contains no chat-tagged ids (which would itself be surprising).
     """
-    items = _fetch_deepinfra_models_by_tag(
-        "chat", timeout=timeout, force_refresh=force_refresh
-    )
+    items = _fetch_deepinfra_models_by_tag("chat", timeout=timeout, force_refresh=force_refresh)
     if items is None:
         return None
     return [item["id"] for item in items] or None
@@ -2952,11 +2934,8 @@ def _fetch_ai_gateway_models(timeout: float = 5.0) -> Optional[list[str]]:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
             return [
-                m["id"]
-                for m in data.get("data", [])
-                if m.get("id")
-                and m.get("type") == "language"
-                and "tool-use" in (m.get("tags") or [])
+                m["id"] for m in data.get("data", [])
+                if m.get("id") and m.get("type") == "language" and "tool-use" in (m.get("tags") or [])
             ]
     except Exception:
         return None
@@ -2970,13 +2949,7 @@ def fetch_api_models(
     headers: Optional[dict[str, str]] = None,
 ) -> Optional[list[str]]:
     """Fetch the list of available model IDs from the provider's ``/models`` endpoint."""
-    return probe_api_models(
-        api_key,
-        base_url,
-        timeout=timeout,
-        api_mode=api_mode,
-        request_headers=headers,
-    ).get("models")
+    return probe_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode, request_headers=headers).get("models")
 
 
 def _custom_endpoint_fingerprint(
@@ -3046,11 +3019,8 @@ def cached_fetch_api_models(
     if not normalized_url:
         if cache_only:
             return None
-        # No base_url means nothing to key the cache on — fall through to a
-        # live call so callers keep getting fetch_api_models' own behavior.
-        return fetch_api_models(
-            api_key, base_url, timeout=timeout, api_mode=api_mode, headers=headers
-        )
+        # Nothing to key the cache on — live call so callers keep fetch_api_models' own behavior.
+        return fetch_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode, headers=headers)
 
     cache_key = f"custom:{normalized_url}"
     fp = _custom_endpoint_fingerprint(api_key, api_mode, headers)
@@ -3059,13 +3029,9 @@ def cached_fetch_api_models(
     now = time.time()
 
     if cache_only:
-        # Same trust window as the stale-while-revalidate tier below, minus
-        # the revalidation: an entry this side of the bound is good enough to
-        # render, and anything older is treated as a miss so the caller falls
-        # back to its configured list rather than showing a stale catalog.
-        if force_refresh or not _cache_entry_valid(entry, fp):
-            return None
-        if now - entry["at"] >= _PROVIDER_MODELS_STALE_SERVE_MAX:
+        # Same trust window as the stale-while-revalidate tier below, minus the revalidation:
+        # anything older is a miss so the caller falls back to its configured list.
+        if force_refresh or not _cache_entry_valid(entry, fp) or now - entry["at"] >= _PROVIDER_MODELS_STALE_SERVE_MAX:
             return None
         return list(entry["models"])
 
@@ -3074,27 +3040,18 @@ def cached_fetch_api_models(
         if age < ttl_seconds:
             return list(entry["models"])
         if age < _PROVIDER_MODELS_STALE_SERVE_MAX:
-            # Stale-while-revalidate: serve the expired entry immediately so
-            # picker opens never block on a live /v1/models round-trip
-            # (#72762's stall class, which a plain TTL would reintroduce an
-            # hour into the session); refresh off-thread for the next open.
+            # Stale-while-revalidate: serve the expired entry immediately so picker opens never
+            # block on a live /v1/models round-trip; refresh off-thread for the next open.
             def _refresh_custom():
-                live = fetch_api_models(
-                    api_key, base_url,
-                    timeout=timeout, api_mode=api_mode, headers=headers,
-                )
-                if not live:
-                    return None
-                return {"fp": fp, "at": time.time(), "models": list(live)}
+                live = fetch_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode, headers=headers)
+                return _cache_entry(fp, live) if live else None
 
             _spawn_swr_refresh(cache_key, _refresh_custom)
             return list(entry["models"])
 
-    live = fetch_api_models(
-        api_key, base_url, timeout=timeout, api_mode=api_mode, headers=headers
-    )
+    live = fetch_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode, headers=headers)
     if live:
-        cache[cache_key] = {"fp": fp, "at": now, "models": list(live)}
+        cache[cache_key] = _cache_entry(fp, live, now)
         _save_provider_models_cache(cache)
         return list(live)
 
@@ -3103,10 +3060,5 @@ def cached_fetch_api_models(
     if _cache_entry_valid(entry, fp):
         return list(entry["models"])
     return live
-
-
-# ---------------------------------------------------------------------------
-# Ollama Cloud — merged model discovery with disk cache
-# ---------------------------------------------------------------------------
 
 
