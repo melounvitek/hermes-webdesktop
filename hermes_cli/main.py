@@ -436,7 +436,7 @@ from hermes_cli.subcommands.profile import build_profile_parser
 from hermes_cli.subcommands.model import build_model_parser
 from hermes_cli.subcommands.setup import build_setup_parser
 
-from hermes_cli.subcommands.whatsapp import build_whatsapp_parser
+from hermes_cli.subcommands.whatsapp import build_whatsapp_parser, build_whatsapp_cloud_parser
 from hermes_cli.subcommands.slack import build_slack_parser
 from hermes_cli.subcommands.login import build_login_parser
 from hermes_cli.subcommands.logout import build_logout_parser
@@ -473,6 +473,21 @@ from hermes_cli.subcommands.pairing import build_pairing_parser
 from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.claw import build_claw_parser
+from hermes_cli.subcommands.moa import build_moa_parser
+from hermes_cli.subcommands.fallback import build_fallback_parser
+from hermes_cli.subcommands.worktree import build_worktree_parser
+from hermes_cli.subcommands.browser import build_browser_parser
+from hermes_cli.subcommands.secrets import build_secrets_parser
+from hermes_cli.subcommands.egress import build_egress_parser
+from hermes_cli.subcommands.migrate import build_migrate_parser
+from hermes_cli.subcommands.checkpoints import build_checkpoints_parser
+from hermes_cli.subcommands.bundles import build_bundles_parser
+from hermes_cli.subcommands.curator import build_curator_parser
+from hermes_cli.subcommands.pets import build_pets_parser
+from hermes_cli.subcommands.journey import build_journey_parser
+from hermes_cli.subcommands.computer_use import build_computer_use_parser
+from hermes_cli.subcommands.sessions import build_sessions_parser
+from hermes_cli.subcommands.completion import build_completion_parser
 
 
 def _require_tty(command_name: str) -> None:
@@ -13513,279 +13528,39 @@ def main():
     # =========================================================================
     build_model_parser(subparsers, cmd_model=cmd_model)
 
-    from hermes_cli.moa_cmd import cmd_moa
-
-    moa_parser = subparsers.add_parser(
-        "moa",
-        help="Configure Mixture of Agents provider/model slots",
-        description="Configure the provider/model set used by /moa <prompt>.",
-    )
-    moa_subparsers = moa_parser.add_subparsers(dest="moa_command")
-    moa_subparsers.add_parser("list", aliases=["ls"], help="Show current MoA model slots")
-    moa_configure = moa_subparsers.add_parser("configure", aliases=["config"], help="Interactively pick MoA models")
-    moa_configure.add_argument("name", nargs="?", help="Preset name to create or update")
-    moa_delete = moa_subparsers.add_parser("delete", aliases=["rm"], help="Delete a MoA preset")
-    moa_delete.add_argument("name", help="Preset name to delete")
-    moa_parser.set_defaults(func=cmd_moa)
+    build_moa_parser(subparsers)
 
     # =========================================================================
     # fallback command — manage the fallback provider chain
     # =========================================================================
-    from hermes_cli.fallback_cmd import cmd_fallback
-
-    fallback_parser = subparsers.add_parser(
-        "fallback",
-        help="Manage fallback providers (tried when the primary model fails)",
-        description=(
-            "Manage the fallback provider chain.  Fallback providers are tried "
-            "in order when the primary model fails with rate-limit, overload, or "
-            "connection errors.  See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/features/fallback-providers"
-        ),
-    )
-    fallback_subparsers = fallback_parser.add_subparsers(dest="fallback_command")
-    fallback_subparsers.add_parser(
-        "list",
-        aliases=["ls"],
-        help="Show the current fallback chain (default when no subcommand)",
-    )
-    fallback_subparsers.add_parser(
-        "add",
-        help="Pick a provider + model (same picker as `hermes model`) and append to the chain",
-    )
-    fallback_subparsers.add_parser(
-        "remove",
-        aliases=["rm"],
-        help="Pick an entry to delete from the chain",
-    )
-    fallback_subparsers.add_parser(
-        "clear",
-        help="Remove all fallback entries",
-    )
-    fallback_parser.set_defaults(func=cmd_fallback)
+    build_fallback_parser(subparsers)
 
     # =========================================================================
     # worktree command — audit/reclaim accumulated git worktrees + branches
     # =========================================================================
-    worktree_parser = subparsers.add_parser(
-        "worktree",
-        help="Audit and reclaim accumulated git worktrees and merged branches",
-        description=(
-            "Attended reclaim for the .worktrees/ directory hermes -w sessions "
-            "accumulate. Never deletes uncommitted tracked changes, unique "
-            "unpushed commits, or in-use trees; untracked-only scratch is "
-            "archived to ~/.hermes/archive/worktree-prune/ before removal. See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/cli#worktree-cleanup"
-        ),
-    )
-    worktree_subparsers = worktree_parser.add_subparsers(dest="worktree_action")
-    worktree_list = worktree_subparsers.add_parser(
-        "list",
-        aliases=["ls", "audit"],
-        help="Classify every tree: age, size, verdict, reason (default action)",
-    )
-    worktree_list.add_argument("--repo", help="Repo root (default: current repo)")
-    worktree_prune = worktree_subparsers.add_parser(
-        "prune",
-        help="Remove safe trees and delete fully-merged local branches",
-    )
-    worktree_prune.add_argument("--repo", help="Repo root (default: current repo)")
-    worktree_prune.add_argument(
-        "--dry-run", action="store_true",
-        help="Show the plan without changing anything",
-    )
-    worktree_prune.add_argument(
-        "--trees-only", action="store_true",
-        help="Only remove worktrees; leave local branches alone",
-    )
-    worktree_prune.add_argument(
-        "--branches-only", action="store_true",
-        help="Only delete merged local branches; leave worktrees alone",
-    )
-
-    def _dispatch_worktree(_args):
-        from hermes_cli.worktree_cmd import cmd_worktree
-
-        # argparse aliases set dest to the literal typed string ("ls"/"audit").
-        action = getattr(_args, "worktree_action", None)
-        if action in ("ls", "audit"):
-            _args.worktree_action = "list"
-        return cmd_worktree(_args)
-
-    worktree_parser.set_defaults(func=_dispatch_worktree)
+    build_worktree_parser(subparsers)
 
 
     # =========================================================================
     # browser command — real-profile helpers (agent-invoked, user-approved)
     # =========================================================================
-    browser_parser = subparsers.add_parser(
-        "browser",
-        help="Real-profile browsing helpers (close a browser locking its profile)",
-        description=(
-            "Helpers for real-profile browsing (browser.use_real_profile). "
-            "close-profile terminates the browser process tree holding your "
-            "default profile so Hermes can copy it — DESTRUCTIVE (unsaved tabs "
-            "in that browser are lost). The agent runs this only after you "
-            "approve closing the browser."
-        ),
-    )
-    browser_subparsers = browser_parser.add_subparsers(dest="browser_action")
-    browser_close = browser_subparsers.add_parser(
-        "close-profile",
-        help="Close the browser locking your real profile (asks nothing — "
-             "run only with the user's explicit OK; loses unsaved tabs)",
-    )
-    browser_close.add_argument(
-        "--browser",
-        help="Override detected default browser (chrome/edge/brave/brave-origin/chromium)",
-    )
-
-    def _dispatch_browser(_args):
-        from hermes_cli.browser_connect import (
-            UNSUPPORTED_CHANNEL,
-            close_browser_holding_profile,
-            detect_default_chromium,
-            real_profile_data_dir,
-        )
-
-        action = getattr(_args, "browser_action", None)
-        if action != "close-profile":
-            browser_parser.print_help()
-            return 2
-        browser = getattr(_args, "browser", None) or detect_default_chromium()
-        if not browser or browser == UNSUPPORTED_CHANNEL:
-            print("✗ No supported Chromium default browser detected.", file=sys.stderr)
-            return 1
-        src = real_profile_data_dir(browser)
-        if not src:
-            print(f"✗ Could not resolve the {browser} profile directory.", file=sys.stderr)
-            return 1
-        closed, msg = close_browser_holding_profile(src)
-        if closed:
-            print(f"✓ {msg}")
-            return 0
-        print(f"✗ {msg}", file=sys.stderr)
-        return 1
-
-    browser_parser.set_defaults(func=_dispatch_browser)
+    build_browser_parser(subparsers)
 
 
     # =========================================================================
     # secrets command — external secret managers (Bitwarden, 1Password)
     # =========================================================================
-    secrets_parser = subparsers.add_parser(
-        "secrets",
-        help="Manage external secret sources (Bitwarden, 1Password)",
-        description=(
-            "Pull API keys from an external secret manager at process startup "
-            "instead of storing them in ~/.hermes/.env.  Supports Bitwarden "
-            "Secrets Manager and 1Password.  See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/"
-        ),
-    )
-    secrets_subparsers = secrets_parser.add_subparsers(dest="secrets_command")
-
-    secrets_bw = secrets_subparsers.add_parser(
-        "bitwarden",
-        aliases=["bw"],
-        help="Bitwarden Secrets Manager integration",
-    )
-
-    secrets_op = secrets_subparsers.add_parser(
-        "onepassword",
-        aliases=["op", "1password"],
-        help="1Password (op:// references) integration",
-    )
-
-    # Lazy-import secrets_cli: the module imports agent.secret_sources.bitwarden
-    # which loads cryptography._rust.pyd.  On Windows this maps the native
-    # extension into the updater process, causing the self-lock preflight to
-    # defer (#86781).  secrets_cli defers its backend import to first use
-    # (module-level __getattr__ + handler-level _load_bw()), so register_cli
-    # at parse time only wires argparse structure with no crypto cost.
-    from hermes_cli import secrets_cli as _secrets_cli
-    from hermes_cli import onepassword_secrets_cli as _op_secrets_cli
-
-    _secrets_cli.register_cli(secrets_bw)
-    _op_secrets_cli.register_cli(secrets_op)
-
-    def _dispatch_secrets(args):  # noqa: ANN001
-        sub = getattr(args, "secrets_command", None)
-        if sub is None:
-            secrets_parser.print_help()
-            return 0
-        return args.func(args)
-
-    secrets_parser.set_defaults(func=_dispatch_secrets)
+    build_secrets_parser(subparsers)
 
     # =========================================================================
     # egress command — iron-proxy outbound credential-injection firewall
     # =========================================================================
-    # NOTE: this is the OUTBOUND egress firewall (ironsh/iron-proxy).
-    # `hermes proxy` (defined elsewhere in this file) is a separate INBOUND
-    # OAuth-aggregator reverse proxy.  Different direction, different purpose.
-    egress_parser = subparsers.add_parser(
-        "egress",
-        help="Manage the iron-proxy egress credential-injection firewall",
-        description=(
-            "Manage iron-proxy, the optional TLS-intercepting egress firewall "
-            "that swaps proxy tokens for real API credentials before outbound "
-            "requests leave a sandbox.  Disabled by default.  See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/egress/iron-proxy"
-        ),
-    )
-
-    from hermes_cli import proxy_cli as _proxy_cli
-    _proxy_cli.register_cli(egress_parser)
-
-    def _dispatch_egress(args):  # noqa: ANN001
-        # The egress subparser uses dest='egress_command' to stay disjoint
-        # from the inbound OAuth ``hermes proxy`` subparser (dest='proxy_command').
-        sub = getattr(args, "egress_command", None)
-        if sub is not None and hasattr(args, "func") and args.func is not _dispatch_egress:
-            return args.func(args)
-        egress_parser.print_help()
-        return 0
-
-    egress_parser.set_defaults(func=_dispatch_egress)
+    build_egress_parser(subparsers)
 
     # =========================================================================
     # migrate command
     # =========================================================================
-    from hermes_cli.migrate import cmd_migrate, cmd_migrate_xai
-
-    migrate_parser = subparsers.add_parser(
-        "migrate",
-        help="Migrate configuration for retired models or deprecated settings",
-        description=(
-            "Diagnose and (optionally) rewrite the active config.yaml to "
-            "replace references to retired models or deprecated settings."
-        ),
-    )
-    migrate_subparsers = migrate_parser.add_subparsers(dest="migrate_type")
-
-    migrate_xai = migrate_subparsers.add_parser(
-        "xai",
-        help="Migrate xAI models scheduled for retirement on May 15, 2026",
-        description=(
-            "Scan config.yaml for references to xAI models retiring on "
-            "May 15, 2026 and, with --apply, rewrite them in-place to the "
-            "official replacements per the xAI migration guide. The original "
-            "config.yaml is backed up before any rewrite."
-        ),
-    )
-    migrate_xai.add_argument(
-        "--apply",
-        action="store_true",
-        help="Rewrite config.yaml in-place (default: dry-run, no writes)",
-    )
-    migrate_xai.add_argument(
-        "--no-backup",
-        action="store_true",
-        help="Skip the timestamped backup of config.yaml when applying",
-    )
-    migrate_xai.set_defaults(func=cmd_migrate_xai)
-    migrate_parser.set_defaults(func=cmd_migrate)
+    build_migrate_parser(subparsers)
 
     # =========================================================================
     # gateway + proxy commands  (parsers built in hermes_cli/subcommands/gateway.py)
@@ -13819,17 +13594,7 @@ def main():
     # =========================================================================
     # whatsapp-cloud command (official Meta Cloud API; complement to Baileys)
     # =========================================================================
-    whatsapp_cloud_parser = subparsers.add_parser(
-        "whatsapp-cloud",
-        help="Set up WhatsApp Business Cloud API integration",
-        description=(
-            "Configure the official Meta WhatsApp Business Cloud API "
-            "adapter (Business account required, public webhook URL "
-            "required). Distinct from `hermes whatsapp` which sets up "
-            "the Baileys bridge for personal accounts."
-        ),
-    )
-    whatsapp_cloud_parser.set_defaults(func=cmd_whatsapp_cloud)
+    build_whatsapp_cloud_parser(subparsers, cmd_whatsapp_cloud=cmd_whatsapp_cloud)
 
     # =========================================================================
     # slack command  (parser built in hermes_cli/subcommands/slack.py)
@@ -13954,16 +13719,7 @@ def main():
     # =========================================================================
     # checkpoints command
     # =========================================================================
-    checkpoints_parser = subparsers.add_parser(
-        "checkpoints",
-        help="Inspect / prune / clear ~/.hermes/checkpoints/",
-        description="Manage the filesystem checkpoint store — the shadow git "
-        "repo hermes uses to snapshot working directories before "
-        "write_file/patch/terminal calls. Lets you see how much "
-        "space checkpoints occupy, force a prune, or wipe the base.",
-    )
-    from hermes_cli.checkpoints import register_cli as _register_checkpoints_cli
-    _register_checkpoints_cli(checkpoints_parser)
+    build_checkpoints_parser(subparsers)
 
     # =========================================================================
     # import command  (parser built in hermes_cli/subcommands/import_cmd.py)
@@ -14007,18 +13763,7 @@ def main():
     # =========================================================================
     # bundles command — skill bundles (alias /<name> for multiple skills)
     # =========================================================================
-    bundles_parser = subparsers.add_parser(
-        "bundles",
-        help="Create, list, and manage skill bundles (aliases for multiple skills)",
-        description=(
-            "Skill bundles let you load several skills under one slash "
-            "command. `/<bundle>` from the CLI or gateway loads every "
-            "referenced skill at once."
-        ),
-    )
-    from hermes_cli.bundles import register_cli as _bundles_register, bundles_command
-    _bundles_register(bundles_parser)
-    bundles_parser.set_defaults(func=bundles_command)
+    build_bundles_parser(subparsers)
 
     # =========================================================================
     # plugins command  (parser built in hermes_cli/subcommands/plugins.py)
@@ -14078,64 +13823,17 @@ def main():
     # =========================================================================
     # curator command — background skill maintenance
     # =========================================================================
-    curator_parser = subparsers.add_parser(
-        "curator",
-        help="Background skill maintenance (curator) — status, run, pause, pin",
-        description=(
-            "The curator is an auxiliary-model background task that "
-            "periodically reviews agent-created skills, prunes stale ones, "
-            "consolidates overlaps, and archives obsolete skills. "
-            "Bundled and hub-installed skills are never touched. "
-            "Archives are recoverable; auto-deletion never happens."
-        ),
-    )
-    try:
-        from hermes_cli.curator import register_cli as _register_curator_cli
-
-        _register_curator_cli(curator_parser)
-    except Exception as _exc:
-        logging.getLogger(__name__).debug("curator CLI wiring failed: %s", _exc)
+    build_curator_parser(subparsers)
 
     # =========================================================================
     # pets command — petdex animated mascots (CLI / TUI / desktop display)
     # =========================================================================
-    pets_parser = subparsers.add_parser(
-        "pets",
-        help="Browse, install, and select petdex animated pets",
-        description=(
-            "Petdex (https://github.com/crafter-station/petdex) is a public "
-            "gallery of animated sprite pets for coding agents. Install one "
-            "and Hermes shows it reacting to agent activity across the CLI, "
-            "TUI, and desktop app."
-        ),
-    )
-    try:
-        from hermes_cli.pets import register_cli as _register_pets_cli
-
-        _register_pets_cli(pets_parser)
-    except Exception as _exc:
-        logging.getLogger(__name__).debug("pets CLI wiring failed: %s", _exc)
+    build_pets_parser(subparsers)
 
     # =========================================================================
     # journey command — learned skills + memories over time, in the terminal
     # =========================================================================
-    journey_parser = subparsers.add_parser(
-        "journey",
-        aliases=["learning", "memory-graph"],
-        help="Timeline of learned skills + memories over time",
-        description=(
-            "A terminal rendition of the desktop Star Map / Memory Graph: a "
-            "timeline bar chart of learned skills and memories over time "
-            "(oldest at top, newest at bottom) plus a playable constellation "
-            "scrubber. Mirrors the TUI `/journey` overlay and the desktop panel."
-        ),
-    )
-    try:
-        from hermes_cli.journey import register_cli as _register_journey_cli
-
-        _register_journey_cli(journey_parser)
-    except Exception as _exc:
-        logging.getLogger(__name__).debug("journey CLI wiring failed: %s", _exc)
+    build_journey_parser(subparsers)
 
     # =========================================================================
     # memory command  (parser built in hermes_cli/subcommands/memory.py)
@@ -14150,229 +13848,7 @@ def main():
     # =========================================================================
     # computer-use command — manage Computer Use (cua-driver)
     # =========================================================================
-    computer_use_parser = subparsers.add_parser(
-        "computer-use",
-        help="Manage the Computer Use (cua-driver) backend (macOS/Windows/Linux)",
-        description=(
-            "Install or check the cua-driver binary used by the\n"
-            "`computer_use` toolset. Supported on macOS, Windows, and\n"
-            "Linux.\n\n"
-            "Use `hermes computer-use install` to fetch and run the\n"
-            "upstream cua-driver installer. This is equivalent to the\n"
-            "post-setup hook that `hermes tools` runs when you first\n"
-            "enable the Computer Use toolset, and is a stable target\n"
-            "for re-running the install if it didn't fire (e.g. when\n"
-            "toggling the toolset on a returning-user setup).\n\n"
-            "Use `hermes computer-use doctor` to run cua-driver's\n"
-            "`health_report` MCP tool and surface its check matrix\n"
-            "(TCC, bundle identity, version, platform support, ...)\n"
-            "in human-readable form."
-        ),
-    )
-    computer_use_sub = computer_use_parser.add_subparsers(dest="computer_use_action")
-
-    computer_use_install = computer_use_sub.add_parser(
-        "install",
-        help="Install or repair the cua-driver binary (macOS/Windows/Linux)",
-    )
-    computer_use_install.add_argument(
-        "--upgrade",
-        action="store_true",
-        help=(
-            "Re-run the upstream installer even if cua-driver is already on "
-            "PATH. The upstream install.sh always pulls the latest release, "
-            "so this performs an in-place upgrade."
-        ),
-    )
-    computer_use_sub.add_parser(
-        "status",
-        help="Print whether cua-driver is installed and on PATH",
-    )
-    computer_use_doctor = computer_use_sub.add_parser(
-        "doctor",
-        help="Run cua-driver `health_report` and surface the check matrix",
-        description=(
-            "Drive cua-driver's stable `health_report` MCP tool and render\n"
-            "its check matrix (TCC permissions, bundle identity, version,\n"
-            "platform support, screenshot probe, …) as human-readable\n"
-            "output. cua-driver owns the health model; this command stays\n"
-            "thin so new checks added upstream surface here without code\n"
-            "changes. Exits 0 when overall=ok, 1 when degraded/failed, 2\n"
-            "when the binary is missing or unreachable."
-        ),
-    )
-    computer_use_doctor.add_argument(
-        "--include",
-        action="append",
-        default=[],
-        metavar="CHECK",
-        help=(
-            "Run only the listed checks. Repeat for multiple "
-            "(e.g. --include tcc_accessibility --include bundle_identity). "
-            "Unknown names are reported by cua-driver."
-        ),
-    )
-    computer_use_doctor.add_argument(
-        "--skip",
-        action="append",
-        default=[],
-        metavar="CHECK",
-        help="Skip the listed checks. Repeat for multiple. Wins over --include.",
-    )
-    computer_use_doctor.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit the raw structured payload as JSON (same shape as `tools/call`).",
-    )
-    computer_use_perms = computer_use_sub.add_parser(
-        "permissions",
-        help="Check or grant macOS Accessibility + Screen Recording (macOS)",
-        description=(
-            "Computer Use drives the Mac through cua-driver, whose TCC grants\n"
-            "attach to cua-driver's own identity (com.trycua.driver) — not the\n"
-            "terminal or the Hermes app. `status` reports the driver's grant\n"
-            "state; `grant` launches CuaDriver via LaunchServices so the macOS\n"
-            "permission dialog is attributed to the process that does the work."
-        ),
-    )
-    computer_use_perms_sub = computer_use_perms.add_subparsers(
-        dest="computer_use_perms_action"
-    )
-    computer_use_perms_status = computer_use_perms_sub.add_parser(
-        "status",
-        help="Report Accessibility + Screen Recording grant state (read-only)",
-    )
-    computer_use_perms_status.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit the normalized permission payload as JSON.",
-    )
-    computer_use_perms_sub.add_parser(
-        "grant",
-        help="Request the grants (opens the dialog attributed to CuaDriver)",
-    )
-    def cmd_computer_use(args):
-        action = getattr(args, "computer_use_action", None)
-        if action == "install":
-            from hermes_cli.tools_config import (
-                _cua_driver_contract_status,
-                install_cua_driver,
-            )
-            if not install_cua_driver(upgrade=bool(getattr(args, "upgrade", False))):
-                return 1
-            return 0 if _cua_driver_contract_status().get("ready") else 1
-        if action == "status":
-            import os as _os
-            import subprocess
-            from hermes_cli.tools_config import _cua_driver_contract_status
-            from tools.computer_use.cua_backend import (
-                cua_driver_update_check,
-                resolve_cua_driver_cmd,
-            )
-            # Must match the runtime resolver: Desktop/TUI processes can omit
-            # ~/.local/bin even though the official installer put the driver there.
-            path = resolve_cua_driver_cmd()
-            override = _os.environ.get("HERMES_CUA_DRIVER_CMD", "").strip()
-            if path:
-                version = ""
-                try:
-                    from hermes_cli.tools_config import _cua_driver_env
-                    version = subprocess.run(
-                        [path, "--version"],
-                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
-                        env=_cua_driver_env(),
-                    ).stdout.strip()
-                except Exception:
-                    pass
-                from hermes_cli.tools_config import _cua_version_summary
-                version = _cua_version_summary(version)
-                # Name the override here too. Without it the operator is told
-                # to repair an install that `hermes computer-use install` will
-                # (correctly) refuse to touch, with nothing pointing at the
-                # env var that actually selected the binary.
-                origin = " [custom binary from HERMES_CUA_DRIVER_CMD]" if override else ""
-                if version:
-                    print(f"cua-driver: installed at {path}{origin} ({version})")
-                else:
-                    print(f"cua-driver: installed at {path}{origin}")
-                contract = _cua_driver_contract_status(path)
-                if not contract.get("ready"):
-                    print(
-                        "  ⚠ Repair required: "
-                        + (contract.get("reason") or "runtime contract is incomplete")
-                    )
-                    if override:
-                        print(
-                            "    Update the binary selected by HERMES_CUA_DRIVER_CMD, or unset "
-                            "the override and run: hermes computer-use install --upgrade"
-                        )
-                    else:
-                        print("    Run: hermes computer-use install")
-                    return 1
-                try:
-                    st = cua_driver_update_check()
-                    if st and st.get("update_available"):
-                        latest = st.get("latest_version") or "?"
-                        print(f"  ⬆ Update available: cua-driver {latest}.")
-                        print("    Run: hermes computer-use install --upgrade")
-                    elif st:
-                        print("  ✓ Up to date.")
-                    else:
-                        # Older driver (no check-update verb) or offline.
-                        print("  Refresh to latest: hermes computer-use install --upgrade")
-                except Exception:
-                    print("  Refresh to latest: hermes computer-use install --upgrade")
-                return 0
-            print("cua-driver: not installed")
-            print("  Run: hermes computer-use install")
-            return 1
-        if action == "doctor":
-            from tools.computer_use.doctor import run_doctor
-            code = run_doctor(
-                include=list(getattr(args, "include", []) or []),
-                skip=list(getattr(args, "skip", []) or []),
-                json_output=bool(getattr(args, "json", False)),
-            )
-            sys.exit(code)
-        if action == "permissions":
-            perms_action = getattr(args, "computer_use_perms_action", None)
-            if perms_action == "grant":
-                from tools.computer_use.permissions import request_permissions_grant
-                sys.exit(request_permissions_grant())
-            if perms_action == "status":
-                import json as _json
-                from tools.computer_use.permissions import computer_use_status
-                st = computer_use_status()
-                if bool(getattr(args, "json", False)):
-                    print(_json.dumps(st, indent=2, sort_keys=True))
-                    sys.exit(0 if st["ready"] else 1)
-                if not st["platform_supported"]:
-                    print(f"Computer Use is not supported on {st['platform']}.")
-                    sys.exit(1)
-                if not st["installed"]:
-                    print("cua-driver: not installed. Run: hermes computer-use install")
-                    sys.exit(1)
-                glyph = lambda v: "✅" if v is True else ("❌" if v is False else "•")  # noqa: E731
-                print(f"cua-driver: {st['version'] or 'installed'} ({st['platform']})")
-                if st["can_grant"]:  # macOS TCC permissions
-                    print(f"  {glyph(st['accessibility'])} Accessibility")
-                    print(f"  {glyph(st['screen_recording'])} Screen Recording")
-                    if not st["ready"]:
-                        print("  Grant: hermes computer-use permissions grant")
-                else:  # no TCC model — readiness is driver health
-                    print(f"  {glyph(st['ready'])} driver health (no permission toggles on {st['platform']})")
-                for c in st["checks"]:
-                    if c["status"] != "ok":
-                        print(f"  ⚠ {c['label']}: {c['message']}")
-                if st["error"]:
-                    print(f"  ⚠ {st['error']}")
-                sys.exit(0 if st["ready"] else 1)
-            computer_use_perms.print_help()
-            return
-        # No subcommand → show help
-        computer_use_parser.print_help()
-
-    computer_use_parser.set_defaults(func=cmd_computer_use)
+    build_computer_use_parser(subparsers)
     # =========================================================================
     # mcp command  (parser built in hermes_cli/subcommands/mcp.py)
     # =========================================================================
@@ -14381,519 +13857,7 @@ def main():
     # =========================================================================
     # sessions command
     # =========================================================================
-    sessions_parser = subparsers.add_parser(
-        "sessions",
-        help="Manage session history (list, rename, export, prune, delete)",
-        description="View and manage the SQLite session store",
-    )
-    sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_action")
-
-    sessions_list = sessions_subparsers.add_parser("list", help="List recent sessions")
-    sessions_list.add_argument(
-        "--source", help="Filter by source (cli, telegram, discord, etc.)"
-    )
-    sessions_list.add_argument(
-        "--limit", type=int, default=20, help="Max sessions to show"
-    )
-    sessions_list.add_argument(
-        "--workspace",
-        metavar="NEEDLE",
-        help="Only sessions in one workspace: a git repo root or project dir "
-        "(matched by path substring or basename).",
-    )
-
-    def _add_session_filter_args(p, default_older_help):
-        p.add_argument(
-            "--older-than",
-            metavar="AGE",
-            help=default_older_help,
-        )
-        p.add_argument(
-            "--newer-than",
-            metavar="AGE",
-            help="Only match sessions active within the last AGE "
-            "(e.g. '5h', '2d') or after an ISO timestamp",
-        )
-        p.add_argument(
-            "--before",
-            metavar="TIME",
-            help="Only match sessions started before TIME "
-            "(duration ago like '5h', or ISO timestamp like '2026-07-05 14:30')",
-        )
-        p.add_argument(
-            "--after",
-            metavar="TIME",
-            help="Only match sessions started at/after TIME "
-            "(duration ago like '5h', or ISO timestamp)",
-        )
-        p.add_argument("--source", help="Only match sessions from this source")
-        p.add_argument(
-            "--title", help="Only match sessions whose title contains this substring"
-        )
-        p.add_argument(
-            "--end-reason", help="Only match sessions with this end reason"
-        )
-        p.add_argument(
-            "--cwd", help="Only match sessions whose working directory is under this path"
-        )
-        p.add_argument(
-            "--min-messages", type=int, help="Only match sessions with >= N messages"
-        )
-        p.add_argument(
-            "--max-messages", type=int, help="Only match sessions with <= N messages"
-        )
-        p.add_argument(
-            "--model",
-            help="Only match sessions whose model name contains this substring "
-            "(e.g. 'sonnet', 'gpt-5', 'hermes')",
-        )
-        p.add_argument(
-            "--provider",
-            help="Only match sessions billed through this provider "
-            "(e.g. openrouter, anthropic, nous)",
-        )
-        p.add_argument(
-            "--user", help="Only match sessions from this user ID"
-        )
-        p.add_argument(
-            "--chat-id", help="Only match sessions from this chat/channel ID"
-        )
-        p.add_argument(
-            "--chat-type",
-            help="Only match sessions with this chat type (e.g. dm, group)",
-        )
-        p.add_argument(
-            "--branch",
-            help="Only match sessions whose git branch contains this substring",
-        )
-        p.add_argument(
-            "--min-tokens", type=int,
-            help="Only match sessions with >= N total tokens (input+output)",
-        )
-        p.add_argument(
-            "--max-tokens", type=int,
-            help="Only match sessions with <= N total tokens (input+output)",
-        )
-        p.add_argument(
-            "--min-cost", type=float,
-            help="Only match sessions costing >= N USD (actual or estimated)",
-        )
-        p.add_argument(
-            "--max-cost", type=float,
-            help="Only match sessions costing <= N USD (actual or estimated)",
-        )
-        p.add_argument(
-            "--min-tool-calls", type=int,
-            help="Only match sessions with >= N tool calls",
-        )
-        p.add_argument(
-            "--max-tool-calls", type=int,
-            help="Only match sessions with <= N tool calls",
-        )
-        p.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="List matching sessions without changing anything",
-        )
-        p.add_argument(
-            "--yes", "-y", action="store_true", help="Skip confirmation"
-        )
-
-    sessions_export = sessions_subparsers.add_parser(
-        "export", help="Export sessions to JSONL, Markdown, or QMD"
-    )
-    sessions_export.add_argument(
-        "output",
-        nargs="?",
-        help=(
-            "Output path. JSONL: file path (use - for stdout, required). "
-            "md/qmd: output directory (default: <hermes home>/session-exports)"
-        ),
-    )
-    sessions_export.add_argument(
-        "--format",
-        choices=["jsonl", "md", "qmd", "html", "trace"],
-        default="jsonl",
-        help=(
-            "Export format (default: jsonl). 'trace' emits Claude Code JSONL "
-            "for the Hugging Face Agent Trace Viewer"
-        ),
-    )
-    sessions_export.add_argument(
-        "--upload",
-        action="store_true",
-        help=(
-            "trace only: upload to your Hugging Face traces dataset instead "
-            "of writing a local file (needs HF_TOKEN)"
-        ),
-    )
-    sessions_export.add_argument(
-        "--public",
-        action="store_true",
-        help="trace --upload only: create/update a public dataset instead of private",
-    )
-    sessions_export.add_argument(
-        "--no-redact",
-        action="store_true",
-        help=(
-            "trace only: skip the forced secret redaction; "
-            "only use after manual review"
-        ),
-    )
-    sessions_export.add_argument(
-        "--only",
-        choices=["user-prompts"],
-        help=(
-            "Export only a filtered view (user-prompts: one prompt record "
-            "per line for jsonl, headed sections for md)"
-        ),
-    )
-    sessions_export.add_argument(
-        "--session-id", help="Session ID or unique prefix to export"
-    )
-    _add_session_filter_args(
-        sessions_export,
-        "Only export sessions older than AGE (duration like '5h'/'2d', "
-        "bare number of days, or an ISO timestamp)",
-    )
-    sessions_export.add_argument(
-        "--redact",
-        action="store_true",
-        help="Redact secrets (API keys, tokens, credentials) from exported content",
-    )
-    sessions_export.add_argument(
-        "--lineage",
-        choices=["single", "logical"],
-        default="single",
-        help="md/qmd only: export one row or its compression lineage",
-    )
-    sessions_export.add_argument(
-        "--delete-after-verified",
-        action="store_true",
-        help="md/qmd only: after verified single-session export, delete that session (needs --yes)",
-    )
-    sessions_export.add_argument(
-        "--force",
-        action="store_true",
-        help="md/qmd only: overwrite an existing export file",
-    )
-
-    sessions_delete = sessions_subparsers.add_parser(
-        "delete", help="Delete a specific session"
-    )
-    sessions_delete.add_argument("session_id", help="Session ID to delete")
-    sessions_delete.add_argument(
-        "--yes", "-y", action="store_true", help="Skip confirmation"
-    )
-
-    sessions_prune = sessions_subparsers.add_parser(
-        "prune",
-        help="Delete old sessions (filterable by time window, source, title, ...)",
-    )
-    _add_session_filter_args(
-        sessions_prune,
-        "Delete sessions older than AGE — days if bare number, or a duration "
-        "like '5h'/'2d'/'1w', or an ISO timestamp (bare prune with no filters "
-        "defaults to 90 days; any filter matches all ages)",
-    )
-    sessions_prune.add_argument(
-        "--include-archived",
-        action="store_true",
-        help="Also delete archived sessions (excluded by default)",
-    )
-    sessions_prune.add_argument(
-        "--include-pinned",
-        action="store_true",
-        help="Also delete pinned sessions (excluded by default — pin is a keep flag)",
-    )
-    sessions_prune.add_argument(
-        "--never-active",
-        action="store_true",
-        help=(
-            "Instead of ended sessions, delete keyed gateway rows that were "
-            "opened and never used (no messages, tokens, tool calls or title) "
-            "and are older than AGE (default 30 days). Ordinary prune can "
-            "never reach these — it only ever selects ended sessions"
-        ),
-    )
-
-    sessions_archive = sessions_subparsers.add_parser(
-        "archive",
-        help="Bulk-archive (soft-hide) sessions matching filters — no deletion",
-    )
-    _add_session_filter_args(
-        sessions_archive,
-        "Only archive sessions older than AGE (duration like '5h'/'2d', "
-        "bare number of days, or ISO timestamp)",
-    )
-
-    sessions_subparsers.add_parser(
-        "optimize",
-        help="Reclaim disk space: merge FTS5 segments + VACUUM (no data change)",
-    )
-
-    sessions_clean_markers = sessions_subparsers.add_parser(
-        "clean-markers",
-        help="Permanently clear stale tool-call marker content left by sessions from before #78148",
-        description=(
-            "Before the #78148 fix, a local tool-call template could persist a "
-            "bare bracketed marker (e.g. \"[memory]\") as an assistant turn's "
-            "content instead of real text. This is already repaired in memory "
-            "on every session load, so running this is optional — it rewrites "
-            "the affected rows once, in place, so long-lived sessions stop "
-            "re-scanning/re-repairing the same rows on every resume. Only the "
-            "content column is touched; tool_calls and every other column on "
-            "the row are left untouched."
-        ),
-    )
-    sessions_clean_markers.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=False,
-        help="Report the affected row count without writing",
-    )
-    sessions_clean_markers.add_argument(
-        "--no-backup",
-        action="store_true",
-        default=False,
-        help="Skip the timestamped state.db backup taken before writing (not recommended)",
-    )
-
-    sessions_optimize_storage = sessions_subparsers.add_parser(
-        "optimize-storage",
-        help="Migrate the search index to the compact v23 layout (reclaims disk on large DBs)",
-        description=(
-            "Rebuild the full-text search index in the compact v23 "
-            "external-content layout. On large databases this reclaims a "
-            "large fraction of state.db (the old layout stored duplicate "
-            "copies of every message and indexed tool output). Runs "
-            "foreground with a progress bar, throttles so a running gateway "
-            "stays responsive, and VACUUMs at the end. Safe to interrupt and "
-            "re-run — it resumes where it left off. No conversation data is "
-            "changed; only the search index is rebuilt."
-        ),
-    )
-    sessions_optimize_storage.add_argument(
-        "--no-vacuum",
-        action="store_true",
-        default=False,
-        help="Skip the final VACUUM (index is rebuilt but freed pages aren't returned to the OS until a later VACUUM)",
-    )
-    sessions_optimize_storage.add_argument(
-        "--yes", "-y",
-        action="store_true",
-        default=False,
-        help="Skip the disk-space confirmation prompt",
-    )
-
-    sessions_repair = sessions_subparsers.add_parser(
-        "repair",
-        help="Repair a malformed state.db schema so hidden sessions reappear",
-        description=(
-            "Recover a state.db whose schema is malformed (e.g. 'table "
-            "messages_fts already exists'), which makes Desktop/Dashboard show "
-            "no sessions. A backup is made first; sessions and messages are "
-            "preserved and the FTS search index is rebuilt if needed."
-        ),
-    )
-    sessions_repair.add_argument(
-        "--check-only",
-        action="store_true",
-        help="Only report whether the database opens cleanly; do not modify it",
-    )
-    sessions_repair.add_argument(
-        "--no-backup",
-        action="store_true",
-        help="Skip the timestamped backup copy (not recommended)",
-    )
-
-    sessions_repair_routing = sessions_subparsers.add_parser(
-        "repair-routing",
-        help="Re-stamp gateway sessions that lost their routing identity",
-        description=(
-            "Find gateway conversations stranded in session rows whose "
-            "routing identity (session_key/chat_id/origin) was never "
-            "written — the damage a corrupt state.db write path leaves "
-            "behind (#82616). Such a row is invisible to restart recovery, "
-            "so the chat resumes an older session instead. Re-stamps each "
-            "orphan from the keyed predecessor it continues, and only when "
-            "that predecessor is unambiguous. Reports without touching the "
-            "database unless --apply is given."
-        ),
-    )
-    sessions_repair_routing.add_argument(
-        "--apply",
-        action="store_true",
-        help="Perform the adoptions (default: report only)",
-    )
-    sessions_repair_routing.add_argument(
-        "--max-gap-seconds",
-        type=float,
-        default=None,
-        help=(
-            "Window between a keyed predecessor's last activity and an "
-            "orphan's start for them to count as the same conversation "
-            "(default: 900)"
-        ),
-    )
-
-    sessions_recover = sessions_subparsers.add_parser(
-        "recover",
-        help="Rebuild canonical session data into a separate clean database",
-        description=(
-            "Offline, non-destructive recovery for a damaged state.db. The "
-            "source database and its WAL/SHM/rollback-journal sidecars are "
-            "copied before SQLite opens anything. Canonical rows are rebuilt "
-            "into a new output database; derived search indexes are recreated "
-            "and the active database is never replaced automatically."
-        ),
-    )
-    sessions_recover.add_argument(
-        "--source",
-        type=Path,
-        required=True,
-        help="Source state.db or preserved backup to inspect/recover",
-    )
-    sessions_recover.add_argument(
-        "--output",
-        type=Path,
-        help="New recovery database path (required unless --inspect-only)",
-    )
-    sessions_recover.add_argument(
-        "--inspect-only",
-        action="store_true",
-        help="Only report canonical table readability; do not create an output database",
-    )
-    sessions_recover.add_argument(
-        "--work-dir",
-        type=Path,
-        help="Existing directory for the disposable source copy (defaults beside the output)",
-    )
-    sessions_recover.add_argument(
-        "--chunk-size",
-        type=int,
-        default=1000,
-        help="Rows committed per recovery batch (default: 1000)",
-    )
-    sessions_recover.add_argument(
-        "--allow-partial",
-        action="store_true",
-        help=(
-            "Best-effort salvage across damaged row ranges; the output remains "
-            "separate and every skipped range is recorded"
-        ),
-    )
-    sessions_recover.add_argument(
-        "--report",
-        type=Path,
-        help="JSON report path (defaults to <output>.recovery.json)",
-    )
-
-    sessions_subparsers.add_parser("stats", help="Show session store statistics")
-
-    sessions_rename = sessions_subparsers.add_parser(
-        "rename", help="Set or change a session's title"
-    )
-    sessions_rename.add_argument("session_id", help="Session ID to rename")
-    sessions_rename.add_argument("title", nargs="+", help="New title for the session")
-
-    sessions_pin = sessions_subparsers.add_parser(
-        "pin",
-        help="Pin session(s) — durable keep flag, exempt from auto-archive",
-        description=(
-            "Set the durable 'keep' flag on one or more sessions. Pinned "
-            "sessions are exempt from the sessions.auto_archive stale sweep "
-            "and always appear in listings. The same flag drives the Desktop "
-            "sidebar's Pinned section — pin from either surface, both see it."
-        ),
-    )
-    sessions_pin.add_argument(
-        "session_ids", nargs="+", help="Session ID(s) or unique prefix(es) to pin"
-    )
-
-    sessions_unpin = sessions_subparsers.add_parser(
-        "unpin", help="Remove the pin (durable keep flag) from session(s)"
-    )
-    sessions_unpin.add_argument(
-        "session_ids", nargs="+", help="Session ID(s) or unique prefix(es) to unpin"
-    )
-
-    sessions_pinned = sessions_subparsers.add_parser(
-        "pinned", help="List pinned sessions"
-    )
-    sessions_pinned.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit machine-readable JSON (for backup/restore scripting)",
-    )
-
-    sessions_retitle = sessions_subparsers.add_parser(
-        "retitle-skills",
-        help="Re-title sessions whose auto-title came from a /skill's own text",
-        description=(
-            "Sessions opened with a /skill were auto-titled from the expanded "
-            "message, which embeds the whole skill body — so the title "
-            "describes the SKILL, not the request. This regenerates those "
-            "titles from what the user actually typed. Lists what it would "
-            "change unless --apply is passed."
-        ),
-    )
-    sessions_retitle.add_argument(
-        "--apply",
-        action="store_true",
-        help="Write the new titles (default: dry run)",
-    )
-    sessions_retitle.add_argument(
-        "--limit",
-        type=int,
-        default=200,
-        help="Maximum sessions to examine (default: 200)",
-    )
-
-    sessions_browse = sessions_subparsers.add_parser(
-        "browse",
-        help="Interactive session picker — browse, search, and resume sessions",
-    )
-    sessions_browse.add_argument(
-        "--source", help="Filter by source (cli, telegram, discord, etc.)"
-    )
-    sessions_browse.add_argument(
-        "--limit", type=int, default=500, help="Max sessions to load (default: 500)"
-    )
-
-    sessions_import = sessions_subparsers.add_parser(
-        "import",
-        help="Import a Claude Code or Codex CLI session into Hermes",
-        description=(
-            "Pull a conversation started in Claude Code (~/.claude/projects) "
-            "or Codex CLI (~/.codex/sessions) into the Hermes session store "
-            "so it can be resumed with 'hermes --resume <id>'. The foreign "
-            "files are only read, never modified."
-        ),
-    )
-    sessions_import.add_argument(
-        "--from",
-        dest="from_source",
-        choices=["claude", "codex"],
-        help="Which tool to import from (default: pick across both)",
-    )
-    sessions_import.add_argument(
-        "path",
-        nargs="?",
-        help="Path to a specific session JSONL file (skips the picker)",
-    )
-
-
-    # cmd_sessions lives in hermes_cli/sessions_cmd.py (main.py decomposition).
-    # sessions_parser is threaded in via functools.partial because the
-    # fallthrough branch calls sessions_parser.print_help() (formerly a
-    # closure capture of this main()-local). The indirection through _self()
-    # keeps the sessions_cmd import lazy until the subcommand actually runs
-    # and lets monkeypatches on hermes_cli.main.cmd_sessions keep working.
-    def _dispatch_sessions(_args, *, sessions_parser=sessions_parser):
-        return _self().cmd_sessions(_args, sessions_parser=sessions_parser)
-
-    sessions_parser.set_defaults(func=_dispatch_sessions)
+    build_sessions_parser(subparsers, cmd_sessions=lambda a, **kw: _self().cmd_sessions(a, **kw))
 
     # =========================================================================
     # insights command  (parser built in hermes_cli/subcommands/insights.py)
@@ -14932,18 +13896,7 @@ def main():
     # =========================================================================
     # completion command
     # =========================================================================
-    completion_parser = subparsers.add_parser(
-        "completion",
-        help="Print shell completion script (bash, zsh, or fish)",
-    )
-    completion_parser.add_argument(
-        "shell",
-        nargs="?",
-        default="bash",
-        choices=["bash", "zsh", "fish"],
-        help="Shell type (default: bash)",
-    )
-    completion_parser.set_defaults(func=lambda args: cmd_completion(args, parser))
+    build_completion_parser(subparsers, cmd_completion=cmd_completion, parser=parser)
 
     # =========================================================================
     # dashboard command  (parser built in hermes_cli/subcommands/dashboard.py)
