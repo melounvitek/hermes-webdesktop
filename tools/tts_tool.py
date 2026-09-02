@@ -44,8 +44,7 @@ import json
 import logging
 import os
 import re
-import subprocess
-import tempfile
+import tempfile  # noqa: F401 — tests/gateway patch ``tts_tool.tempfile.NamedTemporaryFile``
 import threading
 import time
 import uuid
@@ -88,11 +87,26 @@ def _resolve_provider_key(env_var: str, provider_id: str) -> str:
 
 
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
-from tools.tts_command_provider import (
+from tools.tts_command_provider import (  # noqa: F401 — historical names re-exported
+    BUILTIN_TTS_PROVIDERS,
+    COMMAND_TTS_OUTPUT_FORMATS,
+    DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH,
+    DEFAULT_COMMAND_TTS_OUTPUT_FORMAT,
+    DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS,
+    _configured_command_tts_output_path,
+    _generate_command_tts,
+    _get_command_tts_output_format,
+    _get_command_tts_timeout,
+    _get_named_provider_config,
+    _get_provider_section,
+    _is_command_provider_config,
+    _is_command_tts_voice_compatible,
+    _iter_command_providers,
+    _resolve_command_provider_config,
     command_env_passthrough as _command_provider_env_passthrough,
     render_command_template as _render_command_tts_template,
     run_command_provider as _run_command_tts,
-    shell_quote_context as _shell_quote_context,  # noqa: F401 — tests import via this module
+    shell_quote_context as _shell_quote_context,
 )
 from tools.tool_backend_helpers import (
     NOUS_MANAGED_PROVIDER,
@@ -390,47 +404,6 @@ def _get_provider(tts_config: Dict[str, Any]) -> str:
     return provider
 
 
-# ===========================================================================
-# Custom command providers (type: command under tts.providers.<name>)
-# ===========================================================================
-#
-# Config shape::
-#
-#     tts:
-#       provider: piper-en
-#       providers:
-#         piper-en:
-#           type: command
-#           command: "piper -m ~/model.onnx -f {output_path} < {input_path}"
-#           output_format: wav
-#
-# Placeholders: ``{input_path}``, ``{text_path}`` (alias), ``{output_path}``,
-# ``{format}``, ``{voice}``, ``{model}``, ``{speed}``; ``{{``/``}}`` for literal
-# braces. Values are shell-quoted for their surrounding quote context. Built-in
-# provider names always win over a same-named entry under ``tts.providers``.
-
-# Any ``tts.provider`` value NOT in this set refers to ``tts.providers.<name>``.
-BUILTIN_TTS_PROVIDERS = frozenset({
-    "edge",
-    "elevenlabs",
-    "openai",
-    "minimax",
-    "xai",
-    "mistral",
-    "gemini",
-    "neutts",
-    "kittentts",
-    "piper",
-    "deepinfra",
-})
-
-DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS = 120
-DEFAULT_COMMAND_TTS_OUTPUT_FORMAT = "mp3"
-COMMAND_TTS_OUTPUT_FORMATS = frozenset(
-    {"mp3", "wav", "ogg", "flac", "m4a", "aac", "amr", "opus"}
-)
-DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH = 5000
-
 # Platforms whose native voice-bubble delivery requires Ogg/Opus audio
 # (MP3 renders as a broken attachment there).
 OPUS_VOICE_PLATFORMS = frozenset({
@@ -445,66 +418,6 @@ OPUS_VOICE_PLATFORMS = frozenset({
 _NATIVE_OPUS_PROVIDERS = frozenset({"openai", "elevenlabs", "mistral", "gemini"})
 # Built-ins whose native output (MP3/WAV) needs ffmpeg for voice-bubble delivery.
 _FFMPEG_OPUS_PROVIDERS = frozenset({"edge", "neutts", "minimax", "xai", "kittentts", "piper"})
-
-
-def _get_provider_section(tts_config: Dict[str, Any], name: str) -> Dict[str, Any]:
-    """Return a provider config block if it's a dict, else an empty dict."""
-    if not isinstance(tts_config, dict):
-        return {}
-    section = tts_config.get(name)
-    return section if isinstance(section, dict) else {}
-
-
-def _get_named_provider_config(
-    tts_config: Dict[str, Any],
-    name: str,
-) -> Dict[str, Any]:
-    """Config dict for a user-declared provider, or {}.
-
-    ``tts.providers.<name>`` is canonical; ``tts.<name>`` is accepted as
-    back-compat only for non-built-in names (so a user's ``tts.openai`` block
-    still means the OpenAI provider, not a custom command).
-    """
-    providers = _get_provider_section(tts_config, "providers")
-    section = providers.get(name) if isinstance(providers, dict) else None
-    if isinstance(section, dict):
-        return section
-    if name.lower() not in BUILTIN_TTS_PROVIDERS:
-        legacy = _get_provider_section(tts_config, name)
-        if legacy:
-            return legacy
-    return {}
-
-
-def _is_command_provider_config(config: Dict[str, Any]) -> bool:
-    """True when *config* declares a command-type provider (has a non-empty ``command``)."""
-    if not isinstance(config, dict):
-        return False
-    ptype = str(config.get("type") or "").strip().lower()
-    if ptype and ptype != "command":
-        return False
-    command = config.get("command")
-    return isinstance(command, str) and bool(command.strip())
-
-
-def _resolve_command_provider_config(
-    provider: str,
-    tts_config: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    """The provider config when *provider* is a user-declared command provider.
-
-    None for built-in names (native handlers win), unknown names, or
-    non-command types.
-    """
-    if not provider:
-        return None
-    key = provider.lower().strip()
-    if key in BUILTIN_TTS_PROVIDERS:
-        return None
-    config = _get_named_provider_config(tts_config, key)
-    if _is_command_provider_config(config):
-        return config
-    return None
 
 
 def _dispatch_to_plugin_provider(
@@ -591,136 +504,6 @@ def _plugin_provider_is_voice_compatible(provider: str) -> bool:
     except Exception as exc:  # noqa: BLE001
         logger.debug("tts plugin voice_compatible check failed for '%s': %s", key, exc)
         return False
-
-
-def _iter_command_providers(tts_config: Dict[str, Any]):
-    """Yield (name, config) pairs for every declared command-type provider."""
-    if not isinstance(tts_config, dict):
-        return
-    providers = _get_provider_section(tts_config, "providers")
-    for name, cfg in (providers or {}).items():
-        if (
-            isinstance(name, str)
-            and name.lower() not in BUILTIN_TTS_PROVIDERS
-            and _is_command_provider_config(cfg)
-        ):
-            yield name, cfg
-
-
-def _get_command_tts_timeout(config: Dict[str, Any]) -> float:
-    """Timeout in seconds; invalid or non-positive values fall back to the default."""
-    raw = config.get("timeout", config.get("timeout_seconds", DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS))
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return float(DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS)
-    if value <= 0:
-        return float(DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS)
-    return value
-
-
-def _get_command_tts_output_format(
-    config: Dict[str, Any],
-    output_path: Optional[str] = None,
-) -> str:
-    """Validated output format: the output path's suffix wins, then ``format``/``output_format``."""
-    if output_path:
-        suffix = Path(output_path).suffix.lower().strip().lstrip(".")
-        if suffix in COMMAND_TTS_OUTPUT_FORMATS:
-            return suffix
-    raw = (
-        config.get("format")
-        or config.get("output_format")
-        or DEFAULT_COMMAND_TTS_OUTPUT_FORMAT
-    )
-    fmt = str(raw).lower().strip().lstrip(".")
-    return fmt if fmt in COMMAND_TTS_OUTPUT_FORMATS else DEFAULT_COMMAND_TTS_OUTPUT_FORMAT
-
-
-def _is_command_tts_voice_compatible(config: Dict[str, Any]) -> bool:
-    """True only when the user explicitly opted in to voice delivery."""
-    value = config.get("voice_compatible", False)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
-def _configured_command_tts_output_path(path: Path, config: Dict[str, Any]) -> Path:
-    """Return an output path whose extension matches the provider's output_format."""
-    fmt = _get_command_tts_output_format(config)
-    return path.with_suffix(f".{fmt}")
-
-
-def _generate_command_tts(
-    text: str,
-    output_path: str,
-    provider_name: str,
-    config: Dict[str, Any],
-    tts_config: Dict[str, Any],
-) -> str:
-    """Generate speech by running a user-configured shell command.
-
-    Returns the absolute path of the audio file the command wrote. Raises
-    ``ValueError`` for invalid provider config and ``RuntimeError`` for
-    timeouts / non-zero exits / empty output.
-    """
-    command_template = str(config.get("command") or "").strip()
-    if not command_template:
-        raise ValueError(
-            f"tts.providers.{provider_name}.command is not configured"
-        )
-
-    output = Path(output_path).expanduser()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists():
-        output.unlink()
-
-    timeout = _get_command_tts_timeout(config)
-    output_format = _get_command_tts_output_format(config, str(output))
-    speed = config.get("speed", tts_config.get("speed", ""))
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        text_path = Path(tmpdir) / "input.txt"
-        text_path.write_text(text, encoding="utf-8")
-
-        placeholders = {
-            "input_path": str(text_path),
-            "text_path": str(text_path),
-            "output_path": str(output),
-            "format": output_format,
-            "voice": str(config.get("voice", "")),
-            "model": str(config.get("model", "")),
-            "speed": str(speed),
-        }
-        command = _render_command_tts_template(command_template, placeholders)
-
-        try:
-            _run_command_tts(
-                command,
-                timeout,
-                env_passthrough=_command_provider_env_passthrough(config),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                f"TTS provider '{provider_name}' timed out after {timeout:g}s"
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            detail_parts = []
-            if exc.stderr:
-                detail_parts.append(f"stderr: {exc.stderr.strip()}")
-            if exc.stdout:
-                detail_parts.append(f"stdout: {exc.stdout.strip()}")
-            detail = "; ".join(detail_parts) or "no command output"
-            raise RuntimeError(
-                f"TTS provider '{provider_name}' exited with code "
-                f"{exc.returncode}: {detail}"
-            ) from exc
-
-    if not output.exists() or output.stat().st_size <= 0:
-        raise RuntimeError(
-            f"TTS provider '{provider_name}' produced no output at {output}"
-        )
-    return str(output)
 
 
 def _has_any_command_tts_provider(tts_config: Optional[Dict[str, Any]] = None) -> bool:
