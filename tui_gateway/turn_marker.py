@@ -1,21 +1,19 @@
 """Durable interrupted-turn markers for the desktop/TUI auto-continue path.
 
 A running turn's progress lives only in process memory (the agent flushes to
-SQLite at turn end, not mid-turn), so an app/backend/machine death mid-turn
-leaves no durable trace of the interrupted prompt. This sidecar is that
-trace: a marker is written when a turn starts running and cleared when the
-turn concludes — success, handled error, or interrupt all clear it, so only
-a process death leaves one behind. ``session.resume`` reads the marker to
-decide whether to auto-continue the interrupted turn (see
-``_maybe_schedule_auto_continue`` in ``tui_gateway/server.py``).
+SQLite at turn end), so an app/backend/machine death mid-turn leaves no durable
+trace of the interrupted prompt.  A marker is written when a turn starts and
+cleared when it concludes — success, handled error, or interrupt all clear it —
+so only a process death leaves one behind.  ``session.resume`` reads it to
+decide whether to auto-continue (``_maybe_schedule_auto_continue`` in
+``tui_gateway/server.py``).
 
-Markers are stored per ``HERMES_HOME`` (callers pass the session's home so
-profile sessions keep their state in their own profile directory) and the
-file is bounded: writes prune entries older than ``_MAX_AGE_SECS`` and cap
-the total count, so an unlucky streak of crashes can't grow it unboundedly.
+Markers are stored per ``HERMES_HOME`` (profile sessions keep state in their own
+profile dir) and the file is bounded: writes prune entries older than
+``_MAX_AGE_SECS`` and cap the count, so a crash streak can't grow it unboundedly.
 
-Every function is best-effort by design — marker bookkeeping must never
-break a turn — so I/O errors degrade to "no marker" instead of raising.
+Every function is best-effort — marker bookkeeping must never break a turn — so
+I/O errors degrade to "no marker" instead of raising.
 """
 
 from __future__ import annotations
@@ -35,8 +33,8 @@ _MARKER_DIR = "desktop"
 _MARKER_FILE = "interrupted_turns.json"
 _MAX_AGE_SECS = 24 * 3600
 _MAX_ENTRIES = 32
-# Enough to re-submit any realistic prompt; guards the sidecar against a
-# pathological multi-megabyte paste being journaled on every turn.
+# Enough to re-submit any realistic prompt; guards against a multi-megabyte
+# paste being journaled on every turn.
 _MAX_PROMPT_CHARS = 64_000
 
 _lock = threading.Lock()
@@ -44,6 +42,10 @@ _lock = threading.Lock()
 
 def _marker_path(home: Path | str) -> Path:
     return Path(home) / _MARKER_DIR / _MARKER_FILE
+
+
+def _started_at(entry: dict) -> float:
+    return float(entry.get("started_at") or 0)
 
 
 def _load(path: Path) -> dict[str, dict]:
@@ -61,19 +63,11 @@ def _load(path: Path) -> dict[str, dict]:
 
 
 def _prune(entries: dict[str, dict], now: float) -> dict[str, dict]:
-    fresh = {
-        key: entry
-        for key, entry in entries.items()
-        if now - float(entry.get("started_at") or 0) <= _MAX_AGE_SECS
-    }
+    fresh = {k: e for k, e in entries.items() if now - _started_at(e) <= _MAX_AGE_SECS}
     if len(fresh) <= _MAX_ENTRIES:
         return fresh
-    newest = sorted(
-        fresh.items(),
-        key=lambda item: float(item[1].get("started_at") or 0),
-        reverse=True,
-    )[:_MAX_ENTRIES]
-    return dict(newest)
+    newest = sorted(fresh.items(), key=lambda item: _started_at(item[1]), reverse=True)
+    return dict(newest[:_MAX_ENTRIES])
 
 
 def _store(path: Path, entries: dict[str, dict]) -> None:
@@ -152,7 +146,7 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
     if not prompt.strip():
         return None
     try:
-        started_at = float(entry.get("started_at") or 0)
+        started_at = _started_at(entry)
         attempts = max(0, int(entry.get("attempts") or 0))
     except (TypeError, ValueError):
         return None

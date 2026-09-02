@@ -1,79 +1,68 @@
-"""Image-generation JSON-RPC handler (ws twin of the image_generate tool).
+"""Image-generation JSON-RPC handler (ws twin of the image_generate tool), so UI
+surfaces (avatar pickers, artifact panes) can generate directly. The result is
+returned as a data URL: a remote desktop can't read a gateway file path and hosted
+URLs are often CORS-opaque to a renderer canvas.
 
-Desktop plugins reach the backend only through ws JSON-RPC; the image
-generation capability existed solely as a model tool. ``image.generate``
-lets UI surfaces (avatar pickers, artifact panes) generate directly.
-
-The result image is returned as a data URL (``image_data``): a remote
-desktop client cannot read a file path on the gateway host, and hosted
-result URLs are often CORS-opaque to a renderer canvas. Data URLs work
-identically over local and remote gateways.
-
-Handlers are rebound onto server.py's globals at install time (see
-method_ctx.py) — helpers must stay nested inside the handler body.
+Bodies are rebound onto server.py's globals at install time (see
+method_ctx.bind_module), so they reference server.py globals bare.
 """
 
-from .method_ctx import HandlerRegistry
+from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
 method = _registry.method
 
 
+def _image_gen_available() -> bool:
+    try:
+        from tools.image_generation_tool import check_image_generation_requirements
+
+        return bool(check_image_generation_requirements())
+    except Exception:
+        return False
+
+
+def _image_to_data_url(ref: str, cap: int):
+    """Fetch a URL or read a local path into a data URL; None when missing, over *cap*, or failing."""
+    import base64
+    import mimetypes
+    import os
+
+    try:
+        if ref.startswith(("http://", "https://")):
+            import urllib.request
+
+            req = urllib.request.Request(ref, headers={"User-Agent": "hermes-agent"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                if resp.length is not None and resp.length > cap:
+                    return None
+                data = resp.read(cap + 1)
+                mime = resp.headers.get_content_type() or "image/png"
+        elif os.path.isfile(ref):
+            if os.path.getsize(ref) > cap:
+                return None
+            with open(ref, "rb") as fh:
+                data = fh.read(cap + 1)
+            mime = mimetypes.guess_type(ref)[0] or "image/png"
+        else:
+            return None
+        if len(data) > cap:
+            return None
+        if not mime.startswith("image/"):
+            mime = "image/png"
+        return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+    except Exception:
+        return None
+
+
 @method("image.generate")
 def _(rid, params: dict) -> dict:
-    """Generate an image with the configured backend.
-
-    Params: ``prompt`` (required unless ``probe``), ``aspect_ratio``
-    (landscape|square|portrait), ``probe`` (return availability only),
-    ``max_bytes`` (cap on the returned data URL payload, default 8MB).
-
-    Result: ``{available, success, image, image_data, error}`` where
-    ``image`` is the backend's URL/path and ``image_data`` is a data URL
-    of the downloaded bytes (omitted when the download fails — callers
-    should fall back to ``image``).
-    """
-
-    def _availability() -> bool:
-        try:
-            from tools.image_generation_tool import check_image_generation_requirements
-
-            return bool(check_image_generation_requirements())
-        except Exception:
-            return False
-
-    def _to_data_url(ref: str, cap: int):
-        """Fetch a URL or read a local path into a data URL, size-capped."""
-        import base64
-        import mimetypes
-        import os
-
-        try:
-            if ref.startswith(("http://", "https://")):
-                import urllib.request
-
-                req = urllib.request.Request(ref, headers={"User-Agent": "hermes-agent"})
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    if resp.length is not None and resp.length > cap:
-                        return None
-                    data = resp.read(cap + 1)
-                    mime = resp.headers.get_content_type() or "image/png"
-            elif os.path.isfile(ref):
-                if os.path.getsize(ref) > cap:
-                    return None
-                with open(ref, "rb") as fh:
-                    data = fh.read(cap + 1)
-                mime = mimetypes.guess_type(ref)[0] or "image/png"
-            else:
-                return None
-            if len(data) > cap:
-                return None
-            if not mime.startswith("image/"):
-                mime = "image/png"
-            return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
-        except Exception:
-            return None
-
-    available = _availability()
+    """Params: ``prompt`` (required unless ``probe``), ``aspect_ratio``
+    (landscape|square|portrait), ``probe`` (availability only), ``max_bytes`` (cap
+    on the data URL, default 8MB, max 16MB). Result: ``{available, success, image,
+    image_data, error}`` — ``image_data`` is omitted when the download fails, so
+    callers fall back to ``image`` (the backend's URL/path)."""
+    available = _image_gen_available()
     if is_truthy_value(params.get("probe", False)):
         return _ok(rid, {"available": available})
     if not available:
@@ -99,10 +88,9 @@ def _(rid, params: dict) -> dict:
     try:
         from tools.image_generation_tool import _handle_image_generate
 
-        # Full provider dispatcher — the same path the model tool takes:
-        # source-image confinement, plugin-registered providers, managed
-        # Krea routing, then the in-tree FAL fallback. Calling the FAL leaf
-        # (image_generate_tool) directly here bypassed configured providers.
+        # Full provider dispatcher — same path as the model tool (source-image
+        # confinement, plugin providers, managed routing, FAL fallback); calling
+        # the FAL leaf directly bypassed configured providers.
         raw = _handle_image_generate({"prompt": prompt, "aspect_ratio": aspect})
         result = json.loads(raw)
     except Exception as e:
@@ -120,11 +108,12 @@ def _(rid, params: dict) -> dict:
 
     image_ref = str(result.get("image") or "")
     payload = {"available": True, "success": True, "image": image_ref}
-    data_url = _to_data_url(image_ref, cap) if image_ref else None
+    data_url = _image_to_data_url(image_ref, cap) if image_ref else None
     if data_url:
         payload["image_data"] = data_url
     return _ok(rid, payload)
 
 
 def register(server) -> None:
-    _registry.install(server)
+    """Publish this module's helpers + handlers onto ``server``, rebound to its globals."""
+    bind_module(globals(), server, skip=("_",))
