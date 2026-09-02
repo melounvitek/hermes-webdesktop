@@ -33,14 +33,11 @@ from agent.turn_context import (
 from agent.turn_retry_state import TurnRetryState
 from agent.turn_usage import record_response_usage
 from agent.turn_overflow import recover_from_overflow
-from agent.turn_empty_response import recover_empty_response
-from agent.turn_stop_gates import apply_stop_gates
-from agent.turn_tool_validation import validate_tool_calls
 from agent.turn_truncation import (
     handle_content_policy_refusal,
     recover_from_truncation,
 )
-from agent.turn_preflight import compress_after_tool_results, run_preflight_compression
+from agent.turn_preflight import run_preflight_compression
 from agent.turn_recovery import (
     route_classified_error,
     describe_invalid_response,
@@ -57,7 +54,6 @@ from agent.runtime_cwd import resolve_agent_cwd
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
-    coalesce_tool_call_id,
     _sanitize_messages_surrogates,
     _sanitize_structure_non_ascii,
     _sanitize_structure_surrogates,
@@ -88,6 +84,8 @@ from agent.retry_utils import (
 # Bind before the turn starts so a source-tree swap cannot load a skewed
 # finalizer at turn end.
 from agent.turn_finalizer import finalize_turn
+from agent.turn_final_response import finish_text_response
+from agent.turn_tool_round import run_tool_round
 from agent.turn_response_intake import normalize_model_response
 from agent.turn_loop_errors import handle_outer_loop_error
 from hermes_logging import set_session_context
@@ -3370,466 +3368,75 @@ def run_conversation(
             
             # Check for tool calls
             if assistant_message.tool_calls:
-                if not agent.quiet_mode:
-                    agent._vprint(f"{agent.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)...")
-                
-                if agent.verbose_logging:
-                    for tc in assistant_message.tool_calls:
-                        raw_args = tc.function.arguments
-                        args_preview = raw_args[:200] if isinstance(raw_args, str) else repr(raw_args)[:200]
-                        logging.debug("Tool call: %s with args: %s...", tc.function.name, args_preview)
-                
-                _tvv = validate_tool_calls(
+                _tr = run_tool_round(
                     agent,
-                    assistant_message,
-                    finish_reason,
+                    assistant_message=assistant_message,
+                    finish_reason=finish_reason,
                     messages=messages,
                     conversation_history=conversation_history,
                     api_call_count=api_call_count,
                     effective_task_id=effective_task_id,
-                )
-                _mixed_invalid_batch = _tvv.mixed_invalid_batch
-                if _tvv.action == "return":
-                    return _tvv.result
-                if _tvv.action == "continue":
-                    continue
-
-                # ── Post-call guardrails ──────────────────────────
-                assistant_message.tool_calls = agent._cap_delegate_task_calls(
-                    assistant_message.tool_calls
-                )
-                assistant_message.tool_calls = agent._deduplicate_tool_calls(
-                    assistant_message.tool_calls
-                )
-
-                # Collect invalid calls so the assistant message keeps EVERY emitted
-                # call (each tool_call needs a matching result) while only valid ones
-                # dispatch.
-                _invalid_batch_calls = []
-                if _mixed_invalid_batch:
-                    _invalid_batch_calls = [
-                        tc for tc in assistant_message.tool_calls
-                        if tc.function.name not in agent.valid_tool_names
-                    ]
-
-                assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
-
-                turn_content = assistant_message.content or ""
-
-                # A bare bracketed token (e.g. ``[memory]``) beside a function call is
-                # protocol scaffolding; persisting it lets the post-tool fallback replay
-                # it forever (#78148).
-                if (
-                    assistant_message.tool_calls
-                    and _STALE_MARKER_RE.fullmatch(turn_content.strip())
-                ):
-                    logger.warning(
-                        "Discarding bare tool-call marker from assistant content: %s",
-                        turn_content,
-                    )
-                    turn_content = ""
-                    assistant_msg["content"] = ""
-
-                # Classify tools regardless of visible content: a substantive tool-only
-                # turn must invalidate any older housekeeping fallback.
-                _HOUSEKEEPING_TOOLS = frozenset({
-                    "memory", "todo_list", "skill_manage", "session_search",
-                })
-                _all_housekeeping = all(
-                    tc.function.name in _HOUSEKEEPING_TOOLS
-                    for tc in assistant_message.tool_calls
-                )
-
-                # Substantive tools clear any older fallback so a two-turn-old
-                # housekeeping narration isn't attributed to the preceding tool turn.
-                if assistant_message.tool_calls and not _all_housekeeping:
-                    agent._last_content_with_tools = None
-                    agent._last_content_tools_all_housekeeping = False
-                    # Also clear the mute flag a prior housekeeping turn may have set,
-                    # else _vprint suppresses this turn's tool progress until the
-                    # no-tool-call branch clears it.
-                    agent._mute_post_response = False
-
-                # Content + tool_calls in one turn: keep the content as a fallback final
-                # response in case the follow-up turn after tools is empty.
-                if turn_content and agent._has_content_after_think_block(turn_content):
-                    agent._last_content_with_tools = turn_content
-                    # Mute only when EVERY tool call is post-response housekeeping
-                    # (memory, todo, skill_manage); substantive tools keep output on.
-                    agent._last_content_tools_all_housekeeping = _all_housekeeping
-                    if _all_housekeeping and agent._has_stream_consumers():
-                        agent._mute_post_response = True
-                    elif agent._should_emit_quiet_tool_messages():
-                        clean = agent._strip_think_blocks(turn_content).strip()
-                        if clean:
-                            agent._vprint(f"  ┊ 💬 {clean}")
-                
-                # Pop thinking-only prefill message(s) before appending
-                # (tool-call path — same rationale as the final-response path).
-                _had_prefill = False
-                while (
-                    messages
-                    and isinstance(messages[-1], dict)
-                    and messages[-1].get("_thinking_prefill")
-                ):
-                    messages.pop()
-                    _had_prefill = True
-
-                # Tool calls after a prefill recovery reset the prefill counter, so
-                # each tool-call success is a fresh start, not a cumulative burn.
-                if _had_prefill:
-                    agent._thinking_prefill_retries = 0
-                    agent._empty_content_retries = 0
-                # Re-arm the post-tool nudge so it can fire on a LATER tool round.
-                agent._post_tool_empty_retried = False
-                # A landed tool call recovers any dropped-tool-call stall; refresh that
-                # budget so it guards each stall independently, not the whole run.
-                agent._dropped_toolcall_retries = 0
-
-                previous_msg = messages[-1] if messages else None
-                current_interim_visible = agent._interim_assistant_visible_text(assistant_msg)
-                previous_interim_visible = (
-                    agent._interim_assistant_visible_text(previous_msg)
-                    if isinstance(previous_msg, dict)
-                    else ""
-                )
-                duplicate_previous_interim = (
-                    bool(current_interim_visible)
-                    and isinstance(previous_msg, dict)
-                    and previous_msg.get("role") == "assistant"
-                    and previous_msg.get("finish_reason") == "incomplete"
-                    and previous_interim_visible == current_interim_visible
-                )
-                append_message(messages, assistant_msg)
-
-                # Mixed batch: error-result invalid calls and drop them from execution.
-                # The assistant message keeps all calls so tool_call/result pairs hold.
-                if _invalid_batch_calls:
-                    for tc in _invalid_batch_calls:
-                        append_message(messages, {
-                            "role": "tool",
-                            "name": tc.function.name,
-                            "tool_call_id": coalesce_tool_call_id(tc),
-                            "content": _invalid_tool_name_error_content(
-                                tc.function.name, agent.valid_tool_names
-                            ),
-                        })
-                    assistant_message.tool_calls = [
-                        tc for tc in assistant_message.tool_calls
-                        if tc.function.name in agent.valid_tool_names
-                    ]
-
-                _tool_turn_persisted = None
-                try:
-                    # Persist the tool-call turn before any tool side effects so resume
-                    # sees the executed block if a destructive tool restarts Hermes.
-                    _tool_turn_persisted = agent._flush_messages_to_session_db(
-                        messages, conversation_history
-                    )
-                except Exception as exc:
-                    _tool_turn_persisted = False
-                    from hermes_state import classify_persistence_error
-                    agent._last_persistence_error_cause = (
-                        classify_persistence_error(exc)
-                    )
-                    logger.warning(
-                        "Incremental tool-call persistence failed before execution "
-                        "(session=%s): %s",
-                        agent.session_id or "none",
-                        exc,
-                    )
-
-                if _tool_turn_persisted is False:
-                    # Canonical append failed: never project the row or run tools from
-                    # process-only state; break rather than retry the unpersisted turn.
-                    # If the flush recorded no cause, the cause is genuinely unknown.
-                    if getattr(agent, "_last_persistence_error_cause", None) is None:
-                        agent._last_persistence_error_cause = "unknown"
-                    _turn_exit_reason = "session_persistence_failed"
-                    final_response = ""
-                    failed = True
-                    break
-
-                # A UI must never observe an assistant/tool-call row that is only an
-                # in-memory projection: emit interim commentary after the DB append.
-                if not duplicate_previous_interim:
-                    agent._emit_interim_assistant_message(assistant_msg)
-
-                # Flush open streaming boxes before tools so early content doesn't wrap
-                # tool feed lines. Display callback only — TTS (_stream_callback) must
-                # NOT receive None (its end-of-stream marker).
-                if agent.stream_delta_callback:
-                    try:
-                        agent.stream_delta_callback(None)
-                    except Exception:
-                        pass
-
-                agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
-
-                if getattr(agent, "_incremental_persistence_failed", False):
-                    # Tool result could not be made canonical: never send the in-memory
-                    # result to the model or project later events from this turn.
-                    _turn_exit_reason = "session_persistence_failed"
-                    final_response = ""
-                    failed = True
-                    break
-
-                if agent._tool_guardrail_halt_decision is not None:
-                    decision = agent._tool_guardrail_halt_decision
-                    _turn_exit_reason = "guardrail_halt"
-                    final_response = agent._toolguard_controlled_halt_response(decision)
-                    agent._emit_status(
-                        f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
-                    )
-                    append_message(messages, {"role": "assistant", "content": final_response})
-                    # Emit the halt message so it isn't mistaken for a crash; the stream
-                    # callback is still alive, so SSE/TUI clients see the explanation.
-                    if final_response:
-                        agent._safe_print(f"\n{final_response}\n")
-                        if agent.stream_delta_callback:
-                            try:
-                                agent.stream_delta_callback(final_response)
-                                agent.stream_delta_callback(None)
-                            except Exception:
-                                pass
-                    break
-
-                # Reset per-turn retry counters so one truncation can't poison the turn.
-                truncated_tool_call_retries = 0
-
-                # Defer the paragraph break: _fire_stream_delta() prepends one "\n\n"
-                # when real text arrives, so tool iterations don't stack blank lines.
-                agent._stream_needs_break = True
-
-                # Refund the iteration when the ONLY tool was execute_code (programmatic
-                # tool calling) — cheap RPC-style calls shouldn't eat the budget.
-                _tc_names = {tc.function.name for tc in assistant_message.tool_calls}
-                if _tc_names == {"execute_code"}:
-                    agent.iteration_budget.refund()
-                
-                _ptc = compress_after_tool_results(
-                    agent,
-                    messages=messages,
-                    system_message=system_message,
                     user_message=user_message,
+                    system_message=system_message,
                     active_system_prompt=active_system_prompt,
-                    conversation_history=conversation_history,
                     compression_attempts=compression_attempts,
                     max_compression_attempts=max_compression_attempts,
-                    effective_task_id=effective_task_id,
                     final_response=final_response,
-                    turn_exit_reason=_turn_exit_reason,
+                    failed=failed,
+                    _turn_exit_reason=_turn_exit_reason,
+                    truncated_tool_call_retries=truncated_tool_call_retries,
                 )
-                messages = _ptc.messages
-                active_system_prompt = _ptc.active_system_prompt
-                conversation_history = _ptc.conversation_history
-                compression_attempts = _ptc.compression_attempts
-                final_response = _ptc.final_response
-                _turn_exit_reason = _ptc.turn_exit_reason
-                if _ptc.end_turn:
+                messages = _tr.messages
+                conversation_history = _tr.conversation_history
+                active_system_prompt = _tr.active_system_prompt
+                compression_attempts = _tr.compression_attempts
+                final_response = _tr.final_response
+                failed = _tr.failed
+                _turn_exit_reason = _tr._turn_exit_reason
+                truncated_tool_call_retries = _tr.truncated_tool_call_retries
+                if _tr.action == "return":
+                    return _tr.result
+                if _tr.action == "break":
                     break
-                
-                # Save session log incrementally (so progress is visible even if interrupted)
-                agent._session_messages = messages
-                
-                # Touch activity so slow post-tool work plus a slow follow-up API call
-                # can't exceed the gateway inactivity timeout (HERMES_AGENT_TIMEOUT).
-                agent._touch_activity(f"tool results posted, continuing iteration #{api_call_count}")
-                # Continue loop for next response
-                continue
+                if _tr.action == "continue":
+                    continue
             
             else:
-                # No tool calls — final response. (Dropped tool-call recovery lives at
-                # the finalization chokepoint below so it catches every path.)
-                final_response = assistant_message.content or ""
-                
-                # Unmute: _mute_post_response from a housekeeping tool turn must not
-                # silence empty-response warnings on the final response path.
-                agent._mute_post_response = False
-                
-                # Check if response only has think block with no actual content after it
-                if not agent._has_content_after_think_block(final_response):
-                    _ev = recover_empty_response(
-                        agent,
-                        assistant_message,
-                        response,
-                        finish_reason,
-                        final_response=final_response,
-                        messages=messages,
-                        api_messages=api_messages,
-                        conversation_history=conversation_history,
-                        active_system_prompt=active_system_prompt,
-                        api_call_count=api_call_count,
-                        turn_exit_reason=_turn_exit_reason,
-                        preflight_compression_blocked=_preflight_compression_blocked,
-                    )
-                    final_response = _ev.final_response
-                    _turn_exit_reason = _ev.turn_exit_reason
-                    active_system_prompt = _ev.active_system_prompt
-                    _preflight_compression_blocked = _ev.preflight_compression_blocked
-                    if _ev.action == "return":
-                        return _ev.result
-                    if _ev.action == "break":
-                        break
-                    continue
-                
-                # Reset retry counter/signature on successful content
-                agent._empty_content_retries = 0
-                agent._thinking_prefill_retries = 0
-                # Surface the one-shot fallback switch notice before dropping the retry
-                # buffer so a provider/model switch stays visible on success.
-                agent._emit_pending_fallback_notice()
-                agent._clear_status_buffer()
-
-                from agent.agent_runtime_helpers import (
-                    intent_ack_continuation_mode,
-                    trailing_continue_intent,
-                )
-
-                _ack_mode = intent_ack_continuation_mode(agent)
-                # Said-continue-but-stopped guard: no tool calls but the short reply
-                # TAILS with an announced next action. Fires mid-task too; reuses the
-                # SAME bounded continuation path and counter (max 2 per turn).
-                _stall_continue_intent = (
-                    bool(getattr(agent, "_stall_guards", True))
-                    and agent.valid_tool_names
-                    and codex_ack_continuations < 2
-                    and trailing_continue_intent(
-                        agent._strip_think_blocks(final_response or "")
-                    )
-                )
-                if _stall_continue_intent or (
-                    _ack_mode != "off"
-                    and agent.valid_tool_names
-                    and codex_ack_continuations < 2
-                    and agent._looks_like_codex_intermediate_ack(
-                        user_message=user_message,
-                        assistant_content=final_response,
-                        messages=messages,
-                        require_workspace=(_ack_mode == "codex_only"),
-                    )
-                ):
-                    if _stall_continue_intent:
-                        logger.info(
-                            "Stall guard: turn ending on trailing continue-"
-                            "intent with no tool calls — re-prompting to act "
-                            "(%d/2)", codex_ack_continuations + 1,
-                        )
-                    codex_ack_continuations += 1
-                    interim_msg = agent._build_assistant_message(assistant_message, "incomplete")
-                    append_message(messages, interim_msg)
-                    agent._emit_interim_assistant_message(interim_msg)
-
-                    continue_msg = {
-                        "role": "user",
-                        "content": _CODEX_ACK_CONTINUATION_NUDGE,
-                    }
-                    append_message(messages, continue_msg)
-                    agent._session_messages = messages
-                    # An acknowledgment is non-final: its text must not suppress
-                    # iteration-limit summarization if the continuation exhausts budget.
-                    final_response = None
-                    continue
-
-                codex_ack_continuations = 0
-
-                if truncated_response_parts:
-                    final_response = _join_truncated_parts([*truncated_response_parts, final_response])
-                    truncated_response_parts = []
-                    length_continue_retries = 0
-                    # The continuation recovered, so the fragments stay in the transcript.
-                    for _frag in messages:
-                        if isinstance(_frag, dict):
-                            _frag.pop("_length_continuation_fragment", None)
-                            _frag.pop("_length_continuation_nudge", None)
-                
-                final_response = agent._strip_think_blocks(final_response).strip()
-                
-                final_msg = agent._build_assistant_message(assistant_message, finish_reason)
-
-                # ── Dropped tool-call recovery (copilot/Claude) ────────
-                # finish_reason="tool_calls" with empty tool_calls would end the turn
-                # unstarted; re-prompt (max 3 CONSECUTIVE stalls, reset per tool round).
-                if (
-                    finish_reason == "tool_calls"
-                    and not assistant_message.tool_calls
-                    and getattr(agent, "_dropped_toolcall_retries", 0) < 3
-                ):
-                    agent._dropped_toolcall_retries = getattr(agent, "_dropped_toolcall_retries", 0) + 1
-                    logger.warning(
-                        "finish_reason=tool_calls with empty tool_calls array "
-                        "(narration only) — re-prompting to emit the call "
-                        "(retry %d/3, model=%s provider=%s)",
-                        agent._dropped_toolcall_retries, agent.model, agent.provider,
-                    )
-                    agent._emit_status(
-                        "↻ Model signaled a tool call but sent none — "
-                        f"re-prompting ({agent._dropped_toolcall_retries}/3)"
-                    )
-                    # Both halves of the re-prompt pair are ephemeral scaffolding; flag
-                    # them so the flush never persists them and the finalization pop
-                    # can strip an unanswered tail pair.
-                    final_msg["_dropped_toolcall_nudge"] = True
-                    append_message(messages, final_msg)
-                    append_message(messages, {
-                        "role": "user",
-                        "content": _DROPPED_TOOLCALL_NUDGE_CONTENT,
-                        "_dropped_toolcall_nudge": True,
-                    })
-                    agent._session_messages = messages
-                    final_response = None
-                    continue
-
-                # Genuine turn end (no dropped-tool-call mismatch): clear stall budget.
-                agent._dropped_toolcall_retries = 0
-
-                # Pop prefill / empty-retry scaffolding before the final response or
-                # verification follow-up; it must not become durable transcript.
-                while (
-                    messages
-                    and isinstance(messages[-1], dict)
-                    and (
-                        messages[-1].get("_thinking_prefill")
-                        or messages[-1].get("_empty_recovery_synthetic")
-                        or messages[-1].get("_empty_terminal_sentinel")
-                        or messages[-1].get("_dropped_toolcall_nudge")
-                    )
-                ):
-                    messages.pop()
-
-                _sg = apply_stop_gates(
+                _fr = finish_text_response(
                     agent,
-                    final_msg,
-                    final_response=final_response,
+                    assistant_message=assistant_message,
+                    response=response,
+                    finish_reason=finish_reason,
                     messages=messages,
+                    api_messages=api_messages,
                     conversation_history=conversation_history,
-                    pending_verification_response=_pending_verification_response,
-                    pending_verification_response_previewed=_pending_verification_response_previewed,
+                    api_call_count=api_call_count,
+                    user_message=user_message,
+                    active_system_prompt=active_system_prompt,
+                    final_response=final_response,
+                    _turn_exit_reason=_turn_exit_reason,
+                    _preflight_compression_blocked=_preflight_compression_blocked,
+                    codex_ack_continuations=codex_ack_continuations,
+                    truncated_response_parts=truncated_response_parts,
+                    length_continue_retries=length_continue_retries,
+                    _pending_verification_response=_pending_verification_response,
+                    _pending_verification_response_previewed=_pending_verification_response_previewed,
                 )
-                _pending_verification_response = _sg.pending_verification_response
-                _pending_verification_response_previewed = _sg.pending_verification_response_previewed
-                if _sg.continue_turn:
-                    final_response = None
+                active_system_prompt = _fr.active_system_prompt
+                final_response = _fr.final_response
+                _turn_exit_reason = _fr._turn_exit_reason
+                _preflight_compression_blocked = _fr._preflight_compression_blocked
+                codex_ack_continuations = _fr.codex_ack_continuations
+                truncated_response_parts = _fr.truncated_response_parts
+                length_continue_retries = _fr.length_continue_retries
+                _pending_verification_response = _fr._pending_verification_response
+                _pending_verification_response_previewed = _fr._pending_verification_response_previewed
+                if _fr.action == "return":
+                    return _fr.result
+                if _fr.action == "break":
+                    break
+                if _fr.action == "continue":
                     continue
-
-                append_message(messages, final_msg)
-                # Make the answer durable before leaving the loop; _DB_PERSISTED_MARKER
-                # keeps _persist_session idempotent. Failure must NOT abort the turn:
-                # _persist_session retries the write. (#81641)
-                try:
-                    agent._flush_messages_to_session_db(messages, conversation_history)
-                except Exception:
-                    logger.warning(
-                        "final text-turn flush failed (session=%s) — reply is "
-                        "not yet durable; relying on finalize_turn retry",
-                        getattr(agent, "session_id", None) or "none",
-                        exc_info=True,
-                    )
-
-                _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
-                if not agent.quiet_mode:
-                    agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
-                break
             
         except Exception as e:
             _oe = handle_outer_loop_error(
