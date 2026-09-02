@@ -1,9 +1,9 @@
 """cua-driver binary resolution, MCP-invocation discovery, the 0.20 runtime
-contract gate, and the update check / auto-repair path.
+contract gate, and the update check.
 
-Config-derived policy (``_cua_no_overlay``, ``sanitized_cua_driver_env`` ...) is
-looked up lazily through ``tools.computer_use.cua_backend`` so tests that patch
-it there keep working; logger name parity is kept for the same reason.
+Config-derived policy (``_cua_no_overlay``, ``_run_driver`` ...) is looked up
+lazily through ``tools.computer_use.cua_backend`` so tests that patch it there
+keep working; logger name parity is kept for the same reason.
 """
 
 from __future__ import annotations
@@ -19,8 +19,23 @@ import sys
 from pathlib import PureWindowsPath
 from typing import Any, Dict, List, Optional, Tuple
 
-
 logger = logging.getLogger("tools.computer_use.cua_backend")
+
+# No version *pin* knob on purpose: the upstream installer always fetches the
+# latest release, so a pin var would only LOOK like it pinned. Point
+# HERMES_CUA_DRIVER_CMD at a specific binary instead.
+_CUA_DRIVER_CMD_ENV = "HERMES_CUA_DRIVER_CMD"
+_CUA_DRIVER_DEFAULT_CMD = "cua-driver"
+_CUA_DRIVER_ARGS = ["mcp"]  # stdio MCP; fallback when the driver has no `manifest` verb
+
+_CUA_DRIVER_RUNTIME_CONTRACT_MIN = (0, 20, 0)
+_CUA_DRIVER_RUNTIME_CONTRACT_ARGS = {
+    "mcp": {"--socket", "--grant"},
+    "serve": {"--socket", "--permission-mode", "--capability-manifest",
+              "--approve-capability-manifest", "--embedded"},
+    "stop": {"--socket"},
+}
+_SEMVER_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?")
 
 
 def _cb():
@@ -30,28 +45,27 @@ def _cb():
     return cua_backend
 
 
-# No version *pin* knob on purpose: the upstream installer always fetches the
-# latest release, so a pin var would only LOOK like it pinned. Point
-# HERMES_CUA_DRIVER_CMD at a specific binary instead.
-_CUA_DRIVER_CMD_ENV = "HERMES_CUA_DRIVER_CMD"
+def _driver_json(driver_cmd: str, *args: str, timeout: float, require_ok: bool) -> Optional[Dict[str, Any]]:
+    """Run a driver verb and parse its stdout as a JSON object; None on spawn
+    failure, empty stdout (older drivers print usage to stderr), unparseable or
+    non-object output — and, with ``require_ok``, on a non-zero exit."""
+    try:
+        proc = _cb()._run_driver(driver_cmd, *args, timeout=timeout)
+    except Exception:
+        return None
+    out = (proc.stdout or "").strip()
+    if not out or (require_ok and proc.returncode != 0):
+        return None
+    try:
+        data = json.loads(out)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
-_CUA_DRIVER_DEFAULT_CMD = "cua-driver"
-
-
-_CUA_DRIVER_ARGS = ["mcp"]  # stdio MCP; fallback when the driver has no `manifest` verb
-
-
-_CUA_DRIVER_RUNTIME_CONTRACT_MIN = (0, 20, 0)
-
-
-_CUA_DRIVER_RUNTIME_CONTRACT_ARGS = {
-    "mcp": {"--socket", "--grant"},
-    "serve": {"--socket", "--permission-mode", "--capability-manifest",
-              "--approve-capability-manifest", "--embedded"},
-    "stop": {"--socket"},
-}
-
+# ---------------------------------------------------------------------------
+# Binary resolution
+# ---------------------------------------------------------------------------
 
 def _has_path_separator(value: str) -> bool:
     return os.sep in value or (os.altsep is not None and os.altsep in value)
@@ -90,24 +104,22 @@ def _candidate_cua_driver_commands(override: Optional[str] = None) -> List[str]:
     configured = (override if override is not None else os.environ.get(_CUA_DRIVER_CMD_ENV, "")).strip()
     if configured:
         return [configured]
-
-    candidates = [_CUA_DRIVER_DEFAULT_CMD]
     home = os.path.expanduser("~")
     if sys.platform == "win32":
         local_app_data = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
-        candidates.extend([
+        installed = [
             os.path.join(local_app_data, "Programs", "Cua", "cua-driver", "bin", "cua-driver.exe"),
             os.path.join(home, ".local", "bin", "cua-driver.exe"),
             os.path.join(home, ".local", "bin", "cua-driver"),
-        ])
+        ]
     else:
-        candidates.extend([
+        installed = [
             os.path.join(home, ".local", "bin", "cua-driver"),
             os.path.join(home, ".cargo", "bin", "cua-driver"),
             "/opt/homebrew/bin/cua-driver",
             "/usr/local/bin/cua-driver",
-        ])
-    return candidates
+        ]
+    return [_CUA_DRIVER_DEFAULT_CMD, *installed]
 
 
 def resolve_cua_driver_cmd(override: Optional[str] = None) -> Optional[str]:
@@ -125,6 +137,25 @@ def cua_driver_binary_available() -> bool:
     """True if `cua-driver` resolves via env, PATH, or known install paths."""
     return _cb().resolve_cua_driver_cmd() is not None
 
+
+def cua_driver_install_hint() -> str:
+    scripts = "https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts"
+    if sys.platform == "win32":
+        installer = f"  irm {scripts}/install.ps1 | iex"
+    else:
+        installer = f'  /bin/bash -c "$(curl -fsSL {scripts}/install.sh)"'
+    return (
+        "cua-driver is not installed. Install with one of:\n"
+        "  hermes computer-use install\n"
+        "Or run the upstream installer directly:\n"
+        f"{installer}\n"
+        "Or run `hermes tools` and enable the Computer Use toolset to install it automatically."
+    )
+
+
+# ---------------------------------------------------------------------------
+# MCP invocation
+# ---------------------------------------------------------------------------
 
 def _mcp_args_with_overlay_flag(
     args: List[str],
@@ -156,42 +187,32 @@ def _resolve_mcp_invocation(driver_cmd: str, *, timeout: float = 6.0) -> Tuple[s
     discovery failure — the wrapper must not refuse to start over a failed
     discovery hop. ``--no-overlay`` is appended when policy + driver allow.
     """
-    def _with_driver(args: List[str]) -> Tuple[str, List[str]]:
-        return driver_cmd, _mcp_args_with_overlay_flag(args, driver_cmd=driver_cmd)
-
-    default = list(_CUA_DRIVER_ARGS)
-    try:
-        proc = _cb()._run_driver(driver_cmd, "manifest", timeout=timeout)
-    except Exception:
-        return _with_driver(default)
-    out = (proc.stdout or "").strip()
-    if proc.returncode != 0 or not out:
-        return _with_driver(default)
-    try:
-        manifest = json.loads(out)
-    except (ValueError, TypeError):
-        return _with_driver(default)
-    invocation = manifest.get("mcp_invocation") if isinstance(manifest, dict) else None
-    if not isinstance(invocation, dict):
-        return _with_driver(default)
+    manifest = _driver_json(driver_cmd, "manifest", timeout=timeout, require_ok=True) or {}
+    invocation = manifest.get("mcp_invocation")
+    invocation = invocation if isinstance(invocation, dict) else {}
     args = invocation.get("args")
-    command = invocation.get("command")
-    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-        return _with_driver(default)
-    if not isinstance(command, str) or not command:
-        # Args are authoritative; keep our resolved driver_cmd as the binary.
-        return _with_driver(args)
-    # Translate a Windows ``C:\...`` command for WSL BEFORE the separator
-    # check (backslash is not a separator on POSIX).
-    command = _wsl_windows_path_to_posix(command)
-    if not _has_path_separator(command):
-        # A generic ``cua-driver`` name would lose the resolved user-local
-        # path under a GUI's thin PATH; keep the concrete command we verified.
-        return _with_driver(args)
-    # Manifest surfaced a relocated executable — probe THAT binary for
-    # `--no-overlay` support, not the system-resolved one.
-    return command, _mcp_args_with_overlay_flag(args, driver_cmd=command)
+    valid_args = isinstance(args, list) and all(isinstance(a, str) for a in args)
+    if not valid_args:
+        args = list(_CUA_DRIVER_ARGS)
+    command = invocation.get("command") if valid_args else None
+    if isinstance(command, str) and command:
+        # Translate a Windows ``C:\...`` command for WSL BEFORE the separator
+        # check (backslash is not a separator on POSIX). A generic ``cua-driver``
+        # name would lose the resolved user-local path under a GUI's thin PATH,
+        # so only a concrete (path-bearing) command replaces the one we verified
+        # — and THAT binary is probed for `--no-overlay`, not the system one.
+        command = _wsl_windows_path_to_posix(command)
+        if _has_path_separator(command):
+            return command, _mcp_args_with_overlay_flag(args, driver_cmd=command)
+    return driver_cmd, _mcp_args_with_overlay_flag(args, driver_cmd=driver_cmd)
 
+
+# ---------------------------------------------------------------------------
+# Runtime contract + update checking
+# ---------------------------------------------------------------------------
+#
+# cua-driver's native `check-update` verb compares the installed binary against
+# the latest GitHub release (cached ~20h); we prefer it over a hardcoded floor.
 
 def cua_driver_runtime_contract_status(binary: Optional[str] = None) -> Dict[str, Any]:
     """Report whether a local driver can host Hermes' 0.20 integration."""
@@ -217,7 +238,7 @@ def cua_driver_runtime_contract_status(binary: Optional[str] = None) -> Dict[str
         return _not_ready("driver manifest is missing or invalid")
 
     raw_version = str(manifest.get("binary_version") or "").strip()
-    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", raw_version)
+    match = _SEMVER_RE.fullmatch(raw_version)
     if not match:
         return _not_ready("driver manifest does not report a semantic version", raw_version or None)
     if tuple(int(part) for part in match.groups()) < _CUA_DRIVER_RUNTIME_CONTRACT_MIN:
@@ -225,22 +246,18 @@ def cua_driver_runtime_contract_status(binary: Optional[str] = None) -> Dict[str
 
     invocation = manifest.get("mcp_invocation")
     invocation_args = invocation.get("args") if isinstance(invocation, dict) else None
-    if not (
-        isinstance(invocation_args, list)
-        and invocation_args
-        and all(isinstance(arg, str) for arg in invocation_args)
-    ):
+    if not (invocation_args and isinstance(invocation_args, list)
+            and all(isinstance(arg, str) for arg in invocation_args)):
         return _not_ready("driver manifest does not provide an MCP launch command", raw_version)
 
-    advertised: Dict[str, set[str]] = {}
-    for command in manifest.get("subcommands") or []:
-        if not isinstance(command, dict) or not isinstance(command.get("name"), str):
-            continue
-        advertised[command["name"]] = {
-            arg["name"]
-            for arg in command.get("args") or []
+    advertised: Dict[str, set[str]] = {
+        command["name"]: {
+            arg["name"] for arg in command.get("args") or []
             if isinstance(arg, dict) and isinstance(arg.get("name"), str)
         }
+        for command in manifest.get("subcommands") or []
+        if isinstance(command, dict) and isinstance(command.get("name"), str)
+    }
     missing = [
         f"{command} {arg}"
         for command, required_args in _CUA_DRIVER_RUNTIME_CONTRACT_ARGS.items()
@@ -268,20 +285,8 @@ def cua_driver_update_check(*, timeout: Optional[float] = None) -> Optional[Dict
     driver_cmd = _cb().resolve_cua_driver_cmd()
     if not driver_cmd:
         return None
-    try:
-        proc = _cb()._run_driver(driver_cmd, "check-update", "--json", timeout=timeout)
-    except Exception:
-        return None
-    out = (proc.stdout or "").strip()
-    if not out:  # older drivers: usage goes to stderr, stdout empty
-        return None
-    try:
-        data = json.loads(out)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict) or data.get("error"):
-        return None
-    return data
+    data = _driver_json(driver_cmd, "check-update", "--json", timeout=timeout, require_ok=False)
+    return None if data is None or data.get("error") else data
 
 
 def cua_driver_update_nudge() -> Optional[str]:
@@ -295,19 +300,4 @@ def cua_driver_update_nudge() -> Optional[str]:
     return (
         f"cua-driver {latest} is available (you have {current}); "
         f"update with `hermes computer-use install --upgrade`."
-    )
-
-
-def cua_driver_install_hint() -> str:
-    scripts = "https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts"
-    if sys.platform == "win32":
-        installer = f"  irm {scripts}/install.ps1 | iex"
-    else:
-        installer = f'  /bin/bash -c "$(curl -fsSL {scripts}/install.sh)"'
-    return (
-        "cua-driver is not installed. Install with one of:\n"
-        "  hermes computer-use install\n"
-        "Or run the upstream installer directly:\n"
-        f"{installer}\n"
-        "Or run `hermes tools` and enable the Computer Use toolset to install it automatically."
     )
