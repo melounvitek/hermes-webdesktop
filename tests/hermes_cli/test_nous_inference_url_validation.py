@@ -76,9 +76,14 @@ class TestCallSiteWiring:
     """
 
     def _read_auth_source(self):
+        # The Nous refresh sites live in auth_nous.py (split out of auth.py);
+        # read both so the guard tolerates relocation but still fires on deletion.
         import hermes_cli.auth as _auth_mod
+        import hermes_cli.auth_nous as _nous_mod
         from pathlib import Path
-        return Path(_auth_mod.__file__).read_text(encoding="utf-8")
+        return "".join(
+            Path(m.__file__).read_text(encoding="utf-8") for m in (_auth_mod, _nous_mod)
+        )
 
     def test_no_unvalidated_inference_base_url_assignments_remain(self):
         """No remaining ``_optional_base_url(...inference_base_url...)`` reads
