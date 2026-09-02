@@ -14,6 +14,9 @@ POLICY_VERSION = 1
 MAX_POLICY_TOOLSETS = 128
 MAX_POLICY_ITERATIONS = (1 << 53) - 1
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+_POLICY_FIELDS = {
+    "version", "target_profile", "enabled_toolsets", "approval_mode", "max_iterations", "policy_digest",
+}
 
 
 class RoomExecutionPolicyError(ValueError):
@@ -21,13 +24,12 @@ class RoomExecutionPolicyError(ValueError):
 
 
 def _policy_digest(unsigned: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
-        unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-    ).encode("ascii")
+    encoded = json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
     return hashlib.sha256(encoded).hexdigest()
 
 
 def _identifier(value: Any, *, field: str) -> str:
+    # Stringifies first (``None`` -> ""), so non-strings also fail as "is invalid".
     normalized = str(value or "").strip()
     if not normalized or len(normalized) > 128 or _IDENTIFIER_RE.fullmatch(normalized) is None:
         raise RoomExecutionPolicyError(f"{field} is invalid")
@@ -47,25 +49,15 @@ class RoomExecutionPolicy:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "RoomExecutionPolicy":
-        required = {
-            "version", "target_profile", "enabled_toolsets",
-            "approval_mode", "max_iterations", "policy_digest",
-        }
-        if not isinstance(value, Mapping) or set(value) != required:
+        if not isinstance(value, Mapping) or set(value) != _POLICY_FIELDS:
             raise RoomExecutionPolicyError("execution policy fields are invalid")
         if value["version"] != POLICY_VERSION:
             raise RoomExecutionPolicyError("execution policy version is unsupported")
         target_profile = _identifier(value["target_profile"], field="target_profile")
         raw_toolsets = value["enabled_toolsets"]
-        if (
-            not isinstance(raw_toolsets, list)
-            or not raw_toolsets
-            or len(raw_toolsets) > MAX_POLICY_TOOLSETS
-        ):
+        if not isinstance(raw_toolsets, list) or not 1 <= len(raw_toolsets) <= MAX_POLICY_TOOLSETS:
             raise RoomExecutionPolicyError("enabled_toolsets are invalid")
-        toolsets = tuple(
-            sorted(_identifier(item, field="enabled_toolset") for item in raw_toolsets)
-        )
+        toolsets = tuple(sorted(_identifier(item, field="enabled_toolset") for item in raw_toolsets))
         if len(set(toolsets)) != len(toolsets) or "bot_room" not in toolsets:
             raise RoomExecutionPolicyError("enabled_toolsets are invalid")
         approval_mode = str(value["approval_mode"] or "").strip().lower()
@@ -94,13 +86,8 @@ class RoomExecutionPolicy:
         return {**asdict(self), "enabled_toolsets": list(self.enabled_toolsets)}
 
 
-def execution_policy_mapping(
-    *,
-    target_profile: str,
-    config: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
+def execution_policy_mapping(*, target_profile: str, config: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Resolve the effective API-server policy from the target's own config."""
-
     if config is None:
         from gateway.run import _load_gateway_config
 
@@ -114,9 +101,7 @@ def execution_policy_mapping(
 
     toolsets = sorted({*_get_platform_tools(dict(config), "api_server"), "bot_room"})
     agent = config.get("agent") if isinstance(config.get("agent"), Mapping) else {}
-    approvals = (
-        config.get("approvals") if isinstance(config.get("approvals"), Mapping) else {}
-    )
+    approvals = config.get("approvals") if isinstance(config.get("approvals"), Mapping) else {}
     unsigned = {
         "version": POLICY_VERSION,
         "target_profile": _identifier(target_profile, field="target_profile"),
@@ -130,9 +115,7 @@ def execution_policy_mapping(
     return RoomExecutionPolicy.from_mapping(value).as_mapping()
 
 
-_CURRENT_POLICY: ContextVar[RoomExecutionPolicy | None] = ContextVar(
-    "hosted_room_execution_policy", default=None
-)
+_CURRENT_POLICY: ContextVar[RoomExecutionPolicy | None] = ContextVar("hosted_room_execution_policy", default=None)
 
 
 def bind_room_execution_policy(policy: RoomExecutionPolicy) -> Token:
