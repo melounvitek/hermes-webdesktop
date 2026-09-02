@@ -15,138 +15,34 @@ If unset, :func:`get_active_provider` applies fallback logic:
 2. Otherwise return ``None`` (the tool surfaces a helpful error pointing
    the user at ``hermes tools``).
 
-Mirrors ``agent/image_gen_registry.py`` so the two surfaces behave the
-same: the unconfigured fallback is filtered by ``is_available()`` so a box
-that has credentials for only one backend (e.g. DeepInfra, while the
-``fal``/``xai`` plugins also register unconditionally) auto-selects it
-instead of returning ``None``.
+Mirrors ``agent/image_gen_registry.py``: the unconfigured fallback is
+filtered by ``is_available()`` so a box with credentials for only one backend
+(e.g. DeepInfra, while ``fal``/``xai`` register unconditionally) auto-selects
+it instead of returning ``None``. Unlike image gen there is no legacy ``fal``
+preference, and a configured-but-unregistered name fails closed.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Dict, List, Optional
+from typing import Optional
 
+from agent.provider_registry import ProviderRegistry, configured_provider_name, is_available_safe
 from agent.video_gen_provider import VideoGenProvider
-from hermes_constants import hermes_home_key
 
 logger = logging.getLogger(__name__)
 
 
-_providers: Dict[str, VideoGenProvider] = {}
-_scoped_providers: Dict[str, Dict[str, VideoGenProvider]] = {}
-_lock = threading.Lock()
-
-
-def register_provider(provider: VideoGenProvider, *, scope: Optional[str] = None) -> None:
-    """Register a video generation provider.
-
-    Re-registration (same ``name``) overwrites the previous entry and logs
-    a debug message — this makes hot-reload scenarios (tests, dev loops)
-    behave predictably.
-    """
-    if not isinstance(provider, VideoGenProvider):
-        raise TypeError(
-            f"register_provider() expects a VideoGenProvider instance, "
-            f"got {type(provider).__name__}"
-        )
-    raw_name = provider.name
-    if not isinstance(raw_name, str) or not raw_name.strip():
-        raise ValueError("Video gen provider .name must be a non-empty string")
-    name = raw_name.strip()
-    with _lock:
-        target = _providers if scope is None else _scoped_providers.setdefault(scope, {})
-        existing = target.get(name)
-        target[name] = provider
-    if existing is not None:
-        logger.debug("Video gen provider '%s' re-registered (was %r)", name, type(existing).__name__)
-    else:
-        logger.debug("Registered video gen provider '%s' (%s)", name, type(provider).__name__)
-
-
-def list_providers(*, scope: Optional[str] = None) -> List[VideoGenProvider]:
-    """Return all registered providers, sorted by name."""
-    with _lock:
-        merged = dict(_providers)
-        merged.update(_scoped_providers.get(scope or hermes_home_key(), {}))
-        items = list(merged.values())
-    return sorted(items, key=lambda p: p.name)
-
-
-def get_provider(name: str, *, scope: Optional[str] = None) -> Optional[VideoGenProvider]:
-    """Return the provider registered under *name*, or None."""
-    if not isinstance(name, str):
-        return None
-    with _lock:
-        key = name.strip()
-        return _scoped_providers.get(scope or hermes_home_key(), {}).get(key) or _providers.get(key)
-
-
-def snapshot_registration(
-    name: str, *, scope: Optional[str] = None
-) -> Optional[VideoGenProvider]:
-    with _lock:
-        target = _providers if scope is None else _scoped_providers.get(scope, {})
-        return target.get(name.strip())
-
-
-def restore_registration(
-    name: str,
-    current: VideoGenProvider,
-    previous: Optional[VideoGenProvider],
-    *,
-    scope: Optional[str] = None,
-) -> bool:
-    """Restore a plugin registration only when *current* is still installed."""
-    key = name.strip()
-    with _lock:
-        target = _providers if scope is None else _scoped_providers.setdefault(scope, {})
-        if target.get(key) is not current:
-            return False
-        if previous is None:
-            target.pop(key, None)
-        else:
-            target[key] = previous
-        if scope is not None and not target:
-            _scoped_providers.pop(scope, None)
-    return True
+_registry: ProviderRegistry[VideoGenProvider] = ProviderRegistry(
+    label="Video gen", provider_cls=VideoGenProvider, logger=logger,
+)
+_registry.export(globals())
 
 
 def get_active_provider() -> Optional[VideoGenProvider]:
-    """Resolve the currently-active provider.
-
-    Reads ``video_gen.provider`` from config.yaml; falls back per the
-    module docstring.
-    """
-    configured: Optional[str] = None
-    try:
-        from hermes_cli.config import load_config_readonly
-
-        cfg = load_config_readonly()
-        section = cfg.get("video_gen") if isinstance(cfg, dict) else None
-        if isinstance(section, dict):
-            raw = section.get("provider")
-            if isinstance(raw, str) and raw.strip():
-                configured = raw.strip()
-    except Exception as exc:
-        logger.debug("Could not read video_gen.provider from config: %s", exc)
-
-    # The managed "Nous Subscription" selection is serviced by the FAL
-    # plugin through the managed fal-queue gateway (the plugin's resolver
-    # routes managed when the stored selection is "nous").
-    if configured:
-        try:
-            from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER
-
-            if configured.lower() == NOUS_MANAGED_PROVIDER:
-                configured = "fal"
-        except Exception:  # pragma: no cover — helpers are in-repo
-            pass
-
-    with _lock:
-        snapshot = dict(_providers)
-        snapshot.update(_scoped_providers.get(hermes_home_key(), {}))
+    """Resolve the currently-active provider (see module docstring)."""
+    configured = configured_provider_name("video_gen", logger)
+    snapshot = _registry.merged()
 
     if configured:
         provider = snapshot.get(configured)
@@ -158,27 +54,11 @@ def get_active_provider() -> Optional[VideoGenProvider]:
         )
         return None
 
-    def _is_available_safe(p: VideoGenProvider) -> bool:
-        """Wrap ``is_available()`` so a buggy provider doesn't kill resolution."""
-        try:
-            return bool(p.is_available())
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("video_gen provider %s.is_available() raised %s", p.name, exc)
-            return False
-
-    # Fallback: single *available* provider — filter by is_available() so a
-    # box with credentials for only one backend auto-selects it even when
-    # other providers (fal/xai) register unconditionally without keys.
-    # Mirrors agent/image_gen_registry.get_active_provider().
-    available = [p for p in snapshot.values() if _is_available_safe(p)]
+    available = [
+        p for p in snapshot.values()
+        if is_available_safe(p, logger, "video_gen provider %s.is_available() raised %s")
+    ]
     if len(available) == 1:
         return available[0]
 
     return None
-
-
-def _reset_for_tests() -> None:
-    """Clear the registry. **Test-only.**"""
-    with _lock:
-        _providers.clear()
-        _scoped_providers.clear()
