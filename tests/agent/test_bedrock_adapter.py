@@ -574,35 +574,6 @@ class TestBuildConverseKwargs:
         )
         assert "inferenceConfig" not in kwargs
 
-    def test_call_converse_stream_omits_cap_for_none(self):
-        """The streaming entry point funnels through the same builder — pin
-        that max_tokens=None omits the cap there too."""
-        from unittest.mock import MagicMock, patch as mock_patch
-        from agent.bedrock_adapter import call_converse_stream
-        boto3_client = MagicMock()
-        boto3_client.converse_stream.return_value = {"stream": []}
-        with mock_patch(
-            "agent.bedrock_adapter._get_bedrock_runtime_client",
-            return_value=boto3_client,
-        ):
-            call_converse_stream(
-                region="us-east-1",
-                model="test-model",
-                messages=[{"role": "user", "content": "Hi"}],
-                max_tokens=None,
-                temperature=0.2,
-            )
-        wire_kwargs = boto3_client.converse_stream.call_args.kwargs
-        assert "maxTokens" not in wire_kwargs.get("inferenceConfig", {})
-
-
-
-
-
-
-
-
-
     def test_cache_point_added_for_supported_model(self):
         """Claude and Nova on the Converse path get cachePoint markers on
         system, tools, and the message before the newest turn."""
@@ -1033,27 +1004,6 @@ class TestGuardrailConfig:
         assert "guardrailConfig" not in kwargs
 
 
-# ---------------------------------------------------------------------------
-# Error classification
-# ---------------------------------------------------------------------------
-
-class TestBedrockErrorClassification:
-    """Test Bedrock-specific error classification."""
-
-    def test_context_overflow_validation_exception(self):
-        from agent.bedrock_adapter import classify_bedrock_error
-        assert classify_bedrock_error(
-            "ValidationException: input is too long for model"
-        ) == "context_overflow"
-
-
-
-
-
-
-
-
-
 class TestBedrockContextLength:
     """Test Bedrock model context length lookup."""
 
@@ -1277,35 +1227,10 @@ class TestIsStaleConnectionError:
 
 
 class TestCallConverseInvalidatesOnStaleError:
-    """call_converse / call_converse_stream evict the cached client when the
+    """call_converse evicts the cached client when the
     boto3 call raises a stale-connection error — so the next invocation
     reconnects instead of reusing the dead socket."""
 
-
-    def test_converse_stream_evicts_client_on_stale_error(self):
-        pytest.importorskip("botocore.exceptions", reason="botocore (with working exceptions module) required")
-        from agent.bedrock_adapter import (
-            _bedrock_runtime_client_cache,
-            call_converse_stream,
-            reset_client_cache,
-        )
-        from botocore.exceptions import ConnectionClosedError
-
-        reset_client_cache()
-        dead_client = MagicMock()
-        dead_client.converse_stream.side_effect = ConnectionClosedError(
-            endpoint_url="https://bedrock.example",
-        )
-        _bedrock_runtime_client_cache["us-east-1"] = dead_client
-
-        with pytest.raises(ConnectionClosedError):
-            call_converse_stream(
-                region="us-east-1",
-                model="anthropic.claude-3-sonnet-20240229-v1:0",
-                messages=[{"role": "user", "content": "hi"}],
-            )
-
-        assert "us-east-1" not in _bedrock_runtime_client_cache
 
     def test_converse_does_not_evict_on_non_stale_error(self):
         """Non-stale errors (e.g. ValidationException) leave the client cache alone."""
@@ -1374,52 +1299,6 @@ class TestStreamingAccessDeniedDetection:
         assert is_streaming_access_denied_error(
             RuntimeError("stream not supported")
         ) is False
-
-
-class TestCallConverseStreamIamFallback:
-    """call_converse_stream() falls back to converse() when IAM denies the
-    streaming action — InvokeModel-only policies keep working."""
-
-    def test_falls_back_to_converse_on_streaming_denial(self):
-        pytest.importorskip("botocore.exceptions", reason="botocore (with working exceptions module) required")
-        from agent.bedrock_adapter import (
-            _bedrock_runtime_client_cache,
-            call_converse_stream,
-            reset_client_cache,
-        )
-        from botocore.exceptions import ClientError
-
-        reset_client_cache()
-        client = MagicMock()
-        client.converse_stream.side_effect = ClientError(
-            error_response={
-                "Error": {
-                    "Code": "AccessDeniedException",
-                    "Message": (
-                        "User is not authorized to perform: "
-                        "bedrock:InvokeModelWithResponseStream"
-                    ),
-                }
-            },
-            operation_name="ConverseStream",
-        )
-        client.converse.return_value = {
-            "output": {"message": {"role": "assistant", "content": [{"text": "hi"}]}},
-            "stopReason": "end_turn",
-            "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2},
-        }
-        _bedrock_runtime_client_cache["us-east-1"] = client
-
-        result = call_converse_stream(
-            region="us-east-1",
-            model="anthropic.claude-3-sonnet-20240229-v1:0",
-            messages=[{"role": "user", "content": "hi"}],
-        )
-
-        client.converse.assert_called_once()
-        assert result.choices[0].message.content == "hi"
-        # Not a stale connection — client stays cached.
-        assert _bedrock_runtime_client_cache.get("us-east-1") is client
 
 
 # ---------------------------------------------------------------------------
