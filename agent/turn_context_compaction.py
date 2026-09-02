@@ -132,10 +132,7 @@ def _idle_compaction(
         return
     logger.info(
         "Idle compaction: %ss idle >= %ss, ~%s tokens > %s floor (session %s)",
-        int(_idle_gap),
-        _idle_after,
-        f"{_idle_tokens:,}",
-        f"{_idle_floor:,}",
+        int(_idle_gap), _idle_after, f"{_idle_tokens:,}", f"{_idle_floor:,}",
         agent.session_id or "none",
     )
     _idle_status = automatic_compaction_status_message(
@@ -236,8 +233,7 @@ def _preflight_compression(
         logger.info(
             "Skipping preflight compression: rough estimate ~%s >= %s, "
             "but last real provider prompt was %s after compression",
-            f"{_preflight_tokens:,}",
-            f"{_compressor.threshold_tokens:,}",
+            f"{_preflight_tokens:,}", f"{_compressor.threshold_tokens:,}",
             f"{_compressor.last_real_prompt_tokens:,}",
         )
     elif _compression_cooldown:
@@ -279,8 +275,7 @@ def _preflight_compression(
             _grown = None
         if _grown:
             _compressor.update_model(
-                agent.model,
-                _grown,
+                agent.model, _grown,
                 base_url=getattr(agent, "base_url", "") or "",
                 api_key=getattr(agent, "api_key", "") or "",
                 provider=getattr(agent, "provider", "") or "",
@@ -335,9 +330,7 @@ def _run_preflight_passes(
     _clear_overflow_warn(agent)
     logger.info(
         "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
-        f"{_preflight_tokens:,}",
-        f"{_compressor.threshold_tokens:,}",
-        agent.model,
+        f"{_preflight_tokens:,}", f"{_compressor.threshold_tokens:,}", agent.model,
         f"{_compressor.context_length:,}",
     )
     _preflight_status = automatic_compaction_status_message(
@@ -395,8 +388,7 @@ def _run_preflight_passes(
             logger.warning(
                 "Preflight compression made insufficient progress: "
                 "~%s -> ~%s request tokens; skipping additional passes",
-                f"{_orig_tokens:,}",
-                f"{_preflight_tokens:,}",
+                f"{_orig_tokens:,}", f"{_preflight_tokens:,}",
             )
             break
 
@@ -432,8 +424,7 @@ def _engine_preflight_maintenance(
         "Engine-driven preflight maintenance: %s requested "
         "compress() at ~%s tokens (below %s threshold)",
         getattr(_compressor, "name", type(_compressor).__name__),
-        f"{_preflight_tokens:,}",
-        f"{getattr(_compressor, 'threshold_tokens', 0):,}",
+        f"{_preflight_tokens:,}", f"{getattr(_compressor, 'threshold_tokens', 0):,}",
     )
     _engine_input = out.messages
     out.messages, out.active_system_prompt = agent._compress_context(
