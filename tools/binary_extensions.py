@@ -33,23 +33,12 @@ BINARY_EXTENSIONS = frozenset({
     ".lockb", ".dat", ".data",
 })
 
-
-def has_binary_extension(path: str) -> bool:
-    """Check if a file path has a binary extension. Pure string check, no I/O."""
-    dot = path.rfind(".")
-    if dot == -1:
-        return False
-    return path[dot:].lower() in BINARY_EXTENSIONS
-
-
-# Container document formats (OOXML zip / OLE compound / ODF zip / EPUB zip / RTF)
-# that a plain-text write can NEVER produce validly.  read_file auto-extracts
-# these to readable text (via anydoc for the non-built-in formats), so a model
-# that "read" report.docx and then writes the edited text back via
-# write_file/patch silently destroys the document.
-# PDF is intentionally NOT here: raw PDF syntax is text-authorable, so
-# new-file creation is legitimate — only overwrites are dangerous (handled
-# separately by the write guard).
+# Container document formats (OOXML/ODF/EPUB zips, OLE compound, RTF) that a
+# plain-text write can NEVER produce validly. read_file auto-extracts these to
+# text, so a model that "read" report.docx and writes the text back via
+# write_file/patch silently destroys the document. PDF is deliberately absent:
+# raw PDF syntax is text-authorable, so only overwrites are dangerous (handled
+# by the write guard via is_pdf_path).
 OPAQUE_DOCUMENT_EXTENSIONS = frozenset({
     ".doc", ".docx", ".docm",
     ".xls", ".xlsx", ".xlsm", ".xlsb",
@@ -59,15 +48,20 @@ OPAQUE_DOCUMENT_EXTENSIONS = frozenset({
 })
 
 
-def has_opaque_document_extension(path: str) -> bool:
-    """True when the path names an opaque container document (.docx etc.).
-
-    Pure string check, no I/O.
-    """
+def _has_extension_in(path: str, extensions: frozenset) -> bool:
+    """Pure string check on the final ``.suffix`` (case-insensitive), no I/O."""
     dot = path.rfind(".")
-    if dot == -1:
-        return False
-    return path[dot:].lower() in OPAQUE_DOCUMENT_EXTENSIONS
+    return dot != -1 and path[dot:].lower() in extensions
+
+
+def has_binary_extension(path: str) -> bool:
+    """True when the path has a binary extension. Pure string check, no I/O."""
+    return _has_extension_in(path, BINARY_EXTENSIONS)
+
+
+def has_opaque_document_extension(path: str) -> bool:
+    """True when the path names an opaque container document (.docx etc.)."""
+    return _has_extension_in(path, OPAQUE_DOCUMENT_EXTENSIONS)
 
 
 def is_pdf_path(path: str) -> bool:

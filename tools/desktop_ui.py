@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """Bridge desktop-only tools to Hermes-desktop renderer events.
 
-The preview pane, pane focus, and friends live in the desktop renderer, so
-desktop-gated tools reach them through an emitter the desktop ``tui_gateway``
-installs at session start via :func:`set_emitter`. Everywhere else it stays
-``None`` and the tools report "desktop only". Routing keys off
-``HERMES_UI_SESSION_ID`` so the event lands on the window that owns the turn
-(``_emit``/``write_json`` is ``_stdout_lock``-guarded, so emitting from the
-tool's thread is safe).
+The desktop ``tui_gateway`` installs an emitter via :func:`set_emitter`; elsewhere it
+stays ``None`` and tools report "desktop only". Routing keys off ``HERMES_UI_SESSION_ID``
+so the event lands on the window that owns the turn (the sink is lock-guarded).
 """
 
+import json
 from typing import Callable, Optional
 
 from gateway.session_context import get_session_env
+from tools.registry import tool_error
 
 # (sid, event, payload) sink, installed by the desktop gateway.
 _emit: Optional[Callable[[str, str, dict], None]] = None
@@ -32,15 +30,12 @@ def available() -> bool:
 def user_enabled(setting: str, default: bool) -> bool:
     """Read one of the desktop's Appearance switches from ``display.<setting>``.
 
-    The renderer owns these toggles and mirrors them onto the CONNECTED
-    gateway's config (``config.set``), so this reads the user's real answer
-    whether that gateway is local, SSH, URL, or cloud — where an env var would
-    only ever describe the process. Tool ``check_fn``s call it to withdraw
-    themselves from the schema when the user has switched the feature off:
-    Hermes should not be told about a surface it isn't allowed to use.
-
-    An unreadable config falls back to ``default``, which is how a feature that
-    ships on stays on rather than disappearing on a transient read error.
+    The renderer mirrors these toggles onto the CONNECTED gateway's config, so this
+    reads the user's real answer for local/SSH/URL/cloud gateways alike (an env var
+    would only describe the process). ``check_fn``s use it to withdraw a tool from the
+    schema when the user switched the feature off — Hermes should not be told about
+    a surface it may not use. Unreadable config -> ``default`` so a shipped-on
+    feature does not vanish on a transient read error.
     """
     try:
         from hermes_cli.config import load_config_readonly
@@ -62,3 +57,26 @@ def emit(event: str, payload: dict) -> bool:
         return False
     fn(get_session_env("HERMES_UI_SESSION_ID", ""), event, payload)
     return True
+
+
+def emit_or_error(event: str, payload: dict, fail_prefix: str, desktop_only: str, result: dict) -> str:
+    """Emit ``event``; return ``tool_error`` text on failure, else ``result`` as JSON.
+
+    ``fail_prefix`` is prepended to the exception text; ``desktop_only`` is the error
+    when no emitter is wired. Looked up as ``desktop_ui.emit`` so tests can patch it.
+    """
+    try:
+        ok = emit(event, payload)
+    except Exception as exc:
+        return tool_error(f"{fail_prefix}{exc}")
+    if not ok:
+        return tool_error(desktop_only)
+    return json.dumps(result, ensure_ascii=False)
+
+
+def passthrough_json(raw) -> str:
+    """Desktop answers with a JSON object; pass it through, else wrap the raw text."""
+    try:
+        return json.dumps(json.loads(raw), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return json.dumps({"text": str(raw)}, ensure_ascii=False)

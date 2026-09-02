@@ -1,118 +1,56 @@
 #!/usr/bin/env python3
-"""
-Todo Tool Module - Planning & Task Management
+"""Todo tool: in-memory, revisioned task list for multi-step work.
 
-Provides an in-memory, revisioned task list the agent uses to decompose
-complex tasks, track progress, and maintain focus across long conversations.
-The state lives on the AIAgent instance (one per session), is re-injected into
-the conversation after context compression events, and every write bumps a
-monotonic revision so UI clients can reject stale updates.
-
-Design:
-- Single `todo` tool: provide `todos` param to write, omit to read
-- Every call returns the full current list
-- No system prompt mutation, no tool response modification
-- Behavioral guidance lives entirely in the tool schema description
+State lives on the AIAgent (one per session), is re-injected after context
+compression, and every write bumps a monotonic revision so UI clients can
+reject stale updates. One ``todo_list`` tool: pass ``todos`` to write, omit to
+read; every call returns the full list. No system-prompt mutation.
 """
 
 import json
 from typing import Any, Dict, List, Optional
 
 
-# Valid status values for todo items
 VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
 
-# Bounds on persisted todo state. The todo list is a planning aid the model
-# re-reads after every context-compression event (see format_for_injection),
-# so unbounded item content or count defeats the compression it rides through.
-# These caps keep a single oversized item (whether authored by the model or
-# replayed from caller-supplied history on the API server) from inflating the
-# re-injection block. Generous relative to real plans — a todo item is a short
-# task description, and active lists are a handful of items, not hundreds.
+# The list is re-read after every compression (format_for_injection), so
+# unbounded content/count would defeat the compression it rides through. Caps
+# apply equally to model-authored items and caller-replayed API history.
 MAX_TODO_CONTENT_CHARS = 4000
 MAX_TODO_ITEMS = 256
-# Upper bound on a single todo tool-result payload accepted during history
-# hydration. The gateway/API server replays caller-supplied conversation
-# history to rebuild the store, so an oversized forged result is dropped
-# before it is parsed and re-injected (see AIAgent._hydrate_todo_store).
+# Max single todo tool-result payload accepted during history hydration, so a
+# forged oversized result is dropped before parsing (AIAgent._hydrate_todo_store).
 MAX_TODO_RESULT_CHARS = 512_000
 _TRUNCATION_MARKER = "… [truncated]"
-# Persisted as ordinary message content. ContextCompressor uses this stable
-# header to distinguish the synthetic post-compaction row from a real user.
+# Persisted as ordinary message content; ContextCompressor keys on this stable
+# header to tell the synthetic post-compaction row from a real user message.
 TODO_INJECTION_HEADER = (
     "[Your active task list was preserved across context compression]"
 )
 
 
 class TodoStore:
-    """
-    In-memory todo list. One instance per AIAgent (one per session).
+    """In-memory todo list, one per AIAgent. List position is priority.
 
-    Items are ordered -- list position is priority. Each item has:
-      - id: unique string identifier (agent-chosen)
-      - content: task description
-      - status: pending | in_progress | completed | cancelled
-      - parent: optional id of another item, for nested subtasks
+    Items: ``{id, content, status, parent?}`` — ``parent`` nests a subtask.
     """
 
     def __init__(self):
         self._items: List[Dict[str, str]] = []
         self._revision = 0
 
-    def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
-        """
-        Write todos. Returns the full current list after writing.
+    def _fresh_items(self, todos: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        """Validate, dedupe and order a whole new list (replace / restore)."""
+        return self._normalize_order([self._validate(t) for t in self._dedupe_by_id(todos)])
 
-        Args:
-            todos: list of {id, content, status} dicts
-            merge: if False, replace the entire list. If True, update
-                   existing items by id and append new ones.
-        """
+    def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
+        """Replace the list (default) or merge by id; returns the full list after writing."""
         before = self.read()
         if not merge:
-            # Replace mode: new list entirely
-            self._items = self._normalize_order(
-                [self._validate(t) for t in self._dedupe_by_id(todos)]
-            )
+            self._items = self._fresh_items(todos)
         else:
-            # Merge mode: update existing items by id, append new ones
-            existing = {item["id"]: item for item in self._items}
-            for t in self._dedupe_by_id(todos):
-                item_id = str(t.get("id", "")).strip()
-                if not item_id:
-                    continue  # Can't merge without an id
-
-                if item_id in existing:
-                    # Update only the fields the LLM actually provided
-                    if "content" in t and t["content"]:
-                        existing[item_id]["content"] = self._cap_content(str(t["content"]).strip())
-                    if "status" in t and t["status"]:
-                        status = str(t["status"]).strip().lower()
-                        if status in VALID_STATUSES:
-                            existing[item_id]["status"] = status
-                    if "parent" in t:
-                        parent = str(t["parent"] or "").strip()
-                        if parent:
-                            existing[item_id]["parent"] = parent
-                        else:
-                            existing[item_id].pop("parent", None)
-                else:
-                    # New item -- validate fully and append to end
-                    validated = self._validate(t)
-                    existing[validated["id"]] = validated
-                    self._items.append(validated)
-            # Rebuild _items preserving order for existing items
-            seen = set()
-            rebuilt = []
-            for item in self._items:
-                current = existing.get(item["id"], item)
-                if current["id"] not in seen:
-                    rebuilt.append(current)
-                    seen.add(current["id"])
-            self._items = self._normalize_order(rebuilt)
-        # Bound total item count so a replayed/oversized list can't grow the
-        # re-injection block without limit. Keep the highest-priority head
-        # (list order is priority).
+            self._merge(todos)
+        # Keep the highest-priority head so a replayed list can't grow re-injection unbounded.
         if len(self._items) > MAX_TODO_ITEMS:
             self._items = self._items[:MAX_TODO_ITEMS]
         self._sanitize_parents(self._items)
@@ -120,12 +58,46 @@ class TodoStore:
             self._revision += 1
         return self.read()
 
+    def _merge(self, todos: List[Dict[str, Any]]) -> None:
+        """Update existing items only in the fields provided; append new ones (validated)."""
+        existing = {item["id"]: item for item in self._items}
+        for t in self._dedupe_by_id(todos):
+            item_id = str(t.get("id", "")).strip()
+            if not item_id:
+                continue  # Can't merge without an id
+            cur = existing.get(item_id)
+            if cur is None:
+                validated = self._validate(t)
+                existing[validated["id"]] = validated
+                self._items.append(validated)
+                continue
+            if t.get("content"):
+                cur["content"] = self._cap_content(str(t["content"]).strip())
+            if t.get("status"):
+                status = str(t["status"]).strip().lower()
+                if status in VALID_STATUSES:
+                    cur["status"] = status
+            if "parent" in t:
+                parent = str(t["parent"] or "").strip()
+                if parent:
+                    cur["parent"] = parent
+                else:
+                    cur.pop("parent", None)
+        # Rebuild preserving original order for existing items.
+        seen = set()
+        rebuilt = []
+        for item in self._items:
+            current = existing.get(item["id"], item)
+            if current["id"] not in seen:
+                rebuilt.append(current)
+                seen.add(current["id"])
+        self._items = self._normalize_order(rebuilt)
+
     def read(self) -> List[Dict[str, str]]:
         """Return a copy of the current list."""
         return [item.copy() for item in self._items]
 
     def has_items(self) -> bool:
-        """Check if there are any items in the list."""
         return bool(self._items)
 
     def snapshot(self) -> Dict[str, Any]:
@@ -139,9 +111,7 @@ class TodoStore:
         revision: Any = 0,
     ) -> List[Dict[str, str]]:
         """Restore a trusted snapshot without manufacturing a new revision."""
-        self._items = self._normalize_order(
-            [self._validate(t) for t in self._dedupe_by_id(todos)]
-        )[:MAX_TODO_ITEMS]
+        self._items = self._fresh_items(todos)[:MAX_TODO_ITEMS]
         try:
             self._revision = max(0, int(revision or 0))
         except (TypeError, ValueError):
@@ -149,27 +119,16 @@ class TodoStore:
         return self.read()
 
     def format_for_injection(self) -> Optional[str]:
-        """
-        Render the todo list for post-compression injection.
+        """Render the list for post-compression injection, or None if nothing active.
 
-        Returns a human-readable string to append to the compressed
-        message history, or None if the list is empty.
+        Only pending/in_progress items are injected — finished ones make the
+        model re-do work after compression. A parent is kept (with its real
+        status marker) when any descendant is active so subtasks keep context.
         """
         if not self._items:
             return None
 
-        # Status markers for compact display
-        markers = {
-            "completed": "[x]",
-            "in_progress": "[>]",
-            "pending": "[ ]",
-            "cancelled": "[~]",
-        }
-
-        # Only inject pending/in_progress items — completed/cancelled ones
-        # cause the model to re-do finished work after compression. A parent
-        # is kept (with its real status marker) when any descendant is
-        # active, so subtasks keep their context.
+        markers = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
         active = {"pending", "in_progress"}
         children: Dict[str, List[Dict[str, str]]] = {}
         roots: List[Dict[str, str]] = []
@@ -205,12 +164,7 @@ class TodoStore:
 
     @staticmethod
     def _cap_content(content: str) -> str:
-        """Truncate oversized todo content to MAX_TODO_CONTENT_CHARS.
-
-        A single huge item would otherwise inflate the post-compression
-        re-injection block (format_for_injection) without bound. Keep the
-        head — the actionable part of a task description — plus a marker.
-        """
+        """Truncate to MAX_TODO_CONTENT_CHARS keeping the head (the actionable part) + marker."""
         if len(content) > MAX_TODO_CONTENT_CHARS:
             keep = MAX_TODO_CONTENT_CHARS - len(_TRUNCATION_MARKER)
             return content[:keep] + _TRUNCATION_MARKER
@@ -218,25 +172,13 @@ class TodoStore:
 
     @staticmethod
     def _validate(item: Dict[str, Any]) -> Dict[str, str]:
-        """
-        Validate and normalize a todo item.
-
-        Ensures required fields exist and status is valid.
-        Returns a clean dict with only {id, content, status}.
-        """
+        """Normalize one item to ``{id, content, status, parent?}`` with placeholders for missing fields."""
         if not isinstance(item, dict):
             return {"id": "?", "content": "(invalid item)", "status": "pending"}
 
-        item_id = str(item.get("id", "")).strip()
-        if not item_id:
-            item_id = "?"
-
+        item_id = str(item.get("id", "")).strip() or "?"
         content = str(item.get("content", "")).strip()
-        if not content:
-            content = "(no description)"
-        else:
-            content = TodoStore._cap_content(content)
-
+        content = TodoStore._cap_content(content) if content else "(no description)"
         status = str(item.get("status", "pending")).strip().lower()
         if status not in VALID_STATUSES:
             status = "pending"
@@ -249,16 +191,10 @@ class TodoStore:
 
     @staticmethod
     def _sanitize_parents(items: List[Dict[str, str]]) -> None:
-        """Drop dangling parent refs and break cycles (in place).
-
-        A parent pointing at a missing id, or a chain that loops back on
-        itself, would corrupt tree rendering — such items become roots.
-        """
-        ids = {item["id"] for item in items}
+        """Drop dangling parent refs and break cycles in place (such items become roots)."""
         by_id = {item["id"]: item for item in items}
         for item in items:
-            parent = item.get("parent")
-            if parent and parent not in ids:
+            if item.get("parent") and item["parent"] not in by_id:
                 item.pop("parent", None)
         for item in items:
             seen = {item["id"]}
@@ -285,27 +221,19 @@ class TodoStore:
 
     @staticmethod
     def _normalize_order(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """Lift the active step ahead of any earlier unfinished placeholders."""
-        # Nested lists keep authored order — reordering a flat position would
-        # tear a subtask away from its siblings.
+        """Lift the in_progress step ahead of any earlier pending placeholder.
+
+        Nested lists keep authored order — reordering would tear a subtask from its siblings.
+        """
         if any(item.get("parent") for item in items):
             return items
-        active_index = next(
-            (i for i, item in enumerate(items) if item["status"] == "in_progress"),
-            None,
-        )
-        if active_index is None:
+        statuses = [item["status"] for item in items]
+        if "in_progress" not in statuses:
             return items
-
-        pending_index = next(
-            (
-                i for i, item in enumerate(items[:active_index])
-                if item["status"] == "pending"
-            ),
-            None,
-        )
-        if pending_index is None:
+        active_index = statuses.index("in_progress")
+        if "pending" not in statuses[:active_index]:
             return items
+        pending_index = statuses.index("pending")
 
         normalized = items.copy()
         active_item = normalized.pop(active_index)
@@ -318,23 +246,12 @@ def todo_tool(
     merge: bool = False,
     store: Optional[TodoStore] = None,
 ) -> str:
-    """
-    Single entry point for the todo tool. Reads or writes depending on params.
-
-    Args:
-        todos: if provided, write these items. If None, read current list.
-        merge: if True, update by id. If False (default), replace entire list.
-        store: the TodoStore instance from the AIAgent.
-
-    Returns:
-        JSON string with the full current list and summary metadata.
-    """
+    """Write ``todos`` (replace or ``merge`` by id) or read when None; returns list + summary JSON."""
     if store is None:
         return tool_error("TodoStore not initialized")
 
     if todos is not None:
-        # Guard: LLM sometimes sends todos as a JSON string instead of a list
-        if isinstance(todos, str):
+        if isinstance(todos, str):  # LLMs sometimes send a JSON string instead of a list
             try:
                 todos = json.loads(todos)
             except (json.JSONDecodeError, TypeError):
@@ -347,22 +264,14 @@ def todo_tool(
     else:
         items = store.read()
 
-    # Build summary counts
-    pending = sum(1 for i in items if i["status"] == "pending")
-    in_progress = sum(1 for i in items if i["status"] == "in_progress")
-    completed = sum(1 for i in items if i["status"] == "completed")
-    cancelled = sum(1 for i in items if i["status"] == "cancelled")
+    summary = {"total": len(items)}
+    for status in ("pending", "in_progress", "completed", "cancelled"):
+        summary[status] = sum(1 for i in items if i["status"] == status)
 
     return json.dumps({
         "todos": items,
         "revision": store.snapshot()["revision"],
-        "summary": {
-            "total": len(items),
-            "pending": pending,
-            "in_progress": in_progress,
-            "completed": completed,
-            "cancelled": cancelled,
-        },
+        "summary": summary,
     }, ensure_ascii=False)
 
 
@@ -371,17 +280,10 @@ def check_todo_requirements() -> bool:
     return True
 
 
-# =============================================================================
-# OpenAI Function-Calling Schema
-# =============================================================================
-# Behavioral guidance is baked into the description so it's part of the
-# static tool schema (cached, never changes mid-conversation).
-
+# Behavioral guidance is baked into the (static, cached) description; item
+# shape and merge semantics live ONLY in the parameter schema.
 TODO_SCHEMA = {
     "name": "todo_list",
-    # Dieted (#95681): the item shape and merge semantics live ONLY in the
-    # parameter schema below — the description teaches behavior, not
-    # structure the params already define.
     "description": (
         "Track a task list for multi-step work (3+ steps). Use for complex tasks "
         "with 3+ steps or when the user provides multiple tasks. "

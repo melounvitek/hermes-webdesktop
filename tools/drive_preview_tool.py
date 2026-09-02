@@ -1,35 +1,24 @@
 #!/usr/bin/env python3
 """Interact with the in-app browser / preview pane in the Hermes desktop GUI.
 
-``open_preview`` shows a page and ``read_preview`` reads it; this tool is the
-third leg — clicking, typing, scrolling, and history — so the agent can drive
-the same page the user is looking at instead of narrating from the outside.
-
-Elements are addressed by refs from ``action="elements"`` that say what they
-are: ``btn-sign-in``, ``inp-email``. A ref lasts as long as the page is open,
-including across a re-render that destroys and rebuilds the element, and only a
-navigation retires it — the renderer says so rather than acting on whatever now
-occupies the spot.
-
-Because the refs hold, the renderer answers with a *delta* — what appeared,
-what went, what changed, and what was rebound — instead of re-sending the whole
-inventory after every click. That is the cheap half of the arrangement, and it
-only works because the refs are legible enough to read on their own three turns
-later.
-
+``open_preview`` shows a page, ``read_preview`` reads it; this is the third leg —
+clicking, typing, scrolling, history — so the agent drives the page the user sees.
+Elements are addressed by legible refs from ``action="elements"`` (``btn-sign-in``,
+``inp-email``). A ref lasts while the page is open — including across a re-render that
+rebuilds the element — and only a navigation retires it (the renderer says so rather
+than acting on whatever now occupies the spot). Because refs hold, the renderer answers
+with a *delta* (appeared/went/changed/rebound) instead of re-sending the inventory —
+cheap only because the refs stay legible on their own several turns later.
 Round-trips through the gateway's blocking-prompt bridge like ``read_preview``:
-tui_gateway emits ``preview.act.request``, the renderer injects the interaction
-engine into the pane's webview and answers ``preview.act.respond`` with the
-outcome plus whatever moved. This module is just schema + a thin dispatcher
-over the platform-injected callback.
-
-Lives in the ``desktop_ui`` toolset, which the GUI gateway enables only for
-desktop-sourced sessions.
+tui_gateway emits ``preview.act.request``, the renderer injects the interaction engine
+into the pane's webview and answers ``preview.act.respond``. This module is schema + a
+thin dispatcher over the platform-injected callback. Lives in the ``desktop_ui`` toolset,
+which the GUI gateway enables only for desktop-sourced sessions.
 """
 
-import json
 from typing import Callable, Optional
 
+from tools.desktop_ui import passthrough_json
 from tools.registry import registry, tool_error
 
 ACTIONS = (
@@ -116,20 +105,14 @@ def drive_preview_tool(
             "The action timed out, or no GUI window answered. "
             "Open a page with open_preview first."
         )
-
-    # The renderer answers with a JSON object; pass it through, else wrap it.
-    try:
-        return json.dumps(json.loads(raw), ensure_ascii=False)
-    except (TypeError, ValueError):
-        return json.dumps({"text": str(raw)}, ensure_ascii=False)
+    return passthrough_json(raw)
 
 
 ACT_PREVIEW_SCHEMA = {
     "name": "drive_preview",
-    # Dieted (#95681): world-building compressed; response-shape teaching
-    # kept only where skipping it causes wasted calls (delta semantics,
-    # rebound refs, strobe's burst) — those are pre-effect: a model that
-    # doesn't know them re-reads pages or loops strobe.
+    # Response-shape teaching kept only where skipping it wastes calls (delta
+    # semantics, rebound refs, strobe's burst): a model that doesn't know them
+    # re-reads pages or loops strobe.
     "description": (
         "Use the web page open in the desktop preview pane (the one "
         "`desktop_preview` opens): log in, fill forms, click through flows. ALWAYS "

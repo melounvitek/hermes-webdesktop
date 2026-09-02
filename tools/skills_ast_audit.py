@@ -81,6 +81,13 @@ def _scan_source(content: str, rel_path: str) -> List[Finding]:
     return findings
 
 
+def _scan_file(py: Path, rel: str) -> List[Finding]:
+    try:
+        return _scan_source(py.read_text(encoding="utf-8", errors="replace"), rel)
+    except OSError:
+        return []
+
+
 def ast_scan_path(path: Path) -> List[Finding]:
     """Scan a single .py file or recursively scan all .py under a directory.
 
@@ -88,13 +95,7 @@ def ast_scan_path(path: Path) -> List[Finding]:
     non-Python paths, missing paths, or paths with no matching patterns.
     """
     if path.is_file():
-        if path.suffix.lower() != ".py":
-            return []
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return []
-        return _scan_source(content, path.name)
+        return _scan_file(path, path.name) if path.suffix.lower() == ".py" else []
 
     if not path.is_dir():
         return []
@@ -104,14 +105,10 @@ def ast_scan_path(path: Path) -> List[Finding]:
         if set(py.parent.parts) & _IGNORED_DIRS:
             continue
         try:
-            content = py.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        try:
             rel = py.relative_to(path).as_posix()
         except ValueError:
             rel = py.name
-        out.extend(_scan_source(content, rel))
+        out.extend(_scan_file(py, rel))
     return out
 
 

@@ -84,20 +84,24 @@ def test_helper_clears_callbacks_on_teardown():
 
 
 def test_both_rpc_threads_use_propagation_helper():
-    """Source guard: both execute_code RPC threads must wrap their target with
-    propagate_context_to_thread, or the gateway approval bypass (#33057)
-    silently returns."""
+    """Source guard: every execute_code RPC serving thread must carry the
+    cell's approval context, or the gateway approval bypass (#33057) silently
+    returns. The remote poll thread wraps its target with
+    propagate_context_to_thread; the local session kernel instead rebinds
+    authority per cell (``dispatch=`` passed to ``_rpc_server_loop``)."""
     import inspect
     import tools.code_execution_tool as cet
+    import tools.code_kernel as ck
 
     src = inspect.getsource(cet)
-    assert "propagate_context_to_thread(_rpc_server_loop)" in src, (
-        "local UDS RPC server thread is not wrapped with "
-        "propagate_context_to_thread — gateway approval routing will be lost."
-    )
     assert "propagate_context_to_thread(_rpc_poll_loop)" in src, (
         "remote file-RPC poll thread is not wrapped with "
         "propagate_context_to_thread — gateway approval routing will be lost."
+    )
+    kernel_src = inspect.getsource(ck)
+    assert "_rpc_server_loop(" in kernel_src and "dispatch=" in kernel_src, (
+        "local session-kernel RPC server thread must pass a per-cell "
+        "dispatch= to _rpc_server_loop — gateway approval routing will be lost."
     )
 
 

@@ -1,28 +1,14 @@
 """Local-environment toolchain probe for the system prompt.
 
-When the terminal backend is local (the agent's tools run on the same
-machine as Hermes itself), we surface a single deterministic line about
-Python tooling state so models don't have to discover it by hitting
-walls.  Common failure modes this addresses:
+When the terminal backend is local, surface one deterministic line about
+Python tooling state (python3/python versions, missing pip module, pip bound
+to a different Python than ``python3``, PEP 668 externally-managed) so models
+don't discover it by hitting walls.  The probe is cheap (~50ms), cached for
+the process lifetime, and emits nothing when the environment is clean.
 
-* Hermes ships under one Python (e.g. 3.11 in a bundled venv) while the
-  user's login shell has a different one (e.g. 3.12 system).  ``pip``
-  resolved from PATH may not match ``python3 -m pip``.
-* The bundled-venv Python has no pip module installed → ``python3 -m
-  pip`` returns ``No module named pip``.
-* The system Python is PEP-668 externally-managed → naive
-  ``pip install`` fails with ``error: externally-managed-environment``.
-
-The probe is cheap (a handful of subprocess calls, ~50ms total),
-cached for the lifetime of the process, and emits **at most one
-short line** when something non-default is detected.  When the
-environment looks normal (python3+pip both present and matched, no
-PEP 668), it emits nothing — no token cost.
-
-Remote terminal backends (docker, modal, ssh, …) are skipped: the
-host's Python state is irrelevant when tools run inside a sandbox.
-The sandbox has its own existing probe (``_probe_remote_backend``)
-in ``agent/prompt_builder.py``.
+Remote terminal backends (docker, modal, ssh, …) are skipped: the host's
+Python state is irrelevant when tools run inside a sandbox, which has its own
+probe (``_probe_remote_backend`` in ``agent/prompt_builder.py``).
 
 Toggle via ``agent.environment_probe`` in config.yaml (default True).
 """
@@ -30,7 +16,6 @@ Toggle via ``agent.environment_probe`` in config.yaml (default True).
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 import tempfile
@@ -41,17 +26,12 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
-# Module-level cache.  The probe result is deterministic for the
-# lifetime of the process — Python install state doesn't change
-# mid-session in any way that would matter for the system prompt.
-#
-# Concurrency model (#67964): the probe runs in exactly ONE background
-# worker thread; ``_PROBE_DONE`` signals completion.  Callers never
-# execute the probe themselves and never wait unboundedly — they block
-# at most ``_PROBE_WAIT_TIMEOUT`` seconds on the event and then fail
-# open with "".  This guarantees a stuck probe (e.g. a Windows pipe
-# wedged open by an orphaned pip descendant) can degrade at most the
-# probe line itself, never system-prompt construction.
+# Concurrency model: the probe runs in exactly ONE background worker thread;
+# ``_PROBE_DONE`` signals completion.  Callers never execute the probe
+# themselves and block at most ``_PROBE_WAIT_TIMEOUT`` seconds on the event
+# before failing open with "" — a stuck probe (e.g. a Windows pipe wedged open
+# by an orphaned pip descendant) can degrade only the probe line, never
+# system-prompt construction.
 _CACHE_LOCK = threading.Lock()
 _CACHED_LINE: Optional[str] = None  # None = not probed yet; "" = probed, nothing to say.
 _PROBE_DONE = threading.Event()
@@ -60,18 +40,15 @@ _PROBE_THREAD: Optional[threading.Thread] = None
 # before a test reset) can't publish its result into the fresh generation.
 _PROBE_GEN = 0
 
-# Upper bound a prompt build will wait for the probe.  Generous vs the
-# ~0.5s healthy runtime (6 subprocesses × 3s timeout ≈ 18s pathological
-# worst case), but finite: prompt construction must always proceed.
+# Upper bound a prompt build will wait for the probe.  Generous vs the ~0.5s
+# healthy runtime, but finite: prompt construction must always proceed.
 _PROBE_WAIT_TIMEOUT = 10.0
-# Once one caller has burned the full wait and given up, later callers
-# stop paying it too — they just peek at the event.  If the stuck worker
-# ever finishes, the published line resumes appearing in new prompts.
+# Once one caller has burned the full wait, later callers only peek at the
+# event.  If the stuck worker ever finishes, the line resumes appearing.
 _WAIT_ALREADY_TIMED_OUT = False
 
-# Remote backends — keep in sync with agent/prompt_builder.py:_REMOTE_TERMINAL_BACKENDS.
-# Duplicated rather than imported to avoid a circular import (prompt_builder
-# imports nothing from tools).
+# Keep in sync with agent/prompt_builder.py:_REMOTE_TERMINAL_BACKENDS.
+# Duplicated rather than imported to avoid a circular import.
 _REMOTE_BACKENDS = frozenset({
     "docker", "singularity", "modal", "daytona", "ssh", "managed_modal",
     "vercel_sandbox",
@@ -95,19 +72,15 @@ def _run(cmd: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
 
     Failures (binary missing, timeout, OSError) return (-1, "", "<reason>").
 
-    Output is captured through temporary files rather than ``capture_output``
-    pipes so ``timeout`` bounds the *whole* call — even on native Windows.  A
-    console-script launcher (e.g. ``pip.exe``) can spawn a descendant that
-    inherits the captured stdout/stderr handles and outlives its parent.  With
-    OS pipes, the reader threads inside ``subprocess.communicate()`` then block
-    until that descendant closes the write end — which the timeout does *not*
-    cover, because killing the direct child leaves the grandchild holding the
-    pipe.  A whole warm probe could hang for ~28 min this way while holding
-    ``_CACHE_LOCK``, wedging every new session's system-prompt build.
-
-    Temp files have no reader threads, so ``wait()`` only ever waits on the
-    direct child; a lingering grandchild holding the handle can't block us, and
-    the probe genuinely fails open on timeout.
+    Output is captured through temp files rather than pipes so ``timeout``
+    bounds the *whole* call, even on native Windows: a console-script launcher
+    (e.g. ``pip.exe``) can spawn a descendant that inherits the captured
+    handles and outlives its parent.  With OS pipes, ``communicate()``'s reader
+    threads block until that grandchild closes the write end — which the
+    timeout does not cover, since killing the direct child leaves the
+    grandchild holding the pipe (a warm probe could hang ~28 min holding
+    ``_CACHE_LOCK``).  Temp files have no reader threads, so ``wait()`` only
+    waits on the direct child and the probe genuinely fails open on timeout.
     """
     try:
         with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
@@ -119,10 +92,9 @@ def _run(cmd: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
                     timeout=timeout,
                     check=False,
                     stdin=subprocess.DEVNULL,
-                    # CREATE_NO_WINDOW (0 on POSIX): the probe runs in
-                    # windowless processes (pythonw gateway / kanban workers)
-                    # where a console child would otherwise flash a visible
-                    # window per probe — ~5 flashes at every worker startup.
+                    # CREATE_NO_WINDOW (0 on POSIX): windowless hosts (pythonw
+                    # gateway / kanban workers) would otherwise flash a console
+                    # window per probe subprocess.
                     creationflags=windows_hide_flags(),
                 )
             except subprocess.TimeoutExpired:
@@ -143,9 +115,7 @@ def _python_version_of(binary: str) -> Optional[str]:
     if not shutil.which(binary):
         return None
     rc, out, err = _run([binary, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"])
-    if rc == 0 and out:
-        return out
-    return None
+    return out if rc == 0 and out else None
 
 
 def _has_pip_module(binary: str) -> bool:
@@ -157,11 +127,8 @@ def _has_pip_module(binary: str) -> bool:
 
 
 def _detect_pep668(binary: str) -> bool:
-    """True when ``<binary>``'s install location is PEP-668 externally-managed.
-
-    Looks for ``EXTERNALLY-MANAGED`` next to the stdlib (the marker file
-    Debian/Ubuntu drop in to gate naive ``pip install``).
-    """
+    """True when ``<binary>`` is PEP-668 externally-managed (``EXTERNALLY-MANAGED``
+    marker next to the stdlib, as Debian/Ubuntu ship)."""
     if not shutil.which(binary):
         return False
     code = (
@@ -177,24 +144,16 @@ def _detect_pep668(binary: str) -> bool:
 def _pip_python_version() -> Optional[str]:
     """If ``pip`` is on PATH, return the Python version it's bound to.
 
-    ``pip --version`` output looks like::
-
-        pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)
-
-    Returns the parenthesised version (e.g. ``"3.12"``) or None.
+    Parses the trailing ``(python X.Y)`` of ``pip --version`` output, e.g.
+    ``pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)`` → ``"3.12"``.
     """
     if not shutil.which("pip"):
         return None
     rc, out, _err = _run(["pip", "--version"])
     if rc != 0 or not out:
         return None
-    # Parse trailing "(python X.Y)".
     if "(python " in out and out.endswith(")"):
-        try:
-            tail = out.rsplit("(python ", 1)[1]
-            return tail[:-1].strip()
-        except (IndexError, AttributeError):
-            return None
+        return out.rsplit("(python ", 1)[1][:-1].strip()
     return None
 
 
@@ -210,28 +169,20 @@ def _resolve_terminal_backend() -> str:
 
 
 def _build_probe_line() -> str:
-    """Build the one-liner.  Returns "" when nothing notable is detected.
-
-    Emit only when SOMETHING is off — the goal is to save the model from
-    hitting an avoidable wall, not to narrate a healthy environment.
-    """
+    """Build the one-liner.  Returns "" when nothing notable is detected —
+    the goal is to save the model from an avoidable wall, not narrate a
+    healthy environment."""
     py3_ver = _python_version_of("python3")
     py_ver = _python_version_of("python")  # for systems with a `python` alias
     py3_has_pip = _has_pip_module("python3") if py3_ver else False
     pip_bound_to = _pip_python_version()
     py3_pep668 = _detect_pep668("python3") if py3_ver else False
     # Bare which() is correct here, unlike Hermes's own uv call sites: this
-    # reports the environment *the model will see* in the terminal tool, and
-    # what the model can type is exactly what is on that subshell's PATH.
-    # local.py puts the Hermes-managed $HERMES_HOME/bin there, so a managed-only
-    # install answers yes — without that, claiming uv the model cannot invoke
-    # would be worse than claiming none.
+    # reports the environment *the model will see* in the terminal tool, whose
+    # PATH (via local.py) includes the Hermes-managed $HERMES_HOME/bin.
+    # Claiming uv the model cannot invoke would be worse than claiming none.
     has_uv = shutil.which("uv") is not None
 
-    # If python3 exists, has pip, has uv (or no PEP 668), and there's no
-    # version mismatch between `pip` and `python3` → environment is
-    # clean enough to stay silent.  The model can discover details by
-    # running commands if it cares.
     mismatch = bool(pip_bound_to and py3_ver and not py3_ver.startswith(pip_bound_to))
     silent_conditions = (
         py3_ver is not None
@@ -242,8 +193,7 @@ def _build_probe_line() -> str:
     if silent_conditions:
         return ""
 
-    # Build a compact factual summary.  Keep it ONE line so it doesn't
-    # dominate the prompt; the model is good at parsing dense info.
+    # Compact factual summary; ONE line so it doesn't dominate the prompt.
     bits: list[str] = []
     if py3_ver:
         py3_bit = f"python3={py3_ver}"
@@ -256,21 +206,17 @@ def _build_probe_line() -> str:
     if py_ver and py_ver != py3_ver:
         bits.append(f"python={py_ver}")
     elif not py_ver and py3_ver:
-        # Common on Debian/Ubuntu — call it out so the model doesn't
-        # type `python` and hit "command not found".
+        # Common on Debian/Ubuntu — stop the model typing `python`.
         bits.append("python=missing (use python3)")
 
     if pip_bound_to:
         if mismatch:
             bits.append(f"pip→python{pip_bound_to} (mismatch)")
         elif not py3_has_pip:
-            # pip exists but `python3 -m pip` doesn't — the script
-            # works but the module path doesn't.
+            # pip script works but `python3 -m pip` doesn't.
             bits.append(f"pip→python{pip_bound_to}")
-    elif py3_has_pip:
-        # `pip` not on PATH but `python3 -m pip` works.
-        pass
-    else:
+    elif not py3_has_pip:
+        # (when `pip` is off PATH but `python3 -m pip` works, say nothing)
         bits.append("pip=missing")
 
     if py3_pep668:
@@ -279,41 +225,28 @@ def _build_probe_line() -> str:
     if has_uv:
         bits.append("uv=installed")
 
-    if not bits:
-        return ""
-
     return "Python toolchain: " + ", ".join(bits) + "."
 
 
 def get_environment_probe_line(*, force_refresh: bool = False) -> str:
     """Return the cached probe line (building it on first call).
 
-    Returns "" when the environment is clean — the system prompt
-    assembler should drop the section in that case rather than
-    emit an empty heading.
-
-    The probe itself always runs in a single background worker thread;
-    this function waits on its completion event for at most
-    ``_PROBE_WAIT_TIMEOUT`` seconds and then fails open with "".  A
-    wedged probe subprocess (#67964) therefore can never block
-    system-prompt construction — at worst the toolchain line is absent
-    from prompts built while the probe is stuck.
+    Returns "" when the environment is clean — the system prompt assembler
+    should drop the section rather than emit an empty heading.  The probe runs
+    in a single background worker; this waits at most ``_PROBE_WAIT_TIMEOUT``
+    seconds on its completion event and then fails open with "", so a wedged
+    probe subprocess can never block system-prompt construction.
 
     ``force_refresh`` is for tests; real callers should never need it.
     """
-    global _CACHED_LINE, _PROBE_THREAD, _PROBE_GEN, _WAIT_ALREADY_TIMED_OUT
+    global _WAIT_ALREADY_TIMED_OUT
     if force_refresh:
-        with _CACHE_LOCK:
-            _CACHED_LINE = None
-            _PROBE_DONE.clear()
-            _PROBE_THREAD = None
-            _PROBE_GEN += 1
-            _WAIT_ALREADY_TIMED_OUT = False
+        _reset_cache_for_tests()
 
     # Resolve the backend HERE, in the caller's context: under gateway
     # multiplexing the routed profile's backend lives in the per-turn terminal
-    # scope, which the bare probe worker thread does not inherit (#68559). A
-    # remote backend answers "" without consulting the cache — the cached line
+    # scope, which the bare probe worker thread does not inherit.  A remote
+    # backend answers "" without consulting the cache — the cached line
     # describes the HOST toolchain, not where that profile's tools run.
     backend = _resolve_terminal_backend()
     if backend in _REMOTE_BACKENDS or _plugin_backend_is_remote(backend):
@@ -325,9 +258,8 @@ def get_environment_probe_line(*, force_refresh: bool = False) -> str:
     _ensure_probe_started()
     wait_timeout = 0.05 if _WAIT_ALREADY_TIMED_OUT else _PROBE_WAIT_TIMEOUT
     if not _PROBE_DONE.wait(timeout=wait_timeout):
-        # Probe stuck or pathologically slow.  The line is a nice-to-have;
-        # blocking prompt construction is an outage.  Fail open — if the
-        # worker eventually finishes, sessions started later get the line.
+        # Probe stuck or pathologically slow: the line is a nice-to-have,
+        # blocking prompt construction is an outage.  Fail open.
         if not _WAIT_ALREADY_TIMED_OUT:
             _WAIT_ALREADY_TIMED_OUT = True
             logger.warning(
@@ -372,15 +304,11 @@ def _ensure_probe_started() -> None:
 
 
 def warm_environment_probe_async() -> None:
-    """Kick off the probe in a background thread so the first
-    system-prompt build doesn't pay the ~0.5s of subprocess calls
-    (python3/pip/PEP-668 version checks) on the time-to-first-token
-    critical path.
+    """Start the probe in the background so the first system-prompt build
+    doesn't pay the ~0.5s of subprocess calls on the time-to-first-token path.
 
-    Idempotent and fail-safe.  The prompt-build call to
-    ``get_environment_probe_line`` waits (bounded) on the same worker's
-    completion event instead of recomputing.  Called from agent init
-    (all platforms); safe to call from anywhere.
+    Idempotent and fail-safe; ``get_environment_probe_line`` waits (bounded)
+    on the same worker instead of recomputing.  Called from agent init.
     """
     _ensure_probe_started()
 

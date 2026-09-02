@@ -25,14 +25,11 @@ _OSV_ENDPOINT = os.getenv("OSV_ENDPOINT", "https://api.osv.dev/v1/query")
 _TIMEOUT = 10  # seconds
 
 # Result cache: (ecosystem, package, version) -> (expiry_monotonic, result).
-# MCP reconnect ladders, stdio recycles, and parked-server self-probes re-run
-# the preflight for the SAME package on every spawn attempt. Without a cache,
-# a flapping server turns into a sustained OSV query/DNS stream — the #75485
-# incident logged 779K api.osv.dev DNS queries in 16h from revival loops.
-# Malware advisories don't appear or vanish on second-to-second timescales,
-# so a successful verdict (clean OR blocked) is reusable. Network failures
-# are NOT cached: fail-open already covers them, and caching a failure could
-# mask a real advisory once connectivity returns.
+# MCP reconnect ladders and parked-server self-probes re-run the preflight for
+# the SAME package on every spawn; uncached, a flapping server becomes a
+# sustained OSV/DNS query stream. Advisories don't flip on second timescales,
+# so clean AND blocked verdicts are reusable. Network failures are NOT cached:
+# fail-open covers them and caching one could mask a real advisory later.
 _CACHE_TTL_S = float(os.getenv("OSV_CHECK_CACHE_TTL", "3600"))
 _CACHE_MAX_ENTRIES = 256
 _cache: dict = {}
@@ -111,14 +108,15 @@ def check_package_for_malware(
     return result
 
 
+_ECOSYSTEM_BY_COMMAND = {
+    "npx": "npm", "npx.cmd": "npm",
+    "uvx": "PyPI", "uvx.cmd": "PyPI", "pipx": "PyPI",
+}
+
+
 def _infer_ecosystem(command: str) -> Optional[str]:
     """Infer package ecosystem from the command name."""
-    base = os.path.basename(command).lower()
-    if base in {"npx", "npx.cmd"}:
-        return "npm"
-    if base in {"uvx", "uvx.cmd", "pipx"}:
-        return "PyPI"
-    return None
+    return _ECOSYSTEM_BY_COMMAND.get(os.path.basename(command).lower())
 
 
 def _parse_package_from_args(
@@ -131,11 +129,9 @@ def _parse_package_from_args(
     if not args:
         return None, None
 
-    # Skip flags to find the package token.
-    # Honor npx's explicit install target: --package=NAME / --package NAME and
-    # the -p NAME short form, which name a package distinct from the executed
-    # binary. Without this the first bare positional (often the command name)
-    # is mistaken for the package.
+    # Skip flags to find the package token. Honor npx's explicit install target
+    # (--package=NAME / --package NAME / -p NAME), which names a package distinct
+    # from the executed binary; otherwise the first bare positional is used.
     package_token = None
     take_next = False
     for arg in args:
@@ -157,12 +153,8 @@ def _parse_package_from_args(
 
     if not package_token:
         return None, None
-
-    if ecosystem == "npm":
-        return _parse_npm_package(package_token)
-    elif ecosystem == "PyPI":
-        return _parse_pypi_package(package_token)
-    return package_token, None
+    parser = _PACKAGE_PARSERS.get(ecosystem)
+    return parser(package_token) if parser else (package_token, None)
 
 
 def _parse_npm_package(token: str) -> Tuple[Optional[str], Optional[str]]:
@@ -189,6 +181,9 @@ def _parse_pypi_package(token: str) -> Tuple[Optional[str], Optional[str]]:
     if match:
         return match.group(1), match.group(2)
     return token, None
+
+
+_PACKAGE_PARSERS = {"npm": _parse_npm_package, "PyPI": _parse_pypi_package}
 
 
 def _query_osv(

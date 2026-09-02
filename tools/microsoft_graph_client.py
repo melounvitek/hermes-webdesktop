@@ -10,10 +10,17 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 import httpx
 
 from agent.retry_utils import parse_retry_after_seconds
-from tools.microsoft_graph_auth import GraphCredentials, MicrosoftGraphTokenProvider
+from tools.microsoft_graph_auth import (
+    GraphCredentials,
+    MicrosoftGraphTokenProvider,
+    format_graph_error,
+)
 
 
 DEFAULT_GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+
+Headers = dict[str, str] | None
+Params = dict[str, Any] | None
 
 
 class MicrosoftGraphClientError(RuntimeError):
@@ -24,35 +31,28 @@ class MicrosoftGraphAPIError(MicrosoftGraphClientError):
     """Raised when a Graph API request fails."""
 
     def __init__(
-        self,
-        status_code: int,
-        method: str,
-        url: str,
-        message: str,
-        *,
-        retry_after_seconds: float | None = None,
-        payload: Any = None,
+        self, status_code: int, method: str, url: str, message: str, *,
+        retry_after_seconds: float | None = None, payload: Any = None,
     ) -> None:
         self.status_code = status_code
         self.method = method
         self.url = url
         self.retry_after_seconds = retry_after_seconds
         self.payload = payload
-        super().__init__(
-            f"Microsoft Graph API error {status_code} for {method} {url}: {message}"
-        )
+        super().__init__(f"Microsoft Graph API error {status_code} for {method} {url}: {message}")
 
 
 class MicrosoftGraphClient:
-    """Minimal async Microsoft Graph client with retries and pagination."""
+    """Minimal async Microsoft Graph client with retries and pagination.
+
+    Retry policy (shared by JSON requests and streaming downloads): transport
+    errors back off exponentially; 401 clears the token cache and refetches;
+    429/5xx honor ``Retry-After``. Each attempt uses a fresh ``AsyncClient``.
+    """
 
     def __init__(
-        self,
-        token_provider: MicrosoftGraphTokenProvider,
-        *,
-        base_url: str = DEFAULT_GRAPH_BASE_URL,
-        timeout: float = 60.0,
-        max_retries: int = 3,
+        self, token_provider: MicrosoftGraphTokenProvider, *,
+        base_url: str = DEFAULT_GRAPH_BASE_URL, timeout: float = 60.0, max_retries: int = 3,
         transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         user_agent: str = "Hermes-Agent/graph-client",
@@ -67,69 +67,34 @@ class MicrosoftGraphClient:
 
     @classmethod
     def from_env(cls, **kwargs: Any) -> "MicrosoftGraphClient":
-        credentials = GraphCredentials.from_env()
-        provider = MicrosoftGraphTokenProvider(credentials)
-        return cls(provider, **kwargs)
+        return cls(MicrosoftGraphTokenProvider(GraphCredentials.from_env()), **kwargs)
 
-    async def get_json(
-        self,
-        path: str,
-        *,
-        params: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> Any:
-        response = await self._request("GET", path, params=params, headers=headers)
-        return self._decode_json(response)
+    async def get_json(self, path: str, *, params: Params = None, headers: Headers = None) -> Any:
+        return self._decode_json(await self._request("GET", path, params=params, headers=headers))
 
-    async def post_json(
-        self,
-        path: str,
-        *,
-        json_body: Any | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> Any:
-        response = await self._request("POST", path, json_body=json_body, headers=headers)
-        return self._decode_json(response)
+    async def post_json(self, path: str, *, json_body: Any | None = None, headers: Headers = None) -> Any:
+        return self._decode_json(await self._request("POST", path, json_body=json_body, headers=headers))
 
-    async def patch_json(
-        self,
-        path: str,
-        *,
-        json_body: Any | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> Any:
+    async def patch_json(self, path: str, *, json_body: Any | None = None, headers: Headers = None) -> Any:
         response = await self._request("PATCH", path, json_body=json_body, headers=headers)
         if response.status_code == 204 or not response.content:
             return {}
         return self._decode_json(response)
 
-    async def delete(
-        self,
-        path: str,
-        *,
-        headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
+    async def delete(self, path: str, *, headers: Headers = None) -> dict[str, Any]:
         response = await self._request("DELETE", path, headers=headers)
         if response.status_code == 204 or not response.content:
             return {"deleted": True, "status_code": response.status_code}
         return self._decode_json(response)
 
     async def iterate_pages(
-        self,
-        path: str,
-        *,
-        params: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
+        self, path: str, *, params: Params = None, headers: Headers = None
     ) -> AsyncIterator[dict[str, Any]]:
+        # Query params go on the first request only; @odata.nextLink already embeds them.
         next_url: str | None = self._resolve_url(path)
         next_params = dict(params or {})
         while next_url:
-            response = await self._request(
-                "GET",
-                next_url,
-                params=next_params or None,
-                headers=headers,
-            )
+            response = await self._request("GET", next_url, params=next_params or None, headers=headers)
             payload = self._decode_json(response)
             if not isinstance(payload, dict):
                 raise MicrosoftGraphClientError(
@@ -140,11 +105,7 @@ class MicrosoftGraphClient:
             next_params = {}
 
     async def collect_paginated(
-        self,
-        path: str,
-        *,
-        params: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
+        self, path: str, *, params: Params = None, headers: Headers = None
     ) -> list[Any]:
         items: list[Any] = []
         async for page in self.iterate_pages(path, params=params, headers=headers):
@@ -154,180 +115,101 @@ class MicrosoftGraphClient:
         return items
 
     async def download_to_file(
-        self,
-        path: str,
-        destination: str | Path,
-        *,
-        headers: dict[str, str] | None = None,
-        chunk_size: int = 65536,
+        self, path: str, destination: str | Path, *, headers: Headers = None, chunk_size: int = 65536
     ) -> dict[str, Any]:
-        """Download a Graph resource to disk, streaming the response body.
-
-        The body is written chunk-by-chunk via ``response.aiter_bytes`` with
-        the ``httpx.AsyncClient`` kept open for the duration of the iteration,
-        so recordings and other large artifacts do not need to fit in memory.
-        """
+        """Download a Graph resource to disk, streaming the body chunk-by-chunk
+        (recordings and other large artifacts never need to fit in memory).
+        Written to a ``.part`` file and renamed into place only on success."""
         url = self._resolve_url(path)
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp_target = target.with_suffix(target.suffix + ".part")
 
-        attempt = 0
-        last_error: Exception | None = None
-
-        while attempt <= self.max_retries:
-            token = await self.token_provider.get_access_token(
-                force_refresh=attempt > 0 and self._should_refresh_token(last_error)
-            )
-            request_headers = {
-                "Authorization": f"Bearer {token}",
-                "Accept": "*/*",
-                "User-Agent": self.user_agent,
-            }
-            if headers:
-                request_headers.update(headers)
-
+        async def perform(client: httpx.AsyncClient, request_headers: dict[str, str]):
             try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(self.timeout),
-                    transport=self._transport,
-                ) as client:
-                    async with client.stream(
-                        "GET",
-                        url,
-                        headers=request_headers,
-                    ) as response:
-                        if response.status_code >= 400:
-                            # Materialize error body so we can surface a meaningful
-                            # message; error bodies are small.
-                            await response.aread()
-                            api_error = self._build_api_error("GET", url, response)
-                            last_error = api_error
-
-                            if (
-                                response.status_code == 401
-                                and attempt < self.max_retries
-                            ):
-                                self.token_provider.clear_cache()
-                                await self._sleep(
-                                    self._retry_delay(response, attempt)
-                                )
-                                attempt += 1
-                                continue
-
-                            if (
-                                self._should_retry(response)
-                                and attempt < self.max_retries
-                            ):
-                                await self._sleep(
-                                    self._retry_delay(response, attempt)
-                                )
-                                attempt += 1
-                                continue
-
-                            raise api_error
-
-                        content_type = response.headers.get("content-type")
-                        with tmp_target.open("wb") as handle:
-                            async for chunk in response.aiter_bytes(
-                                chunk_size=chunk_size
-                            ):
-                                if chunk:
-                                    handle.write(chunk)
-            except httpx.HTTPError as exc:
-                last_error = exc
+                async with client.stream("GET", url, headers=request_headers) as response:
+                    if response.status_code >= 400:
+                        # Materialize the (small) error body so the message is meaningful.
+                        await response.aread()
+                        return response, None
+                    with tmp_target.open("wb") as handle:
+                        async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                            if chunk:
+                                handle.write(chunk)
+                    return response, response.headers.get("content-type")
+            except httpx.HTTPError:
                 tmp_target.unlink(missing_ok=True)
-                if attempt >= self.max_retries:
-                    raise MicrosoftGraphClientError(
-                        f"Microsoft Graph download failed for GET {url}: {exc}"
-                    ) from exc
-                await self._sleep(self._retry_delay(None, attempt))
-                attempt += 1
-                continue
+                raise
 
-            os.replace(tmp_target, target)
-            return {
-                "path": str(target),
-                "size_bytes": target.stat().st_size,
-                "content_type": content_type,
-            }
-
-        tmp_target.unlink(missing_ok=True)
-        raise MicrosoftGraphClientError(
-            f"Microsoft Graph download exhausted retries for GET {url}."
-        )
+        content_type = await self._with_retries("GET", url, "*/*", None, headers, perform, "download")
+        os.replace(tmp_target, target)
+        return {"path": str(target), "size_bytes": target.stat().st_size, "content_type": content_type}
 
     async def _request(
-        self,
-        method: str,
-        path_or_url: str,
-        *,
-        params: dict[str, Any] | None = None,
-        json_body: Any | None = None,
-        headers: dict[str, str] | None = None,
+        self, method: str, path_or_url: str, *,
+        params: Params = None, json_body: Any | None = None, headers: Headers = None,
     ) -> httpx.Response:
         url = self._resolve_url(path_or_url)
+
+        async def perform(client: httpx.AsyncClient, request_headers: dict[str, str]):
+            response = await client.request(method, url, params=params, json=json_body, headers=request_headers)
+            return response, response
+
+        return await self._with_retries(method, url, "application/json", json_body, headers, perform, "request")
+
+    async def _with_retries(
+        self, method: str, url: str, accept: str, json_body: Any | None, headers: Headers,
+        perform: Callable[[httpx.AsyncClient, dict[str, str]], Awaitable[tuple[httpx.Response, Any]]],
+        kind: str,
+    ) -> Any:
+        """Run ``perform`` (returning ``(response, result)``) under the retry policy.
+
+        ``kind`` ("request"/"download") only labels the transport-failure messages.
+        A ``MicrosoftGraphAPIError`` for the failing status is raised once retries
+        are exhausted or the status is not retryable; only a 401 forces a token refresh.
+        """
         attempt = 0
         last_error: Exception | None = None
 
         while attempt <= self.max_retries:
             token = await self.token_provider.get_access_token(
-                force_refresh=attempt > 0 and self._should_refresh_token(last_error)
+                force_refresh=attempt > 0
+                and isinstance(last_error, MicrosoftGraphAPIError)
+                and last_error.status_code == 401
             )
-            request_headers = {
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-                "User-Agent": self.user_agent,
-            }
+            request_headers = {"Authorization": f"Bearer {token}", "Accept": accept, "User-Agent": self.user_agent}
             if json_body is not None:
                 request_headers["Content-Type"] = "application/json"
             if headers:
                 request_headers.update(headers)
 
             try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(self.timeout),
-                    transport=self._transport,
-                ) as client:
-                    response = await client.request(
-                        method,
-                        url,
-                        params=params,
-                        json=json_body,
-                        headers=request_headers,
-                    )
+                async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout), transport=self._transport) as client:
+                    response, result = await perform(client, request_headers)
             except httpx.HTTPError as exc:
                 last_error = exc
                 if attempt >= self.max_retries:
                     raise MicrosoftGraphClientError(
-                        f"Microsoft Graph request failed for {method} {url}: {exc}"
+                        f"Microsoft Graph {kind} failed for {method} {url}: {exc}"
                     ) from exc
                 await self._sleep(self._retry_delay(None, attempt))
                 attempt += 1
                 continue
 
             if response.status_code < 400:
-                return response
+                return result
 
-            api_error = self._build_api_error(method, url, response)
-            last_error = api_error
-
-            if response.status_code == 401 and attempt < self.max_retries:
-                self.token_provider.clear_cache()
+            api_error = last_error = self._build_api_error(method, url, response)
+            status = response.status_code
+            if attempt < self.max_retries and (status in (401, 429) or 500 <= status < 600):
+                if status == 401:
+                    self.token_provider.clear_cache()
                 await self._sleep(self._retry_delay(response, attempt))
                 attempt += 1
                 continue
-
-            if self._should_retry(response) and attempt < self.max_retries:
-                await self._sleep(self._retry_delay(response, attempt))
-                attempt += 1
-                continue
-
             raise api_error
 
-        raise MicrosoftGraphClientError(
-            f"Microsoft Graph request exhausted retries for {method} {url}."
-        )
+        raise MicrosoftGraphClientError(f"Microsoft Graph {kind} exhausted retries for {method} {url}.")
 
     def _resolve_url(self, path_or_url: str) -> str:
         if path_or_url.startswith(("http://", "https://")):
@@ -346,16 +228,6 @@ class MicrosoftGraphClient:
             ) from exc
 
     @staticmethod
-    def _should_retry(response: httpx.Response | None) -> bool:
-        if response is None:
-            return True
-        return response.status_code == 429 or 500 <= response.status_code < 600
-
-    @staticmethod
-    def _should_refresh_token(error: Exception | None) -> bool:
-        return isinstance(error, MicrosoftGraphAPIError) and error.status_code == 401
-
-    @staticmethod
     def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
         if response is not None:
             retry_after = parse_retry_after_seconds(response.headers)
@@ -364,37 +236,17 @@ class MicrosoftGraphClient:
         return min(8.0, 0.5 * (2 ** attempt))
 
     @staticmethod
-    def _build_api_error(
-        method: str,
-        url: str,
-        response: httpx.Response,
-    ) -> MicrosoftGraphAPIError:
-        payload: Any = None
+    def _build_api_error(method: str, url: str, response: httpx.Response) -> MicrosoftGraphAPIError:
         message = response.text.strip() or "unknown error"
         try:
-            payload = response.json()
+            payload: Any = response.json()
         except ValueError:
             payload = None
-
         if isinstance(payload, dict):
-            error = payload.get("error")
-            if isinstance(error, dict):
-                code = error.get("code")
-                inner_message = error.get("message")
-                if code and inner_message:
-                    message = f"{code}: {inner_message}"
-                elif inner_message:
-                    message = str(inner_message)
-            elif isinstance(error, str):
-                message = error
-
-        retry_after: float | None = parse_retry_after_seconds(response.headers)
-
+            detail = format_graph_error(payload.get("error"))
+            if detail is not None:
+                message = detail
         return MicrosoftGraphAPIError(
-            response.status_code,
-            method,
-            url,
-            message,
-            retry_after_seconds=retry_after,
-            payload=payload,
+            response.status_code, method, url, message,
+            retry_after_seconds=parse_retry_after_seconds(response.headers), payload=payload,
         )

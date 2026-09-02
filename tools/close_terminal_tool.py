@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """Close a read-only agent terminal tab in the Hermes desktop GUI.
 
-Each ``terminal(background=true)`` process is mirrored as a read-only tab in the
-desktop's terminal pane. This tool lets the agent drop a tab it no longer needs
-to show — WITHOUT killing the process (use ``process(action='kill')`` for that).
-The output keeps buffering and the user can reopen the tab from the status stack.
-
-It routes through the process registry's ``on_close`` sink, which the desktop
-gateway wires to emit a ``terminal.close`` event the renderer handles. Like
-``read_terminal`` it lives in the ``desktop_ui`` toolset, which the GUI gateway
-enables only for desktop-sourced sessions, so it never appears outside the GUI.
+Each ``terminal(background=true)`` process is mirrored as a read-only tab; this
+drops the tab WITHOUT killing the process (output keeps buffering, the user can
+reopen it from the status stack).  Routes through the process registry's
+``on_close`` sink, which the desktop gateway wires to a ``terminal.close`` event.
+Lives in the ``desktop_ui`` toolset, enabled only for desktop-sourced sessions.
 """
 
 import json

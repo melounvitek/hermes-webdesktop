@@ -1,27 +1,10 @@
-"""Shared FAL.ai SDK plumbing.
+"""Shared FAL.ai SDK plumbing: lazy import, managed-gateway sync client, small helpers.
 
-Holds the stateless atoms that every FAL-backed tool needs:
-
-* :func:`import_fal_client` — lazy import + ``lazy_deps`` integration so
-  ``fal_client`` isn't pulled at cold start (it added ~64 ms per CLI
-  invocation when imported eagerly).
-* :class:`_ManagedFalSyncClient` — wrapper that drives a Nous-managed
-  fal-queue gateway through the standard ``fal_client.SyncClient``
-  primitives.
-* :func:`_normalize_fal_queue_url_format`, :func:`_extract_http_status`
-  — small helpers used by both the managed client wrapper and
-  ``_submit_fal_request``.
-
-Stateful pieces (cache globals, ``_managed_fal_client*`` selectors,
-``_submit_fal_request``) intentionally stay on
-:mod:`tools.image_generation_tool`. That module is the patch target for
-existing test suites (``tests/tools/test_image_generation.py``,
-``tests/tools/test_managed_media_gateways.py``) and for the
-``plugins/image_gen/fal/`` plugin's ``_it`` indirection — moving the
-caches here would silently defeat ``monkeypatch.setattr(image_tool,
-"_managed_fal_client", None)`` because the lookups would go against
-``fal_common``'s namespace instead. See the per-rule walkthrough at
-issue #26241 for details.
+Stateful pieces (cache globals, ``_managed_fal_client*``, ``_submit_fal_request``)
+intentionally stay on :mod:`tools.image_generation_tool`: it is the patch target
+for the test suites and for ``plugins/image_gen/fal/``'s ``_it`` indirection, so
+moving the caches here would silently defeat
+``monkeypatch.setattr(image_tool, "_managed_fal_client", None)``.
 """
 
 from __future__ import annotations
@@ -31,15 +14,11 @@ from urllib.parse import urlencode
 
 
 def import_fal_client() -> Any:
-    """Import ``fal_client`` (via ``lazy_deps`` when available) and return
-    the module reference.
+    """Import ``fal_client`` (via ``lazy_deps`` when available); raises ImportError if unavailable.
 
-    Callers are responsible for caching the result on their own module
-    global — keeping per-module globals lets tests monkey-patch the
-    target module's ``fal_client`` attribute and have the patched value
-    stick for that module's call sites.
-
-    Raises :class:`ImportError` if the package is genuinely unavailable.
+    Not imported at cold start (it cost ~64 ms per CLI invocation). Callers
+    cache the result on their own module global so tests can monkeypatch that
+    module's ``fal_client`` attribute and have it stick for its call sites.
     """
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
@@ -60,12 +39,7 @@ def _normalize_fal_queue_url_format(queue_run_origin: str) -> str:
 
 
 def _extract_http_status(exc: BaseException) -> Optional[int]:
-    """Return an HTTP status code from httpx/fal exceptions, else None.
-
-    Defensive across exception shapes — httpx.HTTPStatusError exposes
-    ``.response.status_code`` while fal_client wrappers may expose
-    ``.status_code`` directly.
-    """
+    """HTTP status from httpx (``.response.status_code``) or fal_client (``.status_code``) exceptions, else None."""
     response = getattr(exc, "response", None)
     if response is not None:
         status = getattr(response, "status_code", None)
@@ -78,13 +52,10 @@ def _extract_http_status(exc: BaseException) -> Optional[int]:
 
 
 class _ManagedFalSyncClient:
-    """Small per-instance wrapper around ``fal_client.SyncClient`` for
-    managed queue hosts.
+    """Per-instance wrapper driving a Nous-managed fal-queue gateway via ``fal_client.SyncClient`` primitives.
 
-    The wrapper carries its own ``fal_client`` module reference instead
-    of reaching into a module global, so callers stay in control of
-    which module's ``fal_client`` is in scope (matters for the test
-    patches that swap the legacy module's ``fal_client`` attribute).
+    Carries its own ``fal_client`` reference instead of a module global so the
+    caller decides which module's (possibly test-patched) ``fal_client`` is used.
     """
 
     def __init__(self, fal_client: Any, *, key: str, queue_run_origin: str):

@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """Read the in-app terminal pane in the Hermes desktop GUI.
 
-The embedded terminal's buffer lives in the desktop renderer (xterm.js), so this
-tool round-trips through the gateway's blocking-prompt bridge — the same one
-`clarify` uses: tui_gateway emits ``terminal.read.request``, the renderer answers
-with ``terminal.read.respond``. This module is just schema + a thin dispatcher
-over the platform-injected callback.
-
-Lives in the ``desktop_ui`` toolset, which the GUI gateway enables only for
-desktop-sourced sessions.
+The buffer lives in the desktop renderer (xterm.js), so this round-trips through
+the gateway's blocking-prompt bridge (as `clarify` does): tui_gateway emits
+``terminal.read.request``, the renderer answers ``terminal.read.respond``.  Lives
+in the ``desktop_ui`` toolset, enabled only for desktop-sourced sessions.
 """
 
 import json

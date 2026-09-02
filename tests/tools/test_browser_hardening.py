@@ -301,11 +301,11 @@ class TestScrollOptimization:
 class TestEmptyStdoutFailure:
 
     def test_empty_stdout_returns_failure(self):
-        """Verify _run_browser_command returns failure on empty stdout."""
+        """Verify the command-output interpreter returns failure on empty stdout."""
         import tools.browser_tool as bt
-        src = inspect.getsource(bt._run_browser_command)
+        src = inspect.getsource(bt._interpret_browser_command_output)
         assert "returned no output" in src, \
-            "_run_browser_command should treat empty stdout as failure"
+            "_interpret_browser_command_output should treat empty stdout as failure"
 
     def test_empty_ok_commands_is_module_level_frozenset(self):
         """_EMPTY_OK_COMMANDS should be a module-level frozenset, not defined inside a function."""

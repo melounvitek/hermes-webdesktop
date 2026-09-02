@@ -246,7 +246,7 @@ class TestTranscribeLocalCommand:
             captured["env"] = kwargs["env"]
             return Proc()
 
-        monkeypatch.setattr("tools.transcription_tools.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("tools.tts_command_provider.subprocess.Popen", fake_popen)
 
         from tools.transcription_tools import _run_command_stt
 

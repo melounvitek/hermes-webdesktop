@@ -43,23 +43,15 @@ class TestCacheRoundTrip:
         assert entry is not None
         assert msc.tools_from_cache_entry(entry) == tools
         assert msc.utility_tools_from_cache_entry(entry) == []
-        assert msc.has_cached_entry("srv", "fp1")
 
     def test_fingerprint_mismatch_returns_none(self, monkeypatch, tmp_path):
         self._isolate(monkeypatch, tmp_path)
         msc.write_cache_entry("srv", "fp1", tools=[], utility_tools=[])
         assert msc.get_cached_entry("srv", "OTHER") is None
-        assert not msc.has_cached_entry("srv", "OTHER")
 
     def test_missing_server_returns_none(self, monkeypatch, tmp_path):
         self._isolate(monkeypatch, tmp_path)
         assert msc.get_cached_entry("nope", "fp") is None
-
-    def test_clear_cache_entry(self, monkeypatch, tmp_path):
-        self._isolate(monkeypatch, tmp_path)
-        msc.write_cache_entry("srv", "fp1", tools=[], utility_tools=[])
-        msc.clear_cache_entry("srv")
-        assert msc.get_cached_entry("srv", "fp1") is None
 
     def test_corrupt_cache_file_is_tolerated(self, monkeypatch, tmp_path):
         self._isolate(monkeypatch, tmp_path)
@@ -67,7 +59,7 @@ class TestCacheRoundTrip:
         assert msc.get_cached_entry("srv", "fp") is None
         # And writes recover the file.
         msc.write_cache_entry("srv", "fp", tools=[], utility_tools=[])
-        assert msc.has_cached_entry("srv", "fp")
+        assert msc.get_cached_entry("srv", "fp") is not None
 
     def test_malformed_entry_shapes_are_tolerated(self):
         assert msc.tools_from_cache_entry({"tools": "nope"}) == []

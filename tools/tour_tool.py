@@ -1,28 +1,16 @@
 #!/usr/bin/env python3
-"""Run a guided tour (highlight + narrate UI elements) in the Hermes desktop GUI.
+"""Guided tour (highlight + narrate UI elements) in the Hermes desktop GUI.
 
-One generic tool, no baked-in tour definitions: the agent discovers what is on
-screen (``action="targets"``), then highlights any element by CSS selector with
-its own title/text — either one step at a time (``show``, agent-paced) or as a
-full step list the user pages through with Next/Prev (``start``).
+Generic, no baked-in tours: the agent discovers targets (``action="targets"``)
+then highlights by CSS selector one step at a time (``show``) or hands over a
+step list the user pages with Next/Prev (``start``). Surfaces ``app`` (Hermes'
+own DOM) and ``preview`` (the in-app browser page) share the renderer's driver.js.
+Round-trips through the gateway blocking-prompt bridge (``tour.request`` /
+``tour.respond``) so the agent learns whether the selector matched.
 
-Two surfaces share the same engine (driver.js in the renderer):
-
-- ``surface="app"`` — the Hermes desktop app's own DOM (tours of Hermes itself).
-- ``surface="preview"`` — the page loaded in the in-app browser/preview pane
-  (tours of ANY web app, e.g. a project open via open_preview).
-
-Round-trips through the gateway's blocking-prompt bridge like ``read_preview``:
-tui_gateway emits ``tour.request``, the renderer drives driver.js (injecting it
-into the preview's webview when needed) and answers ``tour.respond`` with the
-outcome, so the agent knows whether the selector matched. This module is just
-schema + a thin dispatcher over the platform-injected callback.
-
-Lives in the ``desktop_ui`` toolset, which the GUI gateway enables only for
-desktop-sourced sessions, and withdraws itself when the user has switched tours
-off (Settings → Appearance). A tour takes the whole screen, so "no thanks" has
-to mean the model is never told the tool exists — a switch that only made the
-call fail would leave Hermes offering walkthroughs it cannot give.
+Lives in ``desktop_ui`` (GUI sessions only) and withdraws itself when the user
+turns tours off: a tour takes the whole screen, so "off" must mean the model is
+never told the tool exists rather than being offered a call that fails.
 """
 
 import json
@@ -63,10 +51,7 @@ def tour_tool(
         return tool_error(f"side must be one of: {', '.join(SIDES)}.")
 
     # Every highlighted moment needs something to point at or something to say.
-    def _empty(step: dict) -> bool:
-        return not (step.get("selector") or step.get("title") or step.get("text"))
-
-    if verb == "show" and _empty({"selector": selector, "title": title, "text": text}):
+    if verb == "show" and not (selector or title or text):
         return tool_error("show needs a selector (and/or title/text for the popover).")
 
     if verb == "start":
@@ -75,23 +60,14 @@ def tour_tool(
         for i, step in enumerate(steps):
             if not isinstance(step, dict):
                 return tool_error(f"steps[{i}] must be an object.")
-            if _empty(step):
+            if not (step.get("selector") or step.get("title") or step.get("text")):
                 return tool_error(f"steps[{i}] needs a selector and/or title/text.")
 
-    payload = {
-        key: val
-        for key, val in (
-            ("action", verb),
-            ("surface", where),
-            ("selector", selector),
-            ("title", title),
-            ("text", text),
-            ("side", side),
-            ("steps", steps),
-            ("step_index", step_index),
-        )
-        if val is not None
+    fields = {
+        "action": verb, "surface": where, "selector": selector, "title": title,
+        "text": text, "side": side, "steps": steps, "step_index": step_index,
     }
+    payload = {key: val for key, val in fields.items() if val is not None}
 
     try:
         raw = callback(payload)
@@ -130,8 +106,8 @@ _STEP_SCHEMA = {
 
 TOUR_SCHEMA = {
     "name": "gui_tour",
-    # Dieted (#95681): targets-first flow + stable-selector preference kept
-    # (pre-effect: skipping them means guessed selectors on re-rendering UI).
+    # Description keeps the targets-first flow + stable-selector preference:
+    # without them the model guesses selectors on re-rendering UI.
     "description": (
         "Guided tour in the desktop GUI: dim the screen, highlight an "
         "element, attach a titled popover. Surfaces: 'app' (Hermes itself) "

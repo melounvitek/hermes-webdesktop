@@ -141,7 +141,7 @@ class TestSmartApprovePolicyInjection(unittest.TestCase):
         mock_call_llm.side_effect = TimeoutError("stalled provider")
         mock_cfg.return_value = {"mode": "smart"}
 
-        with patch("tools.approval.logger") as mock_logger:
+        with patch("tools.approval_smart.logger") as mock_logger:
             assert _smart_approve("echo hi", "flagged") == "escalate"
 
         assert mock_logger.warning.called

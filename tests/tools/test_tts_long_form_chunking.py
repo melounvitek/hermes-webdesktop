@@ -141,7 +141,7 @@ class TestBuildAudioDeliveryFiles:
         out = str(tmp_path / "output.mp3")
         profile = AudioDeliveryProfile(platform="default", max_file_bytes=10000)
 
-        with patch("tools.tts_tool._concat_audio_files") as mock_concat:
+        with patch("tools.tts_tool_delivery._concat_audio_files") as mock_concat:
             mock_concat.return_value = out
             # Copy the first file to output so the size check passes
             Path(out).write_bytes(b"\x00" * 300)

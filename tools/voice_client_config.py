@@ -1,33 +1,26 @@
 """Resolve the active profile's STT/TTS config for CLIENT-DIRECT voice.
 
-The desktop app can cut the audio relay hop (mic → gateway → provider and
-provider → gateway → speaker) by calling the voice providers directly with
-the profile's own credentials, fetched over the authenticated REST channel
-at voice-session start. This module is the single resolver behind
-``GET /api/audio/voice-config``: it reuses the exact provider/key/model/
-language resolution chains ``tools.transcription_tools`` and
-``tools.tts_tool`` use, so what the client receives is byte-for-byte what
-the gateway itself would use for the same request.
+The desktop can skip the audio relay hop (mic → gateway → provider) by calling
+voice providers directly with the profile's own credentials, fetched over the
+authenticated REST channel at voice-session start. This is the single resolver
+behind ``GET /api/audio/voice-config``; it reuses the exact provider/key/model/
+language chains of ``tools.transcription_tools`` and ``tools.tts_tool`` so the
+client receives byte-for-byte what the gateway itself would use.
 
 Design rules:
 
-* **Same-trust boundary.** The endpoint is profile-scoped and rides the
-  same auth as every other REST route. A client that can reach it can
-  already drive the agent (terminal included), so handing it the voice
-  key is not a privilege escalation — but keys still never touch client
-  disk (the desktop holds them in renderer memory only) and are never
-  logged here.
-* **Relay is the floor, not an error.** Providers that can only run on
-  the gateway host (local whisper, edge-tts, command providers, plugins)
-  resolve to ``{"mode": "relay"}`` and the desktop falls back to the
-  existing ``/api/audio/*`` relay endpoints. A resolution failure also
-  degrades to relay — the relay endpoint will surface the real error.
-* **No new key stores.** Everything is read through the live resolvers;
-  nothing is persisted anywhere new.
+* **Same-trust boundary.** The endpoint is profile-scoped and rides the same
+  auth as every REST route — a client that can reach it can already drive the
+  agent, so handing it the voice key is no escalation. Keys still never touch
+  client disk (renderer memory only) and are never logged here.
+* **Relay is the floor, not an error.** Server-host-only providers (local
+  whisper, edge-tts, command providers, plugins) resolve to ``{"mode": "relay"}``
+  and the desktop falls back to ``/api/audio/*``. A resolution failure also
+  degrades to relay — the relay endpoint surfaces the real error.
+* **No new key stores.** Everything is read through the live resolvers.
 
-Config gate: ``voice.client_direct`` (config.yaml, default ``true``).
-When false every provider reports relay and the desktop behaves exactly
-as before this feature.
+Config gate: ``voice.client_direct`` (config.yaml, default ``true``). When
+false every provider reports relay and the desktop behaves as before.
 """
 
 from __future__ import annotations
@@ -74,9 +67,38 @@ def _relay(reason: str) -> Dict[str, Any]:
     return {"mode": "relay", "reason": reason}
 
 
+def _section(config: Any, provider: str) -> Dict[str, Any]:
+    """The provider's own sub-dict of an STT/TTS config, shape-guarded."""
+    section = config.get(provider) if isinstance(config, dict) else None
+    return section if isinstance(section, dict) else {}
+
+
+def _direct(wire: str, provider: str, base_url: Any, api_key: str, model: Any, **extra: Any) -> Dict[str, Any]:
+    return {"mode": "direct", "wire": wire, "provider": provider, "base_url": base_url,
+            "api_key": api_key, "model": model, **extra}
+
+
+def _deepinfra_model(section: Dict[str, Any], kind: str) -> Optional[str]:
+    """Configured model, else the first catalog model of ``kind`` (stt/tts)."""
+    from hermes_cli.models import deepinfra_model_ids
+
+    model = section.get("model")
+    if not model:
+        candidates = deepinfra_model_ids(kind)
+        model = candidates[0] if candidates else None
+    return model
+
+
 # ---------------------------------------------------------------------------
 # STT
 # ---------------------------------------------------------------------------
+
+# provider -> (env var, default-model attr on transcription_tools, base_url).
+# ``base_url`` is a transcription_tools attr name or a literal URL.
+_STT_KEYED: Dict[str, tuple[str, str, str]] = {
+    "groq": ("GROQ_API_KEY", "DEFAULT_GROQ_STT_MODEL", "GROQ_BASE_URL"),
+    "mistral": ("MISTRAL_API_KEY", "DEFAULT_MISTRAL_STT_MODEL", "https://api.mistral.ai/v1"),
+}
 
 
 def _resolve_stt_client_config() -> Dict[str, Any]:
@@ -99,22 +121,21 @@ def _resolve_stt_client_config() -> Dict[str, Any]:
         provider, stt_config,
         extra_keys=("language_code",) if provider == "elevenlabs" else (),
     )
-    section = stt_config.get(provider) if isinstance(stt_config, dict) else None
-    section = section if isinstance(section, dict) else {}
+    section = _section(stt_config, provider)
 
-    if provider == "groq":
-        api_key = tt._resolve_provider_key("GROQ_API_KEY", "groq")
+    def direct(wire: str, base_url: Any, api_key: str, model: Any) -> Dict[str, Any]:
+        return _direct(wire, provider, base_url, api_key, model, language=language)
+
+    def env_base_url(env_var: str, default: str) -> str:
+        return str(section.get("base_url") or tt.get_env_value(env_var) or default).strip().rstrip("/")
+
+    if provider in _STT_KEYED:
+        env_var, default_model, base = _STT_KEYED[provider]
+        api_key = tt._resolve_provider_key(env_var, provider)
         if not api_key:
             return _relay("no credentials")
-        return {
-            "mode": "direct",
-            "wire": STT_WIRE_OPENAI,
-            "provider": "groq",
-            "base_url": tt.GROQ_BASE_URL,
-            "api_key": api_key,
-            "model": section.get("model") or tt.DEFAULT_GROQ_STT_MODEL,
-            "language": language,
-        }
+        return direct(STT_WIRE_OPENAI, getattr(tt, base, base), api_key,
+                      section.get("model") or getattr(tt, default_model))
 
     if provider == "openai":
         # Handles the Nous-managed selection too: the resolver returns the
@@ -124,29 +145,7 @@ def _resolve_stt_client_config() -> Dict[str, Any]:
             api_key, base_url = tt._resolve_openai_audio_client_config()
         except ValueError as exc:
             return _relay(f"openai resolution failed: {exc}")
-        return {
-            "mode": "direct",
-            "wire": STT_WIRE_OPENAI,
-            "provider": "openai",
-            "base_url": base_url,
-            "api_key": api_key,
-            "model": section.get("model") or tt.DEFAULT_STT_MODEL,
-            "language": language,
-        }
-
-    if provider == "mistral":
-        api_key = tt._resolve_provider_key("MISTRAL_API_KEY", "mistral")
-        if not api_key:
-            return _relay("no credentials")
-        return {
-            "mode": "direct",
-            "wire": STT_WIRE_OPENAI,
-            "provider": "mistral",
-            "base_url": "https://api.mistral.ai/v1",
-            "api_key": api_key,
-            "model": section.get("model") or tt.DEFAULT_MISTRAL_STT_MODEL,
-            "language": language,
-        }
+        return direct(STT_WIRE_OPENAI, base_url, api_key, section.get("model") or tt.DEFAULT_STT_MODEL)
 
     if provider == "xai":
         # API key only. An xAI OAuth bearer refreshes server-side mid-session;
@@ -154,61 +153,26 @@ def _resolve_stt_client_config() -> Dict[str, Any]:
         api_key = str(tt.get_env_value("XAI_API_KEY") or "").strip()
         if not api_key:
             return _relay("xai oauth (server-managed) or no credentials")
-        base_url = str(
-            section.get("base_url")
-            or tt.get_env_value("XAI_STT_BASE_URL")
-            or tt.XAI_STT_BASE_URL
-        ).strip().rstrip("/")
-        return {
-            "mode": "direct",
-            "wire": STT_WIRE_XAI,
-            "provider": "xai",
-            "base_url": base_url,
-            "api_key": api_key,
-            "model": None,
-            "language": language,
-        }
+        return direct(STT_WIRE_XAI, env_base_url("XAI_STT_BASE_URL", tt.XAI_STT_BASE_URL), api_key, None)
 
     if provider == "elevenlabs":
         api_key = tt._resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs")
         if not api_key:
             return _relay("no credentials")
-        base_url = str(
-            section.get("base_url")
-            or tt.get_env_value("ELEVENLABS_STT_BASE_URL")
-            or tt.ELEVENLABS_STT_BASE_URL
-        ).strip().rstrip("/")
-        return {
-            "mode": "direct",
-            "wire": STT_WIRE_ELEVENLABS,
-            "provider": "elevenlabs",
-            "base_url": base_url,
-            "api_key": api_key,
-            "model": section.get("model") or tt.DEFAULT_ELEVENLABS_STT_MODEL,
-            "language": language,
-        }
+        base_url = env_base_url("ELEVENLABS_STT_BASE_URL", tt.ELEVENLABS_STT_BASE_URL)
+        return direct(STT_WIRE_ELEVENLABS, base_url, api_key,
+                      section.get("model") or tt.DEFAULT_ELEVENLABS_STT_MODEL)
 
     if provider == "deepinfra":
         api_key = tt._resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
         if not api_key:
             return _relay("no credentials")
-        from hermes_cli.models import deepinfra_base_url, deepinfra_model_ids
+        from hermes_cli.models import deepinfra_base_url
 
-        model = section.get("model")
-        if not model:
-            candidates = deepinfra_model_ids("stt")
-            model = candidates[0] if candidates else None
+        model = _deepinfra_model(section, "stt")
         if not model:
             return _relay("no deepinfra stt model")
-        return {
-            "mode": "direct",
-            "wire": STT_WIRE_OPENAI,
-            "provider": "deepinfra",
-            "base_url": deepinfra_base_url(section),
-            "api_key": api_key,
-            "model": model,
-            "language": language,
-        }
+        return direct(STT_WIRE_OPENAI, deepinfra_base_url(section), api_key, model)
 
     return _relay(f"provider {provider!r} has no client wire")
 
@@ -233,8 +197,7 @@ def _resolve_tts_client_config() -> Dict[str, Any]:
             api_key, base_url, is_managed = tts._resolve_openai_audio_client_config()
         except ValueError as exc:
             return _relay(f"openai resolution failed: {exc}")
-        oai = tts_config.get("openai") if isinstance(tts_config, dict) else None
-        oai = oai if isinstance(oai, dict) else {}
+        oai = _section(tts_config, "openai")
         model = oai.get("model") or tts.DEFAULT_OPENAI_MODEL
         config_base = oai.get("base_url")
         if config_base:
@@ -248,58 +211,33 @@ def _resolve_tts_client_config() -> Dict[str, Any]:
             speed = float(oai.get("speed", speed_default))
         except (TypeError, ValueError):
             speed = 1.0
-        return {
-            "mode": "direct",
-            "wire": TTS_WIRE_OPENAI,
-            "provider": "openai",
-            "base_url": base_url,
-            "api_key": api_key,
-            "model": model,
-            "voice": oai.get("voice") or tts.DEFAULT_OPENAI_VOICE,
-            "speed": speed,
-        }
+        return _direct(TTS_WIRE_OPENAI, "openai", base_url, api_key, model,
+                       voice=oai.get("voice") or tts.DEFAULT_OPENAI_VOICE, speed=speed)
 
     if provider == "elevenlabs":
         api_key = tts._resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs")
         if not api_key:
             return _relay("no credentials")
-        el = tts_config.get("elevenlabs") if isinstance(tts_config, dict) else None
-        el = el if isinstance(el, dict) else {}
-        return {
-            "mode": "direct",
-            "wire": TTS_WIRE_ELEVENLABS,
-            "provider": "elevenlabs",
-            "base_url": str(el.get("base_url") or "https://api.elevenlabs.io/v1").rstrip("/"),
-            "api_key": api_key,
-            "model": el.get("model_id") or tts.DEFAULT_ELEVENLABS_MODEL_ID,
-            "voice": el.get("voice_id") or tts.DEFAULT_ELEVENLABS_VOICE_ID,
-            "speed": None,
-        }
+        el = _section(tts_config, "elevenlabs")
+        return _direct(
+            TTS_WIRE_ELEVENLABS, "elevenlabs",
+            str(el.get("base_url") or "https://api.elevenlabs.io/v1").rstrip("/"),
+            api_key, el.get("model_id") or tts.DEFAULT_ELEVENLABS_MODEL_ID,
+            voice=el.get("voice_id") or tts.DEFAULT_ELEVENLABS_VOICE_ID, speed=None,
+        )
 
     if provider == "deepinfra":
         api_key = tts._resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
         if not api_key:
             return _relay("no credentials")
-        from hermes_cli.models import deepinfra_base_url, deepinfra_model_ids
+        from hermes_cli.models import deepinfra_base_url
 
-        di = tts_config.get("deepinfra") if isinstance(tts_config, dict) else None
-        di = di if isinstance(di, dict) else {}
-        model = di.get("model")
-        if not model:
-            candidates = deepinfra_model_ids("tts")
-            model = candidates[0] if candidates else None
+        di = _section(tts_config, "deepinfra")
+        model = _deepinfra_model(di, "tts")
         if not model:
             return _relay("no deepinfra tts model")
-        return {
-            "mode": "direct",
-            "wire": TTS_WIRE_OPENAI,
-            "provider": "deepinfra",
-            "base_url": deepinfra_base_url(di),
-            "api_key": api_key,
-            "model": model,
-            "voice": di.get("voice") or "af_bella",
-            "speed": None,
-        }
+        return _direct(TTS_WIRE_OPENAI, "deepinfra", deepinfra_base_url(di), api_key, model,
+                       voice=di.get("voice") or "af_bella", speed=None)
 
     # edge / minimax / xai / mistral / gemini / neutts / kittentts / piper:
     # either server-host-only engines or wire shapes the desktop doesn't
@@ -323,15 +261,11 @@ def resolve_client_voice_config() -> Dict[str, Any]:
         disabled = _relay("voice.client_direct disabled")
         return {"stt": disabled, "tts": disabled}
 
-    try:
-        stt = _resolve_stt_client_config()
-    except Exception:
-        logger.exception("client voice-config STT resolution failed")
-        stt = _relay("resolution error")
-    try:
-        tts = _resolve_tts_client_config()
-    except Exception:
-        logger.exception("client voice-config TTS resolution failed")
-        tts = _relay("resolution error")
-
-    return {"stt": stt, "tts": tts}
+    out: Dict[str, Any] = {}
+    for key, resolver in (("stt", _resolve_stt_client_config), ("tts", _resolve_tts_client_config)):
+        try:
+            out[key] = resolver()
+        except Exception:
+            logger.exception("client voice-config %s resolution failed", key.upper())
+            out[key] = _relay("resolution error")
+    return out

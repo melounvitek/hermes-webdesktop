@@ -1,20 +1,12 @@
 #!/usr/bin/env python3
 """Point at something in the Hermes desktop GUI and say one line about it.
 
-The quiet sibling of ``tour``. Same durable ``data-tour`` handles, same
-discovery call (``tour(action="targets")``) — but no scrim, no spotlight, and no
-Next/Prev. Just an accent-lit bubble with an arrow into whatever the tip is
-about, which is the right weight for "that button, there" in the middle of a
-sentence.
+The quiet sibling of ``tour``: same ``data-tour`` handles and discovery call,
+but an arrow bubble with no scrim/spotlight/paging. Fire-and-forget — a tip is
+not a question, so blocking the turn on a round-trip would stall the reply.
 
-Fire-and-forget, unlike ``tour``: a tip is not a question, so blocking the turn
-on a round-trip would stall the reply it belongs to.
-
-Lives in the ``desktop_ui`` toolset, which the GUI gateway enables only for
-desktop-sourced sessions, and withdraws itself entirely when the user has
-turned tips off (Settings → Appearance). Off means the model is never told the
-tool exists — a switch that only made the call fail would leave Hermes
-promising to point at things it cannot point at.
+Lives in ``desktop_ui`` (GUI sessions only) and withdraws itself when the user
+turns tips off, so the model is never offered a tool whose call would fail.
 """
 
 import json
@@ -43,10 +35,7 @@ def tip_tool(text: str, selector: str, title: str = "", side: str = "") -> str:
         return tool_error(f"side must be one of: {', '.join(SIDES)}.")
 
     payload = {"selector": selector, "text": text}
-    if title:
-        payload["title"] = title
-    if side:
-        payload["side"] = side
+    payload.update({k: v for k, v in (("title", title), ("side", side)) if v})
 
     try:
         ok = desktop_ui.emit("tip.show", payload)

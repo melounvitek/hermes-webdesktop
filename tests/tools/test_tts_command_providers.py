@@ -128,7 +128,7 @@ class TestCommandTtsEnv:
             captured["env"] = kwargs["env"]
             return Proc()
 
-        monkeypatch.setattr("tools.tts_tool.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("tools.tts_command_provider.subprocess.Popen", fake_popen)
 
         result = _run_command_tts("echo hi", timeout=1)
 
@@ -347,7 +347,7 @@ class TestRunCommandTts:
             def wait(self, timeout=None):
                 return self.returncode
 
-        with patch("tools.tts_tool.subprocess.Popen", return_value=FakeProcess()):
+        with patch("tools.tts_command_provider.subprocess.Popen", return_value=FakeProcess()):
             result = _run_command_tts("fake tts", timeout=0.25)
 
         assert result.returncode == 0
@@ -524,7 +524,7 @@ class TestCommandTtsEnvPassthrough:
             captured["env"] = kwargs["env"]
             return Proc()
 
-        monkeypatch.setattr("tools.tts_tool.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("tools.tts_command_provider.subprocess.Popen", fake_popen)
 
         result = _run_command_tts(
             "echo hi", timeout=1, env_passthrough=["MY_TTS_API_KEY"]

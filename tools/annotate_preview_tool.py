@@ -1,28 +1,13 @@
 #!/usr/bin/env python3
-"""Leave a mark on the page in the Hermes desktop GUI's in-app browser.
+"""Persistent element annotations in the Hermes desktop GUI's in-app browser.
 
-``drive_preview`` already draws every move it makes — the field it can reach,
-a box round its target, the cursor going there — but those are transients:
-each one stands for a single action and retires itself. That is right for
-narrating a click and no use at all for holding a finding on screen.
-
-This is the deliberate one. An annotation outlines an element — or, with
-``hold``, the entire visible field at once — and stays until the agent takes it
-down, so it can show the user what it found, flag the fields
-it is about to fill, or keep its place while it works elsewhere on the page.
-Named for TouchDesigner's Annotate — the labelled box you drop around part of a
-network to call it out.
-
-Annotations are bound to elements, not coordinates: they ride scrolls and
-reflows, and they go when their element does, so a navigation clears them
-without the agent having to.
-
-Rides the same ``preview.act`` bridge as ``drive_preview`` rather than opening
-a second channel — the renderer already resolves ``@e`` refs and owns the
-overlay, so this is one more verb on a wire that exists.
-
-Lives in the ``desktop_ui`` toolset, which the GUI gateway enables only for
-desktop-sourced sessions.
+``drive_preview`` draws transient marks (one per action, self-retiring). An
+annotation outlines an element — or, with ``hold``, the whole visible field —
+and stays until the agent removes it. Annotations bind to elements, not
+coordinates: they ride scrolls/reflows and vanish with their element, so a
+navigation clears them. Rides the same ``preview.act`` bridge as
+``drive_preview`` (the renderer resolves ``@e`` refs and owns the overlay).
+Lives in the ``desktop_ui`` toolset, enabled only for desktop-sourced sessions.
 """
 
 import json

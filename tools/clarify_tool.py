@@ -1,62 +1,37 @@
 #!/usr/bin/env python3
-"""
-Clarify Tool Module - Interactive Clarifying Questions
+"""Clarify tool: structured multiple-choice / open-ended questions to the user.
 
-Allows the agent to present structured multiple-choice questions or open-ended
-prompts to the user. In CLI mode, choices are navigable with arrow keys. On
-messaging platforms, choices are rendered as a numbered list.
-
-Supports both single-select (radio) and multi-select (checkbox) modes via the
-``multi_select`` parameter.
-
-The actual user-interaction logic lives in the platform layer (cli.py for CLI,
-gateway/run.py for messaging). This module defines the schema, validation, and
-a thin dispatcher that delegates to a platform-provided callback.
+Schema, validation and a thin dispatcher; the UI lives in a platform-provided
+callback (cli.py, gateway/run.py, tui_gateway).
 """
 
+import inspect
 import json
 from typing import Dict, List, Optional, Callable
 
 
-# Maximum number of predefined choices the agent can offer.
-# A 5th "Other (type your answer)" option is always appended by the UI.
-MAX_CHOICES = 4
+MAX_CHOICES = 4  # the UI always appends an "Other (type your answer)" row
+MAX_QUESTIONS = 5  # independent questions per batch call
 
-# Maximum number of independent questions in one batch clarify call.
-MAX_QUESTIONS = 5
-
-# Canonical timeout sentinel returned to the agent when the user never
-# answers. The CLI has always returned this exact text; the batch fallback
-# loop also recognises it (alongside ``None``) as "the user walked away",
-# which aborts the remaining questions instead of pestering one by one.
+# Canonical timeout sentinel. The CLI returns this exact text; the batch loop
+# treats it (like ``None``) as "the user walked away" and aborts remaining questions.
 TIMEOUT_RESPONSE = (
     "The user did not provide a response within the time limit. "
     "Use your best judgement to make the choice and proceed."
 )
 
-# Suffix appended to the first choice so the user can see, at a glance, which
-# option the agent actually recommends. Applied here rather than per-surface so
-# CLI, TUI, desktop, and messaging adapters all render the same label.
+# Applied to the first choice here (not per-surface) so every adapter renders it identically.
 RECOMMENDED_LABEL = "(Recommended)"
 
 
 def _flatten_choice(c) -> str:
-    """Coerce a single choice into its user-facing display string.
+    """Coerce one choice to display text.
 
-    The schema declares choices as bare strings, but LLMs sometimes emit
-    dict-shaped choices like ``[{"description": "..."}]``. A naive ``str(c)``
-    turns the whole dict into its Python repr — ``{'description': '...'}`` —
-    which then leaks onto every surface that renders the choice (CLI panel,
-    Discord buttons, Telegram numbered list) AND is returned verbatim as the
-    user's answer. Normalising here, at the one platform-agnostic entry point,
-    fixes the whole class in one place instead of per-adapter.
-
-    Dict unwrap order is the canonical LLM tool-call user-facing keys:
-    ``label`` → ``description`` → ``text`` → ``title``. ``name`` and ``value``
-    are deliberately excluded — they're component-shaped fields that could
-    carry raw enum values or short identifiers, not human-readable labels. A
-    dict with none of the canonical keys is dropped (returns ""), since a
-    garbage label is worse than no choice at all.
+    LLMs sometimes emit dict-shaped choices; ``str(c)`` would leak the dict repr
+    onto every surface and back as the answer, so normalise once here. Unwrap
+    order ``label`` > ``description`` > ``text`` > ``title``; ``name``/``value``
+    are excluded (component fields carrying raw enums, not labels). A dict with
+    none of these becomes "" and is dropped — no choice beats a garbage label.
     """
     if c is None:
         return ""
@@ -74,18 +49,9 @@ def _flatten_choice(c) -> str:
 
 
 def mark_recommended(choices: List[str]) -> List[str]:
-    """Label the first choice as the agent's recommendation.
+    """Suffix the first choice (the schema says best-first) with RECOMMENDED_LABEL.
 
-    The schema tells the model to order ``choices`` best-first, so element 0 is
-    always the option it would pick itself. Tagging it here — the one
-    platform-agnostic entry point — means every surface (CLI panel, TUI,
-    desktop card, Telegram buttons) reads the same way without four copies of
-    the same string concatenation, and the label can never drift between them.
-
-    Idempotent: a model that writes its own "(recommended)" into the choice is
-    left alone rather than getting the suffix twice. A lone choice isn't a
-    recommendation — there's nothing to prefer it over — so single-choice lists
-    pass through untouched.
+    Idempotent, and a lone choice is left untouched (nothing to prefer it over).
     """
     if len(choices) < 2:
         return choices
@@ -96,60 +62,40 @@ def mark_recommended(choices: List[str]) -> List[str]:
 
 
 def strip_recommended(text: str) -> str:
-    """Remove the recommendation label from a resolved answer.
-
-    The user picks the decorated string, but the agent asked about the bare
-    option — returning "Rebase onto main (Recommended)" as ``user_response``
-    would leak presentation into the answer the model reasons about and into
-    anything it echoes back.
-    """
+    """Remove the recommendation label so presentation never leaks into ``user_response``."""
     stripped = str(text).strip()
     if stripped.casefold().endswith(RECOMMENDED_LABEL.casefold()):
         return stripped[: -len(RECOMMENDED_LABEL)].strip()
     return stripped
 
 
-def _invoke_callback(callback, question, choices, multi_select):
-    """Invoke the platform callback, passing multi_select if supported.
-
-    Uses signature inspection (not a ``TypeError`` retry) to decide whether
-    the callback accepts the ``multi_select`` keyword — a retry-on-TypeError
-    approach would re-invoke a *compatible* callback that raised TypeError
-    internally, potentially prompting the user twice.
-    """
-    import inspect
-
-    accepts_multi = False
+def _accepts_kwarg(callback, name: str) -> bool:
+    """Signature-inspect (never a TypeError retry, which could re-prompt the user)
+    whether ``callback`` takes ``name`` or ``**kwargs``. Non-introspectable
+    callables are conservatively treated as legacy."""
     try:
-        sig = inspect.signature(callback)
-        params = sig.parameters
-        accepts_multi = "multi_select" in params or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-        )
+        params = inspect.signature(callback).parameters
     except (TypeError, ValueError):
-        # Builtins / C callables without introspectable signatures:
-        # be conservative and use the legacy 2-arg form.
-        accepts_multi = False
+        return False
+    return name in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
 
-    if accepts_multi:
+
+def _invoke_callback(callback, question, choices, multi_select):
+    """Invoke the platform callback, passing multi_select if supported."""
+    if _accepts_kwarg(callback, "multi_select"):
         return callback(question, choices, multi_select=multi_select)
     return callback(question, choices)
 
 
 def _parse_multi_select_response(raw_response) -> List[str]:
-    """Parse a multi-select response into a list of cleaned choice strings.
-
-    Handles three forms:
-      - Already a list  →  stringify + strip each element
-      - JSON array      →  parse and strip
-      - Comma-separated →  split, strip, drop empties
-    """
+    """Parse a list / JSON array / comma-separated reply into stripped non-empty strings."""
     if isinstance(raw_response, list):
         return [str(r).strip() for r in raw_response if str(r).strip()]
 
     raw = str(raw_response).strip()
 
-    # Try JSON array
     if raw.startswith("["):
         try:
             parsed = json.loads(raw)
@@ -157,33 +103,29 @@ def _parse_multi_select_response(raw_response) -> List[str]:
                 return [str(p).strip() for p in parsed if str(p).strip()]
         except json.JSONDecodeError:
             pass
-
-    # Fall back to comma-separated
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
-# =============================================================================
-# Batch (multi-question) support — issue #18450
-# =============================================================================
+def _clean_choices(choices: list) -> Optional[List[str]]:
+    """Flatten, drop empties, cap at MAX_CHOICES; None when nothing survives (open-ended)."""
+    cleaned = [s for s in (_flatten_choice(c) for c in choices) if s]
+    return cleaned[:MAX_CHOICES] or None
+
+
+def _is_timeout(raw) -> bool:
+    return raw is None or (isinstance(raw, str) and raw.strip() == TIMEOUT_RESPONSE)
+
+
+# --- batch (multi-question) support -----------------------------------------
 
 def _normalize_questions(questions) -> tuple:
-    """Validate and normalize the ``questions`` batch parameter.
+    """Validate the ``questions`` batch param -> ``(normalized, error)``.
 
-    Returns ``(normalized, error)`` where exactly one is non-None, except the
-    empty-list case which returns ``(None, None)`` — an empty array is not an
-    error, it just means "no batch here" and the caller falls back to the
-    single-question path.
-
-    Each normalized entry carries:
-      - ``qid``: stable wire id (``q0``..``qN``, index order). Surfaces key
-        their per-question answers by this; a model-supplied ``id`` is NOT
-        used on the wire (it's unvalidated text) and only echoed in results.
-      - ``id``: the model's optional identifier, or None.
-      - ``question``: stripped question text.
-      - ``choices``: decorated choice list (recommended label applied), or
-        None for open-ended.
-      - ``choices_offered``: the bare list as offered, for the result JSON.
-      - ``multi_select``: honored only when choices exist.
+    An empty list returns ``(None, None)`` (fall back to the single-question
+    path). Each entry carries ``qid`` (stable wire id ``q<index>`` surfaces key
+    answers by; the model's ``id`` is unvalidated text so it is only echoed in
+    results), ``question``, decorated ``choices``, bare ``choices_offered``,
+    and ``multi_select`` (honored only with choices).
     """
     if not isinstance(questions, list):
         return None, "questions must be an array of question objects."
@@ -208,11 +150,7 @@ def _normalize_questions(questions) -> tuple:
         if choices is not None:
             if not isinstance(choices, list):
                 return None, f"questions[{index}].choices must be a list."
-            choices = [s for s in (_flatten_choice(c) for c in choices) if s]
-            if len(choices) > MAX_CHOICES:
-                choices = choices[:MAX_CHOICES]
-            if not choices:
-                choices = None
+            choices = _clean_choices(choices)
 
         model_id = str(item.get("id") or "").strip() or None
 
@@ -228,23 +166,6 @@ def _normalize_questions(questions) -> tuple:
     return normalized, None
 
 
-def _callback_accepts_questions(callback) -> bool:
-    """True when the platform callback understands the ``questions`` kwarg.
-
-    Same signature-inspection approach as ``_invoke_callback`` (never a
-    TypeError retry — that would re-prompt the user on an internal bug).
-    """
-    import inspect
-
-    try:
-        params = inspect.signature(callback).parameters
-        return "questions" in params or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-        )
-    except (TypeError, ValueError):
-        return False
-
-
 def _clean_batch_answer(entry: dict, raw) -> object:
     """Strip presentation from one locked answer (label, multi-select JSON)."""
     if entry["multi_select"]:
@@ -253,12 +174,9 @@ def _clean_batch_answer(entry: dict, raw) -> object:
 
 
 def _batch_result(normalized: List[dict], answers: dict, timed_out: bool) -> str:
-    """Assemble the batch result JSON from per-qid answers.
-
-    Unanswered questions surface as empty ``user_response`` — with the
-    top-level ``timed_out`` flag (present only when true) telling the agent
-    whether those blanks are deliberate skips or the user walking away.
-    """
+    """Batch result JSON; unanswered -> "" — the top-level ``timed_out`` flag
+    (present only when true) tells the agent whether blanks are deliberate
+    skips or the user walking away."""
     responses = []
     for entry in normalized:
         row = {}
@@ -279,24 +197,18 @@ def _batch_result(normalized: List[dict], answers: dict, timed_out: bool) -> str
 def _run_batch(normalized: List[dict], callback, question: str) -> str:
     """Dispatch a validated batch to the platform callback.
 
-    Batch-capable callbacks (a ``questions`` kwarg, detected by signature)
-    get the whole list once and reply with ``{"answers": {qid: raw}}`` plus
-    an optional ``timed_out`` flag — as a dict or a JSON string (the
-    tui_gateway ``_block`` bridge can only carry strings).
-
-    Legacy callbacks are looped one question at a time (messaging adapters,
-    older plugins). An explicit empty answer is a skip and the loop
-    continues; a timeout (``None`` or the ``TIMEOUT_RESPONSE`` sentinel)
-    means the user walked away, so the loop aborts instead of pestering
-    them with the remaining questions. Answers collected before the abort
-    are kept either way.
+    Batch-capable callbacks (``questions`` kwarg) get the whole list once and
+    reply ``{"answers": {qid: raw}, "timed_out"?}`` as a dict or JSON string
+    (the tui_gateway bridge only carries strings). Legacy callbacks are looped
+    per question; an empty answer is a skip, a timeout (``None`` or the
+    sentinel) means the user walked away so the loop aborts instead of pestering
+    them — answers collected before the abort are kept either way.
     """
-    if _callback_accepts_questions(callback):
+    answers: dict = {}
+    timed_out = False
+    if _accepts_kwarg(callback, "questions"):
         raw = callback(question, None, questions=normalized)
-
-        answers: dict = {}
-        timed_out = False
-        if raw is None or (isinstance(raw, str) and raw.strip() == TIMEOUT_RESPONSE):
+        if _is_timeout(raw):
             timed_out = True
         elif isinstance(raw, dict):
             answers = dict(raw.get("answers") or {})
@@ -309,17 +221,14 @@ def _run_batch(normalized: List[dict], callback, question: str) -> str:
             if isinstance(parsed, dict):
                 answers = dict(parsed.get("answers") or {})
                 timed_out = bool(parsed.get("timed_out"))
-        # Any other falsy/unparseable reply is a cancel-all: every answer
-        # empty, no timeout flag (mirrors the single-question skip).
+        # Any other falsy/unparseable reply is a cancel-all (mirrors the single-question skip).
         return _batch_result(normalized, answers, timed_out)
 
-    answers = {}
-    timed_out = False
     for entry in normalized:
         raw = _invoke_callback(
             callback, entry["question"], entry["choices"], entry["multi_select"],
         )
-        if raw is None or (isinstance(raw, str) and raw.strip() == TIMEOUT_RESPONSE):
+        if _is_timeout(raw):
             timed_out = True
             break
         answers[entry["qid"]] = raw
@@ -333,35 +242,12 @@ def clarify_tool(
     questions: Optional[List[dict]] = None,
     callback: Optional[Callable] = None,
 ) -> str:
-    """
-    Ask the user a question, optionally with multiple-choice options.
+    """Ask the user one question (``question``/``choices``/``multi_select``) or a
+    batch (``questions``, which takes precedence when non-empty).
 
-    Args:
-        question:     The question text to present.
-        choices:      Up to 4 predefined answer choices. When omitted the
-                      question is purely open-ended.
-        multi_select: When True, the user can select multiple choices
-                      (checkboxes).  The ``user_response`` in the output JSON
-                      will be a list of strings instead of a single string.
-                      Has no effect when ``choices`` is omitted.
-        questions:    Up to 5 independent questions asked as one batch
-                      (issue #18450). Each item: ``{id?, question, choices?,
-                      multi_select?}``. When present (non-empty), the single
-                      ``question``/``choices``/``multi_select`` parameters
-                      are ignored and the result JSON is ``{"responses":
-                      [...]}`` (plus ``"timed_out": true`` when the user
-                      stopped answering partway).
-        callback:     Platform-provided function that handles the actual UI
-                      interaction.  Signature:
-                      ``callback(question, choices, multi_select=False) -> str``.
-                      Batch-capable platforms additionally accept a
-                      ``questions`` keyword and receive the normalized list
-                      in one call; platforms without it are looped one
-                      question at a time.
-                      Injected by the agent runner (cli.py / gateway).
-
-    Returns:
-        JSON string with the user's response(s).
+    ``callback(question, choices, multi_select=False) -> str`` is platform
+    injected; batch-capable callbacks also accept ``questions=``. Returns the
+    result JSON (``{"responses": [...]}`` for batches).
     """
     if questions is not None:
         normalized, error = _normalize_questions(questions)
@@ -387,27 +273,15 @@ def clarify_tool(
 
     question = question.strip()
 
-    # Validate and trim choices
     if choices is not None:
         if not isinstance(choices, list):
             return tool_error("choices must be a list of strings.")
-        # LLMs sometimes emit dict-shaped choices (e.g. [{"description": "..."}])
-        # instead of bare strings. _flatten_choice unwraps them to their
-        # user-facing text here — the single platform-agnostic entry point —
-        # so the CLI panel, Discord buttons, and Telegram list all render clean
-        # text and the resolved answer is never a raw Python dict repr.
-        choices = [s for s in (_flatten_choice(c) for c in choices) if s]
-        if len(choices) > MAX_CHOICES:
-            choices = choices[:MAX_CHOICES]
-        if not choices:
-            choices = None  # empty list → open-ended
+        choices = _clean_choices(choices)
 
     if callback is None:
         return tool_error("Clarify tool is not available in this execution context.")
 
-    # The first choice is the agent's pick (the schema says order best-first),
-    # so it reaches every surface carrying the "(Recommended)" label. The bare
-    # list is what goes back to the agent — the label is presentation only.
+    # The bare list goes back to the agent; the "(Recommended)" label is presentation only.
     offered = choices
     if choices is not None:
         choices = mark_recommended(choices)
@@ -433,10 +307,6 @@ def check_clarify_requirements() -> bool:
     """Clarify tool has no external requirements -- always available."""
     return True
 
-
-# =============================================================================
-# OpenAI Function-Calling Schema
-# =============================================================================
 
 CLARIFY_SCHEMA = {
     "name": "clarify",
