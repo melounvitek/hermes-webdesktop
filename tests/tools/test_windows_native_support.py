@@ -196,7 +196,7 @@ class TestSigkillFallback:
     @pytest.mark.parametrize(
         "module_path, line_pattern",
         [
-            ("hermes_cli.kanban_db", 'getattr(signal, "SIGKILL", signal.SIGTERM)'),
+            ("hermes_cli.kanban_db_dispatch", 'getattr(signal, "SIGKILL", signal.SIGTERM)'),
         ],
     )
     def test_module_uses_getattr_fallback(self, module_path, line_pattern):
@@ -541,7 +541,7 @@ class TestTuiGatewayEntrySignalGuards:
 
 
 # ---------------------------------------------------------------------------
-# hermes_cli/kanban_db.py waitpid guard
+# hermes_cli/kanban_db_dispatch.py waitpid guard
 # ---------------------------------------------------------------------------
 
 
@@ -551,7 +551,7 @@ class TestKanbanWaitpidWindowsGuard:
 
     def test_source_gates_waitpid_loop(self):
         root = Path(__file__).resolve().parents[2]
-        source = (root / "hermes_cli" / "kanban_db.py").read_text(encoding="utf-8")
+        source = (root / "hermes_cli" / "kanban_db_dispatch.py").read_text(encoding="utf-8")
         # Find the waitpid call and confirm it's inside a POSIX gate.
         idx = source.find("os.waitpid(-1, os.WNOHANG)")
         assert idx > 0, "waitpid call must exist"

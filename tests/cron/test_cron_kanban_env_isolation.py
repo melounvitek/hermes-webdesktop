@@ -385,10 +385,10 @@ def test_every_dispatcher_kanban_var_is_identity_gated():
 
     Fails loudly if a new dispatcher var is added without registering it.
     """
-    import hermes_cli.kanban_db as kanban_db
+    import hermes_cli.kanban_db_dispatch as kanban_db_dispatch
     from agent.delegation_context import KANBAN_ENV_KEYS
 
-    source = ast.parse(open(kanban_db.__file__, encoding="utf-8").read())
+    source = ast.parse(open(kanban_db_dispatch.__file__, encoding="utf-8").read())
     spawn = next(
         node for node in ast.walk(source)
         if isinstance(node, ast.FunctionDef) and node.name == "_default_spawn"
