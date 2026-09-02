@@ -95,7 +95,7 @@ def test_default_capture_prefers_x11_active_window_when_z_index_tied():
     windows = _normalized_windows()
 
     with patch(
-        "tools.computer_use.cua_backend._linux_x11_active_window_id",
+        "tools.computer_use.cua_backend_capture._linux_x11_active_window_id",
         return_value=84043449,
     ):
         target = _select_capture_target(windows, app_requested=False)
@@ -115,7 +115,7 @@ def test_default_capture_skips_desktop_helper_when_active_window_unknown():
     windows = _normalized_windows()
 
     with patch(
-        "tools.computer_use.cua_backend._linux_x11_active_window_id",
+        "tools.computer_use.cua_backend_capture._linux_x11_active_window_id",
         return_value=None,
     ):
         target = _select_capture_target(windows, app_requested=False)
