@@ -96,14 +96,13 @@ def _select_capture_target(
     app_requested: bool,
     exact_target: bool = False,
 ) -> Dict[str, Any]:
-    """Select the best window for capture from z-sorted list_windows output.
+    """Best window from z-sorted (frontmost-first) list_windows output.
 
-    Windows arrive sorted by ``z_index`` descending (frontmost first). For
-    unqualified default captures on Linux (no app filter, no exact target),
-    desktop/shell helper windows are skipped first — they are targetable but
-    capture as empty — and when every remaining candidate shares the same
-    ``z_index`` (the common X11 case) ``_NET_ACTIVE_WINDOW`` beats list order.
-    Exact-target captures never pay for the ``xprop`` probe.
+    Unqualified default captures on Linux (no app filter, no exact target) skip
+    desktop/shell helper windows first — targetable but capture as empty — and
+    when every remaining candidate shares one ``z_index`` (the common X11 case)
+    ``_NET_ACTIVE_WINDOW`` beats list order. Exact-target captures never pay
+    for the ``xprop`` probe.
     """
     pool = [w for w in windows if not w["off_screen"]]
     if not exact_target and not app_requested and sys.platform == "linux":
@@ -243,13 +242,10 @@ class _CaptureMixin:
     def _match_windows_for_app(
         self, windows: List[Dict[str, Any]], app: str
     ) -> List[Dict[str, Any]]:
-        """Resolve ``app=`` through exact names before convenience substrings.
-
-        Linux ``list_windows`` can omit an app name while ``list_apps`` keeps
-        name/bundle-ID metadata. Exact direct names and exact metadata aliases
-        win over substring matches: querying ``Code`` must not silently select
-        ``Visual Studio Code`` because it is frontmost.
-        """
+        """Resolve ``app=``: exact window names, then exact list_apps aliases
+        (Linux ``list_windows`` can omit the app name that ``list_apps`` keeps),
+        then substrings — querying ``Code`` must not silently select
+        ``Visual Studio Code`` because it is frontmost."""
         app_lower = app.strip().lower()
         if not app_lower:
             return []
@@ -354,13 +350,12 @@ class _CaptureMixin:
         return {"pid": self._active_pid, "window_id": self._active_window_id, "session": self._session_id}
 
     def _capture_vision(self) -> Tuple[Optional[str], Optional[str], str]:
-        """Pixels only, no elements. Returns ``(png_b64, mime, window_title)``.
+        """Pixels only, no elements: ``(png_b64, mime, window_title)``.
 
-        Drivers that advertise the (cheaper) standalone ``screenshot`` tool use
-        it; current drivers folded PNG capture into ``get_window_state``, whose
-        tree is DISCARDED here. When discovery hasn't run we still try
-        ``screenshot`` first and fall back, so the path self-heals on any
-        driver version.
+        Drivers advertising the cheaper standalone ``screenshot`` tool use it;
+        current drivers folded PNG capture into ``get_window_state`` (tree
+        DISCARDED here). Before discovery ran we still try ``screenshot`` first
+        and fall back, so the path self-heals on any driver version.
         """
         png_b64: Optional[str] = None
         image_mime_type: Optional[str] = None
@@ -425,14 +420,11 @@ class _CaptureMixin:
         pid: Optional[int] = None,
         window_id: Optional[int] = None,
     ) -> CaptureResult:
-        """Capture the frontmost on-screen window or an exact known target.
-
-        Maps hermes `capture(mode, app)` -> cua-driver `list_windows` +
-        `get_window_state` (ax/som) or `screenshot` (vision). Only the
-        structured ``structuredContent.windows`` shape is supported.
-        """
-        # Drop schema-filler ids (models that zero-fill every optional
-        # property) before they read as a targeting request.
+        """Capture the frontmost on-screen window or an exact known target:
+        `list_windows` + `get_window_state` (ax/som) or `screenshot` (vision).
+        Only the structured ``structuredContent.windows`` shape is supported."""
+        # Schema-filler ids (models zero-fill optional properties) must not read
+        # as a targeting request.
         pid = None if _is_placeholder_id(pid) else pid
         window_id = None if _is_placeholder_id(window_id) else window_id
         exact_target = pid is not None or window_id is not None
@@ -466,13 +458,11 @@ class _CaptureMixin:
                              png_bytes_len=png_bytes_len, image_mime_type=image_mime_type)
 
     def _capture_full_screen(self, mode: str) -> CaptureResult:
-        """Composited grab of everything on screen via `get_desktop_state`
-        (like PrtScn) — the shell window would only show wallpaper + icons.
-        Never enumerates, so it also works when Windows UIA hangs. Pixels only:
-        `elements` is always empty; `note` tells the model how to reach the
-        interactive lanes. ``capture_scope`` is switched to desktop for the
-        call and restored afterwards.
-        """
+        """Composited PrtScn-style grab via `get_desktop_state` (the shell window
+        would only show wallpaper + icons). Never enumerates, so it also works
+        when Windows UIA hangs. Pixels only — `elements` is empty and `note`
+        points the model at the interactive lanes. ``capture_scope`` is switched
+        to desktop for the call and restored afterwards."""
         self._clear_active_target()
         previous_scope: Optional[str] = None
         try:
@@ -550,11 +540,10 @@ class _CaptureMixin:
         return []
 
     def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
-        """Target an app: a pure window-selector (store pid/window_id so later
-        input hits the right process) — background automation never needs to
-        raise a window. ``raise_window=True`` is explicit, separately approved,
-        and uses the standalone ``bring_to_front`` tool.
-        """
+        """Pure window-selector (store pid/window_id so later input hits the
+        right process) — background automation never needs to raise a window.
+        ``raise_window=True`` is explicit, separately approved, and uses the
+        standalone ``bring_to_front`` tool."""
         matched = self._match_windows_for_app(self._load_windows_or_disarm(), app)
         # No silent fallback to the frontmost window: that hides the real
         # failure (often a localized macOS app-name mismatch).

@@ -93,14 +93,11 @@ def _wsl_windows_path_to_posix(path: str) -> str:
 
 
 def _candidate_cua_driver_commands(override: Optional[str] = None) -> List[str]:
-    """Candidate cua-driver commands in resolution order.
-
-    ``override`` / a non-empty ``HERMES_CUA_DRIVER_CMD`` is authoritative (if
-    it is wrong, report the driver missing rather than silently picking
-    another binary). Otherwise PATH, then canonical installer locations —
-    Desktop apps launched from Finder/Dock inherit a narrow PATH that omits
-    ``~/.local/bin``, and freshly installed Windows sessions inherit a stale one.
-    """
+    """Candidate commands in resolution order. ``override`` / a non-empty
+    ``HERMES_CUA_DRIVER_CMD`` is authoritative (if wrong, report the driver
+    missing rather than silently picking another binary). Otherwise PATH, then
+    canonical installer locations — Finder/Dock-launched apps inherit a narrow
+    PATH without ``~/.local/bin``; fresh Windows sessions inherit a stale one."""
     configured = (override if override is not None else os.environ.get(_CUA_DRIVER_CMD_ENV, "")).strip()
     if configured:
         return [configured]
@@ -179,14 +176,11 @@ def _cua_driver_supports_no_overlay(driver_cmd: str) -> bool:
 
 
 def _resolve_mcp_invocation(driver_cmd: str, *, timeout: float = 6.0) -> Tuple[str, List[str]]:
-    """Return ``(command, args)`` that spawn cua-driver's stdio MCP server.
-
-    Asks the driver itself via ``cua-driver manifest`` (``mcp_invocation``
-    carries ``command`` + ``args``) so a future rename of the subcommand keeps
-    working. Falls back to ``(driver_cmd, ["mcp"])`` for older drivers or any
-    discovery failure — the wrapper must not refuse to start over a failed
-    discovery hop. ``--no-overlay`` is appended when policy + driver allow.
-    """
+    """``(command, args)`` that spawn cua-driver's stdio MCP server, asked of
+    the driver itself via ``cua-driver manifest`` (``mcp_invocation``) so a
+    subcommand rename keeps working. Falls back to ``(driver_cmd, ["mcp"])`` on
+    older drivers or any discovery failure — the wrapper must not refuse to
+    start over a failed discovery hop. ``--no-overlay`` appended when allowed."""
     manifest = _driver_json(driver_cmd, "manifest", timeout=timeout, require_ok=True) or {}
     invocation = manifest.get("mcp_invocation")
     invocation = invocation if isinstance(invocation, dict) else {}
@@ -269,17 +263,13 @@ def cua_driver_runtime_contract_status(binary: Optional[str] = None) -> Dict[str
 
 
 def cua_driver_update_check(*, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    """Run ``cua-driver check-update --json``; payload mirrors the
-    ``check_for_update`` MCP tool (``{current_version, latest_version,
-    update_available, ...}``).
-
-    ``timeout`` defaults to 8s on POSIX and 25s on Windows (first spawn of the
-    exe routinely eats seconds in Defender scanning, and a false timeout is
-    expensive: callers treat ``None`` as indeterminate and the upgrade path
-    used to fall through to a full reinstall on it). Returns ``None`` when the
-    binary is missing, the driver predates the verb, the GitHub check failed
-    (``error`` set), or the output didn't parse. Never raises.
-    """
+    """``cua-driver check-update --json`` payload (``{current_version,
+    latest_version, update_available, ...}``), or ``None`` when the binary is
+    missing, the driver predates the verb, the GitHub check failed (``error``
+    set) or the output didn't parse. Never raises. ``timeout`` defaults to 8s
+    on POSIX / 25s on Windows: first spawn of the exe routinely eats seconds in
+    Defender scanning, and callers treat ``None`` as indeterminate (the upgrade
+    path used to fall through to a full reinstall on a false timeout)."""
     if timeout is None:
         timeout = 25.0 if sys.platform == "win32" else 8.0
     driver_cmd = _cb().resolve_cua_driver_cmd()

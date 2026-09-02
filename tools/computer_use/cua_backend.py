@@ -88,15 +88,12 @@ def _computer_use_cfg() -> Dict[str, Any]:
 
 
 def _cua_no_overlay() -> bool:
-    """True when Hermes should pass ``--no-overlay`` to cua-driver.
-
-    ``computer_use.no_overlay`` overrides when set. Auto-detect otherwise:
-    off on macOS (cursor-overlay redraw loop can peg a core after a session),
-    headless Linux / WSL2 / containers, and Linux X11 (the overlay is a
-    fullscreen always-on-top all-workspaces window with no compositor-owned
-    lifecycle, so an unclean session end can leave it wedged over every app);
-    on for Windows and Linux Wayland (compositor owns the surface).
-    """
+    """Pass ``--no-overlay``? ``computer_use.no_overlay`` overrides; else off on
+    macOS (cursor-overlay redraw loop can peg a core after a session), headless
+    Linux / WSL2 / containers, and Linux X11 (the overlay is a fullscreen
+    always-on-top all-workspaces window with no compositor-owned lifecycle, so
+    an unclean session end can leave it wedged over every app); on for Windows
+    and Linux Wayland (compositor owns the surface)."""
     val = _computer_use_cfg().get("no_overlay")
     if val is not None:
         return bool(val)
@@ -122,13 +119,10 @@ def _cua_telemetry_disabled() -> bool:
 
 
 def _cua_configured_permission_mode() -> str:
-    """``computer_use.permission_mode`` (default ``standard``).
-
-    Only ``standard`` / ``bounded`` are honored: ``unrestricted`` is
-    deliberately NOT a config value — it stays tied to the per-session YOLO
-    toggle so a stale config line can never silently bypass approvals.
-    Unknown values fall closed to ``standard``.
-    """
+    """``computer_use.permission_mode``: ``standard`` (default) or ``bounded``;
+    unknown values fall closed to ``standard``. ``unrestricted`` is deliberately
+    NOT a config value — it stays tied to the per-session YOLO toggle so a stale
+    config line can never silently bypass approvals."""
     raw = str(_computer_use_cfg().get("permission_mode", "standard") or "").strip().lower()
     return raw if raw in {"standard", "bounded"} else "standard"
 
@@ -141,14 +135,11 @@ def _cua_capability_manifest() -> Optional[str]:
 
 
 def _manifest_is_mode_independent(path: str) -> bool:
-    """True when this capability manifest may accompany any permission mode.
-
-    v1/v2 manifests must declare ``mode: bounded`` and abort startup under an
-    unrestricted runtime; v3 must NOT declare a mode and is the mode-
-    independent ceiling the driver accepts alongside any mode. Unreadable /
-    unparseable -> False (forwarding one would turn a working session into a
-    hard startup failure; bounded forwards unconditionally anyway).
-    """
+    """True when this manifest may accompany any permission mode: v1/v2 declare
+    ``mode: bounded`` and abort startup under an unrestricted runtime; v3 has no
+    mode and is the ceiling the driver accepts alongside any mode. Unreadable /
+    unparseable -> False (forwarding one would turn a working session into a hard
+    startup failure; bounded forwards unconditionally anyway)."""
     try:
         import yaml
 
@@ -212,13 +203,11 @@ def _run_driver(driver_cmd: str, *args: str, timeout: float) -> subprocess.Compl
 # ---------------------------------------------------------------------------
 
 def _linux_session_locked() -> Optional[bool]:
-    """Best-effort: is the graphical session locked? (Linux only.)
-
-    A locked KDE/GNOME session freezes renderers and half-disables the AX
-    tree, so window discovery legitimately returns nothing — which otherwise
-    reads as a driver bug. True/False when loginctl answers, None when
-    unavailable (non-Linux, no systemd-logind, probe failure).
-    """
+    """Is the graphical session locked? (Linux; best-effort.) A locked KDE/GNOME
+    session freezes renderers and half-disables the AX tree, so discovery
+    legitimately returns nothing — which otherwise reads as a driver bug.
+    True/False when loginctl answers, None when unavailable (non-Linux, no
+    systemd-logind, probe failure)."""
     if sys.platform != "linux":
         return None
 
@@ -355,21 +344,19 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
             )
         self._bridge = _AsyncBridge()
         self._session = _CuaDriverSession(self._bridge, self._embedded_daemon)
-        # Sticky context — updated by capture()/focus_app(), used by actions.
+        # Sticky target — set by capture()/focus_app(), used by actions.
         self._active_pid: Optional[int] = None
         self._active_window_id: Optional[int] = None
         self._last_app: Optional[str] = None
-        # Exact identity for capture_after: app names may be generic on Linux
+        # Exact identity for capture_after: Linux app names may be generic
         # (several unrelated Qt windows can all say Qt6Application).
         self._last_target: Optional[Dict[str, Optional[int]]] = None
-        # Per-snapshot `element_index -> element_token` map from capture().
-        # Actions attach the token so cua-driver detects "stale" explicitly
-        # instead of silently re-resolving to a different element.
+        # Per-snapshot `element_index -> element_token`; actions attach it so
+        # cua-driver reports "stale" instead of silently re-resolving.
         self._snapshot_tokens: Dict[int, str] = {}
-        # Public session label (one per backend = one per Hermes run) passed as
-        # `session` on every call: owns the agent cursor color and gives config
-        # / recording state a stable owner inside the transport-private
-        # lifecycle. Part of the 0.20 runtime contract checked at start().
+        # Public session label (one per Hermes run) sent as `session` on every
+        # call: owns the cursor color and gives config/recording state a stable
+        # owner across transport restarts. Part of the 0.20 runtime contract.
         self._session_id: str = f"hermes-{uuid.uuid4().hex[:12]}"
         self._session.set_transport_reset_callback(self._handle_transport_reset)
 
@@ -392,8 +379,8 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
             raise RuntimeError(f"cua-driver is not ready: {reason}. {repair}")
         _maybe_nudge_update()
         # `mcp` is an optional extra: lazy-install on first use (gated by
-        # `security.allow_lazy_installs`); on failure ensure() raises
-        # FeatureUnavailable with the exact `uv pip install` hint.
+        # `security.allow_lazy_installs`); failure raises FeatureUnavailable
+        # with the exact `uv pip install` hint.
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("tool.computer_use", prompt=False)
         import importlib
@@ -412,12 +399,10 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
         self._best_effort("start_session failed (continuing anonymous)",
                           self._session.call_tool, "start_session", {"session": self._session_id})
 
-        # Post-handshake tuning guards on `_started`: before the handshake
-        # flips it, call_tool would re-enter session.start() and tests that
-        # stub start() would recurse.
+        # Post-handshake tuning guards on `_started`: before the handshake flips
+        # it, call_tool would re-enter session.start() (stubbed start() recurses).
         if self._session._started:
-            # Cap screenshot size so every later capture pays less over the
-            # daemon socket and in the model turn.
+            # Smaller screenshots cost less over the daemon socket and per turn.
             max_dim = _computer_use_max_image_dimension()
             if max_dim:
                 self._best_effort("set_config(max_image_dimension) failed",
@@ -428,9 +413,9 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
                                   self.set_agent_cursor_enabled, False, cursor_id=self._session_id)
 
     def stop(self) -> None:
-        # Best-effort end_session first so the driver cleans per-session state
-        # (cursor overlay, recording ownership, config overrides); the
-        # connection drop below releases daemon-side state regardless.
+        # Best-effort end_session so the driver cleans per-session state (cursor
+        # overlay, recording ownership, config overrides); the connection drop
+        # below releases daemon-side state regardless.
         if self._session._started:
             self._best_effort("end_session failed (continuing teardown)",
                               self._session.call_tool, "end_session", {"session": self._session_id})
@@ -531,10 +516,10 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
 
     # ── Internal ───────────────────────────────────────────────────
     def _maybe_attach_element_token(self, tool: str, args: Dict[str, Any]) -> None:
-        """Attach the last snapshot's ``element_token`` for an ``element_index``
-        call. The token takes precedence and yields an explicit 'stale' error
-        when the snapshot was superseded. Gated on the per-tool capability so
-        older drivers (``additionalProperties: false``) never see the field."""
+        """Attach the snapshot's ``element_token`` to an ``element_index`` call so
+        a superseded snapshot yields an explicit 'stale' error. Gated on the
+        per-tool capability: older drivers (``additionalProperties: false``)
+        must never see the field."""
         idx = args.get("element_index")
         token = self._snapshot_tokens.get(idx) if isinstance(idx, int) else None
         if token and self._session.supports_capability("accessibility.element_tokens", tool=tool):
