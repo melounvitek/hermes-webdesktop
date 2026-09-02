@@ -174,7 +174,9 @@ def _clean_batch_answer(entry: dict, raw) -> object:
 
 
 def _batch_result(normalized: List[dict], answers: dict, timed_out: bool) -> str:
-    """Batch result JSON; unanswered -> "" and ``timed_out`` present only when true."""
+    """Batch result JSON; unanswered -> "" — the top-level ``timed_out`` flag
+    (present only when true) tells the agent whether blanks are deliberate
+    skips or the user walking away."""
     responses = []
     for entry in normalized:
         row = {}
@@ -198,7 +200,9 @@ def _run_batch(normalized: List[dict], callback, question: str) -> str:
     Batch-capable callbacks (``questions`` kwarg) get the whole list once and
     reply ``{"answers": {qid: raw}, "timed_out"?}`` as a dict or JSON string
     (the tui_gateway bridge only carries strings). Legacy callbacks are looped
-    per question; an empty answer is a skip, a timeout aborts the rest.
+    per question; an empty answer is a skip, a timeout (``None`` or the
+    sentinel) means the user walked away so the loop aborts instead of pestering
+    them — answers collected before the abort are kept either way.
     """
     answers: dict = {}
     timed_out = False

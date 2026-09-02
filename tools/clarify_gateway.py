@@ -216,10 +216,12 @@ def _coerce_text_response_detailed(
 
     Reasons: ``"invalid_selection"`` (selection-shaped but out of range /
     unrecognised — keep the clarify armed for a retry) or ``"prose"`` (free
-    text on a native choice prompt — gateway may cancel and route normally).
+    text on a native choice prompt — gateway may cancel and route normally so a
+    redirect-to-steer path cannot deadlock behind the waiting tool).
     Open-ended entries and ``awaiting_text`` mode accept any text; numeric
     picks and exact labels always resolve; multi-select returns a JSON array
-    string that ``_parse_multi_select_response`` decodes on the tool side.
+    string that ``_parse_multi_select_response`` decodes on the tool side, and
+    one bad token rejects the whole reply rather than resolving a partial pick.
     """
     text = str(response).strip()
 
@@ -331,6 +333,10 @@ def clear_session(session_key: str) -> int:
     real, so it is dropped from the registry but its response is preserved
     rather than overwritten with the "" cancellation sentinel. The whole loop
     stays inside the lock so a button callback cannot slip between pop and check.
+    Entries are removed from the registry regardless of state — a cleared
+    session must not be resurrected by late callbacks. Callers distinguish the
+    "" sentinel from a real reply only by their own timeout bookkeeping; most
+    treat any falsy result as "user did not respond".
     """
     with _lock:
         ids = list(_session_index.pop(session_key, []) or [])
@@ -347,8 +353,10 @@ def clear_session(session_key: str) -> int:
 # --- config ---------------------------------------------------------------
 
 def resolve_clarify_timeout(config: dict) -> int:
-    """Clarify timeout (seconds) from a loaded config: legacy ``clarify.timeout``,
-    else ``agent.clarify_timeout``, else 3600. ``<= 0`` is preserved (unlimited)."""
+    """Clarify timeout (seconds) from a loaded config: legacy ``clarify.timeout``
+    if explicitly set, else ``agent.clarify_timeout``, else 3600. Single source
+    of truth for every surface (gateway, CLI, TUI) so the value can't drift.
+    ``<= 0`` is preserved verbatim (unlimited); non-numeric falls back to 3600."""
     raw = (config.get("clarify") or {}).get("timeout")
     if raw is None:
         raw = (config.get("agent") or {}).get("clarify_timeout", 3600)

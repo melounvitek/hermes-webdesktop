@@ -18,6 +18,7 @@ import json
 import logging
 import os
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
@@ -288,6 +289,39 @@ def _coerce_str_list(
     return value, None
 
 
+def _metadata_type_error(metadata: Any) -> str:
+    return tool_error(f"metadata must be an object/dict, got {type(metadata).__name__}")
+
+
+def _merge_artifacts(metadata: Any, artifacts: list[str]) -> tuple[Any, Optional[str]]:
+    """Fold ``artifacts`` into ``metadata["artifacts"]``; ``(metadata, error)``.
+
+    Artifacts ride inside metadata so the completed-event payload needs no DB
+    schema change; the gateway notifier reads payload['artifacts'] and uploads
+    each path as a native attachment. Merged with (never overwriting) a
+    metadata.artifacts the worker passed manually.
+    """
+    if metadata is None:
+        metadata = {}
+    elif not isinstance(metadata, dict):
+        return metadata, _metadata_type_error(metadata)
+    existing = metadata.get("artifacts")
+    if isinstance(existing, (list, tuple)):
+        merged = (str(item).strip() for item in [*existing, *artifacts])
+        metadata["artifacts"] = list(dict.fromkeys(s for s in merged if s))
+    else:
+        metadata["artifacts"] = artifacts
+    return metadata, None
+
+
+def _require_text(args: dict, name: str, message: Optional[str] = None) -> tuple[Any, Optional[str]]:
+    """``(raw_value, error)``: error when ``args[name]`` is missing or blank."""
+    value = args.get(name)
+    if not value or not str(value).strip():
+        return None, tool_error(message or f"{name} is required")
+    return value, None
+
+
 def _parse_bool_arg(args: dict, name: str, *, default: bool = False):
     value = args.get(name)
     if value is None:
@@ -405,6 +439,53 @@ def _goal_mode_handoff_rejection(task, evidence: str):
             exc_info=True,
         )
     return (verdict, None if verdict == "done" else reason)
+
+
+# Per-tool guidance for a judge rejection: verdict -> message. ``{reason}``/``{tid}`` are filled in.
+_GOAL_GATE_MESSAGES = {
+    "kanban_complete": {
+        "blocked": (
+            "Goal completion rejected: judge ruled the goal "
+            "unachievable — {reason}. The task will NOT complete "
+            "silently. Either re-scope the task with kanban_edit, "
+            "or record the block with kanban_block and hand the "
+            "decision to a human / reviewer."
+        ),
+        "continue": (
+            "Goal completion rejected by judge: {reason}. "
+            "To proceed, either: (1) provide explicit acceptance "
+            "evidence in your summary matching the task's criteria, "
+            "or (2) create continuation tasks with parents=[{tid}] "
+            "and keep this task alive."
+        ),
+    },
+    "kanban_request_review": {
+        "blocked": (
+            "Goal review handoff rejected: judge ruled the goal "
+            "unachievable — {reason}. Record the block with "
+            "kanban_block instead of requesting review."
+        ),
+        "continue": (
+            "Goal review handoff rejected by judge: {reason}. "
+            "Provide acceptance evidence matching the card before "
+            "requesting review."
+        ),
+    },
+}
+
+
+def _goal_gate_error(tool_name: str, task, tid: str, evidence: str) -> Optional[str]:
+    """Goal-mode pre-handoff judge gate; a tool error when the judge rejects, else None.
+
+    A worker must not bypass the auxiliary judge by completing / requesting
+    review before acceptance criteria are met. ``blocked`` gets its own
+    guidance; any other non-``done`` verdict gets the ``continue`` guidance.
+    """
+    verdict, rejection = _goal_mode_handoff_rejection(task, evidence)
+    if rejection is None:
+        return None
+    key = "blocked" if verdict == "blocked" else "continue"
+    return tool_error(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=rejection, tid=tid))
 
 
 # ---------------------------------------------------------------------------
@@ -633,52 +714,19 @@ def _handle_complete(args: dict, **kw) -> str:
     if err:
         return err
     if artifacts:
-        # Artifacts ride inside metadata so the completed-event payload needs
-        # no DB schema change; the gateway notifier reads payload['artifacts']
-        # and uploads each path as a native attachment. Merge with (never
-        # overwrite) a metadata.artifacts the worker passed manually.
-        if metadata is None:
-            metadata = {}
-        elif not isinstance(metadata, dict):
-            return tool_error(
-                f"metadata must be an object/dict, got {type(metadata).__name__}"
-            )
-        existing = metadata.get("artifacts")
-        if isinstance(existing, (list, tuple)):
-            merged = (str(item).strip() for item in [*existing, *artifacts])
-            metadata["artifacts"] = list(dict.fromkeys(s for s in merged if s))
-        else:
-            metadata["artifacts"] = artifacts
+        metadata, err = _merge_artifacts(metadata, artifacts)
+        if err:
+            return err
     if not (summary or result):
         return tool_error("provide at least one of: summary (preferred), result")
     if metadata is not None and not isinstance(metadata, dict):
-        return tool_error(
-            f"metadata must be an object/dict, got {type(metadata).__name__}"
-        )
+        return _metadata_type_error(metadata)
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
-        # Goal-mode pre-completion judge gate: a worker must not bypass the
-        # auxiliary judge by completing before acceptance criteria are met.
         task = kb.get_task(conn, tid)
-        gate_verdict, rejection = _goal_mode_handoff_rejection(
-            task, (summary or result or "").strip()
-        )
-        if gate_verdict == "blocked":
-            return tool_error(
-                f"Goal completion rejected: judge ruled the goal "
-                f"unachievable — {rejection}. The task will NOT complete "
-                f"silently. Either re-scope the task with kanban_edit, "
-                f"or record the block with kanban_block and hand the "
-                f"decision to a human / reviewer."
-            )
-        if rejection is not None:
-            return tool_error(
-                f"Goal completion rejected by judge: {rejection}. "
-                f"To proceed, either: (1) provide explicit acceptance "
-                f"evidence in your summary matching the task's criteria, "
-                f"or (2) create continuation tasks with parents=[{tid}] "
-                f"and keep this task alive."
-            )
+        gate_err = _goal_gate_error("kanban_complete", task, tid, (summary or result or "").strip())
+        if gate_err:
+            return gate_err
         try:
             ok = kb.complete_task(
                 conn, tid,
@@ -720,9 +768,9 @@ def _handle_block(args: dict, **kw) -> str:
     tid, err = _worker_guard("kanban_block", args)
     if err:
         return err
-    reason = args.get("reason")
-    if not reason or not str(reason).strip():
-        return tool_error("reason is required — explain what input you need")
+    reason, err = _require_text(args, "reason", "reason is required — explain what input you need")
+    if err:
+        return err
     reason = _redact(reason)
     kind = args.get("kind")
     with _board(args.get("board")) as (kb, conn):
@@ -767,18 +815,17 @@ def _handle_request_review(args: dict, **kw) -> str:
     tid, err = _worker_guard("kanban_request_review", args)
     if err:
         return err
-    summary = args.get("summary")
-    if not summary or not str(summary).strip():
-        return tool_error(
-            "summary is required — describe what was implemented and how it "
-            "was verified so the reviewer has context"
-        )
+    summary, err = _require_text(
+        args, "summary",
+        "summary is required — describe what was implemented and how it "
+        "was verified so the reviewer has context",
+    )
+    if err:
+        return err
     summary = _redact(summary)
     metadata = args.get("metadata")
     if metadata is not None and not isinstance(metadata, dict):
-        return tool_error(
-            f"metadata must be an object/dict, got {type(metadata).__name__}"
-        )
+        return _metadata_type_error(metadata)
     if metadata is not None:
         metadata = _redact_metadata(metadata)
         if metadata is None:
@@ -790,19 +837,9 @@ def _handle_request_review(args: dict, **kw) -> str:
         reviewer = _redact(reviewer)
     with _board(args.get("board")) as (kb, conn):
         task = kb.get_task(conn, tid)
-        gate_verdict, rejection = _goal_mode_handoff_rejection(task, summary)
-        if gate_verdict == "blocked":
-            return tool_error(
-                f"Goal review handoff rejected: judge ruled the goal "
-                f"unachievable — {rejection}. Record the block with "
-                f"kanban_block instead of requesting review."
-            )
-        if rejection is not None:
-            return tool_error(
-                f"Goal review handoff rejected by judge: {rejection}. "
-                "Provide acceptance evidence matching the card before "
-                "requesting review."
-            )
+        gate_err = _goal_gate_error("kanban_request_review", task, tid, summary)
+        if gate_err:
+            return gate_err
         ok, fail_reason = kb.request_review(
             conn, tid,
             summary=summary,
@@ -829,9 +866,9 @@ def _handle_request_changes(args: dict, **kw) -> str:
     tid, err = _worker_guard("kanban_request_changes", args)
     if err:
         return err
-    reason = args.get("reason")
-    if not reason or not str(reason).strip():
-        return tool_error("reason is required — describe the changes needed")
+    reason, err = _require_text(args, "reason", "reason is required — describe the changes needed")
+    if err:
+        return err
     reason = _redact(reason)
     with _board(args.get("board")) as (kb, conn):
         ok, detail = kb.request_changes(
@@ -887,9 +924,9 @@ def _handle_comment(args: dict, **kw) -> str:
             "task_id is required (use the current task id if that's what "
             "you mean — pulls from env but kept explicit here)"
         )
-    body = args.get("body")
-    if not body or not str(body).strip():
-        return tool_error("body is required")
+    body, err = _require_text(args, "body")
+    if err:
+        return err
     body = _redact(body)
     # Author comes from the worker's runtime identity, never caller args:
     # comments are injected into future workers' system prompts as
@@ -903,8 +940,10 @@ def _handle_comment(args: dict, **kw) -> str:
         return _ok(task_id=tid, comment_id=cid)
 
 
-def _store_attachment(kb, board, tid, filename, data, content_type) -> str:
-    with _board(board) as (_, conn):
+def _store_attachment(board, tid, filename, data, content_type) -> str:
+    """Store bytes via ``kanban_db.store_attachment_bytes`` (shared size cap, per-task
+    dir, metadata row) so agent, dashboard, and CLI surfaces stay in lockstep."""
+    with _board(board) as (kb, conn):
         att_id = kb.store_attachment_bytes(
             conn, tid, str(filename), data,
             content_type=content_type, uploaded_by="agent", board=board,
@@ -914,30 +953,23 @@ def _store_attachment(kb, board, tid, filename, data, content_type) -> str:
 
 @_kanban_handler("kanban_attach")
 def _handle_attach(args: dict, **kw) -> str:
-    """Attach an inline (base64) file to a task.
-
-    Goes through ``kanban_db.store_attachment_bytes`` (decode, shared size cap,
-    per-task attachments dir, metadata row) so agent, dashboard, and CLI
-    surfaces stay in lockstep.
-    """
-    from hermes_cli import kanban_db as kb
-
+    """Attach an inline (base64) file to a task."""
     tid, err = _worker_guard("kanban_attach", args)
     if err:
         return err
-    filename = args.get("filename")
-    if not filename or not str(filename).strip():
-        return tool_error("filename is required")
-    content_b64 = args.get("content_base64")
-    if not content_b64 or not str(content_b64).strip():
-        return tool_error("content_base64 is required")
+    filename, err = _require_text(args, "filename")
+    if err:
+        return err
+    content_b64, err = _require_text(args, "content_base64")
+    if err:
+        return err
     import base64
     import binascii
     try:
         data = base64.b64decode(str(content_b64), validate=True)
     except (binascii.Error, ValueError) as e:
         return tool_error(f"content_base64 is not valid base64: {e}")
-    return _store_attachment(kb, args.get("board"), tid, filename, data, args.get("content_type"))
+    return _store_attachment(args.get("board"), tid, filename, data, args.get("content_type"))
 
 
 _MAX_ATTACH_URL_REDIRECTS = 5
@@ -950,7 +982,8 @@ def _download_url_with_cap(url: str, max_bytes: int) -> tuple[bytes, Optional[st
     ``tools.url_safety.is_safe_url`` before fetching, so a model-controlled URL
     (or a public host 302ing to one) cannot reach loopback, private/CGNAT
     ranges, or cloud metadata. Redirects are followed manually so each
-    Location is re-checked. Returns ``(data, content_type)``; raises
+    Location is re-checked (mirrors ``tools.skills_hub._guarded_http_get``).
+    Returns ``(data, content_type)``; raises
     ``ValueError`` for a bad scheme, blocked target, too many redirects, or a
     body over the cap (checked while streaming, so nothing oversize is buffered).
     """
@@ -1007,9 +1040,9 @@ def _handle_attach_url(args: dict, **kw) -> str:
     tid, err = _worker_guard("kanban_attach_url", args)
     if err:
         return err
-    url = args.get("url")
-    if not url or not str(url).strip():
-        return tool_error("url is required")
+    url, err = _require_text(args, "url")
+    if err:
+        return err
     url = str(url).strip()
     filename = args.get("filename") or args.get("title")
     if not filename or not str(filename).strip():
@@ -1025,7 +1058,7 @@ def _handle_attach_url(args: dict, **kw) -> str:
         logger.exception("kanban_attach_url download failed")
         return tool_error(f"kanban_attach_url: failed to fetch {url}: {e}")
     return _store_attachment(
-        kb, args.get("board"), tid, filename, data, args.get("content_type") or fetched_ct
+        args.get("board"), tid, filename, data, args.get("content_type") or fetched_ct
     )
 
 
@@ -1045,24 +1078,25 @@ def _handle_attachments(args: dict, **kw) -> str:
         })
 
 
+def _opt_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    return int(value) if value is not None else default
+
+
 @_kanban_handler("kanban_create")
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
     delegated_err = _reject_delegated_child_mutation("kanban_create")
     if delegated_err:
         return delegated_err
-    title = args.get("title")
-    if not title or not str(title).strip():
-        return tool_error("title is required")
+    title, err = _require_text(args, "title")
+    if err:
+        return err
     assignee = args.get("assignee")
     if not assignee:
         return tool_error(
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
         )
-    body = args.get("body")
-    parents = args.get("parents") or []
-    tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
     # Prefer the request-scoped api_server origin binding over HERMES_SESSION_ID:
     # the env var is clobbered with a subagent's internal id whenever a child
     # agent is constructed in-process, which would stamp — and later wake —
@@ -1074,7 +1108,6 @@ def _handle_create(args: dict, **kw) -> str:
         or _current_origin_session_id()
         or os.environ.get("HERMES_SESSION_ID")
     )
-    priority = args.get("priority")
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch
     # workspace even for a dispatcher-spawned creator — reusing the parent's
     # literal path would let a child mutate review evidence or race its
@@ -1084,60 +1117,51 @@ def _handle_create(args: dict, **kw) -> str:
     workspace_path = args.get("workspace_path")
     project_id = args.get("project") or args.get("project_id")
     project_source_task_id = None
-    _inherit_project = workspace_kind is None and workspace_path is None
-    if workspace_kind is None:
-        workspace_kind = "scratch"
+    inherit_project = workspace_kind is None and workspace_path is None
     triage, bool_error = _parse_bool_arg(args, "triage")
     if bool_error:
         return tool_error(bool_error)
-    idempotency_key = args.get("idempotency_key")
-    max_runtime_seconds = args.get("max_runtime_seconds")
-    initial_status = args.get("initial_status") or "running"
     skills, err = _coerce_str_list(args.get("skills"), "skills", "skill names")
     if err:
         return err
-    goal_mode, goal_bool_error = _parse_bool_arg(args, "goal_mode")
-    if goal_bool_error:
-        return tool_error(goal_bool_error)
-    goal_max_turns = args.get("goal_max_turns")
+    goal_mode, bool_error = _parse_bool_arg(args, "goal_mode")
+    if bool_error:
+        return tool_error(bool_error)
     model_override = args.get("model")
     provider_override = args.get("provider")
     if provider_override and not model_override:
         return tool_error("'provider' requires 'model' to be set as well")
-    parents, err = _coerce_str_list(parents, "parents", "task ids")
+    parents, err = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     if err:
         return err
     with _board(args.get("board")) as (kb, conn):
-        if _inherit_project and project_id is None:
-            _self_tid = os.environ.get("HERMES_KANBAN_TASK")
-            if _self_tid:
-                _self_task = kb.get_task(conn, _self_tid)
-                if _self_task is not None and _self_task.project_id:
-                    project_id = _self_task.project_id
-                    project_source_task_id = _self_task.id
+        if inherit_project and project_id is None:
+            self_tid = os.environ.get("HERMES_KANBAN_TASK")
+            self_task = kb.get_task(conn, self_tid) if self_tid else None
+            if self_task is not None and self_task.project_id:
+                project_id = self_task.project_id
+                project_source_task_id = self_task.id
         new_tid = kb.create_task(
             conn,
             title=str(title).strip(),
-            body=body,
+            body=args.get("body"),
             assignee=str(assignee),
             parents=tuple(parents),
-            tenant=tenant,
-            priority=int(priority) if priority is not None else 0,
-            workspace_kind=str(workspace_kind),
+            tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
+            priority=_opt_int(args.get("priority"), 0),
+            workspace_kind=str(workspace_kind if workspace_kind is not None else "scratch"),
             workspace_path=workspace_path,
             project_id=project_id,
             project_source_task_id=project_source_task_id,
             triage=triage,
-            idempotency_key=idempotency_key,
-            max_runtime_seconds=(
-                int(max_runtime_seconds) if max_runtime_seconds is not None else None
-            ),
+            idempotency_key=args.get("idempotency_key"),
+            max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")),
             skills=skills,
             model_override=model_override,
             provider_override=provider_override,
             goal_mode=goal_mode,
-            goal_max_turns=int(goal_max_turns) if goal_max_turns is not None else None,
-            initial_status=str(initial_status),
+            goal_max_turns=_opt_int(args.get("goal_max_turns")),
+            initial_status=str(args.get("initial_status") or "running"),
             created_by=os.environ.get("HERMES_PROFILE") or "worker",
             session_id=session_id,
         )
@@ -1153,16 +1177,23 @@ def _handle_create(args: dict, **kw) -> str:
         )
 
 
-def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
-    """Auto-subscribe the calling session to task completion / block events.
+@dataclass
+class _NotifyTarget:
+    """Where kanban_create completion/block notifications for this session go."""
+    platform: str
+    chat_id: str
+    chat_type: Optional[str]
+    thread_id: Optional[str]
+    user_id: Optional[str]
+    user_id_alt: Optional[str]
+    notifier_profile: str
+    delivery_mode: Optional[str]
+    delivery_metadata: Optional[dict[str, Any]]
 
-    Returns True iff a subscription row was written; surfaced as ``subscribed``
-    on kanban_create so an orchestrator can fall back to an explicit
-    ``kanban_notify-subscribe`` or polling. Gated by
-    ``kanban.auto_subscribe_on_create`` (default True; unreadable config also
-    means True).
 
-    Delivery targets:
+def _resolve_notify_target() -> Optional[_NotifyTarget]:
+    """Delivery target for the calling session, or None when there is no channel.
+
     - Gateway (telegram/discord/...): ``HERMES_SESSION_PLATFORM`` /
       ``HERMES_SESSION_CHAT_ID`` ContextVars set before dispatch.
     - TUI/desktop: those ContextVars are cleared, but the subprocess inherits
@@ -1170,7 +1201,69 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
       for the TUI notification poller. ``HERMES_SESSION_ID`` is deliberately
       NOT a fallback — it is set for every CLI/ACP invocation for telemetry and
       would auto-subscribe every CLI run.
-    - CLI / cron / tests: no persistent channel, no-op.
+    - CLI / cron / tests: no persistent channel -> None.
+    """
+    from gateway.session_context import get_session_env
+
+    platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+    chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+    if not platform or not chat_id:
+        session_key = (
+            get_session_env("HERMES_SESSION_KEY", "")
+            or os.environ.get("HERMES_SESSION_KEY", "")
+        )
+        if not session_key:
+            return None
+        platform, chat_id = "tui", session_key
+    chat_type = get_session_env("HERMES_SESSION_CHAT_TYPE", "") or None
+    thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "") or None
+    message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "") or ""
+    notifier_profile = (
+        get_session_env("HERMES_SESSION_PROFILE", "")
+        or os.environ.get("HERMES_PROFILE")
+    )
+    if not notifier_profile:
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            notifier_profile = get_active_profile_name() or "default"
+        except Exception:
+            notifier_profile = "default"
+    delivery_metadata: dict[str, Any] = {}
+    if thread_id:
+        delivery_metadata["thread_id"] = thread_id
+    if chat_type:
+        delivery_metadata["chat_type"] = chat_type
+    if (
+        platform.lower() == "telegram"
+        and thread_id
+        and (chat_type or "").lower() in {"dm", "direct", "private"}
+    ):
+        delivery_metadata["telegram_dm_topic_reply_fallback"] = True
+        if str(thread_id) not in {"", "1"}:
+            delivery_metadata["direct_messages_topic_id"] = str(thread_id)
+        if message_id:
+            delivery_metadata["telegram_reply_to_message_id"] = str(message_id)
+    return _NotifyTarget(
+        platform=platform,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        thread_id=thread_id,
+        user_id=get_session_env("HERMES_SESSION_USER_ID", "") or None,
+        user_id_alt=get_session_env("HERMES_SESSION_USER_ID_ALT", "") or None,
+        notifier_profile=notifier_profile,
+        delivery_mode="notify+wake" if platform != "tui" else None,
+        delivery_metadata=delivery_metadata or None,
+    )
+
+
+def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
+    """Auto-subscribe the calling session to task completion / block events.
+
+    Returns True iff a subscription row was written; surfaced as ``subscribed``
+    on kanban_create so an orchestrator can fall back to an explicit
+    ``kanban_notify-subscribe`` or polling. Gated by
+    ``kanban.auto_subscribe_on_create`` (default True; unreadable config also
+    means True). Target resolution: see ``_resolve_notify_target``.
 
     Any failure is logged at WARNING and swallowed: notification bookkeeping
     must never fail the kanban_create the agent is mid-conversation about.
@@ -1180,71 +1273,28 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
         if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=True):
             return False
     except Exception:
-        pass
+        pass  # unreadable config keeps the user-friendly default (True)
 
-    platform = ""
-    chat_id = ""
+    target = None
     try:
-        from gateway.session_context import get_session_env
-        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
-        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
-        if not platform or not chat_id:
-            session_key = (
-                get_session_env("HERMES_SESSION_KEY", "")
-                or os.environ.get("HERMES_SESSION_KEY", "")
-            )
-            if not session_key:
-                return False  # CLI / cron / test — no persistent channel
-            platform = "tui"
-            chat_id = session_key
-        is_gateway_session = platform != "tui"
-        chat_type = get_session_env("HERMES_SESSION_CHAT_TYPE", "") or None
-        delivery_mode = "notify+wake" if is_gateway_session else None
-        thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "") or None
-        user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
-        user_id_alt = get_session_env("HERMES_SESSION_USER_ID_ALT", "") or None
-        message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "") or ""
-        notifier_profile = (
-            get_session_env("HERMES_SESSION_PROFILE", "")
-            or os.environ.get("HERMES_PROFILE")
-        )
-        if not notifier_profile:
-            try:
-                from hermes_cli.profiles import get_active_profile_name
-                notifier_profile = get_active_profile_name() or "default"
-            except Exception:
-                notifier_profile = "default"
-        delivery_metadata: dict[str, Any] = {}
-        if thread_id:
-            delivery_metadata["thread_id"] = thread_id
-        if chat_type:
-            delivery_metadata["chat_type"] = chat_type
-        if (
-            platform.lower() == "telegram"
-            and thread_id
-            and (chat_type or "").lower() in {"dm", "direct", "private"}
-        ):
-            delivery_metadata["telegram_dm_topic_reply_fallback"] = True
-            if str(thread_id) not in {"", "1"}:
-                delivery_metadata["direct_messages_topic_id"] = str(thread_id)
-            if message_id:
-                delivery_metadata["telegram_reply_to_message_id"] = str(message_id)
-
+        target = _resolve_notify_target()
+        if target is None:
+            return False  # CLI / cron / test — no persistent channel
         from hermes_cli import kanban_db as _kb
         _kb.add_notify_sub(
             conn, task_id=task_id,
-            platform=platform, chat_id=chat_id,
-            thread_id=thread_id, user_id=user_id, user_id_alt=user_id_alt,
-            chat_type=chat_type,
-            notifier_profile=notifier_profile,
-            delivery_mode=delivery_mode,
-            delivery_metadata=delivery_metadata or None,
+            platform=target.platform, chat_id=target.chat_id,
+            thread_id=target.thread_id, user_id=target.user_id, user_id_alt=target.user_id_alt,
+            chat_type=target.chat_type,
+            notifier_profile=target.notifier_profile,
+            delivery_mode=target.delivery_mode,
+            delivery_metadata=target.delivery_metadata,
         )
         return True
     except Exception as _exc:
         logger.warning(
             "_maybe_auto_subscribe failed: %r (platform=%r key_set=%r)",
-            _exc, platform, bool(chat_id),
+            _exc, target.platform if target else "", bool(target and target.chat_id),
         )
         return False
 
