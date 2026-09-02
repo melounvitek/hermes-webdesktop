@@ -85,12 +85,15 @@ _ALLOWED: dict[tuple[str, str], str] = {
         "Fallback rung of _append_node_dir_for_service(), after the managed "
         "dirs from iter_hermes_node_dirs() are already appended."
     ),
-    ("hermes_cli/main.py", "node"): (
+    ("hermes_cli/main_tui_launch.py", "node"): (
         "_ensure_tui_node()'s idempotence gate: the question really is 'is "
         "node already discoverable on PATH', before bootstrapping one."
     ),
-    ("hermes_cli/main.py", "npm"): (
+    ("hermes_cli/main_tui_launch.py", "npm"): (
         "Same _ensure_tui_node() gate as node."
+    ),
+    ("hermes_cli/main.py", "npm"): (
+        "_resolve_node_runtime_npm()'s WSL re-scan: PATH minus /mnt/* IS the question."
     ),
     ("tools/browser_tool.py", "npx"): (
         "agent-browser runs via `npx`, resolved against the extended browser "
