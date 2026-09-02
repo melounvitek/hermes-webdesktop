@@ -287,17 +287,12 @@ def _session_filter_where(
     session_key: str = None, exclude_sources: List[str] = None, cwd_prefix: str = None,
     min_message_count: int = 0, archived_only: bool = False, include_archived: bool = False,
 ) -> Tuple[List[str], List[Any]]:
-    """Shared ``sessions s`` WHERE builder for list_sessions_rich / session_count /
-    session_count_by_source, so the count always lines up with the listed rows.
-
-    ``exclude_children`` keeps roots and user-visible branch/reset sessions while
-    hiding sub-agent runs and compression continuations: all four carry
-    parent_session_id, so ``_LISTABLE_CHILD_SQL`` classifies the edge from the
-    stable ``_branched_from`` marker (survives the parent being re-ended with a
-    different end_reason) OR'd with the legacy parent-ended-'branched' heuristic
-    for pre-marker rows; delegate children are excluded by their own marker.
-    Clause order is part of the SQL text contract.
-    """
+    """Shared ``sessions s`` WHERE builder so session counts line up with the
+    listed rows. ``exclude_children`` hides sub-agent runs and compression
+    continuations but keeps branch/reset children: ``_LISTABLE_CHILD_SQL`` uses
+    the stable ``_branched_from`` marker (survives a re-ended parent) OR'd with
+    the legacy parent-ended-'branched' heuristic for pre-marker rows. Clause
+    order is part of the SQL text contract."""
     where: List[str] = []
     params: List[Any] = []
     if exclude_children:
@@ -489,16 +484,11 @@ def _reclaim_idle_read_conn_anywhere() -> bool:
 
 
 class _PathReadBudget:
-    """Read-connection permits for ONE database file, shared process-wide.
-
-    Per-instance semaphores bounded the wrong noun: descriptors are spent on a
-    *file*, so N SessionDB objects on one state.db peaked at N x (1 + MAX) —
-    a gateway holds at least two per profile path — and walked into EMFILE.
-    A pooled idle connection keeps its permit, so the first instance to warm up
-    would pin all eight and demote every later instance to the writer lock;
-    hence a permit miss first reclaims an IDLE connection from a peer on the
-    same path (idle descriptors are transferable, in-use ones are not).
-    """
+    """Read-connection permits for ONE database file, shared process-wide:
+    per-instance semaphores let N SessionDBs on one file peak at N x (1 + MAX)
+    and walk into EMFILE. An idle pooled connection keeps its permit, so a
+    permit miss first reclaims an IDLE connection from a peer on the same path
+    (idle descriptors are transferable, in-use ones are not)."""
 
     def __init__(self) -> None:
         self.permits = threading.BoundedSemaphore(_READ_POOL_MAX)
@@ -610,18 +600,13 @@ def _default_db_path() -> Path:
 # ---------------------------------------------------------------------------
 # Live-DB test-isolation guard
 # ---------------------------------------------------------------------------
-# Forensic evidence on a live developer machine: pytest fixture rows landed in
-# the production ~/.hermes/state.db and a pytest-spawned process flipped the
-# journal mode under the WAL-mode gateway writer, destroying committed
-# transcripts. The hermetic conftest redirects HERMES_HOME per test, but any
-# escape (session-scoped fixture before the autouse one, a subprocess child
-# without HERMES_HOME, a stale worktree, a shell exporting HERMES_HOME to the
-# real home) silently fell through to the real database.
-#
-# This is the single choke point: EVERY SessionDB construction resolves its
-# path here, so under pytest a production state.db fails hard. Env-based
-# (PYTEST_CURRENT_TEST / PYTEST_VERSION inherit into children), so it also
-# protects children that never import the conftest.
+# Field evidence: pytest fixture rows landed in the production state.db and a
+# pytest-spawned child flipped the journal mode under the live WAL writer,
+# destroying committed transcripts. The hermetic conftest redirects HERMES_HOME
+# per test, but any escape (fixture ordering, a child spawned without
+# HERMES_HOME, a shell exporting the real home) fell through silently. EVERY
+# SessionDB construction resolves its path here, so under pytest a production
+# state.db fails hard. Env-based, so subprocess children are protected too.
 
 #: Escape hatch for tests that genuinely need the real DB (conftest sets it for
 #: ``@pytest.mark.live_system_guard_bypass``); scripts may set it explicitly.
@@ -878,18 +863,13 @@ def format_session_db_unavailable(prefix: str = "Session database not available"
 
 
 # ---------------------------------------------------------------------------
-# Malformed-schema recovery
-# ---------------------------------------------------------------------------
-# Nastier than a malformed FTS inverted index: ``sqlite_master`` itself is
-# inconsistent (typically a DUPLICATE object, e.g. two ``CREATE VIRTUAL TABLE
-# messages_fts`` rows). SQLite parses the whole schema while preparing the FIRST
-# statement, so EVERY statement raises — including ``PRAGMA journal_mode``
-# (hence it trips in apply_wal_with_fallback during __init__, before
-# _init_schema), ``PRAGMA integrity_check`` and plain ``DROP TABLE``. Only
-# ``PRAGMA writable_schema=ON`` + direct sqlite_master surgery still work.
-# Symptom: "malformed database schema (messages_fts) - table messages_fts
-# already exists" while Desktop shows "no sessions". Canonical sessions /
-# messages are intact; recovery rebuilds only the FTS layer.
+# Malformed-schema recovery: ``sqlite_master`` itself is inconsistent (typically
+# a DUPLICATE ``CREATE VIRTUAL TABLE messages_fts`` row). SQLite parses the
+# whole schema while preparing the FIRST statement, so EVERY statement raises —
+# including ``PRAGMA journal_mode`` (it trips in apply_wal_with_fallback during
+# __init__, before _init_schema) and plain ``DROP TABLE``; only
+# ``PRAGMA writable_schema=ON`` + sqlite_master surgery still work. Canonical
+# sessions/messages are intact; recovery rebuilds only the FTS layer.
 _MALFORMED_SCHEMA_MARKERS = ("malformed database schema",)
 _MALFORMED_DB_MARKERS = (*_MALFORMED_SCHEMA_MARKERS, "database disk image is malformed")
 
@@ -991,17 +971,11 @@ _DB_CORRUPTION_MARKERS = (
 
 
 def classify_persistence_error(exc_or_str) -> str:
-    """Coarse cause bucket for a session-persistence failure (PERSISTENCE_ERROR_CAUSES).
-
-    Fast-failing the turn is deliberate (the transcript would be lost on
-    restart), but the user's guidance must match the cause: "locked" (write-lock
-    contention: storage busy, retry) vs "disk" (full / read-only / permissions).
-    "compression" = a live lease refused the write; "compression_closed" = the
-    target was rotated by compression and the client must adopt the new id;
-    "turn_lease" = fail-fast fencing, not a storage fault; "corrupt" = file
-    damage (freeing space cannot help — repair path); "replaced" = the path no
-    longer names the opened file (writes on the live handle must stop).
-    """
+    """Coarse cause bucket (PERSISTENCE_ERROR_CAUSES) so the user's guidance
+    matches: "locked" = busy, retry; "disk" = full/read-only/permissions;
+    "compression" = a live lease refused the write; "compression_closed" = adopt
+    the rotated session id; "turn_lease" = fencing, not storage; "corrupt" =
+    file damage (repair path, not disk space); "replaced" = stop writing."""
     if exc_or_str is None:
         return "unknown"
     # Lease refusals contain neither "locked" nor "busy": match by type, then by
@@ -1038,50 +1012,38 @@ def classify_persistence_error(exc_or_str) -> str:
     return "unknown"
 
 
-# Cross-process serialisation for schema surgery: ``_repair_attempt_lock`` only
-# covers threads in ONE interpreter, but gateway, Desktop's ``hermes serve``,
-# CLI sessions and the TUI slash worker all share state.db and each used to run
-# the full writable_schema surgery + VACUUM on top of the winner's. Timeout
-# sized for the slowest legitimate holder (VACUUM over a multi-GB DB) — the
-# losing caller previously spent the same minutes on its own surgery.
+# Cross-process schema-surgery lock: ``_repair_attempt_lock`` covers one
+# interpreter only, while gateway, Desktop backend, CLI and TUI worker share the
+# file and each used to run surgery + VACUUM on top of the winner's. Timeout
+# sized for the slowest legitimate holder (VACUUM over a multi-GB DB).
 _REPAIR_LOCK_TIMEOUT_SECONDS = 120.0
 _IS_WINDOWS = sys.platform == "win32"
 
 
-# Repair-loop bounding + dead-backup hygiene: ``_claim_repair_attempt`` bounds
-# the loop only WITHIN one process. Unhealable b-tree damage failed repair on
-# every process start and each pass took a fresh ~900MB forensic backup (105
-# attempts / 89GB of identical copies). Two persistent bounds: a sidecar attempt
-# ledger (``<db>.repair-attempts.json``, keyed by size + content-sample
-# fingerprint, reset by any successful repair/replacement) refusing surgery after
-# _MAX_PERSISTENT_REPAIR_ATTEMPTS; and backup dedupe + retention cap
-# (_MAX_MALFORMED_BACKUPS) in ``_backup_db_file``.
+# Repair-loop bounding (hermes_state_repair): unhealable b-tree damage failed
+# repair on every start, each pass taking a fresh ~900MB backup (89GB of
+# identical copies). A sidecar attempt ledger (fingerprint = size + content
+# sample) refuses surgery after _MAX_PERSISTENT_REPAIR_ATTEMPTS, and backups are
+# deduped and capped at _MAX_MALFORMED_BACKUPS.
 
 # ── CJK-bigram FTS index (replaces the trigram index when available) ────
+# Trigram needs >=3 chars per term, so 1-2 char CJK terms fell through to a
+# LIKE table scan (3-6s CPU per query on multi-GB installs). ``cjk_unicode61``
+# (native/fts5_cjk/, loadable) re-emits CJK runs as overlapping bigrams; FTS5
+# phrase semantics then give exact substring matching down to 2 chars.
 #
-# The trigram tokenizer needs >=3 chars per term, so 1-2 char CJK terms (일본,
-# 项目, ...) fell through to a LIKE full-table scan — 3-6s CPU per query on
-# multi-GB installs. ``cjk_unicode61`` (native/fts5_cjk/, a small loadable FTS5
-# tokenizer) wraps unicode61 and re-emits maximal CJK runs as overlapping
-# character bigrams (Lucene CJKAnalyzer semantics); FTS5 phrase semantics then
-# give exact substring matching down to 2 chars at index speed.
+# Same v23 discipline as the trigram table: external-content over a
+# tool-row-excluding view, triggers gated on a DEDICATED marker pair
+# (fts_cjk_rebuild_high_water / _progress) so a cjk-only backfill never gates
+# the complete messages_fts triggers. The table exists ONLY when the tokenizer
+# loads (~/.hermes/lib/libfts5_cjk.so); a process that cannot load it drops the
+# cjk triggers (writes keep working; the index goes stale until the next
+# optimize-storage on a capable host).
 #
-# Same v23 storage discipline as the trigram table: external-content over a
-# tool-row-excluding view (tool rows stay searchable via messages_fts), triggers
-# gated on a DEDICATED marker pair (fts_cjk_rebuild_high_water /
-# fts_cjk_rebuild_progress) so a cjk-only backfill never gates the complete
-# messages_fts index's triggers.
-#
-# The table exists ONLY when the loadable tokenizer is available
-# (~/.hermes/lib/libfts5_cjk.so, built by native/fts5_cjk/build.sh). A process
-# that cannot load it self-heals by dropping the cjk triggers (writes keep
-# working; the index goes stale and is rebuilt by the next optimize-storage).
-#
-# Split DDL: the table/view part is safe to ensure any time; the triggers are
-# created ONLY while the index is complete-or-marker-gated. A stale index
-# (trigger gap of unknown extent) must keep its triggers DROPPED — an
-# external-content 'delete' for a rowid the index never held is the canonical
-# FTS5 index-corruption hazard the v23 marker gating exists to prevent.
+# Split DDL: the table/view is safe to ensure any time; triggers are created
+# ONLY while the index is complete-or-marker-gated. A stale index must keep its
+# triggers DROPPED — an external-content 'delete' for a rowid the index never
+# held is the canonical FTS5 corruption hazard the marker gating prevents.
 FTS_CJK_TABLE_SQL = """
 CREATE VIEW IF NOT EXISTS messages_fts_cjk_src AS
     SELECT id, role, content, tool_name, tool_calls
@@ -1237,19 +1199,13 @@ _DELETED_WAL_GENERATION_MSG = (
 
 
 class StateDbCorruptError(sqlite3.DatabaseError):
-    """A live SessionDB observed structural (non-FTS, non-replaced) corruption
-    and is quarantined. Subclasses sqlite3.DatabaseError so every ``except
-    sqlite3.Error`` degrade path keeps working; sqlite_errorcode/name are copied.
-
-    Sticky for the handle's life: later writes fail fast, no reopen after
-    close(), and close() skips its WAL checkpoint. Field evidence: a handle that
-    kept writing ~50 minutes after the first structural error checkpointed 15
-    pages under the wrong page numbers on shutdown, turning a readable file into
-    "file is not a database". SQLite's own close-time checkpoint is disabled via
-    SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE on Python 3.12+ (WAL survives for
-    forensics); on 3.11 it is unavoidable but can only carry pre-corruption
-    frames. Recovery boundary: process restart on a repaired/restored file.
-    """
+    """A live SessionDB observed structural (non-FTS, non-replaced) corruption and
+    is quarantined: sticky for the handle's life — writes fail fast, no reopen,
+    no close-time checkpoint (a handle that kept writing after the first error
+    checkpointed 15 pages under wrong page numbers and turned a readable file
+    into "file is not a database"; SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE on 3.12+
+    also stops SQLite's own). Subclasses sqlite3.DatabaseError so every degrade
+    path keeps working. Recovery boundary: restart on a repaired/restored file."""
 
 
 _STATE_DB_CORRUPT_MSG = (
@@ -1343,22 +1299,15 @@ class SessionDB(
     )
 
     # ── Write-contention tuning ──
-    # Many hermes processes share one state.db; SQLite's deterministic busy
-    # handler convoys under concurrency, so the SQLite timeout stays short (1s)
-    # and retries happen at the application level with random jitter.
-    #
-    # Patience is TIME-based, not attempt-based: a sibling legitimately holds
-    # the lock for multi-second stretches (TRUNCATE checkpoint at close on a
-    # large WAL, VACUUM after auto-prune, offline recovery, an older
-    # still-running process whose FTS maintenance predates bounded merges). An
-    # attempt-counted budget silently lost that race and destroyed the turn as
-    # session_persistence_failed although the store was merely busy.
-    #
-    # Two budgets: routine writes give up after _WRITE_PATIENCE_S; transcript
-    # writes (append_message / session-row creation — failure aborts the user's
-    # turn) ride out anything shorter than _TRANSCRIPT_WRITE_PATIENCE_S. Jitter
-    # stays small for the first _WRITE_RETRY_SLOW_AFTER_S, then backs off so a
-    # long hold isn't hammered with BEGIN IMMEDIATE attempts.
+    # SQLite's deterministic busy handler convoys under many hermes processes,
+    # so the SQLite timeout stays short (1s) and retries use random jitter.
+    # Patience is TIME-based: a sibling legitimately holds the lock for seconds
+    # (TRUNCATE checkpoint at close, VACUUM after auto-prune, recovery, an older
+    # process's unbounded FTS optimize); an attempt-counted budget lost that race
+    # and destroyed the turn as session_persistence_failed on a healthy store.
+    # Routine writes give up after _WRITE_PATIENCE_S; transcript writes (whose
+    # failure aborts the user's turn) get _TRANSCRIPT_WRITE_PATIENCE_S. Jitter
+    # stays small for _WRITE_RETRY_SLOW_AFTER_S, then backs off.
     _WRITE_PATIENCE_S = 20.0
     _TRANSCRIPT_WRITE_PATIENCE_S = 60.0
     # Observation-only activity heartbeat/label writes sit on the response-
@@ -1376,12 +1325,10 @@ class SessionDB(
     _WRITE_RETRY_SLOW_MAX_S = 1.000  # 1s
     # PASSIVE WAL checkpoint every N successful writes.
     _CHECKPOINT_EVERY_N_WRITES = 50
-    # FTS maintenance every 1000 writes uses bounded ``'merge'`` commands (a
-    # positive rank is an output-page budget: milliseconds of write lock each)
-    # instead of unbounded ``'optimize'`` (9-18s per index on a 10GB DB — longer
-    # than a competing writer's patience). Up to _FTS_MERGE_COMMANDS_PER_PASS
-    # per index, stopping early on the no-progress signal; ``usermerge`` is
-    # lowered to 2 so levels with >= 2 segments merge (default 4 never converges).
+    # Bounded FTS ``'merge'`` (milliseconds of lock each) instead of ``'optimize'``
+    # (9-18s per index on a 10GB DB — longer than a writer's patience); up to
+    # _FTS_MERGE_COMMANDS_PER_PASS per index, stopping on no-progress. usermerge
+    # is lowered to 2 so levels with >= 2 segments merge (default 4 never converges).
     _FTS_MERGE_EVERY_N_WRITES = 1000
     _FTS_MERGE_MAX_PAGES_PER_INDEX = 500
     _FTS_MERGE_COMMANDS_PER_PASS = 4
@@ -1551,20 +1498,12 @@ class SessionDB(
                 self._close_connection_quietly(conn)
 
     def _open_read_only(self) -> None:
-        """Read-only attach for cross-profile aggregation (SELECT-only).
-
-        Skips schema init entirely (no DDL, no FTS probe, no column reconcile)
-        and takes NO write lock, so polling another profile's live DB on every
-        sidebar refresh never contends with that profile's backend. The DB must
-        already exist + be initialised (callers guard on ``db_path.exists()``);
-        a SELECT against an empty file raises and the caller degrades.
-
-        FTS capability flags are probed with SELECTs only. The connection is
-        closed on ANY probe failure (malformed schema raises DatabaseError, not
-        the OperationalError the probe handles) so a leaked tracked connection
-        cannot block ``_backup_db_file``'s raw copy — the writable heal that
-        follows would then repair WITHOUT its forensic backup.
-        """
+        """Read-only attach for cross-profile aggregation: no schema init, NO
+        write lock (sidebar polling never contends with that profile's backend);
+        the DB must already exist. FTS flags are probed with SELECTs only, and
+        the connection is closed on ANY probe failure (malformed schema raises
+        DatabaseError) so a leaked tracked connection cannot block the forensic
+        backup the writable heal takes next."""
         open_attempt = 0
         while True:
             try:
@@ -1647,16 +1586,10 @@ class SessionDB(
         self._init_schema()
 
     def _connect_and_init_with_lock_patience(self) -> None:
-        """Open + init, waiting out a sibling's write lock with jittered patience.
-
-        ``_init_schema``'s DDL/reconcile statements run on a 1s-timeout
-        connection with no retry, so a sibling process holding the write lock
-        (VACUUM, TRUNCATE checkpoint at close, a long FTS pass from an older
-        install) used to fail the ENTIRE open — callers then disable
-        persistence for the whole run. The store is healthy; wait it out with
-        the write path's patience. Non-lock errors (including the malformed
-        class) propagate immediately.
-        """
+        """Open + init, waiting out a sibling's write lock with jittered patience:
+        _init_schema's DDL runs on a 1s-timeout connection, so a sibling's VACUUM
+        or checkpoint used to fail the ENTIRE open and callers disabled
+        persistence for the whole run. Non-lock errors propagate immediately."""
         deadline = time.monotonic() + self._WRITE_PATIENCE_S
         while True:
             try:
@@ -1843,18 +1776,11 @@ class SessionDB(
             yield cast(sqlite3.Connection, self._conn)
 
     def _reopen_after_close_locked(self, context: str = "write") -> None:
-        """Reopen the writer connection after ``close()`` raced a live caller.
-
-        A teardown owner (cron run_job's finally, a delegate timeout owner,
-        agent close()) sets ``_conn = None`` while an unwinding worker still has
-        one transcript flush to land; the next write died on ``NoneType`` and
-        the turn's tail was silently dropped. The transcript append is THE
-        critical write, so self-heal: loud (WARNING names the race), bounded
-        (only after an explicit close(); the constructor never leaves a None
-        handle), and ``__del__`` still releases the reopened connection.
-        Caller holds ``self._lock``. A failed reopen raises OperationalError
-        naming the teardown race instead of the opaque attribute error.
-        """
+        """Reopen the writer after ``close()`` raced a live caller (a teardown
+        owner set ``_conn = None`` while a worker still had a transcript flush
+        to land; the turn's tail was silently dropped). Loud (WARNING) and
+        bounded (only after an explicit close()); ``__del__`` still releases it.
+        Caller holds ``self._lock``. A failed reopen names the race in its error."""
         if self.read_only:
             raise sqlite3.ProgrammingError(
                 f"SessionDB for {self.db_path} was closed (read-only handle); "
@@ -1961,18 +1887,12 @@ class SessionDB(
         )
 
     def _ensure_fts_cjk_schema(self, cursor) -> None:
-        """Create / repair / self-heal the CJK-bigram index surface (v23 DBs with
-        healthy base FTS). ``cursor`` may be a Cursor or Connection. Sets
-        ``_fts_cjk_available``; never raises — every failure degrades to
-        trigram/LIKE routing.
-
-        tokenizer loaded, table absent → create; a populated DB gets the cjk
-        backfill markers so the id-gated triggers stay correct and the index is
-        NOT served until optimize-storage backfills. tokenizer loaded, table
-        present → ensure triggers, honour the stale breadcrumb. tokenizer NOT
-        loaded, live triggers → drop them so INSERTs don't fail at trigger time,
-        leave the breadcrumb; the table stays for a capable open to rebuild.
-        """
+        """Create / repair / self-heal the CJK-bigram index (see the module
+        comment). Sets ``_fts_cjk_available``; never raises. Loaded + absent →
+        create (a populated DB gets the backfill markers and is NOT served until
+        optimize-storage backfills); loaded + present → ensure triggers, honour
+        the stale breadcrumb; NOT loaded + live triggers → drop them so INSERTs
+        don't fail at trigger time and leave the breadcrumb."""
         try:
             cjk_present = bool(cursor.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts_cjk'"
@@ -2632,19 +2552,13 @@ class SessionDB(
             pass
 
     # ── Chunked FTS rebuild engine (v23 opt-in optimize) ──
-    # `optimize_fts_storage()` drops the legacy inline FTS indexes and backfills
-    # the external-content ones. One blocking rebuild held the write lock ~16
-    # minutes on a 25 GB DB, so the backfill runs in small chunks, each its own
-    # short write transaction: readers/writers are never starved, an interrupted
-    # run resumes from fts_rebuild_progress, and concurrent runners just
-    # interleave chunks (each chunk claims work by compare-and-swap).
-    #
-    # THROTTLING: a greedy chunk loop re-acquires BEGIN IMMEDIATE back-to-back
-    # and starves other processes' writers (an early 5000-row version owned the
-    # lock ~85% of the time). Small chunks (500 rows: a foreground write queues
-    # for tens of ms at most) plus an inter-chunk pause of max(MIN_PAUSE, chunk
-    # cost x DUTY_FACTOR) cap this process's share of DB bandwidth — works
-    # cross-process because it bounds our own duty cycle unconditionally.
+    # One blocking rebuild held the write lock ~16 minutes on a 25 GB DB, so the
+    # backfill runs in small chunks, each its own short transaction (resumable
+    # from fts_rebuild_progress; concurrent runners claim chunks by CAS).
+    # THROTTLING: a greedy loop owned the lock ~85% of the time and starved
+    # other processes' writers; 500-row chunks plus a pause of max(MIN_PAUSE,
+    # chunk cost x DUTY_FACTOR) cap our duty cycle unconditionally (works
+    # cross-process, unlike any same-process activity stamp).
     _FTS_REBUILD_CHUNK_ROWS = 500
     _FTS_REBUILD_DUTY_FACTOR = 4.0      # sleep >= 4x chunk cost (≤20% duty)
     _FTS_REBUILD_MIN_PAUSE = 0.2        # seconds — floor between chunks
@@ -2689,23 +2603,14 @@ class SessionDB(
 
     @staticmethod
     def _inherit_parent_session_metadata(conn, session_id: str) -> None:
-        """NULL-fill a new child row's cwd/git/profile from its parent; compression forks also inherit routing.
-
-        Child creators historically did not propagate cwd/git_repo_root/
-        git_branch/profile_name, so lineages dropped out of the project sidebar
-        or aggregated as "default" on every fork. profile_name is inherited only
-        across the same ``agent:<ns>:`` key namespace (``_SAME_KEY_NAMESPACE_SQL``).
-
-        The second UPDATE is belt-and-suspenders for gateway routing metadata:
-        the gateway re-records the peer on the child after rotation, but a hard
-        crash between child creation and that write leaves the child without
-        origin columns, so ``find_latest_gateway_session_for_peer`` can't
-        recover the mapping on restart. Inherit them at creation — but ONLY for
-        compression forks (parent ``end_reason='compression'``). Delegate/
-        subagent children are spawned while the parent is still live and must
-        NOT inherit routing keys, or peer recovery could repoint gateway traffic
-        into a subagent's session.
-        """
+        """NULL-fill a child's cwd/git/profile from its parent (child creators
+        didn't propagate them, so lineages dropped out of the project sidebar);
+        profile_name only within the same ``agent:<ns>:`` namespace. The second
+        UPDATE inherits gateway routing columns ONLY for compression forks: a
+        crash before the gateway re-records the peer would otherwise strand the
+        child unroutable, while delegate children are spawned under a live
+        parent and must NOT inherit routing keys (peer recovery could repoint
+        gateway traffic into a subagent's session)."""
         conn.execute(
             f"""UPDATE sessions
                        SET cwd = COALESCE(sessions.cwd,
@@ -2763,21 +2668,13 @@ class SessionDB(
         parent_session_id: str = None, cwd: str = None, profile_name: Optional[str] = None,
         git_repo_root: str = None, origin_json: str = None, display_name: str = None,
     ) -> None:
-        """Insert a session row, enriching NULL metadata on conflict.
-
-        The gateway creates a bare row (source + user_id) before the agent
-        exists and the agent's later ``create_session`` carries the real
-        model/model_config/system_prompt; the upsert ``COALESCE``-fills columns
-        that are still NULL and never overwrites what an earlier writer set (a
-        later bare source="unknown" call cannot clobber a real source/model).
-        ``chat_id``/``thread_id`` record the messaging origin so gateway
-        ``/resume`` can prove an inactive row belongs to the caller (IDOR scoping).
-        With ``parent_session_id`` NULL metadata is backfilled from the parent
-        (:meth:`_inherit_parent_session_metadata`). With no ``profile_name`` the
-        row is stamped with THIS store's own profile (:meth:`_own_profile_name`);
-        profile-keyed consumers treat NULL as unowned. Stores outside the
-        profile tree keep NULL — never guess.
-        """
+        """Upsert a session row, COALESCE-filling NULL columns and never
+        overwriting what an earlier writer set (the gateway creates a bare row
+        before the agent's create_session carries the real model/prompt; a later
+        bare source="unknown" cannot clobber it). chat_id/thread_id scope gateway
+        /resume (IDOR). Children backfill from the parent
+        (:meth:`_inherit_parent_session_metadata`); a missing profile_name is
+        stamped with THIS store's own profile (NULL reads as unowned)."""
         if not (profile_name or "").strip():
             profile_name = self._own_profile_name()
         def _do(conn):
@@ -2959,18 +2856,12 @@ class SessionDB(
         self._execute_write(_do)
 
     def promote_to_session_reset(self, session_id: str, reason: str = "session_reset") -> bool:
-        """Durably mark a session ended by an intentional reset boundary.
-
-        Promotes only live rows or rows carrying a *recoverable* accidental
-        end_reason (``agent_close``, ``ws_orphan_reap``); explicit boundaries
-        (compression, session_reset, ...) are preserved — first writer wins.
-        Plain end_session() is not enough: it no-ops on an already-ended row,
-        so an ``agent_close`` row would stay recoverable and stale-route
-        recovery would resurrect the reset session with its full history. Keep
-        the promotion set in sync with find_latest_gateway_session_for_peer.
-        ``reason`` keeps reset paths auditable (idle, daily, suspended, ...).
-        True when promoted, False when skipped or missing.
-        """
+        """Durably mark an intentional reset boundary on live rows or rows with a
+        *recoverable* accidental end_reason; explicit boundaries are preserved
+        (first writer wins). Plain end_session() no-ops on an ended row, so an
+        ``agent_close`` row would stay recoverable and stale-route recovery would
+        resurrect the reset session. Keep in sync with
+        find_latest_gateway_session_for_peer. True when promoted."""
         if not session_id:
             return False
         now = time.time()
@@ -2996,19 +2887,12 @@ class SessionDB(
         git_repo_root: Optional[str] = None, replace_git_meta: bool = False,
     ) -> Optional[int]:
         """Persist the authoritative cwd and claim a Git metadata generation.
-
-        ``git_branch`` is the branch checked out at start/resume (the sidebar
-        groups by it; the checkout's *current* branch is transient and would
-        misattribute past sessions). ``git_repo_root`` is the authoritative
-        project key, resolved here so every surface reads the same membership.
-        Each field is written only when non-empty so a probe failure never
-        clobbers a captured value — except ``replace_git_meta`` (a deliberate
+        git fields are written only when non-empty (a probe failure never
+        clobbers a captured value) except under ``replace_git_meta`` (a
         workspace MOVE must overwrite the old repo identity even when the new
-        cwd resolves to none). Every call bumps ``git_metadata_generation`` in
-        the same transaction; async probes publish via
-        :meth:`publish_session_git_metadata` with that generation, so an older
-        worker cannot overwrite a newer claim (A -> B -> A, or another process).
-        """
+        cwd has none). Each call bumps ``git_metadata_generation``; async probes
+        publish via :meth:`publish_session_git_metadata` with that generation so
+        an older worker cannot overwrite a newer claim (A -> B -> A)."""
         if not session_id or not cwd:
             return None
         branch = (git_branch or "").strip()
@@ -3523,15 +3407,11 @@ class SessionDB(
 
     @staticmethod
     def _chain_search_where(where_sql: str, id_needle: str, search_needle: str) -> Tuple[str, List[Any]]:
-        """Extend ``where_sql`` with the id_query / search_query chain filters.
-
-        A surfaced row is admitted when its own id, or any id in its forward
-        compression chain (the ``chain`` CTE), matches ``id_needle``; the
-        search variant also matches titles, plus a punctuation-stripped form so
-        ``an94`` finds ``AN-94``. LIKE with a leading wildcard can't use an
-        index, but chain membership and the small result set keep it bounded —
-        far cheaper than fetching every session and scanning in Python.
-        """
+        """Extend ``where_sql`` with the id_query / search_query filters: a row is
+        admitted when its own id or any id in its forward compression chain
+        matches (search also matches titles and a punctuation-stripped form so
+        ``an94`` finds ``AN-94``). Leading-wildcard LIKE can't use an index but
+        chain membership keeps it bounded — far cheaper than scanning in Python."""
         params: List[Any] = []
         clauses: List[str] = []
         def _like_pattern(needle: str) -> str:
@@ -3564,17 +3444,11 @@ class SessionDB(
         return (f"{where_sql} AND {combined}" if where_sql else f"WHERE {combined}"), params
 
     def _project_compression_tips(self, sessions: List[Dict[str, Any]], compact_rows: bool) -> List[Dict[str, Any]]:
-        """Replace each compression root's surfaced fields with its live tip's.
-
-        The entry then acts as the live conversation while keeping the root's
-        ``started_at`` for stable chronological ordering. ``get_compression_chain``
-        is a per-root graph walk (not batchable), but the tip ROW fetch is one
-        batched query instead of one ``_get_session_rich_row`` per root.
-        ``_lineage_ids`` carries every id on the chain, intermediates included: a
-        persisted tile/route can hold a MIDDLE segment's id, and with only the
-        root/tip pair a surface cannot prove it names this conversation — which
-        is how one chat ends up open twice after compaction.
-        """
+        """Replace each compression root's surfaced fields with its live tip's
+        (root ``started_at`` kept for stable ordering); tip rows are fetched in
+        one batched query. ``_lineage_ids`` carries every id on the chain: a
+        persisted tile can hold a MIDDLE segment's id, and with only root/tip a
+        surface cannot prove it names this conversation (one chat open twice)."""
         tip_ids_by_root: Dict[str, str] = {}
         chain_by_root: Dict[str, List[str]] = {}
         for s in sessions:
@@ -3626,20 +3500,13 @@ class SessionDB(
         compact_rows: bool = False, include_pinned: bool = False, session_key: str = None,
         include_hidden: bool = False,
     ) -> List[Dict[str, Any]]:
-        """List sessions with preview (first user message) and ``last_active``
-        (freshest of heartbeat / latest message / started_at) in one query.
-
-        Subagent runs and compression continuations are excluded unless
-        ``include_children``; branch/reset children stay listable.
-        ``project_compression_tips`` surfaces each chain as ONE entry with the
-        live tip's fields. ``order_by_last_active`` sorts by the chain TIP's
-        activity via a recursive CTE so LIMIT/OFFSET stay cheap; ``id_query`` /
-        ``search_query`` (that path only) match across the forward chain, the
-        latter also a punctuation-stripped variant. ``compact_rows`` omits the
-        system_prompt blob so SQLite never copies tens of KB per row.
-        ``include_pinned`` back-fills pins the page window missed (a pin means
-        "always reachable"), still obeying the other filters.
-        """
+        """List sessions with preview and ``last_active`` in one query. Subagent
+        runs / compression continuations are hidden unless ``include_children``;
+        ``project_compression_tips`` shows each chain as its live tip;
+        ``order_by_last_active`` sorts by the chain TIP via a recursive CTE (the
+        only path honouring ``id_query`` / ``search_query``); ``compact_rows``
+        omits the system_prompt blob; ``include_pinned`` back-fills pins the page
+        missed ("always reachable"), still obeying the other filters."""
         self.flush_token_counts()  # rows carry token/cost totals
         where_clauses, params = _session_filter_where(
             exclude_children=not include_children, source=source, sources=sources,
