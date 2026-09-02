@@ -27,6 +27,8 @@ from unittest.mock import MagicMock, call
 from gateway import run as gateway_run
 from gateway import run_turn as gateway_run_turn
 from gateway import run_turn_runner as gateway_run_turn_runner
+from gateway import run_turn as gateway_run_turn
+from gateway import run_turn_runner as gateway_run_turn_runner
 from gateway.session_context import set_current_session_id, get_session_env
 
 

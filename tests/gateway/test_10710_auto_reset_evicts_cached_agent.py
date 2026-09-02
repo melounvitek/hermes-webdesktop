@@ -22,6 +22,7 @@ import inspect
 
 from gateway import run as gateway_run
 from gateway import run_turn as gateway_run_turn
+from gateway import run_turn as gateway_run_turn
 
 
 def _calls(node: ast.AST) -> set[str]:
