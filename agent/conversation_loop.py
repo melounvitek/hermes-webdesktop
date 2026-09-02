@@ -11,7 +11,6 @@ import json
 import logging
 import random
 import re
-import ssl
 import time
 from typing import Any, Dict, List, Optional
 
@@ -20,7 +19,6 @@ from agent.conversation_compression import (
     conversation_history_after_compression,  # noqa: F401 — resolved lazily by turn_overflow/turn_preflight/turn_recovery (tests patch it here)
 )
 from agent.display import KawaiiSpinner
-from agent.error_classifier import FailoverReason, classify_api_error
 from agent.fast_mode import begin_turn as begin_fast_mode_turn
 from agent.message_metadata import append_message
 from agent.turn_context import (
@@ -31,32 +29,11 @@ from agent.turn_context import (
     reanchor_current_turn_user_idx,
 )
 from agent.turn_retry_state import TurnRetryState
-from agent.turn_usage import record_response_usage
-from agent.turn_overflow import recover_from_overflow
-from agent.turn_truncation import (
-    handle_content_policy_refusal,
-    recover_from_truncation,
-)
 from agent.turn_preflight import run_preflight_compression
-from agent.turn_recovery import (
-    route_classified_error,
-    describe_invalid_response,
-    validate_response_shape,
-    compute_error_backoff,
-    interruptible_backoff_sleep,
-    log_api_error_attempt,
-    max_retries_exhausted_result,
-    nonretryable_client_error_result,
-    recover_after_classification,
-    recover_before_classification,
-)
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.message_sanitization import (
-    close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
     _sanitize_messages_surrogates,
-    _sanitize_structure_non_ascii,
-    _sanitize_structure_surrogates,
     _sanitize_surrogates,
 )
 # Must mirror _STALE_TOOL_CALL_MARKER_RE in hermes_state.py; kept local so importing
@@ -77,20 +54,29 @@ from agent.prompt_caching import (
     strip_anthropic_cache_control,
     strip_anthropic_tool_cache_control,
 )
-from agent.retry_utils import (
-    adaptive_rate_limit_backoff,  # noqa: F401 — resolved lazily by agent.turn_recovery (tests patch it here)
+from agent.retry_utils import (  # noqa: F401 — resolved lazily by agent.turn_* (tests patch them here)
+    adaptive_rate_limit_backoff,
     jittered_backoff,
+)
+from agent.turn_recovery import (  # noqa: F401 — resolved lazily by agent.turn_response_check
+    describe_invalid_response,
+    interruptible_backoff_sleep,
+    validate_response_shape,
 )
 # Bind before the turn starts so a source-tree swap cannot load a skewed
 # finalizer at turn end.
 from agent.turn_finalizer import finalize_turn
+from agent.turn_api_request import build_api_request
+from agent.turn_api_call import perform_api_call
+from agent.turn_response_check import check_api_response
+from agent.turn_api_error import handle_api_error
 from agent.turn_final_response import finish_text_response
 from agent.turn_tool_round import run_tool_round
 from agent.turn_response_intake import normalize_model_response
 from agent.turn_loop_errors import handle_outer_loop_error
 from hermes_logging import set_session_context
 from tools.skill_provenance import set_current_write_origin
-from utils import base_url_host_matches, env_var_enabled
+from utils import base_url_host_matches
 
 logger = logging.getLogger(__name__)
 
@@ -2339,537 +2325,96 @@ def run_conversation(
                     pass  # Never let rate guard break the agent loop
 
             try:
-                agent._reset_stream_delivery_tracking()
-                # Per-attempt first-chunk timestamp so a stale value never leaks into
-                # post_api_request.
-                agent._last_api_first_chunk_at = None
-                # api_messages was built for the primary; a fallback (DeepSeek / Kimi /
-                # MiMo) may require reasoning_content. Re-apply the echo-back pad
-                # (idempotent).
-                agent._reapply_reasoning_echo_for_provider(api_messages)
-                # Same for prompt-cache decoration (#72626): strip the primary's
-                # breakpoints and re-render for the current provider.
-                api_messages, _moa_prepared_request, tools_for_api = (
-                    _redecorate_prompt_cache_for_provider(
-                        agent,
-                        api_messages,
-                        system_message=system_message,
-                        moa_prepared=_moa_prepared_request,
-                        tools_for_api=tools_for_api,
-                    )
-                )
-                if tools_for_api == agent.tools:
-                    api_kwargs = agent._build_api_kwargs(api_messages)
-                else:
-                    api_kwargs = agent._build_api_kwargs(
-                        api_messages,
-                        tools_for_api=tools_for_api,
-                    )
-                # Surrogate chokepoint (#50959): tool descriptions, extra_body and
-                # kwargs strings can carry invalid code points (HTTP 400). One walk
-                # makes the payload json.dumps()-safe.
-                _sanitize_structure_surrogates(api_kwargs)
-                if agent._force_ascii_payload:
-                    _sanitize_structure_non_ascii(api_kwargs)
-                if agent.api_mode == "codex_responses":
-                    api_kwargs = agent._get_transport().preflight_kwargs(
-                        api_kwargs,
-                        allow_stream=False,
-                        is_github_responses=agent._is_copilot_url(),
-                        sanitize_harmony_tokens=agent._is_codex_backend(),
-                    )
-                # OpenRouter caching replays identical responses, even empty ones; an
-                # empty-response retry must bypass the cache.
-                if agent._empty_content_retries > 0 and agent._is_openrouter_url():
-                    _xh = dict(api_kwargs.get("extra_headers") or {})
-                    _xh["X-OpenRouter-Cache"] = "false"
-                    api_kwargs["extra_headers"] = _xh
-                # Copilot x-initiator: first call of a user turn is "user" (billed
-                # premium); tool-loop follow-ups keep the default "agent" (#3040).
-                if getattr(agent, "_is_user_initiated_turn", False) and agent._is_copilot_url():
-                    _xh = dict(api_kwargs.get("extra_headers") or {})
-                    _xh["x-initiator"] = "user"
-                    api_kwargs["extra_headers"] = _xh
-                    agent._is_user_initiated_turn = False
-                try:
-                    from hermes_cli.middleware import apply_llm_request_middleware
-
-                    _llm_request_mw = apply_llm_request_middleware(
-                        api_kwargs,
-                        task_id=effective_task_id,
-                        turn_id=turn_id,
-                        api_request_id=api_request_id,
-                        session_id=agent.session_id or "",
-                        platform=agent.platform or "",
-                        model=agent.model,
-                        provider=agent.provider,
-                        base_url=agent.base_url,
-                        api_mode=agent.api_mode,
-                        api_call_count=api_call_count,
-                    )
-                    api_kwargs = _llm_request_mw.payload
-                    _original_api_kwargs = _llm_request_mw.original_payload
-                    _llm_middleware_trace = _llm_request_mw.trace
-                except Exception:
-                    _original_api_kwargs = dict(api_kwargs)
-                    _llm_middleware_trace = []
-
-                try:
-                    from hermes_cli.lifecycle import (
-                        has_hook,
-                        invoke_hook as _invoke_hook,
-                    )
-                    if has_hook("pre_api_request"):
-                        request_messages = api_kwargs.get("messages")
-                        if not isinstance(request_messages, list):
-                            request_messages = api_kwargs.get("input")
-                        if not isinstance(request_messages, list):
-                            request_messages = api_messages
-                        # Shallow copy: plugins may retain the list; deepcopy is costly.
-                        # ``request_messages``/``conversation_history`` are raw langfuse
-                        # passthroughs.
-                        _request_payload = agent._api_request_payload_for_hook(api_kwargs)
-                        # Anthropic (``system``) and Responses/Codex (``instructions``)
-                        # move the system prompt out of messages; pass it for
-                        # observability.
-                        system_prompt_for_hooks = _system_prompt_for_hooks(
-                            api_kwargs, request_messages
-                        )
-                        _invoke_hook(
-                            "pre_api_request",
-                            task_id=effective_task_id,
-                            turn_id=turn_id,
-                            api_request_id=api_request_id,
-                            session_id=agent.session_id or "",
-                            user_message=original_user_message,
-                            conversation_history=list(messages),
-                            platform=agent.platform or "",
-                            model=agent.model,
-                            provider=agent.provider,
-                            base_url=agent.base_url,
-                            api_mode=agent.api_mode,
-                            api_call_count=api_call_count,
-                            retry_count=retry_count,
-                            request_messages=list(request_messages)
-                            if isinstance(request_messages, list)
-                            else [],
-                            system_prompt=system_prompt_for_hooks,
-                            message_count=len(api_messages),
-                            tool_count=len(agent.tools or []),
-                            approx_input_tokens=approx_tokens,
-                            request_char_count=total_chars,
-                            max_tokens=agent.max_tokens,
-                            started_at=api_start_time,
-                            middleware_trace=list(_llm_middleware_trace),
-                            request=_request_payload,
-                        )
-                except Exception:
-                    pass
-
-                if env_var_enabled("HERMES_DUMP_REQUESTS"):
-                    agent._dump_api_request_debug(api_kwargs, reason="preflight")
-
-                # Private to the in-process MoA facade; add after middleware/hooks/debug
-                # dumps so none serializes it into the provider payload.
-                if _moa_prepared_request is not None and agent.provider == "moa":
-                    # Re-read the live client: rotation/fallback/cleanup rebuild
-                    # agent.client between attempts; a native OpenAI client rejects this
-                    # key (TypeError).
-                    if _moa_client_consumes_prepared_request(agent.client):
-                        api_kwargs["_moa_prepared_request"] = _moa_prepared_request
-                    else:
-                        logger.warning(
-                            "MoA client replaced mid-turn (client=%s); sending the "
-                            "prepared prompt without the MoA handshake",
-                            type(agent.client).__name__,
-                        )
-
-                # Always prefer streaming even without consumers: it gives stale-
-                # stream/read-timeout health checks that quiet callers otherwise lack.
-                # Falls back if unsupported.
-                def _stop_spinner():
-                    nonlocal thinking_spinner
-                    if thinking_spinner:
-                        thinking_spinner.stop("")
-                        thinking_spinner = None
-                    if agent.thinking_callback:
-                        agent.thinking_callback("")
-
-                _use_streaming = True
-                # Provider signaled "stream not supported": stay non-streaming for the
-                # session.
-                if getattr(agent, "_disable_streaming", False):
-                    _use_streaming = False
-                # ACP clients (`acp://` scheme, any vendor) return a plain
-                # SimpleNamespace, not a stream; mirrors the Responses API exclusion.
-                elif (
-                    agent.provider in {"copilot-acp"}
-                    or str(agent.base_url or "").lower().startswith("acp://")
-                    or str(agent.base_url or "").lower().startswith("acp+tcp://")
-                ):
-                    _use_streaming = False
-                # MoA streams only with a display/TTS consumer
-                # (MoAChatCompletions.create() honors stream=True); else complete-
-                # response path.
-                elif agent.provider == "moa" and not agent._has_stream_consumers():
-                    _use_streaming = False
-                elif not agent._has_stream_consumers():
-                    # No consumer: still stream for health checking, except Mock clients
-                    # in tests (SimpleNamespace, not stream iterators).
-                    from unittest.mock import Mock
-                    if isinstance(getattr(agent, "client", None), Mock):
-                        _use_streaming = False
-
-                def _perform_api_call(next_api_kwargs):
-                    if agent.api_mode == "codex_responses":
-                        next_api_kwargs = agent._get_transport().preflight_kwargs(
-                            next_api_kwargs,
-                            allow_stream=False,
-                            is_github_responses=agent._is_copilot_url(),
-                            sanitize_harmony_tokens=agent._is_codex_backend(),
-                        )
-                    if _use_streaming:
-                        return agent._interruptible_streaming_api_call(
-                            next_api_kwargs, on_first_delta=_stop_spinner
-                        )
-                    from agent import relay_llm
-
-                    return relay_llm.execute(
-                        next_api_kwargs,
-                        agent._interruptible_api_call,
-                        session_id=str(agent.session_id or ""),
-                        name=str(agent.provider or "provider"),
-                        model_name=str(agent.model or ""),
-                        metadata={
-                            "api_mode": agent.api_mode,
-                            "api_request_id": api_request_id,
-                            "call_role": (
-                                "delegated"
-                                if getattr(agent, "is_subagent", False)
-                                else "fallback"
-                                if int(getattr(agent, "_fallback_index", 0) or 0) > 0
-                                else "primary"
-                            ),
-                            "retry_count": retry_count,
-                        },
-                        defer_logical_completion=True,
-                    )
-
-                from hermes_cli.middleware import run_llm_execution_middleware
-
-                _model_request_active = getattr(agent, "_model_request_active", None)
-                _redirect_lock = getattr(agent, "_pending_redirect_lock", None)
-                if _redirect_lock is not None:
-                    with _redirect_lock:
-                        if _model_request_active is not None:
-                            _model_request_active.set()
-                elif _model_request_active is not None:
-                    _model_request_active.set()
-                _redirect_crossed_response = False
-                try:
-                    response = run_llm_execution_middleware(
-                        api_kwargs,
-                        _perform_api_call,
-                        original_request=_original_api_kwargs,
-                        task_id=effective_task_id,
-                        turn_id=turn_id,
-                        api_request_id=api_request_id,
-                        session_id=agent.session_id or "",
-                        platform=agent.platform or "",
-                        model=agent.model,
-                        provider=agent.provider,
-                        base_url=agent.base_url,
-                        api_mode=agent.api_mode,
-                        api_call_count=api_call_count,
-                        middleware_trace=list(_llm_middleware_trace),
-                    )
-                finally:
-                    if _redirect_lock is not None:
-                        with _redirect_lock:
-                            if _model_request_active is not None:
-                                _model_request_active.clear()
-                            _redirect_crossed_response = bool(
-                                agent._pending_redirect
-                            )
-                    else:
-                        if _model_request_active is not None:
-                            _model_request_active.clear()
-                        _redirect_crossed_response = agent._has_pending_redirect()
-                if _redirect_crossed_response:
-                    # Response and redirect can cross threads: discard the now-stale
-                    # response and rebuild from the correction rather than lose it.
-                    if thinking_spinner:
-                        thinking_spinner.stop("")
-                        thinking_spinner = None
-                    if agent.thinking_callback:
-                        agent.thinking_callback("")
-                    if agent.clear_interrupt(preserve_redirect=True):
-                        _retry.restart_with_redirected_messages = True
-                    else:
-                        interrupted = True
-                    break
-                
-                api_duration = time.time() - api_start_time
-                
-                # Stop thinking spinner silently -- the response box or tool
-                # execution messages that follow are more informative.
-                if thinking_spinner:
-                    thinking_spinner.stop("")
-                    thinking_spinner = None
-                if agent.thinking_callback:
-                    agent.thinking_callback("")
-                
-                if not agent.quiet_mode:
-                    agent._vprint(f"{agent.log_prefix}⏱️  API call completed in {api_duration:.2f}s")
-                
-                if agent.verbose_logging:
-                    # Log response with provider info if available
-                    resp_model = getattr(response, 'model', 'N/A') if response else 'N/A'
-                    logging.debug(f"API Response received - Model: {resp_model}, Usage: {response.usage if hasattr(response, 'usage') else 'N/A'}")
-                
-                # Validate response shape before proceeding
-                response_invalid, error_details = validate_response_shape(agent, response)
-
-                if response_invalid:
-                    agent._invoke_api_request_error_hook(
-                        task_id=effective_task_id,
-                        turn_id=turn_id,
-                        api_request_id=api_request_id,
-                        api_call_count=api_call_count,
-                        api_start_time=api_start_time,
-                        api_kwargs=api_kwargs,
-                        error_type="InvalidAPIResponse",
-                        error_message=", ".join(error_details) or "Invalid API response",
-                        status_code=getattr(getattr(response, "error", None), "code", None),
-                        retry_count=retry_count,
-                        max_retries=max_retries,
-                        retryable=True,
-                        reason="invalid_response",
-                    )
-                    # Stop spinner silently — retry status is now buffered
-                    # and only surfaced if every retry+fallback exhausts.
-                    if thinking_spinner:
-                        thinking_spinner.stop("")
-                        thinking_spinner = None
-                    if agent.thinking_callback:
-                        agent.thinking_callback("")
-                    
-                    # Invalid response — could be rate limiting, provider timeout,
-                    # upstream server error, or malformed response.
-                    retry_count += 1
-                    
-                    # Eager fallback: empty/malformed responses often mean rate limiting
-                    # — switch now instead of extended backoff.
-                    if agent._fallback_index < len(agent._fallback_chain):
-                        agent._buffer_status("⚠️ Empty/malformed response — switching to fallback...")
-                    if agent._try_activate_fallback():
-                        active_system_prompt = _arm_fallback_restart(
-                            agent, api_messages, active_system_prompt, _retry)
-                        retry_count = 0
-                        compression_attempts = 0
-                        break
-
-                    error_msg, provider_name, _failure_hint = describe_invalid_response(
-                        agent, response, api_duration
-                    )
-
-                    agent._buffer_vprint(f"⚠️  Invalid API response (attempt {retry_count}/{max_retries}): {', '.join(error_details)}")
-                    agent._buffer_vprint(f"   🏢 Provider: {provider_name}")
-                    cleaned_provider_error = agent._clean_error_message(error_msg)
-                    agent._buffer_vprint(f"   📝 Provider message: {cleaned_provider_error}")
-                    agent._buffer_vprint(f"   ⏱️  {_failure_hint}")
-                    
-                    if retry_count >= max_retries:
-                        # Try fallback before giving up
-                        if agent._has_pending_fallback():
-                            agent._buffer_status(f"⚠️ Max retries ({max_retries}) for invalid responses — trying fallback...")
-                        if agent._try_activate_fallback():
-                            active_system_prompt = _arm_fallback_restart(
-                                agent, api_messages, active_system_prompt, _retry)
-                            retry_count = 0
-                            compression_attempts = 0
-                            break
-                        # Terminal — flush buffered retry trace so user sees what happened.
-                        agent._flush_status_buffer()
-                        agent._emit_status(f"❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.")
-                        logger.error("%sInvalid API response after %d retries.", agent.log_prefix, max_retries)
-                        agent._persist_session(messages, conversation_history)
-                        _final_response = f"Invalid API response after {max_retries} retries: {_failure_hint}"
-                        return {
-                            "final_response": _final_response,
-                            "messages": messages,
-                            "completed": False,
-                            "api_calls": api_call_count,
-                            "error": _final_response,
-                            "failed": True  # Mark as failure for filtering
-                        }
-                    
-                    # Backoff before retry — jittered exponential: 5s base, 120s cap
-                    wait_time = jittered_backoff(retry_count, base_delay=5.0, max_delay=120.0)
-                    agent._buffer_vprint(f"⏳ Retrying in {wait_time:.1f}s ({_failure_hint})...")
-                    logger.warning("Invalid API response (retry %d/%d): %s | Provider: %s", retry_count, max_retries, ', '.join(error_details), provider_name)
-                    
-                    # A redirect cancels only the live request; the helper preserves the
-                    # pending correction (restart_with_redirected_messages) instead of
-                    # destroying it with clear_interrupt().
-                    _interrupted = interruptible_backoff_sleep(
-                        agent, wait_time, _retry,
-                        messages=messages,
-                        conversation_history=conversation_history,
-                        api_call_count=api_call_count,
-                        abort_message="Interrupt detected during retry wait, aborting.",
-                        interrupt_text=f"Operation interrupted during retry ({_failure_hint}, attempt {retry_count}/{max_retries}).",
-                        activity_label=f"retry backoff ({retry_count}/{max_retries})",
-                    )
-                    if _interrupted is not None:
-                        return _interrupted
-                    if _retry.restart_with_redirected_messages:
-                        break  # rebuild this iteration from the correction
-                    continue  # Retry the API call
-
-                agent._turn_received_provider_response = True
-
-                # Check finish_reason before proceeding
-                if agent.api_mode == "codex_responses":
-                    status = getattr(response, "status", None)
-                    if isinstance(status, str):
-                        status = status.strip().lower()
-                    incomplete_details = getattr(response, "incomplete_details", None)
-                    incomplete_reason = None
-                    if isinstance(incomplete_details, dict):
-                        incomplete_reason = incomplete_details.get("reason")
-                    else:
-                        incomplete_reason = getattr(incomplete_details, "reason", None)
-                    if incomplete_reason is not None:
-                        incomplete_reason = str(incomplete_reason).strip().lower()
-                    if status == "incomplete" and incomplete_reason in {"max_output_tokens", "length"}:
-                        # Responses API max-output exhaustion is a normal Codex
-                        # incomplete turn: use the Codex continuation path, not the
-                        # length rollback.
-                        finish_reason = "incomplete"
-                    elif status == "incomplete" and incomplete_reason == "content_filter":
-                        finish_reason = "content_filter"
-                    else:
-                        finish_reason = "stop"
-                elif agent.api_mode == "anthropic_messages":
-                    _tfr = agent._get_transport()
-                    finish_reason = _tfr.map_finish_reason(response.stop_reason)
-                elif agent.api_mode == "bedrock_converse":
-                    # Bedrock response already normalized at dispatch — use transport
-                    _bt_fr = agent._get_transport()
-                    _bedrock_result = _bt_fr.normalize_response(response)
-                    finish_reason = _bedrock_result.finish_reason
-                else:
-                    _cc_fr = agent._get_transport()
-                    _finish_result = _cc_fr.normalize_response(response)
-                    finish_reason = _finish_result.finish_reason
-                    assistant_message = _finish_result
-                    if agent._should_treat_stop_as_truncated(
-                        finish_reason,
-                        assistant_message,
-                        messages,
-                    ):
-                        agent._vprint(
-                            f"{agent.log_prefix}⚠️  Treating suspicious Ollama/GLM stop response as truncated",
-                            force=True,
-                        )
-                        finish_reason = "length"
-
-                # ── Content-policy refusal (HTTP 200) ──────────────────
-                # Refusal finish reasons (``content_filter``, ``guardrail_intervened``)
-                # are deterministic: one fallback try, else return the refusal.
-                if finish_reason == "content_filter":
-                    _rv = handle_content_policy_refusal(
-                        agent,
-                        response,
-                        _retry,
-                        thinking_spinner=thinking_spinner,
-                        messages=messages,
-                        api_messages=api_messages,
-                        api_kwargs=api_kwargs,
-                        active_system_prompt=active_system_prompt,
-                        conversation_history=conversation_history,
-                        api_call_count=api_call_count,
-                        effective_task_id=effective_task_id,
-                        turn_id=turn_id,
-                        api_request_id=api_request_id,
-                        api_start_time=api_start_time,
-                        retry_count=retry_count,
-                        max_retries=max_retries,
-                    )
-                    thinking_spinner = None
-                    active_system_prompt = _rv.active_system_prompt
-                    if _rv.action == "return":
-                        return _rv.result
-                    retry_count = 0
-                    compression_attempts = 0
-                    break
-
-                if finish_reason == "length":
-                    _tv = recover_from_truncation(
-                        agent,
-                        response,
-                        finish_reason,
-                        _retry,
-                        messages=messages,
-                        conversation_history=conversation_history,
-                        api_kwargs=api_kwargs,
-                        api_call_count=api_call_count,
-                        effective_task_id=effective_task_id,
-                        current_turn_user_idx=current_turn_user_idx,
-                        length_continue_retries=length_continue_retries,
-                        truncated_response_parts=truncated_response_parts,
-                        truncated_tool_call_retries=truncated_tool_call_retries,
-                        retry_count=retry_count,
-                        compression_attempts=compression_attempts,
-                    )
-                    messages = _tv.messages
-                    length_continue_retries = _tv.length_continue_retries
-                    truncated_response_parts = _tv.truncated_response_parts
-                    truncated_tool_call_retries = _tv.truncated_tool_call_retries
-                    retry_count = _tv.retry_count
-                    compression_attempts = _tv.compression_attempts
-                    if _tv.action == "return":
-                        return _tv.result
-                    if _tv.action == "break":
-                        break
-                    if _tv.action == "continue":
-                        continue
-                
-                # Fold provider usage into compressor / anchors / session counters / state.db
-                # (agent/turn_usage.py). A rearmed budget also clears the preflight-block latch.
-                _usage_outcome = record_response_usage(
+                _rq = build_api_request(
                     agent,
-                    response,
+                    api_messages=api_messages,
+                    _moa_prepared_request=_moa_prepared_request,
+                    tools_for_api=tools_for_api,
+                    system_message=system_message,
                     messages=messages,
+                    original_user_message=original_user_message,
+                    approx_tokens=approx_tokens,
+                    total_chars=total_chars,
+                    retry_count=retry_count,
                     api_call_count=api_call_count,
-                    api_duration=api_duration,
+                    api_request_id=api_request_id,
+                    api_start_time=api_start_time,
+                    effective_task_id=effective_task_id,
+                    turn_id=turn_id,
+                )
+                api_messages = _rq.api_messages
+                _moa_prepared_request = _rq._moa_prepared_request
+                tools_for_api = _rq.tools_for_api
+                api_kwargs = _rq.api_kwargs
+                _original_api_kwargs = _rq._original_api_kwargs
+                _llm_middleware_trace = _rq._llm_middleware_trace
+
+                _ac = perform_api_call(
+                    agent,
+                    api_kwargs=api_kwargs,
+                    _original_api_kwargs=_original_api_kwargs,
+                    _llm_middleware_trace=_llm_middleware_trace,
+                    _moa_prepared_request=_moa_prepared_request,
+                    _retry=_retry,
+                    thinking_spinner=thinking_spinner,
+                    retry_count=retry_count,
+                    api_call_count=api_call_count,
+                    api_request_id=api_request_id,
+                    effective_task_id=effective_task_id,
+                    turn_id=turn_id,
+                    interrupted=interrupted,
+                )
+                response = _ac.response
+                thinking_spinner = _ac.thinking_spinner
+                interrupted = _ac.interrupted
+                if _ac.action == "break":
+                    break
+                
+                _rc = check_api_response(
+                    agent,
+                    response=response,
+                    _retry=_retry,
+                    thinking_spinner=thinking_spinner,
+                    messages=messages,
+                    api_messages=api_messages,
+                    api_kwargs=api_kwargs,
+                    active_system_prompt=active_system_prompt,
+                    conversation_history=conversation_history,
+                    finish_reason=finish_reason,
+                    retry_count=retry_count,
+                    max_retries=max_retries,
                     compression_attempts=compression_attempts,
                     max_compression_attempts=max_compression_attempts,
+                    length_continue_retries=length_continue_retries,
+                    truncated_response_parts=truncated_response_parts,
+                    truncated_tool_call_retries=truncated_tool_call_retries,
+                    current_turn_user_idx=current_turn_user_idx,
+                    api_call_count=api_call_count,
+                    api_request_id=api_request_id,
+                    api_start_time=api_start_time,
+                    effective_task_id=effective_task_id,
+                    turn_id=turn_id,
+                    _preflight_compression_blocked=_preflight_compression_blocked,
+                    _last_preflight_pressure=_last_preflight_pressure,
                 )
-                compression_attempts = _usage_outcome.compression_attempts
-                if _usage_outcome.rearmed:
-                    _preflight_compression_blocked = False
-                    _last_preflight_pressure = None
-                
-                _retry.has_retried_429 = False  # Reset on success
-                # Don't clear the retry buffer: bytes back != usable content; it is
-                # cleared once genuine content lands. Clearing Nous rate-limit state
-                # proves the limit reset so other sessions may resume.
-                if agent.provider == "nous":
-                    try:
-                        from agent.nous_rate_guard import clear_nous_rate_limit
-                        clear_nous_rate_limit()
-                    except Exception:
-                        pass
-                from agent import relay_llm
-
-                relay_llm.complete_logical_call(
-                    api_request_id,
-                    outcome="success",
-                )
-                agent._touch_activity(f"API call #{api_call_count} completed")
-                break  # Success, exit retry loop
+                thinking_spinner = _rc.thinking_spinner
+                messages = _rc.messages
+                active_system_prompt = _rc.active_system_prompt
+                finish_reason = _rc.finish_reason
+                retry_count = _rc.retry_count
+                compression_attempts = _rc.compression_attempts
+                length_continue_retries = _rc.length_continue_retries
+                truncated_response_parts = _rc.truncated_response_parts
+                truncated_tool_call_retries = _rc.truncated_tool_call_retries
+                _preflight_compression_blocked = _rc._preflight_compression_blocked
+                _last_preflight_pressure = _rc._last_preflight_pressure
+                api_duration = _rc.api_duration
+                if _rc.action == "return":
+                    return _rc.result
+                if _rc.action == "break":
+                    break
+                if _rc.action == "continue":
+                    continue
 
             except InterruptedError:
                 if thinking_spinner:
@@ -2901,377 +2446,44 @@ def run_conversation(
                 break
 
             except Exception as api_error:
-                # Stop spinner silently — retry status is buffered and
-                # only flushed when every retry+fallback is exhausted.
-                if thinking_spinner:
-                    thinking_spinner.stop("")
-                    thinking_spinner = None
-                if agent.thinking_callback:
-                    agent.thinking_callback("")
-
-                # Pre-classification recovery (encoding sanitization, image rejection,
-                # Bedrock SDK streaming fallback) — see agent/turn_recovery.py.
-                _recovered, active_system_prompt = recover_before_classification(
+                _ae = handle_api_error(
                     agent,
-                    api_error,
+                    api_error=api_error,
+                    _retry=_retry,
+                    thinking_spinner=thinking_spinner,
                     messages=messages,
                     api_messages=api_messages,
                     api_kwargs=api_kwargs,
+                    system_message=system_message,
                     active_system_prompt=active_system_prompt,
-                )
-                if _recovered:
-                    continue
-
-                status_code = getattr(api_error, "status_code", None)
-                error_context = agent._extract_api_error_context(api_error)
-
-                # ── Interpreter finalization: abandon immediately ──
-                # Process is exiting mid-flight: retries/rotation/fallbacks are futile
-                # and the retry trace spams the shell. One log line; shared predicate.
-                from tools.interpreter_shutdown import interpreter_shutting_down
-
-                if interpreter_shutting_down(api_error):
-                    logger.warning(
-                        "%sInterpreter is shutting down — abandoning turn "
-                        "during API call #%d (%s)",
-                        agent.log_prefix, api_call_count, api_error,
-                    )
-                    _shutdown_summary = (
-                        "Turn abandoned: the process was shutting down "
-                        "before the model call could complete."
-                    )
-                    return {
-                        "final_response": _shutdown_summary,
-                        "messages": messages,
-                        "api_calls": api_call_count,
-                        "completed": False,
-                        "failed": True,
-                        "error": _shutdown_summary,
-                        "failure_reason": "interpreter_shutdown",
-                        "failure_retryable": False,
-                    }
-
-                # ── Classify the error for structured recovery decisions ──
-                _compressor = getattr(agent, "context_compressor", None)
-                _ctx_len = getattr(_compressor, "context_length", 200000) if _compressor else 200000
-                classified = classify_api_error(
-                    api_error,
-                    provider=getattr(agent, "provider", "") or "",
-                    model=getattr(agent, "model", "") or "",
+                    conversation_history=conversation_history,
                     approx_tokens=approx_tokens,
-                    context_length=_ctx_len,
-                    num_messages=len(api_messages) if api_messages else 0,
-                )
-                logger.debug(
-                    "Error classified: reason=%s status=%s retryable=%s compress=%s rotate=%s fallback=%s",
-                    classified.reason.value, classified.status_code,
-                    classified.retryable, classified.should_compress,
-                    classified.should_rotate_credential, classified.should_fallback,
-                )
-                agent._invoke_api_request_error_hook(
-                    task_id=effective_task_id,
-                    turn_id=turn_id,
+                    retry_count=retry_count,
+                    max_retries=max_retries,
+                    compression_attempts=compression_attempts,
+                    max_compression_attempts=max_compression_attempts,
+                    api_call_count=api_call_count,
                     api_request_id=api_request_id,
-                    api_call_count=api_call_count,
                     api_start_time=api_start_time,
-                    api_kwargs=api_kwargs,
-                    error_type=type(api_error).__name__,
-                    error_message=str(api_error),
-                    status_code=status_code,
-                    retry_count=retry_count,
-                    max_retries=max_retries,
-                    retryable=classified.retryable,
-                    reason=classified.reason.value,
-                )
-
-                # One-shot post-classification recovery chain (entitlement refresh, credential
-                # pool, image/multimodal strips, per-provider 401 refresh, format-recovery
-                # strips) — see agent/turn_recovery.py.
-                _recovered, recovered_with_pool = recover_after_classification(
-                    agent,
-                    api_error,
-                    classified,
-                    _retry,
-                    status_code=status_code,
-                    error_context=error_context,
-                    messages=messages,
-                    api_messages=api_messages,
-                )
-                if _recovered:
-                    continue
-
-                retry_count += 1
-                elapsed_time = time.time() - api_start_time
-                agent._touch_activity(
-                    f"API error recovery (attempt {retry_count}/{max_retries})"
-                )
-                
-                error_type, error_msg, _provider, _base, _model = log_api_error_attempt(
-                    agent,
-                    api_error,
-                    retry_count=retry_count,
-                    max_retries=max_retries,
-                    status_code=status_code,
-                    elapsed_time=elapsed_time,
-                    api_messages=api_messages,
-                    approx_tokens=approx_tokens,
-                )
-
-                # Check for interrupt before deciding to retry
-                if agent._interrupt_requested:
-                    # Preserve a pending redirect: the user is steering, not stopping
-                    # — rebuild the turn from the correction instead of aborting.
-                    if agent.clear_interrupt(preserve_redirect=True):
-                        _retry.restart_with_redirected_messages = True
-                        break
-                    agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during error handling, aborting retries.", force=True)
-                    _interrupt_text = f"Operation interrupted: handling API error ({error_type}: {agent._clean_error_message(str(api_error))})."
-                    close_interrupted_tool_sequence(messages, _interrupt_text)
-                    agent._persist_session(messages, conversation_history)
-                    agent.clear_interrupt()
-                    return {
-                        "final_response": _interrupt_text,
-                        "messages": messages,
-                        "api_calls": api_call_count,
-                        "completed": False,
-                        "interrupted": True,
-                    }
-                
-                _ce = route_classified_error(
-                    agent,
-                    api_error,
-                    classified,
-                    _retry,
-                    error_msg=error_msg,
-                    error_context=error_context,
-                    recovered_with_pool=recovered_with_pool,
-                    base_url=_base,
-                    model=_model,
-                    messages=messages,
-                    api_messages=api_messages,
-                    system_message=system_message,
-                    active_system_prompt=active_system_prompt,
-                    conversation_history=conversation_history,
-                    retry_count=retry_count,
-                    max_retries=max_retries,
-                    compression_attempts=compression_attempts,
-                    max_compression_attempts=max_compression_attempts,
-                    api_call_count=api_call_count,
                     effective_task_id=effective_task_id,
+                    turn_id=turn_id,
                 )
-                status_code = _ce.status_code
-                messages = _ce.messages
-                active_system_prompt = _ce.active_system_prompt
-                conversation_history = _ce.conversation_history
-                retry_count = _ce.retry_count
-                max_retries = _ce.max_retries
-                compression_attempts = _ce.compression_attempts
-                is_rate_limited = _ce.is_rate_limited
-                _wrapped_output_cap_budget = _ce.wrapped_output_cap_budget
-                _is_zai_coding_overload = _ce.is_zai_coding_overload
-                if _ce.provider_overflow_recovery_pending:
+                thinking_spinner = _ae.thinking_spinner
+                messages = _ae.messages
+                active_system_prompt = _ae.active_system_prompt
+                conversation_history = _ae.conversation_history
+                approx_tokens = _ae.approx_tokens
+                retry_count = _ae.retry_count
+                max_retries = _ae.max_retries
+                compression_attempts = _ae.compression_attempts
+                if _ae._provider_overflow_recovery_pending:
                     _provider_overflow_recovery_pending = True
-                if _ce.action == "return":
-                    return _ce.result
-                if _ce.action == "break":
+                if _ae.action == "return":
+                    return _ae.result
+                if _ae.action == "break":
                     break
-                if _ce.action == "continue":
+                if _ae.action == "continue":
                     continue
-
-                _ov = recover_from_overflow(
-                    agent,
-                    api_error,
-                    classified,
-                    _retry,
-                    status_code=status_code,
-                    error_msg=error_msg,
-                    wrapped_output_cap_budget=_wrapped_output_cap_budget,
-                    messages=messages,
-                    api_messages=api_messages,
-                    system_message=system_message,
-                    active_system_prompt=active_system_prompt,
-                    conversation_history=conversation_history,
-                    approx_tokens=approx_tokens,
-                    compression_attempts=compression_attempts,
-                    max_compression_attempts=max_compression_attempts,
-                    api_call_count=api_call_count,
-                    effective_task_id=effective_task_id,
-                )
-                messages = _ov.messages
-                active_system_prompt = _ov.active_system_prompt
-                conversation_history = _ov.conversation_history
-                approx_tokens = _ov.approx_tokens
-                compression_attempts = _ov.compression_attempts
-                is_context_length_error = _ov.is_context_length_error
-                if _ov.provider_overflow_recovery_pending:
-                    _provider_overflow_recovery_pending = True
-                if _ov.action == "return":
-                    return _ov.result
-                if _ov.action == "break":
-                    break
-                if _ov.action == "continue":
-                    continue
-
-                # Non-retryable: ValueError/TypeError are local bugs, except
-                # UnicodeEncodeError (surrogate path above) and json.JSONDecodeError, a
-                # transient provider/network failure that must be retried (#14782).
-                is_local_validation_error = (
-                    isinstance(api_error, (ValueError, TypeError))
-                    and not isinstance(
-                        api_error, (UnicodeEncodeError, json.JSONDecodeError)
-                    )
-                    # ssl.SSLError inherits from OSError *and* ValueError, so the
-                    # ValueError check would misclassify a TLS failure as a local bug;
-                    # keep it retryable.
-                    and not isinstance(api_error, ssl.SSLError)
-                    # "NoneType is not iterable" TypeErrors are upstream shape
-                    # mismatches (e.g. Codex response.completed.output=null), reachable
-                    # via shims/mocks — retryable so the fallback path runs.
-                    and not (
-                        isinstance(api_error, TypeError)
-                        and "nonetype" in str(api_error).lower()
-                        and "not iterable" in str(api_error).lower()
-                    )
-                )
-                # ``FailoverReason.billing`` (402) is deliberately NOT excluded: pool
-                # rotation and eager fallback already gave up, so retrying only burns
-                # paid requests on a depleted balance. Mirrors 401/403. (#31273)
-                is_client_error = (
-                    is_local_validation_error
-                    or (
-                        not classified.retryable
-                        and not classified.should_compress
-                        and classified.reason not in {
-                            FailoverReason.rate_limit,
-                            FailoverReason.overloaded,
-                            FailoverReason.context_overflow,
-                            FailoverReason.payload_too_large,
-                            FailoverReason.long_context_tier,
-                            FailoverReason.thinking_signature,
-                        }
-                    )
-                ) and not is_context_length_error
-
-                if is_client_error:
-                    # Copilot self-heal BEFORE fallback: a stale credential yields a 400
-                    # ``model_not_available_for_integrator`` / ``model_not_supported``,
-                    # not a 401. Fresh token + client rebuild, one retry, SAME provider.
-                    if (
-                        _is_copilot_provider(agent)
-                        and not _retry.copilot_stale_cred_retry_attempted
-                        and _is_stale_copilot_credential_error(
-                            status_code, str(getattr(api_error, "message", "") or api_error)
-                        )
-                    ):
-                        _retry.copilot_stale_cred_retry_attempted = True
-                        if agent._try_recover_stale_copilot_credential():
-                            agent._buffer_vprint(
-                                "🔐 Copilot credential re-exchanged after "
-                                "model_not_available 400. Retrying request..."
-                            )
-                            retry_count = 0
-                            continue
-                    # Try fallback before aborting; announce it only when a fallback
-                    # chain exists, else "trying fallback..." lies before a silent abort
-                    # (#35314).
-                    if agent._has_pending_fallback():
-                        if classified.reason == FailoverReason.content_policy_blocked:
-                            agent._buffer_status("⚠️ Provider safety filter blocked this request — trying fallback...")
-                        elif classified.reason == FailoverReason.ssl_cert_verification:
-                            agent._buffer_status("⚠️ TLS certificate verification failed — trying fallback...")
-                        else:
-                            agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
-                    if agent._try_activate_fallback():
-                        active_system_prompt = _arm_fallback_restart(
-                            agent, api_messages, active_system_prompt, _retry)
-                        retry_count = 0
-                        compression_attempts = 0
-                        break
-                    return nonretryable_client_error_result(
-                        agent,
-                        api_error,
-                        classified,
-                        status_code=status_code,
-                        api_kwargs=api_kwargs,
-                        api_messages=api_messages,
-                        messages=messages,
-                        conversation_history=conversation_history,
-                        api_call_count=api_call_count,
-                        approx_tokens=approx_tokens,
-                        provider=_provider,
-                        base_url=_base,
-                        model=_model,
-                    )
-
-                if retry_count >= max_retries:
-                    # Before fallback, rebuild the primary client once for transient
-                    # transport errors (stale pool, TCP reset). Once per API call block.
-                    if not _retry.primary_recovery_attempted and agent._try_recover_primary_transport(
-                        api_error, retry_count=retry_count, max_retries=max_retries,
-                    ):
-                        _retry.primary_recovery_attempted = True
-                        retry_count = 0
-                        # Transport recovery starts a fresh attempt cycle: re-open
-                        # fallback state so a follow-on 429 can still activate
-                        # fallback_providers.
-                        _retry.has_retried_429 = False
-                        agent._fallback_index = 0
-                        agent._fallback_activated = False
-                        continue
-                    # Try fallback before giving up entirely
-                    if agent._has_pending_fallback():
-                        agent._buffer_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
-                    if agent._try_activate_fallback():
-                        active_system_prompt = _arm_fallback_restart(
-                            agent, api_messages, active_system_prompt, _retry)
-                        retry_count = 0
-                        compression_attempts = 0
-                        break
-                    return max_retries_exhausted_result(
-                        agent,
-                        api_error,
-                        classified,
-                        max_retries=max_retries,
-                        is_rate_limited=is_rate_limited,
-                        error_msg=error_msg,
-                        api_kwargs=api_kwargs,
-                        api_messages=api_messages,
-                        messages=messages,
-                        conversation_history=conversation_history,
-                        api_call_count=api_call_count,
-                        approx_tokens=approx_tokens,
-                        provider=_provider,
-                        base_url=_base,
-                        model=_model,
-                    )
-
-                wait_time = compute_error_backoff(
-                    agent,
-                    api_error,
-                    retry_count=retry_count,
-                    max_retries=max_retries,
-                    is_rate_limited=is_rate_limited,
-                    is_zai_coding_overload=_is_zai_coding_overload,
-                    base_url=_base,
-                    model=_model,
-                )
-                # Same preserve-redirect rule as the invalid-response wait: a steering
-                # correction must survive backoff, not die as "Operation interrupted".
-                _interrupted = interruptible_backoff_sleep(
-                    agent, wait_time, _retry,
-                    messages=messages,
-                    conversation_history=conversation_history,
-                    api_call_count=api_call_count,
-                    abort_message="Interrupt detected during retry wait, aborting.",
-                    interrupt_text=f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",
-                    activity_label=f"error retry backoff ({retry_count}/{max_retries})",
-                )
-                if _interrupted is not None:
-                    return _interrupted
-                if _retry.restart_with_redirected_messages:
-                    # Leave the retry loop — the check below rebuilds this iteration
-                    # from the correction instead of re-firing the stale request.
-                    break
         
         if _retry.restart_with_redirected_messages:
             # Cancelled request produced no valid assistant item: reuse the same logical

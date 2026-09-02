@@ -65,7 +65,6 @@ def handle_outer_loop_error(
             _turn_exit_reason=_turn_exit_reason,
             failed=failed,
             final_response=final_response,
-
         )
 
     # Count every escaped exception before classification so permanent
