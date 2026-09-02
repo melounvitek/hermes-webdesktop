@@ -1,135 +1,23 @@
-"""
-Shell-script hooks bridge.
+"""Shell-script hooks bridge.
 
-Reads the ``hooks:`` block from ``cli-config.yaml``, prompts the user for
-consent on first use of each ``(event, command)`` pair, and registers
-callbacks on the existing plugin hook manager so every existing
-``invoke_hook()`` site dispatches to the configured shell scripts — with
-zero changes to call sites.
+Reads the ``hooks:`` block from config, prompts for first-use consent per
+``(event, command)`` pair, and registers callbacks on the plugin hook manager
+so every existing ``invoke_hook()`` site dispatches to the configured scripts.
 
-Design notes
-------------
-* Python plugins and shell hooks compose naturally: both flow through
-  :func:`hermes_cli.plugins.invoke_hook` and its aggregators.  Python
-  plugins are registered first (via ``discover_and_load()``) so their
-  block decisions win ties over shell-hook blocks.
-* Subprocess execution uses ``shlex.split(os.path.expanduser(command))``
-  with ``shell=False`` — no shell injection footguns.  Users that need
-  pipes/redirection wrap their logic in a script.
-* First-use consent is gated by the allowlist under
-  ``~/.hermes/shell-hooks-allowlist.json``.  Non-TTY callers must pass
-  ``accept_hooks=True`` (resolved from ``--accept-hooks``,
-  ``HERMES_ACCEPT_HOOKS``, or ``hooks_auto_accept: true`` in config)
-  for registration to succeed without a prompt.
-* Registration is idempotent — safe to invoke from both the CLI entry
-  point (``hermes_cli/main.py``) and the gateway entry point
-  (``gateway/run.py``).
+Wire protocol — stdin JSON::
 
-Wire protocol
--------------
-**stdin** (JSON, piped to the script)::
+    {"hook_event_name": ..., "tool_name": ..., "tool_input": {...},
+     "session_id": ..., "cwd": ..., "extra": {...event-specific kwargs}}
 
-    {
-        "hook_event_name": "pre_tool_call",
-        "tool_name":       "terminal",
-        "tool_input":      {"command": "rm -rf /"},
-        "session_id":      "sess_abc123",
-        "cwd":             "/home/user/project",
-        "extra":           {...}   # event-specific kwargs
-    }
-
-**stdout** (JSON, optional — anything else is ignored)::
-
-    # Block a pre_tool_call (either shape accepted; normalised internally):
-    {"decision": "block", "reason":  "Forbidden command"}   # Claude-Code-style
-    {"action":   "block", "message": "Forbidden command"}   # Hermes-canonical
-
-    # Inject context for pre_llm_call:
-    {"context": "Today is Friday"}
-
-    # Modify tool input for pre_tool_call (Hermes-canonical):
-    {"action": "modify", "args": {"new_string": "fixed content"}}
-
-    # Modify tool input for pre_tool_call (Claude-Code-style):
-    {"decision": "modify", "tool_input": {"new_string": "fixed content"}}
-
-    # Silent no-op:
-    <empty or any non-matching JSON object>
-
-**exit codes**
-
-Exit code 2 from a ``pre_tool_call`` hook blocks the tool call even when
-stdout carries no block JSON (Claude-Code / Cursor compatible).  The block
-message is taken from the stdout block JSON when present, then the first
-400 characters of stderr, then a generic default.  For events whose block
-directive is not honored, exit 2 is logged at warning like any other
-non-zero exit.  All other non-zero exits log a warning and stdout is still
-parsed normally.
-
-**failure semantics**
-
-Hooks fail *open* by default: a spawn error, timeout, or unparseable
-stdout logs a warning and contributes nothing.  A ``pre_tool_call`` entry
-can opt into fail-*closed* semantics with ``fail_closed: true``
-(``failClosed`` also accepted for Cursor/Claude-Code config compat) —
-spawn errors, timeouts, and malformed stdout then BLOCK the tool call
-with ``hook <command> failed closed: <reason>``.  Use this for
-security-gating hooks (secret scanners, policy checks) where a crashed
-hook must not silently allow the action.  On non-blocking events
-``fail_closed`` is ignored with a warning.
-
-Per-event ``extra`` keys
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-The ``extra`` object contains every kwarg that is **not** one of the
-top-level payload keys (``tool_name``, ``args``, ``session_id``,
-``parent_session_id``).  The tables below list the ``extra`` keys
-emitted by each built-in hook site.
-
-``post_tool_call`` (emitted from ``model_tools.py``)::
-
-    result          – tool return value (serialised string)
-    status          – "ok" | "error" | "blocked"
-    error_type      – error category (e.g. "ValueError"), or None
-    error_message   – human-readable error text, or None
-    duration_ms     – wall-clock time in milliseconds
-    task_id         – current task id (empty string if none)
-    tool_call_id    – provider tool-call id
-    turn_id         – current turn id
-    api_request_id  – current API request id
-    middleware_trace – list of dicts from tool middleware chain
-
-``pre_tool_call`` (emitted from ``model_tools.py``)::
-
-    task_id         – current task id (empty string if none)
-    tool_call_id    – provider tool-call id
-    turn_id         – current turn id
-    api_request_id  – current API request id
-    middleware_trace – list of dicts from tool middleware chain
-
-``on_session_start`` (emitted from ``agent/conversation_loop.py``)::
-
-    model           – model name (e.g. "claude-sonnet-4-20250514")
-    platform        – platform identifier (e.g. "cli", "whatsapp")
-
-``on_session_end`` (emitted from ``agent/turn_finalizer.py``)::
-
-    task_id         – current task id
-    turn_id         – current turn id
-    completed       – bool, True when the turn produced a final response
-    interrupted     – bool, True when the user interrupted
-    model           – model name
-    platform        – platform identifier
-
-``subagent_stop`` (emitted from ``tools/delegate_tool.py``)::
-
-    parent_turn_id  – parent agent's current turn id
-    child_session_id – child (subagent) session id
-    child_role      – role string of the child agent
-    child_summary   – summary of the child's work
-    child_status    – exit status string (e.g. "success", "error")
-    tool_call_history – redacted tool name/input summary/byte counts/status list
-    duration_ms     – wall-clock time of the child run in milliseconds
+stdout JSON (optional): ``{"decision"|"action": "block", "reason"|"message": ...}``
+blocks a ``pre_tool_call``; ``{"action": "modify", "args": {...}}`` /
+``{"decision": "modify", "tool_input": {...}}`` rewrites tool args;
+``{"context": "..."}`` injects context for ``pre_llm_call``; ``pre_verify``
+accepts ``continue``/``block`` with a message. Exit code 2 blocks a
+``pre_tool_call`` even without block JSON (Claude-Code / Cursor compatible).
+Hooks fail open unless ``fail_closed: true`` (``failClosed`` accepted) on a
+blocking-capable event, in which case spawn errors, timeouts and unparseable
+stdout block with ``hook <command> failed closed: <reason>``.
 """
 
 from __future__ import annotations
@@ -139,13 +27,12 @@ import json
 import logging
 import os
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -167,68 +54,95 @@ DEFAULT_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 300
 ALLOWLIST_FILENAME = "shell-hooks-allowlist.json"
 _DEFAULT_BLOCK_MESSAGE = "Blocked by shell hook."
-
-# Exit code that signals "block this action" from a hook script, independent
-# of stdout content.  Claude Code / Cursor compatible.
+# Exit code that signals "block this action" independent of stdout (Claude Code / Cursor).
 BLOCK_EXIT_CODE = 2
-
-# Events whose block directive is actually honored downstream (see
-# hermes_cli.plugins.get_pre_tool_call_block_message / _get_pre_tool_call_
-# directive_details).  Exit-code-2 blocking and ``fail_closed`` only make
-# sense for these.
+# Events whose block directive is honored downstream; exit-2 blocking and fail_closed only apply here.
 _BLOCKING_EVENTS = frozenset({"pre_tool_call"})
-
-# Cap on stderr excerpt reused as a block message.
+_TOOL_EVENTS = frozenset({"pre_tool_call", "post_tool_call"})
 _STDERR_MESSAGE_LIMIT = 400
+_TRUTHY = {"1", "true", "yes", "on"}
+# kwargs promoted to top-level payload keys; everything else lands under ``extra``.
+_TOP_LEVEL_PAYLOAD_KEYS = {"tool_name", "args", "session_id", "parent_session_id"}
 
-
-# (home, event, matcher, command) tuples that have been wired to the plugin
-# manager in the current process.  Matcher is part of the key because
-# the same script can legitimately register for different matchers under
-# the same event (e.g. one entry per tool the user wants to gate). Home is
-# part of the key so a multiplexed gateway's secondary profiles — each with
-# their own plugin manager (see hermes_cli.plugins.get_plugin_manager) — can
-# register identical hook triples without the first profile's registration
-# silently shadowing the rest.
-# Second registration attempts for the exact same tuple become no-ops
-# so the CLI and gateway can both call register_from_config() safely.
+# (home, event, matcher, command) tuples wired to the plugin manager in this process.
+# Matcher is in the key: one script may legitimately register per-tool under one event.
+# Home is part of the key so multiplexed-gateway profiles (each with their own
+# plugin manager) can register identical triples without shadowing each other.
 _registered: Set[Tuple[str, str, Optional[str], str]] = set()
 _registered_lock = threading.Lock()
-
-# Intra-process lock for allowlist read-modify-write on platforms that
-# lack ``fcntl`` (non-POSIX).  Kept separate from ``_registered_lock``
-# because ``register_from_config`` already holds ``_registered_lock`` when
-# it triggers ``_record_approval`` — reusing it here would self-deadlock
-# (``threading.Lock`` is non-reentrant).  POSIX callers use the sibling
-# ``.lock`` file via ``fcntl.flock`` and bypass this.
+# Non-POSIX fallback for allowlist read-modify-write. Separate from
+# _registered_lock, which register_from_config already holds when it triggers
+# _record_approval (threading.Lock is non-reentrant).
 _allowlist_write_lock = threading.Lock()
 
 
-@dataclass
-class ShellHookSpec:
-    """Parsed and validated representation of a single ``hooks:`` entry."""
+def _home_key() -> str:
+    return str(get_hermes_home().expanduser().resolve())
 
-    event: str
-    command: str
-    matcher: Optional[str] = None
-    timeout: int = DEFAULT_TIMEOUT_SECONDS
-    fail_closed: bool = False
-    compiled_matcher: Optional[re.Pattern] = field(default=None, repr=False)
+
+def _forget_home_registrations(registry: Set[tuple], lock: threading.Lock) -> None:
+    """Drop the current home's idempotence keys only (shared with outbound webhooks).
+
+    A force-reload in profile A must never drop profile B's live registration.
+    """
+    home_key = _home_key()
+    with lock:
+        registry.difference_update({k for k in registry if k[0] == home_key})
+
+
+def _split(command: str) -> List[str]:
+    # Windows-safe: plain shlex.split eats backslashes in paths.
+    from hermes_cli._subprocess_compat import split_command_line
+
+    return split_command_line(command)
+
+
+def _entry_matches(e: Any, event: Optional[str], command: str) -> bool:
+    return (
+        isinstance(e, dict)
+        and (event is None or e.get("event") == event)
+        and e.get("command") == command
+    )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _payload_fields(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Common stdin/POST payload fields (shared with outbound webhooks); key order is wire order."""
+    extras = {k: v for k, v in kwargs.items() if k not in _TOP_LEVEL_PAYLOAD_KEYS}
+    try:
+        cwd = str(Path.cwd())
+    except OSError:
+        cwd = ""
+    return {
+        "tool_name": kwargs.get("tool_name"),
+        "tool_input": kwargs.get("args") if isinstance(kwargs.get("args"), dict) else None,
+        "session_id": kwargs.get("session_id") or kwargs.get("parent_session_id") or "",
+        "cwd": cwd,
+        "extra": extras,
+    }
+
+
+class _ToolMatcherMixin:
+    """``matcher`` regex handling shared by shell-hook specs and outbound webhook targets."""
+
+    _MATCHER_KIND = "shell hook"
+    matcher: Optional[str]
+    compiled_matcher: Optional[re.Pattern]
 
     def __post_init__(self) -> None:
-        # Strip whitespace introduced by YAML quirks (e.g. multi-line string
-        # folding) — a matcher of " terminal" would otherwise silently fail
-        # to match "terminal" without any diagnostic.
+        # Strip YAML folding whitespace — " terminal" would silently never match.
         if isinstance(self.matcher, str):
-            stripped = self.matcher.strip()
-            self.matcher = stripped if stripped else None
+            self.matcher = self.matcher.strip() or None
         if self.matcher:
             try:
                 self.compiled_matcher = re.compile(self.matcher)
             except re.error as exc:
                 logger.warning(
-                    "shell hook matcher %r is invalid (%s) — treating as "
-                    "literal equality", self.matcher, exc,
+                    "%s matcher %r is invalid (%s) — treating as "
+                    "literal equality", self._MATCHER_KIND, self.matcher, exc,
                 )
                 self.compiled_matcher = None
 
@@ -239,42 +153,37 @@ class ShellHookSpec:
             return False
         if self.compiled_matcher is not None:
             return self.compiled_matcher.fullmatch(tool_name) is not None
-        # compiled_matcher is None only when the regex failed to compile,
-        # in which case we already warned and fall back to literal equality.
-        return tool_name == self.matcher
+        return tool_name == self.matcher  # regex failed to compile: literal fallback
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+@dataclass
+class ShellHookSpec(_ToolMatcherMixin):
+    """Parsed and validated representation of a single ``hooks:`` entry."""
+
+    event: str
+    command: str
+    matcher: Optional[str] = None
+    timeout: int = DEFAULT_TIMEOUT_SECONDS
+    fail_closed: bool = False
+    compiled_matcher: Optional[re.Pattern] = field(default=None, repr=False)
+
+
+# --- Public API ---
 
 def register_from_config(
     cfg: Optional[Dict[str, Any]],
     *,
     accept_hooks: bool = False,
 ) -> List[ShellHookSpec]:
-    """Register every configured shell hook on the plugin manager.
+    """Register every configured shell hook on the plugin manager; idempotent.
 
-    ``cfg`` is the full parsed config dict (``hermes_cli.config.load_config``
-    output).  The ``hooks:`` key is read out of it.  Missing, empty, or
-    non-dict ``hooks`` is treated as zero configured hooks.
-
-    ``accept_hooks=True`` skips the TTY consent prompt — the caller is
-    promising that the user has opted in via a flag, env var, or config
-    setting.  ``HERMES_ACCEPT_HOOKS=1`` and ``hooks_auto_accept: true`` are
-    also honored inside this function so either CLI or gateway call sites
-    pick them up.
-
-    Returns the list of :class:`ShellHookSpec` entries that ended up wired
-    up on the plugin manager.  Skipped entries (unknown events, malformed,
-    not allowlisted, already registered) are logged but not returned.
+    Returns the specs that were newly wired up. Skipped entries (unknown
+    events, malformed, not allowlisted, already registered) are logged only.
     """
     if not isinstance(cfg, dict):
         return []
 
-    # Safe mode (--safe-mode / HERMES_SAFE_MODE=1): shell hooks are user
-    # customizations too — skip registration entirely so a troubleshooting
-    # run fires zero user-configured code (plugins, MCP, AND hooks).
+    # Safe mode: hooks are user customizations too — fire zero user-configured code.
     from utils import env_var_enabled
 
     if env_var_enabled("HERMES_SAFE_MODE"):
@@ -282,23 +191,18 @@ def register_from_config(
         return []
 
     effective_accept = _resolve_effective_accept(cfg, accept_hooks)
-
     specs = _parse_hooks_block(cfg.get("hooks"))
     if not specs:
         return []
 
     registered: List[ShellHookSpec] = []
-
-    # Import lazily — avoids circular imports at module-load time.
-    from hermes_cli.plugins import get_plugin_manager
+    from hermes_cli.plugins import get_plugin_manager  # lazy: avoids import cycle
 
     manager = get_plugin_manager()
-    home_key = str(get_hermes_home().expanduser().resolve())
+    home_key = _home_key()
 
-    # Idempotence + allowlist read happen under the lock; the TTY
-    # prompt runs outside so other threads aren't parked on a blocking
-    # input().  Mutation re-takes the lock with a defensive idempotence
-    # re-check in case two callers ever race through the prompt.
+    # Idempotence + allowlist read happen under the lock; the TTY prompt runs
+    # outside it; mutation re-takes the lock and re-checks in case two callers raced.
     for spec in specs:
         key = (home_key, spec.event, spec.matcher, spec.command)
         with _registered_lock:
@@ -306,18 +210,17 @@ def register_from_config(
                 continue
             already_allowlisted = _is_allowlisted(spec.event, spec.command)
 
-        if not already_allowlisted:
-            if not _prompt_and_record(
-                spec.event, spec.command, accept_hooks=effective_accept,
-            ):
-                logger.warning(
-                    "shell hook for %s (%s) not allowlisted — skipped. "
-                    "Use --accept-hooks / HERMES_ACCEPT_HOOKS=1 / "
-                    "hooks_auto_accept: true, or approve at the TTY "
-                    "prompt next run.",
-                    spec.event, spec.command,
-                )
-                continue
+        if not already_allowlisted and not _prompt_and_record(
+            spec.event, spec.command, accept_hooks=effective_accept,
+        ):
+            logger.warning(
+                "shell hook for %s (%s) not allowlisted — skipped. "
+                "Use --accept-hooks / HERMES_ACCEPT_HOOKS=1 / "
+                "hooks_auto_accept: true, or approve at the TTY "
+                "prompt next run.",
+                spec.event, spec.command,
+            )
+            continue
 
         with _registered_lock:
             if key in _registered:
@@ -336,38 +239,20 @@ def register_from_config(
 
 
 def iter_configured_hooks(cfg: Optional[Dict[str, Any]]) -> List[ShellHookSpec]:
-    """Return the parsed ``ShellHookSpec`` entries from config without
-    registering anything.  Used by ``hermes hooks list`` and ``doctor``."""
+    """Parse config hooks without registering (``hermes hooks list`` / doctor)."""
     if not isinstance(cfg, dict):
         return []
     return _parse_hooks_block(cfg.get("hooks"))
 
 
 def re_register_config_hooks() -> None:
-    """Re-register shell hooks from config after a plugin force-reload.
+    """Re-register config hooks after a plugin force-reload cleared the manager's hooks.
 
-    ``PluginManager.discover_and_load(force=True)`` unloads via the ownership
-    ledger and clears the manager's ``_hooks`` dict, which silently drops
-    shell hooks that were registered from ``config.yaml`` at startup (they
-    are config-owned, not plugin-owned, so the ledger cannot restore them).
-    Clear the idempotence set and re-run ``register_from_config()`` so hooks
-    are wired again (#60036 / PR #60267; tracking #64178 — salvaged from
-    PR #64188).
-
-    Only the idempotence keys for the *current* Hermes home are cleared —
-    ``discover_and_load(force=True)`` only unloads the manager scoped to
-    that one home, so clearing every home's keys would make a force-reload
-    in profile A drop profile B's still-live registration from the ledger
-    and duplicate it on B's next registration call (#92682 review).
-
-    Commands already allowlisted stay allowlisted, so this never re-prompts
-    at a TTY for hooks the user previously approved.
+    Only the current home's idempotence keys are cleared so a force-reload in
+    profile A never drops profile B's live registration. Allowlisted commands
+    stay allowlisted, so this never re-prompts.
     """
-    home_key = str(get_hermes_home().expanduser().resolve())
-    with _registered_lock:
-        _registered.difference_update(
-            {key for key in _registered if key[0] == home_key}
-        )
+    _forget_home_registrations(_registered, _registered_lock)
     from hermes_cli.config import load_config
 
     register_from_config(load_config())
@@ -379,34 +264,22 @@ def reset_for_tests() -> None:
         _registered.clear()
 
 
-# ---------------------------------------------------------------------------
-# Config parsing
-# ---------------------------------------------------------------------------
+# --- Config parsing ---
 
 def _parse_hooks_block(hooks_cfg: Any) -> List[ShellHookSpec]:
-    """Normalise the ``hooks:`` dict into a flat list of ``ShellHookSpec``.
-
-    Malformed entries warn-and-skip — we never raise from config parsing
-    because a broken hook must not crash the agent.
-    """
+    """Normalise ``hooks:`` into specs; malformed entries warn-and-skip, never raise."""
     from hermes_cli.plugins import SHELL_UNSUPPORTED_HOOKS, VALID_HOOKS
 
     if not isinstance(hooks_cfg, dict):
         return []
 
     specs: List[ShellHookSpec] = []
-
     for event_name, entries in hooks_cfg.items():
-        # Reserved sub-keys that aren't event names — skip silently. These
-        # are config sub-sections nested under `hooks:` for related
-        # functionality (e.g. output-spill budgets, outbound webhooks —
-        # the latter parsed by agent/outbound_webhooks.py).
+        # Reserved non-event sub-sections nested under `hooks:`.
         if event_name in ("output_spill", "outbound"):
             continue
         if event_name in SHELL_UNSUPPORTED_HOOKS:
-            # Registering would "succeed" while the hook's return value is
-            # silently dropped (_parse_response has no channel for these
-            # events' directives) — refuse loudly instead.
+            # _parse_response has no channel for these directives — refuse loudly.
             logger.warning(
                 "hook event %r is Python-plugin-only: shell hooks cannot "
                 "return its directive, so this registration is refused "
@@ -415,31 +288,20 @@ def _parse_hooks_block(hooks_cfg: Any) -> List[ShellHookSpec]:
             )
             continue
         if event_name not in VALID_HOOKS:
-            suggestion = difflib.get_close_matches(
-                str(event_name), VALID_HOOKS, n=1, cutoff=0.6,
-            )
+            suggestion = difflib.get_close_matches(str(event_name), VALID_HOOKS, n=1, cutoff=0.6)
             if suggestion:
-                logger.warning(
-                    "unknown hook event %r in hooks: config — did you mean %r?",
-                    event_name, suggestion[0],
-                )
+                logger.warning("unknown hook event %r in hooks: config — did you mean %r?", event_name, suggestion[0])
             else:
-                logger.warning(
-                    "unknown hook event %r in hooks: config (valid: %s)",
-                    event_name, ", ".join(sorted(VALID_HOOKS)),
-                )
+                logger.warning("unknown hook event %r in hooks: config (valid: %s)", event_name, ", ".join(sorted(VALID_HOOKS)))
             continue
-
         if entries is None:
             continue
-
         if not isinstance(entries, list):
             logger.warning(
                 "hooks.%s must be a list of hook definitions; got %s",
                 event_name, type(entries).__name__,
             )
             continue
-
         for i, raw in enumerate(entries):
             spec = _parse_single_entry(event_name, i, raw)
             if spec is not None:
@@ -448,38 +310,29 @@ def _parse_hooks_block(hooks_cfg: Any) -> List[ShellHookSpec]:
     return specs
 
 
-def _parse_single_entry(
-    event: str, index: int, raw: Any,
-) -> Optional[ShellHookSpec]:
+def _parse_single_entry(event: str, index: int, raw: Any) -> Optional[ShellHookSpec]:
+    def warn(msg: str, *args: Any) -> None:
+        logger.warning("hooks.%s[%d]" + msg, event, index, *args)
+
     if not isinstance(raw, dict):
-        logger.warning(
-            "hooks.%s[%d] must be a mapping with a 'command' key; got %s",
-            event, index, type(raw).__name__,
-        )
+        warn(" must be a mapping with a 'command' key; got %s", type(raw).__name__)
         return None
 
     command = raw.get("command")
     if not isinstance(command, str) or not command.strip():
-        logger.warning(
-            "hooks.%s[%d] is missing a non-empty 'command' field",
-            event, index,
-        )
+        warn(" is missing a non-empty 'command' field")
         return None
 
     matcher = raw.get("matcher")
     if matcher is not None and not isinstance(matcher, str):
-        logger.warning(
-            "hooks.%s[%d].matcher must be a string regex; ignoring",
-            event, index,
-        )
+        warn(".matcher must be a string regex; ignoring")
         matcher = None
-
-    if matcher is not None and event not in {"pre_tool_call", "post_tool_call"}:
-        logger.warning(
-            "hooks.%s[%d].matcher=%r will be ignored at runtime — the "
+    if matcher is not None and event not in _TOOL_EVENTS:
+        warn(
+            ".matcher=%r will be ignored at runtime — the "
             "matcher field is only honored for pre_tool_call / "
             "post_tool_call.  The hook will fire on every %s event.",
-            event, index, matcher, event,
+            matcher, event,
         )
         matcher = None
 
@@ -487,86 +340,48 @@ def _parse_single_entry(
     try:
         timeout = int(timeout_raw)
     except (TypeError, ValueError):
-        logger.warning(
-            "hooks.%s[%d].timeout must be an int (got %r); using default %ds",
-            event, index, timeout_raw, DEFAULT_TIMEOUT_SECONDS,
-        )
+        warn(".timeout must be an int (got %r); using default %ds", timeout_raw, DEFAULT_TIMEOUT_SECONDS)
         timeout = DEFAULT_TIMEOUT_SECONDS
-
     if timeout < 1:
-        logger.warning(
-            "hooks.%s[%d].timeout must be >=1; using default %ds",
-            event, index, DEFAULT_TIMEOUT_SECONDS,
-        )
+        warn(".timeout must be >=1; using default %ds", DEFAULT_TIMEOUT_SECONDS)
         timeout = DEFAULT_TIMEOUT_SECONDS
-
     if timeout > MAX_TIMEOUT_SECONDS:
-        logger.warning(
-            "hooks.%s[%d].timeout=%ds exceeds max %ds; clamping",
-            event, index, timeout, MAX_TIMEOUT_SECONDS,
-        )
+        warn(".timeout=%ds exceeds max %ds; clamping", timeout, MAX_TIMEOUT_SECONDS)
         timeout = MAX_TIMEOUT_SECONDS
 
-    # ``fail_closed`` (canonical) / ``failClosed`` (Cursor/Claude-Code
-    # config compat).  Canonical spelling wins when both are present.
-    fail_closed_raw = raw.get("fail_closed", raw.get("failClosed", False))
-    if not isinstance(fail_closed_raw, bool):
-        logger.warning(
-            "hooks.%s[%d].fail_closed must be a boolean (got %r); "
-            "using default false (fail open)",
-            event, index, fail_closed_raw,
-        )
-        fail_closed_raw = False
-    fail_closed = fail_closed_raw
-
+    # ``fail_closed`` (canonical) wins over ``failClosed`` (Cursor/Claude-Code compat).
+    fail_closed = raw.get("fail_closed", raw.get("failClosed", False))
+    if not isinstance(fail_closed, bool):
+        warn(".fail_closed must be a boolean (got %r); using default false (fail open)", fail_closed)
+        fail_closed = False
     if fail_closed and event not in _BLOCKING_EVENTS:
-        logger.warning(
-            "hooks.%s[%d].fail_closed=true will be ignored at runtime — "
+        warn(
+            ".fail_closed=true will be ignored at runtime — "
             "fail_closed only applies to blocking-capable events (%s).  "
             "The hook will fail open on %s like any other hook.",
-            event, index, ", ".join(sorted(_BLOCKING_EVENTS)), event,
+            ", ".join(sorted(_BLOCKING_EVENTS)), event,
         )
         fail_closed = False
 
     return ShellHookSpec(
-        event=event,
-        command=command.strip(),
-        matcher=matcher,
-        timeout=timeout,
-        fail_closed=fail_closed,
+        event=event, command=command.strip(), matcher=matcher,
+        timeout=timeout, fail_closed=fail_closed,
     )
 
 
-# ---------------------------------------------------------------------------
-# Subprocess callback
-# ---------------------------------------------------------------------------
-
-_TOP_LEVEL_PAYLOAD_KEYS = {"tool_name", "args", "session_id", "parent_session_id"}
-
+# --- Subprocess callback ---
 
 def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
-    """Run ``spec.command`` as a subprocess with ``stdin_json`` on stdin.
+    """Run ``spec.command`` with ``stdin_json`` on stdin; the single subprocess site.
 
-    Returns a diagnostic dict with the same keys for every outcome
-    (``returncode``, ``stdout``, ``stderr``, ``timed_out``,
-    ``elapsed_seconds``, ``error``).  This is the single place the
-    subprocess is actually invoked — both the live callback path
-    (:func:`_make_callback`) and the CLI test helper (:func:`run_once`)
-    go through it.
+    Returns a diagnostic dict with the same keys for every outcome.
     """
     result: Dict[str, Any] = {
-        "returncode": None,
-        "stdout": "",
-        "stderr": "",
-        "timed_out": False,
-        "elapsed_seconds": 0.0,
-        "error": None,
+        "returncode": None, "stdout": "", "stderr": "",
+        "timed_out": False, "elapsed_seconds": 0.0, "error": None,
     }
     try:
-        # Windows-safe: plain shlex.split eats backslashes in paths (#78293).
-        from hermes_cli._subprocess_compat import split_command_line
-
-        argv = split_command_line(os.path.expanduser(spec.command))
+        argv = _split(os.path.expanduser(spec.command))
     except ValueError as exc:
         result["error"] = f"command {spec.command!r} cannot be parsed: {exc}"
         return result
@@ -575,25 +390,18 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
         return result
 
     t0 = time.monotonic()
-    # Spawn the hook in its own process group on POSIX (``process_group=0``,
-    # Python ≥3.11) so a timed-out hook's descendants can be reaped with the
-    # hook itself. Windows keeps the hidden-window flags; tree cleanup there
-    # goes through ``taskkill /T`` in ``kill_process_tree``. Hooks that
-    # complete in time keep their descendants — an intentionally detached
-    # helper (``some-daemon &``) survives a successful run. Ported from
-    # openai/codex#37527 ("Terminate timed-out hook process trees").
-    _popen_kwargs: Dict[str, Any] = (
+    # Own process group on POSIX so a timed-out hook's descendants are reaped
+    # with it; Windows tree cleanup goes through kill_process_tree (taskkill /T).
+    # Hooks that finish in time keep detached helpers alive.
+    popen_kwargs: Dict[str, Any] = (
         {"creationflags": windows_hide_flags()} if IS_WINDOWS else {"process_group": 0}
     )
     try:
         proc = subprocess.Popen(
             argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True, encoding='utf-8', errors='replace',
-            shell=False,
-            **_popen_kwargs,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding='utf-8', errors='replace', shell=False,
+            **popen_kwargs,
         )
     except FileNotFoundError:
         result["error"] = "command not found"
@@ -607,25 +415,18 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
 
     try:
         stdout, stderr = proc.communicate(input=stdin_json, timeout=spec.timeout)
-    except subprocess.TimeoutExpired:
-        # Take down the whole process tree, not just the direct child —
-        # otherwise a hook that forked helpers leaves them running (and,
-        # holding the pipe write ends, they'd stall the drain below).
+    except Exception as exc:
+        # Kill the whole tree — forked helpers holding the pipes would stall the drain.
         kill_process_tree(proc)
         try:
             proc.communicate(timeout=1)
         except Exception:
             pass
-        result["timed_out"] = True
-        result["elapsed_seconds"] = round(time.monotonic() - t0, 3)
-        return result
-    except Exception as exc:  # pragma: no cover — defensive
-        kill_process_tree(proc)
-        try:
-            proc.communicate(timeout=1)
-        except Exception:
-            pass
-        result["error"] = str(exc)
+        if isinstance(exc, subprocess.TimeoutExpired):
+            result["timed_out"] = True
+            result["elapsed_seconds"] = round(time.monotonic() - t0, 3)
+        else:  # pragma: no cover — defensive
+            result["error"] = str(exc)
         return result
 
     result["returncode"] = proc.returncode
@@ -639,13 +440,9 @@ def _make_callback(spec: ShellHookSpec) -> Callable[..., Optional[Dict[str, Any]
     """Build the closure that ``invoke_hook()`` will call per firing."""
 
     def _callback(**kwargs: Any) -> Optional[Dict[str, Any]]:
-        # Matcher gate — only meaningful for tool-scoped events.
-        if spec.event in {"pre_tool_call", "post_tool_call"}:
-            if not spec.matches_tool(kwargs.get("tool_name")):
-                return None
-
-        r = _spawn(spec, _serialize_payload(spec.event, kwargs))
-        return _evaluate_result(spec, r)
+        if spec.event in _TOOL_EVENTS and not spec.matches_tool(kwargs.get("tool_name")):
+            return None
+        return _evaluate_result(spec, _spawn(spec, _serialize_payload(spec.event, kwargs)))
 
     _callback.__name__ = f"shell_hook[{spec.event}:{spec.command}]"
     _callback.__qualname__ = _callback.__name__
@@ -653,33 +450,17 @@ def _make_callback(spec: ShellHookSpec) -> Callable[..., Optional[Dict[str, Any]
 
 
 def _fail_closed_block(spec: ShellHookSpec, reason: str) -> Dict[str, Any]:
-    """Canonical block shape for a ``fail_closed`` hook that failed."""
-    return {
-        "action": "block",
-        "message": f"hook {spec.command} failed closed: {reason}",
-    }
+    return {"action": "block", "message": f"hook {spec.command} failed closed: {reason}"}
 
 
-def _evaluate_result(
-    spec: ShellHookSpec, r: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    """Turn a :func:`_spawn` diagnostic dict into the hook's contribution.
+def _evaluate_result(spec: ShellHookSpec, r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Turn a ``_spawn`` diagnostic dict into the hook's contribution.
 
-    Single place that encodes the failure semantics:
-
-    * spawn error / timeout — fail open (log + ``None``) unless the spec
-      is ``fail_closed`` on a blocking-capable event, in which case a
-      canonical block shape is returned;
-    * exit code 2 on a blocking-capable event — block, with the message
-      taken from stdout block JSON, then stderr, then a default
-      (Claude-Code / Cursor compatible);
-    * other non-zero exits — warn, then parse stdout normally;
-    * non-JSON / unparseable stdout on a ``fail_closed`` blocking hook —
-      block instead of silently contributing nothing.
-
-    Shared by the live callback path (:func:`_make_callback`) and the CLI
-    test helper (:func:`run_once`) so ``hermes hooks test`` reflects
-    production behaviour exactly.
+    Encodes the failure semantics once (shared by the live callback and
+    ``run_once``): spawn error/timeout fail open unless fail_closed; exit 2 on
+    a blocking event blocks (message from stdout JSON, then stderr, then
+    default); other non-zero exits warn then parse stdout; unparseable stdout
+    on a fail_closed hook blocks.
     """
     blocking_event = spec.event in _BLOCKING_EVENTS
     fail_closed = spec.fail_closed and blocking_event
@@ -689,19 +470,13 @@ def _evaluate_result(
             "shell hook failed (event=%s command=%s): %s",
             spec.event, spec.command, r["error"],
         )
-        if fail_closed:
-            return _fail_closed_block(spec, r["error"])
-        return None
+        return _fail_closed_block(spec, r["error"]) if fail_closed else None
     if r["timed_out"]:
         logger.warning(
             "shell hook timed out after %.2fs (event=%s command=%s)",
             r["elapsed_seconds"], spec.event, spec.command,
         )
-        if fail_closed:
-            return _fail_closed_block(
-                spec, f"timed out after {spec.timeout}s",
-            )
-        return None
+        return _fail_closed_block(spec, f"timed out after {spec.timeout}s") if fail_closed else None
 
     stderr = r["stderr"].strip()
     if stderr:
@@ -710,9 +485,6 @@ def _evaluate_result(
             spec.event, spec.command, stderr[:_STDERR_MESSAGE_LIMIT],
         )
 
-    # Exit code 2 = block (Claude-Code / Cursor compatible), for events
-    # whose block directive is honored downstream.  stdout block JSON
-    # still wins for the message; otherwise stderr, then a default.
     if r["returncode"] == BLOCK_EXIT_CODE and blocking_event:
         parsed = _parse_response(spec.event, r["stdout"])
         if isinstance(parsed, dict) and parsed.get("action") == "block":
@@ -724,8 +496,7 @@ def _evaluate_result(
         )
         return {"action": "block", "message": message}
 
-    # Other non-zero exits: log but still parse stdout so scripts that
-    # signal failure via exit code can also return a block directive.
+    # Other non-zero exits: still parse stdout so exit-code failures can carry a block directive.
     if r["returncode"] != 0:
         logger.warning(
             "shell hook exited %d (event=%s command=%s); stderr=%s",
@@ -737,127 +508,82 @@ def _evaluate_result(
     parsed = _parse_response(spec.event, stdout)
 
     if parsed is None and fail_closed and stdout:
-        # The hook produced output we could not turn into a directive.
-        # A fail-closed gate must not silently allow the action on
-        # garbage output (e.g. a stack trace on stdout).
+        # A fail-closed gate must not silently allow on garbage stdout (e.g. a stack trace).
         try:
-            data = json.loads(stdout)
-            valid_json = isinstance(data, dict)
+            valid_json = isinstance(json.loads(stdout), dict)
         except json.JSONDecodeError:
             valid_json = False
         if not valid_json:
-            return _fail_closed_block(
-                spec, "unparseable stdout (expected a JSON object)",
-            )
+            return _fail_closed_block(spec, "unparseable stdout (expected a JSON object)")
 
     return parsed
 
 
 def _serialize_payload(event: str, kwargs: Dict[str, Any]) -> str:
-    """Render the stdin JSON payload.  Unserialisable values are
-    stringified via ``default=str`` rather than dropped."""
-    extras = {k: v for k, v in kwargs.items() if k not in _TOP_LEVEL_PAYLOAD_KEYS}
-    try:
-        cwd = str(Path.cwd())
-    except OSError:
-        cwd = ""
-    payload = {
-        "hook_event_name": event,
-        "tool_name": kwargs.get("tool_name"),
-        "tool_input": kwargs.get("args") if isinstance(kwargs.get("args"), dict) else None,
-        "session_id": kwargs.get("session_id") or kwargs.get("parent_session_id") or "",
-        "cwd": cwd,
-        "extra": extras,
-    }
+    """Render the stdin JSON payload; unserialisable values are stringified."""
+    payload = {"hook_event_name": event, **_payload_fields(kwargs)}
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def _block_message(primary: Any, secondary: Any) -> str:
-    """Return a validated string block message, falling back to the default.
-
-    Accepts two candidate fields (primary wins over secondary) so callers
-    can express field-priority differences between the two hook wire formats
-    without duplicating the type-check logic.
-    """
+    """Validated string block message (primary wins), falling back to the default."""
     raw = primary or secondary
     return raw if isinstance(raw, str) and raw else _DEFAULT_BLOCK_MESSAGE
 
 
-def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
-    """Translate stdout JSON into a Hermes wire-shape dict.
-
-    For ``pre_tool_call`` the Claude-Code-style ``{"decision": "block",
-    "reason": "..."}`` payload is translated into the canonical Hermes
-    ``{"action": "block", "message": "..."}`` shape expected by
-    :func:`hermes_cli.plugins.get_pre_tool_call_block_message`.  This is
-    the single most important correctness invariant in this module —
-    skipping the translation silently breaks every ``pre_tool_call``
-    block directive.
-
-    For ``pre_tool_call`` the ``modify`` action (canonical: ``{"action":
-    "modify", "args": {...}}``, Claude-Code-style: ``{"decision":
-    "modify", "tool_input": {...}}``) is translated to
-    ``{"action": "modify", "args": {...}}`` so callers can merge the
-    returned fields into the tool's ``args`` before dispatch.
-
-    For ``pre_llm_call``, ``{"context": "..."}`` is passed through
-    unchanged to match the existing plugin-hook contract.
-
-    Anything else returns ``None``.
-    """
-    stdout = (stdout or "").strip()
-    if not stdout:
-        return None
-
-    try:
-        data = json.loads(stdout)
-    except json.JSONDecodeError:
-        logger.warning(
-            "shell hook stdout was not valid JSON (event=%s): %s",
-            event, stdout[:200],
-        )
-        return None
-
-    if not isinstance(data, dict):
-        return None
-
-    if event == "pre_tool_call":
-        if data.get("action") == "block":
-            return {"action": "block", "message": _block_message(data.get("message"), data.get("reason"))}
-        if data.get("decision") == "block":
-            return {"action": "block", "message": _block_message(data.get("reason"), data.get("message"))}
-        # "modify" action — transform tool_input before dispatch
-        if data.get("action") == "modify":
-            new_args = data.get("args")
-            if isinstance(new_args, dict):
-                return {"action": "modify", "args": new_args}
-        if data.get("decision") == "modify":
-            new_args = data.get("tool_input")
-            if isinstance(new_args, dict):
-                return {"action": "modify", "args": new_args}
-        return None
-
-    if event == "pre_verify":
-        # "continue" (Hermes) / "block" (Claude-Code Stop: block the stop) both
-        # mean keep going; the message/reason is the follow-up for the model. A
-        # continue with no message is a no-op — let the turn finish.
-        action = str(data.get("action") or data.get("decision") or "").strip().lower()
-        if action in {"continue", "block"}:
-            message = data.get("message") or data.get("reason")
-            if isinstance(message, str) and message.strip():
-                return {"action": "continue", "message": message.strip()}
-        return None
-
-    context = data.get("context")
-    if isinstance(context, str) and context.strip():
-        return {"context": context}
-
+def _parse_pre_tool_call(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # Claude-Code-style {"decision": ..., "reason"/"tool_input": ...} is translated to
+    # the canonical Hermes shape expected by get_pre_tool_call_block_message —
+    # skipping this silently breaks every pre_tool_call block directive.
+    if data.get("action") == "block":
+        return {"action": "block", "message": _block_message(data.get("message"), data.get("reason"))}
+    if data.get("decision") == "block":
+        return {"action": "block", "message": _block_message(data.get("reason"), data.get("message"))}
+    if data.get("action") == "modify" and isinstance(data.get("args"), dict):
+        return {"action": "modify", "args": data["args"]}
+    if data.get("decision") == "modify" and isinstance(data.get("tool_input"), dict):
+        return {"action": "modify", "args": data["tool_input"]}
     return None
 
 
-# ---------------------------------------------------------------------------
-# Allowlist / consent
-# ---------------------------------------------------------------------------
+def _parse_pre_verify(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # "continue" (Hermes) / "block" (Claude-Code Stop) both mean keep going;
+    # a continue with no message is a no-op.
+    action = str(data.get("action") or data.get("decision") or "").strip().lower()
+    if action in {"continue", "block"}:
+        message = data.get("message") or data.get("reason")
+        if isinstance(message, str) and message.strip():
+            return {"action": "continue", "message": message.strip()}
+    return None
+
+
+def _parse_context(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    context = data.get("context")
+    if isinstance(context, str) and context.strip():
+        return {"context": context}
+    return None
+
+
+_RESPONSE_PARSERS: Dict[str, Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = {
+    "pre_tool_call": _parse_pre_tool_call,
+    "pre_verify": _parse_pre_verify,
+}
+
+
+def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
+    """Translate stdout JSON into a Hermes wire-shape dict, or ``None``."""
+    stdout = (stdout or "").strip()
+    if not stdout:
+        return None
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        logger.warning("shell hook stdout was not valid JSON (event=%s): %s", event, stdout[:200])
+        return None
+    return _RESPONSE_PARSERS.get(event, _parse_context)(data) if isinstance(data, dict) else None
+
+
+# --- Allowlist / consent ---
 
 def allowlist_path() -> Path:
     """Path to the per-user shell-hook allowlist file."""
@@ -869,27 +595,20 @@ def load_allowlist() -> Dict[str, Any]:
     try:
         raw = json.loads(allowlist_path().read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {"approvals": []}
+        raw = None
     if not isinstance(raw, dict):
         return {"approvals": []}
-    approvals = raw.get("approvals")
-    if not isinstance(approvals, list):
+    if not isinstance(raw.get("approvals"), list):
         raw["approvals"] = []
     return raw
 
 
 def save_allowlist(data: Dict[str, Any]) -> None:
-    """Atomically persist the allowlist via per-process ``mkstemp`` +
-    ``os.replace``.  Cross-process read-modify-write races are handled
-    by :func:`_locked_update_approvals` (``fcntl.flock``).  On OSError
-    the failure is logged; the in-process hook still registers but
-    the approval won't survive across runs."""
+    """Atomically persist the allowlist; on OSError log and keep the in-process approval."""
     p = allowlist_path()
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=f"{p.name}.", suffix=".tmp", dir=str(p.parent),
-        )
+        fd, tmp_path = tempfile.mkstemp(prefix=f"{p.name}.", suffix=".tmp", dir=str(p.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(json.dumps(data, indent=2, sort_keys=True))
@@ -911,55 +630,35 @@ def save_allowlist(data: Dict[str, Any]) -> None:
 
 
 def _is_allowlisted(event: str, command: str) -> bool:
-    data = load_allowlist()
-    return any(
-        isinstance(e, dict)
-        and e.get("event") == event
-        and e.get("command") == command
-        for e in data.get("approvals", [])
-    )
+    return any(_entry_matches(e, event, command) for e in load_allowlist().get("approvals", []))
 
 
 @contextmanager
 def _locked_update_approvals() -> Iterator[Dict[str, Any]]:
-    """Serialise read-modify-write on the allowlist across processes.
-
-    Holds an exclusive ``flock`` on a sibling lock file for the duration
-    of the update so concurrent ``_record_approval``/``revoke`` callers
-    cannot clobber each other's changes (the race Codex reproduced with
-    20–50 simultaneous writers).  Falls back to an in-process lock on
-    platforms without ``fcntl``.
-    """
+    """Serialise allowlist read-modify-write across processes via a sibling flock file."""
     p = allowlist_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = p.with_suffix(p.suffix + ".lock")
-
-    if fcntl is None:  # pragma: no cover — non-POSIX fallback
-        with _allowlist_write_lock:
-            data = load_allowlist()
-            yield data
-            save_allowlist(data)
-        return
-
-    with open(lock_path, "a+", encoding="utf-8") as lock_fh:
-        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-        try:
-            data = load_allowlist()
-            yield data
-            save_allowlist(data)
-        finally:
-            try:
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-            except (OSError, IOError):
-                pass
+    with ExitStack() as stack:
+        if fcntl is None:  # pragma: no cover — non-POSIX fallback
+            stack.enter_context(_allowlist_write_lock)
+        else:
+            lock_fh = stack.enter_context(open(p.with_suffix(p.suffix + ".lock"), "a+", encoding="utf-8"))
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            stack.callback(_flock_unlock, lock_fh)
+        data = load_allowlist()
+        yield data
+        save_allowlist(data)
 
 
-def _prompt_and_record(
-    event: str, command: str, *, accept_hooks: bool,
-) -> bool:
-    """Decide whether to approve an unseen ``(event, command)`` pair.
-    Returns ``True`` iff the approval was granted and recorded.
-    """
+def _flock_unlock(lock_fh: Any) -> None:
+    try:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+    except (OSError, IOError):
+        pass
+
+
+def _prompt_and_record(event: str, command: str, *, accept_hooks: bool) -> bool:
+    """Approve an unseen ``(event, command)`` pair; True iff granted and recorded."""
     if accept_hooks:
         _record_approval(event, command)
         logger.info(
@@ -988,7 +687,6 @@ def _prompt_and_record(
     if answer in {"y", "yes"}:
         _record_approval(event, command)
         return True
-
     return False
 
 
@@ -1001,31 +699,19 @@ def _record_approval(event: str, command: str) -> None:
     }
     with _locked_update_approvals() as data:
         data["approvals"] = [
-            e for e in data.get("approvals", [])
-            if not (
-                isinstance(e, dict)
-                and e.get("event") == event
-                and e.get("command") == command
-            )
+            e for e in data.get("approvals", []) if not _entry_matches(e, event, command)
         ] + [entry]
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 def revoke(command: str) -> int:
-    """Remove every allowlist entry matching ``command``.
+    """Remove every allowlist entry matching ``command``; returns the count removed.
 
-    Returns the number of entries removed.  Does not unregister any
-    callbacks that are already live on the plugin manager in the current
-    process — restart the CLI / gateway to drop them.
+    Live callbacks in the current process stay registered until restart.
     """
     with _locked_update_approvals() as data:
         before = len(data.get("approvals", []))
         data["approvals"] = [
-            e for e in data.get("approvals", [])
-            if not (isinstance(e, dict) and e.get("command") == command)
+            e for e in data.get("approvals", []) if not _entry_matches(e, None, command)
         ]
         after = len(data["approvals"])
     return before - after
@@ -1040,96 +726,56 @@ _SCRIPT_EXTENSIONS: Tuple[str, ...] = (
 
 
 def _command_script_path(command: str) -> str:
-    """Return the script path from ``command`` for doctor / drift checks.
-
-    Prefers a token ending in a known script extension, then a token
-    containing ``/`` or leading ``~``, then the first token.  Handles
-    ``python3 /path/hook.py``, ``/usr/bin/env bash hook.sh``, and the
-    common bare-path form.
-    """
+    """Script path from ``command``: first token with a script extension, then a
+    path-like token, then the first token (``python3 /p/hook.py``, ``/usr/bin/env bash x.sh``)."""
     try:
-        from hermes_cli._subprocess_compat import split_command_line
-
-        parts = split_command_line(command)
+        parts = _split(command)
     except ValueError:
         return command
     if not parts:
         return command
-    for part in parts:
-        if part.lower().endswith(_SCRIPT_EXTENSIONS):
-            return part
-    for part in parts:
-        if "/" in part or part.startswith("~"):
-            return part
-    return parts[0]
+    return (
+        next((p for p in parts if p.lower().endswith(_SCRIPT_EXTENSIONS)), None)
+        or next((p for p in parts if "/" in p or p.startswith("~")), None)
+        or parts[0]
+    )
 
 
-# ---------------------------------------------------------------------------
-# Helpers for accept-hooks resolution
-# ---------------------------------------------------------------------------
-
-def _resolve_effective_accept(
-    cfg: Dict[str, Any], accept_hooks_arg: bool,
-) -> bool:
-    """Combine all three opt-in channels into a single boolean.
-
-    Precedence (any truthy source flips us on):
-      1. ``--accept-hooks`` flag (CLI) / explicit argument
-      2. ``HERMES_ACCEPT_HOOKS`` env var
-      3. ``hooks_auto_accept: true`` in ``cli-config.yaml``
-    """
-    if accept_hooks_arg:
-        return True
-    env = os.environ.get("HERMES_ACCEPT_HOOKS", "").strip().lower()
-    if env in {"1", "true", "yes", "on"}:
+def _resolve_effective_accept(cfg: Dict[str, Any], accept_hooks_arg: bool) -> bool:
+    """Any truthy opt-in channel wins: explicit arg, HERMES_ACCEPT_HOOKS, hooks_auto_accept."""
+    if accept_hooks_arg or os.environ.get("HERMES_ACCEPT_HOOKS", "").strip().lower() in _TRUTHY:
         return True
     cfg_val = cfg.get("hooks_auto_accept", False)
     if isinstance(cfg_val, bool):
         return cfg_val
     if isinstance(cfg_val, str):
-        return cfg_val.strip().lower() in {"1", "true", "yes", "on"}
+        return cfg_val.strip().lower() in _TRUTHY
     return False
 
 
-# ---------------------------------------------------------------------------
-# Introspection (used by `hermes hooks` CLI)
-# ---------------------------------------------------------------------------
+# --- Introspection (used by `hermes hooks` CLI) ---
 
 def allowlist_entry_for(event: str, command: str) -> Optional[Dict[str, Any]]:
     """Return the allowlist record for this pair, if any."""
-    for e in load_allowlist().get("approvals", []):
-        if (
-            isinstance(e, dict)
-            and e.get("event") == event
-            and e.get("command") == command
-        ):
-            return e
-    return None
+    return next((e for e in load_allowlist().get("approvals", []) if _entry_matches(e, event, command)), None)
 
 
 def script_mtime_iso(command: str) -> Optional[str]:
-    """ISO-8601 mtime of the resolved script path, or ``None`` if the
-    script is missing."""
+    """ISO-8601 mtime of the resolved script path, or ``None`` if missing."""
     path = _command_script_path(command)
     if not path:
         return None
     try:
-        expanded = os.path.expanduser(path)
         return datetime.fromtimestamp(
-            os.path.getmtime(expanded), tz=timezone.utc,
+            os.path.getmtime(os.path.expanduser(path)), tz=timezone.utc,
         ).isoformat().replace("+00:00", "Z")
     except OSError:
         return None
 
 
 def script_is_executable(command: str) -> bool:
-    """Return ``True`` iff ``command`` is runnable as configured.
-
-    For a bare invocation (``/path/hook.sh``) the script itself must be
-    executable.  For interpreter-prefixed commands (``python3
-    /path/hook.py``, ``/usr/bin/env bash hook.sh``) the script just has
-    to be readable — the interpreter doesn't care about the ``X_OK``
-    bit.  Mirrors what ``_spawn`` would actually do at runtime."""
+    """True iff ``command`` is runnable as configured: a bare script needs X_OK,
+    an interpreter-prefixed one only R_OK (mirrors what ``_spawn`` does)."""
     path = _command_script_path(command)
     if not path:
         return False
@@ -1137,33 +783,19 @@ def script_is_executable(command: str) -> bool:
     if not os.path.isfile(expanded):
         return False
     try:
-        from hermes_cli._subprocess_compat import split_command_line
-
-        argv = split_command_line(command)
+        argv = _split(command)
     except ValueError:
         return False
     is_bare_invocation = bool(argv) and argv[0] == path
-    required = os.X_OK if is_bare_invocation else os.R_OK
-    return os.access(expanded, required)
+    return os.access(expanded, os.X_OK if is_bare_invocation else os.R_OK)
 
 
-def run_once(
-    spec: ShellHookSpec, kwargs: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Fire a single shell-hook invocation with a synthetic payload.
-    Used by ``hermes hooks test`` and ``hermes hooks doctor``.
+def run_once(spec: ShellHookSpec, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Fire one hook with a synthetic payload (``hermes hooks test`` / doctor).
 
-    ``kwargs`` is the same dict that :func:`hermes_cli.plugins.invoke_hook`
-    would pass at runtime.  It is routed through :func:`_serialize_payload`
-    so the synthetic stdin exactly matches what a real hook firing would
-    produce — otherwise scripts tested via ``hermes hooks test`` could
-    diverge silently from production behaviour.
-
-    Returns the :func:`_spawn` diagnostic dict plus a ``parsed`` field
-    holding the canonical Hermes-wire-shape response — including exit-code-2
-    blocking and ``fail_closed`` semantics, so what ``hermes hooks test``
-    prints is exactly what the dispatcher would receive."""
-    stdin_json = _serialize_payload(spec.event, kwargs)
-    result = _spawn(spec, stdin_json)
+    Routes through ``_serialize_payload`` and ``_evaluate_result`` so the
+    result (``_spawn`` dict + ``parsed``) matches production exactly.
+    """
+    result = _spawn(spec, _serialize_payload(spec.event, kwargs))
     result["parsed"] = _evaluate_result(spec, result)
     return result
