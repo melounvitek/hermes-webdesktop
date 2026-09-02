@@ -628,6 +628,67 @@ def _text_to_speech_single(
         return _tool_failure("TTS generation failed", provider, e)
 
 
+class _ChunkFailed(Exception):
+    """One chunk's synthesis returned an error envelope; message is the final tool error text."""
+
+
+def _synthesize_chunks(
+    chunks: List[str],
+    base_path: Path,
+    generated_artifacts: set,
+    *,
+    provider: str,
+    tts_config: Dict[str, Any],
+    command_provider_config: Optional[Dict[str, Any]],
+    want_opus: bool,
+    instructions: Optional[str],
+) -> tuple:
+    """Synthesize every chunk into ``<base>.chunkNNN<ext>`` (or ``base`` alone) sequentially.
+
+    Every path touched is added to *generated_artifacts* so the caller can
+    sweep non-final files. Returns ``(encoded_paths, chunk_results)``; raises
+    :class:`_ChunkFailed` when a chunk reports failure and ``RuntimeError``
+    when it returns garbage or no audio.
+    """
+    encoded_paths: List[str] = []
+    chunk_results: List[Dict[str, Any]] = []
+    for index, chunk in enumerate(chunks, start=1):
+        if len(chunks) == 1:
+            chunk_path = base_path
+        else:
+            chunk_path = base_path.with_name(
+                f"{base_path.stem}.chunk{index:03d}{base_path.suffix}"
+            )
+        generated_artifacts.add(str(chunk_path))
+        raw_result = _text_to_speech_single(
+            chunk,
+            str(chunk_path),
+            provider=provider,
+            tts_config=tts_config,
+            command_provider_config=command_provider_config,
+            want_opus=want_opus,
+            instructions=instructions,
+        )
+        try:
+            chunk_result = json.loads(raw_result)
+        except (json.JSONDecodeError, TypeError):
+            raise RuntimeError(
+                f"TTS chunk {index} returned invalid JSON: {str(raw_result)[:200]}"
+            )
+        if not chunk_result.get("success"):
+            error_msg = chunk_result.get("error", "unknown error")
+            raise _ChunkFailed(f"TTS chunk {index} failed ({provider}): {error_msg}")
+        actual_path = str(chunk_result.get("file_path") or chunk_path)
+        if not os.path.isfile(actual_path) or os.path.getsize(actual_path) <= 0:
+            raise RuntimeError(
+                f"TTS chunk {index} produced no final audio: {actual_path}"
+            )
+        generated_artifacts.add(actual_path)
+        encoded_paths.append(actual_path)
+        chunk_results.append(chunk_result)
+    return encoded_paths, chunk_results
+
+
 def text_to_speech_tool(
     text: str,
     output_path: Optional[str] = None,
@@ -692,46 +753,15 @@ def text_to_speech_tool(
 
     generated_artifacts: set[str] = set()
     final_paths: List[str] = []
-    chunk_results: List[Dict[str, Any]] = []
     try:
-        encoded_paths: List[str] = []
-        for index, chunk in enumerate(chunks, start=1):
-            if len(chunks) == 1:
-                chunk_path = base_path
-            else:
-                chunk_path = base_path.with_name(
-                    f"{base_path.stem}.chunk{index:03d}{base_path.suffix}"
-                )
-            generated_artifacts.add(str(chunk_path))
-            raw_result = _text_to_speech_single(
-                chunk,
-                str(chunk_path),
-                provider=provider,
-                tts_config=tts_config,
-                command_provider_config=command_provider_config,
-                want_opus=want_opus,
-                instructions=instructions,
-            )
-            try:
-                chunk_result = json.loads(raw_result)
-            except (json.JSONDecodeError, TypeError):
-                raise RuntimeError(
-                    f"TTS chunk {index} returned invalid JSON: {str(raw_result)[:200]}"
-                )
-            if not chunk_result.get("success"):
-                error_msg = chunk_result.get("error", "unknown error")
-                return tool_error(
-                    f"TTS chunk {index} failed ({provider}): {error_msg}",
-                    success=False,
-                )
-            actual_path = str(chunk_result.get("file_path") or chunk_path)
-            if not os.path.isfile(actual_path) or os.path.getsize(actual_path) <= 0:
-                raise RuntimeError(
-                    f"TTS chunk {index} produced no final audio: {actual_path}"
-                )
-            generated_artifacts.add(actual_path)
-            encoded_paths.append(actual_path)
-            chunk_results.append(chunk_result)
+        encoded_paths, chunk_results = _synthesize_chunks(
+            chunks, base_path, generated_artifacts,
+            provider=provider,
+            tts_config=tts_config,
+            command_provider_config=command_provider_config,
+            want_opus=want_opus,
+            instructions=instructions,
+        )
 
         voice_compatible = bool(chunk_results) and all(
             bool(result.get("voice_compatible")) for result in chunk_results
@@ -771,6 +801,8 @@ def text_to_speech_tool(
                 "target_file_bytes": delivery_profile.target_file_bytes,
             },
         }, ensure_ascii=False)
+    except _ChunkFailed as exc:
+        return tool_error(str(exc), success=False)
     except ValueError as exc:
         return _tool_failure("TTS delivery error", provider, exc)
     except Exception as exc:
