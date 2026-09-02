@@ -40,7 +40,7 @@ from hermes_constants import (
     set_hermes_home_override,
 )
 from registration_lifecycle import replacement_coordinator
-from utils import env_var_enabled, fast_safe_load
+from utils import env_var_enabled
 from hermes_cli.config import cfg_get, load_config_readonly
 from hermes_cli.middleware import OBSERVER_SCHEMA_VERSION, VALID_MIDDLEWARE
 from hermes_cli.plugin_capabilities import (  # noqa: F401 — re-exported
@@ -48,13 +48,57 @@ from hermes_cli.plugin_capabilities import (  # noqa: F401 — re-exported
     VALID_CAPABILITY_IDS,
     plugin_capability_granted,
 )
-from hermes_cli.plugin_capabilities import (
-    parse_declared_capabilities as _parse_declared_capabilities,
-)
 from hermes_cli.relay_plugin_cutover import (
     LEGACY_RELAY_PLUGIN_KEYS,
     RELAY_PLUGINS_CONFIG_ENV,
     legacy_relay_plugin_keys,
+)
+from hermes_cli.plugins_manifest import (  # noqa: F401 — re-exported
+    parse_manifest_file,
+    portable_plugin_manifest,
+    _CONFIG_SCHEMA_TYPES,
+    _KNOWN_MANIFEST_FIELDS,
+    _VALID_PLUGIN_KINDS,
+    SUPPORTED_MANIFEST_VERSION,
+    PluginManifest,
+    _detect_kind_from_source,
+    _display_author,
+    _manifest_field_of_type,
+    _parse_manifest_v2_fields,
+    _portable_skill_namespace,
+    _read_source_from_origin,
+    _resolve_module_source,
+    resolve_module_origin,
+    resolve_plugin_load_order,
+    validate_config_schema,
+    yaml,
+)
+from hermes_cli.plugins_discovery import (  # noqa: F401 — re-exported
+    collect_directory_manifests,
+    gate_manifest,
+    scan_directory,
+    ENTRY_POINT_CAPABILITIES_GROUP,
+    ENTRY_POINTS_GROUP,
+    _classify_entrypoint_value_kind,
+    _get_disabled_plugins,
+    _get_enabled_plugins,
+    _select_entry_point_group,
+    discover_entrypoint_manifests,
+)
+from hermes_cli.plugins_state import (  # noqa: F401 — re-exported
+    _PLUGIN_SETTING_RESERVED_ROOTS,
+    _PLUGIN_SETTING_SEGMENT_RE,
+    _PLUGIN_STATE_KEY_RE,
+    _PLUGIN_STATE_LOCKS,
+    _PLUGIN_STATE_LOCKS_GUARD,
+    _PLUGIN_STATE_QUOTA_BYTES,
+    PluginState,
+    _locked_plugin_state,
+    _nested_plugin_mapping,
+    _nested_plugin_value,
+    _plugin_data_namespace,
+    _plugin_relative_segments,
+    _state_thread_lock,
 )
 
 
@@ -68,12 +112,6 @@ def get_bundled_plugins_dir() -> Path:
     if env_override:
         return Path(env_override)
     return Path(__file__).resolve().parent.parent / "plugins"
-
-try:
-    import yaml
-except ImportError:  # pragma: no cover – yaml is optional at import time
-    yaml = None  # type: ignore[assignment]
-
 
 class PluginToolOverrideError(PermissionError):
     """Plugin tried to override a built-in tool without ``plugins.entries.<id>.allow_tool_override``."""
@@ -237,80 +275,6 @@ _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE = (
     "pre_tool_call plugin callback timed out or is still running"
 )
 
-ENTRY_POINTS_GROUP = "hermes_agent.plugins"
-ENTRY_POINT_CAPABILITIES_GROUP = "hermes_agent.plugin_capabilities"
-
-
-def _select_entry_point_group(entry_points: Any, group: str) -> list:
-    """Return one metadata entry-point group across supported Python APIs."""
-    if hasattr(entry_points, "select"):
-        return list(entry_points.select(group=group))
-    if isinstance(entry_points, dict):
-        return list(entry_points.get(group, []))
-    return [ep for ep in entry_points if ep.group == group]
-
-
-def discover_entrypoint_manifests() -> List["PluginManifest"]:
-    """Return metadata-only manifests for installed entry-point plugins.
-
-    Kind comes from an import-free source scan (memory/model providers route to their own
-    discovery). Capabilities come from the companion ``hermes_agent.plugin_capabilities`` group
-    (``<plugin-id>.<capability-id>`` entries pointing at the same object), so consent works without
-    importing plugin code. Failures are isolated per entry point.
-    """
-    manifests: List[PluginManifest] = []
-    try:
-        eps = importlib.metadata.entry_points()
-        group_eps = _select_entry_point_group(eps, ENTRY_POINTS_GROUP)
-        capability_eps = _select_entry_point_group(eps, ENTRY_POINT_CAPABILITIES_GROUP)
-    except Exception as exc:
-        logger.debug("Entry-point scan failed: %s", exc)
-        return manifests
-
-    for ep in group_eps:
-        try:
-            capabilities = []
-            for capability in VALID_CAPABILITY_IDS:
-                declaration_name = f"{ep.name}.{capability}"
-                if any(
-                    declaration.name == declaration_name
-                    and declaration.value == ep.value
-                    for declaration in capability_eps
-                ):
-                    capabilities.append(capability)
-            dist = getattr(ep, "dist", None)
-            metadata = getattr(dist, "metadata", None)
-            manifest = PluginManifest(
-                name=ep.name,
-                version=str(getattr(dist, "version", "") or ""),
-                description=(
-                    str(metadata.get("Summary", "") or "")
-                    if metadata is not None
-                    else ""
-                ),
-                source="entrypoint",
-                path=ep.value,
-                key=ep.name,
-                capabilities=_parse_declared_capabilities(
-                    capabilities, ep.name
-                ),
-            )
-            manifest.kind = _classify_entrypoint_value_kind(ep.value)
-            manifests.append(manifest)
-        except Exception as exc:
-            logger.debug("Entry-point manifest for %r skipped: %s", getattr(ep, "name", "?"), exc)
-    return manifests
-
-
-def _classify_entrypoint_value_kind(value: str) -> str:
-    """Classify an entry-point target by import-free source scan (unresolvable -> standalone)."""
-    try:
-        module_name = str(value).split(":", 1)[0].strip()
-        if not module_name:
-            return "standalone"
-        return _detect_kind_from_source(_resolve_module_source(module_name)) or "standalone"
-    except Exception:
-        return "standalone"
 
 # System-prompt sections are tightly bounded: they become high-trust prompt bytes charged every turn.
 SYSTEM_PROMPT_SECTION_POSITIONS = frozenset({"after_memory"})
@@ -388,420 +352,9 @@ def _plugin_home_scope(home: Path):
 _env_enabled = env_var_enabled  # imported by plugins/memory
 
 
-def _get_disabled_plugins() -> set:
-    """Read ``plugins.disabled`` — a deny-list that wins over ``plugins.enabled``."""
-    try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        disabled = cfg_get(config, "plugins", "disabled", default=[])
-        return set(disabled) if isinstance(disabled, list) else set()
-    except Exception:
-        return set()
-
-
-def _get_enabled_plugins() -> Optional[set]:
-    """Read the ``plugins.enabled`` allow-list (plugins are opt-in).
-
-    ``None`` = key missing/malformed ("nothing enabled yet"; the first ``migrate_config`` run
-    grandfathers installed user plugins); ``set()`` = explicitly empty; else the allow-list.
-    """
-    try:
-        from hermes_cli.config import load_config
-        plugins_cfg = load_config().get("plugins")
-        enabled = plugins_cfg.get("enabled") if isinstance(plugins_cfg, dict) else None
-        return set(enabled) if isinstance(enabled, list) else None
-    except Exception:
-        return None
-
-
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
-
-_VALID_PLUGIN_KINDS: Set[str] = {"standalone", "backend", "exclusive", "platform", "model-provider"}
-
-
-def _portable_skill_namespace(key: str) -> str:
-    """Return a readable, collision-resistant namespace for a portable plugin."""
-
-    slug = "".join(
-        ch if ch.isascii() and (ch.isalnum() or ch in "_-") else "-"
-        for ch in key.lower()
-    )
-    slug = slug.strip("-_") or "plugin"
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
-    return f"agent-plugin-{slug}-{digest}"
-
-
-def _display_author(value: object) -> str:
-    """Normalize a manifest author value for the string PluginManifest field."""
-    if isinstance(value, Mapping):
-        return ", ".join(
-            str(value[field])
-            for field in ("name", "email", "url")
-            if value.get(field)
-        )
-    return "" if value is None else str(value)
-
-
-# Manifest v2 parsing. Unknown plugin.yaml fields are forward-compat surface: warn (debug for v1
-# files, warning for v2+) and continue loading.
-_KNOWN_MANIFEST_FIELDS: Set[str] = {
-    # v1
-    "name", "version", "description", "author", "requires_env",
-    "provides_tools", "provides_hooks", "kind", "hooks", "label",
-    "optional_env", "platforms", "external_dependencies", "pip_dependencies",
-    "provides_browser_providers", "provides_web_providers",
-    # v2
-    "manifest_version", "api_version", "requires_plugins",
-    "python_dependencies", "config_schema", "license", "homepage", "tags",
-    # owned by sibling sub-issues but reserved so their manifests don't warn
-    "capabilities", "emits", "listens", "hermes", "depends",
-}
-
-# Highest manifest schema version this Hermes understands.
-SUPPORTED_MANIFEST_VERSION = 2
-
-_CONFIG_SCHEMA_TYPES: Dict[str, tuple] = {
-    "str": (str,),
-    "string": (str,),
-    "int": (int,),
-    "integer": (int,),
-    "float": (int, float),
-    "number": (int, float),
-    "bool": (bool,),
-    "boolean": (bool,),
-    "list": (list,),
-    "array": (list,),
-    "dict": (dict,),
-    "object": (dict,),
-}
-
-
-def _manifest_field_of_type(data: Mapping, key: str, field_name: str, typ, what: str):
-    """Return ``data[field_name]`` when absent or of ``typ``; warn and return None otherwise."""
-    raw = data.get(field_name)
-    if raw is not None and not isinstance(raw, typ):
-        logger.warning("Plugin %s: %s must be %s; ignoring", key, field_name, what)
-        return None
-    return raw
-
-
-def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
-    """Validate/normalize manifest v2 fields into PluginManifest kwargs (warnings, never failures)."""
-    out: Dict[str, Any] = {}
-
-    # manifest_version — absent means v1 (supported forever).
-    raw_mv = data.get("manifest_version", 1)
-    try:
-        mv = int(raw_mv)
-    except (TypeError, ValueError):
-        logger.warning(
-            "Plugin %s: manifest_version %r is not an integer; treating as 1",
-            key, raw_mv,
-        )
-        mv = 1
-    if mv > SUPPORTED_MANIFEST_VERSION:
-        logger.warning(
-            "Plugin %s: manifest_version %d is newer than this Hermes "
-            "supports (%d); loading anyway and ignoring unknown fields",
-            key, mv, SUPPORTED_MANIFEST_VERSION,
-        )
-    out["manifest_version"] = mv
-
-    # api_version — plugin API generation (independent of manifest_version).
-    raw_api = data.get("api_version")
-    out["api_version"] = None
-    if raw_api is not None:
-        try:
-            out["api_version"] = int(raw_api)
-        except (TypeError, ValueError):
-            logger.warning("Plugin %s: api_version %r is not an integer; ignoring", key, raw_api)
-
-    # requires_plugins — list of {id, version_range?} (str shorthand ok).
-    deps: List[Dict[str, Any]] = []
-    for item in _manifest_field_of_type(data, key, "requires_plugins", list, "a list") or []:
-        if isinstance(item, str):
-            deps.append({"id": item, "version_range": None})
-        elif isinstance(item, Mapping) and isinstance(item.get("id"), str) and item["id"]:
-            vr = item.get("version_range")
-            deps.append({"id": item["id"], "version_range": str(vr) if vr is not None else None})
-        else:
-            logger.warning(
-                "Plugin %s: requires_plugins entry %r must be a plugin id "
-                "string or a {id, version_range} mapping; skipping", key, item,
-            )
-    out["requires_plugins"] = deps
-
-    # python_dependencies — validated and surfaced ONLY; never auto-installed.
-    pydeps: List[str] = []
-    raw_pydeps = _manifest_field_of_type(
-        data, key, "python_dependencies", list, "a list of requirement strings"
-    )
-    for item in raw_pydeps or []:
-        if isinstance(item, str) and item.strip():
-            pydeps.append(item.strip())
-        else:
-            logger.warning(
-                "Plugin %s: python_dependencies entry %r must be a non-empty "
-                "requirement string; skipping", key, item,
-            )
-    out["python_dependencies"] = pydeps
-
-    # config_schema — mapping of key -> {type?, default?, description?, required?}.
-    schema: Dict[str, Any] = {}
-    raw_schema = _manifest_field_of_type(data, key, "config_schema", Mapping, "a mapping")
-    for skey, spec in (raw_schema or {}).items():
-        if not isinstance(spec, Mapping):
-            logger.warning(
-                "Plugin %s: config_schema entry %r must be a mapping "
-                "(e.g. {type: str}); skipping", key, skey,
-            )
-            continue
-        stype = spec.get("type")
-        if stype is not None and str(stype).lower() not in _CONFIG_SCHEMA_TYPES:
-            logger.warning(
-                "Plugin %s: config_schema key %r declares unknown type %r "
-                "(known: %s); type check will be skipped for it",
-                key, skey, stype, ", ".join(sorted(_CONFIG_SCHEMA_TYPES)),
-            )
-        schema[str(skey)] = dict(spec)
-    out["config_schema"] = schema
-
-    # Standard metadata.
-    out["license"] = str(data.get("license") or "")
-    out["homepage"] = str(data.get("homepage") or "")
-    raw_tags = _manifest_field_of_type(data, key, "tags", list, "a list")
-    out["tags"] = [str(t) for t in (raw_tags or [])]
-
-    # Forward compat: unknown fields warn (never fail); v1 manifests only at debug.
-    unknown = sorted(set(data.keys()) - _KNOWN_MANIFEST_FIELDS)
-    if unknown:
-        log = logger.warning if mv >= 2 else logger.debug
-        log(
-            "Plugin %s: unknown manifest field(s) ignored: %s "
-            "(newer manifest schema or typo; plugin still loads)",
-            key, ", ".join(unknown),
-        )
-
-    return out
-
-
-def validate_config_schema(plugin_id: str, schema: Mapping, settings: Mapping) -> List[str]:
-    """Return actionable warning strings for settings vs config_schema mismatches (never raises)."""
-    warnings: List[str] = []
-    if not isinstance(schema, Mapping) or not isinstance(settings, Mapping):
-        return warnings
-    for skey, spec in schema.items():
-        if not isinstance(spec, Mapping):
-            continue
-        present = skey in settings
-        if not present:
-            if spec.get("required") and "default" not in spec:
-                warnings.append(
-                    f"plugins.entries.{plugin_id}.settings.{skey} is required "
-                    "by the plugin's config_schema but is not set"
-                )
-            continue
-        stype = spec.get("type")
-        expected = _CONFIG_SCHEMA_TYPES.get(str(stype).lower()) if stype else None
-        if expected is not None:
-            value = settings[skey]
-            # bool is an int subclass — don't let True satisfy int/float.
-            ok = isinstance(value, expected) and not (
-                isinstance(value, bool) and bool not in expected
-            )
-            if not ok:
-                warnings.append(
-                    f"plugins.entries.{plugin_id}.settings.{skey} should be "
-                    f"{stype} (got {type(value).__name__})"
-                )
-    return warnings
-
-
-def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List[str]:
-    """Return plugin keys in dependency order: B before A when A requires B; alphabetical ties.
-
-    A cycle warns and falls back to alphabetical order for all; a missing dependency warns once
-    but never removes the dependent plugin (loads never hard-fail on advisory deps).
-    """
-    import graphlib
-
-    keys = sorted(manifests.keys())
-    by_name: Dict[str, str] = {}
-    for k in keys:
-        name = manifests[k].name
-        if name and name not in by_name:
-            by_name[name] = k
-
-    def _resolve_dep(dep_id: str) -> Optional[str]:
-        if dep_id in manifests:
-            return dep_id
-        return by_name.get(dep_id)
-
-    edges: Dict[str, Set[str]] = {k: set() for k in keys}
-    for k in keys:
-        for dep in manifests[k].requires_plugins:
-            dep_id = dep.get("id") if isinstance(dep, Mapping) else None
-            if not dep_id:
-                continue
-            resolved = _resolve_dep(dep_id)
-            if resolved is None:
-                logger.warning(
-                    "Plugin %s requires plugin '%s' which is not enabled/"
-                    "installed; loading anyway (probe availability at runtime "
-                    "via ctx.has_plugin). Run `hermes plugins enable %s` if "
-                    "it is installed.",
-                    k, dep_id, dep_id,
-                )
-                continue
-            if resolved == k:
-                logger.warning("Plugin %s declares a dependency on itself; ignoring", k)
-                continue
-            edges[k].add(resolved)
-
-    sorter = graphlib.TopologicalSorter(edges)
-    try:
-        sorter.prepare()
-    except graphlib.CycleError as exc:
-        cycle = exc.args[1] if len(exc.args) > 1 else []
-        logger.warning(
-            "Plugin dependency cycle detected (%s); falling back to "
-            "alphabetical load order for all plugins",
-            " -> ".join(str(c) for c in cycle),
-        )
-        return keys
-
-    ordered: List[str] = []
-    while sorter.is_active():
-        ready = sorted(sorter.get_ready())
-        ordered.extend(ready)
-        sorter.done(*ready)
-    return ordered
-
-
-def _detect_kind_from_source(source_text: str) -> Optional[str]:
-    """Return the kind implied by source markers (mirrors plugins/memory ``_is_memory_provider_dir``).
-
-    Memory-provider markers -> ``exclusive``; ``register_provider`` + ``ProviderProfile`` ->
-    ``model-provider``; else ``None``. Keeps both kinds out of the general manager's eager import.
-    """
-    if "register_memory_provider" in source_text or "MemoryProvider" in source_text:
-        return "exclusive"
-    if "register_provider" in source_text and "ProviderProfile" in source_text:
-        return "model-provider"
-    return None
-
-
-def _read_source_from_origin(origin: Optional[str], limit: int = 8192) -> str:
-    """First ``limit`` chars of a module's source (``.pyc`` mapped back to ``.py``); "" on failure."""
-    if not origin:
-        return ""
-    if origin.endswith((".pyc", ".pyo")):
-        try:
-            origin = importlib.util.source_from_cache(origin)
-        except Exception:
-            return ""
-    if not origin.endswith(".py"):
-        return ""
-    try:
-        return Path(origin).read_text(encoding="utf-8", errors="replace")[:limit]
-    except Exception:
-        return ""
-
-
-def resolve_module_origin(module_name: str) -> Optional[str]:
-    """Return a module's source path WITHOUT importing it, or ``None``.
-
-    ``find_spec`` on a dotted name imports the parent package, so only the top-level name uses it;
-    remaining segments are walked through ``submodule_search_locations`` by hand. Namespace/zipped/
-    extension modules return ``None``. Shared with ``plugins/memory/__init__.py``.
-    """
-    parts = [p for p in module_name.split(".") if p]
-    if not parts:
-        return None
-    try:
-        spec = importlib.util.find_spec(parts[0])
-        if spec is None or not spec.origin:
-            return None
-        if len(parts) == 1:
-            return spec.origin
-
-        search_paths = spec.submodule_search_locations
-        if not search_paths:
-            return None
-        for i, part in enumerate(parts[1:], start=2):
-            found_origin = None
-            next_paths = None
-            for base in search_paths:
-                base = Path(base)
-                pkg_init = base / part / "__init__.py"
-                if pkg_init.is_file():
-                    found_origin = str(pkg_init)
-                    next_paths = [base / part]
-                    break
-                mod_file = base / (part + ".py")
-                if mod_file.is_file():
-                    found_origin = str(mod_file)
-                    break
-            if found_origin is None:
-                return None
-            if i == len(parts) or next_paths is None:
-                return found_origin
-            search_paths = next_paths
-        return None
-    except Exception:
-        return None
-
-
-def _resolve_module_source(module_name: str, limit: int = 8192) -> str:
-    """First ``limit`` chars of a module's source without importing it ("" when unresolvable)."""
-    return _read_source_from_origin(resolve_module_origin(module_name), limit)
-
-
-@dataclass
-class PluginManifest:
-    """Parsed representation of a plugin.yaml manifest."""
-
-    name: str
-    version: str = ""
-    description: str = ""
-    author: str = ""
-    requires_env: List[Union[str, Dict[str, Any]]] = field(default_factory=list)
-    provides_tools: List[str] = field(default_factory=list)
-    provides_hooks: List[str] = field(default_factory=list)
-    source: str = ""        # "bundled", "user", "project", or "entrypoint"
-    path: Optional[str] = None
-    # ``standalone`` (default; opt-in via plugins.enabled) | ``backend`` (pluggable backend for a
-    # core tool; bundled auto-load, user-installed gated) | ``exclusive`` (one active provider,
-    # selected via <category>.provider; own discovery, general scanner skips) | ``platform``
-    # (gateway adapter; bundled auto-load, user-installed gated as untrusted code).
-    kind: str = "standalone"
-    # Path-derived registry key used by plugins.enabled/disabled and `hermes plugins list`:
-    # ``disk-cleanup`` for a flat plugin, ``image_gen/openai`` for a category plugin. Empty -> name.
-    key: str = ""
-    portable: bool = False
-    skill_namespace: str = ""
-    # Declared capability ids, normalized to KNOWN ids. Declaration is consent metadata, NOT a
-    # grant: live only via plugins.entries.<id>.granted_capabilities or the legacy allow_* key.
-    capabilities: List[str] = field(default_factory=list)
-    # Manifest v2 fields — all optional and additive. manifest_version versions the FILE FORMAT
-    # (v1 supported forever); api_version is the runtime plugin API generation (None = current).
-    manifest_version: int = 1
-    api_version: Optional[int] = None
-    # Advisory deps [{"id", "version_range"}]: missing ones warn but load; they order the load.
-    requires_plugins: List[Dict[str, Any]] = field(default_factory=list)
-    # Declared pip deps — VALIDATED AND SURFACED ONLY, never auto-installed.
-    python_dependencies: List[str] = field(default_factory=list)
-    # Schema for plugins.entries.<id>.settings; mismatches warn, never fail.
-    config_schema: Dict[str, Any] = field(default_factory=dict)
-    license: str = ""
-    homepage: str = ""
-    tags: List[str] = field(default_factory=list)
-    # Event-bus declarations, advisory (discoverability only): ``emits`` bare names published under
-    # ``<key>:``; ``listens`` fully-qualified ``<plugin>:<event>`` names.
-    emits: List[str] = field(default_factory=list)
-    listens: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -898,173 +451,6 @@ class PluginRegistration:
 # ---------------------------------------------------------------------------
 # PluginContext  – handed to each plugin's ``register()`` function
 # ---------------------------------------------------------------------------
-
-_PLUGIN_SETTING_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-_PLUGIN_SETTING_RESERVED_ROOTS = frozenset({"model", "plugins", "security", "settings"})
-_PLUGIN_STATE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_PLUGIN_STATE_QUOTA_BYTES = 10 * 1024 * 1024
-_PLUGIN_STATE_LOCKS: Dict[str, threading.RLock] = {}
-_PLUGIN_STATE_LOCKS_GUARD = threading.Lock()
-
-
-def _plugin_relative_segments(key: str) -> tuple[str, ...]:
-    """Validate/split a plugin-relative settings key; global paths, traversal, and core roots are
-    rejected before any config read."""
-    if not isinstance(key, str):
-        raise ValueError("Expected a plugin-relative config key string")
-    segments = tuple(key.split("."))
-    if (
-        not key
-        or "/" in key
-        or "\\" in key
-        or any(
-            not _PLUGIN_SETTING_SEGMENT_RE.fullmatch(segment) for segment in segments
-        )
-        or segments[0].lower() in _PLUGIN_SETTING_RESERVED_ROOTS
-    ):
-        raise ValueError(
-            "Expected a plugin-relative config key such as 'endpoint' or "
-            "'retry.policy'; global, cross-plugin, and traversal paths are forbidden"
-        )
-    return segments
-
-
-def _nested_plugin_value(root: object, segments: tuple[str, ...], default: Any) -> Any:
-    current = root
-    for segment in segments:
-        if not isinstance(current, Mapping) or segment not in current:
-            return default
-        current = current[segment]
-    return current
-
-
-def _nested_plugin_mapping(segments: tuple[str, ...], value: Any) -> dict[str, Any]:
-    nested: Any = value
-    for segment in reversed(segments):
-        nested = {segment: nested}
-    return nested
-
-
-def _plugin_data_namespace(plugin_id: str, skill_namespace: str) -> str:
-    """Return one Windows-safe directory component for plugin-owned data."""
-    candidate = skill_namespace or plugin_id
-    if (
-        skill_namespace
-        and candidate.startswith("agent-plugin-")
-        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,191}", candidate)
-    ):
-        # Portable Agent Plugins already receive this exact PLUGIN_DATA path.
-        return candidate
-    # Fixed prefix avoids Windows reserved device names; digest prevents fold collisions.
-    return _portable_skill_namespace(candidate)
-
-
-def _state_thread_lock(path: Path) -> threading.RLock:
-    key = str(path.resolve(strict=False))
-    with _PLUGIN_STATE_LOCKS_GUARD:
-        return _PLUGIN_STATE_LOCKS.setdefault(key, threading.RLock())
-
-
-@contextmanager
-def _locked_plugin_state(path: Path):
-    """Serialize state read-modify-write across threads/processes (fcntl / msvcrt). The lock lives
-    in a sibling file because atomic replacement changes the target's inode."""
-    lock_path = path.with_name(f".{path.name}.lock")
-    thread_lock = _state_thread_lock(lock_path)
-    with thread_lock:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock_path, "a+b") as handle:
-            if os.name == "nt":  # pragma: no cover - exercised on Windows CI
-                import msvcrt
-
-                if handle.seek(0, os.SEEK_END) == 0:
-                    handle.write(b"\0")
-                    handle.flush()
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                if os.name == "nt":  # pragma: no cover - exercised on Windows CI
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-class PluginState:
-    """Atomic, quota-bounded JSON key/value state owned by one plugin."""
-
-    def __init__(self, plugin_id: str, skill_namespace: str = "") -> None:
-        self._data_namespace = _plugin_data_namespace(plugin_id, skill_namespace)
-
-    @property
-    def data_dir(self) -> Path:
-        """Profile-scoped directory matching portable plugins' PLUGIN_DATA."""
-        return get_hermes_home() / "plugin-data" / self._data_namespace
-
-    @property
-    def path(self) -> Path:
-        return self.data_dir / "state.json"
-
-    @property
-    def quota_bytes(self) -> int:
-        return _PLUGIN_STATE_QUOTA_BYTES
-
-    @staticmethod
-    def _validate_key(key: str) -> None:
-        if (
-            not isinstance(key, str)
-            or not _PLUGIN_STATE_KEY_RE.fullmatch(key)
-            or ".." in key
-        ):
-            raise ValueError(
-                "Plugin state keys must be 1-128 characters using letters, "
-                "numbers, '_', '-', '.', or ':' (without '..')"
-            )
-
-    def _read_unlocked(self) -> dict[str, Any]:
-        try:
-            with open(self.path, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except FileNotFoundError:
-            return {}
-        except (OSError, ValueError) as exc:
-            raise RuntimeError(f"Cannot parse plugin state {self.path}: {exc}") from exc
-        if not isinstance(data, dict):
-            raise RuntimeError(f"Cannot parse plugin state {self.path}: root must be an object")
-        return data
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Read a JSON value, returning *default* when the key is absent."""
-        self._validate_key(key)
-        with _locked_plugin_state(self.path):
-            return self._read_unlocked().get(key, default)
-
-    def set(self, key: str, value: Any) -> None:
-        """Atomically set one JSON value without dropping concurrent updates."""
-        self._validate_key(key)
-        with _locked_plugin_state(self.path):
-            data = self._read_unlocked()
-            data[key] = value
-            try:
-                encoded = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Plugin state value for {key!r} is not JSON-serializable"
-                ) from exc
-            if len(encoded) > self.quota_bytes:
-                raise ValueError(
-                    f"Plugin state quota exceeded: {len(encoded)} bytes is greater "
-                    f"than the {self.quota_bytes}-byte per-plugin quota"
-                )
-            from utils import atomic_json_write
-
-            atomic_json_write(self.path, data, mode=0o600)
 
 
 class PluginContext:
@@ -3000,67 +2386,20 @@ class PluginManager:
         disabled: Set[str],
         enabled: Optional[Set[str]],
     ) -> bool:
-        """Route one winning manifest: load now, defer, or record as skipped. Returns True only for
-        plugins that go through the dependency-ordered load pass. Gate order matters: legacy relay
-        refusal, explicit disable, category-owned kinds, bundled auto-loads, then opt-in."""
-        lookup_key = manifest.key or manifest.name
-
-        # Relay lifecycle is core-owned; an old plugin copy would compete for its registries.
-        if lookup_key in LEGACY_RELAY_PLUGIN_KEYS or manifest.name in LEGACY_RELAY_PLUGIN_KEYS:
-            error = (
-                "removed — Relay lifecycle is owned by Hermes core; configure "
-                f"{RELAY_PLUGINS_CONFIG_ENV} instead"
-            )
-            self._record_placeholder(manifest, enabled=False, error=error)
-            logger.warning(
-                "Refusing to load removed Hermes Relay plugin '%s'; %s", lookup_key, error,
-            )
-            return False
-
-        # Explicit disable always wins (key or legacy bare name).
-        if lookup_key in disabled or manifest.name in disabled:
-            self._record_placeholder(manifest, enabled=False, error="disabled via config")
-            logger.debug("Skipping disabled plugin '%s'", lookup_key)
-            return False
-
-        # Exclusive plugins (memory providers) have their own activation path; record only.
-        if manifest.kind == "exclusive":
-            self._record_placeholder(
-                manifest, enabled=False,
-                error="exclusive plugin — activate via <category>.provider config",
-            )
-            logger.debug("Skipping '%s' (exclusive, handled by category discovery)", lookup_key)
-            return False
-
-        # Model providers load via providers/__init__.py; a second import here would create two
-        # ProviderProfile instances and break the bundled-vs-user "last writer wins" override.
-        if manifest.kind == "model-provider":
-            self._record_placeholder(manifest, enabled=True)
-            logger.debug(
-                "Skipping '%s' (model-provider, handled by providers/ discovery)", lookup_key,
-            )
-            return False
-
-        # Bundled backends auto-load; selection among them is ``<category>.provider`` config.
-        if manifest.source == "bundled" and manifest.kind == "backend":
+        """Route one winning manifest per :func:`gate_manifest`: load now, defer, or record as
+        skipped. Returns True only for plugins that go through the dependency-ordered load pass."""
+        verdict = gate_manifest(manifest, disabled, enabled)
+        if verdict.action == "load":
+            return True
+        if verdict.action == "load_now":
             self._load_plugin(manifest)
-            return False
-
-        # Bundled platforms register LAZILY: eagerly importing ~20 heavy SDKs added seconds to
-        # every `hermes` invocation. A deferred loader keeps every platform available on first use.
-        if manifest.source == "bundled" and manifest.kind == "platform":
+        elif verdict.action == "defer":
             self._register_deferred_platform(manifest)
-            return False
-
-        # Everything else is opt-in via plugins.enabled (path-derived key or legacy bare name).
-        if enabled is None or not (lookup_key in enabled or manifest.name in enabled):
-            self._record_placeholder(
-                manifest, enabled=False,
-                error=f"not enabled in config (run `hermes plugins enable {lookup_key}` to activate)",
-            )
-            logger.debug("Skipping '%s' (not in plugins.enabled)", lookup_key)
-            return False
-        return True
+        else:
+            self._record_placeholder(manifest, enabled=verdict.enabled, error=verdict.error)
+        if verdict.log:
+            logger.log(*verdict.log)
+        return False
 
     def register_approval_transport(
         self,
@@ -3102,43 +2441,8 @@ class PluginManager:
         return registered
 
     def _collect_directory_manifests(self) -> List[PluginManifest]:
-        """Read directory manifests in full-discovery order without loading or mutating anything, so
-        startup probes share the exact precedence/containment rules of ``_discover_and_load_inner``.
-        """
-        manifests: List[PluginManifest] = []
-
-        # 1. Bundled; excluded top-level categories have their own discovery, platforms scan below.
-        repo_plugins = get_bundled_plugins_dir()
-        logger.debug("Scanning bundled plugins: %s", repo_plugins)
-        bundled = self._scan_directory(
-            repo_plugins,
-            source="bundled",
-            skip_names={"memory", "context_engine", "platforms", "model-providers"},
-        )
-        logger.debug("  bundled (top-level): %d manifest(s)", len(bundled))
-        manifests.extend(bundled)
-        bundled_platforms = self._scan_directory(repo_plugins / "platforms", source="bundled")
-        logger.debug("  bundled/platforms: %d manifest(s)", len(bundled_platforms))
-        manifests.extend(bundled_platforms)
-
-        # 2. User plugins (~/.hermes/plugins/)
-        user_dir = get_hermes_home() / "plugins"
-        logger.debug("Scanning user plugins: %s", user_dir)
-        user_manifests = self._scan_directory(user_dir, source="user")
-        logger.debug("  user: %d manifest(s)", len(user_manifests))
-        manifests.extend(user_manifests)
-
-        # 3. Project plugins, only when explicitly opted in (must match the full-discovery gate).
-        if _env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
-            project_dir = Path.cwd() / ".hermes" / "plugins"
-            logger.debug("Scanning project plugins: %s", project_dir)
-            project_manifests = self._scan_directory(project_dir, source="project")
-            logger.debug("  project: %d manifest(s)", len(project_manifests))
-            manifests.extend(project_manifests)
-        else:
-            logger.debug("Project plugins disabled (set HERMES_ENABLE_PROJECT_PLUGINS=1 to enable)")
-
-        return manifests
+        """Directory manifests in full-discovery order (see :func:`collect_directory_manifests`)."""
+        return collect_directory_manifests()
 
     def has_enabled_portable_mcp(self, raw_config: Mapping[str, Any]) -> bool:
         """Probe enabled portable MCP packages without loading plugins (shares the full-discovery
@@ -3191,155 +2495,8 @@ class PluginManager:
         source: str,
         skip_names: Optional[Set[str]] = None,
     ) -> List[PluginManifest]:
-        """Read manifests under *path*: flat ``<root>/<name>/plugin.yaml`` (key ``name``) or
-        category ``<root>/<cat>/<name>/plugin.yaml`` (key ``cat/name``, depth capped at two).
-        *skip_names* ignores top-level names."""
-        return self._scan_directory_level(path, source, skip_names=skip_names, prefix="", depth=0)
-
-    def _scan_directory_level(
-        self,
-        path: Path,
-        source: str,
-        *,
-        skip_names: Optional[Set[str]],
-        prefix: str,
-        depth: int,
-    ) -> List[PluginManifest]:
-        """Recursive body of :meth:`_scan_directory` (``prefix`` = accumulated category path)."""
-        manifests: List[PluginManifest] = []
-        if not path.is_dir():
-            return manifests
-
-        for child in sorted(path.iterdir()):
-            if not child.is_dir():
-                continue
-            if depth == 0 and skip_names and child.name in skip_names:
-                continue
-            manifest_file = child / "plugin.yaml"
-            if not manifest_file.exists():
-                manifest_file = child / "plugin.yml"
-
-            if manifest_file.exists():
-                manifest = self._parse_manifest(manifest_file, child, source, prefix)
-                if manifest is not None:
-                    manifests.append(manifest)
-                continue
-
-            portable_file = child / "plugin.json"
-            if portable_file.exists() or portable_file.is_symlink():
-                try:
-                    from hermes_cli.agent_plugins import read_agent_plugin_manifest
-
-                    data, diagnostics = read_agent_plugin_manifest(child)
-                    for diagnostic in diagnostics:
-                        logger.warning("Agent Plugin '%s': %s", child, diagnostic.message)
-                    key = f"{prefix}/{child.name}" if prefix else data["name"]
-                    manifests.append(
-                        PluginManifest(
-                            name=data["name"],
-                            version=data.get("version", ""),
-                            description=data.get("description", ""),
-                            author=_display_author(data.get("author", "")),
-                            source=source,
-                            path=str(child),
-                            key=key,
-                            portable=True,
-                            skill_namespace=_portable_skill_namespace(key),
-                        )
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to parse %s: %s", portable_file, exc)
-                continue
-
-            # No manifest: treat as a category namespace and recurse one level (depth cap 2).
-            if depth >= 1:
-                logger.debug("Skipping %s (no plugin.yaml, depth cap reached)", child)
-                continue
-
-            sub_prefix = f"{prefix}/{child.name}" if prefix else child.name
-            manifests.extend(
-                self._scan_directory_level(
-                    child,
-                    source,
-                    skip_names=None,
-                    prefix=sub_prefix,
-                    depth=depth + 1,
-                )
-            )
-
-        return manifests
-
-    def _parse_manifest(
-        self,
-        manifest_file: Path,
-        plugin_dir: Path,
-        source: str,
-        prefix: str,
-    ) -> Optional[PluginManifest]:
-        """Parse one ``plugin.yaml`` into a :class:`PluginManifest`; ``None`` (warned) on failure."""
-        try:
-            if yaml is None:
-                logger.warning("PyYAML not installed – cannot load %s", manifest_file)
-                return None
-            data = fast_safe_load(manifest_file.read_text(encoding="utf-8")) or {}
-
-            name = data.get("name", plugin_dir.name)
-            key = f"{prefix}/{plugin_dir.name}" if prefix else name
-
-            raw_kind = data.get("kind", "standalone")
-            if not isinstance(raw_kind, str):
-                raw_kind = "standalone"
-            kind = raw_kind.strip().lower()
-            if kind not in _VALID_PLUGIN_KINDS:
-                logger.warning(
-                    "Plugin %s: unknown kind '%s' (valid: %s); treating as 'standalone'",
-                    key, raw_kind, ", ".join(sorted(_VALID_PLUGIN_KINDS)),
-                )
-                kind = "standalone"
-
-            # Auto-coerce undeclared memory/model providers so they route to their own discovery
-            # instead of the general manager (register_memory_provider here is a no-op).
-            if kind == "standalone" and "kind" not in data:
-                init_file = plugin_dir / "__init__.py"
-                if init_file.exists():
-                    with suppress(Exception):
-                        detected = _detect_kind_from_source(
-                            init_file.read_text(errors="replace", encoding="utf-8")[:8192]
-                        )
-                        if detected:
-                            kind = detected
-                            logger.debug(
-                                "Plugin %s: detected %s, treating as kind='%s'",
-                                key, detected, detected,
-                            )
-
-            logger.debug(
-                "Parsed manifest: key=%s name=%s kind=%s source=%s path=%s",
-                key, name, kind, source, plugin_dir,
-            )
-            v2_fields = _parse_manifest_v2_fields(data, key)
-            return PluginManifest(
-                name=name,
-                version=str(data.get("version", "")),
-                description=data.get("description", ""),
-                author=_display_author(data.get("author", "")),
-                requires_env=data.get("requires_env", []),
-                provides_tools=data.get("provides_tools", []),
-                provides_hooks=data.get("provides_hooks", []),
-                source=source,
-                path=str(plugin_dir),
-                kind=kind,
-                key=key,
-                capabilities=_parse_declared_capabilities(
-                    data.get("capabilities"), name
-                ),
-                **v2_fields,
-                emits=data.get("emits") or [],
-                listens=data.get("listens") or [],
-            )
-        except Exception as exc:
-            logger.warning("Failed to parse %s: %s", manifest_file, exc, exc_info=_PLUGINS_DEBUG)
-            return None
+        """Read manifests under *path* (see :func:`scan_directory`)."""
+        return scan_directory(path, source, skip_names=skip_names)
 
     def _scan_entry_points(self) -> List[PluginManifest]:
         """Read installed plugin entry points (see :func:`discover_entrypoint_manifests`)."""
