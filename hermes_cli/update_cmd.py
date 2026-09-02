@@ -1710,6 +1710,94 @@ def _handle_update_called_process_error(
         sys.exit(1)
 
 
+def _finish_already_up_to_date(
+    git_cmd,
+    branch: str,
+    current_branch: str,
+    _plan,
+    *,
+    assume_yes: bool,
+    gateway_mode: bool,
+    gw_input_fn,
+    pre_update_snapshot_id,
+    desktop_dir,
+    had_desktop_app_before_update: bool,
+    active_lazy_features,
+    active_tool_dependencies,
+    _windows_gateway_resume,
+) -> None:
+    """"Already up to date" path: restore stash/branch, repair the current checkout, catch up the fleet.
+
+    ``sys.exit(1)`` when the current-checkout repair is incomplete (after
+    writing the gateway exit code and finalizing the receipt as partial).
+    """
+    auto_stash_ref = _plan.auto_stash_ref
+    parked_branch_switched = _plan.parked_branch_switched
+    prompt_for_restore = _plan.prompt_for_restore
+    switch_block_reason = _plan.switch_block_reason
+    upstream_checked = _plan.upstream_checked
+    _invalidate_update_cache()
+
+    # Restore stash and switch back to original branch if we moved.
+    # EXCEPTION: a parked feature branch we verified clean + fully
+    # merged stays on the target — re-parking the checkout on the
+    # stale branch is the 2026-08-17 incident all over again.
+    if auto_stash_ref is not None:
+        _m()._restore_stashed_changes(
+            git_cmd,
+            _m().PROJECT_ROOT,
+            auto_stash_ref,
+            prompt_user=prompt_for_restore,
+            input_fn=gw_input_fn,
+        )
+    if parked_branch_switched:
+        if switch_block_reason.startswith("unmerged:"):
+            _count = switch_block_reason.split(":", 1)[1]
+            print(
+                f"  ✓ Checkout was parked on '{current_branch}' — "
+                f"switched back to {branch}; {_count} unmerged "
+                f"commit(s) kept on '{current_branch}'."
+            )
+        else:
+            print(
+                f"  ✓ Checkout was parked on '{current_branch}' (fully "
+                f"merged) — switched back to {branch}."
+            )
+    elif current_branch not in {branch, "HEAD"}:
+        _git_run(git_cmd, ["checkout", current_branch])
+
+    current_checkout_complete = _repair_current_checkout(
+        assume_yes=assume_yes,
+        gateway_mode=gateway_mode,
+        pre_update_snapshot_id=pre_update_snapshot_id,
+        desktop_dir=desktop_dir,
+        had_desktop_app_before_update=had_desktop_app_before_update,
+        active_lazy_features=active_lazy_features,
+        active_tool_dependencies=active_tool_dependencies,
+        upstream_checked=upstream_checked,
+        _windows_gateway_resume=_windows_gateway_resume,
+    )
+    _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
+    # A prior pull may still owe the fleet a restart (#95294); catch
+    # up even on the "Already up to date" path, and BEFORE the exit
+    # gate below so a partial outcome can't strand the fleet on stale
+    # code (#91277 fleet contract).
+    _apply_pending_fleet_restart_catchup()
+    if not current_checkout_complete:
+        if gateway_mode:
+            _write_gateway_update_exit_code(False)
+        try:
+            from hermes_cli.update_receipt import finalize_update_receipt
+
+            finalize_update_receipt("partial")
+        except Exception as _receipt_exc:
+            logger.debug(
+                "Update receipt finalize (current checkout) failed: %s",
+                _receipt_exc,
+            )
+        sys.exit(1)
+
+
 def _cmd_update_impl(args, gateway_mode: bool):
     """Body of ``cmd_update`` — kept separate so the wrapper can always
     restore stdio even on ``sys.exit``."""
@@ -1838,72 +1926,24 @@ def _cmd_update_impl(args, gateway_mode: bool):
         auto_stash_ref = _plan.auto_stash_ref
         commit_count = _plan.commit_count
         in_place_update = _plan.in_place_update
-        parked_branch_switched = _plan.parked_branch_switched
         prompt_for_restore = _plan.prompt_for_restore
-        switch_block_reason = _plan.switch_block_reason
-        upstream_checked = _plan.upstream_checked
 
         if commit_count == 0:
-            _invalidate_update_cache()
-
-            # Restore stash and switch back to original branch if we moved.
-            # EXCEPTION: a parked feature branch we verified clean + fully
-            # merged stays on the target — re-parking the checkout on the
-            # stale branch is the 2026-08-17 incident all over again.
-            if auto_stash_ref is not None:
-                _m()._restore_stashed_changes(
-                    git_cmd,
-                    _m().PROJECT_ROOT,
-                    auto_stash_ref,
-                    prompt_user=prompt_for_restore,
-                    input_fn=gw_input_fn,
-                )
-            if parked_branch_switched:
-                if switch_block_reason.startswith("unmerged:"):
-                    _count = switch_block_reason.split(":", 1)[1]
-                    print(
-                        f"  ✓ Checkout was parked on '{current_branch}' — "
-                        f"switched back to {branch}; {_count} unmerged "
-                        f"commit(s) kept on '{current_branch}'."
-                    )
-                else:
-                    print(
-                        f"  ✓ Checkout was parked on '{current_branch}' (fully "
-                        f"merged) — switched back to {branch}."
-                    )
-            elif current_branch not in {branch, "HEAD"}:
-                _git_run(git_cmd, ["checkout", current_branch])
-
-            current_checkout_complete = _repair_current_checkout(
+            _finish_already_up_to_date(
+                git_cmd,
+                branch,
+                current_branch,
+                _plan,
                 assume_yes=assume_yes,
                 gateway_mode=gateway_mode,
+                gw_input_fn=gw_input_fn,
                 pre_update_snapshot_id=pre_update_snapshot_id,
                 desktop_dir=desktop_dir,
                 had_desktop_app_before_update=had_desktop_app_before_update,
                 active_lazy_features=active_lazy_features,
                 active_tool_dependencies=active_tool_dependencies,
-                upstream_checked=upstream_checked,
                 _windows_gateway_resume=_windows_gateway_resume,
             )
-            _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
-            # A prior pull may still owe the fleet a restart (#95294); catch
-            # up even on the "Already up to date" path, and BEFORE the exit
-            # gate below so a partial outcome can't strand the fleet on stale
-            # code (#91277 fleet contract).
-            _apply_pending_fleet_restart_catchup()
-            if not current_checkout_complete:
-                if gateway_mode:
-                    _write_gateway_update_exit_code(False)
-                try:
-                    from hermes_cli.update_receipt import finalize_update_receipt
-
-                    finalize_update_receipt("partial")
-                except Exception as _receipt_exc:
-                    logger.debug(
-                        "Update receipt finalize (current checkout) failed: %s",
-                        _receipt_exc,
-                    )
-                sys.exit(1)
             return
 
         if commit_count > 0:
