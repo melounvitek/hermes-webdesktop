@@ -16,6 +16,7 @@ WAF-safe), ``client_name`` (default "Hermes Agent"), ``client_metadata_url``
 """
 
 import asyncio
+import contextlib
 import contextvars
 import importlib.util as _importlib_util
 import json
@@ -216,13 +217,9 @@ def _cached_redirect_port(storage: "HermesTokenStorage | None") -> int | None:
     ``client_id`` gets ``redirect_uri does not match any registered URIs``.
     """
     for _uri, parsed in _cached_redirect_uris(storage):
-        if (
-            parsed.scheme == "http"
-            and parsed.hostname in {"127.0.0.1", "localhost"}
-            and parsed.path == "/callback"
-            and parsed.port is not None
-        ):
-            return int(parsed.port)
+        if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"} and parsed.path == "/callback":
+            if parsed.port is not None:
+                return int(parsed.port)
     return None
 
 
@@ -317,10 +314,8 @@ def _write_json(path: Path, data: dict) -> None:
             os.fsync(fh.fileno())
         os.replace(tmp, path)
     except OSError:
-        try:
+        with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 
@@ -391,11 +386,9 @@ class HermesTokenStorage:
         if absolute_expiry is not None:
             data["expires_in"] = int(max(absolute_expiry - time.time(), 0))
         elif data.get("expires_in") is not None:
-            try:
+            with contextlib.suppress(OSError, TypeError, ValueError):
                 implied_expiry = self._tokens_path().stat().st_mtime + int(data["expires_in"])
                 data["expires_in"] = int(max(implied_expiry - time.time(), 0))
-            except (OSError, TypeError, ValueError):
-                pass
 
     async def get_tokens(self) -> "OAuthToken | None":
         return self._load_model(self._tokens_path(), "OAuthToken", "tokens", self._rebase_expires_in)
@@ -405,12 +398,9 @@ class HermesTokenStorage:
         # Persist an absolute ``expires_at``: a relative ``expires_in`` reloaded
         # after restart has no wall-clock reference, leaving the SDK's
         # ``token_expiry_time=None`` and ``is_token_valid()`` falsely True.
-        expires_in = payload.get("expires_in")
-        if expires_in is not None:
-            try:
-                payload["expires_at"] = time.time() + int(expires_in)
-            except (TypeError, ValueError):
-                pass  # mock tokens / odd shapes: skip rather than fail persistence
+        if payload.get("expires_in") is not None:
+            with contextlib.suppress(TypeError, ValueError):  # mock tokens / odd shapes: skip, don't fail persistence
+                payload["expires_at"] = time.time() + int(payload["expires_in"])
         _write_json(self._tokens_path(), payload)
         logger.debug("OAuth tokens saved for %s", self._server_name)
 
@@ -491,10 +481,8 @@ class HermesTokenStorage:
         to undo a ``remove()`` after a failed re-auth so a valid token survives."""
         snap: dict[str, bytes] = {}
         for p in self._state_paths():
-            try:
+            with contextlib.suppress(OSError):
                 snap[p.name] = p.read_bytes()
-            except OSError:
-                pass
         return snap
 
     def restore(self, snapshot: dict[str, bytes], *, only_if_absent: bool = False) -> None:
@@ -559,12 +547,9 @@ def _authorization_code_result(code: str, state: "str | None", iss: "str | None"
 
 
 def _parse_redirect_query(query: str) -> dict[str, Any]:
-    """Extract code/state/error/iss from a redirect query string.
-
-    ``iss`` is the RFC 9207 authorization-response issuer: mcp 2.0 rejects a
-    response that omits it when the server advertised
-    ``authorization_response_iss_parameter_supported``, so it must be kept.
-    """
+    """Extract code/state/error/iss from a redirect query string. ``iss`` is the
+    RFC 9207 issuer: mcp 2.0 rejects a response that omits it when the server
+    advertised ``authorization_response_iss_parameter_supported``, so keep it."""
     params = parse_qs(query)
     return {k: params.get(k, [None])[0] for k in ("code", "state", "error", "iss")}
 
@@ -778,16 +763,14 @@ def _callback_outcome(result: dict, cimd_url: str | None):
     if result["error"]:
         raise RuntimeError(f"OAuth authorization failed: {result['error']}")
     if result["auth_code"] is None:
-        hint = ""
-        if cimd_url:
-            hint = (
-                " If the browser showed an invalid-client error instead of "
-                "an approval prompt, the authorization server rejected "
-                f"Hermes' Client ID Metadata Document ({cimd_url}); set "
-                "``cimd: false`` under that server's ``oauth:`` block in "
-                "config.yaml to authorize via dynamic client registration "
-                "instead."
-            )
+        hint = (
+            " If the browser showed an invalid-client error instead of "
+            "an approval prompt, the authorization server rejected "
+            f"Hermes' Client ID Metadata Document ({cimd_url}); set "
+            "``cimd: false`` under that server's ``oauth:`` block in "
+            "config.yaml to authorize via dynamic client registration "
+            "instead."
+        ) if cimd_url else ""
         raise OAuthNonInteractiveError(
             "OAuth callback timed out — no authorization code received. "
             "Ensure you completed the browser authorization flow." + hint
@@ -1033,8 +1016,8 @@ def _configure_callback_port(cfg: dict, storage: "HermesTokenStorage | None" = N
         cfg["_resolved_port"] = 0
         cfg["redirect_uri"] = cfg.get("redirect_uri") or dashboard_flow.redirect_uri
         return 0
-    cached_redirect_uri = _cached_redirect_uri(storage)
-    if not cfg.get("redirect_uri") and cached_redirect_uri:
+    cached_redirect_uri = None if cfg.get("redirect_uri") else _cached_redirect_uri(storage)
+    if cached_redirect_uri:
         cfg["redirect_uri"] = cached_redirect_uri
         cfg["_resolved_port"] = 0
         return 0
@@ -1094,16 +1077,14 @@ def apply_oauth_provider_defaults(cfg: dict, *, server_name: str = "", server_ur
             logger.info(
                 "MCP OAuth '%s': Figma DCR allowlist — registering as "
                 "client_name=%r (override via oauth.client_name)",
-                server_name or server_url,
-                _FIGMA_DCR_CLIENT_NAME,
+                server_name or server_url, _FIGMA_DCR_CLIENT_NAME,
             )
         if not cfg.get("scope"):
             cfg["scope"] = _FIGMA_DEFAULT_SCOPE
         # Figma advertises token_endpoint_auth_method=none yet returns a
         # client_secret and then demands it at the token endpoint; request a
         # confidential-client registration so the SDK posts the secret.
-        if not cfg.get("token_endpoint_auth_method"):
-            cfg["token_endpoint_auth_method"] = "client_secret_post"
+        cfg["token_endpoint_auth_method"] = cfg.get("token_endpoint_auth_method") or "client_secret_post"
     return cfg
 
 
@@ -1116,9 +1097,7 @@ def _build_client_metadata(cfg: dict) -> "OAuthClientMetadata":
         _ensure_sdk_loaded()
     # Public client by default; confidential only with a known secret or a
     # provider (e.g. Figma) that needs confidential-style token posts.
-    auth_method = cfg.get("token_endpoint_auth_method") or (
-        "client_secret_post" if cfg.get("client_secret") else "none"
-    )
+    auth_method = cfg.get("token_endpoint_auth_method") or ("client_secret_post" if cfg.get("client_secret") else "none")
     metadata_kwargs: dict[str, Any] = {
         "client_name": cfg.get("client_name", "Hermes Agent"),
         "redirect_uris": [AnyUrl(_resolve_redirect_uri(cfg, port))],
