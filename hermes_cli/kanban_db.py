@@ -2260,20 +2260,19 @@ def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
     return removed
 
 
-def parent_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
+def _linked_ids(conn: sqlite3.Connection, want: str, where: str, task_id: str) -> list[str]:
     rows = conn.execute(
-        "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
-        (task_id,),
+        f"SELECT {want} FROM task_links WHERE {where} = ? ORDER BY {want}", (task_id,)
     ).fetchall()
-    return [r["parent_id"] for r in rows]
+    return [r[want] for r in rows]
+
+
+def parent_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    return _linked_ids(conn, "parent_id", "child_id", task_id)
 
 
 def child_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
-    rows = conn.execute(
-        "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
-        (task_id,),
-    ).fetchall()
-    return [r["child_id"] for r in rows]
+    return _linked_ids(conn, "child_id", "parent_id", task_id)
 
 
 def task_graph_contexts(
@@ -2347,12 +2346,14 @@ def add_comment(
         return int(cur.lastrowid or 0)
 
 
-def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
-    rows = conn.execute(
-        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC",
-        (task_id,),
+def _task_rows(conn: sqlite3.Connection, table: str, task_id: str, order: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        f"SELECT * FROM {table} WHERE task_id = ? ORDER BY {order}", (task_id,)
     ).fetchall()
-    return [Comment.from_row(r) for r in rows]
+
+
+def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
+    return [Comment.from_row(r) for r in _task_rows(conn, "task_comments", task_id, "created_at ASC")]
 
 
 def list_comments_after(
@@ -2538,11 +2539,7 @@ def add_attachment(
 
 
 def list_attachments(conn: sqlite3.Connection, task_id: str) -> list[Attachment]:
-    rows = conn.execute(
-        "SELECT * FROM task_attachments WHERE task_id = ? ORDER BY created_at ASC, id ASC",
-        (task_id,),
-    ).fetchall()
-    return [Attachment.from_row(r) for r in rows]
+    return [Attachment.from_row(r) for r in _task_rows(conn, "task_attachments", task_id, "created_at ASC, id ASC")]
 
 
 def get_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[Attachment]:
@@ -2577,11 +2574,7 @@ def delete_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[
 
 
 def list_events(conn: sqlite3.Connection, task_id: str) -> list[Event]:
-    rows = conn.execute(
-        "SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC, id ASC",
-        (task_id,),
-    ).fetchall()
-    return [Event.from_row(r) for r in rows]
+    return [Event.from_row(r) for r in _task_rows(conn, "task_events", task_id, "created_at ASC, id ASC")]
 
 
 def _insert_comment(
@@ -5940,7 +5933,6 @@ from hermes_cli.kanban_db_dispatch import (  # noqa: E402,F401
     _apply_default_assignee,
     _classify_worker_exit,
     _clear_failure_counter,
-    _clear_spawn_failures,
     _default_spawn,
     _defer_reclaim_for_live_worker,
     _dispatch_lane_task,

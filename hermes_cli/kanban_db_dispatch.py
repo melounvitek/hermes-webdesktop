@@ -206,28 +206,17 @@ def _record_worker_exit(pid: int, raw_status: int) -> None:
 
 
 def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
-    """Classify a recently-reaped worker by pid.
+    """Return ``(kind, code)`` for a reaped worker PID.
 
-    Returns ``(kind, code)`` where ``kind`` is one of:
-
-    * ``"clean_exit"`` — ``WIFEXITED`` with ``WEXITSTATUS == 0``. When the
-      task is still ``running`` in the DB, this is a protocol violation
-      (worker exited without calling ``kanban_complete`` / ``kanban_block``)
-      and should be auto-blocked immediately — retrying will just loop.
-    * ``"rate_limited"`` — ``WIFEXITED`` with status
-      ``KANBAN_RATE_LIMIT_EXIT_CODE``. The worker bailed because the
-      provider rate-limited / exhausted quota, NOT because the task failed.
-      ``detect_crashed_workers`` releases the task back to ``ready`` without
-      counting a failure, so a long quota window can't trip the breaker.
-    * ``"nonzero_exit"`` — ``WIFEXITED`` with non-zero status. Real error.
-    * ``"signaled"`` — ``WIFSIGNALED`` (OOM killer, SIGKILL, etc). Real crash.
-    * ``"unknown"`` — pid was not in the reap registry (either reaped by
-      something else, or died between reap tick and liveness check). Fall
-      back to existing crashed-counter behavior.
-
-    ``code`` is the exit status (for ``clean_exit`` / ``rate_limited`` /
-    ``nonzero_exit``) or the signal number (for ``signaled``), or ``None``
-    for ``unknown``.
+    ``clean_exit`` (status 0 — a still-``running`` task is a protocol
+    violation: worker exited without ``kanban_complete``/``kanban_block``, so
+    auto-block, retrying just loops); ``rate_limited`` (status
+    ``KANBAN_RATE_LIMIT_EXIT_CODE`` — provider quota wall, released back to
+    ``ready`` WITHOUT counting a failure so a long quota window can't trip the
+    breaker); ``nonzero_exit`` (real error); ``signaled`` (OOM/SIGKILL, real
+    crash; ``code`` is the signal); ``unknown`` (pid not in the reap registry
+    — reaped elsewhere or died between reap tick and liveness check — fall
+    back to the crashed-counter path; ``code`` is None).
     """
     entry = _recent_worker_exits.get(int(pid))
     if entry is None:
@@ -2012,35 +2001,23 @@ def _dispatch_once_locked(
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
 ) -> DispatchResult:
-    """Run one dispatcher tick.
+    """Run one dispatcher tick: reclaim stale (TTL / heartbeat) and crashed
+    (dead host-local PID) running tasks, promote todo -> ready where all
+    parents are done, then for each ready task with an assignee atomically
+    claim and call ``spawn_fn(task, workspace_path, board) -> Optional[int]``,
+    recording the returned PID as ``worker_pid`` so later ticks catch crashes
+    before the TTL expires.
 
-    Steps:
-      1. Reclaim stale running tasks (TTL expired).
-      2. Reclaim stale running tasks (no recent heartbeat).
-      3. Reclaim crashed running tasks (host-local PID no longer alive).
-      3. Promote todo -> ready where all parents are done.
-      4. For each ready task with an assignee, atomically claim and call
-         ``spawn_fn(task, workspace_path, board) -> Optional[int]``. The
-         return value (if any) is recorded as ``worker_pid`` so subsequent
-         ticks can detect crashes before the TTL expires.
-
-    Spawn failures are counted per-task. After ``failure_limit`` consecutive
-    failures the task is auto-blocked with the last error as its reason —
-    prevents the dispatcher from thrashing forever on an unfixable task.
-
-    ``max_spawn`` is a **live concurrency cap** (running + this tick's spawns
-    across the board), not a per-tick budget — a per-tick reading would grow
-    concurrency by N every tick on a busy board without bound.
-
-    ``max_in_progress`` is a **host-level** cap: it counts running tasks on
-    every active board plus this tick's spawns, because workers are OS
-    processes sharing one machine's memory and a per-board reading would
-    multiply the cap by the number of boards. ``max_spawn`` keeps its
-    historical per-board semantics.
-
-    ``spawn_fn`` defaults to ``_default_spawn``. Tests pass a stub.
-    ``board`` pins workspace/log/db resolution for this tick to a specific
-    board. When omitted, the current-board resolution chain is used.
+    After ``failure_limit`` consecutive per-task failures the task is
+    auto-blocked with the last error as reason (no thrashing on an unfixable
+    task). ``max_spawn`` is a live per-board concurrency cap (running + this
+    tick's spawns), not a per-tick budget — a per-tick reading would grow
+    concurrency by N every tick. ``max_in_progress`` is a host-level cap over
+    every active board plus this tick's spawns: workers are OS processes
+    sharing one machine's memory, so a per-board reading would multiply it by
+    the board count. ``spawn_fn`` defaults to ``_default_spawn`` (tests stub
+    it); ``board`` pins workspace/log/db resolution for this tick, else the
+    current-board chain is used.
     """
     # Reap zombie children from previously spawned workers. See
     # reap_worker_zombies() for the full rationale.

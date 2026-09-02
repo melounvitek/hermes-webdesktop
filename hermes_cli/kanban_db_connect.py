@@ -606,37 +606,21 @@ def _attempt_index_reindex_repair(
 def _guard_existing_db_is_healthy(path: Path) -> None:
     """Run ``PRAGMA integrity_check`` on an existing non-empty DB file.
 
-    Opens the probe in read/write mode so SQLite can recover or
-    checkpoint a healthy WAL/hot-journal DB before we declare it
-    corrupt.
-
-    **Narrow auto-repair:** when the integrity failure consists *only* of
-    index-scoped errors (``wrong # of entries in index <name>`` / ``row N
-    missing from index <name>``), the table b-trees are intact and REINDEX
-    rebuilds the damaged indexes losslessly. In that case we take the
-    corrupt backup FIRST (same content-addressed quarantine as the
-    fail-closed path), run REINDEX under the caller-held init flock,
-    re-run ``integrity_check``, and proceed only if it comes back clean.
-    Anything else — page corruption, ``malformed`` images, a REINDEX that
-    does not produce a clean re-check — fails closed exactly as before:
-    copy the file (and any WAL/SHM sidecars) to a backup and raise
-    :class:`KanbanDbCorruptError` so callers cannot silently recreate the
-    schema on top of a damaged DB.
-
-    Transient lock/busy errors (``sqlite3.OperationalError``) are NOT
-    treated as corruption; they propagate raw so the caller sees a
-    normal lock failure and no spurious ``.corrupt`` backup is made.
-
-    No-op for missing files, zero-byte files (treated as fresh), and
-    paths already proven healthy this process (cache hit).
-
-    Path-trust note: ``path`` arrives via :func:`connect`, which itself
-    resolves it from an explicit ``db_path`` argument, the
-    :func:`kanban_db_path` env-var chain, or the kanban-home default —
-    all sources Hermes treats as user-controlled-but-trusted on the
-    user's own machine. We additionally resolve the path here and
-    confine all filesystem writes to its parent directory so any
-    accidental ``..`` segments are collapsed before any I/O happens.
+    The probe opens read/write so SQLite can recover/checkpoint a healthy
+    WAL/hot-journal DB before we declare it corrupt. Narrow auto-repair: when
+    the failure is ONLY index-scoped (``wrong # of entries in index`` / ``row
+    N missing from index``) the table b-trees are intact and REINDEX rebuilds
+    losslessly — take the content-addressed corrupt backup FIRST, REINDEX
+    under the caller-held init flock, re-check, proceed only if clean. Any
+    other failure (page corruption, ``malformed``, unclean re-check) fails
+    closed: copy the file + WAL/SHM sidecars to a backup and raise
+    :class:`KanbanDbCorruptError` so callers never recreate the schema on top
+    of a damaged DB. ``sqlite3.OperationalError`` (lock/busy) is NOT
+    corruption and propagates raw (no spurious ``.corrupt`` backup). No-op for
+    missing / zero-byte (fresh) files and paths already proven healthy this
+    process. ``path`` comes from user-controlled-but-trusted sources; it is
+    resolved here and all writes are confined to its parent so stray ``..``
+    segments collapse before any I/O.
     """
     # Resolve before any I/O. ``Path.resolve()`` normalizes ``..`` and
     # symlinks, giving us a canonical path whose parent dir we can pin.
