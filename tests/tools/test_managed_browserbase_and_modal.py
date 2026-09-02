@@ -154,6 +154,9 @@ def _install_fake_tools_package():
         sys.modules[f"plugins.browser.{_name}.provider"] = types.SimpleNamespace(
             **{_classname: _provider_stub_cls},
         )
+    # The fake ``plugins.browser`` package has an empty __path__, so the shared
+    # base the real vendor modules import must be loaded by path as well.
+    _load_plugin_module("plugins.browser._common", "browser/_common.py")
 
     sys.modules["tools.managed_tool_gateway"] = _load_tool_module(
         "tools.managed_tool_gateway",
