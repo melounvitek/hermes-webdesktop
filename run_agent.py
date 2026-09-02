@@ -324,6 +324,31 @@ def _qwen_portal_headers() -> dict:
     }
 
 
+def _lazy_attr(module: str, name: str):
+    """Resolve ``module.name`` at call time (keeps heavy/cyclic imports off the run_agent import path)."""
+    import importlib
+
+    return getattr(importlib.import_module(module), name)
+
+
+# Route-specific default headers; first host match wins (order preserved from the original chain).
+# Builders resolve their module lazily so run_agent keeps its import-time cost and avoids cycles.
+_ROUTE_DEFAULT_HEADERS = (
+    ("openrouter.ai", lambda self, url: _lazy_attr("agent.auxiliary_client", "build_or_headers")()),
+    ("ai-gateway.vercel.sh", lambda self, url: dict(_lazy_attr("agent.auxiliary_client", "_AI_GATEWAY_HEADERS"))),
+    ("integrate.api.nvidia.com", lambda self, url: _lazy_attr("agent.auxiliary_client", "build_nvidia_nim_headers")(url)),
+    ("api.routermint.com", lambda self, url: _routermint_headers()),
+    ("githubcopilot.com", lambda self, url: _lazy_attr("hermes_cli.models", "copilot_default_headers")()),
+    ("api.kimi.com", lambda self, url: dict(_lazy_attr("agent.auxiliary_client", "_AI_GATEWAY_HEADERS"))),
+    ("portal.qwen.ai", lambda self, url: _qwen_portal_headers()),
+    ("chatgpt.com", lambda self, url: _lazy_attr("agent.codex_headers", "codex_cloudflare_headers")(
+        self._client_kwargs.get("api_key", ""), base_url=url,
+    )),
+    # Covers provider=xai and provider=xai-oauth (api.x.ai).
+    ("x.ai", lambda self, url: _lazy_attr("tools.xai_http", "hermes_xai_default_headers")()),
+)
+
+
 def _safe_session_filename_component(session_id: str) -> str:
     """Return a stable, path-safe filename component for a session ID.
 
@@ -5719,39 +5744,10 @@ class AIAgent:
         *,
         apply_user_headers: bool = True,
     ) -> None:
-        from agent.auxiliary_client import (
-            _AI_GATEWAY_HEADERS,
-            build_nvidia_nim_headers,
-            build_or_headers,
-        )
-
-        if base_url_host_matches(base_url, "openrouter.ai"):
-            self._client_kwargs["default_headers"] = build_or_headers()
-        elif base_url_host_matches(base_url, "ai-gateway.vercel.sh"):
-            self._client_kwargs["default_headers"] = dict(_AI_GATEWAY_HEADERS)
-        elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
-            self._client_kwargs["default_headers"] = build_nvidia_nim_headers(base_url)
-        elif base_url_host_matches(base_url, "api.routermint.com"):
-            self._client_kwargs["default_headers"] = _routermint_headers()
-        elif base_url_host_matches(base_url, "githubcopilot.com"):
-            from hermes_cli.models import copilot_default_headers
-
-            self._client_kwargs["default_headers"] = copilot_default_headers()
-        elif base_url_host_matches(base_url, "api.kimi.com"):
-            from agent.auxiliary_client import _AI_GATEWAY_HEADERS
-            self._client_kwargs["default_headers"] = dict(_AI_GATEWAY_HEADERS)
-        elif base_url_host_matches(base_url, "portal.qwen.ai"):
-            self._client_kwargs["default_headers"] = _qwen_portal_headers()
-        elif base_url_host_matches(base_url, "chatgpt.com"):
-            from agent.codex_headers import codex_cloudflare_headers
-            self._client_kwargs["default_headers"] = codex_cloudflare_headers(
-                self._client_kwargs.get("api_key", ""), base_url=base_url,
-            )
-        elif base_url_host_matches(base_url, "x.ai"):
-            # Cover both provider=xai and provider=xai-oauth (api.x.ai).
-            from tools.xai_http import hermes_xai_default_headers
-
-            self._client_kwargs["default_headers"] = hermes_xai_default_headers()
+        for host, build in _ROUTE_DEFAULT_HEADERS:
+            if base_url_host_matches(base_url, host):
+                self._client_kwargs["default_headers"] = build(self, base_url)
+                break
         else:
             # No URL-specific headers — check profile.default_headers before clearing.
             _ph_headers = None
