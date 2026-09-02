@@ -194,20 +194,28 @@ class GatewayStreamConsumer:
         self.chat_id = chat_id
         self.cfg = config or StreamConsumerConfig()
         self.metadata = metadata
-        # No-arg callback fired whenever a fresh content bubble is created
-        # (first send, commentary, overflow chunk, fallback continuation); the
-        # gateway uses it to open the next tool-progress bubble BELOW resumed
-        # content instead of editing the old one above.  Exceptions swallowed.
+        # Fired whenever a fresh content bubble is created (first send,
+        # commentary, overflow chunk, fallback continuation) so the gateway
+        # opens the next tool-progress bubble BELOW it.  Exceptions swallowed.
         self._on_new_message = on_new_message
-        # Fired once on entering the finalization path so the gateway can pause
-        # typing refreshes before a slow rich-text final edit.
+        # Fired once on entering finalization so the gateway can pause typing
+        # refreshes before a slow rich-text final edit.
         self._on_before_finalize = on_before_finalize
         self._initial_reply_to_id = initial_reply_to_id
-
-        # Per-turn id passed to adapter.send_stream_frame() so concurrent
-        # consumers (/background, parallel subagents) don't interfere.
+        # Per-turn id for adapter.send_stream_frame() so concurrent consumers
+        # (/background, parallel subagents) don't interfere.
         import uuid
         self._turn_id = str(uuid.uuid4())
+        # Returns False after /new or /stop; run() then abandons the stream.
+        self._run_still_current = run_still_current or (lambda: True)
+        # Only platforms needing an explicit finalize call (DingTalk AI Cards)
+        # force a redundant final edit; ``is True`` keeps MagicMock adapters out.
+        self._adapter_requires_finalize: bool = (
+            getattr(adapter, "REQUIRES_EDIT_FINALIZE", False) is True
+        )
+        # Telegram bounds edit retries at 5s; a final-delivery fallback must not
+        # hold the stream task through a longer flood cooldown.
+        self._max_fallback_flood_retry_seconds = 5.0
 
         self._queue: queue.Queue = queue.Queue()
         self._accumulated = ""
@@ -215,45 +223,40 @@ class GatewayStreamConsumer:
         # head chunks; records a reconcilable turn-final payload for splits.
         self._stream_ledger = ""
         self._message_id: Optional[str] = None
-        # time.monotonic() when ``_message_id`` was first assigned; fresh-final
-        # logic uses it to detect long-lived previews.
+        # monotonic() when ``_message_id`` was first assigned (fresh-final age).
         self._message_created_ts: Optional[float] = None
-        # Every real preview message id put on screen this response (first send
-        # + continuation messages).  Fresh-final deletes them all so a reply
-        # split at the edit limit leaves no stale fragments above the final.
-        self._preview_message_ids: "set[str]" = set()
-        # IDs from only the active text segment: failure recovery must never
+        # Every real preview id on screen this response (first send +
+        # continuations): fresh-final deletes them all so a reply split at the
+        # edit limit leaves no stale fragments above the final.  The segment
+        # set holds only the active text segment: failure recovery must never
         # delete an earlier finalized preamble/commentary message.
+        self._preview_message_ids: "set[str]" = set()
         self._segment_preview_message_ids: "set[str]" = set()
         self._already_sent = False
-        self._edit_supported = True  # Disabled when progressive edits are no longer usable
+        self._edit_supported = True  # False once progressive edits stop working
         self._last_edit_time = 0.0
-        self._last_sent_text = ""   # Track last-sent text to skip redundant edits
-        # True when the most recent _send_or_edit split across continuation
-        # messages (the adapter adopted a new message id).
+        self._last_sent_text = ""    # skip redundant edits
+        # Most recent _send_or_edit split across continuation messages (the
+        # adapter adopted a new message id).
         self._last_edit_overflowed = False
         self._fallback_final_send = False
         self._fallback_prefix = ""
-        # True when fallback sends only the missing tail after a partial
-        # overflow delivery: the visible prefix is content, not a stale preview.
+        # Fallback sends only the missing tail after a partial overflow
+        # delivery: the visible prefix is content, not a stale preview.
         self._fallback_preserve_partial_messages = False
-        # Telegram bounds edit retries at 5s; a final-delivery fallback must not
-        # hold the stream task through a longer flood cooldown.
-        self._max_fallback_flood_retry_seconds = 5.0
-        self._flood_strikes = 0         # Consecutive flood-control edit failures
-        self._current_edit_interval = self.cfg.edit_interval  # Adaptive backoff
+        self._flood_strikes = 0         # consecutive flood-control edit failures
+        self._current_edit_interval = self.cfg.edit_interval  # adaptive backoff
         self._final_response_sent = False
         # Final content reached the user even if the cosmetic final edit
         # (cursor removal) then failed.
         self._final_content_delivered = False
         # Exact cleaned payload of the turn-final delivery that set the flags
-        # above.  The gateway compares it against the completed final_response
-        # before trusting the flags (a successful finalize edit may carry only a
-        # stale preview snapshot).  ``None`` = no record → legacy trust.
+        # above; the gateway compares it to the completed final_response before
+        # trusting the flags (a successful finalize edit may carry only a stale
+        # preview snapshot).  ``None`` = no record → legacy trust.
         self._delivered_final_text: Optional[str] = None
         # Answer delivered across multiple sealed messages (overflow split /
-        # continuation adoption).  With a recorded payload, delivered_final_matches
-        # can still reconcile; payload-less split delivery must NOT inherit
+        # continuation adoption).  Payload-less split delivery must NOT inherit
         # legacy trust (it swallowed complete replies after partial splits).
         self._turn_split_delivery = False
         # A full-final send timed out in a way that MAY have reached the
@@ -261,61 +264,44 @@ class GatewayStreamConsumer:
         # re-sending risks a duplicate rather than recovering a loss.
         self._delivery_ambiguous = False
         self._delivered_commentary_texts: list[str] = []
-        # Finalized visible text of each segment, so has_delivered_text still
+        # Finalized visible text per segment, so has_delivered_text still
         # matches after _reset_segment_state clears _last_sent_text.
         self._delivered_segment_texts: list[str] = []
-        # Only platforms needing an explicit finalize call (e.g. DingTalk AI
-        # Cards) force a redundant final edit.  ``is True`` keeps MagicMock
-        # adapters in tests from enabling this path.
-        self._adapter_requires_finalize: bool = (
-            getattr(adapter, "REQUIRES_EDIT_FINALIZE", False) is True
-        )
-
-        # Returns False after /new or /stop; run() then abandons the stream
-        # instead of delivering stale deltas.
-        self._run_still_current = run_still_current or (lambda: True)
-
-        # Think-block filter state (mirrors CLI's _stream_delta tag suppression)
+        # Think-block filter state (mirrors CLI's _stream_delta tag suppression).
         self._in_think_block = False
         self._think_buffer = ""
+        self._before_finalize_notified = False
 
-        # Draft streaming: resolved at the start of run().  Animated frames go
-        # via adapter.send_draft instead of edits; the final answer still uses
-        # the normal first-send path (drafts have no message_id).
+        # Transports, resolved at the start of run().  Draft: animated frames
+        # via adapter.send_draft instead of edits; the final still uses the
+        # first-send path (drafts have no message_id); the first draft failure
+        # disables drafts for the response.  Native (WeCom msgtype "stream"):
+        # the ONLY delivery channel — seed, cumulative updates and finish=true
+        # all go through send_stream_frame(); any failure falls back to edit/send.
         self._use_draft_streaming = False
         self._draft_id: Optional[int] = None
-        # First draft failure permanently disables drafts for this response.
         self._draft_failures = 0
-        self._before_finalize_notified = False
-        # Native streaming (e.g. WeCom msgtype "stream"): the ONLY delivery
-        # channel for the turn — seed, cumulative updates, and finish=true all
-        # go through adapter.send_stream_frame().  Resolved at the start of
-        # run(); disabled on any failure so the consumer falls back to edit/send.
         self._use_native_streaming = False
-        # Seed frame sent (even though it has zero visible content); fallback
-        # logic uses it to decide whether the stream must be finalized first.
+        # Seed frame sent (zero visible content but the bubble is open); the
+        # fallback decides from this whether the stream must be finalized first.
         self._native_stream_opened = False
-        # Visible chars last pushed to the native stream; throttles frames
-        # under WeCom's 30 frames/min ceiling.
+        # Visible chars last pushed; throttles under WeCom's 30 frames/min.
         self._native_last_pushed_len = 0
-        # Boundary state, set by close_for_approval_prompt(); race-free because
-        # boundaries are processed serially.  ``_boundary_reopen``: keep native
-        # streaming enabled so post-prompt output re-opens a fresh stream via
-        # the lazy re-seed (clarify: short waits) instead of degrading to send()
+        # Boundary state from close_for_approval_prompt(); race-free because
+        # boundaries are processed serially.  ``_boundary_reopen`` keeps native
+        # enabled so post-prompt output re-opens a fresh stream via the lazy
+        # re-seed (clarify: short waits) instead of degrading to send()
         # (approval: unbounded waits, stream may go stale).
         self._boundary_placeholder = _DEFAULT_BOUNDARY_PLACEHOLDER
         self._boundary_reason = "Approval"
         self._boundary_reopen = False
-        # Boundary asked to reopen but nothing has re-seeded yet; keeps got_done
-        # from opening a stream just to emit a lone "✅" placeholder.
+        # Reopen requested but nothing re-seeded yet: got_done must not open a
+        # stream just to emit a lone "✅".  An EAGER re-seed (_REOPEN_SEED)
+        # already opened a fresh bubble before any content: got_done must
+        # actively finalize it or a blank typing bubble hangs forever.
         self._awaiting_reopen_after_boundary = False
-        # An EAGER re-seed (_REOPEN_SEED) already opened a fresh bubble before
-        # any content, so got_done must actively finalize it when the agent
-        # produces nothing — otherwise a blank typing bubble hangs forever.
         self._reopen_seeded_eagerly = False
-
-        # Tool-progress overlay (native streaming only): lines from
-        # on_tool_progress() shown in the bubble until real text arrives.
+        # Tool-progress overlay (native only): shown in the bubble until text arrives.
         self._tool_progress_lines: list[str] = []
         self._tool_progress_active: bool = False
 
@@ -538,12 +524,18 @@ class GatewayStreamConsumer:
         an earlier (cursor-suffixed) preview, and recording the accumulator
         would let that frozen preview suppress the corrective send.
         """
-        self._final_response_sent = True
-        self._final_content_delivered = True
+        self._mark_final_delivered()
         acked = self._last_sent_text or self._accumulated
         if self.cfg.cursor and acked.endswith(self.cfg.cursor):
             acked = acked[: -len(self.cfg.cursor)]
         self._record_turn_final_payload(acked)
+
+    def _mark_final_delivered(self, record: Optional[str] = None) -> None:
+        """Set both turn-final flags; ``record`` also records the delivered payload."""
+        self._final_response_sent = True
+        self._final_content_delivered = True
+        if record is not None:
+            self._record_turn_final_payload(record)
 
     def _record_turn_final_payload(self, text: str) -> None:
         """Record what the user actually saw as this turn's final answer.
@@ -765,49 +757,10 @@ class GatewayStreamConsumer:
         final send would then leave the user with nothing.
         """
         _reason = self._boundary_reason or "Approval"
-        delivery_failed = False
         try:
+            boundary_ok = True
             if self._native_stream_opened:
-                finalize_text = self._accumulated or self._boundary_placeholder
-                finalize_ok = False
-                try:
-                    result = await self._send_frame(finalize_text, finalize=True)
-                    finalize_ok = bool(result)
-                except Exception as e:
-                    logger.warning("%s boundary: finalize failed: %s", _reason, e)
-
-                if not finalize_ok:
-                    # Typing bubble may still show partial content; deliver
-                    # pre-prompt text via send() so the user at least sees it.
-                    logger.warning(
-                        "%s boundary: finalize not confirmed, "
-                        "falling back to send() for pre-prompt text (chat=%s)",
-                        _reason, self.chat_id,
-                    )
-                    fallback_ok = False
-                    try:
-                        send_result = await self.adapter.send(
-                            self.chat_id, finalize_text,
-                        )
-                        fallback_ok = getattr(send_result, "success", False)
-                    except Exception as send_err:
-                        logger.warning(
-                            "%s boundary: fallback send also failed: %s",
-                            _reason, send_err,
-                        )
-                    if not fallback_ok:
-                        logger.error(
-                            "%s boundary: both finalize and fallback send failed "
-                            "(chat=%s) — pre-prompt text may not have been delivered",
-                            _reason, self.chat_id,
-                        )
-                        delivery_failed = True
-                else:
-                    logger.debug(
-                        "%s boundary: finalized stream (chat=%s, turn=%s)",
-                        _reason, self.chat_id, self._turn_id,
-                    )
-
+                boundary_ok = await self._finalize_boundary_stream(_reason)
             if self._boundary_reopen:
                 # Clarify: keep native enabled; marking the stream closed makes
                 # the next post-prompt delta re-open a fresh one via the lazy
@@ -823,27 +776,56 @@ class GatewayStreamConsumer:
                     self.chat_id, self._turn_id,
                 )
             else:
-                # Approval: post-approval output goes via send().  buffer_only
-                # delivers it in one shot on got_done, avoiding mid-stream
-                # flushes that create multiple messages on non-editable platforms.
+                # Approval: post-approval output goes via one send() at got_done.
                 self._degrade_native_to_buffered_send()
                 self._reset_segment_state()
-
-            boundary_ok = not delivery_failed
-
         except Exception as e:
             logger.warning("%s boundary processing failed: %s", _reason, e)
             boundary_ok = False
         finally:
-            if boundary_future is not None:
-                try:
-                    if (
-                        isinstance(boundary_future, (asyncio.Future, concurrent.futures.Future))
-                        and not boundary_future.done()
-                    ):
+            if isinstance(boundary_future, (asyncio.Future, concurrent.futures.Future)):
+                with contextlib.suppress(Exception):
+                    if not boundary_future.done():
                         boundary_future.set_result(boundary_ok)
-                except Exception:
-                    pass
+
+    async def _finalize_boundary_stream(self, _reason: str) -> bool:
+        """Close the open native stream at a boundary; send() the pre-prompt text if that fails.
+
+        Returns False only when both finalize and the fallback send failed
+        (pre-prompt text may not have been delivered).
+        """
+        finalize_text = self._accumulated or self._boundary_placeholder
+        finalize_ok = False
+        try:
+            finalize_ok = bool(await self._send_frame(finalize_text, finalize=True))
+        except Exception as e:
+            logger.warning("%s boundary: finalize failed: %s", _reason, e)
+        if finalize_ok:
+            logger.debug(
+                "%s boundary: finalized stream (chat=%s, turn=%s)",
+                _reason, self.chat_id, self._turn_id,
+            )
+            return True
+        # Typing bubble may still show partial content; deliver pre-prompt
+        # text via send() so the user at least sees it.
+        logger.warning(
+            "%s boundary: finalize not confirmed, "
+            "falling back to send() for pre-prompt text (chat=%s)",
+            _reason, self.chat_id,
+        )
+        fallback_ok = False
+        try:
+            send_result = await self.adapter.send(self.chat_id, finalize_text)
+            fallback_ok = getattr(send_result, "success", False)
+        except Exception as send_err:
+            logger.warning("%s boundary: fallback send also failed: %s", _reason, send_err)
+        if not fallback_ok:
+            logger.error(
+                "%s boundary: both finalize and fallback send failed "
+                "(chat=%s) — pre-prompt text may not have been delivered",
+                _reason, self.chat_id,
+            )
+        return fallback_ok
 
     def on_delta(self, text: str) -> None:
         """Thread-safe callback — called from the agent's worker thread.
@@ -1437,8 +1419,7 @@ class GatewayStreamConsumer:
             if not tick.update_visible:
                 await self._finalize_edit(self._accumulated or "✅", record=False)
             else:
-                self._final_response_sent = True
-                self._final_content_delivered = True
+                self._mark_final_delivered()
         elif self._accumulated:
             await self._finalize_edit_path(tick)
 
@@ -1481,9 +1462,7 @@ class GatewayStreamConsumer:
         """finalize=True send_or_edit; on success mark the turn delivered (and record the payload)."""
         self._final_response_sent = await self._send_or_edit(text, finalize=True)
         if self._final_response_sent:
-            self._final_content_delivered = True
-            if record:
-                self._record_turn_final_payload(text)
+            self._mark_final_delivered(record=text if record else None)
         return self._final_response_sent
 
     def _cumulative_transport(self) -> bool:
@@ -1555,9 +1534,7 @@ class GatewayStreamConsumer:
             # Sets no delivery flags.
             await self._abandon_native_stream()
         if best_effort_ok and not self._final_response_sent:
-            self._final_response_sent = True
-            self._final_content_delivered = True
-            self._record_turn_final_payload(self._accumulated)
+            self._mark_final_delivered(record=self._accumulated)
 
     def _wake_flush_waiters(self) -> None:
         """Wake still-queued _FLUSH waiters so a consumer dying mid-flush
@@ -1745,10 +1722,8 @@ class GatewayStreamConsumer:
 
         self._message_id = last_message_id
         self._already_sent = True
-        self._final_response_sent = True
-        self._final_content_delivered = True
         # Recorder substitutes the unsplit ledger on a split turn.
-        self._record_turn_final_payload(final_text)
+        self._mark_final_delivered(record=final_text)
         self._last_sent_text = chunks[-1]
         self._fallback_prefix = ""
         self._fallback_preserve_partial_messages = False
@@ -1808,10 +1783,8 @@ class GatewayStreamConsumer:
             except Exception:
                 pass
         self._already_sent = True
-        self._final_response_sent = True
-        self._final_content_delivered = True
         # Recorder substitutes the full ledger on a split turn.
-        self._record_turn_final_payload(final_text)
+        self._mark_final_delivered(record=final_text)
         return None
 
     def _fallback_len_budget(self) -> "tuple[Callable[[str], int], int]":
@@ -1886,8 +1859,7 @@ class GatewayStreamConsumer:
         self._segment_preview_message_ids = set()
         self._message_id = new_message_id or "__no_edit__"
         self._already_sent = True
-        self._final_response_sent = True
-        self._final_content_delivered = True
+        self._mark_final_delivered()
         # Record VERBATIM, not via _record_turn_final_payload: the sealed
         # previews were just deleted, so the ledger (which still holds sealed
         # heads) would claim delivery for text this path removed.
@@ -2319,8 +2291,7 @@ class GatewayStreamConsumer:
             if finalize and self._use_native_streaming and self._native_stream_opened:
                 try:
                     if await self._send_frame("✅", finalize=True):
-                        self._final_response_sent = True
-                        self._final_content_delivered = True
+                        self._mark_final_delivered()
                 except Exception as e:
                     logger.debug("Finalize empty stream failed: %s", e)
             return True  # cursor-only / whitespace-only update
@@ -2403,10 +2374,8 @@ class GatewayStreamConsumer:
         # dispatch failure rolls the mark back below.  Residual window (cancel
         # between mark and wire write, sub-ms) is accepted.
         if finalize:
-            self._final_response_sent = True
-            self._final_content_delivered = True
             # Recorded so a stale/partial frame can't suppress the corrective send.
-            self._record_turn_final_payload(text)
+            self._mark_final_delivered(record=text)
         try:
             ok = await self._send_frame(text, finalize=finalize)
         except Exception as e:
@@ -2417,8 +2386,7 @@ class GatewayStreamConsumer:
             self._last_sent_text = text
             self._native_last_pushed_len = len(text)
             if finalize:
-                self._final_response_sent = True
-                self._final_content_delivered = True
+                self._mark_final_delivered()
             return True
 
         # Definitive failure: roll back the optimistic mark so the edit/send
