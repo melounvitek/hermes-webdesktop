@@ -1,24 +1,8 @@
-"""Automation Blueprints — parameterized automation blueprints with typed slots.
-
-A *blueprint* is a one-place definition of an automation that every surface
-renders natively:
-
-  * Dashboard / GUI app  -> a form (one field per slot)
-  * CLI / TUI / messenger -> a pre-filled ``/blueprint`` slash command
-  * Agent                 -> a seed prompt; it asks for any blank/ambiguous slot
-  * Docs catalog          -> a copy-paste command + a ``hermes://`` deep-link
-
-The single source of truth is the slot schema below. ``blueprint_form_schema``
-emits what a form renderer needs; ``blueprint_slash_command`` emits the flattened
-one-line command; ``fill_blueprint`` validates user-supplied values and turns a
-blueprint into a ``cron.jobs.create_job`` kwargs dict (so there is no second job
-engine). The form-where-there's-a-screen / agent-fills-where-there's-a-chat
-split both consume this same module.
-
-Design choice: users never type raw cron. A blueprint carries a fixed recurrence
-in ``schedule_template`` and parameterizes only the human-friendly parts
-(time-of-day, weekday set). Blueprints needing full flexibility expose a ``text``
-slot named ``schedule`` that passes through verbatim.
+"""Automation Blueprints — one slot-schema definition per automation that every surface renders
+natively: dashboard form (``blueprint_form_schema``), pre-filled ``/blueprint`` slash command
+(``blueprint_slash_command``), agent seed prompt, docs deep-link. ``fill_blueprint`` validates values
+into ``cron.jobs.create_job`` kwargs — there is no second job engine. Users never type raw cron:
+``schedule_template`` fixes the recurrence and only human-friendly parts (time, weekdays) are slots.
 """
 
 from __future__ import annotations
@@ -68,10 +52,9 @@ class BlueprintSlot:
     options: tuple = ()       # for type="enum": allowed values
     optional: bool = False
     help: str = ""
-    # When False, ``options`` are suggestions rather than a closed set —
-    # any value is accepted (e.g. the deliver slot, where the real set of
-    # valid platforms depends on the user's configured gateways and is
-    # validated downstream by the cron scheduler).
+    # When False, ``options`` are suggestions rather than a closed set — any value is accepted (e.g.
+    # the deliver slot, where the real set of valid platforms depends on the user's configured
+    # gateways and is validated downstream by the cron scheduler).
     strict: bool = True
 
     def __post_init__(self) -> None:
@@ -418,9 +401,8 @@ CATALOG: List[AutomationBlueprint] = [
         description="A periodic nudge during the day to drink water, stand up, "
         "and stretch.",
         category="general",
-        # NOTE: cron minute-field steps (*/90) wrap per hour — */90 and */120
-        # both degrade to hourly. Use an hour-field step instead so the chosen
-        # cadence is what actually fires.
+        # NOTE: cron minute-field steps (*/90) wrap per hour — */90 and */120 both degrade to
+        # hourly. Use an hour-field step instead so the chosen cadence is what actually fires.
         schedule_template="0 {start_hour}-{end_hour}/{interval_hours} * * 1-5",
         prompt_template=(
             "Send the user a brief, friendly nudge to drink some water, stand "
@@ -752,11 +734,10 @@ def fill_blueprint(
 ) -> Dict[str, Any]:
     """Validate ``values`` and return ``cron.jobs.create_job`` kwargs.
 
-    Missing required (non-optional) slots raise BlueprintFillError naming the
-    slot, so a form can show field errors and the agent knows what to ask.
-    Unknown slot names are rejected (a typo'd ``tiem=07:15`` must not silently
-    create a job with the default time). Enum values are checked against their
-    options. The result is passed straight to ``create_job`` — no second schema.
+    Missing required (non-optional) slots raise BlueprintFillError naming the slot, so a form can
+    show field errors and the agent knows what to ask. Unknown slot names are rejected (a typo'd
+    ``tiem=07:15`` must not silently create a job with the default time). Enum values are checked
+    against their options. The result is passed straight to ``create_job`` — no second schema.
     """
     known = {s.name for s in blueprint.slots}
     unknown = sorted(set(values) - known)

@@ -1,18 +1,12 @@
 """Curated catalog of starter cron-job suggestions.
 
-These are the built-in automations Hermes can offer a new user out of the box —
-the ``catalog`` source of the unified suggestion surface. Each entry is a
-ready-to-run ``cron.jobs.create_job`` spec wrapped as a suggestion; the user
-accepts via ``/suggestions``. Nothing here auto-schedules.
+These are the built-in automations Hermes can offer a new user out of the box — the ``catalog``
+source of the unified suggestion surface. Each entry is a ready-to-run ``cron.jobs.create_job`` spec
+wrapped as a suggestion; the user accepts via ``/suggestions``. Nothing here auto-schedules.
 
-The "important-mail monitor" entry is where the old proactive-monitor engine
-lives now: its ``classify_items.py`` (poll a source -> LLM-score urgency ->
-surface only above-threshold) is ONE catalog automation, not a standalone
-feature.
-
-Adding a catalog entry: append a CatalogEntry. Keep prompts self-contained
-(cron jobs run with no chat context) and schedules sensible. The ``job_spec``
-is passed verbatim to ``create_job`` on accept.
+The "important-mail monitor" entry (``classify_items.py``: poll -> LLM-score urgency -> surface
+above-threshold) is ONE catalog automation, not a standalone feature. New entries: append a
+CatalogEntry with a self-contained prompt (cron jobs run with no chat context).
 """
 
 from __future__ import annotations
@@ -128,11 +122,10 @@ def seed_catalog_suggestions(
 ) -> List[Dict[str, Any]]:
     """Register catalog entries as pending suggestions.
 
-    ``add_fn`` defaults to ``cron.suggestions.add_suggestion`` (injectable for
-    tests). ``keys`` restricts to specific catalog entries; omit to seed all.
-    Entries already dismissed/accepted (by dedup key) or beyond the pending cap
-    are skipped by the store, so re-seeding is safe and idempotent. Returns the
-    list of suggestion records actually created.
+    ``add_fn`` defaults to ``cron.suggestions.add_suggestion`` (injectable for tests). ``keys``
+    restricts to specific catalog entries; omit to seed all. Entries already dismissed/accepted (by
+    dedup key) or beyond the pending cap are skipped by the store, so re-seeding is safe and
+    idempotent. Returns the list of suggestion records actually created.
     """
     if add_fn is None:
         from cron.suggestions import add_suggestion as add_fn  # type: ignore[assignment]

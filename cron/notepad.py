@@ -1,24 +1,10 @@
-"""Per-job durable notepad for cron jobs.
+"""Per-job durable KV notepad (cursors, watermarks) carried across cron wake-ups; profile-local
+SQLite next to the executions ledger (same connection/pragma pattern as ``cron/executions.py``).
 
-A tiny KV scratchpad each cron job can use to carry state across scheduled
-wake-ups (cursors, watermarks, watchlists). Stored in its own profile-local
-SQLite file next to the executions ledger, following the same
-connection/pragma pattern as ``cron/executions.py``.
-
-Size caps (documented contract):
-
-- ``MAX_VALUE_BYTES`` (16 KB): per-key value cap, measured in UTF-8 bytes.
-- ``MAX_JOB_TOTAL_BYTES`` (64 KB): per-job cap over the sum of key+value
-  bytes. Oversized writes raise ``ValueError`` and leave the store
-  untouched — the notepad is prompt-injected each run, so unbounded growth
-  would bloat every wake-up's prompt.
-
-Write path is the CLI (``hermes cron notepad <job_id> set <key> <value>``),
-which the running agent invokes via its terminal tool; no model tool is
-added.
-
-Inspired by: Amp (Sourcegraph) cron notepad (idea-level, proprietary — zero
-code).
+Caps are a documented contract: ``MAX_VALUE_BYTES`` (16 KB per value, UTF-8) and
+``MAX_JOB_TOTAL_BYTES`` (64 KB per job, key+value). Oversized writes raise ``ValueError`` and leave
+the store untouched — the notepad is prompt-injected each run. Write path is the CLI
+(``hermes cron notepad <job_id> set ...``) via the terminal tool; no model tool is added.
 """
 
 from __future__ import annotations
@@ -32,10 +18,9 @@ from typing import Any, Dict, Iterator, List, Optional
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 
-# Optional test override. Production resolves the path at transaction time so
-# multiplexed profile ticks (set_hermes_home_override) cannot leak one
-# profile's notepad rows into the import-time home — and remove_job's
-# clear_notepad cannot wipe the wrong profile's DB (#86519). Same pattern as
+# Optional test override. Production resolves the path at transaction time so multiplexed profile
+# ticks (set_hermes_home_override) cannot leak one profile's notepad rows into the import-time home
+# — and remove_job's clear_notepad cannot wipe the wrong profile's DB. Same pattern as
 # cron/executions.py.
 NOTEPAD_FILE: Optional[Path] = None
 MAX_VALUE_BYTES = 16 * 1024
@@ -77,9 +62,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
 def _transaction() -> Iterator[sqlite3.Connection]:
     """Open a connection, commit/rollback on exit, always close.
 
-    Mirrors ``cron.executions._transaction``: schema init runs inside the
-    ``try`` so a PRAGMA/DDL failure still closes the connection instead of
-    leaking it.
+    Mirrors ``cron.executions._transaction``: schema init runs inside the ``try`` so a PRAGMA/DDL
+    failure still closes the connection instead of leaking it.
     """
     with _lock:
         conn = _connect()

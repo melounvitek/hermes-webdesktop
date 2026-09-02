@@ -70,15 +70,9 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def _transaction() -> Iterator[sqlite3.Connection]:
-    """Open a connection, commit/rollback on exit, always close.
-
-    ``sqlite3.Connection.__enter__``/``__exit__`` only commit or roll back
-    the transaction; it does not close the connection. Relying on that alone
-    leaks a connection (and its WAL/SHM file descriptors) on every call,
-    since closing then depends on the garbage collector. Schema init runs
-    inside the ``try`` too, so a PRAGMA/DDL failure after a successful
-    ``connect()`` still closes the connection instead of leaking it.
-    """
+    """Open a connection, commit/rollback on exit, always close. ``sqlite3.Connection``'s own
+    context manager does NOT close (leaks WAL/SHM fds until GC); schema init runs inside the ``try``
+    so a PRAGMA/DDL failure after ``connect()`` still closes."""
     with _lock:
         conn = _connect()
         try:

@@ -1,5 +1,4 @@
-"""
-Cron job scheduling system for Hermes Agent.
+"""Cron job scheduling system for Hermes Agent.
 
 This module provides scheduled task execution, allowing the agent to:
 - Run automated tasks on schedules (cron expressions, intervals, one-shot)
@@ -11,8 +10,8 @@ Cron jobs are executed automatically by the gateway daemon:
     sudo hermes gateway install --system  # Linux servers: boot-time system service
     hermes gateway            # Or run in foreground
 
-The gateway ticks the scheduler every 60 seconds. A file lock prevents
-duplicate execution if multiple processes overlap.
+The gateway ticks the scheduler every 60 seconds. A file lock prevents duplicate execution if
+multiple processes overlap.
 """
 
 from cron.jobs import (
