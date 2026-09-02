@@ -318,10 +318,7 @@ class SessionSearchMixin:
                     (high_water,),
                 ).fetchall()
                 if not upper_rows:
-                    conn.execute(f"DROP TABLE IF EXISTS {tbl}")
-                    _delete_meta(conn, marker_key)
-                    logger.info("Old FTS shadow table %s torn down.", tbl)
-                    return True
+                    return _drop(conn, marker_key)
                 upper = upper_rows[-1][0]
                 cur = conn.execute(f"DELETE FROM {tbl} WHERE {key} > ? AND {key} <= ?", (high_water, upper))
                 if cur.rowcount > 0:
@@ -332,9 +329,16 @@ class SessionSearchMixin:
                 f"(SELECT {key} FROM {tbl} LIMIT {self._FTS_REBUILD_CHUNK_ROWS})"
             )
             if cur.rowcount == 0:
-                conn.execute(f"DROP TABLE IF EXISTS {tbl}")
-                logger.info("Old FTS shadow table %s torn down.", tbl)
+                return _drop(conn)
             return True  # re-check: more trash tables / chunks may remain
+
+        def _drop(conn, marker_key: Optional[str] = None) -> bool:
+            """Drained — the DROP is cheap now. True: re-check for more trash."""
+            conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+            if marker_key is not None:
+                _delete_meta(conn, marker_key)
+            logger.info("Old FTS shadow table %s torn down.", tbl)
+            return True
 
         try:
             return bool(self._execute_write(_do))

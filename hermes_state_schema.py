@@ -366,7 +366,7 @@ class SessionSchemaMixin:
         ``_FTS_HOLDER_ESCALATE_SECONDS``, provably inactive orphan Desktop
         backends are reaped and the holders re-checked."""
         now = time.time()
-        record = None
+        record = {}
         try:
             row = cursor.execute(
                 "SELECT value FROM state_meta WHERE key = ? LIMIT 1", (FTS_REBUILD_DEFERRAL_KEY,),
@@ -376,13 +376,12 @@ class SessionSchemaMixin:
                 if isinstance(parsed, dict):
                     record = parsed
         except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
-            record = None
+            record = {}
         try:
-            first_seen = float((record or {}).get("first_seen", now))
-            attempts = int((record or {}).get("attempts", 0)) + 1
+            first_seen = float(record.get("first_seen", now))
+            attempts = int(record.get("attempts", 0)) + 1
         except (TypeError, ValueError):
-            first_seen = now
-            attempts = 1
+            first_seen, attempts = now, 1
         if first_seen > now or first_seen < 0:
             first_seen = now
         diagnostic = {
