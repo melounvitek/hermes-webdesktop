@@ -1,22 +1,16 @@
 """Provider-agnostic streaming TTS: sentence text → int16 PCM chunk iterator.
 
-The keystone of Hermes' conversational voice UX. `stream_tts_to_speaker`
-(``tools.tts_tool``) owns the sentence buffer, sounddevice output, and
-stop/queue protocol; this module owns the *provider* half — turning one
-sentence into audio the moment it's ready, so playback starts on sentence one
-instead of after the whole reply.
+``stream_tts_to_speaker`` (``tools.tts_tool``) owns the sentence buffer,
+sounddevice output and stop/queue protocol; this module owns the *provider*
+half — turning one sentence into audio the moment it's ready so playback starts
+on sentence one instead of after the whole reply.
 
-Two provider shapes, one contract (int16 mono PCM at ``sample_rate``):
-
-* **True streamers** (`StreamingTTSProvider.stream`) — chunked APIs
-  (ElevenLabs pcm_24000, OpenAI pcm, …) that yield audio as it synthesizes.
-  Lowest time-to-first-audio.
-* **Everyone else** — providers with no chunked API still get per-*sentence*
-  playback via the proven sync `text_to_speech_tool` path (handled by the
-  dispatcher, not here), so edge (the default) is conversational too.
-
-Adding a streamer is `@register("name")` on a `StreamingTTSProvider` subclass;
-the dispatcher, config gate (`tts.<name>.streaming`), and resolver come free.
+One contract (int16 mono PCM at ``sample_rate``): **true streamers**
+(`StreamingTTSProvider.stream`) wrap chunked APIs (ElevenLabs pcm_24000, OpenAI
+pcm, …); providers with no chunked API (edge, the default) still get per-
+*sentence* playback via the sync ``text_to_speech_tool`` path in the dispatcher.
+Adding a streamer is ``@register("name")`` on a subclass; the dispatcher, config
+gate (``tts.<name>.streaming``) and resolver come free.
 """
 
 from __future__ import annotations
@@ -32,19 +26,16 @@ from tools.tts_tool import _get_provider, _load_tts_config, get_env_value
 
 logger = logging.getLogger(__name__)
 
-# Upper bound on the PCM bytes accepted from one provider stream for one
-# sentence. Mirrors the 16 MiB bounded-upstream-body invariant of the sync
-# providers (``_read_tts_response_bytes`` in tools.tts_tool): a buggy or
-# hostile endpoint must not be able to feed us unbounded audio.
+# Per-sentence PCM byte cap, mirroring the 16 MiB bounded-body invariant of the
+# sync providers: a buggy or hostile endpoint must not feed unbounded audio.
 _STREAM_SENTENCE_BYTE_CAP = 16 * 1024 * 1024
 
 
 def _resolve_key(env_var: str, provider_id: str) -> str:
-    """Provider secret lookup: config > env/.env > credential pool.
+    """Provider secret lookup (config > env/.env > credential pool).
 
-    Thin, monkeypatchable seam over ``tools.tts_tool._resolve_provider_key``
-    (which delegates to ``resolve_provider_secret``). ALL streaming-provider
-    key lookups go through here — never bare ``get_env_value``.
+    Monkeypatchable seam over ``tools.tts_tool._resolve_provider_key``. ALL
+    streaming-provider key lookups go through here — never bare ``get_env_value``.
     """
     try:
         from tools.tts_tool import _resolve_provider_key
@@ -54,14 +45,17 @@ def _resolve_key(env_var: str, provider_id: str) -> str:
         return get_env_value(env_var) or ""
 
 
+def _gemini_key() -> str:
+    return _resolve_key("GEMINI_API_KEY", "gemini") or _resolve_key("GOOGLE_API_KEY", "gemini")
+
+
 # ---------------------------------------------------------------------------
 # Interruption latch — lets the model know it was cut off mid-speech
 # ---------------------------------------------------------------------------
-# When the user barges in on a spoken reply (talks over it, types, hits the
-# record key), the surface marks the latch; the next turn's submit path takes
-# it and prepends SPEECH_INTERRUPTED_NOTE to the model-bound message (API-call
-# local — never persisted, same as the CLI's model-switch notes). The TTL
-# keeps a stale barge from annotating an unrelated message minutes later.
+# When the user barges in on a spoken reply, the surface marks the latch; the
+# next turn's submit path takes it and prepends SPEECH_INTERRUPTED_NOTE to the
+# model-bound message (API-call local, never persisted). The TTL keeps a stale
+# barge from annotating an unrelated message minutes later.
 
 SPEECH_INTERRUPTED_NOTE = (
     "[Note: the user interrupted your previous spoken reply before it finished.]"
@@ -89,11 +83,10 @@ _THINK_BLOCK_RE = re.compile(r"<think[\s>].*?</think>", flags=re.DOTALL)
 class SentenceChunker:
     """Incremental sentence cutter for LLM token deltas.
 
-    Shared by the speaker pipeline (`stream_tts_to_speaker`) and the
-    speak-stream WebSocket so every surface cuts speech identically. Strips
-    ``<think>`` blocks (even split across deltas) and merges fragments shorter
-    than *min_len* into the following sentence, so "Ha!" rides along with the
-    sentence after it instead of stalling as a tiny clip.
+    Shared by the speaker pipeline and the speak-stream WebSocket so every
+    surface cuts speech identically. Strips ``<think>`` blocks (even split
+    across deltas) and merges fragments shorter than *min_len* into the
+    following sentence, so "Ha!" rides along instead of stalling as a tiny clip.
     """
 
     def __init__(self, min_len: int = 20):
@@ -173,9 +166,8 @@ def _try_instantiate(name: str, tts_config: Dict) -> Optional[StreamingTTSProvid
 
 
 # Fallback priority for ``tts.streaming.provider: auto`` — best chunked
-# latency/quality first. Deliberately hard-coded (a UX decision, not a
-# config knob); edge is absent because it has no chunked-PCM API — the
-# dispatcher's per-sentence sync path keeps it conversational instead.
+# latency/quality first. Deliberately hard-coded (a UX decision, not a config
+# knob); edge is absent because it has no chunked-PCM API.
 _PROVIDER_PRIORITY: List[str] = ["elevenlabs", "gemini", "openai", "xai"]
 
 
@@ -185,18 +177,13 @@ def resolve_streaming_provider(
 ) -> Optional[StreamingTTSProvider]:
     """Return a ready streamer for the *configured* provider, else ``None``.
 
-    Resolution order:
-
-    1. ``tts.streaming.provider`` (config knob) when set:
-       * a provider name pins that exact streamer (or ``None`` if unusable);
-       * ``auto`` walks the priority list (``elevenlabs → gemini → openai
-         → xai``) and returns the first usable streamer — an explicit
-         opt-in to "give me the best chunked voice available".
-    2. Otherwise the *configured* TTS provider (or ``preferred`` override).
-       ``None`` means "no chunked API for this provider" — the dispatcher
-       then speaks per-sentence via the sync path, preserving the user's
-       chosen voice. We never silently swap to a different provider just
-       to get streaming.
+    1. ``tts.streaming.provider`` when set: a name pins that exact streamer
+       (or ``None`` if unusable); ``auto`` walks ``_PROVIDER_PRIORITY`` and
+       returns the first usable one.
+    2. Otherwise the configured TTS provider (or ``preferred``). ``None`` means
+       "no chunked API" — the dispatcher speaks per-sentence via the sync path,
+       preserving the user's chosen voice. We never silently swap providers
+       just to get streaming.
     """
     streaming_cfg = tts_config.get("streaming") or {}
     pinned = str(streaming_cfg.get("provider") or "").lower().strip()
@@ -211,6 +198,18 @@ def resolve_streaming_provider(
 
     name = (preferred or _get_provider(tts_config)).lower().strip()
     return _try_instantiate(name, tts_config)
+
+
+def _capped(chunks: Iterator[bytes], label: str) -> Iterator[bytes]:
+    """Pass chunks through, aborting past the per-sentence byte cap (runaway/hostile upstream)."""
+    total = 0
+    for chunk in chunks:
+        total += len(chunk)
+        if total > _STREAM_SENTENCE_BYTE_CAP:
+            logger.warning("%s exceeded %d bytes for one sentence; truncating",
+                           label, _STREAM_SENTENCE_BYTE_CAP)
+            return
+        yield chunk
 
 
 # ---------------------------------------------------------------------------
@@ -293,40 +292,19 @@ class OpenAIStreamer(StreamingTTSProvider):
             yield from _capped(response.iter_bytes(), "OpenAI streaming TTS")
 
 
-def _capped(chunks: Iterator[bytes], label: str) -> Iterator[bytes]:
-    """Pass chunks through, aborting past the 16 MiB per-sentence cap.
-
-    The streaming mirror of ``_read_tts_response_bytes``'s bounded-body
-    invariant: one sentence of PCM should never approach the cap, so
-    exceeding it means a runaway/hostile upstream — stop pulling.
-    """
-    total = 0
-    for chunk in chunks:
-        total += len(chunk)
-        if total > _STREAM_SENTENCE_BYTE_CAP:
-            logger.warning("%s exceeded %d bytes for one sentence; truncating",
-                           label, _STREAM_SENTENCE_BYTE_CAP)
-            return
-        yield chunk
-
-
 @register("gemini")
 class GeminiStreamer(StreamingTTSProvider):
     """Gemini ``streamGenerateContent?alt=sse`` → base64 PCM chunks (24 kHz).
 
-    Salvaged from PR #47588 (@Cdddo) and rebased onto the post-campaign
-    infrastructure: credentials via the provider-secret resolver, requests
-    (not httpx) with a bounded streamed body, and main's provider ABC.
+    ``?alt=sse`` flips the response from one JSON blob to an SSE feed of
+    base64 PCM chunks. Uses requests with a bounded streamed body.
     """
 
     sample_rate = 24000
 
     @staticmethod
     def available() -> bool:
-        return bool(
-            _resolve_key("GEMINI_API_KEY", "gemini")
-            or _resolve_key("GOOGLE_API_KEY", "gemini")
-        )
+        return bool(_gemini_key())
 
     def stream(self, text: str) -> Iterator[bytes]:
         import base64
@@ -340,10 +318,7 @@ class GeminiStreamer(StreamingTTSProvider):
             DEFAULT_GEMINI_TTS_VOICE,
         )
 
-        api_key = (
-            _resolve_key("GEMINI_API_KEY", "gemini")
-            or _resolve_key("GOOGLE_API_KEY", "gemini")
-        )
+        api_key = _gemini_key()
         model = str(self.section.get("model", DEFAULT_GEMINI_TTS_MODEL)).strip() or DEFAULT_GEMINI_TTS_MODEL
         voice = str(self.section.get("voice", DEFAULT_GEMINI_TTS_VOICE)).strip() or DEFAULT_GEMINI_TTS_VOICE
         base_url = str(
@@ -363,8 +338,6 @@ class GeminiStreamer(StreamingTTSProvider):
                 },
             },
         }
-        # ``?alt=sse`` flips the response from a single JSON blob to an SSE
-        # feed of base64 PCM chunks — the whole point of this provider.
         url = f"{base_url}/models/{model}:streamGenerateContent"
 
         def _sse_chunks() -> Iterator[bytes]:
@@ -399,14 +372,11 @@ class GeminiStreamer(StreamingTTSProvider):
 
 @register("xai")
 class XAIStreamer(StreamingTTSProvider):
-    """xAI WebSocket TTS → binary PCM frames (24 kHz mono int16).
+    """xAI WebSocket TTS (``wss://api.x.ai/v1/tts``) → binary PCM frames (24 kHz mono int16).
 
-    Salvaged from PR #47588 (@Cdddo): xAI's chunked TTS API is
-    WebSocket-only (``wss://api.x.ai/v1/tts``). Credentials route through
-    ``resolve_xai_http_credentials`` (OAuth or XAI_API_KEY), same as the
-    sync ``_generate_xai_tts`` path. The async WS loop is bridged to the
-    sync iterator contract via ``_collect_async`` — the seam unit tests
-    monkeypatch.
+    Credentials route through ``resolve_xai_http_credentials`` (OAuth or
+    XAI_API_KEY), same as the sync path. The async WS loop is bridged to the
+    sync iterator contract via ``_collect_async`` — the seam unit tests patch.
     """
 
     sample_rate = 24000
