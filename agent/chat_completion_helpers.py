@@ -1495,6 +1495,16 @@ class _RequestClientRegistry:
             self.agent._close_request_openai_client(request_client, reason=reason)
 
 
+def _codex_silent_hang_hint(agent, api_kwargs: dict) -> Optional[str]:
+    hint_fn = getattr(agent, "_codex_silent_hang_hint", None)
+    if not callable(hint_fn):
+        return None
+    try:
+        return hint_fn(model=api_kwargs.get("model"))
+    except Exception:
+        return None
+
+
 def interruptible_api_call(agent, api_kwargs: dict):
     """
     Run the API call in a background thread so the main conversation loop
@@ -1798,13 +1808,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
             and _elapsed > _ttfb_timeout
             and getattr(agent, "_codex_stream_last_event_ts", None) is None
         ):
-            _silent_hint: Optional[str] = None
-            _hint_fn = getattr(agent, "_codex_silent_hang_hint", None)
-            if callable(_hint_fn):
-                try:
-                    _silent_hint = _hint_fn(model=api_kwargs.get("model"))
-                except Exception:
-                    _silent_hint = None
+            _silent_hint = _codex_silent_hang_hint(agent, api_kwargs)
             logger.warning(
                 "Codex stream produced no bytes within TTFB cutoff "
                 "(%.0fs > %.0fs, model=%s). Backend accepted the connection "
@@ -1894,13 +1898,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
         # Stale-call detector: kill the connection if no response
         # arrives within the configured timeout.
         if _elapsed > _stale_timeout:
-            _silent_hint: Optional[str] = None
-            _hint_fn = getattr(agent, "_codex_silent_hang_hint", None)
-            if callable(_hint_fn):
-                try:
-                    _silent_hint = _hint_fn(model=api_kwargs.get("model"))
-                except Exception:
-                    _silent_hint = None
+            _silent_hint = _codex_silent_hang_hint(agent, api_kwargs)
             _report_stale_nonstream_kill(
                 agent, api_kwargs, _elapsed, _stale_timeout, hint=_silent_hint
             )
@@ -3575,6 +3573,35 @@ def _build_partial_stream_stub(
     )
 
 
+# SSE error events from proxies (e.g. OpenRouter's
+# {"error":{"message":"Network connection lost."}}) are raised as APIError by
+# the OpenAI SDK. They are semantically identical to httpx connection drops —
+# the upstream stream died — and are retried with a fresh connection.
+# Distinguished from HTTP errors by the missing status_code (APIStatusError
+# for 4xx/5xx always carries one).
+_SSE_CONN_PHRASES = (
+    "connection lost",
+    "connection reset",
+    "connection closed",
+    "connection terminated",
+    "network error",
+    "network connection",
+    "terminated",
+    "peer closed",
+    "broken pipe",
+    "upstream connect error",
+)
+
+
+def _is_sse_connection_error(exc: BaseException) -> bool:
+    from openai import APIError as _APIError
+
+    if not isinstance(exc, _APIError) or getattr(exc, "status_code", None):
+        return False
+    err_lower = str(exc).lower()
+    return any(phrase in err_lower for phrase in _SSE_CONN_PHRASES)
+
+
 def _stream_final_text(response) -> str:
     try:
         choices = getattr(response, "choices", None)
@@ -5024,27 +5051,9 @@ class _StreamingCall:
                         _partial_tool_in_flight = bool(
                             self.result.get("partial_tool_names")
                         ) or self.provider_tool_in_flight["yes"]
-                        _is_sse_conn_err_preview = False
-                        if not _is_timeout and not _is_conn_err:
-                            from openai import APIError as _APIError
-                            if isinstance(e, _APIError) and not getattr(e, "status_code", None):
-                                _err_lower_preview = str(e).lower()
-                                _SSE_PREVIEW_PHRASES = (
-                                    "connection lost",
-                                    "connection reset",
-                                    "connection closed",
-                                    "connection terminated",
-                                    "network error",
-                                    "network connection",
-                                    "terminated",
-                                    "peer closed",
-                                    "broken pipe",
-                                    "upstream connect error",
-                                )
-                                _is_sse_conn_err_preview = any(
-                                    phrase in _err_lower_preview
-                                    for phrase in _SSE_PREVIEW_PHRASES
-                                )
+                        _is_sse_conn_err_preview = (
+                            not _is_timeout and not _is_conn_err and _is_sse_connection_error(e)
+                        )
                         _is_transient = (
                             _is_timeout
                             or _is_conn_err
@@ -5114,35 +5123,9 @@ class _StreamingCall:
                         # _ensure_primary_openai_client on the next attempt.
                         continue
 
-                    # SSE error events from proxies (e.g. OpenRouter sends
-                    # {"error":{"message":"Network connection lost."}}) are
-                    # raised as APIError by the OpenAI SDK.  These are
-                    # semantically identical to httpx connection drops —
-                    # the upstream stream died — and should be retried with
-                    # a fresh connection.  Distinguish from HTTP errors:
-                    # APIError from SSE has no status_code, while
-                    # APIStatusError (4xx/5xx) always has one.
-                    _is_sse_conn_err = False
-                    if not _is_timeout and not _is_conn_err:
-                        from openai import APIError as _APIError
-                        if isinstance(e, _APIError) and not getattr(e, "status_code", None):
-                            _err_lower_sse = str(e).lower()
-                            _SSE_CONN_PHRASES = (
-                                "connection lost",
-                                "connection reset",
-                                "connection closed",
-                                "connection terminated",
-                                "network error",
-                                "network connection",
-                                "terminated",
-                                "peer closed",
-                                "broken pipe",
-                                "upstream connect error",
-                            )
-                            _is_sse_conn_err = any(
-                                phrase in _err_lower_sse
-                                for phrase in _SSE_CONN_PHRASES
-                            )
+                    _is_sse_conn_err = (
+                        not _is_timeout and not _is_conn_err and _is_sse_connection_error(e)
+                    )
 
                     if (
                         _is_timeout
