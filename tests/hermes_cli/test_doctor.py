@@ -47,7 +47,9 @@ class TestDoctorPlatformHints:
         assert "hermes update" not in hint
 
     def test_sqlite_upgrade_hint_preserves_nix_guidance_as_prose(self):
-        guidance = doctor.recommended_update_command_for_method("nix")
+        from hermes_cli.config import recommended_update_command_for_method
+
+        guidance = recommended_update_command_for_method("nix")
         hint = doctor._sqlite_upgrade_hint("nix")
 
         assert guidance in hint
