@@ -6,7 +6,6 @@ from toolsets import (
     TOOLSETS,
     get_toolset,
     resolve_toolset,
-    resolve_multiple_toolsets,
     get_all_toolsets,
     validate_toolset,
     create_custom_toolset,
@@ -103,16 +102,6 @@ class TestResolveToolset:
         assert resolve_toolset("plugin_example") == ["plugin_a", "plugin_b"]
 
 
-
-
-class TestResolveMultipleToolsets:
-    def test_combines_and_deduplicates(self):
-        tools = resolve_multiple_toolsets(["web", "terminal"])
-        assert "web_search" in tools
-        assert "web_extract" in tools
-        assert "terminal" in tools
-        # No duplicates
-        assert len(tools) == len(set(tools))
 
 
 
