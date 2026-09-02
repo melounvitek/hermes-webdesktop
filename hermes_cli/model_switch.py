@@ -46,44 +46,13 @@ from agent.models_dev import (
     list_provider_models,
 )
 from utils import base_url_hostname, base_url_origin
-from hermes_cli.model_switch_providers import (  # noqa: F401  (re-exported; tests patch hermes_cli.model_switch.<name>)
-    _MODEL_DISCOVERY_ERRORS,
+from hermes_cli.model_switch_providers import (  # noqa: F401  (re-exported; callers/tests patch hermes_cli.model_switch.<name>)
     _NativePickerModelList,
-    _PARALLEL_PREFETCH_WORKERS,
-    _PickerBuild,
-    _UNCAPPED_PICKER_PROVIDERS,
-    _auth_store_has_provider,
-    _aws_live_or_curated_ids,
-    _build_curated_lists,
-    _cap_models,
     _collect_authed_provider_slugs,
-    _credential_identity,
     _credential_pool_is_usable,
-    _discover_endpoint_models,
-    _discover_flag,
-    _display_prefix,
-    _entry_api_mode,
-    _entry_base_url,
     _fetch_picker_live_models,
-    _has_aws_sdk_creds_for_listing,
-    _has_fast_aws_sdk_signal,
-    _is_aws_sdk,
-    _iter_builtin_candidates,
-    _lap_bare_custom_row,
-    _lap_builtin_rows,
-    _lap_canonical_rows,
-    _lap_custom_provider_rows,
-    _lap_overlay_rows,
-    _lap_user_provider_rows,
-    _live_or_curated_ids,
-    _norm_url,
-    _nous_picker_model_ids,
-    _overlay_has_env_creds,
     _picker_prewarm_done,
-    _pool_usable,
     _prefetch_provider_models_parallel,
-    _prepend_moa_picker_provider,
-    _raw_pool_usable,
     _save_discovered_models_to_config,
     list_authenticated_providers,
     list_picker_providers,
@@ -120,32 +89,21 @@ def _declared_model_ids(value: Any) -> list[str]:
 
     if isinstance(value, str):
         _add(value)
-        return ids
-
-    if isinstance(value, dict):
+    elif isinstance(value, dict):
+        # Backward compat: pre-fix Hermes wrote sentinel keys inside the
+        # user-facing ``models`` mapping. Never list them as model IDs.
         for model_id in value:
-            # Backward compat: pre-fix Hermes wrote sentinel keys inside the
-            # user-facing ``models`` mapping. Never list them as model IDs.
-            if model_id in {
-                "__explicit_model_allowlist__",
-                "__discovered_model_catalog__",
-            }:
-                continue
-            _add(model_id)
-        return ids
-
-    if isinstance(value, (list, tuple)):
+            if model_id not in ("__explicit_model_allowlist__", "__discovered_model_catalog__"):
+                _add(model_id)
+    elif isinstance(value, (list, tuple)):
         for item in value:
-            if isinstance(item, str):
-                _add(item)
-                continue
             if isinstance(item, dict):
                 model_id = item.get("id")
                 if not isinstance(model_id, str) or not model_id.strip():
                     model_id = item.get("name")
                 _add(model_id)
-        return ids
-
+            else:
+                _add(item)  # non-str items are dropped by _add
     return ids
 
 
@@ -160,12 +118,9 @@ def _entry_models_discovered(entry: Any) -> bool:
     """
     if not isinstance(entry, dict):
         return False
-    if entry.get("models_discovered") is True:
-        return True
     models = entry.get("models")
-    return (
-        isinstance(models, dict)
-        and models.get("__discovered_model_catalog__") is True
+    return entry.get("models_discovered") is True or (
+        isinstance(models, dict) and models.get("__discovered_model_catalog__") is True
     )
 
 
@@ -188,15 +143,11 @@ def _models_config_is_allowlist(value: Any, discovered: bool = False) -> bool:
     """
     if discovered:
         return False
-    if value is None:
-        return False
     if isinstance(value, str):
         return bool(value.strip())
-    if isinstance(value, dict):
-        return False
     if isinstance(value, (list, tuple)):
         return bool(_declared_model_ids(value))
-    return False
+    return False  # None, dict (per-model metadata), or anything else
 
 
 def _bare_custom_provider_def(current_base_url: str) -> Optional[ProviderDef]:
@@ -277,12 +228,9 @@ def format_model_for_display(model_name: str) -> str:
     wire-side operation — the proxy expects the full opaque ID, and
     callers that compare or persist must keep the original.
     """
-    if not model_name:
-        return model_name
     for prefix in _OPAQUE_MODEL_PREFIXES:
-        if model_name.startswith(prefix):
-            tail = model_name[len(prefix):]
-            return tail if tail else model_name
+        if model_name and model_name.startswith(prefix):
+            return model_name[len(prefix):] or model_name
     return model_name
 
 
@@ -294,16 +242,12 @@ def is_nous_hermes_non_agentic(model_name: str) -> bool:
     Callers in :mod:`cli.py` and here should go through this single helper
     so the two sites don't drift.
     """
-    if not model_name:
-        return False
-    return bool(_NOUS_HERMES_NON_AGENTIC_RE.search(model_name))
+    return bool(model_name and _NOUS_HERMES_NON_AGENTIC_RE.search(model_name))
 
 
 def _check_hermes_model_warning(model_name: str) -> str:
     """Return a warning string if *model_name* is a Nous Hermes 3/4 chat model."""
-    if is_nous_hermes_non_agentic(model_name):
-        return _HERMES_MODEL_WARNING
-    return ""
+    return _HERMES_MODEL_WARNING if is_nous_hermes_non_agentic(model_name) else ""
 
 
 # ---------------------------------------------------------------------------
@@ -318,53 +262,26 @@ class ModelIdentity(NamedTuple):
 
 
 MODEL_ALIASES: dict[str, ModelIdentity] = {
-    # Anthropic
     "sonnet":    ModelIdentity("anthropic", "claude-sonnet"),
     "opus":      ModelIdentity("anthropic", "claude-opus"),
     "haiku":     ModelIdentity("anthropic", "claude-haiku"),
     "claude":    ModelIdentity("anthropic", "claude"),
-
-    # OpenAI
     "gpt5":      ModelIdentity("openai", "gpt-5"),
     "gpt":       ModelIdentity("openai", "gpt"),
     "codex":     ModelIdentity("openai", "codex"),
     "o3":        ModelIdentity("openai", "o3"),
     "o4":        ModelIdentity("openai", "o4"),
-
-    # Google
     "gemini":    ModelIdentity("google", "gemini"),
-
-    # DeepSeek
     "deepseek":  ModelIdentity("deepseek", "deepseek-chat"),
-
-    # X.AI
     "grok":      ModelIdentity("x-ai", "grok"),
-
-    # Meta
     "llama":     ModelIdentity("meta-llama", "llama"),
-
-    # Qwen / Alibaba
     "qwen":      ModelIdentity("qwen", "qwen"),
-
-    # MiniMax
     "minimax":   ModelIdentity("minimax", "minimax"),
-
-    # Nvidia
     "nemotron":  ModelIdentity("nvidia", "nemotron"),
-
-    # Moonshot / Kimi
     "kimi":      ModelIdentity("moonshotai", "kimi"),
-
-    # Z.AI / GLM
     "glm":       ModelIdentity("z-ai", "glm"),
-
-    # Step Plan (StepFun)
     "step":      ModelIdentity("stepfun", "step"),
-
-    # Xiaomi
     "mimo":      ModelIdentity("xiaomi", "mimo"),
-
-    # Arcee
     "trinity":   ModelIdentity("arcee-ai", "trinity"),
 }
 
@@ -439,60 +356,43 @@ def _load_direct_aliases() -> dict[str, DirectAlias]:
         from hermes_cli.config import load_config
         cfg = load_config()
 
-        # --- model_aliases (dict-based format) ---
+        # model_aliases: dict entries carry their own credential fields.
         user_aliases = cfg.get("model_aliases")
         if isinstance(user_aliases, dict):
             for name, entry in user_aliases.items():
-                if not isinstance(entry, dict):
-                    continue
-                model = entry.get("model", "")
-                provider = entry.get("provider", "custom")
-                base_url = entry.get("base_url", "")
-                if model:
+                if isinstance(entry, dict) and entry.get("model", ""):
                     merged[name.strip().lower()] = DirectAlias(
-                        model=model, provider=provider, base_url=base_url,
+                        model=entry.get("model", ""), provider=entry.get("provider", "custom"),
+                        base_url=entry.get("base_url", ""),
                         api_key=str(entry.get("api_key", "") or "").strip(),
                         key_env=str(entry.get("key_env", "") or "").strip(),
                     )
 
-        # --- model.aliases (from config set / hand-written config) ---
+        # model.aliases (config set / hand-written): never override model_aliases entries.
         model_section = cfg.get("model", {})
-        if isinstance(model_section, dict):
-            simple_aliases = model_section.get("aliases")
-            if isinstance(simple_aliases, dict):
-                current_provider = model_section.get("provider", "")
-                for name, value in simple_aliases.items():
-                    key = name.strip().lower()
-                    if not key or key in merged:
-                        continue  # don't override explicit model_aliases entries
-                    if isinstance(value, dict):
-                        # Dict form mirrors the ``model_aliases:`` shape:
-                        # localqwen: {model: qwen3.5:4b, provider: custom}.
-                        # Hand-written configs already use it; honoring it
-                        # here keeps aliases with an explicit provider from
-                        # being silently dropped (#87189).
-                        model = str(value.get("model") or "").strip()
-                        if not model:
-                            continue
+        simple_aliases = model_section.get("aliases") if isinstance(model_section, dict) else None
+        if isinstance(simple_aliases, dict):
+            current_provider = model_section.get("provider", "")
+            for name, value in simple_aliases.items():
+                key = name.strip().lower()
+                if not key or key in merged:
+                    continue
+                if isinstance(value, dict):
+                    # Dict form mirrors ``model_aliases:`` (localqwen: {model:
+                    # qwen3.5:4b, provider: custom}); honoring it keeps aliases
+                    # with an explicit provider from being silently dropped.
+                    model = str(value.get("model") or "").strip()
+                    if model:
                         provider = str(value.get("provider") or "").strip()
                         merged[key] = DirectAlias(
-                            model=model,
-                            provider=provider or current_provider or "custom",
+                            model=model, provider=provider or current_provider or "custom",
                             base_url=str(value.get("base_url") or "").strip(),
                         )
-                        continue
-                    if not isinstance(value, str) or not value.strip():
-                        continue
+                elif isinstance(value, str) and value.strip():
                     val = value.strip()
-                    if "/" in val:
-                        provider, model = val.split("/", 1)
-                    else:
-                        provider = current_provider
-                        model = val
+                    provider, model = val.split("/", 1) if "/" in val else (current_provider, val)
                     merged[key] = DirectAlias(
-                        model=model.strip(),
-                        provider=provider.strip() or current_provider,
-                        base_url="",
+                        model=model.strip(), provider=provider.strip() or current_provider, base_url="",
                     )
     except Exception:
         pass
@@ -526,14 +426,16 @@ def _direct_alias_source_identity() -> Optional[tuple]:
         from hermes_constants import get_config_path
 
         path = get_config_path()
-        try:
-            stat = path.stat()
-        except OSError:
-            # A missing config is still a definite identity for this profile.
-            return (str(path), None, None)
-        return (str(path), stat.st_mtime_ns, stat.st_size)
     except Exception:
         return None
+    try:
+        stat = path.stat()
+    except OSError:
+        # A missing config is still a definite identity for this profile.
+        return (str(path), None, None)
+    except Exception:
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size)
 
 
 def _ensure_direct_aliases() -> None:
@@ -598,10 +500,7 @@ def direct_alias_runtime_request(alias: DirectAlias) -> tuple[str, Optional[str]
     An alias with no base_url keeps its label: there is no foreign host to
     protect against, and the label is the only routing information there is.
     """
-    key = direct_alias_api_key(alias) or None
-    if alias.base_url:
-        return "custom", key
-    return (alias.provider or "custom"), key
+    return ("custom" if alias.base_url else (alias.provider or "custom")), direct_alias_api_key(alias) or None
 
 
 # Hosts where plaintext HTTP is not a downgrade — a local server has no
@@ -670,23 +569,15 @@ def resolve_startup_model_route(
         if explicit_provider:
             # An explicit --provider wins over the alias's own label; the
             # alias contributes model/base_url only.
-            return StartupModelRoute(
-                model=direct.model,
-                provider=explicit_provider,
-                base_url=direct.base_url,
-            )
+            return StartupModelRoute(model=direct.model, provider=explicit_provider, base_url=direct.base_url)
         # Resolve through the SAME owner the interactive /model and oneshot
         # paths use: a URL-bearing alias must resolve its credential for the
-        # alias HOST, never for its provider label — a label like
-        # ``anthropic`` on a foreign URL would otherwise reach that
-        # provider's explicit-runtime branch and put the live vendor token
-        # on the foreign wire (#28660).
+        # alias HOST, never for its provider label — a label like ``anthropic``
+        # on a foreign URL would otherwise reach that provider's explicit-runtime
+        # branch and put the live vendor token on the foreign wire (#28660).
         alias_provider, alias_key = direct_alias_runtime_request(direct)
         return StartupModelRoute(
-            model=direct.model,
-            provider=alias_provider,
-            base_url=direct.base_url,
-            api_key=alias_key or "",
+            model=direct.model, provider=alias_provider, base_url=direct.base_url, api_key=alias_key or "",
         )
 
     if explicit_provider or "/" not in raw:
@@ -700,12 +591,9 @@ def resolve_startup_model_route(
     # ``anthropic/claude-opus-4.6`` silently rerouted to native Anthropic.
     if current_provider:
         try:
-            from hermes_cli.providers import (
-                is_routing_aggregator as _is_routing_agg,
-                normalize_provider as _norm_prov,
-            )
+            from hermes_cli.providers import is_routing_aggregator, normalize_provider as _norm_prov
 
-            if _is_routing_agg(_norm_prov(current_provider)):
+            if is_routing_aggregator(_norm_prov(current_provider)):
                 from hermes_cli.models import _find_openrouter_slug
 
                 if _find_openrouter_slug(raw):
@@ -713,11 +601,7 @@ def resolve_startup_model_route(
         except Exception:
             pass
 
-    configured = {
-        str(name).strip().lower()
-        for name in (user_providers or {})
-        if str(name).strip()
-    }
+    configured = {str(name).strip().lower() for name in (user_providers or {}) if str(name).strip()}
     configured.update(
         f"custom:{entry.get('name', '').strip().lower()}"
         for entry in (custom_providers or [])
@@ -736,10 +620,7 @@ def resolve_startup_model_route(
         provider = canonical
     else:
         return None
-
-    if is_aggregator(canonical):
-        return None
-    return StartupModelRoute(model=model, provider=provider)
+    return None if is_aggregator(canonical) else StartupModelRoute(model=model, provider=provider)
 
 
 # ---------------------------------------------------------------------------
@@ -778,9 +659,13 @@ class ModelFlagParseResult:
     force_refresh: bool = False
     is_session: bool = False
     is_once: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Flag parsing
 # ---------------------------------------------------------------------------
+
+_BOOL_FLAGS = {"--global": "is_global", "--session": "is_session", "--refresh": "force_refresh", "--once": "is_once"}
 
 
 def parse_model_flags_detailed(raw_args: str) -> ModelFlagParseResult:
@@ -806,51 +691,28 @@ def parse_model_flags_detailed(raw_args: str) -> ModelFlagParseResult:
         "--refresh"                      -> ("", "", False, True, False)
         "sonnet --provider anthropic --global" -> ("sonnet", "anthropic", True, False, False)
     """
-    is_global = False
-    explicit_provider = ""
-    force_refresh = False
-    is_session = False
-    is_once = False
-
-    # Normalize Unicode dashes (Telegram/iOS auto-converts -- to em/en dash)
-    # A single Unicode dash before a flag keyword becomes "--"
-    import re as _re
-    raw_args = _re.sub(r'[\u2012\u2013\u2014\u2015](provider|global|session|refresh|once)', r'--\1', raw_args)
+    # Normalize Unicode dashes (Telegram/iOS auto-converts -- to em/en dash):
+    # a single Unicode dash before a flag keyword becomes "--".
+    raw_args = re.sub(r'[\u2012\u2013\u2014\u2015](provider|global|session|refresh|once)', r'--\1', raw_args)
 
     # Keep this hand-rolled because model IDs may contain colons/slashes and
     # the historical parser did not require shell quoting.
+    flags = dict.fromkeys(_BOOL_FLAGS.values(), False)
+    explicit_provider = ""
     parts = raw_args.split()
     i = 0
     filtered: list[str] = []
     while i < len(parts):
-        if parts[i] == "--global":
-            is_global = True
-            i += 1
-        elif parts[i] == "--session":
-            is_session = True
-            i += 1
-        elif parts[i] == "--refresh":
-            force_refresh = True
-            i += 1
-        elif parts[i] == "--once":
-            is_once = True
-            i += 1
+        if parts[i] in _BOOL_FLAGS:
+            flags[_BOOL_FLAGS[parts[i]]] = True
         elif parts[i] == "--provider" and i + 1 < len(parts):
             explicit_provider = parts[i + 1]
-            i += 2
+            i += 1
         else:
             filtered.append(parts[i])
-            i += 1
+        i += 1
 
-    model_input = " ".join(filtered).strip()
-    return ModelFlagParseResult(
-        model_input=model_input,
-        explicit_provider=explicit_provider,
-        is_global=is_global,
-        force_refresh=force_refresh,
-        is_session=is_session,
-        is_once=is_once,
-    )
+    return ModelFlagParseResult(model_input=" ".join(filtered).strip(), explicit_provider=explicit_provider, **flags)
 
 
 def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool, bool]:
@@ -859,14 +721,8 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool, bool]:
     New call sites that care about ``--once`` should use
     :func:`parse_model_flags_detailed`.
     """
-    parsed = parse_model_flags_detailed(raw_args)
-    return (
-        parsed.model_input,
-        parsed.explicit_provider,
-        parsed.is_global,
-        parsed.force_refresh,
-        parsed.is_session,
-    )
+    p = parse_model_flags_detailed(raw_args)
+    return (p.model_input, p.explicit_provider, p.is_global, p.force_refresh, p.is_session)
 
 
 def resolve_persist_behavior(
@@ -903,9 +759,7 @@ def resolve_persist_behavior(
     flat string rather than a dict, in which case the built-in default
     (``False``) applies.
     """
-    if is_once:
-        return False
-    if is_session:
+    if is_once or is_session:
         return False
     if is_global:
         return True
@@ -1022,15 +876,9 @@ def parse_model_switch_args(raw: str) -> ModelSwitchRequest:
         errors.append(MODEL_SWITCH_ERR_ONCE_WITH_GLOBAL)
     if parsed.is_once and not parsed.model_input and not parsed.explicit_provider:
         errors.append(MODEL_SWITCH_ERR_ONCE_REQUIRES_TARGET)
-
-    if parsed.is_once:
-        scope = "once"
-    elif parsed.is_session:
-        scope = "session"
-    elif parsed.is_global:
-        scope = "global"
-    else:
-        scope = "default"
+    # First matching flag wins: once > session > global > default.
+    scope = next((name for name, on in (("once", parsed.is_once), ("session", parsed.is_session),
+                                        ("global", parsed.is_global)) if on), "default")
 
     return ModelSwitchRequest(
         raw=raw,
@@ -1047,16 +895,12 @@ def parse_model_switch_args(raw: str) -> ModelSwitchRequest:
 
 def _effective_model_candidate(value: Any) -> str:
     """Extract a model-name candidate from a str / dict / attr-object."""
-    if value is None:
-        return ""
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, dict):
         return str(value.get("model") or "").strip()
-    model_attr = getattr(value, "model", None)
-    if model_attr is not None:
-        return str(model_attr or "").strip()
-    return ""
+    model_attr = getattr(value, "model", None)  # None value -> getattr default -> ""
+    return str(model_attr or "").strip() if model_attr is not None else ""
 
 
 def resolve_effective_model(
@@ -1161,38 +1005,24 @@ def _model_sort_key(model_id: str, prefix: str) -> tuple:
     if state == "in_version":
         _flush()
 
-    suffix = suffix_buf.lower().strip("-_.")
-    suffix = suffix.strip()
+    suffix = suffix_buf.lower().strip("-_.").strip()
 
-    # Split out YYYYMMDD date stamps (e.g. claude-opus-4-20250514): they are
-    # snapshot markers, not version components, and would otherwise dwarf
-    # real point versions (20250514 > 8).  Kept as a trailing tiebreaker so
-    # bare IDs sort before their dated snapshots, and newer snapshots before
-    # older ones.  The 19_000_101 threshold reclassifies only 8-digit stamps,
-    # so shorter numeric components (mistral-large-2411, gpt-4-0613) keep
-    # their current behavior.
-    version_nums: list[float] = []
-    date_stamp = 0.0
-    for n in nums:
-        if n >= 19_000_101:
-            date_stamp = max(date_stamp, n)
-        else:
-            version_nums.append(n)
-
-    # Negate versions so higher → sorts first
-    version_key = tuple(-n for n in version_nums)
+    # YYYYMMDD date stamps (claude-opus-4-20250514) are snapshot markers, not
+    # version components, and would dwarf real point versions (20250514 > 8);
+    # keep them as a trailing tiebreaker so bare IDs sort before their dated
+    # snapshots and newer snapshots before older. The 19_000_101 threshold
+    # reclassifies only 8-digit stamps (mistral-large-2411, gpt-4-0613 keep
+    # sorting as versions).
+    version_key = tuple(-n for n in nums if n < 19_000_101)  # negate: higher sorts first
+    date_stamp = max((n for n in nums if n >= 19_000_101), default=0.0)
     date_key = (0.0, 0.0) if date_stamp == 0.0 else (1.0, -date_stamp)
 
-    # Suffix quality ranking: pro/max > (no suffix) > omni/flash/mini/lite
-    # Lower number = preferred
+    # Suffix quality: pro/max/plus/turbo (0) > no suffix / omni / flash / mini (1).
     # "sol" is the flagship tier of the GPT-5.6 series (sol > terra > luna);
-    # without it, alias resolution would tiebreak alphabetically and pick
-    # luna (the cheapest) for `/model gpt`. Unlike pro/max/plus/turbo it is a
-    # series codename, not a generic quality word — revisit if another vendor
-    # ever ships a "-sol" suffix that isn't a flagship.
-    _SUFFIX_RANK = {"pro": 0, "max": 0, "plus": 0, "turbo": 0, "sol": 0}
-    suffix_rank = _SUFFIX_RANK.get(suffix, 1)
-
+    # without it `/model gpt` would tiebreak alphabetically onto luna, the
+    # cheapest. It is a series codename, not a generic quality word — revisit
+    # if another vendor ships a non-flagship "-sol".
+    suffix_rank = 0 if suffix in ("pro", "max", "plus", "turbo", "sol") else 1
     return version_key + (suffix_rank, suffix) + date_key
 
 
@@ -1217,9 +1047,8 @@ def _ambiguous_alias_message(err: "AmbiguousAliasError") -> str:
     """User-facing disambiguation list for an ambiguous alias."""
     shown = err.candidates[:10]
     lines = "\n".join(f"  {i}. {m}" for i, m in enumerate(shown, 1))
-    more = ""
-    if len(err.candidates) > len(shown):
-        more = f"\n  … and {len(err.candidates) - len(shown)} more"
+    hidden = len(err.candidates) - len(shown)
+    more = f"\n  … and {hidden} more" if hidden > 0 else ""
     return (
         f"'{err.alias}' matches {len(err.candidates)} models on "
         f"{err.provider} — not switching automatically:\n{lines}{more}\n"
@@ -1270,31 +1099,14 @@ def resolve_alias(
     catalog = list_provider_models(current_provider)
     try:
         from hermes_cli.models import _PROVIDER_MODELS
-        static = _PROVIDER_MODELS.get(current_provider, [])
-        if static:
-            seen = {m.lower() for m in catalog}
-            for m in static:
-                if m.lower() not in seen:
-                    catalog.append(m)
+        seen = {m.lower() for m in catalog}
+        catalog.extend(m for m in _PROVIDER_MODELS.get(current_provider, []) if m.lower() not in seen)
     except Exception:
         pass
 
-    # For aggregators, models are vendor/model-name format
-    aggregator = is_aggregator(current_provider)
-
-    if aggregator:
-        prefix = f"{vendor}/{family}".lower()
-        matches = [
-            mid for mid in catalog
-            if mid.lower().startswith(prefix)
-        ]
-    else:
-        family_lower = family.lower()
-        matches = [
-            mid for mid in catalog
-            if mid.lower().startswith(family_lower)
-        ]
-
+    # Aggregator catalogs are vendor/model-name; direct providers are bare family names.
+    prefix = f"{vendor}/{family}" if is_aggregator(current_provider) else family
+    matches = [mid for mid in catalog if mid.lower().startswith(prefix.lower())]
     if not matches:
         return None
 
@@ -1303,8 +1115,7 @@ def resolve_alias(
     # repeatedly guessed wrong (dated snapshots outranking point releases,
     # suffix tiebreaks landing on the cheapest tier). One match = resolve;
     # several = make the user choose.
-    prefix_for_sort = f"{vendor}/{family}" if aggregator else family
-    matches.sort(key=lambda m: _model_sort_key(m, prefix_for_sort))
+    matches.sort(key=lambda m: _model_sort_key(m, prefix))
     if len(matches) > 1:
         raise AmbiguousAliasError(key, current_provider, matches)
     return (current_provider, matches[0], key)
@@ -1321,13 +1132,10 @@ def get_authenticated_provider_slugs(
     in-memory cache (1 hr TTL) — no extra network cost.
     """
     try:
-        providers = list_authenticated_providers(
-            current_provider=current_provider,
-            user_providers=user_providers,
-            custom_providers=custom_providers,
-            max_models=0,
-        )
-        return [p["slug"] for p in providers]
+        return [p["slug"] for p in list_authenticated_providers(
+            current_provider=current_provider, user_providers=user_providers,
+            custom_providers=custom_providers, max_models=0,
+        )]
     except Exception:
         return []
 
@@ -1341,15 +1149,11 @@ def _resolve_alias_fallback(
     Falls back to ``("openrouter", "nous")`` only when no authenticated
     providers are supplied (backwards compat for non-interactive callers).
     """
-    providers = authenticated_providers or ("openrouter", "nous")
-    for provider in providers:
-        # AmbiguousAliasError propagates: the alias exists on this provider,
-        # the user just has to choose — trying the next provider instead
-        # would silently switch them somewhere they didn't ask to go.
-        result = resolve_alias(raw_input, provider)
-        if result is not None:
-            return result
-    return None
+    # AmbiguousAliasError propagates: the alias exists on this provider, the
+    # user just has to choose — trying the next provider instead would silently
+    # switch them somewhere they didn't ask to go.
+    return next((r for r in (resolve_alias(raw_input, p) for p in authenticated_providers or ("openrouter", "nous"))
+                 if r is not None), None)
 
 
 def resolve_display_context_length(
@@ -1381,19 +1185,12 @@ def resolve_display_context_length(
     Prefer the provider-aware value; fall back to ``model_info.context_window``
     only if the resolver returns nothing.
     """
-    if config_context_length is not None and (
-        configured_model or configured_provider or configured_base_url
-    ):
+    if config_context_length is not None and (configured_model or configured_provider or configured_base_url):
         try:
             from hermes_cli.route_identity import should_clear_context_pin
 
             if should_clear_context_pin(
-                configured_model,
-                model,
-                configured_base_url,
-                base_url,
-                configured_provider,
-                provider,
+                configured_model, model, configured_base_url, base_url, configured_provider, provider,
             ):
                 config_context_length = None
         except Exception:
@@ -1402,12 +1199,8 @@ def resolve_display_context_length(
     try:
         from agent.model_metadata import get_model_context_length
         ctx = get_model_context_length(
-            model,
-            base_url=base_url or "",
-            api_key=api_key or "",
-            provider=provider or None,
-            custom_providers=custom_providers,
-            config_context_length=config_context_length,
+            model, base_url=base_url or "", api_key=api_key or "", provider=provider or None,
+            custom_providers=custom_providers, config_context_length=config_context_length,
         )
         if ctx:
             return int(ctx)
@@ -1446,16 +1239,9 @@ async def resolve_display_context_length_async(
     import asyncio
 
     return await asyncio.to_thread(
-        resolve_display_context_length,
-        model,
-        provider,
-        base_url=base_url,
-        api_key=api_key,
-        model_info=model_info,
-        custom_providers=custom_providers,
-        config_context_length=config_context_length,
-        configured_model=configured_model,
-        configured_provider=configured_provider,
+        resolve_display_context_length, model, provider, base_url=base_url, api_key=api_key,
+        model_info=model_info, custom_providers=custom_providers, config_context_length=config_context_length,
+        configured_model=configured_model, configured_provider=configured_provider,
         configured_base_url=configured_base_url,
     )
 
@@ -1490,42 +1276,22 @@ def _configured_provider_matches(
         return {}
     target = model_name.strip().lower()
 
-    def _match(value) -> Optional[str]:
-        """Canonical id if ``value`` (a model collection or scalar) declares
-        ``target``, else None."""
-        for model_id in _declared_model_ids(value):
-            if model_id.lower() == target:
-                return model_id
-        return None
+    candidates: list[tuple[str, dict]] = []
+    if isinstance(user_providers, dict):
+        candidates += [(slug, cfg) for slug, cfg in user_providers.items()
+                       if isinstance(slug, str) and isinstance(cfg, dict)]
+    if isinstance(custom_providers, list):
+        candidates += [(f"custom:{e['name']}", e) for e in custom_providers
+                       if isinstance(e, dict) and isinstance(e.get("name"), str) and e["name"].strip()]
 
     matches: dict[str, str] = {}
-
-    if isinstance(user_providers, dict):
-        for slug, cfg in user_providers.items():
-            if not isinstance(slug, str) or not isinstance(cfg, dict):
-                continue
-            for key in ("models", "model", "default_model"):
-                hit = _match(cfg.get(key))
-                if hit:
-                    matches[slug] = hit
-                    break
-
-    if isinstance(custom_providers, list):
-        for entry in custom_providers:
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("name")
-            if not isinstance(name, str) or not name.strip():
-                continue
-            slug = f"custom:{name}"
-            if slug in matches:
-                continue
-            for key in ("models", "model", "default_model"):
-                hit = _match(entry.get(key))
-                if hit:
-                    matches[slug] = hit
-                    break
-
+    for slug, cfg in candidates:
+        if slug in matches:
+            continue
+        hit = next((mid for key in ("models", "model", "default_model")
+                    for mid in _declared_model_ids(cfg.get(key)) if mid.lower() == target), None)
+        if hit:
+            matches[slug] = hit
     return matches
 
 
@@ -1548,15 +1314,11 @@ def _resolve_named_custom_model_id(
     for entry in custom_providers or []:
         if not isinstance(entry, dict):
             continue
-        entry_slugs = custom_provider_aliases(
-            str(entry.get("name") or ""),
-            str(entry.get("provider_key") or ""),
-        )
-        if provider not in entry_slugs or f"custom:{prefix}" not in entry_slugs:
-            continue
-        for model_id in _declared_model_ids(entry.get("models")):
-            if model_id.lower() == candidate.lower():
-                return model_id
+        entry_slugs = custom_provider_aliases(str(entry.get("name") or ""), str(entry.get("provider_key") or ""))
+        if provider in entry_slugs and f"custom:{prefix}" in entry_slugs:
+            for model_id in _declared_model_ids(entry.get("models")):
+                if model_id.lower() == candidate.lower():
+                    return model_id
     return model_name
 
 
@@ -1573,13 +1335,8 @@ def _runtime_creds(fallback_headers: dict, **kwargs) -> tuple[str, str, str, dic
     extra_headers)``; ``extra_headers`` falls back to *fallback_headers*."""
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
-    runtime = resolve_runtime_provider(**kwargs)
-    return (
-        runtime.get("api_key", ""),
-        runtime.get("base_url", ""),
-        runtime.get("api_mode", ""),
-        runtime.get("extra_headers") or fallback_headers,
-    )
+    rt = resolve_runtime_provider(**kwargs)
+    return rt.get("api_key", ""), rt.get("base_url", ""), rt.get("api_mode", ""), rt.get("extra_headers") or fallback_headers
 
 
 def _entry_configured_key(cfg: dict, read_env) -> str:
@@ -1603,18 +1360,14 @@ def _ollama_configured_base() -> tuple[dict, str]:
 
 def _unknown_provider_message(explicit_provider: str) -> str:
     msg = (
-        f"Unknown provider '{explicit_provider}'. "
-        f"Check 'hermes model' for available providers, or define it "
-        f"in config.yaml under 'providers:'."
+        f"Unknown provider '{explicit_provider}'. Check 'hermes model' for available "
+        f"providers, or define it in config.yaml under 'providers:'."
     )
-    # Surface common config issues that cause provider resolution failures
-    try:
+    try:  # Surface common config issues that cause provider resolution failures
         from hermes_cli.config import validate_config_structure
         issues = validate_config_structure()
         if issues:
-            msg += "\n\nRun 'hermes doctor' — config issues detected:"
-            for ci in issues[:3]:
-                msg += f"\n  • {ci.message}"
+            msg += "\n\nRun 'hermes doctor' — config issues detected:" + "".join(f"\n  • {ci.message}" for ci in issues[:3])
     except Exception:
         pass
     return msg
@@ -1673,22 +1426,17 @@ def _config_declares_model(
     models). Custom entries match by slug alias or by base_url."""
     if user_providers:
         from hermes_cli.config import is_provider_enabled
-        for slug, cfg in user_providers.items():
-            if not is_provider_enabled(cfg):
-                continue
-            if slug == target_provider and new_model in _declared_model_ids(cfg.get("models", {})):
-                return True
-    if custom_providers and isinstance(custom_providers, list):
-        for entry in custom_providers:
-            if not isinstance(entry, dict):
-                continue
-            entry_aliases = custom_provider_aliases(
-                str(entry.get("name", "") or ""), str(entry.get("provider_key") or ""),
-            )
-            if (target_provider.lower() in entry_aliases or entry.get("base_url", "") == base_url) and (
-                new_model == entry.get("model", "") or new_model in _declared_model_ids(entry.get("models", {}))
-            ):
-                return True
+        cfg = user_providers.get(target_provider)
+        if cfg is not None and is_provider_enabled(cfg) and new_model in _declared_model_ids(cfg.get("models", {})):
+            return True
+    for entry in custom_providers if isinstance(custom_providers, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        entry_aliases = custom_provider_aliases(str(entry.get("name", "") or ""), str(entry.get("provider_key") or ""))
+        if (target_provider.lower() in entry_aliases or entry.get("base_url", "") == base_url) and (
+            new_model == entry.get("model", "") or new_model in _declared_model_ids(entry.get("models", {}))
+        ):
+            return True
     return False
 
 
@@ -1928,30 +1676,30 @@ def _route_from_model_input(st: _Switch) -> Optional[ModelSwitchResult]:
     (a) -> alias fallback (b) or ``vendor:model`` conversion (c) -> aggregator
     catalog search (d) -> configured-provider match (d.5) ->
     detect_provider_for_model() as last resort (e)."""
-    from hermes_cli.models import detect_provider_for_model
-
     raw_input, current_provider = st.raw_input, st.current_provider
-    resolved_moa_preset = False
     try:
         from hermes_cli.config import load_config
         from hermes_cli.moa_config import exact_moa_preset_name, normalize_moa_config
 
         moa_match = exact_moa_preset_name(normalize_moa_config(load_config().get("moa") or {}), raw_input)
-        if moa_match:
-            st.target_provider, st.new_model, st.resolved_alias = "moa", moa_match, ""
-            resolved_moa_preset = True
-            alias_result = None
-        else:
-            alias_result = resolve_alias(raw_input, current_provider)
+    except Exception:
+        moa_match = None  # MoA config unreadable: fall through to plain alias resolution
+    if moa_match:
+        st.target_provider, st.new_model, st.resolved_alias = "moa", moa_match, ""
+        return _route_after_alias(st, resolved=True)
+    try:
+        alias_result = resolve_alias(raw_input, current_provider)
     except AmbiguousAliasError as err:
         return st.fail(_ambiguous_alias_message(err))
-    except Exception:
-        try:
-            alias_result = resolve_alias(raw_input, current_provider)
-        except AmbiguousAliasError as err:
-            return st.fail(_ambiguous_alias_message(err))
+    return _route_after_alias(st, alias_result=alias_result)
 
-    if resolved_moa_preset:
+
+def _route_after_alias(st: _Switch, alias_result=None, resolved: bool = False) -> Optional[ModelSwitchResult]:
+    """PATH B steps (b)-(e) once the MoA preset / alias lookup (a) is settled."""
+    from hermes_cli.models import detect_provider_for_model
+
+    raw_input, current_provider = st.raw_input, st.current_provider
+    if resolved:
         pass
     elif alias_result is not None:
         st.target_provider, st.new_model, st.resolved_alias = alias_result
@@ -2021,14 +1769,13 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
     so use the pdef's endpoint directly.
     """
     user_pdef = None
+    explicit_norm = st.explicit_provider.strip().lower()
     if st.explicit_provider and st.user_providers:
         from hermes_cli.providers import resolve_user_provider
-        user_pdef = resolve_user_provider(st.explicit_provider.strip().lower(), st.user_providers)
-        if user_pdef is None:
-            user_pdef = resolve_user_provider(st.target_provider, st.user_providers)
+        user_pdef = (resolve_user_provider(explicit_norm, st.user_providers)
+                     or resolve_user_provider(st.target_provider, st.user_providers))
     if user_pdef is not None and user_pdef.base_url:
-        ucfg = (st.user_providers or {}).get(st.explicit_provider.strip().lower()) \
-            or (st.user_providers or {}).get(st.target_provider) or {}
+        ucfg = st.user_providers.get(explicit_norm) or st.user_providers.get(st.target_provider) or {}
         # Key reads go through the per-profile secret scope: a raw os.environ
         # read would hand this profile another profile's key under the
         # multiplexed gateway.
@@ -2159,12 +1906,8 @@ def _validate_switch(st: _Switch) -> Optional[ModelSwitchResult]:
             api_mode=st.api_mode or None, headers=headers,
         )
     except Exception as e:
-        validation = {
-            "accepted": False,
-            "persist": False,
-            "recognized": False,
-            "message": f"Could not validate `{st.new_model}`: {e}",
-        }
+        validation = {"accepted": False, "persist": False, "recognized": False,
+                      "message": f"Could not validate `{st.new_model}`: {e}"}
 
     if not validation.get("accepted"):
         if _config_declares_model(st.new_model, st.target_provider, st.base_url, st.user_providers, st.custom_providers):
@@ -2236,12 +1979,7 @@ def _build_switch_result(st: _Switch) -> ModelSwitchResult:
     )
     model_info = get_model_info(st.target_provider, st.new_model, allow_network=True)
 
-    warnings: list[str] = []
-    if st.validation.get("message"):
-        warnings.append(st.validation["message"])
-    hermes_warn = _check_hermes_model_warning(st.new_model)
-    if hermes_warn:
-        warnings.append(hermes_warn)
+    warnings = [w for w in (st.validation.get("message"), _check_hermes_model_warning(st.new_model)) if w]
 
     # Carry the switched provider's request_overrides (custom_providers
     # ``extra_body`` such as chat_template_kwargs) so the gateway applies them
@@ -2250,8 +1988,7 @@ def _build_switch_result(st: _Switch) -> ModelSwitchResult:
     try:
         from hermes_cli.runtime_provider import _get_named_custom_provider, _custom_provider_request_overrides
         cp_for_ro = _get_named_custom_provider(st.target_provider)
-        if cp_for_ro:
-            request_overrides = _custom_provider_request_overrides(cp_for_ro) or None
+        request_overrides = _custom_provider_request_overrides(cp_for_ro) or None if cp_for_ro else None
     except Exception:
         request_overrides = None
 
@@ -2268,11 +2005,8 @@ def _build_switch_result(st: _Switch) -> ModelSwitchResult:
         provider_label=st.provider_label,
         resolved_via_alias=st.resolved_alias,
         capabilities=capabilities,
-        runtime_capabilities={
-            key: value
-            for key, value in runtime_capabilities.items()
-            if isinstance(key, str) and isinstance(value, bool)
-        },
+        runtime_capabilities={k: v for k, v in runtime_capabilities.items()
+                              if isinstance(k, str) and isinstance(v, bool)},
         model_info=model_info,
         is_global=st.is_global,
     )
@@ -2302,17 +2036,10 @@ def switch_model(
     ``custom_providers:`` list from config.yaml.
     """
     st = _Switch(
-        raw_input=raw_input,
-        current_provider=current_provider,
-        current_model=current_model,
-        current_base_url=current_base_url,
-        current_api_key=current_api_key,
-        is_global=is_global,
-        explicit_provider=explicit_provider,
-        user_providers=user_providers,
-        custom_providers=custom_providers,
-        new_model=raw_input.strip(),
-        target_provider=current_provider,
+        raw_input=raw_input, current_provider=current_provider, current_model=current_model,
+        current_base_url=current_base_url, current_api_key=current_api_key, is_global=is_global,
+        explicit_provider=explicit_provider, user_providers=user_providers, custom_providers=custom_providers,
+        new_model=raw_input.strip(), target_provider=current_provider,
     )
     route = _route_explicit_provider if explicit_provider else _route_from_model_input
     for step in (route, _resolve_switch_credentials, _validate_switch):
@@ -2344,46 +2071,9 @@ def _scoped_key_env(name: str) -> str:
     credential visible for this profile here", which is exactly how the picker
     already treats a missing key.
     """
-    if not name:
-        return ""
     try:
         from agent.secret_scope import get_secret
 
-        return (get_secret(name, "") or "").strip()
+        return (get_secret(name, "") or "").strip() if name else ""
     except Exception:
         return ""
-
-
-# --- Parallel prefetch for provider model catalogs -----------------------
-#
-# When the 1h disk cache lapses (or on first cold open), list_authenticated_providers()
-# calls cached_provider_model_ids() serially for each authed provider.  Each call
-# that misses the cache blocks on a live /v1/models HTTP round-trip (1-8s per
-# provider depending on endpoint latency).  With 10+ authed providers the
-# cumulative serial blocking time is 15-30+ seconds.
-#
-# This prefetch function runs those same cached_provider_model_ids() calls in
-# parallel via ThreadPoolExecutor before the main picker build loop starts.
-# The main loop then hits warm cache entries instead of blocking on live
-# fetches.  Providers whose cache was already fresh (SWR or within TTL) are
-# skipped entirely — no wasted network calls.
-#
-# Net effect on a 13-provider setup with an expired cache:
-#   Before: ~20s serial blocking (sum of all provider latencies)
-#   After:  ~8s parallel (max single provider latency), rest served from cache
-
-
-# --- Provider-row discovery shared by the picker and the prefetch scan -------
-#
-# ``list_authenticated_providers`` builds picker rows in sections:
-#   1  built-in providers mapped to models.dev (PROVIDER_TO_MODELS_DEV)
-#   2  Hermes-only overlays (nous, openai-codex, copilot, opencode-go, ...)
-#   2b canonical providers missed by 1/2 (keeps /model in sync with `hermes model`)
-#   3  ``providers:`` dict entries from config, 3b the bare active custom endpoint
-#   4  ``custom_providers:`` list entries
-# ``_collect_authed_provider_slugs`` mirrors the credential checks of 1/2/2b
-# without fetching model lists. The helpers below are the single copy of each
-# check; every ``from hermes_cli.auth/models import`` stays lazy so tests can
-# patch those modules.
-
-

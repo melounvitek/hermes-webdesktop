@@ -282,6 +282,12 @@ _PARALLEL_PREFETCH_WORKERS = 8
 def _prefetch_provider_models_parallel(provider_slugs: list[str]) -> None:
     """Fetch model catalogs for multiple providers in parallel.
 
+    Run before the picker build loop: when the 1h disk cache lapses (or on a
+    cold first open) ``list_authenticated_providers`` would otherwise call
+    ``cached_provider_model_ids`` serially, blocking 1-8s per provider on a live
+    /v1/models round-trip (15-30s+ with 10+ providers); after the prefetch the
+    loop hits warm entries and total wait is the slowest single provider.
+
     Only providers whose cache entry is stale or missing are fetched; fresh
     entries are skipped to avoid unnecessary network calls.  Each worker uses
     :func:`update_provider_cache_entry` (thread-safe) to persist its result,
@@ -730,7 +736,12 @@ def _collect_authed_provider_slugs(
 
 @dataclass
 class _PickerBuild:
-    """Mutable state threaded through the ``list_authenticated_providers`` sections."""
+    """Mutable state threaded through the ``list_authenticated_providers`` sections:
+    1 built-ins mapped to models.dev, 2 Hermes-only overlays (nous, openai-codex,
+    copilot, opencode-*), 2b canonical providers missed by 1/2 (keeps /model in sync
+    with `hermes model`), 3 ``providers:`` entries + 3b the bare active custom
+    endpoint, 4 ``custom_providers:`` entries. Every ``hermes_cli.auth/models`` import
+    in the row builders stays lazy so tests can patch those modules."""
 
     current_provider: str
     current_base_url: str
