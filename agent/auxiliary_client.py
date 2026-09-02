@@ -8651,6 +8651,26 @@ class _LadderStep(NamedTuple):
 _RERAISE_ORIGINAL = object()
 
 
+# Ordered (predicate, reason) pairs for the provider-fallback rung: first match
+# wins, so a payment-flavoured 429 reads as "payment error", not "rate limit".
+_FALLBACK_REASONS: Tuple[Tuple[Callable[[Exception], bool], str], ...] = (
+    (_is_auth_error, "auth error"),
+    (_is_payment_error, "payment error"),
+    (_is_rate_limit_error, "rate limit"),
+    (_is_model_incompatible_error, "model incompatible with route"),
+    (_is_invalid_aux_response_error, "invalid provider response"),
+    (_is_connection_error, "connection error"),
+)
+
+
+def _fallback_reason(exc: Exception) -> Optional[str]:
+    """Human-readable reason when ``exc`` warrants trying another provider, else None."""
+    for predicate, reason in _FALLBACK_REASONS:
+        if predicate(exc):
+            return reason
+    return None
+
+
 def _rung(step: "_LadderStep", accept: Callable[[Exception], bool]):
     """One ladder rung: perform ``step``; yields ``(response, None)`` on success,
     ``(None, exc)`` when ``accept(exc)`` lets the next rung handle it, else re-raises."""
@@ -8888,43 +8908,22 @@ def _aux_recovery_ladder(
     # exhaustion, is unreachable, is rate-limited (429), or 401s past the
     # refresh paths. Auth is NOT a capacity error: it only bypasses the
     # explicit-provider gate in auto mode.
-    should_fallback = (
-        _is_auth_error(first_err)
-        or _is_payment_error(first_err)
-        or _is_connection_error(first_err)
-        or _is_rate_limit_error(first_err)
-        or _is_model_incompatible_error(first_err)
-        or _is_invalid_aux_response_error(first_err)
-    )
+    # Capacity errors (payment/quota, connection, exhausted 429, model incompatible
+    # with route, malformed response) bypass the explicit-provider gate: the
+    # provider cannot serve this request regardless of user intent. Auth errors
+    # are NOT capacity errors: they only fall back in auto mode.
     is_auto = resolved_provider in {"auto", "", None}
-    # Capacity errors (payment/quota, connection, exhausted 429, model
-    # incompatible with route) bypass the explicit-provider gate: the provider
-    # cannot serve this request regardless of user intent.
-    is_capacity_error = (
-        _is_payment_error(first_err)
-        or _is_connection_error(first_err)
-        or _is_rate_limit_error(first_err)
-        or _is_model_incompatible_error(first_err)
-        or _is_invalid_aux_response_error(first_err)
+    reason = _fallback_reason(first_err)
+    is_capacity_error = any(
+        predicate(first_err) for predicate, label in _FALLBACK_REASONS if label != "auth error"
     )
-    if should_fallback and (is_auto or is_capacity_error):
-        if _is_auth_error(first_err):
-            reason = "auth error"
-        elif _is_payment_error(first_err):
-            reason = "payment error"
+    if reason is not None and (is_auto or is_capacity_error):
+        if reason == "payment error":
             # Mark the concrete backend (not the "auto" label) unhealthy so
             # later aux calls skip it instead of paying another doomed RTT.
             _mark_provider_unhealthy(
                 _recoverable_pool_provider(resolved_provider, client, main_runtime=main_runtime) or resolved_provider
             )
-        elif _is_rate_limit_error(first_err):
-            reason = "rate limit"
-        elif _is_model_incompatible_error(first_err):
-            reason = "model incompatible with route"
-        elif _is_invalid_aux_response_error(first_err):
-            reason = "invalid provider response"
-        else:
-            reason = "connection error"
         logger.info("Auxiliary %s%s: %s on %s (%s), trying fallback",
                     task or "call", tag, reason, resolved_provider, first_err)
 
@@ -8957,23 +8956,20 @@ def _aux_recovery_ladder(
                     failed_model=_chain_failed_model)
 
         if fb_client is not None:
-            _record_route_info(
-                route_info, _fallback_provider_from_label(fb_label), fb_model
-            )
-            fb_resp = yield _LadderStep("fallback", (fb_client, fb_model, fb_label))
-            if fb_resp is not None:
-                return fb_resp
-            # Candidate credential was stale and quarantined — walk the
-            # discovery chain once more (unhealthy entries are skipped).
-            fb_client, fb_model, fb_label = _try_payment_fallback(
-                resolved_provider, task, reason="stale fallback credential")
-            if fb_client is not None:
+            # Second pass: the candidate credential was stale and quarantined — walk
+            # the discovery chain once more (unhealthy entries are skipped).
+            for _pass in range(2):
                 _record_route_info(
                     route_info, _fallback_provider_from_label(fb_label), fb_model
                 )
                 fb_resp = yield _LadderStep("fallback", (fb_client, fb_model, fb_label))
                 if fb_resp is not None:
                     return fb_resp
+                if _pass == 0:
+                    fb_client, fb_model, fb_label = _try_payment_fallback(
+                        resolved_provider, task, reason="stale fallback credential")
+                    if fb_client is None:
+                        break
         # All fallback layers exhausted — one user-visible warning, then re-raise.
         logger.warning(
             "Auxiliary %s%s: %s on %s and all fallbacks exhausted "
