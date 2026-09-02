@@ -24,45 +24,6 @@ import time
 import uuid
 import webbrowser
 
-# httpx is imported lazily: it costs ~30ms at import time and hermes_cli.auth
-# is on the interactive-CLI startup path via credential_pool → auxiliary_client
-# → cli_commands_mixin, where no HTTP request is ever made before first use.
-# The proxy resolves to the real module on first attribute access; every
-# consumer in this file uses `httpx.<attr>` so the swap is transparent.
-# Annotations like ``httpx.Client`` stay valid: `from __future__ import
-# annotations` (above) keeps them unevaluated at runtime, and the
-# TYPE_CHECKING import gives static checkers the real module.
-import importlib as _importlib
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import httpx
-else:
-    class _LazyHttpx:
-        __slots__ = ("_mod",)
-
-        def __init__(self) -> None:
-            object.__setattr__(self, "_mod", None)
-
-        def _resolve(self):
-            mod = object.__getattribute__(self, "_mod")
-            if mod is None:
-                mod = _importlib.import_module("httpx")
-                object.__setattr__(self, "_mod", mod)
-            return mod
-
-        def __getattr__(self, name):
-            return getattr(self._resolve(), name)
-
-        # Forward set/del to the real module so monkeypatch.setattr
-        # ("hermes_cli.auth.httpx.Client", ...) keeps working in tests.
-        def __setattr__(self, name, value):
-            setattr(self._resolve(), name, value)
-
-        def __delattr__(self, name):
-            delattr(self._resolve(), name)
-
-    httpx = _LazyHttpx()
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -80,6 +41,76 @@ from hermes_cli.config import (
 from hermes_constants import OPENROUTER_BASE_URL, secure_parent_dir
 from agent.credential_persistence import sanitize_borrowed_credential_payload
 from utils import atomic_replace, atomic_yaml_write, env_float, is_truthy_value
+from hermes_cli.auth_constants import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
+    AUTH_STORE_VERSION,
+    AUTH_LOCK_TIMEOUT_SECONDS,
+    DEFAULT_NOUS_PORTAL_URL,
+    DEFAULT_NOUS_INFERENCE_URL,
+    DEFAULT_NOUS_CLIENT_ID,
+    NOUS_INFERENCE_INVOKE_SCOPE,
+    NOUS_BILLING_MANAGE_SCOPE,
+    DEFAULT_NOUS_SCOPE,
+    NOUS_DEVICE_CODE_SOURCE,
+    NOUS_AUTH_PATH_INVOKE_JWT,
+    ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+    NOUS_INVOKE_JWT_MIN_TTL_SECONDS,
+    DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS,
+    DEVICE_CODE_GRANT_TYPE,
+    _FORM_JSON_HEADERS,
+    DEFAULT_CODEX_BASE_URL,
+    DEFAULT_XAI_OAUTH_BASE_URL,
+    MINIMAX_OAUTH_CLIENT_ID,
+    MINIMAX_OAUTH_SCOPE,
+    MINIMAX_OAUTH_GRANT_TYPE,
+    MINIMAX_OAUTH_GLOBAL_BASE,
+    MINIMAX_OAUTH_CN_BASE,
+    MINIMAX_OAUTH_GLOBAL_INFERENCE,
+    MINIMAX_OAUTH_CN_INFERENCE,
+    MINIMAX_OAUTH_REFRESH_SKEW_SECONDS,
+    DEFAULT_QWEN_BASE_URL,
+    DEFAULT_GITHUB_MODELS_BASE_URL,
+    DEFAULT_COPILOT_ACP_BASE_URL,
+    DEFAULT_OLLAMA_CLOUD_BASE_URL,
+    DEFAULT_ACTUAL_BASE_URL,
+    DEFAULT_ACTUAL_LOCAL_BASE_URL,
+    STEPFUN_STEP_PLAN_INTL_BASE_URL,
+    STEPFUN_STEP_PLAN_CN_BASE_URL,
+    CODEX_OAUTH_CLIENT_ID,
+    CODEX_OAUTH_TOKEN_URL,
+    _HERMES_CLI_VERSION,
+    CODEX_OAUTH_USER_AGENT,
+    CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+    XAI_OAUTH_ISSUER,
+    XAI_OAUTH_DISCOVERY_URL,
+    XAI_OAUTH_CLIENT_ID,
+    XAI_OAUTH_SCOPE,
+    XAI_OAUTH_DEVICE_CODE_URL,
+    XAI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+    QWEN_OAUTH_CLIENT_ID,
+    QWEN_OAUTH_TOKEN_URL,
+    QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+    DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL,
+    DEFAULT_SPOTIFY_API_BASE_URL,
+    DEFAULT_SPOTIFY_REDIRECT_URI,
+    SPOTIFY_DOCS_URL,
+    SPOTIFY_DASHBOARD_URL,
+    SPOTIFY_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+    OAUTH_OVER_SSH_DOCS_URL,
+    DEFAULT_SPOTIFY_SCOPE,
+    SERVICE_PROVIDER_NAMES,
+    LMSTUDIO_NOAUTH_PLACEHOLDER,
+    ACTUAL_LOCAL_NOAUTH_PLACEHOLDER,
+    CODEX_RATE_LIMITED_CODE,
+    AuthError,
+    _provider_error_factory,
+    _nous_err,
+    _xai_err,
+    _codex_err,
+    _spotify_err,
+    _qwen_err,
+    _minimax_err,
+    httpx,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,102 +122,6 @@ try:
     import msvcrt
 except Exception:
     msvcrt = None
-
-# =============================================================================
-# Constants
-# =============================================================================
-
-AUTH_STORE_VERSION = 1
-AUTH_LOCK_TIMEOUT_SECONDS = 15.0
-
-# Nous Portal defaults
-DEFAULT_NOUS_PORTAL_URL = "https://portal.nousresearch.com"
-DEFAULT_NOUS_INFERENCE_URL = "https://inference-api.nousresearch.com/v1"
-DEFAULT_NOUS_CLIENT_ID = "hermes-cli"
-NOUS_INFERENCE_INVOKE_SCOPE = "inference:invoke"
-NOUS_BILLING_MANAGE_SCOPE = "billing:manage"
-DEFAULT_NOUS_SCOPE = NOUS_INFERENCE_INVOKE_SCOPE
-NOUS_DEVICE_CODE_SOURCE = "device_code"
-NOUS_AUTH_PATH_INVOKE_JWT = "invoke_jwt"
-ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120       # refresh 2 min before expiry
-NOUS_INVOKE_JWT_MIN_TTL_SECONDS = ACCESS_TOKEN_REFRESH_SKEW_SECONDS
-DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS = 1     # poll at most every 1s
-DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
-_FORM_JSON_HEADERS = {
-    "Content-Type": "application/x-www-form-urlencoded",
-    "Accept": "application/json",
-}
-DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
-DEFAULT_XAI_OAUTH_BASE_URL = "https://api.x.ai/v1"
-MINIMAX_OAUTH_CLIENT_ID = "78257093-7e40-4613-99e0-527b14b39113"
-MINIMAX_OAUTH_SCOPE = "group_id profile model.completion"
-MINIMAX_OAUTH_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:user_code"
-MINIMAX_OAUTH_GLOBAL_BASE = "https://api.minimax.io"
-MINIMAX_OAUTH_CN_BASE = "https://api.minimaxi.com"
-MINIMAX_OAUTH_GLOBAL_INFERENCE = "https://api.minimax.io/anthropic"
-MINIMAX_OAUTH_CN_INFERENCE = "https://api.minimaxi.com/anthropic"
-MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
-DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
-DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
-DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
-DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
-DEFAULT_ACTUAL_BASE_URL = "https://api.actual.inc/v1"
-DEFAULT_ACTUAL_LOCAL_BASE_URL = "http://127.0.0.1:8080/v1"
-STEPFUN_STEP_PLAN_INTL_BASE_URL = "https://api.stepfun.ai/step_plan/v1"
-STEPFUN_STEP_PLAN_CN_BASE_URL = "https://api.stepfun.com/step_plan/v1"
-CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
-try:  # Version tag for the Codex token-endpoint User-Agent; fall back if unavailable.
-    from hermes_cli import __version__ as _HERMES_CLI_VERSION
-except Exception:  # pragma: no cover - version import should always succeed
-    _HERMES_CLI_VERSION = "unknown"
-CODEX_OAUTH_USER_AGENT = f"hermes-cli/{_HERMES_CLI_VERSION}"
-CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
-XAI_OAUTH_ISSUER = "https://auth.x.ai"
-XAI_OAUTH_DISCOVERY_URL = f"{XAI_OAUTH_ISSUER}/.well-known/openid-configuration"
-XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
-XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access"
-XAI_OAUTH_DEVICE_CODE_URL = f"{XAI_OAUTH_ISSUER}/oauth2/device/code"
-# xAI/Grok OAuth access tokens are intentionally short-lived (about 6h in
-# current SuperGrok flows). A two-minute refresh window is too narrow for
-# gateway/cron workloads that may only touch the provider every 30 minutes,
-# leaving brief but noisy credential-expiry gaps. Refresh up to one hour
-# early so ordinary runtime calls keep the token warm without user reauth.
-XAI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 3600
-QWEN_OAUTH_CLIENT_ID = "f0304373b74a44d2b584a3fb70ca9e56"
-QWEN_OAUTH_TOKEN_URL = "https://chat.qwen.ai/api/v1/oauth2/token"
-QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
-DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL = "https://accounts.spotify.com"
-DEFAULT_SPOTIFY_API_BASE_URL = "https://api.spotify.com/v1"
-DEFAULT_SPOTIFY_REDIRECT_URI = "http://127.0.0.1:43827/spotify/callback"
-SPOTIFY_DOCS_URL = "https://hermes-agent.nousresearch.com/docs/user-guide/features/spotify"
-SPOTIFY_DASHBOARD_URL = "https://developer.spotify.com/dashboard"
-SPOTIFY_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
-
-OAUTH_OVER_SSH_DOCS_URL = "https://hermes-agent.nousresearch.com/docs/guides/oauth-over-ssh"
-DEFAULT_SPOTIFY_SCOPE = " ".join((
-    "user-modify-playback-state",
-    "user-read-playback-state",
-    "user-read-currently-playing",
-    "user-read-recently-played",
-    "playlist-read-private",
-    "playlist-read-collaborative",
-    "playlist-modify-public",
-    "playlist-modify-private",
-    "user-library-read",
-    "user-library-modify",
-))
-SERVICE_PROVIDER_NAMES: Dict[str, str] = {
-    "spotify": "Spotify",
-}
-
-# LM Studio's default no-auth mode still requires *some* non-empty bearer for
-# the API-key code paths (auxiliary_client, runtime resolver) to treat the
-# provider as configured. This sentinel is sent only to LM Studio, never to
-# any remote service.
-LMSTUDIO_NOAUTH_PLACEHOLDER = "dummy-lm-api-key"
-ACTUAL_LOCAL_NOAUTH_PLACEHOLDER = "dummy-actual-local-api-key"
-
 
 def is_actual_local_base_url(base_url: str) -> bool:
     """Return True for Actual's loopback local API endpoint."""
@@ -873,45 +808,6 @@ def _normalize_lmstudio_runtime_base_url(base_url: str) -> str:
 # =============================================================================
 # Error Types
 # =============================================================================
-
-# Error code marking upstream rate-limit / usage-quota exhaustion (HTTP 429).
-# Such failures are transient and re-authenticating cannot resolve them, so
-# they must be kept distinct from missing/expired-credential errors.
-CODEX_RATE_LIMITED_CODE = "codex_rate_limited"
-
-
-class AuthError(RuntimeError):
-    """Structured auth error with UX mapping hints."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        provider: str = "",
-        code: Optional[str] = None,
-        relogin_required: bool = False,
-    ) -> None:
-        super().__init__(message)
-        self.provider = provider
-        self.code = code
-        self.relogin_required = relogin_required
-
-
-def _provider_error_factory(provider: str) -> Callable[..., AuthError]:
-    def factory(message: str, code: Optional[str] = None, *, relogin: bool = False) -> AuthError:
-        return AuthError(message, provider=provider, code=code, relogin_required=relogin)
-
-    return factory
-
-
-# Per-provider AuthError constructors: ``_xai_err(message, code, relogin=True)``.
-_nous_err = _provider_error_factory("nous")
-_xai_err = _provider_error_factory("xai-oauth")
-_codex_err = _provider_error_factory("openai-codex")
-_spotify_err = _provider_error_factory("spotify")
-_qwen_err = _provider_error_factory("qwen-oauth")
-_minimax_err = _provider_error_factory("minimax-oauth")
-
 
 def is_rate_limited_auth_error(error: Exception) -> bool:
     """True when an :class:`AuthError` represents upstream rate-limiting / quota
