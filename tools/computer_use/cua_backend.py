@@ -253,8 +253,8 @@ def _linux_session_locked() -> Optional[bool]:
     if sys.platform != "linux":
         return None
     try:
-        proc = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
-                              capture_output=True, text=True, timeout=2.0)
+        proc = subprocess.run(["loginctl", "list-sessions", "--no-legend"], capture_output=True,
+                              text=True, timeout=2.0, stdin=subprocess.DEVNULL)
         if proc.returncode != 0:
             return None
         any_seat = False
@@ -263,8 +263,8 @@ def _linux_session_locked() -> Optional[bool]:
             if len(parts) < 2 or "seat" not in line:
                 continue
             any_seat = True
-            probe = subprocess.run(["loginctl", "show-session", parts[0], "-p", "LockedHint"],
-                                   capture_output=True, text=True, timeout=2.0)
+            probe = subprocess.run(["loginctl", "show-session", parts[0], "-p", "LockedHint"], capture_output=True,
+                                   text=True, timeout=2.0, stdin=subprocess.DEVNULL)
             if "LockedHint=no" in probe.stdout:
                 return False
         return True if any_seat else None
@@ -302,8 +302,8 @@ def _linux_x11_active_window_id() -> Optional[int]:
     if sys.platform != "linux" or not os.environ.get("DISPLAY"):
         return None
     try:
-        proc = subprocess.run(["xprop", "-root", "_NET_ACTIVE_WINDOW"], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", timeout=2, check=False)
+        proc = subprocess.run(["xprop", "-root", "_NET_ACTIVE_WINDOW"], capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=2, check=False, stdin=subprocess.DEVNULL)
     except Exception:
         return None
     return _parse_xprop_net_active_window(proc.stdout or "") if proc.returncode == 0 else None

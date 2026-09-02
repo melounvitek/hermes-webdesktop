@@ -1358,7 +1358,8 @@ def _wsl_powershell_player_cmd(file_path: str) -> Optional[List[str]]:
         import uuid
 
         def _out(cmd):
-            return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=3).decode(errors="replace").strip()
+            return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                           timeout=3).decode(errors="replace").strip()
 
         win_tmp_wsl = _out(["wslpath", "-u", _out(["cmd.exe", "/c", "echo %TEMP%"])])
         if not win_tmp_wsl:

@@ -551,6 +551,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         extra_args += ["--constraint", str(constraints)]
 
     def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+        # _SUBPROCESS_KW carries stdin=DEVNULL  # noqa: subprocess-stdin
         return subprocess.run(cmd, **_SUBPROCESS_KW, creationflags=windows_hide_flags(), **kw)
 
     def _finish(r: subprocess.CompletedProcess) -> _InstallResult:
