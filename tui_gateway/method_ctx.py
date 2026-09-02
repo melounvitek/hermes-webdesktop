@@ -87,27 +87,31 @@ class HandlerRegistry:
 _PLUMBING = {"HandlerRegistry", "method", "_profile_scoped", "register", "rebind", "logger"}
 
 
-def bind_module(module, server, *, skip=()) -> None:
-    """Publish everything ``module`` defines onto ``server``, rebound to its globals.
+def bind_module(module_globals: dict, server, *, skip=()) -> None:
+    """Publish everything a split module defines onto ``server``, rebound to its globals.
 
-    Functions are rebound; classes get their methods rebound in place; other
-    values (constants, ``global``-mutated state seeds) are copied as-is.
+    ``module_globals`` is the caller's ``globals()`` (not ``sys.modules[__name__]``:
+    tests that ``patch.dict(sys.modules)`` around the server import drop the
+    submodule entries while the package attribute survives, so a re-import would
+    KeyError).  Functions are rebound; classes get their methods rebound in place;
+    other values (constants, ``global``-mutated state seeds) are copied as-is.
     Imported modules/functions, dunders and registry plumbing are skipped, so a
     split module needs no hand-maintained export list.  Finally the module's
     ``_registry`` (if any) installs its @method handlers.
     """
     g = vars(server)
-    for name, obj in list(vars(module).items()):
+    mod_name = module_globals["__name__"]
+    for name, obj in list(module_globals.items()):
         if name.startswith("__") or name in _PLUMBING or name in skip:
             continue
         if isinstance(obj, (types.ModuleType, HandlerRegistry)):
             continue
         if isinstance(obj, types.FunctionType):
-            if obj.__module__ != module.__name__:
+            if obj.__module__ != mod_name:
                 continue
             obj = rebind(obj, g)
         elif isinstance(obj, type):
-            if obj.__module__ != module.__name__:
+            if obj.__module__ != mod_name:
                 continue
             for attr, val in list(vars(obj).items()):
                 if isinstance(val, types.FunctionType):
@@ -115,6 +119,6 @@ def bind_module(module, server, *, skip=()) -> None:
                 elif isinstance(val, (staticmethod, classmethod)):
                     setattr(obj, attr, type(val)(rebind(val.__func__, g)))
         setattr(server, name, obj)
-    registry = getattr(module, "_registry", None)
+    registry = module_globals.get("_registry")
     if isinstance(registry, HandlerRegistry):
         registry.install(server)

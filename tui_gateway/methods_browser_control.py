@@ -27,8 +27,8 @@ Note on handler globals: ``HandlerRegistry.install`` (method_ctx.py) rebinds
 each handler's ``__globals__`` onto server.py's namespace, so handler bodies
 may only reference names server.py defines/imports (``_ok``, ``_err``,
 ``_sessions``, ``_sessions_lock``, ``current_transport``, ``logger``, ...).
-This module's own helpers and constants are therefore captured through
-keyword-default arguments, which ``install`` preserves.
+This module's own helpers and constants reach the handlers through closure
+cells of :func:`_controller_method` (rebind preserves and re-targets them).
 """
 
 from __future__ import annotations
@@ -61,6 +61,10 @@ _CLOUD_TRANSPORT_FAMILY = "cloud-ticket-ws"
 #: JSON-RPC error code for identity / session / flag denials (forbidden).
 _ERR_FORBIDDEN = 4403
 
+_IDENTITY_REQUIRED = "authenticated controller identity required"
+_NOT_OWNED = "controller is not owned by this transport"
+_NO_CONTROLLER = "no controller registered for this session"
+
 
 def _is_authenticated_identity(identity: object) -> bool:
     """True for a server-minted, non-internal ``{user_id, provider}`` identity."""
@@ -72,9 +76,7 @@ def _is_authenticated_identity(identity: object) -> bool:
         return False
     if not isinstance(provider, str) or not provider.strip():
         return False
-    if user_id == _INTERNAL_USER_ID and provider == _INTERNAL_PROVIDER:
-        return False
-    return True
+    return not (user_id == _INTERNAL_USER_ID and provider == _INTERNAL_PROVIDER)
 
 
 def _principal_digest(identity: dict) -> str:
@@ -125,68 +127,120 @@ def _broker_event_writer(transport: object, session_id: str):
     return send
 
 
-@method("browser.controller.register")
-def _(
+def _controller_method(
+    name: str,
+    *,
+    identity_message: str = _IDENTITY_REQUIRED,
+    lookup_scope: bool = True,
+    missing_scope_message: str = _NO_CONTROLLER,
+    precheck=None,
+):
+    """Register a handler behind the shared fail-closed (4403) controller gates.
+
+    Order: ``precheck(rid, params)`` (may return an error envelope) → the
+    calling transport holds a server-authenticated, non-internal identity
+    (``WSTransport.auth_identity``, never the RPC params) → the named session
+    exists and its ``transport`` is exactly the caller → when ``lookup_scope``,
+    a controller scope is attached for this session/principal/family and the
+    caller owns it. ``fn(rid, params, transport, identity, session_id, broker,
+    scope)`` then runs (``scope`` is ``None`` when ``lookup_scope`` is off).
+    """
+    forbidden = _ERR_FORBIDDEN
+    family = _CLOUD_TRANSPORT_FAMILY
+    identity_ok = _is_authenticated_identity
+    digest = _principal_digest
+    not_owned = _NOT_OWNED
+
+    def dec(fn):
+        def handler(rid, params: dict) -> dict:
+            from gateway import browser_control_broker
+
+            if precheck is not None:
+                denied = precheck(rid, params)
+                if denied is not None:
+                    return denied
+            transport = current_transport()
+            identity = getattr(transport, "auth_identity", None)
+            if not identity_ok(identity):
+                return _err(rid, forbidden, identity_message)
+            session_id = str(params.get("session_id") or "")
+            with _sessions_lock:
+                session = _sessions.get(session_id)
+                if session is None or session.get("transport") is not transport:
+                    return _err(rid, forbidden, "session is not owned by this transport")
+            broker = browser_control_broker.get_browser_control_broker()
+            scope = None
+            if lookup_scope:
+                scope = broker.scope_for_session(
+                    session_id=session_id,
+                    principal_id=digest(identity),
+                    transport_family=family,
+                )
+                if scope is None:
+                    return _err(rid, forbidden, missing_scope_message)
+                # Defense in depth: the broker's exact-scope operations already
+                # reject foreign scopes; the owner check makes the "same
+                # transport" rule explicit at this layer too.
+                if not broker.is_owner(scope, transport):
+                    return _err(rid, forbidden, not_owned)
+            return fn(rid, params, transport, identity, session_id, broker, scope, session)
+
+        handler.__doc__ = fn.__doc__
+        return method(name)(handler)
+
+    return dec
+
+
+def _register_precheck(
     rid,
     params: dict,
-    _family=_CLOUD_TRANSPORT_FAMILY,
+    _forbidden=_ERR_FORBIDDEN,
     _protocol_version=BROWSER_CONTROL_PROTOCOL_VERSION,
     _protocol_supported=browser_control_protocol_supported,
-    _filter_capabilities=filter_browser_control_capabilities,
-    _forbidden=_ERR_FORBIDDEN,
-    _identity_ok=_is_authenticated_identity,
-    _digest=_principal_digest,
-    _event_writer=_broker_event_writer,
-) -> dict:
-    """Attach this connection as the browser controller for one session.
-
-    Fails closed (4403) unless *every* gate passes:
-
-    * the ``browser.extension_control.enabled`` feature flag is on;
-    * the calling transport holds a server-authenticated, non-internal
-      identity (``WSTransport.auth_identity`` — never the RPC params);
-    * the named session exists in the live session registry and its
-      ``transport`` is exactly the calling transport;
-    * at least one requested capability survives the shared allowlist.
-
-    The returned ``scope`` names a server-derived ``principal_id``, the
-    ``cloud-ticket-ws`` transport family, and the filtered capability set.
-    """
+):
     from gateway import browser_control_broker
 
     if not browser_control_broker.browser_control_enabled():
-        return _err(
-            rid,
-            _forbidden,
-            "browser.extension_control.enabled is not set",
-        )
-
+        return _err(rid, _forbidden, "browser.extension_control.enabled is not set")
     if not _protocol_supported(params.get("protocol_version")):
         return _err(
             rid,
             _forbidden,
             f"unsupported browser-control protocol version; expected {_protocol_version}",
         )
+    return None
 
-    transport = current_transport()
-    identity = getattr(transport, "auth_identity", None)
-    if not _identity_ok(identity):
-        return _err(
-            rid,
-            _forbidden,
-            "browser.controller.register requires an authenticated "
-            "non-internal identity",
-        )
 
-    session_id = str(params.get("session_id") or "")
-    with _sessions_lock:
-        session = _sessions.get(session_id)
-        if session is None or session.get("transport") is not transport:
-            return _err(
-                rid,
-                _forbidden,
-                "session is not owned by this transport",
-            )
+@_controller_method(
+    "browser.controller.register",
+    identity_message="browser.controller.register requires an authenticated non-internal identity",
+    lookup_scope=False,
+    precheck=_register_precheck,
+)
+def _(
+    rid,
+    params: dict,
+    transport,
+    identity,
+    session_id,
+    broker,
+    _scope,
+    session,
+    _family=_CLOUD_TRANSPORT_FAMILY,
+    _forbidden=_ERR_FORBIDDEN,
+    _filter_capabilities=filter_browser_control_capabilities,
+    _digest=_principal_digest,
+    _event_writer=_broker_event_writer,
+) -> dict:
+    """Attach this connection as the browser controller for one session.
+
+    Fails closed (4403) unless the ``browser.extension_control.enabled`` flag
+    is on, the protocol version is supported, the shared identity/session
+    gates pass, and at least one requested capability survives the allowlist.
+    The returned ``scope`` names a server-derived ``principal_id``, the
+    ``cloud-ticket-ws`` transport family, and the filtered capability set.
+    """
+    from gateway import browser_control_broker
 
     controller_id = str(params.get("controller_id") or "").strip()
     browser_profile_id = str(params.get("browser_profile_id") or "").strip()
@@ -200,11 +254,7 @@ def _(
 
     capabilities = _filter_capabilities(params.get("capabilities"))
     if not capabilities:
-        return _err(
-            rid,
-            _forbidden,
-            "no permitted controller capabilities requested",
-        )
+        return _err(rid, _forbidden, "no permitted controller capabilities requested")
 
     scope = browser_control_broker.ControllerScope(
         principal_id=_digest(identity),
@@ -215,14 +265,7 @@ def _(
         transport_family=_family,
         capabilities=capabilities,
     )
-
-    broker = browser_control_broker.get_browser_control_broker()
-    broker.attach(
-        scope,
-        _event_writer(transport, session_id),
-        owner=transport,
-    )
-
+    broker.attach(scope, _event_writer(transport, session_id), owner=transport)
     return _ok(
         rid,
         {
@@ -239,15 +282,8 @@ def _(
     )
 
 
-@method("browser.controller.result")
-def _(
-    rid,
-    params: dict,
-    _family=_CLOUD_TRANSPORT_FAMILY,
-    _forbidden=_ERR_FORBIDDEN,
-    _identity_ok=_is_authenticated_identity,
-    _digest=_principal_digest,
-) -> dict:
+@_controller_method("browser.controller.result")
+def _(rid, params: dict, _transport, _identity, _session_id, broker, scope, _session, _forbidden=_ERR_FORBIDDEN) -> dict:
     """Deliver one controller command result back to the broker.
 
     Only the transport that owns the session may resolve its commands, and
@@ -256,48 +292,9 @@ def _(
     ``False`` for unknown / already-resolved / cancelled command ids — the
     broker's idempotent answer, surfaced verbatim.
     """
-    from gateway import browser_control_broker
-
-    transport = current_transport()
-    identity = getattr(transport, "auth_identity", None)
-    if not _identity_ok(identity):
-        return _err(rid, _forbidden, "authenticated controller identity required")
-    session_id = str(params.get("session_id") or "")
-    with _sessions_lock:
-        session = _sessions.get(session_id)
-        if session is None or session.get("transport") is not transport:
-            return _err(
-                rid,
-                _forbidden,
-                "session is not owned by this transport",
-            )
-
     command_id = str(params.get("command_id") or "")
     if not command_id:
         return _err(rid, _forbidden, "command_id required")
-
-    broker = browser_control_broker.get_browser_control_broker()
-    scope = broker.scope_for_session(
-        session_id=session_id,
-        principal_id=_digest(identity),
-        transport_family=_family,
-    )
-    if scope is None:
-        return _err(
-            rid,
-            _forbidden,
-            "no controller registered for this session",
-        )
-    # Defense in depth: the exact-scope complete below already rejects any
-    # foreign scope, but the owner check makes the "same transport" rule
-    # explicit at this layer too.
-    if not broker.is_owner(scope, transport):
-        return _err(
-            rid,
-            _forbidden,
-            "controller is not owned by this transport",
-        )
-
     ok = params.get("ok") is True
     accepted = broker.complete(
         command_id,
@@ -308,71 +305,15 @@ def _(
     return _ok(rid, {"accepted": accepted})
 
 
-@method("browser.controller.heartbeat")
-def _(
-    rid,
-    params: dict,
-    _family=_CLOUD_TRANSPORT_FAMILY,
-    _forbidden=_ERR_FORBIDDEN,
-    _identity_ok=_is_authenticated_identity,
-    _digest=_principal_digest,
-) -> dict:
+@_controller_method("browser.controller.heartbeat")
+def _(rid, params: dict, *_gate) -> dict:
     """Acknowledge a heartbeat only for this transport's attached controller."""
-    from gateway import browser_control_broker
-
-    transport = current_transport()
-    identity = getattr(transport, "auth_identity", None)
-    if not _identity_ok(identity):
-        return _err(rid, _forbidden, "authenticated controller identity required")
-    session_id = str(params.get("session_id") or "")
-    with _sessions_lock:
-        session = _sessions.get(session_id)
-        if session is None or session.get("transport") is not transport:
-            return _err(rid, _forbidden, "session is not owned by this transport")
-
-    broker = browser_control_broker.get_browser_control_broker()
-    scope = broker.scope_for_session(
-        session_id=session_id,
-        principal_id=_digest(identity),
-        transport_family=_family,
-    )
-    if scope is None:
-        return _err(rid, _forbidden, "no controller registered for this session")
-    if not broker.is_owner(scope, transport):
-        return _err(rid, _forbidden, "controller is not owned by this transport")
     return _ok(rid, {"ok": True})
 
 
-@method("browser.controller.detach")
-def _(
-    rid,
-    params: dict,
-    _family=_CLOUD_TRANSPORT_FAMILY,
-    _forbidden=_ERR_FORBIDDEN,
-    _identity_ok=_is_authenticated_identity,
-    _digest=_principal_digest,
-) -> dict:
+@_controller_method("browser.controller.detach", missing_scope_message=_NOT_OWNED)
+def _(rid, params: dict, transport, _identity, _session_id, broker, scope, _session) -> dict:
     """Hard-detach only the controller owned by this authenticated transport."""
-    from gateway import browser_control_broker
-
-    transport = current_transport()
-    identity = getattr(transport, "auth_identity", None)
-    if not _identity_ok(identity):
-        return _err(rid, _forbidden, "authenticated controller identity required")
-    session_id = str(params.get("session_id") or "")
-    with _sessions_lock:
-        session = _sessions.get(session_id)
-        if session is None or session.get("transport") is not transport:
-            return _err(rid, _forbidden, "session is not owned by this transport")
-
-    broker = browser_control_broker.get_browser_control_broker()
-    scope = broker.scope_for_session(
-        session_id=session_id,
-        principal_id=_digest(identity),
-        transport_family=_family,
-    )
-    if scope is None or not broker.is_owner(scope, transport):
-        return _err(rid, _forbidden, "controller is not owned by this transport")
     broker.detach(scope, owner=transport, notify_controller=False)
     return _ok(rid, {"detached": True})
 

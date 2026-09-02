@@ -16,6 +16,8 @@ from typing import Any, Callable
 
 from gateway import hosted_room_driver as state
 
+_LockType = type(threading.Lock())
+
 
 class HostedRoomSessionError(RuntimeError):
     """Raised when an in-process session operation is rejected."""
@@ -36,34 +38,33 @@ class HostedRoomServerRPC:
     def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         handler = self.server._methods[method]
         envelope = handler(f"hosted-room-{next(self._ids)}", params)
-        error = envelope.get("error") if isinstance(envelope, dict) else None
+        if not isinstance(envelope, dict):
+            envelope = {}
+        error = envelope.get("error")
         if isinstance(error, dict):
             raise HostedRoomSessionError(
                 method,
                 int(error.get("code") or 5000),
                 str(error.get("message") or "gateway rejected the request"),
             )
-        result = envelope.get("result") if isinstance(envelope, dict) else None
+        result = envelope.get("result")
         if not isinstance(result, dict):
             raise HostedRoomSessionError(method, 5000, "gateway returned no result")
         return result
 
-    def resolve_exact(
-        self, *, profile: str, title: str, source: str
-    ) -> Mapping[str, Any] | None:
+    def resolve_exact(self, *, profile: str, title: str, source: str) -> Mapping[str, Any] | None:
         del source
         result = self._call(
-            "session.list",
-            {"profile": profile, "title": title, "include_hidden": True},
+            "session.list", {"profile": profile, "title": title, "include_hidden": True}
         )
         rows = result.get("sessions")
-        if not isinstance(rows, list) or not rows:
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
             return None
         row = rows[0]
-        if not isinstance(row, dict):
-            return None
-        session_id = row.get("resolved_id") or row.get("id")
-        return {"session_id": session_id, "title": row.get("title") or title}
+        return {
+            "session_id": row.get("resolved_id") or row.get("id"),
+            "title": row.get("title") or title,
+        }
 
     def create(self, *, profile: str, title: str, source: str) -> Mapping[str, Any]:
         return self._call(
@@ -79,17 +80,10 @@ class HostedRoomServerRPC:
             },
         )
 
-    def resume(
-        self, *, profile: str, session_id: str, source: str
-    ) -> Mapping[str, Any]:
+    def resume(self, *, profile: str, session_id: str, source: str) -> Mapping[str, Any]:
         return self._call(
             "session.resume",
-            {
-                "profile": profile,
-                "session_id": session_id,
-                "omit_messages": True,
-                "source": source,
-            },
+            {"profile": profile, "session_id": session_id, "omit_messages": True, "source": source},
         )
 
     def submit(
@@ -128,14 +122,9 @@ class HostedRoomServerRPC:
             exc.not_admitted = True
             raise
 
-    def history(
-        self, *, profile: str, session_id: str, source: str
-    ) -> Sequence[Mapping[str, Any]]:
+    def history(self, *, profile: str, session_id: str, source: str) -> Sequence[Mapping[str, Any]]:
         del source
-        result = self._call(
-            "session.history",
-            {"profile": profile, "session_id": session_id},
-        )
+        result = self._call("session.history", {"profile": profile, "session_id": session_id})
         rows = result.get("messages")
         return tuple(row for row in rows if isinstance(row, dict)) if isinstance(rows, list) else ()
 
@@ -155,7 +144,7 @@ class HostedRoomServerRPC:
         if record is None:
             return {"active": False, "task_id": None}
         lock = record.get("history_lock")
-        if not isinstance(lock, type(threading.Lock())):
+        if not isinstance(lock, _LockType):
             return {"active": bool(record.get("running")), "task_id": None}
         with lock:
             task = record.get("_hosted_room_task")
@@ -163,9 +152,7 @@ class HostedRoomServerRPC:
                 "active": bool(record.get("running")),
                 "task_id": task.get("task_id") if isinstance(task, dict) else None,
             }
-            pending_reader = getattr(
-                self.server, "_pending_approval_request_payload", None
-            )
+            pending_reader = getattr(self.server, "_pending_approval_request_payload", None)
             pending = (
                 pending_reader(str(record.get("session_key") or ""))
                 if callable(pending_reader)
@@ -176,38 +163,18 @@ class HostedRoomServerRPC:
                 result["pending_approval"] = pending
             return result
 
-    def approve(
-        self,
-        *,
-        session_id: str,
-        request_id: str,
-        choice: str,
-    ) -> Mapping[str, Any]:
+    def approve(self, *, session_id: str, request_id: str, choice: str) -> Mapping[str, Any]:
         """Resolve one exact local room approval without broad policy changes."""
         return self._call(
             "approval.respond",
-            {
-                "session_id": session_id,
-                "request_id": request_id,
-                "choice": choice,
-                "all": False,
-            },
+            {"session_id": session_id, "request_id": request_id, "choice": choice, "all": False},
         )
 
     def interrupt(
-        self,
-        *,
-        profile: str,
-        session_id: str,
-        source: str,
-        expected_task_id: str,
+        self, *, profile: str, session_id: str, source: str, expected_task_id: str
     ) -> Mapping[str, Any] | None:
         del source
         return self._call(
             "session.interrupt",
-            {
-                "profile": profile,
-                "session_id": session_id,
-                "expected_hosted_task_id": expected_task_id,
-            },
+            {"profile": profile, "session_id": session_id, "expected_hosted_task_id": expected_task_id},
         )

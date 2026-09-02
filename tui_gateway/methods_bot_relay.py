@@ -21,8 +21,13 @@ connected gateway:
 
 Storage/validation plumbing lives in ``tools/bot_relay.py``. Handlers are
 rebound onto server.py's globals at install time (see method_ctx.py) and may
-reference server module globals (``_ok``, ``_err``) not imported here.
+reference server module globals (``_ok``, ``_err``) not imported here; this
+module's own helpers reach them via keyword defaults.
 """
+
+import os
+import subprocess
+from pathlib import Path
 
 from .method_ctx import HandlerRegistry
 
@@ -30,8 +35,27 @@ _registry = HandlerRegistry()
 method = _registry.method
 
 
+def _relay_root() -> Path:
+    """Install root shared by every profile (relay state is install-wide)."""
+    home = Path(os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes"))
+    return home.parent.parent if home.parent.name == "profiles" else home
+
+
+def _run_delivery(profile: str, tmp: str) -> subprocess.CompletedProcess:
+    from tools.bot_relay import local_delivery_command
+
+    return subprocess.run(
+        local_delivery_command(profile, tmp),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
+
+
 @method("bot_relay.roster.sync")
-def _(rid, params: dict) -> dict:
+def _(rid, params: dict, _root=_relay_root) -> dict:
     """Replace this gateway's view of agents on OTHER connections.
 
     Params: ``agents`` — list of rows ``{profile, handle, connection_id,
@@ -39,41 +63,30 @@ def _(rid, params: dict) -> dict:
     dropped, not fatal. Result: ``{count}`` (accepted rows).
     """
     try:
-        import os
-        from pathlib import Path
-
         from tools.bot_relay import write_remote_roster
 
-        home = Path(os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes"))
-        root = home.parent.parent if home.parent.name == "profiles" else home
-        count = write_remote_roster(root, params.get("agents"))
-        return _ok(rid, {"count": count})
+        return _ok(rid, {"count": write_remote_roster(_root(), params.get("agents"))})
     except Exception as e:
         return _err(rid, 5090, str(e))
 
 
 @method("bot_relay.outbox.drain")
-def _(rid, params: dict) -> dict:
+def _(rid, params: dict, _root=_relay_root) -> dict:
     """Claim every pending cross-connection envelope queued on this gateway.
 
     Claimed envelopes move to ``claimed/`` atomically, so concurrent drains
     (two Desktop windows) can't double-deliver. Result: ``{envelopes}``.
     """
     try:
-        import os
-        from pathlib import Path
-
         from tools.bot_relay import claim_pending_envelopes
 
-        home = Path(os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes"))
-        root = home.parent.parent if home.parent.name == "profiles" else home
-        return _ok(rid, {"envelopes": claim_pending_envelopes(root)})
+        return _ok(rid, {"envelopes": claim_pending_envelopes(_root())})
     except Exception as e:
         return _err(rid, 5091, str(e))
 
 
 @method("bot_relay.deliver")
-def _(rid, params: dict) -> dict:
+def _(rid, params: dict, _root=_relay_root, _run=_run_delivery) -> dict:
     """Deliver a relayed DM into a profile's Bot Chat ON THIS GATEWAY.
 
     Params: ``profile`` (target on this install), ``message`` (already
@@ -86,7 +99,6 @@ def _(rid, params: dict) -> dict:
     import os
     import subprocess
     import tempfile
-    from pathlib import Path
 
     profile = str(params.get("profile") or "").strip()
     message = str(params.get("message") or "").strip()
@@ -94,13 +106,12 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4090, "profile and message required")
     try:
         from tools.bot_mode_dm import MESSAGE_MAX_CHARS
-        from tools.bot_relay import acquire_turn_lock, local_delivery_command
+        from tools.bot_relay import acquire_turn_lock
 
         if len(message) > MESSAGE_MAX_CHARS + 200:  # + attribution headroom
             return _err(rid, 4091, "message too long")
 
-        home = Path(os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes"))
-        root = home.parent.parent if home.parent.name == "profiles" else home
+        root = _root()
         known = {"default"}
         profiles_dir = root / "profiles"
         if profiles_dir.is_dir():
@@ -109,13 +120,13 @@ def _(rid, params: dict) -> dict:
         if resolved not in known:
             return _err(rid, 4092, f"no profile '{profile}' on this gateway")
 
-        # #100523: when THIS gateway already hosts the target's Bot Chat live
-        # (the Desktop has it open), the subprocess transport is fenced out by
-        # the single-owner lease ("already has a live owner") and the payload
-        # is dropped. Land the DM in the live session as a normal user turn
-        # via prompt.submit instead — same choke point the composer uses, so
-        # role alternation, persistence and streaming all behave as a typed
-        # message would. (Nested per method_ctx rebinding.)
+        # When THIS gateway already hosts the target's Bot Chat live (the
+        # Desktop has it open), the subprocess transport is fenced out by the
+        # single-owner lease and the payload dropped. Land the DM in the live
+        # session as a normal user turn via prompt.submit instead — the
+        # composer's choke point, so role alternation, persistence and
+        # streaming behave as a typed message would. (Nested: needs server
+        # globals via method_ctx rebinding.)
         def _live_bot_chat_sid(profile_name: str) -> str:
             from tools.bot_mode_probe import BOT_CHAT_TITLE
 
@@ -148,30 +159,21 @@ def _(rid, params: dict) -> dict:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(message)
-            # Per-profile turn lock (#93091): serialize with any other
-            # delivery turn into this profile (relay or local message_agent).
-            # The lock covers only the turn execution window. Worst-case
-            # handler hold is lock wait (bot_mode.turn_wait_seconds, default
-            # 120s) + the 600s turn timeout below — doubled when the retry
-            # policy grants one bounded re-run — so clients calling
-            # bot_relay.deliver must tolerate ~1320s before assuming failure.
+            # Per-profile turn lock serializes with any other delivery turn into
+            # this profile (relay or local message_agent) and covers only the
+            # turn execution window. Worst-case handler hold is lock wait
+            # (bot_mode.turn_wait_seconds, default 120s) + the 600s turn timeout,
+            # doubled when the retry policy grants one bounded re-run — callers
+            # must tolerate ~1320s before assuming failure.
             with acquire_turn_lock(root, resolved):
-                proc = subprocess.run(
-                    local_delivery_command(resolved, tmp),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=600,
-                )
+                proc = _run(resolved, tmp)
                 if proc.returncode != 0:
-                    # Retry session policy (#93091 item 5): transient classes
-                    # re-run the SAME session once; context_overflow also
-                    # re-runs the same session — the retried turn's pre-API
-                    # compaction pass (agent/conversation_loop.py) compacts
-                    # the over-threshold Bot Chat transcript first, which is
-                    # the sanctioned compression lever (no fresh session is
-                    # ever minted). Auth/quota/config classes never retry.
+                    # Retry policy: transient classes re-run the SAME session
+                    # once; context_overflow also re-runs the same session — the
+                    # retried turn's pre-API compaction pass compacts the
+                    # over-threshold Bot Chat transcript first (the sanctioned
+                    # compression lever; no fresh session is ever minted).
+                    # Auth/quota/config classes never retry.
                     from tools.bot_failure_reasons import (
                         RETRY_NONE,
                         classify_agent_error,
@@ -180,14 +182,7 @@ def _(rid, params: dict) -> dict:
 
                     first_detail = (proc.stderr or proc.stdout or "").strip()[-500:]
                     if retry_action(classify_agent_error(first_detail)) != RETRY_NONE:
-                        proc = subprocess.run(
-                            local_delivery_command(resolved, tmp),
-                            capture_output=True,
-                            text=True,
-                            encoding="utf-8",
-                            errors="replace",
-                            timeout=600,
-                        )
+                        proc = _run(resolved, tmp)
         finally:
             try:
                 os.unlink(tmp)
@@ -207,14 +202,14 @@ def _(rid, params: dict) -> dict:
     except subprocess.TimeoutExpired:
         return _err(rid, 5093, "delivery turn timed out")
     except Exception as e:
-        # 'target_busy' extends the #93091 item-1 structured refusal enum.
+        # 'target_busy' extends the structured refusal enum.
         if getattr(e, "reason", "") == "target_busy":
             return _err(rid, 5096, str(e))
         return _err(rid, 5094, str(e))
 
 
 @method("bot_relay.reply")
-def _(rid, params: dict) -> dict:
+def _(rid, params: dict, _root=_relay_root) -> dict:
     """Write a relayed reply (or delivery error) for a sender-side waiter.
 
     Params: ``id`` (envelope id), ``reply`` and/or ``error``, optional
@@ -224,15 +219,10 @@ def _(rid, params: dict) -> dict:
     if not envelope_id:
         return _err(rid, 4093, "id required")
     try:
-        import os
-        from pathlib import Path
-
         from tools.bot_relay import write_reply
 
-        home = Path(os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes"))
-        root = home.parent.parent if home.parent.name == "profiles" else home
         write_reply(
-            root,
+            _root(),
             envelope_id,
             reply=str(params.get("reply") or ""),
             error=str(params.get("error") or ""),
@@ -250,13 +240,14 @@ def register(server) -> None:
     from . import methods_groups
 
     server._LONG_HANDLERS = server._LONG_HANDLERS | methods_groups.LONG_HANDLERS
-    server.get_hosted_room_service = methods_groups.get_hosted_room_service
-    server._WORKER_UNAVAILABLE = methods_groups._WORKER_UNAVAILABLE
-    server._profile_name = methods_groups._profile_name
-    server._requested_profile = methods_groups._requested_profile
-    server._api_server_key = methods_groups._api_server_key
-    server._room_link_run_storage_durable = (
-        methods_groups._room_link_run_storage_durable
-    )
+    for name in (
+        "get_hosted_room_service",
+        "_WORKER_UNAVAILABLE",
+        "_profile_name",
+        "_requested_profile",
+        "_api_server_key",
+        "_room_link_run_storage_durable",
+    ):
+        setattr(server, name, getattr(methods_groups, name))
     methods_groups.bind_server(server)
     methods_groups.register(server)
