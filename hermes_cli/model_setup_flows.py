@@ -41,32 +41,17 @@ from hermes_cli.model_setup_flows_common import (  # noqa: F401
     _show_curated,
 )
 from hermes_cli.model_setup_flows_custom import (  # noqa: F401
-    _parse_context_length,
-    _probe_custom_endpoint,
-    _pick_detected_model,
     _model_flow_custom,
-    _configured_model_ids,
-    _discover_named_custom_models,
-    _pick_named_custom_model,
     _model_flow_named_custom,
 )
 from hermes_cli.model_setup_flows_azure import (  # noqa: F401
-    _azure_mode_label,
-    _azure_entra_preflight,
-    _azure_pick_model,
     _model_flow_azure_foundry,
 )
 from hermes_cli.model_setup_flows_bedrock import (  # noqa: F401
     BEDROCK_GEO_PREFIXES,
-    _REGION_GEO,
     bedrock_region_geo_prefix,
     bedrock_model_routable_from_region,
     _model_flow_bedrock_api_key,
-    _BEDROCK_EXCLUDE_PREFIXES,
-    _BEDROCK_EXCLUDE_SUBSTRINGS,
-    _BEDROCK_PROFILE_PREFIXES,
-    _BEDROCK_RECOMMENDED_BASES,
-    _bedrock_text_model_ids,
     _model_flow_bedrock,
 )
 
