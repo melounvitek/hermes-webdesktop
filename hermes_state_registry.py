@@ -1,40 +1,31 @@
-"""Process-wide shared SessionDB registry (#90837).
+"""Process-wide shared SessionDB registry.
 
-A gateway process opens state.db from many call sites — the runner's
-``AsyncSessionDB``, the ``SessionStore`` per-path cache, per-agent lazy
-recall (``run_agent._get_session_db_for_recall``), per-job cron opens,
-and per-message opens in mirror / channel_directory / slash_commands /
-shutdown_flush / session_search / react_to_message.  Each bare
-``SessionDB()`` mints its own writer connection, ``self._lock``,
-close-time WAL checkpoint, and async token-writer thread.  With N
-independent writer connections on one WAL file, mutual exclusion relies
-only on SQLite's WAL write lock plus each instance's busy_timeout retry
-ladder — and one connection's close-time checkpoint can race another's
-growth, producing the lost/reordered-page-write signature reported
-across 11+ incidents (#90837).
-
-This module owns that boundary: one shared ``SessionDB`` per resolved
-path per process, refcounted, with generation-aware retirement when the
-underlying file is replaced (snapshot restore, recovery swap).
+A gateway process opens state.db from many call sites (runner, SessionStore,
+per-agent recall, cron, per-message helpers).  Each bare ``SessionDB()`` mints
+its own writer connection, lock, close-time WAL checkpoint and token-writer
+thread; N independent writers on one WAL file rely only on SQLite's write lock
+plus busy_timeout, and one connection's close-time checkpoint can race another's
+growth (lost/reordered-page-write corruption).  This module owns that boundary:
+one shared ``SessionDB`` per resolved path per process, refcounted, with
+generation-aware retirement when the file is replaced (snapshot restore,
+recovery swap).
 
 Lifecycle rules:
 
-- ``acquire(path)`` returns the current generation for *path*,
-  incrementing its refcount.  Same path ⇒ same instance ⇒ same writer
-  connection.
-- ``close()`` on a shared instance is a NO-OP.  The registry — not any
-  individual caller — owns the connection lifecycle, so one caller's
-  ``close()`` can never tear down a writer other callers still hold.
-- ``release(db)`` decrements the generation *db was acquired from*
-  (object-keyed, not pathname-keyed, so an inode replacement cannot
-  strand a still-owned generation).  The final release of a retired
-  generation tears it down.
-- On inode change, the old generation is RETIRED — never lent again —
-  but stays alive until its existing holders release.  If a replacement
-  open fails, the registry is left WITHOUT a path entry (never a closed
-  stale object), so the next acquire retries fresh.
-- All teardown happens OUTSIDE the registry lock: a final release's
-  WAL checkpoint must never stall acquisition for every state.db.
+- ``acquire(path)`` returns the current generation for *path* and bumps its
+  refcount.  Same path ⇒ same instance ⇒ same writer connection.
+- ``close()`` on a shared instance is a NO-OP: the registry, not any caller,
+  owns the connection lifecycle, so one caller can never tear down a writer
+  others still hold.
+- ``release(db)`` decrements the generation *db was acquired from* (object-
+  keyed, not pathname-keyed, so an inode replacement cannot strand a
+  still-owned generation).  The final release of a retired generation tears
+  it down.
+- On inode change the old generation is RETIRED (never lent again) but stays
+  alive until its holders release.  If the replacement open fails the registry
+  keeps NO path entry (never a closed stale object) so the next acquire retries.
+- All teardown happens OUTSIDE the registry lock: a final release's WAL
+  checkpoint must never stall acquisition for every state.db.
 """
 
 from __future__ import annotations
@@ -44,32 +35,12 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
+from hermes_state_common import stat_db_file_identity as _stat_db_file_identity
+
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typed only
     from hermes_state import SessionDB
 
 logger = logging.getLogger(__name__)
-
-
-def _stat_db_file_identity(path: Path) -> Optional[Tuple[int, int]]:
-    """Return ``(st_dev, st_ino)`` for *path*, or None when unavailable.
-
-    Mirrors the hermes_state helper of the same name; kept local so this
-    module has no import-time dependency on hermes_state (which imports
-    this module — the cycle is resolved by deferring SessionDB lookup
-    to call time).
-    """
-    import os
-
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    # Windows volumes (and some network FS) report st_ino=0; a (0, 0)
-    # identity would false-positive every check. Skip the inode half of
-    # the guard there.
-    if not st.st_dev or not st.st_ino:
-        return None
-    return (st.st_dev, st.st_ino)
 
 
 class _Generation:
@@ -85,16 +56,13 @@ class _Generation:
 
 
 _lock = threading.Lock()
-# path → live generation (never retired).  A retired generation leaves
-# this table immediately on retirement and lives on in _retired until
-# its last holder releases.
+# path → live generation.  Retired generations move to _retired (keyed by
+# id(db)) until their last holder releases.
 _generations: Dict[Path, _Generation] = {}
-# Object-keyed retired generations still draining holders.
-_retired: Dict[int, _Generation] = {}  # id(db) → generation
-# Paths whose next generation is currently being constructed.  Construction
-# stays outside _lock because schema reconciliation can take seconds, but peers
-# for the SAME file must wait: otherwise every cold caller opens a writable
-# SQLite connection before the registry chooses one winner.
+_retired: Dict[int, _Generation] = {}
+# Paths whose next generation is being constructed.  Construction runs outside
+# _lock (schema reconciliation can take seconds), but peers for the SAME file
+# must wait or every cold caller opens its own writer before a winner is chosen.
 _opening: Dict[Path, threading.Event] = {}
 
 
@@ -120,20 +88,13 @@ def _teardown(db: "SessionDB") -> None:
 def acquire(db_path: Optional[Path] = None) -> "SessionDB":
     """Return the shared SessionDB for *db_path*, incrementing its refcount.
 
-    The same resolved path always returns the same ``SessionDB`` instance
-    within one process, so all long-lived in-process callers share one
-    writer connection, one ``self._lock``, and one token-writer thread.
+    If the file was replaced (different inode) since the generation opened —
+    ``hermes sessions recover``, snapshot restore — that generation is RETIRED
+    but stays alive for its holders, and a fresh one is opened in its place.
 
-    If the underlying file was replaced (different inode) since the
-    shared generation was opened — e.g. by ``hermes sessions recover`` or
-    a snapshot restore — the current generation is RETIRED (never lent
-    again) but stays alive for its existing holders, and a fresh
-    generation is opened in its place.
-
-    Raises whatever ``SessionDB.__init__`` raises (malformed, locked,
-    etc.).  On a replacement-open failure the registry holds NO entry for
-    the path, so the next acquire retries fresh rather than handing out
-    a closed stale object.
+    Raises whatever ``SessionDB.__init__`` raises.  On a replacement-open
+    failure the registry holds NO entry for the path, so the next acquire
+    retries fresh instead of receiving a closed stale object.
     """
     from hermes_state import _default_db_path
 
@@ -153,9 +114,8 @@ def acquire(db_path: Optional[Path] = None) -> "SessionDB":
                     and generation.identity is not None
                     and current != generation.identity
                 ):
-                    # File replaced: retire the live generation (its
-                    # holders keep it until they release) and elect one
-                    # caller to construct the replacement below.
+                    # File replaced: retire, then elect one caller to open
+                    # the replacement below.
                     _retire_generation_locked(path, generation)
                 else:
                     generation.refcount += 1
@@ -167,13 +127,12 @@ def acquire(db_path: Optional[Path] = None) -> "SessionDB":
                 _opening[path] = opening
                 break
 
-        # Another caller is constructing this path.  Do not hold the global
-        # registry lock while waiting: unrelated databases continue opening.
-        # A failed opener signals too, so one waiter can retry as the successor.
+        # Another caller is constructing this path; wait without holding the
+        # global lock.  A failed opener signals too, so a waiter can retry.
         opening.wait()
 
-    # Open a fresh generation OUTSIDE the lock.  The per-path opening marker
-    # prevents redundant writer connections without serialising other files.
+    # Open OUTSIDE the lock; the per-path marker prevents redundant writers
+    # without serialising other files.
     try:
         db = _open_session_db(path)
         db._shared_registry_owned = True
@@ -188,8 +147,7 @@ def acquire(db_path: Optional[Path] = None) -> "SessionDB":
     with _lock:
         existing = _generations.get(path)
         if existing is not None:
-            # Defensive: a generation may have been installed by explicit
-            # registry manipulation while this open was in flight.
+            # Defensive: installed by explicit registry manipulation mid-open.
             existing.refcount += 1
             winner = existing.db
         else:
@@ -206,9 +164,8 @@ def acquire(db_path: Optional[Path] = None) -> "SessionDB":
 def _retire_generation_locked(path: Path, generation: _Generation) -> None:
     """Retire *generation* so it is never lent again (caller holds _lock).
 
-    The instance stays alive — its holders still own references — and is
-    tracked in ``_retired`` keyed by ``id(db)`` so their releases find
-    the right generation even after the path maps to a new one.
+    It stays alive for its holders, tracked in ``_retired`` by ``id(db)`` so
+    their releases find it even after the path maps to a new generation.
     """
     generation.retired = True
     if _generations.get(path) is generation:
@@ -219,15 +176,11 @@ def _retire_generation_locked(path: Path, generation: _Generation) -> None:
 def release(db: "SessionDB") -> bool:
     """Decrement the refcount of a shared SessionDB.
 
-    Returns ``True`` if *db* was a shared instance and its refcount was
-    decremented; ``False`` if *db* is not registry-managed (caller owns
-    its own close()).  The final release of a generation tears it down —
-    OUTSIDE the registry lock, so a close-time WAL checkpoint never
-    stalls acquisition for every state.db in the process.
-
-    Object-keyed lookup means an inode replacement cannot strand a
-    still-owned generation: holders of the old generation release into
-    the retired record, not into whatever the path currently names.
+    Returns ``True`` if *db* was shared; ``False`` if it is not registry-managed
+    (caller owns close()).  The final release tears the generation down OUTSIDE
+    the registry lock so a close-time WAL checkpoint never stalls acquisition.
+    Lookup is object-keyed, so holders of an old generation release into its
+    retired record, not into whatever the path currently names.
     """
     if db is None:
         return False
@@ -244,8 +197,7 @@ def release(db: "SessionDB") -> bool:
                 return False
             generation = _generations.get(path)
             if generation is None or generation.db is not db:
-                # Not a shared instance (caller used SessionDB()
-                # directly) — nothing to do; the caller owns close().
+                # Not shared (bare SessionDB()); the caller owns close().
                 return False
         generation.refcount -= 1
         needs_teardown = generation.refcount <= 0
@@ -259,21 +211,17 @@ def release(db: "SessionDB") -> bool:
                         _generations.pop(Path(path), None)
                     except (TypeError, ValueError):
                         pass
-    # Teardown OUTSIDE the lock: it stops the token writer, checkpoints
-    # the WAL, and drains the read pool — none of which may hold up
-    # acquisition for every other state.db in the process.
+    # Teardown OUTSIDE the lock: stopping the token writer, WAL checkpoint and
+    # read-pool drain must not block acquisition for every other state.db.
     if needs_teardown:
         _teardown(db)
     return True
 
 
 def close_all() -> int:
-    """Close every shared SessionDB in this process, regardless of refcount.
+    """Close every shared SessionDB regardless of refcount; returns the count.
 
-    Called at gateway shutdown (after all agents and cron jobs have
-    finished) to release every WAL write lock and drain every
-    token-writer thread cleanly.  Returns the number of instances
-    closed.  Idempotent.
+    For gateway shutdown, after all agents and cron jobs finished.  Idempotent.
     """
     closed = 0
     with _lock:
@@ -282,7 +230,6 @@ def close_all() -> int:
         _retired.clear()
         for generation in generations:
             generation.retired = True
-    # Teardown outside the lock, one generation at a time.
     for generation in generations:
         _teardown(generation.db)
         closed += 1
@@ -290,12 +237,11 @@ def close_all() -> int:
 
 
 def live_shared_session_dbs() -> List["SessionDB"]:
-    """Snapshot of every live (non-retired) shared SessionDB in this process.
+    """Snapshot of every live (non-retired) shared SessionDB.
 
-    For periodic in-process maintenance (the gateway housekeeping tick's
-    deferred-FTS retry). Refcounts are NOT touched: the caller only invokes
-    a method on an instance that some holder already keeps alive; a
-    concurrent final release closes it and the callee sees ``_conn is None``.
+    For in-process maintenance (housekeeping deferred-FTS retry).  Refcounts
+    are NOT touched: a concurrent final release may close an instance, in
+    which case the callee sees ``_conn is None``.
     """
     with _lock:
         return [g.db for g in _generations.values() if not g.retired]
@@ -314,9 +260,7 @@ def stats() -> Dict[str, int]:
         }
 
 
-# ── Backwards-compatible aliases (hermes_state re-exports) ──
-# Kept so call sites and tests can import either from hermes_state
-# (the historical path) or from this module directly.
+# ── Backwards-compatible aliases (hermes_state re-exports them) ──
 
 def get_shared_session_db(db_path: Optional[Path] = None) -> "SessionDB":
     return acquire(db_path)
@@ -333,10 +277,8 @@ def close_shared_session_dbs() -> int:
 def release_or_close(db: "SessionDB") -> None:
     """Release a shared instance, or close it when it is not registry-managed.
 
-    The one-line cleanup for call sites that previously did a plain
-    ``db.close()``: shared instances return their refcount to the
-    registry (the registry owns the lifecycle), anything else — read-only
-    opens, CLI one-shots, test fakes — falls back to a direct close.
+    Drop-in for a plain ``db.close()``: read-only opens, CLI one-shots and
+    test fakes fall back to a direct close.
     """
     if not release(db):
         try:

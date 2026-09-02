@@ -14,30 +14,21 @@ source board's slug)::
       attachments/<task>/…   attachment blobs (unless --no-attachments)
       logs/<task>.log        worker logs (only with --include-logs)
 
-Two things make this more than a ``tar czf`` of the board directory.
+Two things make this more than ``tar czf`` of the board directory:
 
-**The database is live.** Kanban runs in WAL mode and a dispatcher may be
-mid-write, so copying ``kanban.db`` off the filesystem yields a torn
-snapshot that is missing whatever still sits in the ``-wal`` file. Export
-goes through SQLite's online-backup API instead, which produces a
-consistent single-file image of a database that is being written to.
+* **The database is live** (WAL mode, dispatcher may be mid-write), so the
+  export uses SQLite's online-backup API for a consistent image instead of a
+  file copy that would miss the ``-wal`` sidecar.
+* **Rows carry machine-local state** — claims, PIDs, heartbeats, absolute
+  paths, gateway chat subscriptions, session ids. Shipping them verbatim
+  would import claims owned by a stranger's process or push events into a
+  stranger's Telegram thread. Scrubbed on export and re-scrubbed on import
+  (an archive is untrusted); see :func:`_scrub_local_state` and
+  :func:`_relocate_imported_rows`.
 
-**Rows carry machine-local state.** Claims, PIDs, heartbeats, absolute
-workspace and attachment paths, gateway chat subscriptions, and session
-ids are all meaningful only on the machine that wrote them. Shipping them
-verbatim is how an imported board arrives holding claims owned by a
-process on somebody else's laptop, or starts pushing task events into a
-stranger's Telegram thread. Everything machine-local is scrubbed on the
-export side (so the archive itself never carries it) and defensively
-re-scrubbed on import; see :func:`_scrub_local_state` and
-:func:`_relocate_imported_rows`.
-
-Imports always land as a **new** board — the slug auto-suffixes on
-collision — so an import can never mutate a board that is already there.
-That also means an imported board is never ``default``, which is what
-lets the import side ignore the default board's split on-disk layout
-(``<root>/kanban.db`` beside ``<root>/kanban/attachments/``) and put
-everything inside one ``boards/<slug>/`` directory.
+Imports always land as a **new** board (slug auto-suffixes on collision), so
+an import never mutates an existing board and is never ``default`` — which
+lets the importer ignore the default board's split on-disk layout.
 """
 
 from __future__ import annotations
@@ -74,13 +65,8 @@ _DISPATCHABLE_STATUSES = ("ready", "running", "todo", "scheduled")
 # ---------------------------------------------------------------------------
 
 def _snapshot_db(source: Path, target: Path) -> None:
-    """Write a consistent copy of ``source`` to ``target``.
-
-    Uses SQLite's online-backup API rather than a file copy: in WAL mode
-    a just-committed page can still live in the ``-wal`` sidecar, so
-    copying only ``kanban.db`` loses recent writes and can produce a
-    torn image if the dispatcher commits mid-copy.
-    """
+    """Consistent copy of ``source`` via the online-backup API (a file copy
+    would miss pages still in the ``-wal`` sidecar and could tear)."""
     src = sqlite3.connect(str(source))
     try:
         dst = sqlite3.connect(str(target))
@@ -93,14 +79,9 @@ def _snapshot_db(source: Path, target: Path) -> None:
 
 
 def _scrub_local_state(conn: sqlite3.Connection) -> None:
-    """Strip machine-local runtime state. Caller owns the transaction.
-
-    Runs on the export side so the archive itself never carries another
-    machine's claims, PIDs, or — the one that actually matters for a
-    board shared with someone else — the gateway chat ids subscribed to
-    its task events. Repeated on import because an archive is untrusted
-    input.
-    """
+    """Strip machine-local runtime state (claims, PIDs, and above all the
+    gateway chat ids subscribed to task events). Caller owns the transaction.
+    Run on export and again on import (an archive is untrusted input)."""
     conn.execute("DELETE FROM kanban_notify_subs")
     conn.execute(
         """
@@ -157,12 +138,9 @@ def export_board(
     include_attachments: bool = True,
     include_logs: bool = False,
 ) -> dict[str, Any]:
-    """Export ``board`` to a ``tar.gz`` archive. Returns a summary dict.
-
-    ``output_path`` may be given with or without the ``.tar.gz`` suffix.
-    Workspaces are never included: they are git worktrees and scratch
-    trees that are large, machine-local, and rebuilt on demand.
-    """
+    """Export ``board`` to a ``tar.gz`` (suffix optional on ``output_path``);
+    returns a summary dict. Workspaces are never included — large,
+    machine-local, rebuilt on demand."""
     slug = kb._normalize_board_slug(board) or kb.get_current_board()
     if not kb.board_exists(slug):
         raise ValueError(f"board {slug!r} does not exist")
@@ -241,12 +219,8 @@ def export_board(
 # ---------------------------------------------------------------------------
 
 def _available_slug(preferred: str) -> str:
-    """Return ``preferred``, or the first free ``<preferred>-N`` variant.
-
-    ``default`` always reports as existing, so an archive exported from a
-    default board naturally lands as ``default-2`` instead of colliding
-    with the importer's own default board.
-    """
+    """``preferred`` or the first free ``<preferred>-N``. ``default`` always
+    exists, so a default-board export lands as ``default-2``."""
     if not kb.board_exists(preferred):
         return preferred
     # Leave headroom for the suffix inside the 64-char slug limit.
@@ -295,22 +269,17 @@ def _read_board_metadata(path: Path) -> dict[str, Any]:
 def _relocate_imported_rows(
     conn: sqlite3.Connection, slug: str
 ) -> tuple[dict[str, int], list[str]]:
-    """Re-anchor an imported board's rows to this machine.
+    """Re-anchor an imported board's rows to this machine; returns
+    ``(stats, warnings)``.
 
-    Returns ``(stats, warnings)``. Three things move:
-
-    * Attachment rows are repointed at this board's attachments tree.
-      Rows whose blob did not travel (an export made with
-      ``--no-attachments``) are dropped, because a row pointing at a file
-      that does not exist breaks download in every UI that lists it.
-    * Workspace paths are cleared. ``scratch`` tasks regenerate one under
-      this board on the next claim, so they are simply reset. ``dir`` and
-      ``worktree`` tasks cannot be resolved without a path that means
-      something here, so any that are still dispatchable are parked in
-      ``triage`` — otherwise the dispatcher claims them, fails to build a
-      workspace, and burns them straight into the failure breaker.
-    * Runtime state is scrubbed again. Export already did this, but an
-      archive is an untrusted input and the cost is one UPDATE.
+    * Attachment rows are repointed at this board's tree; rows whose blob
+      did not travel (``--no-attachments``) are dropped, since a dangling row
+      breaks download in every UI.
+    * Workspace paths are cleared. ``scratch`` regenerates on next claim;
+      dispatchable ``dir``/``worktree`` tasks are parked in ``triage``,
+      otherwise the dispatcher claims them, fails to build a workspace, and
+      burns them into the failure breaker.
+    * Runtime state is scrubbed again (untrusted input, one UPDATE).
     """
     warnings: list[str] = []
     now = int(time.time())
@@ -389,12 +358,8 @@ def import_board(
     *,
     activate: bool = False,
 ) -> dict[str, Any]:
-    """Import a board archive as a new board. Returns a summary dict.
-
-    ``slug`` overrides the name from the archive. Either way the final
-    slug auto-suffixes if it is taken, so an import never merges into or
-    overwrites an existing board.
-    """
+    """Import an archive as a NEW board (``slug`` overrides the archive's;
+    either way it auto-suffixes if taken). Returns a summary dict."""
     archive = Path(archive_path).expanduser()
     if not archive.exists():
         raise FileNotFoundError(f"archive not found: {archive}")
