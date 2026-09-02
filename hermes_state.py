@@ -908,6 +908,13 @@ _TRANSIENT_SQLITE_MARKERS = (
 )
 
 
+def _is_no_more_rows(exc: sqlite3.Error) -> bool:
+    """Transient engine error on contended WAL appends; the identical write succeeds
+    standalone, so it retries like locked/busy. Message-scoped because some builds
+    raise it as InterfaceError (outside DatabaseError)."""
+    return "no more rows available" in str(exc).lower()
+
+
 def is_transient_sqlite_error(exc: BaseException) -> bool:
     """"Busy right now", not "damaged". One predicate so the read-only open
     retry and the HTTP 503-vs-500 split cannot drift apart."""
@@ -1456,29 +1463,23 @@ class SessionDB(
         self._db_file_identity: Optional[tuple] = None
         self._db_file_application_id: int = 0
         self._db_file_generation_token: str = ""
-        self._db_replaced = False
+        self._db_sidecar_identity: Dict[str, tuple] = {}
+        self._db_replaced = self._db_wal_generation_lost = False
         # Sticky quarantine (see StateDbCorruptError); never cleared.
         self._db_corrupt = False
         self._db_corrupt_reason = ""
-        self._db_sidecar_identity: Dict[str, tuple] = {}
-        self._db_wal_generation_lost = False
         self._fts_usermerge_floor_applied = False  # one-shot usermerge-floor write guard
-        self._fts_enabled = False
-        self._fts_stale = False
-        self._trigram_available = False
+        self._fts_enabled = self._fts_stale = self._trigram_available = False
         # _fts_cjk_loaded: tokenizer extension present on the writer connection;
         # _fts_cjk_available: messages_fts_cjk is queryable AND not marked stale.
-        self._fts_cjk_loaded = False
-        self._fts_cjk_available = False
-        self._fts_unavailable_warned = False
+        self._fts_cjk_loaded = self._fts_cjk_available = self._fts_unavailable_warned = False
         self._conn = None
         # Async token accounting (queue_token_counts). Distinct from self._lock
         # so enqueue/flush bookkeeping never contends with SQLite writes.
         self._token_queue: deque = deque()
         self._token_queue_cond = threading.Condition(threading.Lock())
         self._token_writer_thread: Optional[threading.Thread] = None
-        self._token_writer_stop = False
-        self._token_writer_busy = False
+        self._token_writer_stop = self._token_writer_busy = False
         self._token_atexit_hook: Optional[Callable[[], None]] = None
         # Opened via get_shared_session_db(): close() releases a refcount instead.
         self._shared_registry_owned = False
@@ -1920,9 +1921,7 @@ class SessionDB(
         row = cursor.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'"
         ).fetchone()
-        if row is None:
-            return False
-        return "tool_name" not in (row[0] or "")
+        return row is not None and "tool_name" not in (row[0] or "")
 
     def _warn_trigram_unavailable(self, exc: sqlite3.OperationalError) -> None:
         """Log once that the trigram tokenizer is missing; base FTS5 stays enabled."""
@@ -2093,11 +2092,6 @@ class SessionDB(
         # it has started, an IOERR leaves settlement unknown and must propagate —
         # this helper owns non-idempotent transcript/counter mutations.
         ioerr_begin_retried = False
-        # Transient engine error on contended WAL appends; the identical write
-        # succeeds standalone, so retry like locked/busy. Message-scoped because
-        # some builds raise it as InterfaceError (outside DatabaseError).
-        def _is_no_more_rows(exc: sqlite3.Error) -> bool:
-            return "no more rows available" in str(exc).lower()
         while True:
             self._raise_if_db_corrupt()
             self._raise_if_db_replaced()
@@ -2241,16 +2235,11 @@ class SessionDB(
                 if row and row[0]:
                     token = str(row[0])
                 self._db_file_generation_token = token
-                current = 0
                 pragma_row = self._conn.execute("PRAGMA application_id").fetchone()
-                if pragma_row:
-                    current = int(pragma_row[0] or 0)
+                current = int(pragma_row[0] or 0) if pragma_row else 0
                 if current == 0:
-                    app_id = int(token[:8], 16) & 0x7FFFFFFF
-                    if app_id == 0:
-                        app_id = 1
-                    self._conn.execute(f"PRAGMA application_id={app_id}")
-                    current = app_id
+                    current = (int(token[:8], 16) & 0x7FFFFFFF) or 1
+                    self._conn.execute(f"PRAGMA application_id={current}")
                 self._db_file_application_id = current
                 try:
                     self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
@@ -2269,10 +2258,10 @@ class SessionDB(
         elif self._conn is not None and not self._db_file_application_id:
             try:
                 pragma_row = self._read_one("PRAGMA application_id")
-                if pragma_row and pragma_row[0]:
-                    self._db_file_application_id = int(pragma_row[0])
             except sqlite3.Error:
-                pass
+                pragma_row = None
+            if pragma_row and pragma_row[0]:
+                self._db_file_application_id = int(pragma_row[0])
 
     def _db_file_was_replaced(self) -> bool:
         """True when the path no longer names the file this instance opened."""
@@ -2339,15 +2328,19 @@ class SessionDB(
         logger.error(_DELETED_WAL_GENERATION_MSG)
         raise DeletedWalGenerationError(_DELETED_WAL_GENERATION_MSG)
 
+    def _halt_if_db_generation_changed(self) -> None:
+        """Halt (logging) when the file or its WAL generation is no longer ours."""
+        if self._db_replaced or self._db_file_was_replaced():
+            self._halt_db_replaced()
+        if self._db_wal_generation_lost or self._wal_generation_was_lost():
+            self._halt_deleted_wal_generation()
+
     def _raise_if_db_replaced(self) -> None:
         if self._db_replaced:
             raise StateDbReplacedError(_STATE_DB_REPLACED_MSG)
         if self._db_wal_generation_lost:
             raise DeletedWalGenerationError(_DELETED_WAL_GENERATION_MSG)
-        if self._db_file_was_replaced():
-            self._halt_db_replaced()
-        if self._wal_generation_was_lost():
-            self._halt_deleted_wal_generation()
+        self._halt_if_db_generation_changed()
 
     @classmethod
     def _is_structural_corruption_error(cls, exc: BaseException) -> bool:
@@ -2382,9 +2375,8 @@ class SessionDB(
         )
         err = self._corrupt_error()
         for attr in ("sqlite_errorcode", "sqlite_errorname"):
-            value = getattr(exc, attr, None)
-            if value is not None:
-                setattr(err, attr, value)
+            if getattr(exc, attr, None) is not None:
+                setattr(err, attr, getattr(exc, attr))
         raise err from exc
 
     def _disable_close_time_checkpoint(self) -> None:
@@ -2525,10 +2517,7 @@ class SessionDB(
         if not self._fts_enabled or not self._is_fts_write_corruption_error(exc):
             return False
         self._raise_if_db_corrupt()
-        if self._db_replaced or self._db_file_was_replaced():
-            self._halt_db_replaced()
-        if self._db_wal_generation_lost or self._wal_generation_was_lost():
-            self._halt_deleted_wal_generation()
+        self._halt_if_db_generation_changed()
         try:
             with self._lock:
                 self._conn.execute("BEGIN IMMEDIATE")
@@ -2924,11 +2913,7 @@ class SessionDB(
             if len(rows) > 1:
                 return None
         elif len(rows) > 1:
-            distinct_users = {
-                str(r.get("user_id") or "").strip()
-                for r in rows
-                if str(r.get("user_id") or "").strip()
-            }
+            distinct_users = {u for u in (str(r.get("user_id") or "").strip() for r in rows) if u}
             if len(distinct_users) > 1:
                 return None
         return str(rows[0]["id"])
