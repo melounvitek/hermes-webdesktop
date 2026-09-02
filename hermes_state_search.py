@@ -448,8 +448,9 @@ class SessionSearchMixin:
     def _seed_fts_rebuild_markers(self, conn, *, force: bool = False) -> int:
         """Write ``fts_rebuild_high_water`` / ``fts_rebuild_progress`` for a
         full backfill; returns the high-water id. Without ``force`` and with
-        high_water already set, only repairs a missing progress key. Caller
-        holds the write transaction."""
+        high_water already set, only repairs a missing progress key (see
+        ``_reseed_missing_progress`` for why a missing key must not read as
+        "done"). Caller holds the write transaction."""
         existing_hw = _meta_row(conn, "fts_rebuild_high_water")
         if existing_hw is not None and not force:
             self._reseed_missing_progress(conn)
@@ -535,6 +536,8 @@ class SessionSearchMixin:
                 ]
                 for sh in shadows:
                     conn.execute(f"ALTER TABLE {sh} RENAME TO fts_v22_trash_{sh}")
+            # Claim the backfill BEFORE the empty v23 tables exist so a crash before
+            # schema ensure resumes instead of stamping an empty index.
             hw = self._seed_fts_rebuild_markers(conn, force=True)
             _delete_meta(conn, "fts_optimize_available")
             return hw

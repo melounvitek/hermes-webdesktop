@@ -309,7 +309,8 @@ def apply_wal_with_fallback(
 
     # Decide BEFORE the flip whether it would overwrite a mode somebody chose:
     # the probe and page_count are only readable while the file is untouched.
-    # A 0-page DB has no prior choice, so brand-new databases stay quiet.
+    # A 0-page DB has no prior choice, and every caller reaches this before
+    # creating schema, so brand-new databases stay quiet.
     _upgrading_existing_db = (
         current_mode is not None and current_mode != "wal" and _database_has_content(conn)
     )
@@ -345,8 +346,8 @@ def apply_wal_with_fallback(
             raise  # unrelated OperationalError — don't silently swallow
         # ``disk i/o error`` is ambiguous: deterministic WAL-incompatibility on
         # ZFS / APFS-CoW, or a one-shot transient EIO. Treating a transient EIO
-        # as a permanent downgrade signal produced mixed-mode corruption, so
-        # retry the pragma: transient EIO clears and we return "wal";
+        # as a permanent downgrade signal produced mixed-mode corruption (process
+        # A downgrades to DELETE while siblings set WAL), so retry the pragma: transient EIO clears and we return "wal";
         # deterministic cases keep failing into the guarded DELETE fallback.
         if "disk i/o error" in msg:
             for _ in range(2):

@@ -289,8 +289,8 @@ class SessionTelegramTopicsMixin:
     ) -> int:
         """Remove the binding row for one (chat, thread) pair.
 
-        Called when the Bot API confirms a topic was deleted externally;
-        otherwise ``gateway.run._recover_telegram_topic_thread_id`` keeps
+        Called when the Bot API confirms a topic was deleted externally
+        (``Thread not found`` after the same-thread retry failed); otherwise ``gateway.run._recover_telegram_topic_thread_id`` keeps
         redirecting inbound messages to the dead topic.  If this removes the
         chat's *last* binding, ``telegram_dm_topic_mode`` is flipped to
         ``enabled = 0`` in the same transaction, or a user who disabled topics
@@ -319,7 +319,8 @@ class SessionTelegramTopicsMixin:
                 return
             if not deleted["count"]:
                 return
-            # Last binding gone → disable topic mode, same transaction.
+            # Last binding gone → disable topic mode in the same transaction, so
+            # there is no read-after-prune race.
             try:
                 remaining = conn.execute(
                     """

@@ -138,7 +138,8 @@ class SessionMaintenanceMixin:
         Disable the gate only for sources owned by state.db itself.
 
         SELECT, live-lease validation and UPDATE run in one ``BEGIN IMMEDIATE``
-        transaction; active turn leases / compression locks spare the row.
+        transaction; active turn leases / compression locks spare the row, and
+        expired guards are removed so their former owner is fenced.
         """
         from hermes_state import SessionCompressionInProgressError, SessionTurnLeaseLostError
         srcs = tuple(s for s in sources if s)

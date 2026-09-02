@@ -1937,6 +1937,10 @@ class SessionDB(
             if not cjk_present:
                 # Any old stale breadcrumb refers to a table that no longer exists.
                 cursor.execute("DELETE FROM state_meta WHERE key = ?", (FTS_CJK_STALE_KEY,))
+                # Empty DB: index complete by construction (triggers cover everything),
+                # no markers. Populated DB: the marker pair keeps the id-gated triggers
+                # correct while old rows await optimize-storage; the index is NOT
+                # served until that backfill completes.
                 if cursor.execute("SELECT COUNT(*) FROM messages WHERE role <> 'tool'").fetchone()[0] > 0:
                     hw = cursor.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
                     for k, v in (
@@ -2195,7 +2199,8 @@ class SessionDB(
         recorded_app = int(self._db_file_application_id or 0)
         if recorded_app:
             disk_app = _read_sqlite_application_id(self.db_path)
-            # Header 0 = WAL not yet checkpointed, not a replace.
+            # Header 0 = WAL not yet checkpointed, not a replace; any real
+            # replacement (a copied Hermes DB minted its own id) is nonzero.
             if disk_app and disk_app != recorded_app:
                 return True
         return False
@@ -2303,6 +2308,9 @@ class SessionDB(
         conn = self._conn
         setconfig = getattr(conn, "setconfig", None)
         if flag is None or conn is None or setconfig is None:
+            # <3.12 has no setconfig: the residual close checkpoint is tolerable — it
+            # can only carry pre-quarantine committed frames; this handle accepts no
+            # further writes.
             return
         try:
             setconfig(flag, True)

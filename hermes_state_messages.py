@@ -129,6 +129,12 @@ class SessionMessagesMixin:
         scrubbed from text so persistence never fails. Paired with :meth:`_decode_content`.
         """
         if isinstance(content, str):
+            # Lone UTF-16 surrogates arrive in tool results scraped from the web. The
+            # upstream sanitizer only cleans the api_messages copy and the recovery
+            # sanitizer only runs after the API call raises (it no longer does), so the
+            # canonical history keeps them and this write is where they land. Left raw,
+            # sqlite3 raises UnicodeEncodeError, the flush is abandoned, and the session
+            # silently stops persisting for the rest of its life.
             return _sanitize_surrogates(content)
         if content is None or isinstance(content, (bytes, int, float)):
             return content
@@ -432,7 +438,10 @@ class SessionMessagesMixin:
         display_metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Stamp presentation metadata on this turn's freshly persisted row; the model
-        still receives ``role``/``content`` unchanged."""
+        still receives ``role``/``content`` unchanged. Gateway/CLI synthetic inputs call
+        this immediately after their serial turn has flushed (the target is resolved as
+        newest-active-row-by-content), preserving producer provenance without
+        classifying by content at render time."""
         from hermes_state import _scrub_surrogates
         if not session_id or not content or not display_kind:
             return False
@@ -1154,6 +1163,9 @@ class SessionMessagesMixin:
             if row["role"] in {"user", "assistant"} and isinstance(content, str):
                 content = sanitize_context(content).strip()
             msg = {"role": row["role"], "content": content}
+            # Underscore-prefixed like ``_row_id``: every transport strips it before the
+            # wire, and compression's assembly copies deliberately strip it so rotated
+            # child handoffs still flush (see _fresh_compaction_message_copy).
             msg[_DB_PERSISTED_MARKER_KEY] = True
             if include_row_ids and row["id"] is not None:
                 msg["_row_id"] = row["id"]
@@ -1525,8 +1537,9 @@ class SessionMessagesMixin:
             return cursor.fetchone()[0]
 
     def has_platform_message_id(self, session_id: str, platform_message_id: str) -> bool:
-        """True when a message with *platform_message_id* exists (partial index lookup;
-        the gateway's transient-failure dedupe guard)."""
+        """True when a message with *platform_message_id* exists (uses the
+        idx_messages_platform_msg_id partial index; the gateway's transient-failure
+        dedupe guard)."""
         return self._read_one(
             "SELECT 1 FROM messages WHERE session_id = ? AND platform_message_id = ? LIMIT 1",
             (session_id, platform_message_id),
@@ -1560,7 +1573,8 @@ class SessionMessagesMixin:
 
     def is_explicit_fork_child(self, session_id: str) -> bool:
         """Public read-only view of :meth:`_is_explicit_fork_child_row`; a missing row
-        is not a fork."""
+        is not a fork. ``agent/prompt_cache_scope.py`` uses it to keep a declared
+        conversation key from crossing the fork boundary."""
         session = self.get_session(session_id)
         return bool(session and self._is_explicit_fork_child_row(session))
 
@@ -1573,7 +1587,11 @@ class SessionMessagesMixin:
         ``conversation_generations`` (advanced inside each boundary's txn), not an
         aggregate over session rows: deletes/prunes would let an aggregate re-emit a
         retired pair. Rows are never garbage-collected, by design (dropping one would
-        re-issue generation 1 — the ABA this counter prevents).
+        re-issue generation 1 — the ABA this counter prevents). Wall-clock-free, so a
+        backwards NTP correction cannot reorder it. DBs upgraded mid-conversation start
+        at no generation and take their first from the next boundary written; a
+        conversation that reset before the upgrade shares its predecessor's scope once
+        (costs a warm prompt-cache bucket, never crosses an identity).
         """
         if not session_key or not source:
             return None

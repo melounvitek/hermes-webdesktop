@@ -51,6 +51,7 @@ _FINGERPRINT_SAMPLE_BYTES = 65536
 # malformed-SCHEMA DB still accepts writes, so without the mask any live write
 # re-keys the ledger and the repair budget resets to 1 forever. The page-1
 # sqlite_master b-tree — what repair identity depends on — sits after byte 100.
+# (WAL mode routes commits to the -wal sidecar; masking is harmless there.)
 _FINGERPRINT_VOLATILE_HEADER_RANGES = ((24, 28), (92, 96))
 # Free-space headroom for the pre-repair forensic backup (a full raw copy of
 # the damaged DB plus sidecars; a repair loop on a large state.db is a disk
@@ -612,7 +613,8 @@ def _backup_db_file(db_path: Path) -> "Tuple[Optional[Path], Optional[str]]":
     because the forensic bundle is the recovery path when every strategy fails.
     Refuses while a connection to this DB is live in the process: reading the
     file would ``close()`` a descriptor and cancel that connection's POSIX
-    advisory locks (see ``hermes_cli.sqlite_safe_read``).
+    advisory locks (see ``hermes_cli.sqlite_safe_read``) — a real case: one
+    SessionDB can enter repair while the gateway holds others.
 
     Dedupe: if the newest existing backup is byte-identical to the current
     recovery image (``_backup_content_identity`` — NOT mtime, NOT
@@ -1135,7 +1137,8 @@ def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str]
     open-time WAL-reset gate never sees a flip made inside repair). Routed
     through :func:`apply_wal_with_fallback`, not a direct pragma, so it
     inherits the vulnerable-SQLite WAL-reset gate (on a vulnerable runtime the
-    gate deliberately keeps DELETE), the macOS-NFS silent-refusal handling,
+    gate deliberately keeps DELETE and the resulting journal_mode-changed
+    WARNING is expected there), the macOS-NFS silent-refusal handling,
     and the WAL companions. ``before_mode`` (None if unprobeable) is only for
     the log comparison; the target comes from ``database.journal_mode``.
     Best-effort: the repair already succeeded, so failures log at WARNING.
@@ -1169,7 +1172,8 @@ def _repair_state_db_schema_locked(db_path: Path, *, backup: bool, report: Dict[
     Caller must hold the cross-process repair lock for *db_path*. Strategies
     run on a SCRATCH COPY; the result is copied back through SQLite's
     transactional backup API only once proven to open cleanly, so a failed
-    repair cannot modify or lose committed canonical data.
+    repair cannot modify or lose committed canonical data. (A WAL checkpoint of
+    already-committed frames on guard release is not a repair mutation.)
 
     WHY not in place: Strategy 2 ends in ``VACUUM``, which rebuilds the file
     from the schema SQLite can still parse. When the damage IS in the schema
