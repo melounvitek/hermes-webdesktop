@@ -8651,6 +8651,18 @@ class _LadderStep(NamedTuple):
 _RERAISE_ORIGINAL = object()
 
 
+def _rung(step: "_LadderStep", accept: Callable[[Exception], bool]):
+    """One ladder rung: perform ``step``; yields ``(response, None)`` on success,
+    ``(None, exc)`` when ``accept(exc)`` lets the next rung handle it, else re-raises."""
+    try:
+        result = yield step
+    except Exception as exc:
+        if not accept(exc):
+            raise
+        return None, exc
+    return result, None
+
+
 def _aux_recovery_ladder(
     first_err: Exception,
     *,
@@ -8684,7 +8696,24 @@ def _aux_recovery_ladder(
     def _call(target_client: Any, request_kwargs: Dict[str, Any]) -> _LadderStep:
         return _LadderStep("call", (target_client, request_kwargs))
 
-    _LadderCall = _LadderStep
+
+    def _param_rung_accepts(exc: Exception) -> bool:
+        # Fall through to the max_tokens/payment/auth chains with the stripped
+        # kwargs; re-raise anything those chains won't handle.
+        return (
+            _is_payment_error(exc)
+            or _is_connection_error(exc)
+            or _is_auth_error(exc)
+            or "max_tokens" in str(exc)
+            or "unsupported_parameter" in str(exc)
+        )
+
+    def _capacity_rung_accepts(exc: Exception) -> bool:
+        return _is_payment_error(exc) or _is_connection_error(exc) or _is_rate_limit_error(exc)
+
+    def _credential_rung_accepts(exc: Exception) -> bool:
+        return _is_auth_error(exc) or _is_payment_error(exc) or _is_rate_limit_error(exc)
+
     if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
         retry_kwargs = dict(kwargs)
         retry_kwargs.pop("temperature", None)
@@ -8692,22 +8721,10 @@ def _aux_recovery_ladder(
             "Auxiliary %s%s: provider rejected temperature; retrying once without it",
             task or "call", tag,
         )
-        try:
-            return (yield _call(client, retry_kwargs))
-        except Exception as retry_err:
-            retry_err_str = str(retry_err)
-            # Fall through to the max_tokens/payment/auth chains with the
-            # stripped kwargs; re-raise anything those chains won't handle.
-            if not (
-                _is_payment_error(retry_err)
-                or _is_connection_error(retry_err)
-                or _is_auth_error(retry_err)
-                or "max_tokens" in retry_err_str
-                or "unsupported_parameter" in retry_err_str
-            ):
-                raise
-            first_err = retry_err
-            kwargs = retry_kwargs
+        resp, first_err = yield from _rung(_call(client, retry_kwargs), _param_rung_accepts)
+        if first_err is None:
+            return resp
+        kwargs = retry_kwargs
 
     if _is_structured_output_rejection(first_err):
         retry_kwargs = _without_structured_output_format(kwargs)
@@ -8718,20 +8735,10 @@ def _aux_recovery_ladder(
                 "enforcement degrades to prompt compliance): %s",
                 task or "call", tag, first_err,
             )
-            try:
-                return (yield _call(client, retry_kwargs))
-            except Exception as retry_err:
-                # Same contract as the temperature rung.
-                if not (
-                    _is_payment_error(retry_err)
-                    or _is_connection_error(retry_err)
-                    or _is_auth_error(retry_err)
-                    or "max_tokens" in str(retry_err)
-                    or "unsupported_parameter" in str(retry_err)
-                ):
-                    raise
-                first_err = retry_err
-                kwargs = retry_kwargs
+            resp, first_err = yield from _rung(_call(client, retry_kwargs), _param_rung_accepts)
+            if first_err is None:
+                return resp
+            kwargs = retry_kwargs
 
     err_str = str(first_err)
     # ZAI vision models reject max_tokens with code 1210 and a message that
@@ -8748,12 +8755,9 @@ def _aux_recovery_ladder(
     ):
         kwargs.pop("max_tokens", None)
         kwargs.pop("max_completion_tokens", None)
-        try:
-            return (yield _call(client, kwargs))
-        except Exception as retry_err:
-            if not (_is_payment_error(retry_err) or _is_connection_error(retry_err) or _is_rate_limit_error(retry_err)):
-                raise
-            first_err = retry_err
+        resp, first_err = yield from _rung(_call(client, kwargs), _capacity_rung_accepts)
+        if first_err is None:
+            return resp
 
     # ── Stale-model self-heal (Nous Portal recommendation drift) ───
     # A long-lived process can pin a Portal model since dropped from the catalog
@@ -8772,10 +8776,9 @@ def _aux_recovery_ladder(
                 task or "call", tag, kwargs.get("model"), healed_model,
             )
             kwargs["model"] = healed_model
-            try:
-                return (yield _call(client, kwargs))
-            except Exception as retry_err:
-                first_err = retry_err
+            resp, first_err = yield from _rung(_call(client, kwargs), lambda exc: True)
+            if first_err is None:
+                return resp
 
     # ── Nous auth refresh parity with main agent ──────────────────
     client_is_nous = (
@@ -8806,17 +8809,12 @@ def _aux_recovery_ladder(
             )
             if refreshed_model and refreshed_model != kwargs.get("model"):
                 kwargs["model"] = refreshed_model
-            try:
-                return (yield _call(refreshed_client, kwargs))
-            except Exception as retry_err:
-                if not (
-                    _is_auth_error(retry_err)
-                    or _is_payment_error(retry_err)
-                    or _is_connection_error(retry_err)
-                    or _is_rate_limit_error(retry_err)
-                ):
-                    raise
-                first_err = retry_err
+            resp, first_err = yield from _rung(
+            _call(refreshed_client, kwargs),
+            lambda exc: _credential_rung_accepts(exc) or _is_connection_error(exc),
+        )
+            if first_err is None:
+                return resp
 
     if _is_auth_error(first_err) and client_is_nous:
         refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
@@ -8853,7 +8851,7 @@ def _aux_recovery_ladder(
                 "Auxiliary %s%s: refreshed %s credentials after auth error, retrying",
                 task or "call", tag, auth_refresh_provider,
             )
-            return (yield _LadderCall("retry_same_provider", (auth_refresh_provider, resolved_model or final_model)))
+            return (yield _LadderStep("retry_same_provider", (auth_refresh_provider, resolved_model or final_model)))
 
     # ── Same-provider credential-pool recovery ─────────────────────
     pool_provider = _recoverable_pool_provider(resolved_provider, client, main_runtime=main_runtime)
@@ -8865,19 +8863,16 @@ def _aux_recovery_ladder(
         # Skip the extra retry for clear payment/quota errors — the endpoint
         # won't accept another request with the same exhausted key.
         if _is_rate_limit_error(first_err) and not _is_payment_error(first_err):
-            try:
-                return (yield _call(client, kwargs))
-            except Exception as retry_err:
-                if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
-                    raise
-                recovery_err = retry_err
+            resp, recovery_err = yield from _rung(_call(client, kwargs), _credential_rung_accepts)
+            if recovery_err is None:
+                return resp
         if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key):
             logger.info(
                 "Auxiliary %s%s: recovered %s via credential-pool rotation after %s",
                 task or "call", tag, pool_provider, type(recovery_err).__name__,
             )
             try:
-                return (yield _LadderCall("retry_same_provider", (resolved_provider, resolved_model)))
+                return (yield _LadderStep("retry_same_provider", (resolved_provider, resolved_model)))
             except Exception as retry2_err:
                 # Rotated key also hit a wall: mark it now so concurrent processes
                 # skip it, then fall through to the payment fallback below.
@@ -8965,7 +8960,7 @@ def _aux_recovery_ladder(
             _record_route_info(
                 route_info, _fallback_provider_from_label(fb_label), fb_model
             )
-            fb_resp = yield _LadderCall("fallback", (fb_client, fb_model, fb_label))
+            fb_resp = yield _LadderStep("fallback", (fb_client, fb_model, fb_label))
             if fb_resp is not None:
                 return fb_resp
             # Candidate credential was stale and quarantined — walk the
@@ -8976,7 +8971,7 @@ def _aux_recovery_ladder(
                 _record_route_info(
                     route_info, _fallback_provider_from_label(fb_label), fb_model
                 )
-                fb_resp = yield _LadderCall("fallback", (fb_client, fb_model, fb_label))
+                fb_resp = yield _LadderStep("fallback", (fb_client, fb_model, fb_label))
                 if fb_resp is not None:
                     return fb_resp
         # All fallback layers exhausted — one user-visible warning, then re-raise.
