@@ -370,21 +370,16 @@ def get_toolset(name: str, *, include_registry: bool = True) -> Optional[Dict[st
         merged_tools = sorted(set(toolset.get("tools", [])) | set(registry.get_tool_names_for_toolset(name)))
         return {**toolset, "tools": merged_tools}
 
-    registry_toolset = name
-    description = f"Plugin toolset: {name}"
-    if name not in _get_plugin_toolset_names():
+    if name in _get_plugin_toolset_names():
+        # Plugin toolset; shown as its MCP server alias when one exists.
+        registry_toolset = name
+        alias = _display_alias(name, _get_registry_toolset_aliases())
+        description = f"MCP server '{alias}' tools" if alias else f"Plugin toolset: {name}"
+    else:
         registry_toolset = registry.get_toolset_alias_target(name)
         if not registry_toolset:
             return None
         description = f"MCP server '{name}' tools"
-    else:
-        reverse_aliases = {
-            canonical: alias
-            for alias, canonical in _get_registry_toolset_aliases().items()
-            if alias not in TOOLSETS
-        }
-        if reverse_aliases.get(name):
-            description = f"MCP server '{reverse_aliases[name]}' tools"
 
     return {
         "description": description,
@@ -417,6 +412,28 @@ def bundle_non_core_tools(toolset_name: str) -> Set[str]:
 _resolve_toolset_memo: Dict[Tuple[str, bool, int, int], List[str]] = {}
 
 
+def _plugin_platform_bundle(name: str) -> List[str]:
+    """Implicit `hermes-<platform>` bundle for a registered plugin platform: core
+    tools plus whatever the plugin registered under the platform name. [] otherwise."""
+    if not name.startswith("hermes-"):
+        return []
+    platform_name = name[len("hermes-"):]
+    try:
+        from gateway.platform_registry import platform_registry
+        if not platform_registry.is_registered(platform_name):
+            return []
+        tools = set(_HERMES_CORE_TOOLS)
+        registry = _registry()
+        if registry is not None:
+            try:
+                tools.update(e.name for e in registry.get_all_entries() if e.toolset == platform_name)
+            except Exception:
+                pass
+        return list(tools)
+    except Exception:
+        return []
+
+
 def resolve_toolset(name: str, visited: Set[str] = None, *, include_registry: bool = True) -> List[str]:
     """Recursively resolve a toolset (and its includes) to a sorted tool-name list.
 
@@ -445,24 +462,7 @@ def resolve_toolset(name: str, visited: Set[str] = None, *, include_registry: bo
 
     toolset = get_toolset(name, include_registry=include_registry)
     if not toolset:
-        # Registered plugin platforms get an implicit hermes-<platform> bundle:
-        # core tools + whatever the plugin registered under the platform name.
-        if include_registry and name.startswith("hermes-"):
-            platform_name = name[len("hermes-"):]
-            try:
-                from gateway.platform_registry import platform_registry
-                if platform_registry.is_registered(platform_name):
-                    plugin_tools = set(_HERMES_CORE_TOOLS)
-                    registry = _registry()
-                    if registry is not None:
-                        try:
-                            plugin_tools.update(e.name for e in registry.get_all_entries() if e.toolset == platform_name)
-                        except Exception:
-                            pass
-                    return list(plugin_tools)
-            except Exception:
-                pass
-        return []
+        return _plugin_platform_bundle(name) if include_registry else []
 
     tools = set(toolset.get("tools", []))
     for included_name in toolset.get("includes", []):
@@ -498,18 +498,15 @@ def _get_registry_toolset_aliases() -> Dict[str, str]:
         return {}
 
 
+def _display_alias(ts_name: str, aliases: Dict[str, str]) -> Optional[str]:
+    """First non-static alias pointing at *ts_name*, or None."""
+    return next((a for a, canonical in aliases.items() if canonical == ts_name and a not in TOOLSETS), None)
+
+
 def _plugin_display_names() -> List[str]:
     """Plugin toolset names, shown under their first non-static alias when one exists."""
     aliases = _get_registry_toolset_aliases()
-    names = []
-    for ts_name in _get_plugin_toolset_names():
-        for alias, canonical in aliases.items():
-            if canonical == ts_name and alias not in TOOLSETS:
-                names.append(alias)
-                break
-        else:
-            names.append(ts_name)
-    return names
+    return [_display_alias(n, aliases) or n for n in _get_plugin_toolset_names()]
 
 
 def get_all_toolsets() -> Dict[str, Dict[str, Any]]:
