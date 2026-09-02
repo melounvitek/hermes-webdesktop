@@ -280,10 +280,10 @@ SCHEMA_VERSION = 28
 AUTO_VACUUM_MIN_FREELIST_RATIO = 0.25
 
 # FTS storage layout, tracked INDEPENDENTLY of SCHEMA_VERSION (state_meta
-# ``fts_storage_version``): the schema version advances freely on open, but
-# the FTS layout only changes when a DB is born fresh or explicitly optimized
-# via ``hermes sessions optimize-storage``.  Legacy DBs sit at 0 (marker
-# absent) with a working inline index.  1 = v23 external-content layout.
+# ``fts_storage_version``): schema version advances freely on open, the FTS
+# layout only changes when a DB is born fresh or explicitly optimized via
+# ``hermes sessions optimize-storage``.  Legacy DBs sit at 0 (marker absent)
+# with a working inline index; 1 = v23 external-content layout.
 FTS_STORAGE_VERSION = 1
 
 # Cap on user-controlled FTS5 query input before sanitizer processing.
@@ -573,13 +573,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_system_prompt_hash
 # While a background rebuild is pending, two state_meta keys define which rows
 # are IN the FTS indexes: H = fts_rebuild_high_water (MAX(messages.id) when the
 # old indexes were dropped), P = fts_rebuild_progress (highest backfilled id).
-# A row is indexed iff id <= P OR id > H (AUTOINCREMENT ids, so post-drop rows
-# are indexed live by the insert triggers); rows in (P, H] are not.
-#
-# Every trigger gates on that predicate: an FTS5 external-content 'delete' for
-# a row NOT in the index corrupts it, and skipping one for an indexed row
-# leaves a stale entry.  With no rebuild pending both keys are absent and
-# COALESCE makes the predicate a tautology.
+# A row is indexed iff id <= P OR id > H (AUTOINCREMENT ids: post-drop rows are
+# indexed live by the insert triggers); rows in (P, H] are not.  Every trigger
+# gates on that predicate: an external-content 'delete' for a row NOT in the
+# index corrupts it, and skipping one for an indexed row leaves a stale entry.
+# With no rebuild pending both keys are absent and COALESCE makes it a tautology.
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content,
@@ -769,26 +767,22 @@ END;
 """
 
 # ── Cross-process full-FTS-rebuild admission (single authority) ──────────────
-#
-# Several Hermes processes share one state.db.  A full structural FTS rebuild
-# (FTS5 'rebuild' or the drop/recreate in `_recover_stale_fts`) must run in
-# ONE of them at a time: concurrent rebuilds have structurally corrupted
-# state.db in production.  This is the single admission authority for
-# `rebuild_fts()`, `_rebuild_fts_indexes()` and `_recover_stale_fts()`.  The
-# chunked backfill (`fts_rebuild_step`) is deliberately NOT routed through it:
-# it claims progress under SQLite transaction authority and is multi-process.
-#
+# Several Hermes processes share one state.db; a full structural FTS rebuild
+# (FTS5 'rebuild' or the drop/recreate in `_recover_stale_fts`) must run in ONE
+# of them at a time — concurrent rebuilds structurally corrupted state.db in
+# production.  Single authority for `rebuild_fts()`, `_rebuild_fts_indexes()`
+# and `_recover_stale_fts()`; the chunked backfill (`fts_rebuild_step`) is
+# deliberately NOT routed through it (it claims progress under SQLite
+# transaction authority and is multi-process).
 # Semantics mirror `hermes_state._cross_process_repair_lock`: portable (msvcrt
-# on Windows, flock elsewhere), bounded wait, FAIL CLOSED.  The kernel drops
-# the lock when the holder dies UNLESS a forked child inherited the fd (flock
-# rides the open file description), which holds it forever; so the holder's
-# pid + start time are recorded under the lock and a provably-dead holder's
-# lock is broken by unlinking and retaking on a fresh inode.  Indeterminate
-# liveness still defers.  Lives here because the mixins cannot import
+# on Windows, flock elsewhere), bounded wait, FAIL CLOSED.  flock rides the open
+# file description, so a forked child that inherited the fd holds it forever
+# after the holder dies; the holder's pid + start time are recorded under the
+# lock and a provably-dead holder's lock is broken by unlinking and retaking on
+# a fresh inode.  Indeterminate liveness still defers.  `<db>.fts_rebuild.lock`
+# is distinct from `<db>.repair.lock` (schema surgery on an EXCLUSIVE offline
+# connection, minutes in VACUUM).  Lives here because mixins cannot import
 # hermes_state (cycle).
-#
-# `<db>.fts_rebuild.lock` is distinct from `<db>.repair.lock`: schema surgery
-# runs on an EXCLUSIVE offline connection and may take minutes in VACUUM.
 
 logger = logging.getLogger("hermes_state")
 

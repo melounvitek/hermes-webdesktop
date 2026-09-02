@@ -33,9 +33,8 @@ _FTS_HOLDER_ESCALATE_ATTEMPTS = 3
 _FTS_HOLDER_ESCALATE_SECONDS = 60.0
 # In-process retry cadence for a deferred stale-FTS rebuild
 # (``retry_deferred_fts_recovery``): startup paid the full admission wait once;
-# later retries are non-blocking probes so a live holder never stalls a
-# long-lived writer. Each failed retry doubles the spacing up to the cap, so a
-# permanent holder costs one deferral warning per hour, not per minute.
+# later retries are non-blocking probes. Each failed retry doubles the spacing
+# up to the cap, so a permanent holder costs one warning per hour, not per minute.
 _FTS_STALE_RETRY_SECONDS = 60.0
 _FTS_STALE_RETRY_MAX_SECONDS = 3600.0
 
@@ -43,12 +42,11 @@ _FTS_STALE_RETRY_MAX_SECONDS = 3600.0
 # in-memory SQLite database, so do it once per process.
 _READ_PROBE_STATEMENTS: Optional[tuple] = None
 
-# The trigram triggers come ONLY from FTS_TRIGRAM_SQL / LEGACY_FTS_TRIGRAM_SQL,
-# whose CREATE VIRTUAL TABLE needs the trigram tokenizer (SQLite >= 3.34);
-# without it _ensure_fts_schema soft-fails that DDL and "all six present" is
-# permanently unsatisfiable. Split the set so a trigger's absence is only
-# measured against the DDL that can create it. Exhaustive and disjoint by
-# construction; pinned by test_fts_trigger_subsets_match_the_ddl.
+# Trigram triggers come ONLY from FTS_TRIGRAM_SQL / LEGACY_FTS_TRIGRAM_SQL, whose
+# CREATE VIRTUAL TABLE needs the trigram tokenizer (SQLite >= 3.34); without it
+# _ensure_fts_schema soft-fails that DDL and "all six present" is unsatisfiable.
+# Split so a trigger's absence is measured only against the DDL that can create
+# it. Exhaustive and disjoint by construction (test_fts_trigger_subsets_match_the_ddl).
 _FTS_TRIGRAM_TRIGGERS = tuple(n for n in _FTS_TRIGGERS if "_trigram_" in n)
 _FTS_BASE_TRIGGERS = tuple(n for n in _FTS_TRIGGERS if n not in _FTS_TRIGRAM_TRIGGERS)
 
@@ -811,11 +809,10 @@ class SessionSchemaMixin:
         (row transforms) that cannot be expressed declaratively.
         """
         # Startup-watchdog progress lease: on multi-GB state.db files the
-        # reconciliation + data migrations are legitimately slow and I/O-bound
-        # (near-zero CPU), which the watchdog's CPU fallback would misread as
-        # a parked deadlock. Single lease is deliberate (clamped to
-        # _MAX_LEASE_S=900): a genuinely wedged init delays supervisor respawn
-        # by up to the lease; per-chunk renewal isn't worth the complexity.
+        # reconciliation + data migrations are I/O-bound (near-zero CPU), which
+        # the watchdog's CPU fallback would misread as a parked deadlock. Single
+        # lease (clamped to _MAX_LEASE_S=900) is deliberate: a wedged init delays
+        # supervisor respawn by up to the lease; per-chunk renewal isn't worth it.
         report_startup_progress(600.0, phase="state_db_init_schema")
         cursor = self._conn.cursor()
         cursor.executescript(SCHEMA_SQL)
@@ -953,15 +950,13 @@ class SessionSchemaMixin:
                 pass
         if current_version < 22:
             self._migrate_v22_session_model_usage(cursor)
-        # v23: FTS storage redesign (external-content tables; inline v11
-        # tables were ~75% of state.db on heavy installs). OPT-IN, NOT
-        # AUTOMATIC: the transition is disk-heavy (~2x transient) and long
-        # (hours on a 25 GB DB), so an existing install only gets a flag
-        # advertising it; `hermes sessions optimize-storage` performs it as
-        # a deliberate foreground operation. DECOUPLED VERSIONING: the FTS
-        # layout is tracked by the independent `fts_storage_version`
-        # marker, so schema_version still advances here and future
-        # migrations land for legacy-FTS users too.
+        # v23: FTS storage redesign (external-content tables; inline v11 tables
+        # were ~75% of state.db on heavy installs). OPT-IN, NOT AUTOMATIC: the
+        # transition is disk-heavy (~2x transient) and long (hours on 25 GB), so
+        # an existing install only gets a flag; `hermes sessions optimize-storage`
+        # performs it in the foreground. The FTS layout is tracked by the
+        # independent `fts_storage_version` marker, so schema_version still
+        # advances here and future migrations land for legacy-FTS users too.
         if current_version < 23 and fts5_available and self._db_has_legacy_inline_fts(cursor):
             self.set_meta("fts_optimize_available", "1", cursor=cursor)
         if current_version < 25:
@@ -970,12 +965,11 @@ class SessionSchemaMixin:
             # for partially migrated or externally written rows.
             self._dedupe_legacy_system_prompts(cursor)
 
-        # Stamp the FTS layout version (fresh/optimized DBs) so the main
-        # version can always advance; a legacy DB keeps its absent/0 marker
-        # until optimize-storage runs. An INTERRUPTED optimize (rebuild
-        # markers, trash tables, or an empty external index against
-        # non-empty messages) is NOT stamped: the marker is the source of
-        # truth for "fully optimized" and keeps the resume offer alive.
+        # Stamp the FTS layout version (fresh/optimized DBs); a legacy DB keeps
+        # its absent/0 marker until optimize-storage runs. An INTERRUPTED optimize
+        # (rebuild markers, trash tables, or an empty external index against
+        # non-empty messages) is NOT stamped: the marker is the source of truth
+        # for "fully optimized" and keeps the resume offer alive.
         if (
             fts5_available
             and not self._db_has_legacy_inline_fts(cursor)
@@ -987,10 +981,9 @@ class SessionSchemaMixin:
         ):
             self.set_meta("fts_storage_version", str(FTS_STORAGE_VERSION), cursor=cursor)
 
-        # Advance schema_version — deliberately NOT gated on the FTS opt-in
-        # (that would block every future migration for a user who never
-        # optimizes). FTS5 unavailable is the one skip: we can't have
-        # created the current FTS objects, so claiming current would lie.
+        # Advance schema_version — deliberately NOT gated on the FTS opt-in (that
+        # would block every future migration for a user who never optimizes).
+        # FTS5 unavailable is the one skip: claiming current would lie.
         if current_version < SCHEMA_VERSION and fts_migrations_complete and fts5_available:
             cursor.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
 
