@@ -46,6 +46,31 @@ def _close_client(client: Any) -> None:
         close()
 
 
+def _with_openai_client(api_key: str, base_url: Optional[str], file_path: str, log_label: str, body):
+    """Run ``body(client)`` against a fresh OpenAI SDK client (30s timeout, no SDK retries).
+
+    Always closes the client; any exception maps to the shared envelope via
+    :func:`_openai_sdk_failure`.
+    """
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
+        try:
+            return body(client)
+        finally:
+            _close_client(client)
+    except Exception as e:
+        return _openai_sdk_failure(e, file_path, log_label)
+
+
+def _cloud_failure(exc: BaseException, file_path: str, label: str, detail: Optional[str] = None) -> Dict[str, Any]:
+    """Map a REST/SDK provider exception to the shared envelope (``label`` e.g. ``"xAI STT transcription"``)."""
+    if isinstance(exc, PermissionError):
+        return _error_result(f"Permission denied: {file_path}")
+    logger.error("%s failed: %s", label, exc, exc_info=True)
+    return _error_result(f"{label} failed: {exc if detail is None else detail}")
+
+
 def _openai_sdk_failure(exc: BaseException, file_path: str, log_label: str) -> Dict[str, Any]:
     """Map an OpenAI-SDK-shaped exception to the shared error envelope.
 
@@ -95,35 +120,29 @@ def _transcribe_groq(
 
     language = language or _resolve_stt_language("groq")
 
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=GROQ_BASE_URL, timeout=30, max_retries=0)
-        try:
-            create_kwargs = {
-                "model": model_name,
-                "response_format": "text",
-            }
-            if language:
-                create_kwargs["language"] = language
-            if prompt:
-                # Only sent when set so the no-hook, no-config request stays byte-identical.
-                create_kwargs["prompt"] = prompt
-            with open(file_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
-                    file=audio_file,
-                    **create_kwargs,
-                )
+    def _run(client):
+        create_kwargs = {
+            "model": model_name,
+            "response_format": "text",
+        }
+        if language:
+            create_kwargs["language"] = language
+        if prompt:
+            # Only sent when set so the no-hook, no-config request stays byte-identical.
+            create_kwargs["prompt"] = prompt
+        with open(file_path, "rb") as audio_file:
+            transcription = client.audio.transcriptions.create(
+                file=audio_file,
+                **create_kwargs,
+            )
 
-            transcript_text = str(transcription).strip()
-            logger.info("Transcribed %s via Groq API (%s, lang=%s, %d chars)",
-                         Path(file_path).name, model_name, language or "auto", len(transcript_text))
+        transcript_text = str(transcription).strip()
+        logger.info("Transcribed %s via Groq API (%s, lang=%s, %d chars)",
+                     Path(file_path).name, model_name, language or "auto", len(transcript_text))
 
-            return _ok_result(transcript_text, "groq")
-        finally:
-            _close_client(client)
+        return _ok_result(transcript_text, "groq")
 
-    except Exception as e:
-        return _openai_sdk_failure(e, file_path, "Groq")
+    return _with_openai_client(api_key, GROQ_BASE_URL, file_path, "Groq", _run)
 
 
 def _transcribe_openai(
@@ -162,9 +181,8 @@ def _transcribe_openai(
         logger.info("Model %s not available on OpenAI, using %s", model_name, DEFAULT_STT_MODEL)
         model_name = DEFAULT_STT_MODEL
 
-    try:
-        from openai import OpenAI, BadRequestError
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
+    def _run(client):
+        from openai import BadRequestError
 
         def _create_transcription(path: str):
             with open(path, "rb") as audio_file:
@@ -186,37 +204,33 @@ def _transcribe_openai(
                     create_kwargs["prompt"] = prompt
                 return client.audio.transcriptions.create(**create_kwargs)
 
-        try:
-            with tempfile.TemporaryDirectory(prefix="hermes-stt-") as work_dir:
-                try:
-                    transcription = _create_transcription(file_path)
-                except BadRequestError as exc:
-                    message = str(exc).lower()
-                    if not any(k in message for k in ("unsupported", "corrupted", "invalid file")):
-                        raise
-                    # Newer models reject some containers whisper-1 accepted
-                    # (notably Ogg/Opus voice notes): transcode to m4a, retry once.
-                    converted_path, transcode_error = _transcode_audio_for_stt(file_path, work_dir)
-                    if transcode_error:
-                        return _error_result(transcode_error)
-                    logger.info(
-                        "Retrying %s STT after transcoding %s to m4a (API rejected the original container)",
-                        provider_label, Path(file_path).name,
-                    )
-                    transcription = _create_transcription(converted_path)
+        with tempfile.TemporaryDirectory(prefix="hermes-stt-") as work_dir:
+            try:
+                transcription = _create_transcription(file_path)
+            except BadRequestError as exc:
+                message = str(exc).lower()
+                if not any(k in message for k in ("unsupported", "corrupted", "invalid file")):
+                    raise
+                # Newer models reject some containers whisper-1 accepted
+                # (notably Ogg/Opus voice notes): transcode to m4a, retry once.
+                converted_path, transcode_error = _transcode_audio_for_stt(file_path, work_dir)
+                if transcode_error:
+                    return _error_result(transcode_error)
+                logger.info(
+                    "Retrying %s STT after transcoding %s to m4a (API rejected the original container)",
+                    provider_label, Path(file_path).name,
+                )
+                transcription = _create_transcription(converted_path)
 
-            transcript_text = _extract_transcript_text(transcription)
-            logger.info(
-                "Transcribed %s via %s (%s, %d chars)",
-                Path(file_path).name, provider_label, model_name, len(transcript_text),
-            )
+        transcript_text = _extract_transcript_text(transcription)
+        logger.info(
+            "Transcribed %s via %s (%s, %d chars)",
+            Path(file_path).name, provider_label, model_name, len(transcript_text),
+        )
 
-            return _ok_result(transcript_text, provider_label)
-        finally:
-            _close_client(client)
+        return _ok_result(transcript_text, provider_label)
 
-    except Exception as e:
-        return _openai_sdk_failure(e, file_path, provider_label)
+    return _with_openai_client(api_key, base_url, file_path, provider_label, _run)
 
 
 def _transcribe_mistral(
@@ -262,11 +276,8 @@ def _transcribe_mistral(
             )
             return _ok_result(transcript_text, "mistral")
 
-    except PermissionError:
-        return _error_result(f"Permission denied: {file_path}")
     except Exception as e:
-        logger.error("Mistral transcription failed: %s", e, exc_info=True)
-        return _error_result(f"Mistral transcription failed: {type(e).__name__}")
+        return _cloud_failure(e, file_path, "Mistral transcription", type(e).__name__)
 
 
 def _post_audio_multipart(url: str, headers: Dict[str, str], file_path: str, data: Dict[str, str]):
@@ -417,11 +428,8 @@ def _transcribe_xai(
 
         return _ok_result(transcript_text, "xai")
 
-    except PermissionError:
-        return _error_result(f"Permission denied: {file_path}")
     except Exception as e:
-        logger.error("xAI STT transcription failed: %s", e, exc_info=True)
-        return _error_result(f"xAI STT transcription failed: {e}")
+        return _cloud_failure(e, file_path, "xAI STT transcription")
 
 
 def _transcribe_elevenlabs(
@@ -484,11 +492,8 @@ def _transcribe_elevenlabs(
 
         return _ok_result(transcript_text, "elevenlabs")
 
-    except PermissionError:
-        return _error_result(f"Permission denied: {file_path}")
     except Exception as e:
-        logger.error("ElevenLabs STT transcription failed: %s", e, exc_info=True)
-        return _error_result(f"ElevenLabs STT transcription failed: {e}")
+        return _cloud_failure(e, file_path, "ElevenLabs STT transcription")
 
 
 def _transcribe_deepinfra(

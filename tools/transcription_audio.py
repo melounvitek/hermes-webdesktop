@@ -248,6 +248,21 @@ def _convert_caf_to_wav(file_path: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Cloud pre-upload silence trim
+# ---------------------------------------------------------------------------
+#
+# Local faster-whisper gets Silero VAD; cloud providers get the raw file, so
+# every second of silence is paid for twice (upload + per-minute billing) and
+# cloud Whisper hallucinates on it. Before uploading to a built-in cloud
+# provider we collapse long pauses with ffmpeg's silenceremove, keeping
+# ``stt.cloud_trim_keep_ms`` of each pause so word boundaries survive.
+# Purely best-effort — ANY of these uploads the original untouched:
+# ``stt.cloud_trim_silence: false``, ffmpeg/ffprobe missing, trim failure or
+# timeout, a ~empty result (the provider, not a dB heuristic, decides "no
+# speech"), or <10% saving. Command-type and plugin providers are NOT trimmed:
+# they may wrap local CLIs that want the original bytes.
+
 _CLOUD_TRIM_THRESHOLD_DB_DEFAULT = -40  # audio below this level counts as silence
 
 

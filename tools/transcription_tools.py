@@ -10,74 +10,50 @@ deepinfra; plus user-declared command providers and plugin providers.
 
 import logging
 import os
-import platform
-import re
-import shlex
 import shutil
-import subprocess
-import tempfile
+import subprocess  # noqa: F401  (tests patch tools.transcription_tools.subprocess.run)
+import tempfile  # noqa: F401  (tests patch tools.transcription_tools.tempfile.TemporaryDirectory)
 import threading
 import time
+import importlib.util as _ilu
 from pathlib import Path
 from typing import Optional, Dict, Any
-from urllib.parse import urljoin
 
-from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli._subprocess_compat import windows_hide_flags  # noqa: F401  (imported by tests)
 from utils import is_truthy_value
-from tools.managed_tool_gateway import resolve_managed_tool_gateway
-from tools.tts_command_provider import (  # noqa: F401 — aliases are patched by tests
-    command_env_passthrough as _command_stt_env_passthrough,
-    quote_command_placeholder as _quote_command_stt_placeholder,
-    render_command_template as _render_command_stt_template,
-    run_command_provider as _run_command_stt,
-    shell_quote_context as _shell_quote_context_stt,
-    terminate_command_process_tree as _terminate_command_stt_process_tree,
-)
-from tools.tool_backend_helpers import (
+from tools.managed_tool_gateway import resolve_managed_tool_gateway  # noqa: F401  (patched by tests)
+from tools.tool_backend_helpers import (  # noqa: F401  (patched by tests; read lazily by transcription_cloud)
     managed_nous_tools_enabled,
     nous_tool_gateway_unavailable_message,
     resolve_openai_audio_api_key,
 )
-
 from tools.transcription_common import (  # noqa: F401  (re-exported; tests patch tools.transcription_tools.<name>)
     BUILTIN_STT_PROVIDERS,
     CLOUD_STT_PROVIDERS,
-    COMMON_LOCAL_BIN_DIRS,
     DEFAULT_ELEVENLABS_STT_MODEL,
     DEFAULT_GROQ_STT_MODEL,
     DEFAULT_LOCAL_MODEL,
-    DEFAULT_LOCAL_STT_LANGUAGE,
     DEFAULT_MISTRAL_STT_MODEL,
     DEFAULT_PROVIDER,
     DEFAULT_STT_MODEL,
     ELEVENLABS_STT_BASE_URL,
-    GROQ_BASE_URL,
     GROQ_MODELS,
-    LOCAL_NATIVE_AUDIO_FORMATS,
     LOCAL_STT_COMMAND_ENV,
     LOCAL_STT_LANGUAGE_ENV,
     MAX_FILE_SIZE,
-    OPENAI_BASE_URL,
     OPENAI_MODELS,
     SUPPORTED_FORMATS,
     XAI_STT_BASE_URL,
-    _config_number,
     _error_result,
     _get_stt_section,
-    _log_prompt_unsupported,
     _ok_result,
 )
-
 from tools.transcription_audio import (  # noqa: F401  (re-exported; tests patch tools.transcription_tools.<name>)
     _CLOUD_TRIM_KEEP_MS_DEFAULT,
     _CLOUD_TRIM_MIN_INPUT_SECONDS,
-    _CLOUD_TRIM_MIN_RESULT_SECONDS,
-    _CLOUD_TRIM_MIN_SAVING,
     _CLOUD_TRIM_THRESHOLD_DB_DEFAULT,
-    _STT_M4A_ENCODE_ARGS,
     _cloud_trim_settings,
     _convert_caf_to_wav,
-    _find_binary,
     _find_ffmpeg_binary,
     _find_ffprobe_binary,
     _find_whisper_binary,
@@ -85,20 +61,14 @@ from tools.transcription_audio import (  # noqa: F401  (re-exported; tests patch
     _prepare_local_audio,
     _probe_audio_duration,
     _run_ffmpeg_stt_encode,
-    _run_quiet,
-    _transcode_audio_for_stt,
     _trim_silence_for_cloud_stt,
     _validate_audio_file,
     _validate_audio_file_size,
     _validate_audio_source_file,
 )
-
 from tools.transcription_local import (  # noqa: F401  (re-exported; tests patch tools.transcription_tools.<name>)
-    _CUDA_LIB_ERROR_MARKERS,
     _LOGPROB_THRESHOLD_DEFAULT,
     _NO_SPEECH_PROB_THRESHOLD_DEFAULT,
-    _VAD_MIN_SILENCE_MS_DEFAULT,
-    _confidence_thresholds,
     _get_idle_unload_seconds,
     _get_local_command_template,
     _has_local_command,
@@ -108,23 +78,14 @@ from tools.transcription_local import (  # noqa: F401  (re-exported; tests patch
     _looks_like_cuda_lib_error,
     _normalize_local_command_model,
     _normalize_local_model,
-    _should_force_faster_whisper_cpu,
-    _sysctl_value,
     _transcribe_local_command,
     _try_lazy_install_stt,
     build_local_transcribe_kwargs,
 )
-
 from tools.transcription_cloud import (  # noqa: F401  (re-exported; tests patch tools.transcription_tools.<name>)
-    _close_client,
-    _direct_openai_credentials,
-    _elevenlabs_error_detail,
     _extract_transcript_text,
     _has_xai_stt_credentials,
-    _http_error_detail,
     _is_local_or_private_url,
-    _openai_sdk_failure,
-    _post_audio_multipart,
     _resolve_openai_audio_client_config,
     _transcribe_deepinfra,
     _transcribe_elevenlabs,
@@ -133,15 +94,12 @@ from tools.transcription_cloud import (  # noqa: F401  (re-exported; tests patch
     _transcribe_openai,
     _transcribe_xai,
 )
-
 from tools.transcription_command import (  # noqa: F401  (re-exported; tests patch tools.transcription_tools.<name>)
     COMMAND_STT_OUTPUT_FORMATS,
     DEFAULT_COMMAND_STT_LANGUAGE,
     DEFAULT_COMMAND_STT_OUTPUT_FORMAT,
     DEFAULT_COMMAND_STT_TIMEOUT_SECONDS,
-    _PRE_TRANSCRIPTION_MUTABLE_FIELDS,
     _PROMPT_CHARS_PER_TOKEN,
-    _WHISPER_PROMPT_CAPPED_PROVIDERS,
     _WHISPER_PROMPT_TOKEN_CAP,
     _apply_pre_transcription_hook,
     _dispatch_to_plugin_provider,
@@ -149,9 +107,9 @@ from tools.transcription_command import (  # noqa: F401  (re-exported; tests pat
     _get_command_stt_output_format,
     _get_command_stt_timeout,
     _get_named_stt_provider_config,
-    _is_command_stt_provider_config,
-    _read_command_stt_output,
+    _render_command_stt_template,
     _resolve_command_stt_provider_config,
+    _run_command_stt,
     _transcribe_command_stt,
     _unregistered_stt_provider_error,
 )
@@ -183,13 +141,6 @@ def _resolve_provider_key(env_var: str, provider_id: str) -> str:
     except ImportError:  # pragma: no cover — helpers are in-repo
         return str(get_env_value(env_var) or "").strip()
     return resolve_provider_secret(env_var, provider_id, env_getter=get_env_value)
-
-
-# ---------------------------------------------------------------------------
-# Optional imports — graceful degradation
-# ---------------------------------------------------------------------------
-
-import importlib.util as _ilu
 
 
 def _safe_find_spec(module_name: str) -> bool:
@@ -353,50 +304,70 @@ def _resolve_explicit_local_command() -> str:
     return "none"
 
 
-def _explicit_cloud_resolver(name: str, probe, warning: str):
-    def resolve() -> str:
-        if probe():
-            return name
-        logger.warning(warning)
-        return "none"
-    return resolve
-
-
-# Explicit ``stt.provider`` selections -> resolver returning the provider or "none".
-_EXPLICIT_PROVIDER_RESOLVERS = {
-    "local": _resolve_explicit_local,
-    "local_command": _resolve_explicit_local_command,
-    "openai": _resolve_explicit_openai,
-    "groq": _explicit_cloud_resolver(
-        "groq", _has_groq_key, "STT provider 'groq' configured but GROQ_API_KEY not set"),
-    "mistral": _explicit_cloud_resolver(
-        "mistral", _has_mistral_key,
+# Cloud providers in AUTO-DETECT priority order:
+#   name -> (explicit-selection probe, auto-detect probe, explicit warning, auto-detect log)
+# The two probes differ only for openai (auto-detect additionally requires the
+# SDK) and xai (auto-detect must never raise). DeepInfra is LAST so a
+# DEEPINFRA_API_KEY set for the chat surface never displaces an existing
+# xAI/ElevenLabs auto-selection. Mistral only auto-selects when the SDK is
+# already present — no lazy-install during passive auto-detection (explicit
+# ``provider: mistral`` installs on first use).
+_CLOUD_PROVIDER_SPECS = {
+    "groq": (
+        _has_groq_key, _has_groq_key,
+        "STT provider 'groq' configured but GROQ_API_KEY not set",
+        "No local STT available, using Groq Whisper API",
+    ),
+    "openai": (
+        None, lambda: _HAS_OPENAI and _has_openai_audio_backend(),
+        None,  # explicit openai has its own resolver (logs the real gateway reason)
+        "No local STT available, using OpenAI Whisper API",
+    ),
+    "mistral": (
+        _has_mistral_key, _has_mistral_key,
         "STT provider 'mistral' configured but mistralai package "
-        "not installed or MISTRAL_API_KEY not set"),
-    "xai": _explicit_cloud_resolver(
-        "xai", _has_xai_stt_credentials, "STT provider 'xai' configured but no xAI credentials are available"),
-    "elevenlabs": _explicit_cloud_resolver(
-        "elevenlabs", _has_elevenlabs_key, "STT provider 'elevenlabs' configured but ELEVENLABS_API_KEY not set"),
-    "deepinfra": _explicit_cloud_resolver(
-        "deepinfra", _has_deepinfra_key,
+        "not installed or MISTRAL_API_KEY not set",
+        "No local STT available, using Mistral Voxtral Transcribe API",
+    ),
+    "xai": (
+        _has_xai_stt_credentials, _has_xai_stt_credentials_quietly,
+        "STT provider 'xai' configured but no xAI credentials are available",
+        "No local STT available, using xAI Grok STT API",
+    ),
+    "elevenlabs": (
+        _has_elevenlabs_key, _has_elevenlabs_key,
+        "STT provider 'elevenlabs' configured but ELEVENLABS_API_KEY not set",
+        "No local STT available, using ElevenLabs Scribe STT API",
+    ),
+    "deepinfra": (
+        _has_deepinfra_key, _has_deepinfra_key,
         "STT provider 'deepinfra' configured but DEEPINFRA_API_KEY not set "
-        "(or openai package missing)"),
+        "(or openai package missing)",
+        "No local STT available, using DeepInfra Whisper API",
+    ),
 }
 
-# Auto-detect ladder for cloud providers, in priority order: (check, name, log).
-# DeepInfra is LAST so a DEEPINFRA_API_KEY set for the chat surface never
-# displaces an existing xAI/ElevenLabs auto-selection. Mistral only
-# auto-selects when the SDK is already present — no lazy-install during
-# passive auto-detection (explicit ``provider: mistral`` installs on first use).
-_AUTO_DETECT_CLOUD = (
-    (_has_groq_key, "groq", "No local STT available, using Groq Whisper API"),
-    (lambda: _HAS_OPENAI and _has_openai_audio_backend(),
-     "openai", "No local STT available, using OpenAI Whisper API"),
-    (_has_mistral_key, "mistral", "No local STT available, using Mistral Voxtral Transcribe API"),
-    (_has_xai_stt_credentials_quietly, "xai", "No local STT available, using xAI Grok STT API"),
-    (_has_elevenlabs_key, "elevenlabs", "No local STT available, using ElevenLabs Scribe STT API"),
-    (_has_deepinfra_key, "deepinfra", "No local STT available, using DeepInfra Whisper API"),
-)
+
+def _resolve_explicit_provider(provider: str) -> str:
+    """Resolve an explicit ``stt.provider`` to a usable provider name or ``"none"``.
+
+    Unknown names pass through untouched so the dispatcher can fail with the
+    provider-not-registered message.
+    """
+    if provider == "local":
+        return _resolve_explicit_local()
+    if provider == "local_command":
+        return _resolve_explicit_local_command()
+    if provider == "openai":
+        return _resolve_explicit_openai()
+    spec = _CLOUD_PROVIDER_SPECS.get(provider)
+    if spec is None:
+        return provider
+    probe, _auto, warning, _log = spec
+    if probe():
+        return provider
+    logger.warning(warning)
+    return "none"
 
 
 def _get_provider(stt_config: dict) -> str:
@@ -432,8 +403,7 @@ def _get_provider(stt_config: dict) -> str:
             pass
 
     if explicit:
-        resolver = _EXPLICIT_PROVIDER_RESOLVERS.get(provider)
-        return resolver() if resolver else provider  # Unknown — let it fail downstream
+        return _resolve_explicit_provider(provider)
 
     if _HAS_FASTER_WHISPER:
         return "local"
@@ -441,26 +411,11 @@ def _get_provider(stt_config: dict) -> str:
         return "local_command"
     if _try_lazy_install_stt():
         return "local"
-    for available, name, message in _AUTO_DETECT_CLOUD:
+    for name, (_probe, available, _warning, message) in _CLOUD_PROVIDER_SPECS.items():
         if available():
             logger.info(message)
             return name
     return "none"
-
-
-# ---------------------------------------------------------------------------
-# Plugin provider dispatch
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# pre_transcription plugin hook (STT prompt/vocab threading)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Shared validation
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -624,47 +579,6 @@ def _transcribe_local(
 
 
 # ---------------------------------------------------------------------------
-# OpenAI-SDK-shaped providers: groq, openai (+ deepinfra via openai)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Provider: mistral (Voxtral Transcribe API)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# REST multipart providers: xAI, ElevenLabs
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Provider: ElevenLabs (Scribe STT API)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Provider: DeepInfra (OpenAI-compatible /v1/audio/transcriptions)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Cloud pre-upload silence trim
-# ---------------------------------------------------------------------------
-#
-# Local faster-whisper gets Silero VAD; cloud providers get the raw file, so
-# every second of silence is paid for twice (upload + per-minute billing) and
-# cloud Whisper hallucinates on it. Before uploading to a built-in cloud
-# provider we collapse long pauses with ffmpeg's silenceremove, keeping
-# ``stt.cloud_trim_keep_ms`` of each pause so word boundaries survive.
-# Purely best-effort — ANY of these uploads the original untouched:
-# ``stt.cloud_trim_silence: false``, ffmpeg/ffprobe missing, trim failure or
-# timeout, a ~empty result (the provider, not a dB heuristic, decides "no
-# speech"), or <10% saving. Command-type and plugin providers are NOT trimmed:
-# they may wrap local CLIs that want the original bytes.
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -727,38 +641,38 @@ def _transcribe_prepared_audio(
             shutil.rmtree(trim_cleanup_dir, ignore_errors=True)
 
 
+# Built-in provider -> (stt section, config key, default, treat-empty-as-missing).
+# "local_command" shares the ``stt.local`` section; xAI takes no model parameter
+# (the name is logging-only); deepinfra resolves from the live catalog when empty.
+_BUILTIN_MODEL_KEYS = {
+    "local": ("local", "model", DEFAULT_LOCAL_MODEL, False),
+    "local_command": ("local", "model", DEFAULT_LOCAL_MODEL, False),
+    "groq": ("groq", "model", DEFAULT_GROQ_STT_MODEL, True),
+    "openai": ("openai", "model", DEFAULT_STT_MODEL, False),
+    "mistral": ("mistral", "model", DEFAULT_MISTRAL_STT_MODEL, False),
+    "elevenlabs": ("elevenlabs", "model_id", DEFAULT_ELEVENLABS_STT_MODEL, False),
+    "deepinfra": ("deepinfra", "model", "", True),
+}
+
+
 def _builtin_model_name(provider: str, stt_config: Dict[str, Any], model: Optional[str]) -> str:
     """Resolve the model for a built-in provider: caller override > ``stt.<provider>`` config > default."""
     if model:
         return model
-    if provider in ("local", "local_command"):
-        return _get_stt_section(stt_config, "local").get("model", DEFAULT_LOCAL_MODEL)
     if provider == "xai":
-        return "grok-stt"  # xAI STT takes no model parameter — logging only
-    cfg = _get_stt_section(stt_config, provider)
-    if provider == "groq":
-        return cfg.get("model") or DEFAULT_GROQ_STT_MODEL
-    if provider == "openai":
-        return cfg.get("model", DEFAULT_STT_MODEL)
-    if provider == "mistral":
-        return cfg.get("model", DEFAULT_MISTRAL_STT_MODEL)
-    if provider == "elevenlabs":
-        return cfg.get("model_id", DEFAULT_ELEVENLABS_STT_MODEL)
-    return cfg.get("model") or ""  # deepinfra: resolved from the live catalog when empty
+        return "grok-stt"
+    section, key, default, empty_is_missing = _BUILTIN_MODEL_KEYS[provider]
+    cfg = _get_stt_section(stt_config, section)
+    if empty_is_missing:
+        return cfg.get(key) or default
+    return cfg.get(key, default)
 
 
-# Built-in provider -> handler. Looked up at call time so tests may patch the
-# module-level ``_transcribe_*`` functions.
-_BUILTIN_STT_HANDLERS = {
-    "local": lambda *a, **kw: _transcribe_local(*a, **kw),
-    "local_command": lambda *a, **kw: _transcribe_local_command(*a, **kw),
-    "groq": lambda *a, **kw: _transcribe_groq(*a, **kw),
-    "openai": lambda *a, **kw: _transcribe_openai(*a, **kw),
-    "mistral": lambda *a, **kw: _transcribe_mistral(*a, **kw),
-    "xai": lambda *a, **kw: _transcribe_xai(*a, **kw),
-    "elevenlabs": lambda *a, **kw: _transcribe_elevenlabs(*a, **kw),
-    "deepinfra": lambda *a, **kw: _transcribe_deepinfra(*a, **kw),
-}
+def _builtin_handler(provider: str):
+    """Handler for a built-in provider, looked up in this module at call time so tests may patch ``_transcribe_*``."""
+    if provider not in BUILTIN_STT_PROVIDERS:
+        return None
+    return globals()[f"_transcribe_{provider}"]
 
 
 def _dispatch_stt_provider(
@@ -787,7 +701,7 @@ def _dispatch_stt_provider(
     )
     prompt = _enforce_prompt_length_limit(prompt, provider)
 
-    handler = _BUILTIN_STT_HANDLERS.get(provider)
+    handler = _builtin_handler(provider)
     if handler is not None:
         model_name = _builtin_model_name(provider, stt_config, model)
         if provider in ("local", "local_command"):
