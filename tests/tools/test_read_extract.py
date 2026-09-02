@@ -16,6 +16,7 @@ import os
 import tempfile
 import unittest
 import zipfile
+from pathlib import PurePosixPath
 from unittest import mock
 
 from tools.read_extract import (
@@ -706,7 +707,7 @@ class TestReadFileToolIntegration(unittest.TestCase):
                     mock.patch.object(
                         file_tools,
                         "_resolve_path_for_task",
-                        return_value=file_tools.PurePosixPath("/workspace/remote.rtf"),
+                        return_value=PurePosixPath("/workspace/remote.rtf"),
                     ), mock.patch("os.path.getsize", side_effect=AssertionError("host read")):
                 res = json.loads(read_file_tool("/workspace/remote.rtf", task_id="remote"))
         finally:

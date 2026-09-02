@@ -34,9 +34,17 @@ def test_sibling_container_config_sites_carry_docker_network():
         tree = ast.parse(inspect.getsource(module))
         sites = 0
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Dict):
+            # Accept a dict literal or a (key, default) pair table that a dict
+            # comprehension is built from.
+            if isinstance(node, ast.Dict):
+                keys = {k.value for k in node.keys if isinstance(k, ast.Constant)}
+            elif isinstance(node, ast.Tuple) and node.elts and all(
+                isinstance(e, ast.Tuple) and len(e.elts) == 2 and isinstance(e.elts[0], ast.Constant)
+                for e in node.elts
+            ):
+                keys = {e.elts[0].value for e in node.elts}
+            else:
                 continue
-            keys = {k.value for k in node.keys if isinstance(k, ast.Constant)}
             if "docker_run_as_host_user" in keys:
                 sites += 1
                 assert "docker_network" in keys, (

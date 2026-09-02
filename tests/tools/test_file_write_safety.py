@@ -395,7 +395,7 @@ class TestProtectedInstructionFiles:
 
     @pytest.fixture(autouse=True)
     def _gate_on(self, monkeypatch):
-        import tools.file_tools as ft
+        import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
             ft, "_protected_instruction_config", lambda: (True, [])
         )
@@ -489,7 +489,7 @@ class TestProtectedInstructionFiles:
         assert not target.exists()
 
     def test_config_disabled_skips_gate(self, tmp_path, approvals, monkeypatch):
-        import tools.file_tools as ft
+        import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
             ft, "_protected_instruction_config", lambda: (False, [])
         )
@@ -498,7 +498,7 @@ class TestProtectedInstructionFiles:
         assert approvals["calls"] == []
 
     def test_extra_patterns_from_config(self, tmp_path, approvals, monkeypatch):
-        import tools.file_tools as ft
+        import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
             ft, "_protected_instruction_config", lambda: (True, ["*.mdc"])
         )
@@ -561,7 +561,7 @@ class TestProtectedInstructionFiles:
         self, tmp_path, approvals, monkeypatch
     ):
         """~/.hermes itself is governed by existing guards, not this gate."""
-        import tools.file_tools as ft
+        import tools.file_tools_write_guards as ft
         fake_home = tmp_path / ".hermes"
         (fake_home / "notes").mkdir(parents=True)
         monkeypatch.setattr(
