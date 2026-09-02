@@ -4,6 +4,12 @@ Centralises the caps previously hardcoded in ``terminal_tool`` (``max_bytes``)
 and ``file_operations`` (``max_lines`` / ``max_line_length``). Defaults equal
 the old constants, so behaviour is unchanged when the section is absent, and
 the reader never raises — any config error falls back to the defaults.
+Ported from anomalyco/opencode PR #23770. Example::
+
+    tool_output:
+      max_bytes: 100000        # terminal output cap (chars)
+      max_lines: 5000          # read_file pagination + truncation cap
+      max_line_length: 2000    # per-line cap before '... [truncated]'
 """
 
 from __future__ import annotations

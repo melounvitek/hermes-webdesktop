@@ -598,10 +598,11 @@ class TestCodeExecutionTransportTcpFallback:
         )
 
     def test_server_side_branches_on_use_tcp_rpc(self):
+        # The local RPC listener lives in the session kernel (tools/code_kernel.py).
         root = Path(__file__).resolve().parents[2]
-        source = (root / "tools" / "code_execution_tool.py").read_text(encoding="utf-8")
-        assert "_use_tcp_rpc = _IS_WINDOWS" in source
-        assert 'rpc_endpoint = f"tcp://{_host}:{_port}"' in source
+        source = (root / "tools" / "code_kernel.py").read_text(encoding="utf-8")
+        assert "if _IS_WINDOWS:" in source
+        assert 'rpc_endpoint = f"tcp://{host}:{port}"' in source
 
 
 # ---------------------------------------------------------------------------

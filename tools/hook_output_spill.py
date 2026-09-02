@@ -17,7 +17,9 @@ Config (``config.yaml``)::
         directory: null        # default: <HERMES_HOME>/hook_outputs
 
 Invariants: unchanged input when disabled or under the cap; never raises —
-an I/O failure still returns a bounded preview with an in-prompt notice.
+an I/O failure still returns a bounded preview with an in-prompt notice. Spill
+files are grouped per session so ``/new`` sessions don't pile into one directory.
+Ported from openai/codex PR #21069.
 """
 
 from __future__ import annotations
@@ -37,11 +39,6 @@ DEFAULT_MAX_CHARS = 10_000
 DEFAULT_PREVIEW_HEAD = 500
 DEFAULT_PREVIEW_TAIL = 500
 DEFAULT_ENABLED = True
-
-
-def _coerce_non_negative_int(value: Any, default: int) -> int:
-    """Like ``_coerce_positive_int`` but allows zero (e.g. empty tail)."""
-    return _coerce_int(value, default, 0)
 
 
 def get_spill_config() -> Dict[str, Any]:
@@ -68,12 +65,9 @@ def get_spill_config() -> Dict[str, Any]:
     return {
         "enabled": enabled,
         "max_chars": _coerce_positive_int(section.get("max_chars"), DEFAULT_MAX_CHARS),
-        "preview_head": _coerce_non_negative_int(
-            section.get("preview_head"), DEFAULT_PREVIEW_HEAD
-        ),
-        "preview_tail": _coerce_non_negative_int(
-            section.get("preview_tail"), DEFAULT_PREVIEW_TAIL
-        ),
+        # head/tail allow zero (empty tail), max_chars must be positive.
+        "preview_head": _coerce_int(section.get("preview_head"), DEFAULT_PREVIEW_HEAD, 0),
+        "preview_tail": _coerce_int(section.get("preview_tail"), DEFAULT_PREVIEW_TAIL, 0),
         "directory": directory,
     }
 

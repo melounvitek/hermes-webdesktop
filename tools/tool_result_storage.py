@@ -220,10 +220,7 @@ def _build_persisted_message(
 ) -> str:
     """Build the <persisted-output> replacement block."""
     size_kb = original_size / 1024
-    if size_kb >= 1024:
-        size_str = f"{size_kb / 1024:.1f} MB"
-    else:
-        size_str = f"{size_kb:.1f} KB"
+    size_str = f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.1f} KB"
 
     msg = f"{PERSISTED_OUTPUT_TAG}\n"
     msg += f"This tool result was too large ({original_size:,} characters, {size_str}).\n"

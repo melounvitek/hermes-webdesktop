@@ -55,6 +55,7 @@ def _has_extension_in(path: str, extensions: frozenset) -> bool:
 
 
 def has_binary_extension(path: str) -> bool:
+    """True when the path has a binary extension. Pure string check, no I/O."""
     return _has_extension_in(path, BINARY_EXTENSIONS)
 
 
@@ -64,4 +65,5 @@ def has_opaque_document_extension(path: str) -> bool:
 
 
 def is_pdf_path(path: str) -> bool:
+    """True when the path has a .pdf extension. Pure string check, no I/O."""
     return path.lower().endswith(".pdf")

@@ -44,6 +44,7 @@ _HAS_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 # channel. The only legitimate modern use is emoji tag sequences (TR51: U+1F3F4
 # base + tag spec + U+E007F CANCEL TAG, e.g. the Scotland/Wales flags); those
 # are preserved, same rationale as keeping ZWJ inside emoji sequences.
+# Ported from block/goose#10746 (which strips flags too).
 _UNICODE_TAG_SUB_RE = re.compile(
     r"(\U0001F3F4[\U000E0020-\U000E007E]+\U000E007F)"  # valid emoji tag seq (kept)
     r"|[\U000E0000-\U000E007F]"                        # any other tag char (stripped)
@@ -68,6 +69,7 @@ def sanitize_display_text(text: str) -> str:
     hide content). Use when re-rendering persisted text (e.g. the ``/resume``
     recap): Rich's ``Text()`` does NOT neutralize raw escape bytes, so a replayed
     message must not be able to clear the screen, retitle the window, or restyle UI.
+    Mirrors openai/codex#31494 (``sanitize_user_text``).
     """
     if not text or not _HAS_CONTROL.search(text):
         return text
