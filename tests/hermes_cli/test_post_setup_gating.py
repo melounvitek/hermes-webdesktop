@@ -21,7 +21,7 @@ class TestPostSetupGate:
         from hermes_cli import tools_config
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        monkeypatch.setattr(tools_config.shutil, "which", lambda name, path=None: None)
+        monkeypatch.setattr("shutil.which", lambda name, path=None: None)
 
         assert tools_config._toolset_needs_configuration_prompt(
             "computer_use", {}

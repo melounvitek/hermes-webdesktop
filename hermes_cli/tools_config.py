@@ -3,31 +3,24 @@
 import json as _json
 import logging
 import os
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 
 from hermes_cli.config import (
     cfg_get,
-    load_config, save_config, get_env_value, save_env_value,
+    load_config, save_config, get_env_value,
 )
 from hermes_cli.colors import Colors, color
 from hermes_cli.nous_subscription import (
-    MANAGED_FEATURE_COVERAGE_CATEGORY,
     NousSubscriptionFeatures,
     apply_nous_managed_defaults,
     get_nous_subscription_features,
 )
-from hermes_cli.nous_account import format_nous_portal_entitlement_message
 from hermes_cli.toolset_scope import (
     _TOOLSET_PLATFORM_RESTRICTIONS,
     toolset_allowed_for_platform as _toolset_allowed_for_platform,
 )
-from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, fal_key_is_configured
-from utils import base_url_hostname, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +40,6 @@ from hermes_cli.cli_output import (  # noqa: E402 — late import block
     print_info as _print_info,
     print_success as _print_success,
     print_warning as _print_warning,
-    prompt as _prompt,
 )
 from hermes_cli.tools_config_cua import (  # noqa: F401 — re-exported for hermes_cli.tools_config.X callers and test patches
     _post_setup_no_window_flags,
@@ -1520,6 +1512,122 @@ def _platform_menu_label(config: dict, pkey: str) -> str:
     return f"Configure {PLATFORMS[pkey]['label']}  ({count}/{total} enabled)"
 
 
+def _print_tools_summary(config: dict, enabled_platforms: List[str]) -> None:
+    """``hermes tools --summary``: enabled toolsets per platform, non-interactive."""
+    total = len(_get_effective_configurable_toolsets())
+    print(color("⚕ Tool Summary", Colors.CYAN, Colors.BOLD))
+    print()
+    summary = _platform_toolset_summary(config, enabled_platforms)
+    for pkey in enabled_platforms:
+        enabled = summary.get(pkey, set())
+        print(color(f"  {PLATFORMS[pkey]['label']}", Colors.BOLD) + color(f"  ({len(enabled)}/{total})", Colors.DIM))
+        if enabled:
+            for ts_key in sorted(enabled):
+                print(color(f"    ✓ {_toolset_label(ts_key)}", Colors.GREEN))
+        else:
+            print(color("    (none enabled)", Colors.DIM))
+    print()
+
+
+def _configure_list(to_configure: List[str], config: dict, *, selected: bool = True) -> None:
+    """Announce then configure each toolset in ``to_configure``."""
+    if not to_configure:
+        return
+    print()
+    what = "selected tool(s)" if selected else "tool(s)"
+    print(color(f"  Configuring {len(to_configure)} {what}:", Colors.YELLOW))
+    for ts_key in to_configure:
+        print(color(f"    • {_toolset_label(ts_key)}", Colors.DIM))
+    print(color("  You can skip any tool you don't need right now.", Colors.DIM))
+    print()
+    for ts_key in to_configure:
+        _configure_toolset(ts_key, config)
+
+
+def _checklist_diff(new_enabled: Set[str], prev: Set[str], platform: str) -> tuple[Set[str], Set[str]]:
+    """``(added, removed)`` scoped to the checklist's universe.
+
+    The resolved ``prev`` can include non-configurable toolsets (``kanban``, recovered platform
+    composites) the user was never shown a checkbox for; without this scope the summary would print
+    spurious ``- kanban`` removals even though the config keeps them (see _checklist_toolset_keys).
+    """
+    universe = _checklist_toolset_keys(platform)
+    return (new_enabled - prev) & universe, (prev - new_enabled) & universe
+
+
+def _first_install_flow(config: dict, enabled_platforms: List[str]) -> None:
+    """Fresh install: one checklist per platform, no menu, keys prompted for every enabled tool."""
+    for pkey in enabled_platforms:
+        pinfo = PLATFORMS[pkey]
+        current_enabled = _get_platform_tools(config, pkey, include_default_mcp_servers=False)
+        new_enabled = _prompt_toolset_checklist(pinfo["label"], current_enabled - _DEFAULT_OFF_TOOLSETS, pkey)
+        _print_toolset_diff(*_checklist_diff(new_enabled, current_enabled, pkey))
+
+        auto_configured = apply_nous_managed_defaults(config, enabled_toolsets=new_enabled, force_fresh=True)
+        for ts_key in sorted(auto_configured):
+            label = next((l for k, l, _ in CONFIGURABLE_TOOLSETS if k == ts_key), ts_key)
+            print(color(f"  ✓ {label}: using your Nous subscription defaults", Colors.GREEN))
+
+        # Walk through ALL selected tools with provider options or key requirements, so browser
+        # (Local vs Browserbase), TTS (Edge vs OpenAI vs ElevenLabs), etc. are shown even when a
+        # free provider exists.
+        _configure_list(
+            [ts for ts in sorted(new_enabled) if _is_configurable(ts) and ts not in auto_configured],
+            config, selected=False,
+        )
+        _save_platform_tools(config, pkey, new_enabled)
+        save_config(config)
+        print(color(f"  ✓ Saved {pinfo['label']} tool configuration", Colors.GREEN))
+        print()
+
+
+def _configure_all_platforms(config: dict, platform_keys: List[str]) -> bool:
+    """'Configure all platforms (global)' menu entry. Returns True when config was saved."""
+    all_current: Set[str] = set()
+    for pk in platform_keys:
+        all_current |= _get_platform_tools(config, pk, include_default_mcp_servers=False)
+    new_enabled = _prompt_toolset_checklist("All platforms", all_current, force_fresh=True)
+    selected_to_configure = _toolsets_needing_setup(new_enabled, config)
+    _configure_list(selected_to_configure, config)
+
+    if new_enabled == all_current and not selected_to_configure:
+        print(color("  No changes", Colors.DIM))
+        return False
+    for pk in platform_keys:
+        prev = _get_platform_tools(config, pk, include_default_mcp_servers=False)
+        added, removed = _checklist_diff(new_enabled, prev, pk)
+        if added or removed:
+            print(color(f"  {PLATFORMS[pk]['label']}:", Colors.DIM))
+            _print_toolset_diff(added, removed, indent="    ")
+        # Keys for newly enabled tools not already handled by the global selected-tool pass, so a
+        # tool already enabled globally but lacking provider config doesn't drop the user back to
+        # the main menu.
+        _configure_newly_added(added, set(selected_to_configure), config)
+        _save_platform_tools(config, pk, new_enabled)
+    save_config(config)
+    print(color("  ✓ Saved configuration for all platforms", Colors.GREEN))
+    return True
+
+
+def _configure_one_platform(config: dict, pkey: str) -> None:
+    """Per-platform checklist + key setup + save."""
+    pinfo = PLATFORMS[pkey]
+    current_enabled = _get_platform_tools(config, pkey, include_default_mcp_servers=False)
+    new_enabled = _prompt_toolset_checklist(pinfo["label"], current_enabled, force_fresh=True)
+    selected_to_configure = _toolsets_needing_setup(new_enabled, config)
+    _configure_list(selected_to_configure, config)
+
+    if new_enabled != current_enabled or selected_to_configure:
+        added, removed = _checklist_diff(new_enabled, current_enabled, pkey)
+        _print_toolset_diff(added, removed)
+        _configure_newly_added(added, set(selected_to_configure), config)
+        _save_platform_tools(config, pkey, new_enabled)
+        save_config(config)
+        print(color(f"  ✓ Saved {pinfo['label']} configuration", Colors.GREEN))
+    else:
+        print(color(f"  No changes to {pinfo['label']}", Colors.DIM))
+
+
 def tools_command(args=None, first_install: bool = False, config: dict = None):
     """Entry point for `hermes tools` and `hermes setup tools`.
 
@@ -1532,24 +1640,8 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
     enabled_platforms = _get_enabled_platforms()
 
     print()
-
-    # Non-interactive summary mode for CLI usage
     if getattr(args, "summary", False):
-        total = len(_get_effective_configurable_toolsets())
-        print(color("⚕ Tool Summary", Colors.CYAN, Colors.BOLD))
-        print()
-        summary = _platform_toolset_summary(config, enabled_platforms)
-        for pkey in enabled_platforms:
-            pinfo = PLATFORMS[pkey]
-            enabled = summary.get(pkey, set())
-            count = len(enabled)
-            print(color(f"  {pinfo['label']}", Colors.BOLD) + color(f"  ({count}/{total})", Colors.DIM))
-            if enabled:
-                for ts_key in sorted(enabled):
-                    print(color(f"    ✓ {_toolset_label(ts_key)}", Colors.GREEN))
-            else:
-                print(color("    (none enabled)", Colors.DIM))
-        print()
+        _print_tools_summary(config, enabled_platforms)
         return
     print(color("⚕ Hermes Tool Configuration", Colors.CYAN, Colors.BOLD))
     print(color("  Enable or disable tools per platform.", Colors.DIM))
@@ -1557,185 +1649,48 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
     print(color("  Guide: https://hermes-agent.nousresearch.com/docs/user-guide/features/tools", Colors.DIM))
     print()
 
-    def _configure_list(to_configure, *, selected=True):
-        if not to_configure:
-            return
-        print()
-        what = "selected tool(s)" if selected else "tool(s)"
-        print(color(f"  Configuring {len(to_configure)} {what}:", Colors.YELLOW))
-        for ts_key in to_configure:
-            print(color(f"    • {_toolset_label(ts_key)}", Colors.DIM))
-        print(color("  You can skip any tool you don't need right now.", Colors.DIM))
-        print()
-        for ts_key in to_configure:
-            _configure_toolset(ts_key, config)
-
-    # ── First-time install: linear flow, no platform menu ──
     if first_install:
-        for pkey in enabled_platforms:
-            pinfo = PLATFORMS[pkey]
-            current_enabled = _get_platform_tools(config, pkey, include_default_mcp_servers=False)
-
-            # Uncheck toolsets that should be off by default
-            checklist_preselected = current_enabled - _DEFAULT_OFF_TOOLSETS
-
-            # Show checklist
-            new_enabled = _prompt_toolset_checklist(pinfo["label"], checklist_preselected, pkey)
-
-            # Only diff against toolsets the checklist actually offered. The
-            # resolved ``current_enabled`` can include non-configurable toolsets
-            # (e.g. ``kanban``, recovered platform composites) the user was
-            # never shown a checkbox for; without this scope the summary would
-            # print spurious ``- kanban`` removals even though the config keeps
-            # them. See _checklist_toolset_keys.
-            _diff_universe = _checklist_toolset_keys(pkey)
-            _print_toolset_diff(
-                (new_enabled - current_enabled) & _diff_universe,
-                (current_enabled - new_enabled) & _diff_universe,
-            )
-
-            auto_configured = apply_nous_managed_defaults(
-                config,
-                enabled_toolsets=new_enabled,
-                force_fresh=True,
-            )
-            for ts_key in sorted(auto_configured):
-                label = next((l for k, l, _ in CONFIGURABLE_TOOLSETS if k == ts_key), ts_key)
-                print(color(f"  ✓ {label}: using your Nous subscription defaults", Colors.GREEN))
-
-            # Walk through ALL selected tools that have provider options or
-            # need API keys.  This ensures browser (Local vs Browserbase),
-            # TTS (Edge vs OpenAI vs ElevenLabs), etc. are shown even when
-            # a free provider exists.
-            _configure_list(
-                [
-                    ts_key for ts_key in sorted(new_enabled)
-                    if _is_configurable(ts_key) and ts_key not in auto_configured
-                ],
-                selected=False,
-            )
-
-            _save_platform_tools(config, pkey, new_enabled)
-            save_config(config)
-            print(color(f"  ✓ Saved {pinfo['label']} tool configuration", Colors.GREEN))
-            print()
-
+        _first_install_flow(config, enabled_platforms)
         return
 
-    # ── Returning user: platform menu loop ──
+    # Returning user: platform menu loop. Per-platform rows first, then the extras in this order.
     platform_keys = list(enabled_platforms)
     platform_choices = [_platform_menu_label(config, pkey) for pkey in platform_keys]
-
-    if len(platform_keys) > 1:
+    has_global = len(platform_keys) > 1
+    if has_global:
         platform_choices.append("Configure all platforms (global)")
     platform_choices.append("Reconfigure an existing tool's provider or API key")
     platform_choices.append(_shared_metrics_menu_label(config))
-
-    # Show MCP option if any MCP servers are configured
-    _has_mcp = bool(config.get("mcp_servers"))
-    if _has_mcp:
+    has_mcp = bool(config.get("mcp_servers"))
+    if has_mcp:
         platform_choices.append("Configure MCP server tools")
-
     platform_choices.append("Done")
 
-    # Index offsets for the extra options after per-platform entries
-    _global_idx = len(platform_keys) if len(platform_keys) > 1 else -1
-    _reconfig_idx = len(platform_keys) + (1 if len(platform_keys) > 1 else 0)
-    _metrics_idx = _reconfig_idx + 1
-    _mcp_idx = (_metrics_idx + 1) if _has_mcp else -1
-    _done_idx = _metrics_idx + (2 if _has_mcp else 1)
+    global_idx = len(platform_keys) if has_global else -1
+    reconfig_idx = len(platform_keys) + (1 if has_global else 0)
+    metrics_idx = reconfig_idx + 1
+    mcp_idx = (metrics_idx + 1) if has_mcp else -1
+    done_idx = metrics_idx + (2 if has_mcp else 1)
 
     while True:
         idx = _prompt_choice("Select an option:", platform_choices, default=0)
-
-        if idx == _done_idx:
+        if idx == done_idx:
             break
-
-        if idx == _reconfig_idx:
+        if idx == reconfig_idx:
             _reconfigure_tool(config, force_fresh=True)
-            print()
-            continue
-
-        if idx == _metrics_idx:
+        elif idx == metrics_idx:
             _configure_shared_metrics_interactive(config)
-            platform_choices[_metrics_idx] = _shared_metrics_menu_label(config)
-            print()
-            continue
-
-        if idx == _mcp_idx:
+            platform_choices[metrics_idx] = _shared_metrics_menu_label(config)
+        elif idx == mcp_idx:
             _configure_mcp_tools_interactive(config)
-            print()
-            continue
-
-        if idx == _global_idx:
-            # Use the union of all platforms' current tools as the starting state
-            all_current = set()
-            for pk in platform_keys:
-                all_current |= _get_platform_tools(config, pk, include_default_mcp_servers=False)
-            new_enabled = _prompt_toolset_checklist(
-                "All platforms",
-                all_current,
-                force_fresh=True,
-            )
-            selected_to_configure = _toolsets_needing_setup(new_enabled, config)
-            _configure_list(selected_to_configure)
-
-            if new_enabled != all_current or selected_to_configure:
-                for pk in platform_keys:
-                    prev = _get_platform_tools(config, pk, include_default_mcp_servers=False)
-                    # Scope the printed diff to the checklist's universe (see
-                    # _checklist_toolset_keys) so non-configurable toolsets like
-                    # ``kanban`` aren't reported as added/removed.
-                    _diff_universe = _checklist_toolset_keys(pk)
-                    added = (new_enabled - prev) & _diff_universe
-                    removed = (prev - new_enabled) & _diff_universe
-                    if added or removed:
-                        print(color(f"  {PLATFORMS[pk]['label']}:", Colors.DIM))
-                        _print_toolset_diff(added, removed, indent="    ")
-                    # Configure API keys for newly enabled tools not already
-                    # handled by the global selected-tool pass above, so a
-                    # tool that was already enabled globally but lacked
-                    # provider configuration doesn't drop the user back to the
-                    # main menu.
-                    _configure_newly_added(added, set(selected_to_configure), config)
-                    _save_platform_tools(config, pk, new_enabled)
-                save_config(config)
-                print(color("  ✓ Saved configuration for all platforms", Colors.GREEN))
+        elif idx == global_idx:
+            if _configure_all_platforms(config, platform_keys):
                 for ci, pk in enumerate(platform_keys):
                     platform_choices[ci] = _platform_menu_label(config, pk)
-            else:
-                print(color("  No changes", Colors.DIM))
-            print()
-            continue
-
-        pkey = platform_keys[idx]
-        pinfo = PLATFORMS[pkey]
-
-        current_enabled = _get_platform_tools(config, pkey, include_default_mcp_servers=False)
-        new_enabled = _prompt_toolset_checklist(
-            pinfo["label"],
-            current_enabled,
-            force_fresh=True,
-        )
-
-        selected_to_configure = _toolsets_needing_setup(new_enabled, config)
-        _configure_list(selected_to_configure)
-
-        if new_enabled != current_enabled or selected_to_configure:
-            _diff_universe = _checklist_toolset_keys(pkey)
-            added = (new_enabled - current_enabled) & _diff_universe
-            removed = (current_enabled - new_enabled) & _diff_universe
-            _print_toolset_diff(added, removed)
-            _configure_newly_added(added, set(selected_to_configure), config)
-
-            _save_platform_tools(config, pkey, new_enabled)
-            save_config(config)
-            print(color(f"  ✓ Saved {pinfo['label']} configuration", Colors.GREEN))
         else:
-            print(color(f"  No changes to {pinfo['label']}", Colors.DIM))
-
+            _configure_one_platform(config, platform_keys[idx])
+            platform_choices[idx] = _platform_menu_label(config, platform_keys[idx])
         print()
-        platform_choices[idx] = _platform_menu_label(config, pkey)
 
     print()
     from hermes_constants import display_hermes_home
