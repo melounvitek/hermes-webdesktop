@@ -70,6 +70,7 @@ def _lazy_call_llm(*args, **kwargs):
         fn = __getattr__("call_llm")
     return fn(*args, **kwargs)
 
+
 # Keys re-added to the agent-browser subprocess env AFTER credential stripping.
 # agent-browser is a Node process loading npm deps: a compromised transitive
 # dependency could read every Hermes secret from process.env, so only the
@@ -97,6 +98,7 @@ def _build_browser_env() -> dict:
         if _key in os.environ:
             env[_key] = os.environ[_key]
     return env
+
 
 try:
     from tools.website_policy import check_website_access
@@ -341,6 +343,7 @@ from tools.browser_tool_session import (  # noqa: F401  (re-exported; tests patc
     _interpret_browser_command_output,
     _run_browser_command,
 )
+
 
 def _get_vision_model() -> Optional[str]:
     """Model for browser_vision (screenshot analysis — multimodal)."""
@@ -738,6 +741,7 @@ class _BrowserSessionBackend:
 def _browser_session_backend(session_key: str) -> _BrowserSessionBackend:
     """Return the SuspectableBackend adapter for ``session_key``."""
     return _BrowserSessionBackend(session_key)
+
 
 # Background cleanup thread state
 _cleanup_thread = None
@@ -1742,6 +1746,7 @@ from tools.browser_tool_vision import (  # noqa: F401  (re-exported; tests patch
     _native_vision_result,
     _analyze_screenshot_with_aux_llm,
 )
+
 
 def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> Union[str, Dict[str, Any]]:
     """Screenshot the current page for visual inspection (CAPTCHAs, images, layouts).
