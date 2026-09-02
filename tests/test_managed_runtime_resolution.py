@@ -92,7 +92,7 @@ _ALLOWED: dict[tuple[str, str], str] = {
     ("hermes_cli/main_tui_launch.py", "npm"): (
         "Same _ensure_tui_node() gate as node."
     ),
-    ("hermes_cli/main.py", "npm"): (
+    ("hermes_cli/main_install_repair.py", "npm"): (
         "_resolve_node_runtime_npm()'s WSL re-scan: PATH minus /mnt/* IS the question."
     ),
     ("tools/browser_tool.py", "npx"): (
