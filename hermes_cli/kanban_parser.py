@@ -132,8 +132,8 @@ def _board_specs():
     ]
 
 
-def _specs():
-    """Top-level ``hermes kanban <action>`` records, in ``--help`` order."""
+def _task_specs():
+    """``init`` … ``attach-rm``: creation, listing, inspection and attachment verbs."""
     return [
         _cmd("init", help="Create kanban.db if missing (idempotent)"),
         _cmd("boards", children=("boards_action", _board_specs()),
@@ -291,6 +291,12 @@ def _specs():
         ], help="Attach a local file to a task"),
         _cmd("attachments", [_arg("task_id"), _json_flag()], help="List a task's attachments"),
         _cmd("attach-rm", [_arg("attachment_id", type=int)], help="Delete an attachment by id"),
+    ]
+
+
+def _lifecycle_specs():
+    """``complete`` … ``repair``: state transitions, dispatcher, notify and maintenance verbs."""
+    return [
         _cmd("complete", [
             _arg("task_ids", nargs="+",
                  help="One or more task ids (only --result applies to all of them)"),
@@ -482,6 +488,11 @@ def _specs():
                  "is healthy or was repaired, non-zero when it is still corrupt."
              )),
     ]
+
+
+def _specs():
+    """Top-level ``hermes kanban <action>`` records, in ``--help`` order."""
+    return _task_specs() + _lifecycle_specs()
 
 
 def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
