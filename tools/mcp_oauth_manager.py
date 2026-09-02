@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Central manager for per-server MCP OAuth state.
+"""Central manager for per-server MCP OAuth state (one instance per process).
 
-One instance per process. Holds per-server provider instances and coordinates:
-
-- **Cross-process token reload** via mtime-based disk watch, so tokens
-  refreshed by another process (cron, another CLI) are picked up without a
-  restart (Claude Code's ``invalidateOAuthCacheIfDiskChanged`` bug class).
-- **401 deduplication** via in-flight futures: N concurrent tool calls hitting
-  401 with the same access_token trigger one recovery attempt.
-- **Reconnect signalling** — ``MCPServerTask`` in ``mcp_tool.py`` drives the
-  reconnect; the manager decides when it is warranted.
+Holds per-server provider instances and coordinates cross-process token reload
+(mtime-based disk watch, so tokens refreshed by cron/another CLI are picked up
+without a restart — Claude Code's ``invalidateOAuthCacheIfDiskChanged`` bug
+class), 401 deduplication (N concurrent tool calls hitting 401 with the same
+access_token trigger one recovery attempt) and reconnect signalling
+(``MCPServerTask`` in ``mcp_tool.py`` drives the reconnect; the manager decides
+when it is warranted).
 
 This module is the ONLY place that instantiates the SDK's ``OAuthClientProvider``
 for runtime use; other code paths go through ``get_manager()``. We lean on the
@@ -111,13 +109,11 @@ class _HermesRuntimeProviderMixin:
         token regardless of age and a restarted process ships stale Bearer tokens
         (some providers answer 200 with an app-level auth error the transport
         can't see). Seeding the expiry makes the SDK take ``can_refresh_token()``
-        and refresh before the first request; ``HermesTokenStorage`` persists
-        absolute ``expires_at`` so the TTL reflects wall-clock age.
-
-        Metadata is restored from disk, else discovered pre-flight when we hold
-        tokens but no metadata: otherwise ``_refresh_token`` guesses
-        ``{server_url}/token`` (wrong for split-origin providers such as
-        BetterStack), the refresh 404s and we fall through to browser reauth.
+        and refresh first; ``HermesTokenStorage`` persists absolute ``expires_at``
+        so the TTL reflects wall-clock age. Metadata is restored from disk, else
+        discovered pre-flight when we hold tokens but no metadata: otherwise
+        ``_refresh_token`` guesses ``{server_url}/token`` (wrong for split-origin
+        providers such as BetterStack), 404s, and we fall through to browser reauth.
         """
         await super()._initialize()
         tokens = self.context.current_tokens
@@ -179,9 +175,7 @@ class _HermesRuntimeProviderMixin:
             # Step 1: PRM discovery to learn the authorization_server URL.
             for url in build_protected_resource_metadata_discovery_urls(None, server_url):
                 resp = await _send(client, url, "PRM")
-                if resp is None:
-                    continue
-                prm = await handle_protected_resource_response(resp)
+                prm = await handle_protected_resource_response(resp) if resp is not None else None
                 if prm:
                     self.context.protected_resource_metadata = prm
                     if prm.authorization_servers:
@@ -190,9 +184,7 @@ class _HermesRuntimeProviderMixin:
 
             # Step 2: ASM discovery against auth_server_url (server_url fallback
             # for legacy providers).
-            for url in build_oauth_authorization_server_metadata_discovery_urls(
-                self.context.auth_server_url, server_url
-            ):
+            for url in build_oauth_authorization_server_metadata_discovery_urls(self.context.auth_server_url, server_url):
                 resp = await _send(client, url, "ASM")
                 if resp is None:
                     continue
@@ -570,16 +562,11 @@ class MCPOAuthManager:
     async def handle_401(self, server_name: str, failed_access_token: Optional[str] = None) -> bool:
         """Handle a 401 from a tool call, deduplicated across concurrent callers.
 
-        Returns:
-            True  if a (possibly new) access token is now available — caller
-                  should trigger a reconnect and retry the operation.
-            False if no recovery path exists — caller should surface a
-                  ``needs_reauth`` error to the model so it stops hallucinating
-                  manual refresh attempts.
-
-        Thundering-herd protection: if N concurrent tool calls hit 401 with
-        the same ``failed_access_token``, only one recovery attempt fires.
-        Others await the same future.
+        True: a (possibly new) access token is available — caller should reconnect
+        and retry. False: no recovery path — caller should surface a
+        ``needs_reauth`` error so the model stops hallucinating manual refreshes.
+        Thundering-herd protection: N concurrent 401s with the same
+        ``failed_access_token`` fire one recovery attempt; the rest await its future.
         """
         entry = self._entries.get(self._key(server_name))
         if entry is None or entry.provider is None:
