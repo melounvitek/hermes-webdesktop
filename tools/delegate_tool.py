@@ -186,9 +186,7 @@ def _expand_parent_toolsets(parent_toolsets: set) -> set:
     return expanded
 
 
-def _preserve_parent_mcp_toolsets(
-    child_toolsets: List[str], parent_toolsets: set[str]
-) -> List[str]:
+def _preserve_parent_mcp_toolsets(child_toolsets: List[str], parent_toolsets: set[str]) -> List[str]:
     """Append any parent MCP toolsets that are missing from a narrowed child."""
     preserved = list(child_toolsets)
     for toolset_name in sorted(parent_toolsets):
@@ -276,9 +274,7 @@ def _resolve_child_toolsets(
         expanded_parent = _expand_parent_toolsets(parent_toolsets)
         child_toolsets = [t for t in toolsets if t in expanded_parent]
         if _get_inherit_mcp_toolsets():
-            child_toolsets = _preserve_parent_mcp_toolsets(
-                child_toolsets, parent_toolsets
-            )
+            child_toolsets = _preserve_parent_mcp_toolsets(child_toolsets, parent_toolsets)
         child_toolsets = _strip_blocked_tools(child_toolsets)
     elif parent_agent and parent_enabled is not None:
         child_toolsets = _strip_blocked_tools(parent_enabled)
@@ -293,9 +289,7 @@ def _resolve_child_toolsets(
     else:
         inherited_disabled = []
     if effective_role == "orchestrator":
-        inherited_disabled = [
-            name for name in inherited_disabled if name != "delegation"
-        ]
+        inherited_disabled = [name for name in inherited_disabled if name != "delegation"]
     child_disabled_toolsets = list(
         dict.fromkeys(
             inherited_disabled + _blocked_toolsets_for_role(effective_role) + ["kanban"]
@@ -395,10 +389,7 @@ def _resolve_child_runtime(
             if parsed is not None:
                 child_reasoning = parsed
             else:
-                logger.warning(
-                    "Unknown delegation.reasoning_effort '%s', inheriting parent level",
-                    delegation_effort,
-                )
+                logger.warning("Unknown delegation.reasoning_effort '%s', inheriting parent level", delegation_effort)
     except Exception as exc:
         logger.debug("Could not load delegation reasoning_effort: %s", exc)
 
@@ -447,10 +438,7 @@ def _open_child_session_db(parent_agent) -> Any:
         _parent_db_path = getattr(parent_session_db, "db_path", None)
         return get_shared_session_db(_parent_db_path) if _parent_db_path is not None else get_shared_session_db()
     except Exception:
-        logger.debug(
-            "subagent: failed to open dedicated SessionDB; child persistence disabled",
-            exc_info=True,
-        )
+        logger.debug("subagent: failed to open dedicated SessionDB; child persistence disabled", exc_info=True)
         return None
 
 
@@ -737,9 +725,7 @@ def _run_single_child(
             _child_close_deferred = failure.close_deferred
             return failure.entry
 
-        schema = _validate_child_output_schema(
-            child, result, task_index, ws.child_task_id, _relay_child_text
-        )
+        schema = _validate_child_output_schema(child, result, task_index, ws.child_task_id, _relay_child_text)
         _merge_late_steer(result, _subagent_id, child)
 
         # Flush any remaining batched progress to gateway
@@ -757,9 +743,7 @@ def _run_single_child(
         return entry
 
     except Exception as exc:
-        _late_pending_steer = (
-            _close_subagent_steering(_subagent_id, child) if _subagent_id else None
-        )
+        _late_pending_steer = (_close_subagent_steering(_subagent_id, child) if _subagent_id else None)
         duration = round(time.monotonic() - child_start, 2)
         logging.exception(f"[subagent-{task_index}] failed")
         _safe_progress(
@@ -787,9 +771,7 @@ def _run_single_child(
         )
 
 
-def _recover_tasks_from_json_string(
-    tasks: Any,
-) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     if not isinstance(tasks, str):
         return None, None
     raw = tasks.strip()
@@ -803,10 +785,7 @@ def _recover_tasks_from_json_string(
             f"that could not be parsed as JSON ({exc.msg})."
         )
     if not isinstance(parsed, list):
-        return None, (
-            f"tasks must be a JSON array of task objects; parsed "
-            f"{type(parsed).__name__} instead."
-        )
+        return None, (f"tasks must be a JSON array of task objects; parsed " f"{type(parsed).__name__} instead.")
     return parsed, None
 
 
@@ -1280,10 +1259,7 @@ def _build_top_level_description() -> str:
             "derives this from depth automatically.\n"
         )
     else:
-        restrictions_rule = (
-            "- Children cannot call delegate_task, clarify, memory, or "
-            "cronjob.\n"
-        )
+        restrictions_rule = ("- Children cannot call delegate_task, clarify, memory, or " "cronjob.\n")
 
     return (
         "Spawn subagents in isolated contexts; each gets its own conversation, "
@@ -1341,19 +1317,14 @@ def _build_dynamic_schema_overrides() -> dict:
     get_definitions() pass rewrites the description fields to the user's
     actual limits.
     """
-    overrides_params = {
-        **DELEGATE_TASK_SCHEMA["parameters"],
-    }
+    overrides_params = {**DELEGATE_TASK_SCHEMA["parameters"]}
     # Deep-copy properties so we don't mutate the static schema dict.
     overrides_params["properties"] = {
         k: dict(v) for k, v in DELEGATE_TASK_SCHEMA["parameters"]["properties"].items()
     }
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
 
-    return {
-        "description": _build_top_level_description(),
-        "parameters": overrides_params,
-    }
+    return {"description": _build_top_level_description(), "parameters": overrides_params}
 
 
 DELEGATE_TASK_SCHEMA = {
@@ -1496,11 +1467,7 @@ def _strip_model_hidden_task_fields(tasks: Any) -> Any:
         if not isinstance(task, dict):
             stripped_tasks.append(task)
             continue
-        stripped = {
-            key: value
-            for key, value in task.items()
-            if key not in _MODEL_HIDDEN_TASK_FIELDS
-        }
+        stripped = {key: value for key, value in task.items() if key not in _MODEL_HIDDEN_TASK_FIELDS}
         changed = changed or len(stripped) != len(task)
         stripped_tasks.append(stripped)
     return stripped_tasks if changed else tasks

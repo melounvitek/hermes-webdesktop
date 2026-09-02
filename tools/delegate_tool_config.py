@@ -57,10 +57,7 @@ def _subagent_auto_deny(command: str, description: str, **kwargs) -> str:
 
 def _subagent_auto_approve(command: str, description: str, **kwargs) -> str:
     """Auto-approve (opt-in YOLO via delegation.subagent_auto_approve): returns 'once'."""
-    logger.warning(
-        "Subagent auto-approved dangerous command: %s (%s)",
-        command, description,
-    )
+    logger.warning("Subagent auto-approved dangerous command: %s (%s)", command, description)
     return "once"
 
 
@@ -180,20 +177,11 @@ def _get_max_spawn_depth() -> int:
     try:
         ival = int(val)
     except (TypeError, ValueError):
-        logger.warning(
-            "delegation.max_spawn_depth=%r is not a valid integer; " "using default %d",
-            val,
-            MAX_DEPTH,
-        )
+        logger.warning("delegation.max_spawn_depth=%r is not a valid integer; " "using default %d", val, MAX_DEPTH)
         return MAX_DEPTH
     floored = max(_MIN_SPAWN_DEPTH, ival)
     if floored != ival:
-        logger.warning(
-            "delegation.max_spawn_depth=%d below floor %d; using %d",
-            ival,
-            _MIN_SPAWN_DEPTH,
-            floored,
-        )
+        logger.warning("delegation.max_spawn_depth=%d below floor %d; using %d", ival, _MIN_SPAWN_DEPTH, floored)
     return floored
 
 
@@ -217,9 +205,7 @@ def _normalized_runtime_url(value: Any) -> str:
     return str(value or "").strip().rstrip("/")
 
 
-def _inherit_parent_capabilities(
-    parent_agent, override_provider, override_base_url
-) -> Optional[dict]:
+def _inherit_parent_capabilities(parent_agent, override_provider, override_base_url) -> Optional[dict]:
     """Parent's endpoint-trust capability map for a child, or None.
 
     ``agent.capabilities`` is a trust decision scoped to one provider+endpoint:
@@ -231,11 +217,7 @@ def _inherit_parent_capabilities(
     parent_caps = getattr(parent_agent, "capabilities", None)
     if not isinstance(parent_caps, dict):
         return None
-    return {
-        key: value
-        for key, value in parent_caps.items()
-        if isinstance(key, str) and isinstance(value, bool)
-    }
+    return {key: value for key, value in parent_caps.items() if isinstance(key, str) and isinstance(value, bool)}
 
 
 def _inherit_parent_base_url(parent_agent, fallback_base_url: Optional[str]) -> Optional[str]:
@@ -294,9 +276,7 @@ def _resolve_child_credential_pool(
                 # Unregistered endpoint (no custom_providers entry): keep the
                 # child's fixed credential rather than inherit the parent's.
                 return None
-            parent_key = get_custom_provider_pool_key(
-                getattr(parent_agent, "base_url", None)
-            )
+            parent_key = get_custom_provider_pool_key(getattr(parent_agent, "base_url", None))
             if (
                 parent_pool is not None
                 and parent_provider == "custom"
@@ -318,11 +298,7 @@ def _resolve_child_credential_pool(
     try:
         return _loaded_pool(effective_provider)
     except Exception as exc:
-        logger.debug(
-            "Could not load credential pool for child provider '%s': %s",
-            effective_provider,
-            exc,
-        )
+        logger.debug("Could not load credential pool for child provider '%s': %s", effective_provider, exc)
     return None
 
 
@@ -406,9 +382,7 @@ def _direct_endpoint_credentials(cfg_values: dict, explicit_request_overrides) -
         try:
             from hermes_cli.runtime_provider import resolve_runtime_provider
 
-            runtime = resolve_runtime_provider(
-                requested=configured_provider, target_model=configured_model
-            )
+            runtime = resolve_runtime_provider(requested=configured_provider, target_model=configured_model)
             request_overrides = dict(runtime.get("request_overrides") or {}) or None
             max_output_tokens = runtime.get("max_output_tokens")
         except Exception as exc:

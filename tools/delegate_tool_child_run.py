@@ -50,10 +50,7 @@ def _append_missed_steer(entry: Dict[str, Any], late_steer: Optional[str]) -> No
     """Record steer text that won the race with the child's failure/timeout."""
     if late_steer:
         entry["missed_steer"] = late_steer
-        entry["error"] += (
-            " [steer did not land before the subagent stopped: "
-            f"{late_steer}]"
-        )
+        entry["error"] += (" [steer did not land before the subagent stopped: " f"{late_steer}]")
 
 
 def _close_child(child: Any, log_message: str) -> None:
@@ -263,11 +260,7 @@ def _start_heartbeat(child: Any, parent_agent: Any, task_index: int) -> tuple:
     ``try`` so a failed ``start()`` (OS thread exhaustion) leaves ``ident`` None
     and the finally-path join can be skipped safely.
     """
-    from tools.delegate_tool import (
-        _HEARTBEAT_INTERVAL,
-        _HEARTBEAT_STALE_CYCLES_IDLE,
-        _HEARTBEAT_STALE_CYCLES_IN_TOOL,
-    )
+    from tools.delegate_tool import (_HEARTBEAT_INTERVAL, _HEARTBEAT_STALE_CYCLES_IDLE, _HEARTBEAT_STALE_CYCLES_IN_TOOL)
 
     _heartbeat_stop = threading.Event()
     # Stale detection: a cycle counts as stale when (tool, iteration,
@@ -593,9 +586,7 @@ def _await_child(
     back to ``input()`` and deadlock the parent TUI (deny vs approve follows
     delegation.subagent_auto_approve).
     """
-    from tools.delegate_tool import (
-        _get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb,
-    )
+    from tools.delegate_tool import (_get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb)
     from tools.daemon_pool import DaemonThreadPoolExecutor
 
     child_timeout = _get_child_timeout()
@@ -610,9 +601,7 @@ def _await_child(
         from agent.delegation_context import delegated_child_context
 
         with delegated_child_context(str(getattr(child, "session_id", "") or "")):
-            return child.run_conversation(
-                user_message=goal, task_id=ws.child_task_id, stream_callback=relay_child_text,
-            )
+            return child.run_conversation(user_message=goal, task_id=ws.child_task_id, stream_callback=relay_child_text)
 
     future = executor.submit(contextvars.copy_context().run, _run_with_thread_capture)
     try:
@@ -702,11 +691,7 @@ def _handle_child_wait_failure(
             goal=goal,
         )
         if diagnostic_path:
-            logger.warning(
-                "Subagent %d 0-API-call timeout — diagnostic written to %s",
-                task_index,
-                diagnostic_path,
-            )
+            logger.warning("Subagent %d 0-API-call timeout — diagnostic written to %s", task_index, diagnostic_path)
 
     status = "timeout" if is_timeout else "error"
     _safe_progress(
@@ -949,10 +934,7 @@ def _build_result_entry(
     _missed_steer = result.get("pending_steer")
     if isinstance(_missed_steer, str) and _missed_steer.strip():
         entry["missed_steer"] = _missed_steer
-        _miss_note = (
-            "[steer did not land — the subagent finished before it could "
-            f"be delivered: {_missed_steer}]"
-        )
+        _miss_note = ("[steer did not land — the subagent finished before it could " f"be delivered: {_missed_steer}]")
         entry["summary"] = f"{summary}\n\n{_miss_note}" if summary else _miss_note
     return entry
 

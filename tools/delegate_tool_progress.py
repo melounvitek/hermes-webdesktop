@@ -111,9 +111,7 @@ _EVENT_HANDLERS: Dict[Any, Optional[str]] = {
 def _normalize_event(event_type: Any) -> Any:
     """Lifecycle string / DelegateEvent / legacy string / ``delegate.*`` string
     → dispatch key; None for unknown events."""
-    if isinstance(event_type, DelegateEvent) or (
-        isinstance(event_type, str) and event_type in _LIFECYCLE_EVENTS
-    ):
+    if isinstance(event_type, DelegateEvent) or (isinstance(event_type, str) and event_type in _LIFECYCLE_EVENTS):
         return event_type
     event = _LEGACY_EVENT_MAP.get(event_type)
     if event is not None:
@@ -139,11 +137,7 @@ def _build_child_system_prompt(
     OpenClaw's buildSubagentSystemPrompt); its depth note is literal truth
     grounded in the passed config so the LLM can't confabulate nesting.
     """
-    parts = [
-        "You are a focused subagent working on a specific delegated task.",
-        "",
-        f"YOUR TASK:\n{goal}",
-    ]
+    parts = ["You are a focused subagent working on a specific delegated task.", "", f"YOUR TASK:\n{goal}"]
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
     if workspace_path and str(workspace_path).strip():
@@ -162,13 +156,9 @@ def _build_child_system_prompt(
         try:
             from agent.prompt_builder import build_context_files_prompt
 
-            _ctx_files = build_context_files_prompt(
-                cwd=str(workspace_path), skip_soul=True
-            )
+            _ctx_files = build_context_files_prompt(cwd=str(workspace_path), skip_soul=True)
         except Exception:
-            logger.debug(
-                "subagent: workspace context-files load failed", exc_info=True
-            )
+            logger.debug("subagent: workspace context-files load failed", exc_info=True)
             _ctx_files = ""
         if _ctx_files.strip():
             parts.append(
@@ -338,9 +328,7 @@ class _ChildProgressRelay:
         return _batch_prefix(deleg, self.task_index, self.task_count)
 
     def _identity_kwargs(self) -> Dict[str, Any]:
-        kw: Dict[str, Any] = {
-            "task_index": self.task_index, "task_count": self.task_count, "goal": self.goal_label,
-        }
+        kw: Dict[str, Any] = {"task_index": self.task_index, "task_count": self.task_count, "goal": self.goal_label}
         for key in ("subagent_id", "parent_id", "depth", "model"):
             if getattr(self, key) is not None:
                 kw[key] = getattr(self, key)

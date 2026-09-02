@@ -198,9 +198,7 @@ def steer_subagent(
             return False
 
 
-def _capture_gateway_steer_authority(
-    owner_session_id: Optional[str],
-) -> tuple[Any, Any]:
+def _capture_gateway_steer_authority(owner_session_id: Optional[str]) -> tuple[Any, Any]:
     """Capture exact request transport + live session generation, if any.
 
     This is intentionally an in-process bridge, not a serializable capability.
@@ -316,12 +314,7 @@ def _owns_subagent_record(record: Dict[str, Any], parent_agent: Any) -> bool:
     }
 
 
-def _handle_control_action(
-    action: str,
-    subagent_id: Optional[str],
-    message: Optional[str],
-    parent_agent: Any,
-) -> str:
+def _handle_control_action(action: str, subagent_id: Optional[str], message: Optional[str], parent_agent: Any) -> str:
     """Synchronous control plane for delegate_task: list/steer/stop.
 
     Runs in-turn (never backgrounded) and only over subagents descended from
@@ -353,11 +346,7 @@ def _handle_control_action(
                     "live_transcript": getattr(agent, "_live_transcript_path", None),
                 }
             )
-        payload: Dict[str, Any] = {
-            "action": "list",
-            "count": len(entries),
-            "subagents": entries,
-        }
+        payload: Dict[str, Any] = {"action": "list", "count": len(entries), "subagents": entries}
         if not entries:
             payload["note"] = (
                 "No live subagents right now. Children that already finished "
@@ -383,10 +372,7 @@ def _handle_control_action(
         )
 
     if action == "steer" and not (message or "").strip():
-        return tool_error(
-            "action='steer' requires a non-empty 'message' describing the "
-            "course correction."
-        )
+        return tool_error("action='steer' requires a non-empty 'message' describing the " "course correction.")
     outcome = _CONTROL_OUTCOMES.get(action)
     if outcome is None:
         return tool_error(f"Unknown action '{action}'. Use spawn, list, steer, or stop.")

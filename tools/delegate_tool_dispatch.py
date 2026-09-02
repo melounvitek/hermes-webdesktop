@@ -107,10 +107,7 @@ def _run_children_parallel(
 
         pending = set(futures.keys())
         while pending:
-            if (
-                honor_parent_interrupt
-                and getattr(parent_agent, "_interrupt_requested", False) is True
-            ):
+            if (honor_parent_interrupt and getattr(parent_agent, "_interrupt_requested", False) is True):
                 # Parent interrupted — collect whatever finished and abandon the
                 # rest (children already got the interrupt signal).
                 for f in pending:

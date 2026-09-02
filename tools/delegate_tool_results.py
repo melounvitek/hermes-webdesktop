@@ -116,10 +116,7 @@ _TOOL_INPUT_URL_KEYS = frozenset({"endpoint", "url", "urls"})
 def _sanitize_tool_target(key: str, value: Any) -> Any:
     """Keep bounded side-effect targets while dropping URL secrets."""
     if isinstance(value, list):
-        cleaned = [
-            item for item in (_sanitize_tool_target(key, item) for item in value[:16])
-            if item is not None
-        ]
+        cleaned = [item for item in (_sanitize_tool_target(key, item) for item in value[:16]) if item is not None]
         return cleaned or None
     if not isinstance(value, str) or not value:
         return None
@@ -292,9 +289,7 @@ def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
         return None
 
 
-def _trim_summary_with_footer(
-    summary: str, cap: int, task_index: int
-) -> tuple[str, Optional[str]]:
+def _trim_summary_with_footer(summary: str, cap: int, task_index: int) -> tuple[str, Optional[str]]:
     """Return (model_text, spill_path) for one over-budget summary.
 
     Mirrors web_extract's ``_truncate_with_footer``: keep a head+tail window
@@ -402,9 +397,7 @@ def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
     compression/429 death spiral.
     """
     from tools.delegate_tool import _load_config
-    summaries = [
-        r for r in results if isinstance(r, dict) and isinstance(r.get("summary"), str) and r["summary"]
-    ]
+    summaries = [r for r in results if isinstance(r, dict) and isinstance(r.get("summary"), str) and r["summary"]]
     if not summaries:
         return
 
@@ -427,9 +420,7 @@ def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
         if len(summary) <= cap:
             continue
         original_len = len(summary)
-        model_text, spill_path = _trim_summary_with_footer(
-            summary, cap, entry.get("task_index", -1)
-        )
+        model_text, spill_path = _trim_summary_with_footer(summary, cap, entry.get("task_index", -1))
         entry["summary"] = model_text
         entry["summary_truncated"] = True
         if spill_path:
@@ -567,12 +558,7 @@ def _finalize_child_results(
         _rollup_children_cost(parent_agent, _fire_subagent_stop_hooks(results, child_by_index, parent_agent))
 
 
-def _run_child_lifecycle(
-    task_index: int,
-    goal: str,
-    child=None,
-    parent_agent=None,
-) -> Dict[str, Any]:
+def _run_child_lifecycle(task_index: int, goal: str, child=None, parent_agent=None) -> Dict[str, Any]:
     """Run one child and apply the same host lifecycle used by delegate_task."""
     from tools.delegate_tool import _run_single_child
     result = _run_single_child(task_index, goal, child, parent_agent)
