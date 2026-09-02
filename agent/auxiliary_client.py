@@ -3785,8 +3785,7 @@ _AUX_UNHEALTHY_TTL_SECONDS = 600  # 10 minutes
 _aux_unhealthy_until: Dict[str, float] = {}
 _aux_unhealthy_logged_at: Dict[str, float] = {}
 
-# resolved_provider / explicit-config names → chain labels. Keep in sync
-# with the alias map in _try_payment_fallback.
+# resolved_provider / explicit-config names → chain labels.
 _AUX_UNHEALTHY_LABEL_ALIASES = {
     "openrouter": "openrouter",
     "nous": "nous",
@@ -3811,14 +3810,13 @@ def _mark_provider_unhealthy(provider: str, ttl: Optional[float] = None) -> None
     label = _normalize_chain_label(provider)
     if not label:
         return
-    expires_at = time.time() + (ttl if ttl is not None else _AUX_UNHEALTHY_TTL_SECONDS)
+    ttl = _AUX_UNHEALTHY_TTL_SECONDS if ttl is None else ttl
+    expires_at = time.time() + ttl
     _aux_unhealthy_until[label] = expires_at
     logger.warning(
         "Auxiliary: marking %s unhealthy for %ds (payment / credit error). "
         "Subsequent auxiliary calls will skip it until %s.",
-        label,
-        int(ttl if ttl is not None else _AUX_UNHEALTHY_TTL_SECONDS),
-        time.strftime("%H:%M:%S", time.localtime(expires_at)),
+        label, int(ttl), time.strftime("%H:%M:%S", time.localtime(expires_at)),
     )
 
 
@@ -4971,11 +4969,7 @@ def _try_payment_fallback(
     skip_labels = {skip}
     if main_provider and main_provider.lower() in skip:
         skip_labels.add(main_provider.lower())
-    # Map resolved_provider values back to chain labels.
-    _alias_to_label = {"openrouter": "openrouter", "nous": "nous",
-                       "openai-codex": "openai-codex", "codex": "openai-codex",
-                       "custom": "local/custom", "local/custom": "local/custom"}
-    skip_chain_labels = {_alias_to_label.get(s, s) for s in skip_labels}
+    skip_chain_labels = {_normalize_chain_label(s) for s in skip_labels}
 
     tried = []
     for label, try_fn in _get_provider_chain():
@@ -5113,6 +5107,40 @@ def _candidate_context_window(
     return None
 
 
+def _context_too_small(
+    entry: Dict[str, Any],
+    provider: str,
+    model: str,
+    min_ctx: Optional[int],
+    *,
+    task: Optional[str],
+    label: str,
+    name_model: bool = False,
+) -> Optional[str]:
+    """Screen one fallback candidate by context window; returns the ``tried`` note when it is too small."""
+    if min_ctx is None:
+        return None
+    fb_ctx = _candidate_context_window(
+        provider,
+        model,
+        base_url=str(entry.get("base_url") or ""),
+        api_key=_fallback_entry_api_key(entry) or "",
+    )
+    if fb_ctx is None or fb_ctx >= min_ctx:
+        return None
+    if name_model:
+        logger.info(
+            "Auxiliary %s: skipping %s (%s context=%d < min=%d), continuing chain",
+            task, label, model, fb_ctx, min_ctx,
+        )
+    else:
+        logger.info(
+            "Auxiliary %s: skipping %s (context=%d < min=%d), continuing chain",
+            task or "call", label, fb_ctx, min_ctx,
+        )
+    return f"{label} (context too small: {fb_ctx}<{min_ctx})"
+
+
 def _try_configured_fallback_chain(
     task: str,
     failed_provider: str,
@@ -5179,20 +5207,12 @@ def _try_configured_fallback_chain(
             fb_client, resolved_model = None, None
 
         if fb_client is not None:
-            if min_ctx is not None and resolved_model:
-                fb_ctx = _candidate_context_window(
-                    fb_provider,
-                    resolved_model,
-                    base_url=str(entry.get("base_url") or ""),
-                    api_key=_fallback_entry_api_key(entry) or "",
-                )
-                if fb_ctx is not None and fb_ctx < min_ctx:
-                    logger.info(
-                        "Auxiliary %s: skipping %s (%s context=%d < min=%d), continuing chain",
-                        task, label, resolved_model, fb_ctx, min_ctx,
-                    )
-                    tried.append(f"{label} (context too small: {fb_ctx}<{min_ctx})")
-                    continue
+            too_small = _context_too_small(
+                entry, fb_provider, resolved_model, min_ctx, task=task, label=label, name_model=True,
+            ) if resolved_model else None
+            if too_small:
+                tried.append(too_small)
+                continue
             logger.info(
                 "Auxiliary %s: %s on %s — configured fallback to %s (%s)",
                 task, reason, failed_provider, label, resolved_model or fb_model or "default",
@@ -5310,20 +5330,12 @@ def _try_main_fallback_chain(
             logger.debug("Auxiliary %s: main fallback %s failed to resolve: %s", task or "call", label, exc)
             fb_client, resolved_model = None, None
         if fb_client is not None:
-            if min_ctx is not None:
-                fb_ctx = _candidate_context_window(
-                    fb_provider,
-                    resolved_model or fb_model,
-                    base_url=str(entry.get("base_url") or ""),
-                    api_key=_fallback_entry_api_key(entry) or "",
-                )
-                if fb_ctx is not None and fb_ctx < min_ctx:
-                    logger.info(
-                        "Auxiliary %s: skipping %s (context=%d < min=%d), continuing chain",
-                        task or "call", label, fb_ctx, min_ctx,
-                    )
-                    tried.append(f"{label} (context too small: {fb_ctx}<{min_ctx})")
-                    continue
+            too_small = _context_too_small(
+                entry, fb_provider, resolved_model or fb_model, min_ctx, task=task, label=label,
+            )
+            if too_small:
+                tried.append(too_small)
+                continue
             logger.info(
                 "Auxiliary %s: %s on %s — main fallback chain to %s (%s)",
                 task or "call", reason, failed_provider or "auto", label,
@@ -6748,6 +6760,15 @@ def _client_cache_key(
     return (provider, async_mode, base_url or "", api_key_key, api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key)
 
 
+def _current_event_loop() -> Any:
+    """``asyncio.get_event_loop()`` or None when no loop can be obtained (async cache-key binding)."""
+    try:
+        import asyncio as _aio
+        return _aio.get_event_loop()
+    except RuntimeError:
+        return None
+
+
 def _store_cached_client(cache_key: tuple, client: Any, default_model: Optional[str], *, bound_loop: Any = None) -> None:
     if isinstance(client, _AuxProbeClientStub):
         # Probe stubs must never be cached — the next hit would get a dud client.
@@ -6800,13 +6821,8 @@ def _refresh_nous_auxiliary_client(
     sync_client = _create_openai_client(api_key=fresh_key, base_url=fresh_base_url)
     final_model = model
 
-    current_loop = None
+    current_loop = _current_event_loop() if async_mode else None
     if async_mode:
-        try:
-            import asyncio as _aio
-            current_loop = _aio.get_event_loop()
-        except RuntimeError:
-            pass
         client, final_model = _to_async_client(sync_client, final_model or "", is_vision=is_vision)
     else:
         client = sync_client
@@ -7011,13 +7027,7 @@ def _get_cached_client(
     validates the cached loop is the current, open loop; stale entries are
     replaced in place (bounded cache, no cross-loop reuse).
     """
-    current_loop = None
-    if async_mode:
-        try:
-            import asyncio as _aio
-            current_loop = _aio.get_event_loop()
-        except RuntimeError:
-            pass
+    current_loop = _current_event_loop() if async_mode else None
     runtime = _normalize_main_runtime(main_runtime)
     cache_key = _client_cache_key(
         provider,
