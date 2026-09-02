@@ -6327,12 +6327,6 @@ _mcp_oauth_transactions: dict[tuple[str, str], threading.Lock] = {}
 _mcp_oauth_transactions_lock = threading.Lock()
 
 
-def _mcp_oauth_callback_url_from_base(base_url: str, server_name: str) -> str:
-    from urllib.parse import quote
-
-    return f"{base_url.rstrip('/')}/api/mcp/oauth/callback/{quote(server_name, safe='')}"
-
-
 def _mcp_oauth_transaction(flow) -> threading.Lock:
     key = (flow.hermes_home, flow.server_name)
     with _mcp_oauth_transactions_lock:
@@ -6859,8 +6853,6 @@ _TERMINAL_BACKENDS: List[Dict[str, str]] = [
     },
 ]
 
-_TERMINAL_BACKEND_NAMES = {row["name"] for row in _TERMINAL_BACKENDS}
-
 
 def _plugin_terminal_backend_rows() -> List[Dict[str, str]]:
     """Picker rows for plugin-registered terminal backends (fail-soft)."""
@@ -7284,11 +7276,6 @@ def _ws_host_origin_is_allowed(ws: "WebSocket") -> bool:
     same bound dashboard host.
     """
     return _ws_host_origin_reason(ws) is None
-
-
-def _ws_request_reason(ws: "WebSocket") -> Optional[str]:
-    """First Host/Origin or peer-IP rejection reason, or None when allowed."""
-    return _ws_host_origin_reason(ws) or _ws_client_reason(ws)
 
 
 def _ws_request_is_allowed(ws: "WebSocket") -> bool:
@@ -9035,12 +9022,6 @@ def _start_parent_death_watchdog() -> None:
         os._exit(0)
 
     threading.Thread(target=_loop, daemon=True, name="serve-parent-watchdog").start()
-
-
-def _demo() -> None:
-    assert _is_serve_orphaned(999999999, pid_exists=lambda _pid: False) is True
-    assert _is_serve_orphaned(42, pid_exists=lambda _pid: True) is False
-    print("web_server parent-death watchdog self-check: OK")
 
 
 # ── Port-conflict sentinel (#93608) ─────────────────────────────────────────
