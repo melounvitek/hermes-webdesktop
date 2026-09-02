@@ -447,12 +447,12 @@ class TestCanonicalHistoryIsolation:
         import inspect
         import re as _re
 
-        import agent.conversation_loop as loop_mod
+        import agent.turn_recovery as loop_mod
 
-        src = inspect.getsource(loop_mod)
+        src = inspect.getsource(loop_mod.recover_after_classification)
         # Locate the image_corrupt recovery block and inspect its calls.
         block = _re.search(
-            r"image_corrupt:\n(.*?)\n\s*(?:continue|else)", src, _re.S
+            r"image_corrupt:\n(.*?)\n\s*(?:continue|return|else)", src, _re.S
         )
         assert block is not None, "image_corrupt recovery branch not found"
         body = block.group(1)
