@@ -916,61 +916,8 @@ def _sweep_bytecode_after_update(branch: str) -> None:
     _m()._refresh_bootstrap_cache_scripts(branch)
 
 
-def _run_post_update_maintenance(
-    *,
-    assume_yes,
-    gateway_mode,
-    pre_update_snapshot_id,
-    had_desktop_app_before_update,
-    node_failures,
-    desktop_build_ok,
-    pre_update_version,
-) -> bool:
-    """Post-pull housekeeping: state.db restore, catalog/skills/profile syncs, config migration,
-    the update summary (verdict returned), and best-effort notices/self-heals. Every step is
-    isolated so none can fail the update."""
-    from hermes_cli.update_cmd import (
-        _check_and_apply_config_migration,
-        _m,
-        _print_curator_first_run_notice,
-        _print_curator_recent_run_notice,
-    )
-    # macOS TCC: Desktop bundles are re-signed each update, so old grants can go stale
-    # (toggle ON, yet macOS re-prompts with no Allow button). Tell users how to re-grant.
-    if sys.platform == "darwin" and had_desktop_app_before_update:
-        print()
-        print(
-            "  ℹ macOS: if Hermes re-prompts for permissions you already "
-            "granted (toggle shows ON), the stored grant is stale — run "
-            "`tccutil reset ScreenCapture com.nousresearch.hermes` (repeat "
-            "per affected service), toggle it ON in System Settings, then "
-            "fully quit & relaunch once."
-        )
-
-    # macOS TCC interpreter anchor; boot-gated — a failed probe leaves the venv untouched.
-    try:
-        from hermes_cli.macos_tcc_anchor import ensure_tcc_anchor
-
-        ensure_tcc_anchor()
-    except Exception:
-        logger.debug("macOS TCC anchor refresh skipped", exc_info=True)
-
-    # state.db integrity guard for root home AND every profile; restore from own snapshot.
-    with _best_effort('Post-update state.db integrity check failed: %s'):
-        _verify_and_restore_state_dbs_post_update()
-
-    # Seed the model-catalog cache from the checkout instead of a bot-gated, flaky fetch.
-    with _best_effort('Model catalog seed during update failed: %s'):
-        from hermes_cli.model_catalog import seed_cache_from_checkout
-
-        if seed_cache_from_checkout(_m().PROJECT_ROOT):
-            print("  ✓ Model catalog cache refreshed from checkout")
-
-    with _best_effort('Skills sync during update failed: %s'):
-        print()
-        print("→ Syncing bundled skills...")
-        _print_bundled_skills_sync_report()
-
+def _sync_profiles_after_update() -> None:
+    """Best-effort per-profile syncs: bundled skills, ``.env`` backfill, Honcho profiles."""
     # All profiles incl. the active one: seed_profile_skills() subprocesses with an explicit
     # HERMES_HOME, so sync_skills()'s module-level HERMES_HOME cache can't skew it.
     with suppress(Exception):
@@ -1026,17 +973,11 @@ def _run_post_update_maintenance(
         if synced:
             print(f"\n-> Honcho: synced {synced} profile(s)")
 
-    _check_and_apply_config_migration(
-        assume_yes=assume_yes,
-        gateway_mode=gateway_mode,
-        pre_update_snapshot_id=pre_update_snapshot_id,
-    )
 
-    update_complete = _print_update_summary(
-        node_failures=node_failures,
-        desktop_build_ok=desktop_build_ok,
-        pre_update_version=pre_update_version,
-    )
+def _print_post_update_notices_and_self_heals() -> None:
+    """Best-effort notices (FTS optimize, curator) and self-heals (FHS PATH, ACP launcher,
+    Windows bin launchers, cua-driver refresh) that run after the summary."""
+    from hermes_cli.update_cmd import _m, _print_curator_first_run_notice, _print_curator_recent_run_notice
 
     # v23 FTS layout is opt-in (existing indexes untouched); surface the command here.
     with _best_effort('FTS optimize notice failed: %s'):
@@ -1089,4 +1030,72 @@ def _run_post_update_maintenance(
                 require_confirmed_update=True,
                 show_installer_progress=False,
             )
+
+
+def _run_post_update_maintenance(
+    *,
+    assume_yes,
+    gateway_mode,
+    pre_update_snapshot_id,
+    had_desktop_app_before_update,
+    node_failures,
+    desktop_build_ok,
+    pre_update_version,
+) -> bool:
+    """Post-pull housekeeping: state.db restore, catalog/skills/profile syncs, config migration,
+    the update summary (verdict returned), and best-effort notices/self-heals. Every step is
+    isolated so none can fail the update."""
+    from hermes_cli.update_cmd import _check_and_apply_config_migration, _m
+
+    # macOS TCC: Desktop bundles are re-signed each update, so old grants can go stale
+    # (toggle ON, yet macOS re-prompts with no Allow button). Tell users how to re-grant.
+    if sys.platform == "darwin" and had_desktop_app_before_update:
+        print()
+        print(
+            "  ℹ macOS: if Hermes re-prompts for permissions you already "
+            "granted (toggle shows ON), the stored grant is stale — run "
+            "`tccutil reset ScreenCapture com.nousresearch.hermes` (repeat "
+            "per affected service), toggle it ON in System Settings, then "
+            "fully quit & relaunch once."
+        )
+
+    # macOS TCC interpreter anchor; boot-gated — a failed probe leaves the venv untouched.
+    try:
+        from hermes_cli.macos_tcc_anchor import ensure_tcc_anchor
+
+        ensure_tcc_anchor()
+    except Exception:
+        logger.debug("macOS TCC anchor refresh skipped", exc_info=True)
+
+    # state.db integrity guard for root home AND every profile; restore from own snapshot.
+    with _best_effort('Post-update state.db integrity check failed: %s'):
+        _verify_and_restore_state_dbs_post_update()
+
+    # Seed the model-catalog cache from the checkout instead of a bot-gated, flaky fetch.
+    with _best_effort('Model catalog seed during update failed: %s'):
+        from hermes_cli.model_catalog import seed_cache_from_checkout
+
+        if seed_cache_from_checkout(_m().PROJECT_ROOT):
+            print("  ✓ Model catalog cache refreshed from checkout")
+
+    with _best_effort('Skills sync during update failed: %s'):
+        print()
+        print("→ Syncing bundled skills...")
+        _print_bundled_skills_sync_report()
+
+    _sync_profiles_after_update()
+
+    _check_and_apply_config_migration(
+        assume_yes=assume_yes,
+        gateway_mode=gateway_mode,
+        pre_update_snapshot_id=pre_update_snapshot_id,
+    )
+
+    update_complete = _print_update_summary(
+        node_failures=node_failures,
+        desktop_build_ok=desktop_build_ok,
+        pre_update_version=pre_update_version,
+    )
+
+    _print_post_update_notices_and_self_heals()
     return update_complete
