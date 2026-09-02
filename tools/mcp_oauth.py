@@ -42,19 +42,19 @@ import sys
 import threading
 import time
 import webbrowser
-from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
 from hermes_constants import secure_parent_dir
+from tools.mcp_dashboard_oauth import contextvar_set as _contextvar_set, get_dashboard_oauth_flow
 
 logger = logging.getLogger(__name__)
 
 # Lazy SDK imports: availability is detected WITHOUT importing mcp (~170 ms).
 # Module-level names stay None placeholders so tests can patch.object them;
 # _ensure_sdk_loaded() binds the real classes on first use.
-
 _OAUTH_AVAILABLE = _importlib_util.find_spec("mcp") is not None
 if not _OAUTH_AVAILABLE:
     logger.debug("MCP OAuth types not available -- OAuth MCP auth disabled")
@@ -74,8 +74,7 @@ _SDK_LOAD_FAILED = False
 def _ensure_sdk_loaded() -> bool:
     """Bind the SDK OAuth classes into module globals; True when available.
 
-    Only names that are currently ``None`` are (re)bound, so test patches of
-    the module-level names are left untouched.
+    Only names currently ``None`` are (re)bound, so test patches stay intact.
     """
     global _SDK_LOAD_FAILED, _OAUTH_AVAILABLE
     if _SDK_LOAD_FAILED:
@@ -165,6 +164,7 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"[^\w\-]", "_", name).strip("_")[:128] or "default"
 
 
+# -- Callback-port reservation ---------------------------------------------
 # Bound-but-not-listening sockets for pending callback flows, keyed by port.
 # Holding the socket from port selection until the waiter adopts it closes the
 # TOCTOU window where another process grabs the port in between. Bounded FIFO
@@ -176,9 +176,9 @@ _MAX_RESERVED_SOCKETS = 8
 def _park_reserved_socket(port: int, sock: socket.socket) -> None:
     """Hold *sock* bound to *port* until the callback waiter adopts it.
 
-    Pinned CIMD sockets are never evicted: the published document only
-    declares the pinned ports, so losing one mid-flow would reopen the exact
-    race the parking prevents. The FIFO cap applies to ephemeral ports only.
+    Pinned CIMD sockets are never evicted: the published document only declares
+    the pinned ports, so losing one mid-flow would reopen the exact race the
+    parking prevents. The FIFO cap applies to ephemeral ports only.
     """
     while len(_reserved_sockets) >= _MAX_RESERVED_SOCKETS:
         stale_port = next((p for p in _reserved_sockets if p not in _CIMD_PORTS), None)
@@ -214,6 +214,9 @@ def _reserve_callback_port() -> int:
     return _bind_reserved(0)  # type: ignore[return-value]  # port 0 never returns None
 
 
+# -- Cached registration lookups ---------------------------------------------
+
+
 def _cached_client_info(storage: "HermesTokenStorage | None") -> dict | None:
     """The on-disk client registration for *storage*, or None."""
     if storage is None:
@@ -237,10 +240,9 @@ def _cached_redirect_uris(storage: "HermesTokenStorage | None"):
 def _cached_redirect_port(storage: "HermesTokenStorage | None") -> int | None:
     """Loopback callback port from the cached client registration.
 
-    Providers bind a dynamically-registered ``client_id`` to the exact
-    redirect URI registered with it; picking a new random port on restart
-    while reusing the stored ``client_id`` gets ``redirect_uri does not match
-    any registered URIs``.
+    Providers bind a dynamically-registered ``client_id`` to the exact redirect
+    URI registered with it; a new random port on restart under the stored
+    ``client_id`` gets ``redirect_uri does not match any registered URIs``.
     """
     for _uri, parsed in _cached_redirect_uris(storage):
         if (
@@ -261,6 +263,9 @@ def _cached_redirect_uri(storage: "HermesTokenStorage | None") -> str | None:
     return None
 
 
+# -- Interactivity -----------------------------------------------------------
+
+
 def _is_interactive() -> bool:
     """True if we can reasonably expect to interact with a user."""
     if not _oauth_interactive_enabled.get():
@@ -274,11 +279,8 @@ def _is_interactive() -> bool:
 
 
 def _raise_if_non_interactive(lead: str) -> None:
-    """Raise ``OAuthNonInteractiveError`` unless interactive.
-
-    ``lead`` is the boundary-specific first sentence; the shared
-    ``hermes mcp login`` next-step wording lives here only.
-    """
+    """Raise ``OAuthNonInteractiveError`` unless interactive; *lead* is the
+    boundary-specific first sentence, the ``hermes mcp login`` next step is shared."""
     if not _is_interactive():
         raise OAuthNonInteractiveError(
             f"{lead} "
@@ -287,30 +289,17 @@ def _raise_if_non_interactive(lead: str) -> None:
         )
 
 
-@contextmanager
-def _contextvar_set(var: "contextvars.ContextVar", value):
-    token = var.set(value)
-    try:
-        yield
-    finally:
-        var.reset(token)
-
-
 def force_interactive_oauth():
-    """Treat the current context as interactive despite no TTY (GUI-driven auth).
-
-    The user IS present — just not on stdin. Propagates across the MCP
-    event-loop thread boundary like ``suppress_interactive_oauth``.
-    """
+    """Treat the current context as interactive despite no TTY (GUI-driven auth):
+    the user IS present, just not on stdin. Crosses the MCP event-loop thread
+    like ``suppress_interactive_oauth``."""
     return _contextvar_set(_oauth_interactive_forced, True)
 
 
 def suppress_interactive_oauth():
-    """Disable stdin-based OAuth prompts for the current execution context.
-
-    ContextVar-based so suppression set on a background-discovery thread
-    reaches the coroutine scheduled on the MCP event-loop thread.
-    """
+    """Disable stdin-based OAuth prompts for the current execution context;
+    ContextVar-based so a background-discovery thread's suppression reaches the
+    coroutine scheduled on the MCP event-loop thread."""
     return _contextvar_set(_oauth_interactive_enabled, False)
 
 
@@ -328,6 +317,9 @@ def _can_open_browser() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
+# -- JSON file I/O ------------------------------------------------------------
+
+
 def _read_json(path: Path) -> dict | None:
     """Read a JSON file, returning None if it doesn't exist or is invalid."""
     if not path.exists():
@@ -342,15 +334,14 @@ def _read_json(path: Path) -> dict | None:
 def _write_json(path: Path, data: dict) -> None:
     """Atomically write *data* as JSON created at 0o600.
 
-    ``os.open`` with ``O_EXCL`` + explicit mode avoids the write-then-chmod
-    TOCTOU window where the file briefly inherits the umask (often
-    world-readable). The parent dir is tightened to 0o700 (no-op on Windows;
-    ``secure_parent_dir`` refuses /, top-level dirs and the install tree).
+    ``os.open`` with ``O_EXCL`` + explicit mode avoids the write-then-chmod TOCTOU
+    window where the file briefly inherits the umask (often world-readable). The
+    parent dir is tightened to 0o700 (no-op on Windows; ``secure_parent_dir``
+    refuses /, top-level dirs and the install tree). The per-process random tmp
+    suffix avoids collisions between concurrent writers and stale crash leftovers.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     secure_parent_dir(path)
-    # Per-process random suffix avoids collisions between concurrent writers
-    # and stale leftovers from a crashed write.
     tmp = path.with_suffix(f".tmp.{os.getpid()}.{secrets.token_hex(4)}")
     try:
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
@@ -367,9 +358,7 @@ def _write_json(path: Path, data: dict) -> None:
         raise
 
 
-# ---------------------------------------------------------------------------
-# HermesTokenStorage -- persistent token/client-info on disk
-# ---------------------------------------------------------------------------
+# -- HermesTokenStorage -- persistent token/client-info on disk --------------
 
 
 class HermesTokenStorage:
@@ -408,9 +397,7 @@ class HermesTokenStorage:
     @staticmethod
     def _load_model(path: Path, sdk_name: str, label: str, fixup=None):
         """Read *path* into SDK model *sdk_name*; None if absent, no SDK, or corrupt.
-
-        ``fixup(data)`` may rewrite the raw dict before validation.
-        """
+        ``fixup(data)`` may rewrite the raw dict before validation."""
         data = _read_json(path)
         cls = _sdk_class(sdk_name) if data is not None else None
         if cls is None:
@@ -428,11 +415,11 @@ class HermesTokenStorage:
     def _rebase_expires_in(self, data: dict) -> None:
         """Rewrite ``expires_in`` to the seconds remaining now.
 
-        ``set_tokens`` stores an absolute ``expires_at`` (not an SDK field, so
-        it is stripped here); a relative value reloaded after restart would make
-        ``is_token_valid()`` True for tokens that expired while down. Legacy
-        files without it use the file mtime as a best-effort write time,
-        clamped to zero (self-heals on the next ``set_tokens``).
+        ``set_tokens`` stores an absolute ``expires_at`` (not an SDK field, so it
+        is stripped here); a relative value reloaded after restart would make
+        ``is_token_valid()`` True for tokens that expired while down. Legacy files
+        without it use the file mtime as a best-effort write time, clamped to
+        zero (self-heals on the next ``set_tokens``).
         """
         absolute_expiry = data.pop("expires_at", None)
         if absolute_expiry is not None:
@@ -467,9 +454,9 @@ class HermesTokenStorage:
     def _coerce_secret_auth_method(data: dict) -> bool:
         """Set ``client_secret_post`` when a secret is present but no method is.
 
-        Some DCR providers (notably Supabase) return a ``client_secret`` but
-        omit ``token_endpoint_auth_method``; the SDK defaults it to ``none``,
-        omits the secret at the token endpoint and the exchange fails.
+        Some DCR providers (notably Supabase) return a ``client_secret`` but omit
+        ``token_endpoint_auth_method``; the SDK defaults it to ``none``, omits the
+        secret at the token endpoint and the exchange fails.
         """
         if data.get("client_secret") and data.get("token_endpoint_auth_method") in (None, "none", ""):
             data["token_endpoint_auth_method"] = "client_secret_post"
@@ -511,8 +498,8 @@ class HermesTokenStorage:
     def mark_cimd_rejected(self) -> None:
         """Durably record that this server refused our Client ID Metadata Document.
 
-        The in-memory fallback only holds for one process; without a marker
-        every restart re-presents a refused client_id. Cleared by ``remove()``
+        The in-memory fallback only holds for one process; without a marker every
+        restart re-presents a refused client_id. Cleared by ``remove()``
         (``hermes mcp login`` / ``remove``) so a fixed document gets a retry.
         """
         path = self._cimd_rejected_path()
@@ -568,9 +555,9 @@ class HermesTokenStorage:
 
     def poison_client_registration(self) -> bool:
         """Discard a dead dynamically-registered client (``invalid_client`` at the
-        token endpoint) so the SDK re-runs DCR next flow; stale ``meta.json``
-        goes too. Tokens are kept: re-auth overwrites them and a valid refresh
-        token survives if re-registration never completes. Keeps one ``.bak``.
+        token endpoint) so the SDK re-runs DCR next flow; stale ``meta.json`` goes
+        too. Tokens are kept: re-auth overwrites them and a valid refresh token
+        survives if re-registration never completes. Keeps one ``.bak``.
         Returns True if a client file was present and removed.
         """
         client_path = self._client_info_path()
@@ -595,17 +582,13 @@ class HermesTokenStorage:
         return self._tokens_path().exists()
 
 
-# ---------------------------------------------------------------------------
-# Callback capture -- HTTP listener and stdin paste share one result dict
-# ---------------------------------------------------------------------------
+# -- Callback capture -- HTTP listener and stdin paste share one result dict --
 
 
 def _authorization_code_result(code: str, state: "str | None", iss: "str | None" = None):
-    """Package redirect parameters in the shape the installed SDK expects.
-
-    mcp 2.0's ``callback_handler`` contract returns an ``AuthorizationCodeResult``
-    (the SDK reads ``.state`` / ``.iss`` off it); older SDKs take a tuple.
-    """
+    """Package redirect parameters in the shape the installed SDK expects: mcp 2.0's
+    ``callback_handler`` returns an ``AuthorizationCodeResult`` (the SDK reads
+    ``.state`` / ``.iss`` off it); older SDKs take a tuple."""
     try:
         from mcp.shared.auth import AuthorizationCodeResult
     except ImportError:  # mcp < 2.0
@@ -636,11 +619,8 @@ def _fill_result(result: dict, parsed: dict[str, Any]) -> None:
 
 
 def _make_callback_handler() -> tuple[type, dict]:
-    """Create a per-flow callback HTTP handler class with its own result dict.
-
-    Each call returns a fresh ``(HandlerClass, result_dict)`` so concurrent
-    flows don't stomp on each other.
-    """
+    """Fresh ``(HandlerClass, result_dict)`` per flow so concurrent flows don't
+    stomp on each other."""
     result: dict[str, Any] = {"auth_code": None, "state": None, "error": None, "iss": None}
 
     class _Handler(BaseHTTPRequestHandler):
@@ -668,8 +648,8 @@ def _make_callback_handler() -> tuple[type, dict]:
 def _paste_callback_reader(result: dict) -> None:
     """Read one stdin line, parse it as an OAuth redirect, write to *result*.
 
-    Accepts a full redirect URL, the provider's own callback URL, just the
-    query string (``?code=...&state=...`` or ``code=...``), or a skip token
+    Accepts a full redirect URL, the provider's own callback URL, just the query
+    string (``?code=...&state=...`` or ``code=...``), or a skip token
     (``skip``/``cancel``/``s``/``n``/``no``/``q``/``quit``) which exits the flow
     without auth. Parse failures, EOF and interrupts are swallowed — this is a
     best-effort fallback racing the HTTP listener, which stays primary.
@@ -711,16 +691,18 @@ def _paste_callback_reader(result: dict) -> None:
         print("  Got authorization code from paste — completing flow.", file=sys.stderr)
 
 
-# ---------------------------------------------------------------------------
-# Async redirect + callback handlers for OAuthClientProvider
-# ---------------------------------------------------------------------------
+# -- Async redirect + callback handlers for OAuthClientProvider --------------
 
 
 def _print_ssh_hint(port: int, redirect_uri: str | None) -> None:
-    """Remote-session guidance printed under the authorization URL."""
+    """Remote-session guidance printed under the authorization URL.
+
+    With a proxy callback (e.g. Tailscale Funnel) the redirect is forwarded to
+    this machine's listener, so no tunnel/paste is needed. On the loopback default
+    the redirect reaches the *remote* machine's listener, not the browser's, so
+    the user must paste the redirect URL back or SSH-forward the port.
+    """
     if redirect_uri:
-        # A proxy callback (e.g. Tailscale Funnel) forwards the redirect to the
-        # listener on this machine, so no tunnel/paste is needed.
         print(
             f"  Remote session detected. After you authorize, the provider redirects to\n"
             f"    {redirect_uri}\n"
@@ -728,8 +710,6 @@ def _print_ssh_hint(port: int, redirect_uri: str | None) -> None:
             file=sys.stderr,
         )
     elif port:
-        # Loopback default: the redirect reaches the *remote* machine's listener,
-        # not the browser's machine. Paste the redirect URL back, or SSH-forward.
         print(
             f"  Remote session detected. After you authorize, the provider redirects to\n"
             f"    http://127.0.0.1:{port}/callback\n"
@@ -749,52 +729,50 @@ def _print_ssh_hint(port: int, redirect_uri: str | None) -> None:
         )
 
 
+def _announce_authorization_url(authorization_url: str, port: int, redirect_uri: str | None) -> None:
+    """Print the URL (always, as the fallback) and open the browser when possible."""
+    print(
+        f"\n  MCP OAuth: authorization required.\n"
+        f"  Open this URL in your browser:\n\n"
+        f"    {authorization_url}\n",
+        file=sys.stderr,
+    )
+    if os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY"):
+        _print_ssh_hint(port, redirect_uri)
+
+    if not _can_open_browser():
+        print("  (Headless environment detected — open the URL manually.)\n", file=sys.stderr)
+        return
+    try:
+        opened = webbrowser.open(authorization_url)
+    except Exception:
+        opened = False
+    if opened:
+        print("  (Browser opened automatically.)\n", file=sys.stderr)
+    else:
+        print("  (Could not open browser — please open the URL manually.)\n", file=sys.stderr)
+
+
 def _make_redirect_handler(port: int, redirect_uri: str | None = None):
-    """Return a redirect handler closing over this flow's port.
-
-    A closure (not the module-level ``_oauth_port``) keeps concurrent
-    server flows isolated. ``redirect_uri`` is a configured proxy callback
-    (or None for loopback) and only tailors the remote-session hint.
-    """
+    """Return a redirect handler closing over this flow's port (a closure, not the
+    module-level ``_oauth_port``, keeps concurrent server flows isolated).
+    ``redirect_uri`` is a configured proxy callback (None for loopback) and only
+    tailors the remote-session hint."""
     async def _redirect_handler(authorization_url: str) -> None:
-        """Open the browser when possible; always print the URL as a fallback."""
-        from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
-
         dashboard_flow = get_dashboard_oauth_flow()
         if dashboard_flow is not None:
             await dashboard_flow.publish_authorization_url(authorization_url)
             return
-
-        # Fail fast in non-interactive contexts (systemd gateway, cron,
-        # background discovery): a cached-but-unusable token makes the SDK fall
-        # through to the authorization-code flow even though the token-file
-        # guard passed, and we would otherwise block in the waiter for the full
-        # timeout. Deliberately re-checks interactivity here.
+        # Fail fast in non-interactive contexts (systemd gateway, cron, background
+        # discovery): a cached-but-unusable token makes the SDK fall through to
+        # the authorization-code flow even though the token-file guard passed, and
+        # we would otherwise block in the waiter for the full timeout.
+        # Deliberately re-checks interactivity here.
         _raise_if_non_interactive(
             "MCP OAuth requires browser authorization but no interactive "
             "session is available (non-interactive/background context)."
         )
-
-        print(
-            f"\n  MCP OAuth: authorization required.\n"
-            f"  Open this URL in your browser:\n\n"
-            f"    {authorization_url}\n",
-            file=sys.stderr,
-        )
-        if os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY"):
-            _print_ssh_hint(port, redirect_uri)
-
-        if not _can_open_browser():
-            print("  (Headless environment detected — open the URL manually.)\n", file=sys.stderr)
-            return
-        try:
-            opened = webbrowser.open(authorization_url)
-        except Exception:
-            opened = False
-        if opened:
-            print("  (Browser opened automatically.)\n", file=sys.stderr)
-        else:
-            print("  (Could not open browser — please open the URL manually.)\n", file=sys.stderr)
+        _announce_authorization_url(authorization_url, port, redirect_uri)
 
     return _redirect_handler
 
@@ -828,32 +806,64 @@ def _start_callback_server(port: int, handler_cls: type) -> HTTPServer:
     return server
 
 
-def _make_callback_waiter(
-    port: int, cimd_url: str | None = None, timeout: float = 300.0
-):
+async def _poll_callback_result(server: HTTPServer, result: dict, timeout: float) -> None:
+    """Poll *result* until filled or *timeout* elapses; always closes the listener."""
+    poll_interval = 0.5
+    elapsed = 0.0
+    try:
+        while elapsed < timeout and not _result_taken(result):
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+    finally:
+        server.server_close()
+
+
+def _callback_outcome(result: dict, cimd_url: str | None):
+    """Turn a filled/empty result dict into the SDK's callback value, or raise."""
+    if result["error"] == _USER_SKIPPED_SENTINEL:
+        raise OAuthNonInteractiveError("user_skipped")
+    if result["error"]:
+        raise RuntimeError(f"OAuth authorization failed: {result['error']}")
+    if result["auth_code"] is None:
+        hint = ""
+        if cimd_url:
+            hint = (
+                " If the browser showed an invalid-client error instead of "
+                "an approval prompt, the authorization server rejected "
+                f"Hermes' Client ID Metadata Document ({cimd_url}); set "
+                "``cimd: false`` under that server's ``oauth:`` block in "
+                "config.yaml to authorize via dynamic client registration "
+                "instead."
+            )
+        raise OAuthNonInteractiveError(
+            "OAuth callback timed out — no authorization code received. "
+            "Ensure you completed the browser authorization flow." + hint
+        )
+    return _authorization_code_result(result["auth_code"], result["state"], result.get("iss"))
+
+
+def _make_callback_waiter(port: int, cimd_url: str | None = None, timeout: float = 300.0):
     """Return a callback waiter bound to one flow's port (isolating concurrent flows).
 
     ``timeout`` is the only place ``oauth.timeout`` applies (mcp 2.0 dropped the
-    provider's own). ``cimd_url`` only tailors the timeout message: a server
-    that refuses the document aborts at the *authorization* endpoint, so no
-    redirect arrives and a bare "timed out" would hide the cause. On a TTY the
-    HTTP listener races a stdin paste fallback. Raises
-    ``OAuthNonInteractiveError`` on timeout or when non-interactive.
+    provider's own). ``cimd_url`` only tailors the timeout message: a server that
+    refuses the document aborts at the *authorization* endpoint, so no redirect
+    arrives and a bare "timed out" would hide the cause. On a TTY the HTTP
+    listener races a stdin paste fallback. Raises ``OAuthNonInteractiveError`` on
+    timeout or when non-interactive.
     """
 
     async def _wait():
-        from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
-
         dashboard_flow = get_dashboard_oauth_flow()
         if dashboard_flow is not None:
             # Dashboard flow speaks the legacy tuple; normalize to one shape.
             dash_code, dash_state = await dashboard_flow.wait_for_callback()
             return _authorization_code_result(dash_code, dash_state)
 
-        # Reaching here means the SDK entered the authorization-code flow, so
-        # any cached token is unusable. Reject BEFORE binding: binding would
-        # block for the full timeout and collide with the TIME_WAIT port on
-        # retry (``Address already in use``). Holds regardless of token files.
+        # Reaching here means the SDK entered the authorization-code flow, so any
+        # cached token is unusable. Reject BEFORE binding: binding would block for
+        # the full timeout and collide with the TIME_WAIT port on retry
+        # (``Address already in use``). Holds regardless of token files.
         _raise_if_non_interactive(
             "OAuth callback requires an interactive session but none is "
             "available (non-interactive/background context); skipping browser "
@@ -875,42 +885,13 @@ def _make_callback_waiter(
             )
             threading.Thread(target=_paste_callback_reader, args=(result,), daemon=True).start()
 
-        poll_interval = 0.5
-        elapsed = 0.0
-        try:
-            while elapsed < timeout and not _result_taken(result):
-                await asyncio.sleep(poll_interval)
-                elapsed += poll_interval
-        finally:
-            server.server_close()
-
-        if result["error"] == _USER_SKIPPED_SENTINEL:
-            raise OAuthNonInteractiveError("user_skipped")
-        if result["error"]:
-            raise RuntimeError(f"OAuth authorization failed: {result['error']}")
-        if result["auth_code"] is None:
-            hint = ""
-            if cimd_url:
-                hint = (
-                    " If the browser showed an invalid-client error instead of "
-                    "an approval prompt, the authorization server rejected "
-                    f"Hermes' Client ID Metadata Document ({cimd_url}); set "
-                    "``cimd: false`` under that server's ``oauth:`` block in "
-                    "config.yaml to authorize via dynamic client registration "
-                    "instead."
-                )
-            raise OAuthNonInteractiveError(
-                "OAuth callback timed out — no authorization code received. "
-                "Ensure you completed the browser authorization flow." + hint
-            )
-        return _authorization_code_result(result["auth_code"], result["state"], result.get("iss"))
+        await _poll_callback_result(server, result, timeout)
+        return _callback_outcome(result, cimd_url)
 
     return _wait
 
 
-# ---------------------------------------------------------------------------
-# OAuth provider class (legacy build_oauth_auth path)
-# ---------------------------------------------------------------------------
+# -- OAuth provider class (legacy build_oauth_auth path) ---------------------
 
 
 HermesOAuthClientProvider: Any = None
@@ -935,29 +916,17 @@ def _get_hermes_oauth_provider_class() -> type | None:
     return HermesOAuthClientProvider
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
-def remove_oauth_tokens(
-    server_name: str,
-    *,
-    hermes_home: str | Path | None = None,
-) -> None:
+def remove_oauth_tokens(server_name: str, *, hermes_home: str | Path | None = None) -> None:
     """Delete stored OAuth tokens and client info for a server."""
     HermesTokenStorage(server_name, hermes_home=hermes_home).remove()
     logger.info("OAuth tokens removed for '%s'", server_name)
 
 
-# ---------------------------------------------------------------------------
-# CIMD -- OAuth Client ID Metadata Documents
-#
+# -- CIMD -- OAuth Client ID Metadata Documents -------------------------------
 # Under CIMD the client_id IS an HTTPS URL the authorization server fetches to
 # learn our name, logo and permitted redirect URIs, replacing per-install DCR.
 # The SDK does the protocol work; Hermes only decides whether a flow is
 # eligible and hands the URL to ``OAuthClientProvider``.
-# ---------------------------------------------------------------------------
 
 # Published from ``website/static/oauth/client-metadata.json`` by the docs
 # deploy. The github.io origin is deliberate: an authorization server MUST NOT
@@ -1039,10 +1008,9 @@ def _pick_cimd_port() -> int | None:
 def _server_declined_cimd(storage: "HermesTokenStorage | None") -> bool:
     """True when cached metadata shows this server doesn't advertise CIMD.
 
-    The SDK decides CIMD vs DCR in its 401 branch — after Hermes must fix
-    the redirect URI. Cached authorization-server metadata closes the gap for
-    every server already reached: only a genuinely unknown server pays the
-    optimistic pin.
+    The SDK decides CIMD vs DCR in its 401 branch — after Hermes must fix the
+    redirect URI. Cached authorization-server metadata closes the gap for every
+    server already reached: only a genuinely unknown server pays the optimistic pin.
     """
     if storage is None:
         return False
@@ -1055,10 +1023,7 @@ def _server_declined_cimd(storage: "HermesTokenStorage | None") -> bool:
     return getattr(metadata, "client_id_metadata_document_supported", None) is not True
 
 
-def _maybe_use_cimd(
-    cfg: dict,
-    storage: "HermesTokenStorage | None" = None,
-) -> "tuple[str, int] | None":
+def _maybe_use_cimd(cfg: dict, storage: "HermesTokenStorage | None" = None) -> "tuple[str, int] | None":
     """Return ``(client_id URL, pinned callback port)``, or None to use DCR.
 
     Every early return is a case where the redirect URI Hermes would send is
@@ -1081,8 +1046,6 @@ def _maybe_use_cimd(
         return None
     # Dashboard/desktop flows redirect to a deployment-specific server URL
     # that can never appear in a static document.
-    from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
-
     if get_dashboard_oauth_flow() is not None:
         return None
     if cfg.get("redirect_uri") or cfg.get("redirect_port"):
@@ -1105,10 +1068,8 @@ def _maybe_use_cimd(
 
 def cimd_provider_kwargs(cfg: dict) -> dict[str, Any]:
     """``client_metadata_url=`` for ``OAuthClientProvider``, when CIMD applies.
-
-    Returned as kwargs so the argument is omitted entirely on a DCR flow: an
-    SDK too old for CIMD rejects the keyword outright.
-    """
+    Returned as kwargs so the argument is omitted entirely on a DCR flow: an SDK
+    too old for CIMD rejects the keyword outright."""
     url = cfg.get("_cimd_url")
     return {"client_metadata_url": url} if url else {}
 
@@ -1127,10 +1088,7 @@ def token_request_user_agent(cfg: dict) -> str | None:
     return None
 
 
-def _configure_callback_port(
-    cfg: dict,
-    storage: "HermesTokenStorage | None" = None,
-) -> int:
+def _configure_callback_port(cfg: dict, storage: "HermesTokenStorage | None" = None) -> int:
     """Resolve the callback port into ``cfg['_resolved_port']`` (0 = non-loopback URI).
 
     Precedence: dashboard flow / cached https redirect URI → CIMD pinned port
@@ -1139,8 +1097,6 @@ def _configure_callback_port(
     fixed ports bind via reuse_address. Also sets the legacy ``_oauth_port``.
     """
     global _oauth_port
-    from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
-
     dashboard_flow = get_dashboard_oauth_flow()
     if dashboard_flow is not None:
         cfg["_resolved_port"] = 0
@@ -1168,11 +1124,11 @@ def _resolve_redirect_uri(cfg: dict, port: int) -> str:
     """Configured ``redirect_uri`` (proxy, e.g. Tailscale Funnel) or
     ``http://<redirect_host>:<port>/callback``.
 
-    Client metadata and pre-registered client info must both derive the URI
-    here so they stay identical. ``redirect_host`` (default ``127.0.0.1``)
-    only changes the hostname: some WAFs reject a literal ``127.0.0.1`` in the
-    authorize query, and ``localhost`` works around it. The listener still
-    binds ``127.0.0.1``.
+    Client metadata and pre-registered client info must both derive the URI here
+    so they stay identical. ``redirect_host`` (default ``127.0.0.1``) only
+    changes the hostname: some WAFs reject a literal ``127.0.0.1`` in the
+    authorize query, and ``localhost`` works around it. The listener still binds
+    ``127.0.0.1``.
     """
     configured = cfg.get("redirect_uri")
     if configured:
@@ -1188,10 +1144,7 @@ _FIGMA_DCR_CLIENT_NAME = "Claude Code"
 _FIGMA_DEFAULT_SCOPE = "mcp:connect"
 
 
-def _is_figma_remote_mcp(
-    server_name: str | None = None,
-    server_url: str | None = None,
-) -> bool:
+def _is_figma_remote_mcp(server_name: str | None = None, server_url: str | None = None) -> bool:
     """True when this MCP server is Figma's hosted remote endpoint."""
     url = (server_url or "").lower()
     name = (server_name or "").lower()
@@ -1204,12 +1157,7 @@ def _is_figma_remote_mcp(
     return "figma" in name and (not url or "figma" in base_url_hostname(url))
 
 
-def apply_oauth_provider_defaults(
-    cfg: dict,
-    *,
-    server_name: str = "",
-    server_url: str | None = None,
-) -> dict:
+def apply_oauth_provider_defaults(cfg: dict, *, server_name: str = "", server_url: str | None = None) -> dict:
     """Mutate *cfg* with provider-specific OAuth workarounds. Returns *cfg*.
 
     Call before building client metadata / pre-registering. Only fills keys
@@ -1270,19 +1218,17 @@ def _build_client_metadata(cfg: dict) -> "OAuthClientMetadata":
 
 
 def _invalidate_tokens_on_client_change(
-    storage: "HermesTokenStorage",
-    new_client_id: str,
-    new_client_secret: str | None,
+    storage: "HermesTokenStorage", new_client_id: str, new_client_secret: str | None
 ) -> None:
     """Drop cached tokens when the configured OAuth client identity changes.
 
     Tokens are minted for a specific ``client_id``; after editing
     ``oauth.client_id`` / ``oauth.client_secret`` (or switching from DCR to a
     pre-registered client) the old tokens fail refresh with ``invalid_client``.
-    Pre-registered clients are exempt from the auto-poison path, so without
-    this check stale tokens wedge every request until a manual wipe. Compares
-    on-disk ``client.json`` against the incoming identity BEFORE it is
-    overwritten; a matching identity is a no-op.
+    Pre-registered clients are exempt from the auto-poison path, so without this
+    check stale tokens wedge every request until a manual wipe. Compares on-disk
+    ``client.json`` against the incoming identity BEFORE it is overwritten; a
+    matching identity is a no-op.
     """
     existing = _read_json(storage._client_info_path())
     if not isinstance(existing, dict):
@@ -1314,11 +1260,7 @@ def _invalidate_tokens_on_client_change(
         )
 
 
-def _maybe_preregister_client(
-    storage: "HermesTokenStorage",
-    cfg: dict,
-    client_metadata: "OAuthClientMetadata",
-) -> None:
+def _maybe_preregister_client(storage: "HermesTokenStorage", cfg: dict, client_metadata: "OAuthClientMetadata") -> None:
     """If cfg has a pre-registered client_id, persist it to storage."""
     client_id = cfg.get("client_id")
     if not client_id:
@@ -1342,10 +1284,7 @@ def _maybe_preregister_client(
 
 
 def humanize_oauth_registration_error(
-    server_name: str,
-    exc: BaseException | str,
-    *,
-    server_url: str | None = None,
+    server_name: str, exc: BaseException | str, *, server_url: str | None = None
 ) -> str | None:
     """Turn a Dynamic Client Registration 403/Forbidden into a useful next step.
 
@@ -1359,7 +1298,6 @@ def humanize_oauth_registration_error(
         return None
     looks_like_registration = (
         "regist" in lowered
-        or "client registration" in lowered
         or "dcr" in lowered
         or "dynamic client" in lowered
         or lowered.strip() in {"forbidden", "403 forbidden", "http 403: forbidden"}
@@ -1388,17 +1326,13 @@ def humanize_oauth_registration_error(
     )
 
 
-def build_oauth_auth(
-    server_name: str,
-    server_url: str,
-    oauth_config: dict | None = None,
-) -> "OAuthClientProvider | None":
+def build_oauth_auth(server_name: str, server_url: str, oauth_config: dict | None = None) -> "OAuthClientProvider | None":
     """Build an ``httpx.Auth``-compatible OAuth handler for an MCP server.
 
     Legacy public API; new code should use
-    :func:`tools.mcp_oauth_manager.get_manager` so OAuth state is shared
-    across config-time, runtime, and reconnect paths. Returns None if the MCP
-    SDK lacks OAuth support.
+    :func:`tools.mcp_oauth_manager.get_manager` so OAuth state is shared across
+    config-time, runtime, and reconnect paths. Returns None if the MCP SDK lacks
+    OAuth support.
     """
     if not _OAUTH_AVAILABLE or (
         OAuthClientProvider is None and not _ensure_sdk_loaded()
