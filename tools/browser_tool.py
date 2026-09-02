@@ -1336,21 +1336,15 @@ def browser_back(task_id: Optional[str] = None) -> str:
     effective_task_id = _last_session_key(task_id or "default")
     result = _run_browser_command(effective_task_id, "back", [])
 
-    if result.get("success") and _eval_ssrf_guard_active(effective_task_id):
+    if result.get("success"):
         # History can land on a private/internal/cloud-metadata address the
         # navigate preflight never saw (earlier redirect chain, manipulated
         # client-side history). Re-check post-navigation like every other
         # content-returning entry point — the floor fires for every backend.
-        _blocked_url = _current_page_private_url(effective_task_id)
-        if _blocked_url:
-            return json.dumps({
-                "success": False,
-                "error": (
-                    "Blocked: page URL targets a private or internal address "
-                    f"({_blocked_url}). Browser history navigation (back) "
-                    "landed on this address."
-                ),
-            }, ensure_ascii=False)
+        blocked = _blocked_private_page(
+            effective_task_id, "Browser history navigation (back) landed on this address.")
+        if blocked is not None:
+            return blocked
     return _tool_response(result, {"url": result.get("data", {}).get("url", "")}, "Failed to go back")
 
 
@@ -1368,47 +1362,39 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     return _tool_response(result, {"pressed": key}, f"Failed to press {key}")
 
 
-def _blocked_private_page_action(effective_task_id: str, action: str) -> Optional[str]:
-    """Return a blocked payload when an unsafe cloud page would receive input."""
-    if not _eval_ssrf_guard_active(effective_task_id):
-        return None
-    blocked_url = _current_page_private_url(effective_task_id)
-    if not blocked_url:
-        return None
+def _blocked_private_page_json(blocked_url: str, why: str) -> str:
+    """Refusal payload for a page whose URL targets a private/internal address."""
     return json.dumps({
         "success": False,
-        "error": (
-            "Blocked: page URL targets a private or internal address "
-            f"({blocked_url}). Refusing to {action} on this page in this "
-            "browser mode."
-        ),
+        "error": f"Blocked: page URL targets a private or internal address ({blocked_url}). {why}",
     }, ensure_ascii=False)
 
 
-def _blocked_private_page_json(blocked_url: str) -> str:
-    """Blocked payload for content-returning tools whose page was eval-navigated private."""
-    return json.dumps({
-        "success": False,
-        "error": (
-            "Blocked: page URL targets a private or internal address "
-            f"({blocked_url}). This may have been caused by a "
-            "JavaScript navigation via browser_console."
-        ),
-    }, ensure_ascii=False)
-
-
-def _blocked_private_page_content(effective_task_id: str) -> Optional[str]:
+def _blocked_private_page(effective_task_id: str, why: str) -> Optional[str]:
     """Blocked payload when the SSRF guard is active and the current page is private, else None.
 
-    Sibling of the snapshot/vision/eval/get_images guards: after any eval that
-    may have changed ``location.href`` to a private address, returning page
-    content would expose it. Fail-open on probe failure (see
-    ``_current_page_private_url``).
+    Fail-open on probe failure (see ``_current_page_private_url``).
     """
     if not _eval_ssrf_guard_active(effective_task_id):
         return None
     blocked_url = _current_page_private_url(effective_task_id)
-    return _blocked_private_page_json(blocked_url) if blocked_url else None
+    return _blocked_private_page_json(blocked_url, why) if blocked_url else None
+
+
+def _blocked_private_page_action(effective_task_id: str, action: str) -> Optional[str]:
+    """Return a blocked payload when an unsafe cloud page would receive input."""
+    return _blocked_private_page(
+        effective_task_id, f"Refusing to {action} on this page in this browser mode.")
+
+
+_EVAL_NAVIGATED_WHY = "This may have been caused by a JavaScript navigation via browser_console."
+
+
+def _blocked_private_page_content(effective_task_id: str) -> Optional[str]:
+    """Content-returning tools (snapshot/vision/eval/get_images): after any eval that
+    may have changed ``location.href`` to a private address, returning page content
+    would expose it."""
+    return _blocked_private_page(effective_task_id, _EVAL_NAVIGATED_WHY)
 
 
 def browser_console(clear: bool = False, expression: Optional[str] = None, task_id: Optional[str] = None) -> str:
@@ -1630,7 +1616,7 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
         if _eval_ssrf_guard_active(task_id or "default"):
             _blocked_url = _camofox_current_page_private_url(tab_id, user_id)
             if _blocked_url:
-                return _blocked_private_page_json(_blocked_url)
+                return _blocked_private_page_json(_blocked_url, _EVAL_NAVIGATED_WHY)
 
         return json.dumps({
             "success": True,
