@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -18,13 +17,11 @@ from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.conversation_compression import (
     conversation_history_after_compression,  # noqa: F401 — resolved lazily by turn_overflow/turn_preflight/turn_recovery (tests patch it here)
 )
-from agent.display import KawaiiSpinner
 from agent.fast_mode import begin_turn as begin_fast_mode_turn
 from agent.message_metadata import append_message
 from agent.turn_context import (
     PreflightCompressionTimedOut,
     build_turn_context,
-    reanchor_current_turn_user_idx,
 )
 from agent.turn_retry_state import TurnRetryState
 from agent.runtime_cwd import resolve_agent_cwd
@@ -61,11 +58,16 @@ from agent.turn_recovery import (  # noqa: F401 — resolved lazily by agent.tur
 # Bind before the turn starts so a source-tree swap cannot load a skewed
 # finalizer at turn end.
 from agent.turn_finalizer import finalize_turn
-from agent.turn_iteration_prep import prepare_iteration
+from agent.turn_iteration_prep import (
+    announce_api_call,
+    apply_retry_restarts,
+    begin_iteration,
+    prepare_iteration,
+)
 from agent.turn_preflight_gate import run_preflight_gate
 from agent.turn_request_assembly import assemble_api_request
 from agent.turn_api_request import build_api_request
-from agent.turn_api_call import perform_api_call
+from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, perform_api_call
 from agent.turn_response_check import check_api_response
 from agent.turn_api_error import handle_api_error
 from agent.turn_final_response import finish_text_response
@@ -1542,6 +1544,55 @@ def _notify_context_engine_turn_complete(
         )
 
 
+def _decode_inline_moa_turn(user_message, persist_user_message):
+    """Decode a MoA preset encoded into ``user_message`` (``hermes_cli.moa_config``).
+
+    Returns ``(user_message, moa_config, persist_user_message)``; unchanged with
+    ``moa_config=None`` when nothing is encoded or decoding fails."""
+    try:
+        from hermes_cli.moa_config import decode_moa_turn
+
+        _decoded_message, _decoded_moa_config = decode_moa_turn(user_message)
+        if _decoded_moa_config is not None:
+            if persist_user_message is None:
+                persist_user_message = _decoded_message
+            return _decoded_message, _decoded_moa_config, persist_user_message
+    except Exception:
+        pass
+    return user_message, None, persist_user_message
+
+
+def _preflight_timeout_result(agent, exc, conversation_history) -> Dict[str, Any]:
+    """Typed recovery result when turn-start preflight compression timed out (#98424):
+    no provider call was sent. Surfaces hide raw exception text, which would bury the
+    actionable guidance and skip the compression_exhausted recovery contract."""
+    logger.warning(
+        "Turn-start preflight compression timed out — ending turn with "
+        "typed recovery result: %s",
+        exc,
+    )
+    # Clear the tripwire slot note_turn_start registered; the early return skips the
+    # persist funnel that clears it. The user row is deliberately NOT persisted:
+    # the gateway skips persistence for compression_exhausted results (#7100).
+    from agent.agent_runtime_helpers import note_turn_persisted
+
+    note_turn_persisted(agent)
+    # Not _COMPRESSION_TIMEOUT_FINAL_RESPONSE — that describes a different state
+    # (compression ran, could not reduce); the exception text carries the guidance.
+    _final_response = str(exc)
+    return {
+        "final_response": _final_response,
+        "messages": list(conversation_history or []),
+        "completed": False,
+        "api_calls": 0,
+        "error": _final_response,
+        "partial": True,
+        "failed": True,
+        "compression_exhausted": True,
+        "turn_exit_reason": "context_compression_timeout",
+    }
+
+
 def run_conversation(
     agent,
     user_message: Any,
@@ -1568,17 +1619,9 @@ def run_conversation(
 
     Returns: dict with the final response and message history."""
     if moa_config is None:
-        try:
-            from hermes_cli.moa_config import decode_moa_turn
-
-            _decoded_message, _decoded_moa_config = decode_moa_turn(user_message)
-            if _decoded_moa_config is not None:
-                user_message = _decoded_message
-                moa_config = _decoded_moa_config
-                if persist_user_message is None:
-                    persist_user_message = _decoded_message
-        except Exception:
-            pass
+        user_message, moa_config, persist_user_message = _decode_inline_moa_turn(
+            user_message, persist_user_message
+        )
 
     # The gateway caches agents across turns; compression state is per-turn, or a stale
     # in-place boundary would make a later uncompressed result look compacted.
@@ -1622,34 +1665,7 @@ def run_conversation(
             moa_active=bool(moa_config),
         )
     except PreflightCompressionTimedOut as _preflight_timeout_exc:
-        # Preflight compression timed out; no provider call sent (#98424). Return the
-        # typed recovery result: surfaces hide raw exception text, which would bury the
-        # actionable guidance and skip the compression_exhausted recovery contract.
-        logger.warning(
-            "Turn-start preflight compression timed out — ending turn with "
-            "typed recovery result: %s",
-            _preflight_timeout_exc,
-        )
-        # Clear the tripwire slot note_turn_start registered; the early return skips the
-        # persist funnel that clears it. The user row is deliberately NOT persisted:
-        # the gateway skips persistence for compression_exhausted results (#7100).
-        from agent.agent_runtime_helpers import note_turn_persisted
-
-        note_turn_persisted(agent)
-        # Not _COMPRESSION_TIMEOUT_FINAL_RESPONSE — that describes a different state
-        # (compression ran, could not reduce); the exception text carries the guidance.
-        _final_response = str(_preflight_timeout_exc)
-        return {
-            "final_response": _final_response,
-            "messages": list(conversation_history or []),
-            "completed": False,
-            "api_calls": 0,
-            "error": _final_response,
-            "partial": True,
-            "failed": True,
-            "compression_exhausted": True,
-            "turn_exit_reason": "context_compression_timeout",
-        }
+        return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
     user_message = _ctx.user_message
     original_user_message = _ctx.original_user_message
     messages = _ctx.messages
@@ -1733,52 +1749,20 @@ def run_conversation(
         )
 
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
-        _redirect_text = agent._drain_pending_redirect()
-        if _redirect_text:
-            _apply_active_turn_redirect(agent, messages, _redirect_text)
-            if isinstance(original_user_message, str):
-                original_user_message = (
-                    f"{original_user_message}\n\n"
-                    f"User correction during the turn: {_redirect_text}"
-                )
-            agent._persist_session(messages, conversation_history)
-
-        # Reset per-turn checkpoint dedup so each iteration can take one snapshot
-        agent._checkpoint_mgr.new_turn()
-
-        # Check for interrupt request (e.g., user sent new message)
-        if agent._interrupt_requested:
-            interrupted = True
-            _turn_exit_reason = "interrupted_by_user"
-            if not agent.quiet_mode:
-                agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
-            break
-
-        # Aggregate input budget for detached auxiliary forks: bounds the whole review,
-        # not each request. Checked between iterations so the crossing request's writes
-        # have landed, mirroring the iteration-budget exit (#93057).
-        if _review_input_budget_exhausted(agent):
-            _turn_exit_reason = "review_input_budget_exhausted"
-            if not agent.quiet_mode:
-                agent._safe_print(
-                    f"\n⏹️  Review input budget exhausted "
-                    f"({int(agent.session_input_tokens):,} tokens) — stopping "
-                    f"the review tool loop before the next provider call."
-                )
-            break
-        
-        api_call_count += 1
-        agent._api_call_count = api_call_count
-        agent._touch_activity(f"starting API call #{api_call_count}")
-
-        # Grace call: budget exhausted but the model gets one more call. Consume the
-        # flag so the loop exits after this iteration regardless of outcome.
-        if agent._budget_grace_call:
-            agent._budget_grace_call = False
-        elif not agent.iteration_budget.consume():
-            _turn_exit_reason = "budget_exhausted"
-            if not agent.quiet_mode:
-                agent._safe_print(f"\n⚠️  Iteration budget exhausted ({agent.iteration_budget.used}/{agent.iteration_budget.max_total} iterations used)")
+        _it = begin_iteration(
+            agent,
+            messages=messages,
+            conversation_history=conversation_history,
+            original_user_message=original_user_message,
+            api_call_count=api_call_count,
+            interrupted=interrupted,
+            _turn_exit_reason=_turn_exit_reason,
+        )
+        original_user_message = _it.original_user_message
+        api_call_count = _it.api_call_count
+        interrupted = _it.interrupted
+        _turn_exit_reason = _it._turn_exit_reason
+        if _it.action == "break":
             break
 
         _ip = prepare_iteration(
@@ -1851,33 +1835,15 @@ def run_conversation(
         if _pg.action == "continue":
             continue
 
-        # Thinking spinner for quiet mode (animated during API call)
-        thinking_spinner = None
-        
-        if not agent.quiet_mode:
-            agent._vprint(f"\n{agent.log_prefix}🔄 Making API call #{api_call_count}/{agent.max_iterations}...")
-            agent._vprint(f"{agent.log_prefix}   📊 Request size: {len(api_messages)} messages, ~{approx_tokens:,} tokens (~{total_chars:,} chars)")
-            agent._vprint(f"{agent.log_prefix}   🔧 Available tools: {len(agent.tools) if agent.tools else 0}")
-        else:
-            # Animated thinking spinner in quiet mode
-            face = random.choice(KawaiiSpinner.get_thinking_faces())
-            verb = random.choice(KawaiiSpinner.get_thinking_verbs())
-            if agent.thinking_callback:
-                # CLI TUI mode: use prompt_toolkit widget instead of raw spinner
-                # (works in both streaming and non-streaming modes)
-                agent.thinking_callback(f"{face} {verb}...")
-            elif not agent._has_stream_consumers() and agent._should_start_quiet_spinner():
-                # Raw KawaiiSpinner only when no streaming consumers and the
-                # spinner output has a safe sink.
-                spinner_type = random.choice(['brain', 'sparkle', 'pulse', 'moon', 'star'])
-                thinking_spinner = KawaiiSpinner(f"{face} {verb}...", spinner_type=spinner_type, print_fn=agent._print_fn)
-                thinking_spinner.start()
-        
-        # Log request details if verbose
-        if agent.verbose_logging:
-            logging.debug(f"API Request - Model: {agent.model}, Messages: {len(messages)}, Tools: {len(agent.tools) if agent.tools else 0}")
-            logging.debug(f"Last message role: {messages[-1]['role'] if messages else 'none'}")
-            logging.debug(f"Total message size: ~{approx_tokens:,} tokens")
+        _an = announce_api_call(
+            agent,
+            messages=messages,
+            api_messages=api_messages,
+            api_call_count=api_call_count,
+            approx_tokens=approx_tokens,
+            total_chars=total_chars,
+        )
+        thinking_spinner = _an.thinking_spinner
         
         api_start_time = time.time()
         retry_count = 0
@@ -1891,52 +1857,24 @@ def run_conversation(
         agent._current_api_request_id = api_request_id
 
         while retry_count < max_retries:
-            # ── Nous Portal rate limit guard ──────────────────────
-            # Skip the call if another session recorded a rate limit: every attempt
-            # (incl. SDK retries) counts against RPH.
-            if agent.provider == "nous":
-                try:
-                    from agent.nous_rate_guard import (
-                        nous_rate_limit_remaining,
-                        format_remaining as _fmt_nous_remaining,
-                    )
-                    _nous_remaining = nous_rate_limit_remaining()
-                    if _nous_remaining is not None and _nous_remaining > 0:
-                        _nous_msg = (
-                            f"Nous Portal rate limit active — "
-                            f"resets in {_fmt_nous_remaining(_nous_remaining)}."
-                        )
-                        agent._buffer_vprint(
-                            f"⏳ {_nous_msg} Trying fallback..."
-                        )
-                        agent._buffer_status(f"⏳ {_nous_msg}")
-                        if agent._try_activate_fallback():
-                            active_system_prompt = _arm_fallback_restart(
-                                agent, api_messages, active_system_prompt, _retry)
-                            retry_count = 0
-                            compression_attempts = 0
-                            break
-                        # No fallback available — surface buffered context
-                        # so user sees the rate-limit message that led here.
-                        agent._flush_status_buffer()
-                        agent._persist_session(messages, conversation_history)
-                        return {
-                            "final_response": (
-                                f"⏳ {_nous_msg}\n\n"
-                                "No fallback provider available. "
-                                "Try again after the reset, or add a "
-                                "fallback provider in config.yaml."
-                            ),
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "failed": True,
-                            "error": _nous_msg,
-                        }
-                except ImportError:
-                    pass
-                except Exception:
-                    pass  # Never let rate guard break the agent loop
+            _ng = nous_rate_limit_guard(
+                agent,
+                _retry=_retry,
+                api_messages=api_messages,
+                messages=messages,
+                conversation_history=conversation_history,
+                active_system_prompt=active_system_prompt,
+                retry_count=retry_count,
+                compression_attempts=compression_attempts,
+                api_call_count=api_call_count,
+            )
+            active_system_prompt = _ng.active_system_prompt
+            retry_count = _ng.retry_count
+            compression_attempts = _ng.compression_attempts
+            if _ng.action == "return":
+                return _ng.result
+            if _ng.action == "break":
+                break
 
             try:
                 _rq = build_api_request(
@@ -2031,33 +1969,21 @@ def run_conversation(
                     continue
 
             except InterruptedError:
-                if thinking_spinner:
-                    thinking_spinner.stop("")
-                    thinking_spinner = None
-                if agent.thinking_callback:
-                    agent.thinking_callback("")
-                if agent._has_pending_redirect():
-                    # redirect() cancelled only this request: keep the correction
-                    # queued, clear the cancellation bit, let the outer loop rebuild.
-                    # Never materialize incomplete signed/encrypted reasoning items.
-                    if agent.clear_interrupt(preserve_redirect=True):
-                        _retry.restart_with_redirected_messages = True
-                        break
-                api_elapsed = time.time() - api_start_time
-                agent._vprint(f"{agent.log_prefix}⚡ Interrupted during API call.", force=True)
-                interrupted = True
-                # Keep assistant text already streamed before the stop, else the next
-                # turn has no record of the half-finished reply.
-                _partial = agent._strip_think_blocks(
-                    getattr(agent, "_current_streamed_assistant_text", "") or ""
-                ).strip()
-                if _partial:
-                    append_message(messages, {"role": "assistant", "content": _partial})
-                    final_response = _partial
-                else:
-                    final_response = f"{INTERRUPT_WAITING_FOR_MODEL_PREFIX}{api_elapsed:.1f}s elapsed)."
-                agent._persist_session(messages, conversation_history)
-                break
+                _ai = handle_api_interrupt(
+                    agent,
+                    _retry=_retry,
+                    thinking_spinner=thinking_spinner,
+                    messages=messages,
+                    conversation_history=conversation_history,
+                    api_start_time=api_start_time,
+                    interrupted=interrupted,
+                    final_response=final_response,
+                )
+                thinking_spinner = _ai.thinking_spinner
+                interrupted = _ai.interrupted
+                final_response = _ai.final_response
+                if _ai.action == "break":
+                    break
 
             except Exception as api_error:
                 _ae = handle_api_error(
@@ -2099,77 +2025,33 @@ def run_conversation(
                 if _ae.action == "continue":
                     continue
         
-        if _retry.restart_with_redirected_messages:
-            # Cancelled request produced no valid assistant item: reuse the same logical
-            # iteration after the outer loop appends partial context + correction.
-            api_call_count -= 1
-            agent.iteration_budget.refund()
-            _retry.restart_with_redirected_messages = False
-            continue
-
-        # If the API call was interrupted, skip response processing
-        if interrupted:
-            _turn_exit_reason = "interrupted_during_api_call"
+        _rs = apply_retry_restarts(
+            agent,
+            _retry=_retry,
+            response=response,
+            interrupted=interrupted,
+            messages=messages,
+            conversation_history=conversation_history,
+            user_message=user_message,
+            api_kwargs=api_kwargs,
+            current_turn_user_idx=current_turn_user_idx,
+            final_response=final_response,
+            retry_count=retry_count,
+            api_call_count=api_call_count,
+            length_continue_retries=length_continue_retries,
+            _preflight_compression_blocked=_preflight_compression_blocked,
+            _turn_exit_reason=_turn_exit_reason,
+        )
+        current_turn_user_idx = _rs.current_turn_user_idx
+        final_response = _rs.final_response
+        retry_count = _rs.retry_count
+        api_call_count = _rs.api_call_count
+        _preflight_compression_blocked = _rs._preflight_compression_blocked
+        _turn_exit_reason = _rs._turn_exit_reason
+        if _rs.action == "break":
             break
-
-        if _retry.restart_with_compressed_messages:
-            api_call_count -= 1
-            agent.iteration_budget.refund()
-            # Compression restarts count toward the retry limit so a compression that
-            # shrinks messages but not enough can't loop forever.
-            retry_count += 1
-            _retry.restart_with_compressed_messages = False
-            if _should_skip_model_call_for_reference_handoff(
-                messages, user_message
-            ):
-                logger.info(
-                    "Skipping compressed-restart model call: reference-only "
-                    "handoff would be the sole active user turn (#80622)"
-                )
-                if not final_response:
-                    final_response = _HANDOFF_SKIP_FINAL_RESPONSE
-                _turn_exit_reason = "compaction_handoff_not_actionable"
-                break
-            # In-loop compression rebuilt `messages`; re-anchor the current-turn index
-            # like the prologue, AFTER the handoff guard (it may re-append this turn's
-            # ask). A stale anchor injects prefetch into a historical row.
-            current_turn_user_idx = reanchor_current_turn_user_idx(
-                messages, user_message
-            )
-            agent._persist_user_message_idx = current_turn_user_idx
+        if _rs.action == "continue":
             continue
-
-        if _retry.restart_with_rebuilt_messages:
-            # A stall/failure escalated to the fallback chain: re-issue against the
-            # active fallback provider, refunding budget/count for the stalled attempt.
-            api_call_count -= 1
-            agent.iteration_budget.refund()
-            _retry.restart_with_rebuilt_messages = False
-            # Failover shrank the compressor window: clear the preflight block so
-            # preflight re-runs before the first fallback call. Hoisted to the single
-            # consumer. (#84733)
-            _preflight_compression_blocked = False
-            continue
-
-        if _retry.restart_with_length_continuation:
-            # Boost output budget per retry: 2×, 4×, 8×, 16× base, capped at 32 768, via
-            # _ephemeral_max_output_tokens. Keep a larger original provider/model
-            # default as the floor so retries never downshift.
-            _boost_base = agent.max_tokens if agent.max_tokens else 4096
-            _boost = _boost_base * (2 ** length_continue_retries)
-            _requested_cap = agent._requested_output_cap_from_api_kwargs(api_kwargs)
-            if _requested_cap is not None:
-                _boost = max(_boost, _requested_cap)
-            _boost_cap = max(32768, _requested_cap or 0)
-            agent._ephemeral_max_output_tokens = min(_boost, _boost_cap)
-            continue
-
-        # All retries may exhaust with `response` still None; break out cleanly.
-        if response is None:
-            _turn_exit_reason = "all_retries_exhausted_no_response"
-            print(f"{agent.log_prefix}❌ All API retries exhausted with no successful response.")
-            agent._persist_session(messages, conversation_history)
-            break
 
         try:
             _ri = normalize_model_response(

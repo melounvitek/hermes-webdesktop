@@ -7,8 +7,8 @@ here imports ``agent.conversation_loop`` at module level (cycle).
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
+import logging
 from typing import Any, Dict, Optional
 
 from agent.message_metadata import append_message

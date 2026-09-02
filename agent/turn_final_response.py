@@ -7,9 +7,10 @@ re-prompt, scaffolding pop, stop gates, then the durable final flush. Extracted 
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
+import logging
 from typing import Any, Dict, Optional
+
 from agent.message_metadata import append_message
 from agent.turn_empty_response import recover_empty_response
 from agent.turn_stop_gates import apply_stop_gates

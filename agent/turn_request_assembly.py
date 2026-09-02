@@ -10,12 +10,12 @@ sites keep intercepting.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
+import logging
 from typing import Any, Dict, Optional
 
-from agent.model_metadata import anchored_context_tokens
 from agent.message_sanitization import _sanitize_messages_surrogates
+from agent.model_metadata import anchored_context_tokens
 from agent.prompt_caching import build_prompt_cache_plan, effective_cache_ttl
 from agent.turn_context import build_api_messages
 

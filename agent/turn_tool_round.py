@@ -7,9 +7,10 @@ guardrail halts / persistence failures, then compress after tool results. Extrac
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
+import logging
 from typing import Any, Dict, Optional
+
 from agent.message_metadata import append_message
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.turn_preflight import compress_after_tool_results

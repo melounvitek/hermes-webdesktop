@@ -9,12 +9,12 @@ existing ``patch("agent.conversation_loop.X")`` sites keep intercepting.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
 import json
+import logging
 import ssl
 import time
+from typing import Any, Dict, Optional
 
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.message_sanitization import close_interrupted_tool_sequence

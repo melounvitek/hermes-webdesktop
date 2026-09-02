@@ -7,11 +7,11 @@ continuation guards. Extracted from ``run_conversation``; nothing here imports
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
 import json
+import logging
 import re
+from typing import Any, Dict, Optional
 
 from agent.provider_projection import splice_provider_projection
 from agent.trajectory import has_incomplete_scratchpad

@@ -9,10 +9,10 @@ existing ``patch("agent.conversation_loop.X")`` sites keep intercepting.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+import logging
 import time
+from typing import Any, Dict, Optional
 
 from agent.turn_truncation import handle_content_policy_refusal, recover_from_truncation
 from agent.turn_usage import record_response_usage

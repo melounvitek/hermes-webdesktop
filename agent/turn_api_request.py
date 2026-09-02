@@ -8,9 +8,10 @@ nothing here imports ``agent.conversation_loop`` at module level.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
+import logging
 from typing import Any, Dict, Optional
+
 from agent.message_sanitization import (
     _sanitize_structure_non_ascii,
     _sanitize_structure_surrogates,

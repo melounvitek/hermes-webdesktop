@@ -9,11 +9,11 @@ loop from spinning until the budget is gone (#92450). Nothing here imports
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+import logging
 import os
 import sys
+from typing import Any, Dict, Optional
 
 from agent.message_metadata import append_message
 
