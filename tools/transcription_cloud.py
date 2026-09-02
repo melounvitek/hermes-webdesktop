@@ -346,9 +346,7 @@ def _transcribe_xai(
         creds = resolve_xai_http_credentials()
     api_key = str(creds.get("api_key") or "").strip()
     if not api_key:
-        return _error_result(
-            "No xAI credentials found. Configure xAI OAuth in `hermes model` or set XAI_API_KEY"
-        )
+        return _error_result("No xAI credentials found. Configure xAI OAuth in `hermes model` or set XAI_API_KEY")
 
     stt_config = _load_stt_config()
     xai_config = stt_config.get("xai") or {}
@@ -362,11 +360,8 @@ def _transcribe_xai(
             url = xai_config.get("base_url") or get_env_value("XAI_STT_BASE_URL") or resolved_creds.get("base_url")
         return str(url or XAI_STT_BASE_URL).strip().rstrip("/")
 
-    base_url = _resolve_base_url(creds)
     # Language: hook override > stt.xai.language > stt.language > env.
     language = language or _resolve_stt_language("xai", stt_config) or ""
-    use_format = is_truthy_value(xai_config.get("format", True))
-    use_diarize = is_truthy_value(xai_config.get("diarize", False))
 
     try:
         from tools.xai_http import hermes_xai_user_agent
@@ -374,8 +369,8 @@ def _transcribe_xai(
         data: Dict[str, str] = {}
         if language:
             data["language"] = language
-        for flag, enabled in (("format", use_format), ("diarize", use_diarize)):
-            if enabled:
+        for flag, default in (("format", True), ("diarize", False)):
+            if is_truthy_value(xai_config.get(flag, default)):
                 data[flag] = "true"
 
         def _post_transcription(bearer: str, endpoint_base_url: str):
@@ -385,32 +380,18 @@ def _transcribe_xai(
                 file_path, data,
             )
 
-        response = _post_transcription(api_key, base_url)
+        response = _post_transcription(api_key, _resolve_base_url(creds))
 
-        if (
-            response.status_code in {401, 403}
-            and creds.get("provider") == "xai-oauth"
-        ):
-            logger.info(
-                "xAI STT got HTTP %d; refreshing OAuth credentials and retrying once",
-                response.status_code,
-            )
+        if response.status_code in {401, 403} and creds.get("provider") == "xai-oauth":
+            logger.info("xAI STT got HTTP %d; refreshing OAuth credentials and retrying once", response.status_code)
             try:
-                refreshed_creds = resolve_xai_http_credentials(
-                    force_refresh=True,
-                    api_key_hint=api_key,
-                )
+                refreshed_creds = resolve_xai_http_credentials(force_refresh=True, api_key_hint=api_key)
                 refreshed_key = str(refreshed_creds.get("api_key") or "").strip()
                 if refreshed_key and refreshed_key != api_key:
-                    response = _post_transcription(
-                        refreshed_key,
-                        _resolve_base_url(refreshed_creds),
-                    )
+                    response = _post_transcription(refreshed_key, _resolve_base_url(refreshed_creds))
             except Exception as retry_exc:
                 logger.warning(
-                    "xAI STT OAuth refresh-and-retry after HTTP %d failed: %s",
-                    response.status_code,
-                    retry_exc,
+                    "xAI STT OAuth refresh-and-retry after HTTP %d failed: %s", response.status_code, retry_exc,
                 )
 
         transcript_text, result, error = _rest_transcript(
@@ -453,21 +434,16 @@ def _transcribe_elevenlabs(
     ).strip().rstrip("/")
     # Language: hook override > stt.elevenlabs.language(_code) > stt.language.
     language_code = language or _resolve_stt_language("elevenlabs", stt_config, extra_keys=("language_code",)) or ""
-    tag_audio_events = is_truthy_value(elevenlabs_config.get("tag_audio_events", False))
-    diarize = is_truthy_value(elevenlabs_config.get("diarize", False))
-
     try:
         data: Dict[str, str] = {
             "model_id": model_name,
-            "tag_audio_events": "true" if tag_audio_events else "false",
-            "diarize": "true" if diarize else "false",
+            "tag_audio_events": str(is_truthy_value(elevenlabs_config.get("tag_audio_events", False))).lower(),
+            "diarize": str(is_truthy_value(elevenlabs_config.get("diarize", False))).lower(),
         }
         if language_code:
             data["language_code"] = language_code
 
-        response = _post_audio_multipart(
-            f"{base_url}/speech-to-text", {"xi-api-key": api_key}, file_path, data,
-        )
+        response = _post_audio_multipart(f"{base_url}/speech-to-text", {"xi-api-key": api_key}, file_path, data)
 
         transcript_text, _body, error = _rest_transcript(
             response, "ElevenLabs STT", _elevenlabs_error_detail, _extract_transcript_text,
@@ -507,21 +483,14 @@ def _transcribe_deepinfra(
         candidates = deepinfra_model_ids("stt")
         if not candidates:
             return _error_result(
-                "No DeepInfra STT model available. Pin one in "
-                "config.yaml under stt.deepinfra.model, or check "
-                "connectivity to api.deepinfra.com so the live catalog "
-                "can be fetched."
+                "No DeepInfra STT model available. Pin one in config.yaml under stt.deepinfra.model, "
+                "or check connectivity to api.deepinfra.com so the live catalog can be fetched."
             )
         model_name = candidates[0]
 
     return _transcribe_openai(
-        file_path,
-        model_name,
-        api_key=api_key,
-        base_url=base_url,
-        provider_label="deepinfra",
-        language=language,
-        prompt=prompt,
+        file_path, model_name, api_key=api_key, base_url=base_url, provider_label="deepinfra",
+        language=language, prompt=prompt,
     )
 
 
@@ -541,11 +510,9 @@ def _is_local_or_private_url(url: str) -> bool:
             return False
         if host == "localhost" or host.endswith((".local", ".lan", ".internal")):
             return True
-        try:
-            return ipaddress.ip_address(host).is_private or ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            return False
-    except Exception:
+        addr = ipaddress.ip_address(host)
+        return addr.is_private or addr.is_loopback
+    except Exception:  # unparsable URL or non-IP hostname
         return False
 
 
@@ -577,17 +544,13 @@ def _resolve_openai_audio_client_config() -> tuple[str, str]:
     - never-configured stt section → legacy ladder: direct credentials, then
       the managed gateway.
     """
-    from tools.transcription_tools import _load_stt_config, managed_nous_tools_enabled, nous_tool_gateway_unavailable_message, resolve_managed_tool_gateway
-    from tools.tool_backend_helpers import (
-        NOUS_MANAGED_PROVIDER,
-        read_selection,
-        selection_error,
+    from tools.transcription_tools import (
+        _load_stt_config, managed_nous_tools_enabled, nous_tool_gateway_unavailable_message,
+        resolve_managed_tool_gateway,
     )
+    from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection, selection_error
 
     openai_cfg = _load_stt_config().get("openai") or {}
-    cfg_api_key = openai_cfg.get("api_key", "")
-    cfg_base_url = openai_cfg.get("base_url", "")
-
     selected = read_selection("stt")
 
     def _managed() -> Optional[tuple[str, str]]:
@@ -600,23 +563,19 @@ def _resolve_openai_audio_client_config() -> tuple[str, str]:
         managed = _managed()
         if managed is None:
             raise ValueError(selection_error(
-                "stt",
-                NOUS_MANAGED_PROVIDER,
-                "the Nous Tool Gateway is not available (not entitled or "
-                "unreachable)",
+                "stt", NOUS_MANAGED_PROVIDER,
+                "the Nous Tool Gateway is not available (not entitled or unreachable)",
             ))
         return managed
 
-    direct = _direct_openai_credentials(cfg_api_key, cfg_base_url)
+    direct = _direct_openai_credentials(openai_cfg.get("api_key", ""), openai_cfg.get("base_url", ""))
     if direct is not None:
         return direct
 
     if selected is not None:
         raise ValueError(selection_error(
-            "stt",
-            selected,
-            "neither stt.openai.api_key in config nor "
-            "VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set",
+            "stt", selected,
+            "neither stt.openai.api_key in config nor VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set",
         ))
 
     managed = _managed()
@@ -640,10 +599,6 @@ def _extract_transcript_text(transcription: Any) -> str:
 
     match = re.match(
         r"\s*language\s+[\w.-]+(?:\s*<audio_language>[^<]*</audio_language>)?\s*<asr_text>\s*(?P<text>.*)",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
+        text, flags=re.IGNORECASE | re.DOTALL,
     )
-    if match:
-        text = match.group("text").strip()
-
-    return text
+    return match.group("text").strip() if match else text
