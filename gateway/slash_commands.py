@@ -65,6 +65,13 @@ _BUSY_MODE_BEHAVIOR = {
     "interrupt": ("interrupts current run", "Messages will interrupt the current run while Hermes is busy."),
 }
 
+# /diff argument -> diff mode (unknown args leave the mode unchanged).
+_DIFF_MODE_BY_ARG = {
+    "staged": "staged", "--staged": "staged", "cached": "staged", "--cached": "staged",
+    "all": "all", "--all": "all", "head": "all",
+    "session": "session",
+}
+
 # /voice subcommand -> stored mode (None = auto-TTS disabled), confirmation i18n key.
 _VOICE_MODE_BY_ARG = {
     "on": ("voice_only", "gateway.voice.enabled_voice_only"),
@@ -78,6 +85,16 @@ _VOICE_MODE_BY_ARG = {
 def _clean_str(value: Any) -> str:
     """Strip and return a non-empty string value, or empty string."""
     return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def _nested_dict(root: dict, *keys: str) -> dict:
+    """Walk/create ``root[k1][k2]...`` as dicts, replacing any non-dict value on the path."""
+    current = root
+    for k in keys:
+        if not isinstance(current.get(k), dict):
+            current[k] = {}
+        current = current[k]
+    return current
 
 
 def _int_value(value: Any) -> int:
@@ -392,6 +409,86 @@ def _usage_agent_stats_lines(agent) -> list[str]:
     if ctx.compression_count:
         lines.append(t("gateway.usage.label_compressions", count=ctx.compression_count))
     return lines
+
+
+def _restart_notify_payload(event: MessageEvent) -> dict:
+    """Requester routing info so the new gateway process can notify them once back online."""
+    source = event.source
+    notify_data = {
+        "platform": source.platform.value if source.platform else None,
+        "chat_id": source.chat_id,
+        "chat_type": source.chat_type,
+    }
+    if source.delivered_via_upstream_relay is True:
+        notify_data["delivered_via_upstream_relay"] = True
+        if source.user_id:
+            notify_data["user_id"] = source.user_id
+        if source.scope_id:
+            notify_data["scope_id"] = source.scope_id
+    if source.thread_id:
+        notify_data["thread_id"] = source.thread_id
+    if event.message_id:
+        notify_data["message_id"] = event.message_id
+    return notify_data
+
+
+_WINDOWS_UPDATE_HELPER = """
+import os, subprocess, sys
+output_path = sys.argv[1]
+exit_code_path = sys.argv[2]
+cmd = sys.argv[3:]
+env = dict(os.environ)
+env["PYTHONUNBUFFERED"] = "1"
+with open(output_path, "wb") as f:
+    proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env)
+    rc = proc.wait(timeout=3600)
+with open(exit_code_path, "w", encoding="utf-8") as f:
+    f.write(str(rc))
+""".strip()
+
+
+def _spawn_detached_update(hermes_cmd, output_path, exit_code_path) -> None:
+    """Spawn ``hermes update --gateway`` detached so it survives the gateway restart it may trigger.
+
+    setsid is portable (works where ``systemd-run --user`` lacks a D-Bus session); ``--gateway``
+    enables file-based IPC for interactive prompts so the gateway forwards them instead of skipping;
+    PYTHONUNBUFFERED lets the gateway stream output in near-real-time. Windows has no setsid chain:
+    an inline Python helper runs the command, redirects both outputs to the same file and writes the
+    exit code. It invokes the updater as a module under this interpreter rather than through
+    hermes_cmd (venv\Scripts\hermes.exe): the shim launcher holds its own file open for the whole
+    run, and the update has to replace it.
+    """
+    import shutil
+    import subprocess
+
+    if sys.platform == "win32":
+        from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
+
+        subprocess.Popen(
+            [
+                sys.executable, "-c", _WINDOWS_UPDATE_HELPER,
+                str(output_path), str(exit_code_path),
+                sys.executable, "-m", "hermes_cli.main",
+                "update", "--gateway",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **windows_detach_popen_kwargs(),
+        )
+        return
+    hermes_cmd_str = " ".join(shlex.quote(part) for part in hermes_cmd)
+    update_cmd = (
+        f"PYTHONUNBUFFERED=1 {hermes_cmd_str} update --gateway"
+        f" > {shlex.quote(str(output_path))} 2>&1; "
+        # Avoid `status=$?`: `status` is read-only in zsh and this template is reused in
+        # macOS/zsh operator wrappers, so keep it zsh-safe even though bash runs it here.
+        f"rc=$?; printf '%s' \"$rc\" > {shlex.quote(str(exit_code_path))}"
+    )
+    setsid_bin = shutil.which("setsid")
+    # Preferred: setsid creates a new session, fully detached; fallback start_new_session=True
+    # calls os.setsid() in the child.
+    argv = [setsid_bin, "bash", "-c", update_cmd] if setsid_bin else ["bash", "-c", update_cmd]
+    subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def _home_thread_from_source(source) -> Optional[str]:
@@ -1271,12 +1368,7 @@ class GatewaySlashCommandsMixin:
         # Non-DM: scope by participant whenever the session key for this source
         # is per-user. is_shared_multi_user_session mirrors build_session_key's
         # isolation rules exactly, so the guard stays in lock-step with the key.
-        shared = is_shared_multi_user_session(
-            current,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
-        )
-        if shared:
+        if self._is_shared_session_source(current):
             return True
         # Per-user key: compare the participant id the key is actually built
         # from (user_id_alt or user_id — Signal/Feishu key on user_id_alt).
@@ -1287,6 +1379,17 @@ class GatewaySlashCommandsMixin:
         # Per-user key but a participant id is missing on one side: cannot prove
         # the same owner — fail closed.
         return False
+
+    def _is_shared_session_source(self, source: SessionSource) -> bool:
+        """Whether *source*'s session key is shared by every participant (not per-user).
+
+        Mirrors build_session_key's isolation rules exactly, so the guards stay in lock-step with the key.
+        """
+        return is_shared_multi_user_session(
+            source,
+            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+        )
 
     def _resume_caller_is_admin(self, source: SessionSource) -> bool:
         """Whether *source* is an EXPLICITLY-configured admin allowed cross-origin /resume or /sessions.
@@ -1377,12 +1480,7 @@ class GatewaySlashCommandsMixin:
             # group/thread session (group_sessions_per_user=False, or a shared thread) is one session
             # for every participant, so the same-chat proof suffices — do NOT also require user-id
             # equality (it would block co-members). A per-user session still requires the same owner.
-            shared = is_shared_multi_user_session(
-                source,
-                group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-                thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
-            )
-            if shared:
+            if self._is_shared_session_source(source):
                 return True
             # Per-user non-DM: the session key includes the participant (``user_id_alt or
             # user_id``). If the caller keys on user_id_alt, the persisted row (user_id only) cannot
@@ -1708,31 +1806,16 @@ class GatewaySlashCommandsMixin:
         # Save the requester's routing info so the new gateway process can
         # notify them once it comes back online.
         try:
-            notify_data = {
-                "platform": event.source.platform.value if event.source.platform else None,
-                "chat_id": event.source.chat_id,
-                "chat_type": event.source.chat_type,
-            }
-            if event.source.delivered_via_upstream_relay is True:
-                notify_data["delivered_via_upstream_relay"] = True
-                if event.source.user_id:
-                    notify_data["user_id"] = event.source.user_id
-                if event.source.scope_id:
-                    notify_data["scope_id"] = event.source.scope_id
-            if event.source.thread_id:
-                notify_data["thread_id"] = event.source.thread_id
-            if event.message_id:
-                notify_data["message_id"] = event.message_id
-            if event.source is not None:
-                try:
-                    self._restart_command_source = dataclasses.replace(
-                        event.source,
-                        message_id=str(event.message_id)
-                        if event.message_id is not None
-                        else event.source.message_id,
-                    )
-                except Exception:
-                    self._restart_command_source = event.source
+            notify_data = _restart_notify_payload(event)
+            try:
+                self._restart_command_source = dataclasses.replace(
+                    event.source,
+                    message_id=str(event.message_id)
+                    if event.message_id is not None
+                    else event.source.message_id,
+                )
+            except Exception:
+                self._restart_command_source = event.source
             await asyncio.to_thread(
                 atomic_json_write,
                 _hermes_home / ".restart_notify.json",
@@ -3160,12 +3243,8 @@ class GatewaySlashCommandsMixin:
             low = arg.lower()
             if low in ("--stat", "stat"):
                 stat_only = True
-            elif low in ("staged", "--staged", "cached", "--cached"):
-                mode = "staged"
-            elif low in ("all", "--all", "head"):
-                mode = "all"
-            elif low == "session":
-                mode = "session"
+            else:
+                mode = _DIFF_MODE_BY_ARG.get(low, mode)
 
         from tools.terminal_scope import terminal_env as _tenv
 
@@ -3181,22 +3260,7 @@ class GatewaySlashCommandsMixin:
             return t("gateway.diff.failed",
                      error=result.get("error", "Could not generate diff"))
 
-        stat = result.get("stat", "")
-        diff = result.get("diff", "")
-        untracked = result.get("untracked", [])
-        if result.get("empty") or (not stat and not diff and not untracked):
-            return t("gateway.diff.no_changes")
-
-        out: list[str] = []
-        if stat:
-            out.append(f"```\n{stat}\n```")
-        if untracked:
-            shown = "\n".join(f"+ {rel}" for rel in untracked[:15])
-            more = f"\n... and {len(untracked) - 15} more" if len(untracked) > 15 else ""
-            out.append(f"**Untracked:**\n```\n{shown}{more}\n```")
-        if not stat_only and diff:
-            out.append(self._fenced_truncated_diff(diff))
-        return "\n\n".join(out)
+        return self._render_diff_result(result, stat_only)
 
     async def _gateway_session_diff(self, cwd: str, stat_only: bool) -> str:
         """Cumulative checkpoint-baseline diff for /diff session (gateway)."""
@@ -3208,15 +3272,22 @@ class GatewaySlashCommandsMixin:
         if not result.get("success"):
             return t("gateway.diff.failed",
                      error=result.get("error", "Could not generate diff"))
+        return self._render_diff_result(result, stat_only)
 
+    def _render_diff_result(self, result: dict, stat_only: bool) -> str:
+        """Render a working/session diff result: stat block, untracked list, fenced (truncated) diff."""
         stat = result.get("stat", "")
         diff = result.get("diff", "")
-        if result.get("empty") or (not stat and not diff):
+        untracked = result.get("untracked", [])
+        if result.get("empty") or (not stat and not diff and not untracked):
             return t("gateway.diff.no_changes")
-
         out: list[str] = []
         if stat:
             out.append(f"```\n{stat}\n```")
+        if untracked:
+            shown = "\n".join(f"+ {rel}" for rel in untracked[:15])
+            more = f"\n... and {len(untracked) - 15} more" if len(untracked) > 15 else ""
+            out.append(f"**Untracked:**\n```\n{shown}{more}\n```")
         if not stat_only and diff:
             out.append(self._fenced_truncated_diff(diff))
         return "\n\n".join(out)
@@ -3241,6 +3312,12 @@ class GatewaySlashCommandsMixin:
             )
         return f"```diff\n{diff}{note}\n```"
 
+    def _track_background_task(self, coro) -> None:
+        """Fire-and-forget *coro*, keeping a strong ref in ``_background_tasks`` until it finishes."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def _handle_background_command(self, event: MessageEvent) -> str:
         """Handle /bg <prompt> — run a prompt in a background thread with its own session; the
         result is sent to the same chat without touching the active session's history.
@@ -3259,7 +3336,7 @@ class GatewaySlashCommandsMixin:
         media_types = list(event.media_types) if event.media_types else []
 
         # Fire-and-forget the background task
-        _task = asyncio.create_task(
+        self._track_background_task(
             self._run_background_task(
                 prompt,
                 source,
@@ -3269,8 +3346,6 @@ class GatewaySlashCommandsMixin:
                 media_types=media_types,
             )
         )
-        self._background_tasks.add(_task)
-        _task.add_done_callback(self._background_tasks.discard)
 
         preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
         return t("gateway.background.started", preview=preview, task_id=task_id)
@@ -3344,9 +3419,7 @@ class GatewaySlashCommandsMixin:
                     metadata=_thread_metadata,
                 )
 
-        _task = asyncio.create_task(_run_side_question())
-        self._background_tasks.add(_task)
-        _task.add_done_callback(self._background_tasks.discard)
+        self._track_background_task(_run_side_question())
 
         return t("gateway.btw.started", preview=preview)
 
@@ -3360,13 +3433,8 @@ class GatewaySlashCommandsMixin:
             # Write-back round-trip: raw read is correct (merged defaults must
             # not be persisted back to the user's file).
             user_config = read_user_config_raw(config_path)
-            keys = key_path.split(".")
-            current = user_config
-            for k in keys[:-1]:
-                if k not in current or not isinstance(current[k], dict):
-                    current[k] = {}
-                current = current[k]
-            current[keys[-1]] = value
+            *parents, leaf = key_path.split(".")
+            _nested_dict(user_config, *parents)[leaf] = value
             atomic_config_write(config_path, user_config)
             return True
         except Exception as e:
@@ -3432,27 +3500,11 @@ class GatewaySlashCommandsMixin:
         """Build the choice list for the interactive /reasoning picker."""
         from hermes_constants import VALID_REASONING_EFFORTS
 
-        choices = [
-            {
-                "value": "none",
-                "label": t("gateway.reasoning.choice_none"),
-                "is_current": current_effort == "none",
-            }
-        ]
-        for level in VALID_REASONING_EFFORTS:
-            choices.append(
-                {
-                    "value": level,
-                    "label": level,
-                    "is_current": level == current_effort,
-                }
-            )
+        choices = [{"value": "none", "label": t("gateway.reasoning.choice_none"), "is_current": current_effort == "none"}]
+        choices.extend({"value": level, "label": level, "is_current": level == current_effort} for level in VALID_REASONING_EFFORTS)
         choices.extend(
-            [
-                {"value": "reset", "label": t("gateway.reasoning.choice_reset"), "is_current": False},
-                {"value": "show", "label": t("gateway.reasoning.choice_show"), "is_current": False},
-                {"value": "hide", "label": t("gateway.reasoning.choice_hide"), "is_current": False},
-            ]
+            {"value": v, "label": t(f"gateway.reasoning.choice_{v}"), "is_current": False}
+            for v in ("reset", "show", "hide")
         )
         return choices
 
@@ -3778,40 +3830,22 @@ class GatewaySlashCommandsMixin:
 
         # --- cycle mode (per-platform) ----------------------------------------
         cycle = ["off", "new", "all", "verbose", "log"]
-        descriptions = {
-            "off": t("gateway.verbose.mode_off"),
-            "new": t("gateway.verbose.mode_new"),
-            "all": t("gateway.verbose.mode_all"),
-            "verbose": t("gateway.verbose.mode_verbose"),
-            "log": t("gateway.verbose.mode_log"),
-        }
-
         # Read current effective mode for this platform via the resolver
         from gateway.display_config import resolve_display_setting
         current = resolve_display_setting(user_config, platform_key, "tool_progress", "all")
         if current not in cycle:
             current = "all"
-        idx = (cycle.index(current) + 1) % len(cycle)
-        new_mode = cycle[idx]
+        new_mode = cycle[(cycle.index(current) + 1) % len(cycle)]
+        description = t(f"gateway.verbose.mode_{new_mode}")
 
         # Save to display.platforms.<platform>.tool_progress
         try:
-            if "display" not in user_config or not isinstance(user_config.get("display"), dict):
-                user_config["display"] = {}
-            display = user_config["display"]
-            if "platforms" not in display or not isinstance(display.get("platforms"), dict):
-                display["platforms"] = {}
-            if platform_key not in display["platforms"] or not isinstance(display["platforms"].get(platform_key), dict):
-                display["platforms"][platform_key] = {}
-            display["platforms"][platform_key]["tool_progress"] = new_mode
+            _nested_dict(user_config, "display", "platforms", platform_key)["tool_progress"] = new_mode
             atomic_config_write(config_path, user_config)
-            return (
-                f"{descriptions[new_mode]}\n"
-                + t("gateway.verbose.saved_suffix", platform=platform_key)
-            )
+            return f"{description}\n" + t("gateway.verbose.saved_suffix", platform=platform_key)
         except Exception as e:
             logger.warning("Failed to save tool_progress mode: %s", e)
-            return f"{descriptions[new_mode]}\n" + t("gateway.verbose.save_failed", error=e)
+            return f"{description}\n" + t("gateway.verbose.save_failed", error=e)
 
     async def _handle_busy_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /busy — control what happens when messaging while Hermes is working."""
@@ -3908,12 +3942,7 @@ class GatewaySlashCommandsMixin:
 
         # --- write global flag ---------------------------------------------
         try:
-            if not isinstance(user_config.get("display"), dict):
-                user_config["display"] = {}
-            display = user_config["display"]
-            if not isinstance(display.get("runtime_footer"), dict):
-                display["runtime_footer"] = {}
-            display["runtime_footer"]["enabled"] = new_state
+            _nested_dict(user_config, "display", "runtime_footer")["enabled"] = new_state
             atomic_config_write(config_path, user_config)
         except Exception as e:
             logger.warning("Failed to save runtime_footer.enabled: %s", e)
@@ -5470,9 +5499,6 @@ class GatewaySlashCommandsMixin:
         """
         from gateway.run import _hermes_home, _resolve_hermes_bin
         import json
-        import shutil
-        import subprocess
-        from datetime import datetime
         from hermes_cli.config import is_managed, format_managed_message
 
         # Block non-messaging platforms (API server, webhooks, ACP)
@@ -5522,72 +5548,8 @@ class GatewaySlashCommandsMixin:
         _tmp_pending.replace(pending_path)
         exit_code_path.unlink(missing_ok=True)
 
-        # Spawn `hermes update --gateway` detached (setsid: portable, works where systemd-run --user
-        # lacks a D-Bus session) so it survives gateway restart. --gateway enables file-based IPC
-        # for interactive prompts so the gateway forwards them instead of skipping. PYTHONUNBUFFERED
-        # lets the gateway stream output in near-real-time.
-        # Windows: no setsid chain — an inline Python helper via sys.executable runs the command,
-        # redirects both outputs to the same files, and writes the exit code.
         try:
-            if sys.platform == "win32":
-                import textwrap
-                from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
-
-                # Invoke the updater as a module under this interpreter rather than through
-                # hermes_cmd (venv\Scripts\hermes.exe): the shim launcher holds its own file open
-                # for the whole run, and the update has to replace it.
-                helper = textwrap.dedent(
-                    """
-                    import os, subprocess, sys
-                    output_path = sys.argv[1]
-                    exit_code_path = sys.argv[2]
-                    cmd = sys.argv[3:]
-                    env = dict(os.environ)
-                    env["PYTHONUNBUFFERED"] = "1"
-                    with open(output_path, "wb") as f:
-                        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env)
-                        rc = proc.wait(timeout=3600)
-                    with open(exit_code_path, "w", encoding="utf-8") as f:
-                        f.write(str(rc))
-                    """
-                ).strip()
-                subprocess.Popen(
-                    [
-                        sys.executable, "-c", helper,
-                        str(output_path), str(exit_code_path),
-                        sys.executable, "-m", "hermes_cli.main",
-                        "update", "--gateway",
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    **windows_detach_popen_kwargs(),
-                )
-            else:
-                hermes_cmd_str = " ".join(shlex.quote(part) for part in hermes_cmd)
-                update_cmd = (
-                    f"PYTHONUNBUFFERED=1 {hermes_cmd_str} update --gateway"
-                    f" > {shlex.quote(str(output_path))} 2>&1; "
-                    # Avoid `status=$?`: `status` is read-only in zsh and this template is reused in
-                    # macOS/zsh operator wrappers, so keep it zsh-safe even though bash runs it here.
-                    f"rc=$?; printf '%s' \"$rc\" > {shlex.quote(str(exit_code_path))}"
-                )
-                setsid_bin = shutil.which("setsid")
-                if setsid_bin:
-                    # Preferred: setsid creates a new session, fully detached
-                    subprocess.Popen(
-                        [setsid_bin, "bash", "-c", update_cmd],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                    )
-                else:
-                    # Fallback: start_new_session=True calls os.setsid() in child
-                    subprocess.Popen(
-                        ["bash", "-c", update_cmd],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                    )
+            _spawn_detached_update(hermes_cmd, output_path, exit_code_path)
         except Exception as e:
             pending_path.unlink(missing_ok=True)
             exit_code_path.unlink(missing_ok=True)
