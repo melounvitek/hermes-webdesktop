@@ -137,9 +137,7 @@ def _is_path_unsafe(value: object, *, strict: bool = True) -> bool:
     return len(s) >= 2 and s[0].isalpha() and s[1] == ":"
 
 
-def _is_session_key_unsafe(value: object) -> bool:
-    """Relaxed traversal check for a logical session_key."""
-    return _is_path_unsafe(value, strict=False)
+_CHAT_TYPE_PREFIX = {"group": "group: ", "channel": "channel: "}
 
 
 @dataclass
@@ -203,11 +201,8 @@ class SessionSource:
     def _describe(chat_type: str, user_label: str, chat_label: str) -> str:
         if chat_type == "dm":
             return f"DM with {user_label}"
-        if chat_type == "group":
-            return f"group: {chat_label}"
-        if chat_type == "channel":
-            return f"channel: {chat_label}"
-        return chat_label
+        prefix = _CHAT_TYPE_PREFIX.get(chat_type, "")
+        return f"{prefix}{chat_label}"
 
     @property
     def description(self) -> str:
@@ -401,6 +396,101 @@ def neutralize_untrusted_inline_text(value: Any, *, max_chars: int = _MAX_PROMPT
     return text
 
 
+def _slack_platform_notes(context: SessionContext) -> List[str]:
+    # Capability note only when Slack tools are actually loaded; otherwise
+    # keep the disclaimer honest so we never promise tools the agent lacks.
+    if _slack_tools_loaded():
+        lines = ["", (
+            "**Platform notes:** You are running inside Slack and have access "
+            "to Slack-specific tools this session. Consult the available Slack "
+            "tool schemas for the exact operations supported (e.g. channel "
+            "history and thread lookups, posting, reactions) — use those tools "
+            "for Slack-specific requests, and do not promise Slack actions "
+            "beyond what the loaded tools actually expose."
+        )]
+    else:
+        lines = ["", (
+            "**Platform notes:** You are running inside Slack. "
+            "You do NOT have access to Slack-specific APIs — you cannot search "
+            "channel history, pin/unpin messages, manage channels, or list users. "
+            "Do not promise to perform these actions. The gateway may inline the "
+            "current message's Slack block/attachment payload when available, but "
+            "you still cannot call Slack APIs yourself."
+        )]
+    if context.shared_multi_user_session:
+        lines.append(
+            "In shared Slack threads, use the current turn's sender prefix "
+            "as the only verified current-author mention target. Do not "
+            "guess or reuse `<@U...>` mentions from names, memory, or prior "
+            "conversation history."
+        )
+    return lines
+
+
+def _discord_platform_notes(context: SessionContext) -> List[str]:
+    if _discord_tools_loaded():
+        src = context.source
+        lines = ["", "**Discord IDs (for the `discord` / `discord_admin` tools):**"]
+        if src.guild_id:
+            lines.append(f"  - Guild: `{src.guild_id}`")
+        if src.thread_id and src.parent_chat_id:
+            lines.append(f"  - Parent channel: `{src.parent_chat_id}`")
+            lines.append(f"  - Thread: `{src.thread_id}` (use as `channel_id` for fetch_messages etc.)")
+        else:
+            lines.append(f"  - Channel: `{src.chat_id}`")
+        if src.message_id:
+            # The volatile per-turn message id must stay OUT of this cached
+            # block (it would bust the agent-cache signature every message);
+            # run.py injects it into the user message instead.
+            lines.append(
+                "  - Triggering message: provided per-turn in the incoming "
+                "user message (use it as `message_id` for reply/react/pin)"
+            )
+    else:
+        lines = ["", (
+            "**Platform notes:** You are running inside Discord. "
+            "You do NOT have access to Discord-specific APIs — you cannot search "
+            "channel history, pin messages, manage roles, or list server members. "
+            "Do not promise to perform these actions. If the user asks, explain "
+            "that you can only read messages sent directly to you and respond."
+        )]
+    # Static: live voice-channel state arrives on the user message (it
+    # changed bytes every turn here and busted the prompt cache).
+    lines += ["", (
+        "Voice-channel state, when relevant, appears in the current "
+        "message as a `[Voice channel now: ...]` note."
+    )]
+    return lines
+
+
+_STATIC_PLATFORM_NOTES = {
+    Platform.BLUEBUBBLES: (
+        "**Platform notes:** You are responding via iMessage. "
+        "Keep responses short and conversational — think texts, not essays. "
+        "Structure longer replies as separate short thoughts, each separated "
+        "by a blank line (double newline). Each block between blank lines "
+        "will be delivered as its own iMessage bubble, so write accordingly: "
+        "one idea per bubble, 1–3 sentences each. "
+        "If the user needs a detailed answer, give the short version first "
+        "and offer to elaborate."
+    ),
+    Platform.YUANBAO: (
+        "**Platform notes:** You are running inside Yuanbao. "
+        "To send a private (DM) message to a user in the current group, "
+        "use the yb_send_dm tool (look up the recipient by name or pass "
+        "their user_id). Your normal reply is delivered to the group you "
+        "are responding in."
+    ),
+}
+
+# Platform -> extra "Platform notes" lines for the session-context prompt.
+_PLATFORM_NOTES = {
+    Platform.SLACK: _slack_platform_notes,
+    Platform.DISCORD: _discord_platform_notes,
+    **{p: (lambda ctx, note=note: ["", note]) for p, note in _STATIC_PLATFORM_NOTES.items()},
+}
+
+
 def build_session_context_prompt(
     context: SessionContext,
     *,
@@ -422,6 +512,10 @@ def build_session_context_prompt(
         except Exception:
             pass
     redact_pii = redact_pii and _is_pii_safe
+
+    def _chat_label(chat_id: str) -> str:
+        return _hash_chat_id(chat_id) if redact_pii else chat_id
+
     lines = [
         "## Current Session Context",
         "",
@@ -444,7 +538,7 @@ def build_session_context_prompt(
             desc = SessionSource._describe(
                 src.chat_type,
                 src.user_name or (_hash_sender_id(src.user_id) if src.user_id else "user"),
-                src.chat_name or _hash_chat_id(src.chat_id),
+                src.chat_name or _chat_label(src.chat_id),
             )
         else:
             desc = src.description
@@ -459,14 +553,13 @@ def build_session_context_prompt(
 
     if context.source.platform == Platform.MATRIX:
         src = context.source
-        room_name = src.chat_name or src.chat_id
-        room_id = _hash_chat_id(src.chat_id) if redact_pii else src.chat_id
-        lines.append("")
-        lines.append(f"**Matrix Room:** {_format_untrusted_prompt_value(room_name)}")
-        lines.append(f"**Matrix Room ID:** {room_id}")
+        lines += [
+            "",
+            f"**Matrix Room:** {_format_untrusted_prompt_value(src.chat_name or src.chat_id)}",
+            f"**Matrix Room ID:** {_chat_label(src.chat_id)}",
+        ]
         if src.thread_id:
-            thread_id = _hash_chat_id(src.thread_id) if redact_pii else src.thread_id
-            lines.append(f"**Matrix Thread:** {thread_id}")
+            lines.append(f"**Matrix Thread:** {_chat_label(src.thread_id)}")
         lines.append(
             "**Matrix room boundary:** Treat this turn as scoped to the current "
             "Matrix room/thread only. Do not assume unresolved references are "
@@ -492,94 +585,7 @@ def build_session_context_prompt(
             uid = _hash_sender_id(uid)
         lines.append(f"**User ID:** {_format_untrusted_prompt_value(uid)}")
 
-    # Platform-specific behavioral notes
-    if context.source.platform == Platform.SLACK:
-        # Capability note only when Slack tools are actually loaded; otherwise
-        # keep the disclaimer honest so we never promise tools the agent lacks.
-        if _slack_tools_loaded():
-            lines.append("")
-            lines.append(
-                "**Platform notes:** You are running inside Slack and have access "
-                "to Slack-specific tools this session. Consult the available Slack "
-                "tool schemas for the exact operations supported (e.g. channel "
-                "history and thread lookups, posting, reactions) — use those tools "
-                "for Slack-specific requests, and do not promise Slack actions "
-                "beyond what the loaded tools actually expose."
-            )
-        else:
-            lines.append("")
-            lines.append(
-                "**Platform notes:** You are running inside Slack. "
-                "You do NOT have access to Slack-specific APIs — you cannot search "
-                "channel history, pin/unpin messages, manage channels, or list users. "
-                "Do not promise to perform these actions. The gateway may inline the "
-                "current message's Slack block/attachment payload when available, but "
-                "you still cannot call Slack APIs yourself."
-            )
-        if context.shared_multi_user_session:
-            lines.append(
-                "In shared Slack threads, use the current turn's sender prefix "
-                "as the only verified current-author mention target. Do not "
-                "guess or reuse `<@U...>` mentions from names, memory, or prior "
-                "conversation history."
-            )
-    elif context.source.platform == Platform.DISCORD:
-        if _discord_tools_loaded():
-            src = context.source
-            id_lines = ["", "**Discord IDs (for the `discord` / `discord_admin` tools):**"]
-            if src.guild_id:
-                id_lines.append(f"  - Guild: `{src.guild_id}`")
-            if src.thread_id and src.parent_chat_id:
-                id_lines.append(f"  - Parent channel: `{src.parent_chat_id}`")
-                id_lines.append(f"  - Thread: `{src.thread_id}` (use as `channel_id` for fetch_messages etc.)")
-            else:
-                id_lines.append(f"  - Channel: `{src.chat_id}`")
-            if src.message_id:
-                # The volatile per-turn message id must stay OUT of this cached
-                # block (it would bust the agent-cache signature every message);
-                # run.py injects it into the user message instead.
-                id_lines.append(
-                    "  - Triggering message: provided per-turn in the incoming "
-                    "user message (use it as `message_id` for reply/react/pin)"
-                )
-            lines.extend(id_lines)
-        else:
-            lines.append("")
-            lines.append(
-                "**Platform notes:** You are running inside Discord. "
-                "You do NOT have access to Discord-specific APIs — you cannot search "
-                "channel history, pin messages, manage roles, or list server members. "
-                "Do not promise to perform these actions. If the user asks, explain "
-                "that you can only read messages sent directly to you and respond."
-            )
-        # Static: live voice-channel state arrives on the user message (it
-        # changed bytes every turn here and busted the prompt cache).
-        lines.append("")
-        lines.append(
-            "Voice-channel state, when relevant, appears in the current "
-            "message as a `[Voice channel now: ...]` note."
-        )
-    elif context.source.platform == Platform.BLUEBUBBLES:
-        lines.append("")
-        lines.append(
-            "**Platform notes:** You are responding via iMessage. "
-            "Keep responses short and conversational — think texts, not essays. "
-            "Structure longer replies as separate short thoughts, each separated "
-            "by a blank line (double newline). Each block between blank lines "
-            "will be delivered as its own iMessage bubble, so write accordingly: "
-            "one idea per bubble, 1–3 sentences each. "
-            "If the user needs a detailed answer, give the short version first "
-            "and offer to elaborate."
-        )
-    elif context.source.platform == Platform.YUANBAO:
-        lines.append("")
-        lines.append(
-            "**Platform notes:** You are running inside Yuanbao. "
-            "To send a private (DM) message to a user in the current group, "
-            "use the yb_send_dm tool (look up the recipient by name or pass "
-            "their user_id). Your normal reply is delivered to the group you "
-            "are responding in."
-        )
+    lines.extend(_PLATFORM_NOTES.get(context.source.platform, lambda ctx: [])(context))
 
     platforms_list = ["local (files on this machine)"]
     for p in context.connected_platforms:
@@ -589,39 +595,32 @@ def build_session_context_prompt(
     lines.append(f"**Connected Platforms:** {', '.join(platforms_list)}")
 
     if context.home_channels:
-        lines.append("")
-        lines.append("**Home Channels (default destinations):**")
+        lines += ["", "**Home Channels (default destinations):**"]
         for platform, home in context.home_channels.items():
-            hc_id = _hash_chat_id(home.chat_id) if redact_pii else home.chat_id
             safe_name = _format_untrusted_prompt_value(home.name)
-            safe_id = _format_untrusted_prompt_value(hc_id)
+            safe_id = _format_untrusted_prompt_value(_chat_label(home.chat_id))
             lines.append(f"  - {platform.value}: {safe_name} (ID: {safe_id})")
 
-    lines.append("")
-    lines.append("**Delivery options for scheduled tasks:**")
+    lines += ["", "**Delivery options for scheduled tasks:**"]
 
     from hermes_constants import display_hermes_home
 
     if context.source.platform == Platform.LOCAL:
         lines.append("- `\"origin\"` → Local output (saved to files)")
     else:
-        _origin_label = context.source.chat_name or (
-            _hash_chat_id(context.source.chat_id) if redact_pii else context.source.chat_id
+        _origin_label = _format_untrusted_prompt_value(
+            context.source.chat_name or _chat_label(context.source.chat_id)
         )
-        _origin_label = _format_untrusted_prompt_value(_origin_label)
         lines.append(f"- `\"origin\"` → Back to this chat ({_origin_label})")
 
     lines.append(
         f"- `\"local\"` → Save to local files only ({display_hermes_home()}/cron/output/)"
     )
-
     for platform, home in context.home_channels.items():
         home_name = _format_untrusted_prompt_value(home.name)
         lines.append(f"- `\"{platform.value}\"` → Home channel ({home_name})")
 
-    lines.append("")
-    lines.append("*For explicit targeting, use `\"platform:chat_id\"` format if the user provides a specific chat ID.*")
-
+    lines += ["", "*For explicit targeting, use `\"platform:chat_id\"` format if the user provides a specific chat ID.*"]
     return "\n".join(lines)
 
 
@@ -781,7 +780,7 @@ class SessionEntry:
             raise ValueError(
                 "Invalid session_id: potential directory traversal detected"
             )
-        if _is_session_key_unsafe(session_key):
+        if _is_path_unsafe(session_key, strict=False):
             raise ValueError(
                 "Invalid session_key: potential directory traversal detected"
             )
@@ -1240,7 +1239,7 @@ class SessionStore:
                 if entry.session_id == session_id:
                     return entry.session_key
         except Exception:
-            pass
+            pass  # bare stores / foreign entry objects in suites
         return (getattr(self, "_session_owner_hints", None) or {}).get(session_id)
 
     def _db_for_session_id(self, session_id: Optional[str]):
@@ -2019,11 +2018,15 @@ class SessionStore:
         except Exception as exc:
             log(exc)
 
-    def _reopen_session_row(self, session_key: str, session_id: str) -> None:
+    def _reopen_session_row(self, session_key: str, session_id: str, *, log_prefix: str = "") -> None:
+        """Best-effort ``reopen_session``; failures are debug-logged only."""
         try:
             self._db_for_key(session_key).reopen_session(session_id)
         except Exception as exc:
-            logger.debug("Gateway session DB reopen failed for %s: %s", session_key, exc)
+            if log_prefix:
+                logger.debug("%s: %s", log_prefix, exc)
+            else:
+                logger.debug("Gateway session DB reopen failed for %s: %s", session_key, exc)
 
     def _record_gateway_session_peer(
         self,
@@ -2289,6 +2292,107 @@ class SessionStore:
             with inflight_lock:
                 self._inflight_sessions.pop(session_key, None)
 
+    def _adopt_legacy_slack_entry(self, source: SessionSource, session_key: str) -> None:
+        """One-time migration of pre-workspace-scope Slack keys.
+
+        MOVE (not copy) the legacy entry so a second workspace with identical
+        Slack ids cannot attach to the same transcript. Adopt when the legacy
+        origin names the same workspace; a scope-less DM is claimed once by
+        the first workspace; a scope-less channel/group is refused (channel
+        ids collide across workspaces).
+        """
+        legacy_key = self._legacy_slack_session_key(source)
+        if not legacy_key:
+            return
+        migrated: Optional[SessionEntry] = None
+        with self._lock:
+            self._ensure_loaded_locked()
+            legacy_entry = self._entries.get(legacy_key)
+            if session_key not in self._entries and legacy_entry is not None:
+                origin_scope = getattr(legacy_entry.origin, "scope_id", None)
+                if origin_scope is not None:
+                    adopt = origin_scope == source.scope_id
+                else:
+                    adopt = source.chat_type == "dm"
+                if adopt and self._claim_legacy_slack_key(legacy_key):
+                    migrated = self._entries.pop(legacy_key)
+                    migrated.session_key = session_key
+                    migrated.origin = source
+                    migrated.platform = source.platform
+                    migrated.chat_type = source.chat_type
+                    self._entries[session_key] = migrated
+        if migrated is not None:
+            self._save_entries()
+            self._record_gateway_session_peer(
+                migrated.session_id, session_key, source, display_name=migrated.display_name,
+            )
+
+    def _route_reset_reason(
+        self, entry: SessionEntry, source: SessionSource, now: datetime
+    ) -> Optional[str]:
+        """Reset decision for an existing route (no lock; DB/config I/O).
+
+        ``suspended`` always resets. Otherwise the reset policy decides; a
+        still-pending resume marker is additionally freshness-gated — but
+        ``session_reset.mode: none`` (user opted out of ALL automatic resets)
+        makes an expired marker fall through to a normal resume, never a
+        silent fresh session.
+        """
+        if entry.suspended:
+            return "suspended"
+        reason = self._should_reset(entry, source)
+        if reason or not entry.resume_pending:
+            return reason
+        policy = self.config.get_reset_policy(
+            platform=source.platform, session_type=source.chat_type,
+        )
+        if policy.mode == "none":
+            return None
+        window = auto_continue_freshness_window()
+        ref_time = entry.last_resume_marked_at or entry.updated_at
+        if window > 0 and (now - ref_time).total_seconds() > window:
+            return "resume_pending_expired"
+        return None
+
+    def _finish_route_transition(
+        self,
+        session_key: str,
+        *,
+        end_session_id: Optional[str],
+        end_reason: str,
+        create_kwargs: Optional[Dict[str, Any]],
+        origin: Optional[SessionSource],
+        display_name: Optional[str],
+        during: str = "",
+    ) -> None:
+        """SQLite side of a routing transition, outside ``_lock``.
+
+        Promotes the predecessor row to an explicit reset boundary (with the
+        specific reason so state.db is auditable, e.g. ``resume_pending_expired``
+        vs a plain ``session_reset``), then INSERTs the new row + routing peer.
+        Both are best-effort: failures are warned and self-healed by the next
+        per-turn peer refresh.
+        """
+        if self._db_for_key(session_key) and end_session_id:
+            self._promote_session_reset(
+                session_key, end_session_id, end_reason,
+                log=lambda e: logger.warning(
+                    "Failed to end predecessor session row %s for %s%s: %s — "
+                    "the old row remains open and may win restart recovery "
+                    "until the next successful peer refresh",
+                    end_session_id, session_key, during, e,
+                ),
+            )
+        if self._db_for_key(session_key) and create_kwargs:
+            self._create_session_row(
+                session_key, create_kwargs, origin, display_name,
+                log=lambda e: logger.warning(
+                    "Failed to create session row %s for %s%s: %s — deferring "
+                    "to the self-healing peer refresh on the next turn",
+                    create_kwargs.get("session_id"), session_key, during, e,
+                ),
+            )
+
     def _get_or_create_session_impl(
         self,
         source: SessionSource,
@@ -2303,100 +2407,32 @@ class SessionStore:
         """
         session_key = self._generate_session_key(source)
         now = _now()
-
-        # One-time migration of pre-workspace-scope Slack keys: MOVE (not
-        # copy) the legacy entry so a second workspace with identical Slack
-        # ids cannot attach to the same transcript. Adopt when the legacy
-        # origin names the same workspace; a scope-less DM is claimed once by
-        # the first workspace; a scope-less channel/group is refused (channel
-        # ids collide across workspaces).
-        migrated_legacy_entry: Optional[SessionEntry] = None
-        legacy_key = self._legacy_slack_session_key(source)
-        if legacy_key and not force_new:
-            with self._lock:
-                self._ensure_loaded_locked()
-                legacy_entry = self._entries.get(legacy_key)
-                if session_key not in self._entries and legacy_entry is not None:
-                    origin_scope = getattr(legacy_entry.origin, "scope_id", None)
-                    if origin_scope is not None:
-                        adopt = origin_scope == source.scope_id
-                    else:
-                        adopt = source.chat_type == "dm"
-                    if adopt and self._claim_legacy_slack_key(legacy_key):
-                        migrated_legacy_entry = self._entries.pop(legacy_key)
-                        migrated_legacy_entry.session_key = session_key
-                        migrated_legacy_entry.origin = source
-                        migrated_legacy_entry.platform = source.platform
-                        migrated_legacy_entry.chat_type = source.chat_type
-                        self._entries[session_key] = migrated_legacy_entry
-            if migrated_legacy_entry is not None:
-                self._save_entries()
-                self._record_gateway_session_peer(
-                    migrated_legacy_entry.session_id,
-                    session_key,
-                    source,
-                    display_name=migrated_legacy_entry.display_name,
-                )
+        if not force_new:
+            self._adopt_legacy_slack_entry(source, session_key)
 
         db_end_session_id = None
         db_create_kwargs = None
-        existing_session_id = None
         force_new_observed_entry = None
 
-        # ---- Phase 0: lock read -- existing session_id for compression tip ----
-        if not force_new:
-            with self._lock:
-                self._ensure_loaded_locked()
-                entry = self._entries.get(session_key)
-                if entry is not None:
-                    existing_session_id = entry.session_id
-
-        # Compression tip lookup outside the lock (DB I/O).
-        canonical_existing_session_id = (
-            self._compression_tip_for_session_id(existing_session_id)
-            if existing_session_id
-            else None
-        )
-
-        # ---- Phase 1: lock read -- get entry snapshot for stale/reset checks ----
+        # ---- Phase 1: lock read -- entry snapshot for stale/reset checks ----
         _stale_session_id = None
         _entry_for_checks = None
         with self._lock:
             self._ensure_loaded_locked()
             if force_new:
                 force_new_observed_entry = self._entries.get(session_key)
-            if session_key in self._entries and not force_new:
+            elif session_key in self._entries:
                 _entry_for_checks = self._entries[session_key]
                 _stale_session_id = _entry_for_checks.session_id
 
-        # ---- Phase 1b: no-lock I/O -- stale check + reset policy ----
+        # ---- Phase 1b: no-lock I/O -- compression tip + stale check + reset policy ----
+        canonical_existing_session_id = None
         _is_stale = False
         _reset_reason = None
-        if _entry_for_checks is not None and _stale_session_id is not None:
+        if _entry_for_checks is not None:
+            canonical_existing_session_id = self._compression_tip_for_session_id(_stale_session_id)
             _is_stale = self._is_session_ended_in_db(_stale_session_id)
-            if _entry_for_checks.suspended:
-                _reset_reason = "suspended"
-            elif _entry_for_checks.resume_pending:
-                _reset_reason = self._should_reset(_entry_for_checks, source)
-                if not _reset_reason:
-                    # Freshness-gate stale resume_pending zombies — but honor
-                    # ``session_reset.mode: none`` (user opted out of ALL
-                    # automatic resets): an expired marker then falls through
-                    # to a normal resume, never a silent fresh session.
-                    _policy = self.config.get_reset_policy(
-                        platform=source.platform,
-                        session_type=source.chat_type,
-                    )
-                    if _policy.mode != "none":
-                        _fw = auto_continue_freshness_window()
-                        _ref_time = (
-                            _entry_for_checks.last_resume_marked_at
-                            or _entry_for_checks.updated_at
-                        )
-                        if _fw > 0 and (now - _ref_time).total_seconds() > _fw:
-                            _reset_reason = "resume_pending_expired"
-            else:
-                _reset_reason = self._should_reset(_entry_for_checks, source)
+            _reset_reason = self._route_reset_reason(_entry_for_checks, source, now)
 
         # ---- Phase 2: lock write -- apply decisions to _entries ----
         _needs_save = False
@@ -2418,7 +2454,7 @@ class SessionStore:
                 # A heal rewrites entry.session_id, so it must reach the
                 # sessions.json mirror too (forces the full-rewrite save).
                 _healed = self._heal_compression_tip_locked(
-                    entry, existing_session_id, canonical_existing_session_id
+                    entry, _stale_session_id, canonical_existing_session_id
                 )
                 # If another thread replaced the entry during our lock-free
                 # window, the stale/reset decisions no longer apply: healthy.
@@ -2473,11 +2509,7 @@ class SessionStore:
                 else:
                     self._reopen_session_row(session_key, recovered.session_id)
                     with self._lock:
-                        published = self._entries.get(session_key)
-                        if published is None:
-                            self._entries[session_key] = recovered
-                            published = recovered
-                    entry = published
+                        entry = self._entries.setdefault(session_key, recovered)
                     _needs_save = True
 
         if entry is None:
@@ -2500,16 +2532,10 @@ class SessionStore:
             )
             with self._lock:
                 current = self._entries.get(session_key)
-                may_publish = current is None or (
-                    force_new and current is force_new_observed_entry
-                )
-                if may_publish:
+                if current is None or (force_new and current is force_new_observed_entry):
                     self._entries[session_key] = candidate
-                    published = candidate
-                else:
-                    published = current
-            assert published is not None
-            entry = published
+                    current = candidate
+            entry = current
             _needs_save = True
             if entry is candidate:
                 db_create_kwargs = self._session_create_kwargs(
@@ -2527,31 +2553,14 @@ class SessionStore:
             else:
                 self._save_entries()
 
-        # SQLite operations outside the lock.
-        if self._db_for_key(session_key) and db_end_session_id:
-            # Use the specific reset reason so state.db is auditable (e.g.
-            # "resume_pending_expired" vs a plain idle/daily "session_reset").
-            self._promote_session_reset(
-                session_key, db_end_session_id,
-                auto_reset_reason if auto_reset_reason else "session_reset",
-                log=lambda e: logger.warning(
-                    "Failed to end predecessor session row %s for %s: %s — "
-                    "the old row remains open and may win restart recovery "
-                    "until the next successful peer refresh",
-                    db_end_session_id, session_key, e,
-                ),
-            )
-
-        if self._db_for_key(session_key) and db_create_kwargs:
-            self._create_session_row(
-                session_key, db_create_kwargs, source, entry.display_name,
-                log=lambda e: logger.warning(
-                    "Failed to create session row %s for %s: %s — deferring "
-                    "to the self-healing peer refresh on the next turn",
-                    db_create_kwargs.get("session_id"), session_key, e,
-                ),
-            )
-
+        self._finish_route_transition(
+            session_key,
+            end_session_id=db_end_session_id,
+            end_reason=auto_reset_reason if auto_reset_reason else "session_reset",
+            create_kwargs=db_create_kwargs,
+            origin=source,
+            display_name=entry.display_name,
+        )
         return entry
 
     @staticmethod
@@ -2636,72 +2645,53 @@ class SessionStore:
             display_name=peer_display_name,
         )
 
-    def get_session_metadata(
-        self,
-        session_key: str,
-        key: str,
-        default: Any = None,
-    ) -> Any:
+    def _update_entry(self, session_key: str, mutate) -> bool:
+        """Apply ``mutate(entry)`` under ``_lock`` and full-save; False when the
+        entry is missing or *mutate* returned False (nothing to persist)."""
+        with self._lock:
+            entry = self._entry_locked(session_key)
+            if entry is None or mutate(entry) is False:
+                return False
+            self._save()
+            return True
+
+    def get_session_metadata(self, session_key: str, key: str, default: Any = None) -> Any:
         """Return a metadata value stored on a live session entry."""
         with self._lock:
             entry = self._entry_locked(session_key)
-            if entry is None:
-                return default
-            return entry.metadata.get(key, default)
+            return default if entry is None else entry.metadata.get(key, default)
 
-    def set_session_metadata(
-        self,
-        session_key: str,
-        key: str,
-        value: Any,
-    ) -> bool:
+    def set_session_metadata(self, session_key: str, key: str, value: Any) -> bool:
         """Persist a small, JSON-serializable metadata value on a live entry.
 
         Deliberately does NOT advance ``updated_at`` (the user-activity clock
         behind reset policy and the resume freshness gate): a background
         write must not make an idle session look fresh.
         """
-        with self._lock:
-            entry = self._entry_locked(session_key)
-            if entry is None:
-                return False
-            entry.metadata[key] = value
-            self._save()
-            return True
+        return self._update_entry(session_key, lambda e: e.metadata.__setitem__(key, value))
 
-    def set_model_override(
-        self, session_key: str, override: Optional[Dict[str, Any]]
-    ) -> None:
+    def set_model_override(self, session_key: str, override: Optional[Dict[str, Any]]) -> None:
         """Persist (or clear, with ``None``) the session-scoped /model override;
         only non-secret keys are written (see ``sanitize_model_override``)."""
-        with self._lock:
-            entry = self._entry_locked(session_key)
-            if entry is None:
-                return
-            cleaned = sanitize_model_override(override)
+        cleaned = sanitize_model_override(override)
+
+        def _apply(entry: SessionEntry):
             if entry.model_override == cleaned:
-                return
+                return False
             entry.model_override = cleaned
-            self._save()
+
+        self._update_entry(session_key, _apply)
 
     def get_model_override(self, session_key: str) -> Optional[Dict[str, str]]:
         """Return the persisted /model override for *session_key*, if any."""
         with self._lock:
             entry = self._entry_locked(session_key)
-            if entry is None:
-                return None
-            return dict(entry.model_override) if entry.model_override else None
+            return dict(entry.model_override) if entry and entry.model_override else None
 
     def suspend_session(self, session_key: str) -> bool:
         """Mark a session suspended so it auto-resets on next access (/stop).
         Returns True if the session existed."""
-        with self._lock:
-            entry = self._entry_locked(session_key)
-            if entry is not None:
-                entry.suspended = True
-                self._save()
-                return True
-        return False
+        return self._update_entry(session_key, lambda e: setattr(e, "suspended", True))
 
     def mark_turn_active(self, session_key: str) -> Optional[str]:
         """Persist exact ownership of the agent turn running for *session_key*.
@@ -2817,38 +2807,30 @@ class SessionStore:
                 self._save()
         return cleared
 
-    def mark_resume_pending(
-        self,
-        session_key: str,
-        reason: str = "restart_timeout",
-    ) -> bool:
+    def mark_resume_pending(self, session_key: str, reason: str = "restart_timeout") -> bool:
         """Mark a session resumable after a restart interruption (keeps the
         session_id/transcript, unlike ``suspend_session``). True if marked."""
-        with self._lock:
-            entry = self._entry_locked(session_key)
-            if entry is not None:
-                # Never override an explicit ``suspended`` (hard forced-wipe).
-                if entry.suspended:
-                    return False
-                entry.resume_pending = True
-                entry.resume_reason = reason
-                entry.last_resume_marked_at = _now()
-                self._save()
-                return True
-        return False
+        def _apply(entry: SessionEntry):
+            # Never override an explicit ``suspended`` (hard forced-wipe).
+            if entry.suspended:
+                return False
+            entry.resume_pending = True
+            entry.resume_reason = reason
+            entry.last_resume_marked_at = _now()
+
+        return self._update_entry(session_key, _apply)
 
     def clear_resume_pending(self, session_key: str) -> bool:
         """Clear the resume-pending flag after a successful resumed turn.
         Returns True if a flag was cleared."""
-        with self._lock:
-            entry = self._entry_locked(session_key)
-            if entry is None or not entry.resume_pending:
+        def _apply(entry: SessionEntry):
+            if not entry.resume_pending:
                 return False
             entry.resume_pending = False
             entry.resume_reason = None
             entry.last_resume_marked_at = None
-            self._save()
-            return True
+
+        return self._update_entry(session_key, _apply)
 
     def prune_old_entries(self, max_age_days: int) -> int:
         """Drop routing entries idle (by ``updated_at``) for more than max_age_days.
@@ -2906,15 +2888,10 @@ class SessionStore:
 
     def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
         """Force reset a session, creating a new session ID."""
-        db_end_session_id = None
-        db_create_kwargs = None
-        new_entry = None
-
         with self._lock:
             old_entry = self._entry_locked(session_key)
             if old_entry is None:
                 return None
-            db_end_session_id = old_entry.session_id
             now = _now()
             session_id = _new_session_id(now)
             new_entry = self._replace_route_locked(
@@ -2928,33 +2905,17 @@ class SessionStore:
                 origin=old_entry.origin,
                 source_value=old_entry.platform.value if old_entry.platform else "unknown",
                 display_name=old_entry.display_name,
-                parent_session_id=db_end_session_id,
+                parent_session_id=old_entry.session_id,
             )
-            db_create_kwargs["model_config"] = {"_reset_from": db_end_session_id}
-
-        if self._db_for_key(session_key) and db_end_session_id:
-            self._promote_session_reset(
-                session_key, db_end_session_id, "session_reset",
-                log=lambda e: logger.warning(
-                    "Failed to end predecessor session row %s for %s during "
-                    "reset: %s — the old row remains open and may win restart "
-                    "recovery until the next successful peer refresh",
-                    db_end_session_id, session_key, e,
-                ),
-            )
-
-        if self._db_for_key(session_key) and db_create_kwargs:
-            self._create_session_row(
-                session_key, db_create_kwargs, old_entry.origin,
-                new_entry.display_name if new_entry else None,
-                log=lambda e: logger.warning(
-                    "Failed to create session row %s for %s during reset: %s "
-                    "— deferring to the self-healing peer refresh on the next "
-                    "turn",
-                    session_id, session_key, e,
-                ),
-            )
-
+        self._finish_route_transition(
+            session_key,
+            end_session_id=old_entry.session_id,
+            end_reason="session_reset",
+            create_kwargs=db_create_kwargs,
+            origin=old_entry.origin,
+            display_name=new_entry.display_name,
+            during=" during reset",
+        )
         return new_entry
 
     def _replace_route_locked(self, session_key, old_entry, session_id, now, **fields) -> SessionEntry:
@@ -3031,10 +2992,7 @@ class SessionStore:
             )
 
         if self._db_for_key(session_key):
-            try:
-                self._db_for_key(session_key).reopen_session(target_session_id)
-            except Exception as e:
-                logger.debug("Session DB reopen_session failed: %s", e)
+            self._reopen_session_row(session_key, target_session_id, log_prefix="Session DB reopen_session failed")
             self._record_gateway_session_peer(
                 target_session_id,
                 session_key,
@@ -3080,7 +3038,7 @@ class SessionStore:
             return None
         with self._lock:
             entry = self._entry_locked(session_key)
-            return getattr(entry, "session_id", None) if entry else None
+            return entry.session_id if entry else None
     
     def _get_transcript_drain_lock(self):
         """Return the lock that serializes pending-queue drain boundaries."""
@@ -3104,43 +3062,147 @@ class SessionStore:
             session_id = reroutes[session_id]
         return session_id
 
+    def _spool_dropped(self, session_id: str, message: Dict[str, Any]):
+        """Spool one evicted/undeliverable message to disk; path or None."""
+        try:
+            from gateway.shutdown_flush import spool_dropped_transcript_message
+
+            return spool_dropped_transcript_message(session_id, message)
+        except Exception:
+            return None
+
+    def _enqueue_transcript_message(self, session_id: str, message: Dict[str, Any]) -> list:
+        """Queue *message* (retry lock held); evicts + spools the oldest past the cap.
+
+        Spooling uses the same machinery as shutdown flush so the message is
+        replayed after DB recovery instead of being lost.
+        """
+        pending = self._dirty_transcripts.setdefault(session_id, [])
+        pending.append(dict(message))
+        if len(pending) > self._MAX_PENDING_PER_SESSION:
+            spool_path = self._spool_dropped(session_id, pending.pop(0))
+            if spool_path is not None:
+                self._lazy("_spooled_drop_sessions", set).add(session_id)
+                logger.warning(
+                    "Session DB transcript pending queue full for %s "
+                    "(cap=%d); spooled oldest message to %s for replay "
+                    "after DB recovery",
+                    session_id, self._MAX_PENDING_PER_SESSION, spool_path,
+                )
+            else:
+                logger.warning(
+                    "Session DB transcript pending queue full for %s "
+                    "(cap=%d); dropping oldest message to make room "
+                    "(on-disk spool unavailable)",
+                    session_id, self._MAX_PENDING_PER_SESSION,
+                )
+        return pending
+
+    def _divert_transcript_after_db_replaced(
+        self, session_id: str, queue_session_id: str, exc: Exception
+    ) -> None:
+        """Stop SQLite writes on a replaced/quarantined handle and divert the backlog.
+
+        Retrying cannot succeed and the FTS rebuild must never run on this
+        handle; the pending queue goes to the on-disk spool + JSONL fallback.
+        """
+        logger.error(
+            "Session DB refused further writes on this handle for "
+            "%s (%s); stopping SQLite writes and diverting pending "
+            "transcripts to the on-disk fallback: %s",
+            session_id, type(exc).__name__, exc,
+        )
+        with self._transcript_retry_lock:
+            remaining = list(self._dirty_transcripts.get(queue_session_id, []))
+            self._dirty_transcripts.pop(queue_session_id, None)
+            self._transcript_append_failures.pop(session_id, None)
+        for dropped in remaining:
+            try:
+                from gateway.shutdown_flush import spool_dropped_transcript_message
+
+                spool_dropped_transcript_message(session_id, dropped)
+            except Exception:
+                logger.warning(
+                    "pending fallback failed for replaced "
+                    "state.db transcript on %s",
+                    session_id,
+                    exc_info=True,
+                )
+        try:
+            from hermes_state import divert_session_transcript_jsonl
+            divert_session_transcript_jsonl(session_id, remaining)
+        except Exception:
+            logger.warning(
+                "JSONL divert failed for replaced state.db "
+                "transcript on %s",
+                session_id,
+                exc_info=True,
+            )
+
+    def _live_compression_child(self, session_id: str) -> str:
+        """Transitive compression tip of *session_id* if it is a different, still-live
+        row, else "" (a depth-1 lookup misses multi-hop lineages).
+
+        Uses the PARENT's proven owner handle: the child's id is not published
+        until after its write succeeds, so a by-id lookup would fall back to
+        the ambient store.
+        """
+        owner_db = self._db_for_session_id(session_id)
+        if owner_db is None:
+            return ""
+        tip = owner_db.get_compression_tip(session_id)
+        if tip and tip != session_id:
+            tip_row = owner_db.get_session(tip)
+            if tip_row is not None and tip_row.get("ended_at") is None:
+                return str(tip)
+        return ""
+
+    def _migrate_transcript_queue_to_child(
+        self, session_id: str, queue_session_id: str, child_id: str, pending: list, msg
+    ) -> list:
+        """Move the retry queue + failure counter from parent to child and publish
+        the reroute (retry lock held). Returns the child's pending list.
+
+        Older parent backlog must precede messages already queued directly on
+        the child. Routing is published only AFTER the queue moved (caller), so
+        new child writes cannot bypass older parent backlog.
+        """
+        if pending and pending[0] is msg:
+            pending.pop(0)
+        existing_child_pending = self._dirty_transcripts.get(child_id, [])
+        if pending:
+            pending.extend(existing_child_pending)
+            self._dirty_transcripts[child_id] = pending
+        elif existing_child_pending:
+            pending = existing_child_pending
+        self._dirty_transcripts.pop(queue_session_id, None)
+        previous_failures = self._transcript_append_failures.pop(queue_session_id, 0)
+        if previous_failures:
+            self._transcript_append_failures[child_id] = max(
+                previous_failures,
+                self._transcript_append_failures.get(child_id, 0),
+            )
+        self._transcript_reroutes[session_id] = child_id
+        return pending
+
+    def _publish_transcript_reroute(self, session_id: str, child_id: str) -> None:
+        """Repoint every route at the compression child and save (index authoritative again)."""
+        with self._lock:
+            for entry in self._entries.values():
+                if entry.session_id == session_id:
+                    entry.session_id = child_id
+            self._save()
+        _hints = getattr(self, "_session_owner_hints", None)
+        if _hints:
+            _hints.pop(child_id, None)
+
     def _append_to_transcript_serialized(
         self, session_id: str, message: Dict[str, Any]
     ) -> None:
         """Append a message to a session's transcript (SQLite), draining the
         per-session retry queue."""
         with self._transcript_retry_lock:
-            pending = self._dirty_transcripts.setdefault(session_id, [])
-            pending.append(dict(message))
-            # Cap the queue; spool the evicted oldest message to disk (same
-            # machinery as shutdown flush) for replay after DB recovery.
-            if len(pending) > self._MAX_PENDING_PER_SESSION:
-                dropped = pending.pop(0)
-                spool_path = None
-                try:
-                    from gateway.shutdown_flush import (
-                        spool_dropped_transcript_message,
-                    )
-                    spool_path = spool_dropped_transcript_message(
-                        session_id, dropped
-                    )
-                except Exception:
-                    spool_path = None
-                if spool_path is not None:
-                    self._lazy("_spooled_drop_sessions", set).add(session_id)
-                    logger.warning(
-                        "Session DB transcript pending queue full for %s "
-                        "(cap=%d); spooled oldest message to %s for replay "
-                        "after DB recovery",
-                        session_id, self._MAX_PENDING_PER_SESSION, spool_path,
-                    )
-                else:
-                    logger.warning(
-                        "Session DB transcript pending queue full for %s "
-                        "(cap=%d); dropping oldest message to make room "
-                        "(on-disk spool unavailable)",
-                        session_id, self._MAX_PENDING_PER_SESSION,
-                    )
+            pending = self._enqueue_transcript_message(session_id, message)
             msg = pending[0]
         queue_session_id = session_id
 
@@ -3166,60 +3228,14 @@ class SessionStore:
                 )
 
                 if isinstance(exc, (StateDbReplacedError, StateDbCorruptError)):
-                    # This handle must not touch the file again (replaced
-                    # generation / quarantined corruption): retrying cannot
-                    # succeed and the FTS rebuild must never run on it. Divert.
-                    logger.error(
-                        "Session DB refused further writes on this handle for "
-                        "%s (%s); stopping SQLite writes and diverting pending "
-                        "transcripts to the on-disk fallback: %s",
-                        session_id, type(exc).__name__, exc,
-                    )
-                    with self._transcript_retry_lock:
-                        remaining = list(self._dirty_transcripts.get(queue_session_id, []))
-                        self._dirty_transcripts.pop(queue_session_id, None)
-                        self._transcript_append_failures.pop(session_id, None)
-                    for dropped in remaining:
-                        try:
-                            from gateway.shutdown_flush import (
-                                spool_dropped_transcript_message,
-                            )
-                            spool_dropped_transcript_message(session_id, dropped)
-                        except Exception:
-                            logger.warning(
-                                "pending fallback failed for replaced "
-                                "state.db transcript on %s",
-                                session_id,
-                                exc_info=True,
-                            )
-                    try:
-                        from hermes_state import divert_session_transcript_jsonl
-                        divert_session_transcript_jsonl(session_id, remaining)
-                    except Exception:
-                        logger.warning(
-                            "JSONL divert failed for replaced state.db "
-                            "transcript on %s",
-                            session_id,
-                            exc_info=True,
-                        )
+                    self._divert_transcript_after_db_replaced(session_id, queue_session_id, exc)
                     return
 
                 if isinstance(exc, CompressionSessionClosedError):
-                    # Resolve the transitive compression tip (a depth-1 lookup
-                    # misses multi-hop lineages); adopt only a different,
-                    # still-live tip, else fail closed. Use the PARENT's proven
-                    # owner handle: the child's id is not published until
-                    # after its write succeeds, so a by-id lookup would fall
-                    # back to the ambient store.
+                    # Adopt only a different, still-live compression tip, else
+                    # fail closed.
                     _owner_key = self._owner_key_for_session_id(session_id)
-                    _owner_db = self._db_for_session_id(session_id)
-                    child_id = ""
-                    if _owner_db is not None:
-                        tip = _owner_db.get_compression_tip(session_id)
-                        if tip and tip != session_id:
-                            tip_row = _owner_db.get_session(tip)
-                            if tip_row is not None and tip_row.get("ended_at") is None:
-                                child_id = str(tip)
+                    child_id = self._live_compression_child(session_id)
                     if child_id:
                         # Record the child's owner BEFORE writing to it (the
                         # reroute is published only after the write succeeds
@@ -3232,40 +3248,11 @@ class SessionStore:
                             exc = reroute_exc
                         else:
                             with self._transcript_retry_lock:
-                                if pending and pending[0] is msg:
-                                    pending.pop(0)
-                                existing_child_pending = self._dirty_transcripts.get(
-                                    child_id, []
+                                pending = self._migrate_transcript_queue_to_child(
+                                    session_id, queue_session_id, child_id, pending, msg
                                 )
-                                if pending:
-                                    # Older parent backlog must precede messages
-                                    # already queued directly on the child.
-                                    pending.extend(existing_child_pending)
-                                    self._dirty_transcripts[child_id] = pending
-                                elif existing_child_pending:
-                                    pending = existing_child_pending
-                                self._dirty_transcripts.pop(queue_session_id, None)
-                                previous_failures = self._transcript_append_failures.pop(
-                                    queue_session_id, 0
-                                )
-                                if previous_failures:
-                                    self._transcript_append_failures[child_id] = max(
-                                        previous_failures,
-                                        self._transcript_append_failures.get(child_id, 0),
-                                    )
-                                self._transcript_reroutes[session_id] = child_id
                                 queue_session_id = child_id
-                            # Publish routing only after the retry queue has moved,
-                            # so new child writes cannot bypass older parent backlog.
-                            with self._lock:
-                                for entry in self._entries.values():
-                                    if entry.session_id == session_id:
-                                        entry.session_id = child_id
-                                self._save()
-                            # The index is authoritative again; drop the hint.
-                            _hints = getattr(self, "_session_owner_hints", None)
-                            if _hints:
-                                _hints.pop(child_id, None)
+                            self._publish_transcript_reroute(session_id, child_id)
                             if not pending:
                                 return
                             msg = pending[0]
