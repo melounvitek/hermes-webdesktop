@@ -8,26 +8,20 @@ import re
 import shutil
 import sys
 import threading
-from typing import Callable
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 from tools.mcp_tool_common import _env_ref_name, _prepend_path, _core
 
 logger = logging.getLogger("tools.mcp_tool")
 
-
 _mcp_stderr_log_fh: Optional[Any] = None
-
-
 _mcp_stderr_log_lock = threading.Lock()
 
 
 def _get_mcp_stderr_log() -> Any:
-    """Shared append-mode handle for MCP subprocess stderr, opened once per process.
-
-    Must expose a real fd (``fileno()``) because asyncio wires the child's stderr
-    directly to it. Falls back to ``/dev/null``, then the real stderr.
-    """
+    """Shared append-mode handle for MCP subprocess stderr, opened once per
+    process. Must expose a real fd (``fileno()``) because asyncio wires the
+    child's stderr directly to it. Falls back to ``/dev/null``, then real stderr."""
     global _mcp_stderr_log_fh
     with _mcp_stderr_log_lock:
         if _mcp_stderr_log_fh is not None:
@@ -36,10 +30,9 @@ def _get_mcp_stderr_log() -> Any:
             from hermes_constants import get_hermes_home
             log_dir = get_hermes_home() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
-            log_path = log_dir / "mcp-stderr.log"
             # Line-buffered so output lands promptly; errors="replace" tolerates
             # garbled binary from misbehaving servers.
-            fh = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+            fh = open(log_dir / "mcp-stderr.log", "a", encoding="utf-8", errors="replace", buffering=1)
             fh.fileno()  # confirm a real fd before committing
             _mcp_stderr_log_fh = fh
         except Exception as exc:  # pragma: no cover — best-effort fallback
@@ -64,43 +57,18 @@ def _write_stderr_log_header(server_name: str) -> None:
 
 
 # Env vars safe to pass to stdio subprocesses (no secrets).
-_SAFE_ENV_KEYS = frozenset({
-    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
-})
+_SAFE_ENV_KEYS = frozenset({"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR"})
 
-
+# Windows process/location vars needed by launcher-style tools (e.g. Docker
+# Desktop's MCP plugin discovery); none carry secrets.
 _SAFE_ENV_KEYS_CASE_INSENSITIVE = frozenset({
-    # Windows process/location vars needed by launcher-style tools (e.g.
-    # Docker Desktop's MCP plugin discovery); none carry secrets.
-    "ALLUSERSPROFILE",
-    "APPDATA",
-    "COMMONPROGRAMFILES",
-    "COMMONPROGRAMFILES(X86)",
-    "COMMONPROGRAMW6432",
-    "COMPUTERNAME",
-    "COMSPEC",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "LOCALAPPDATA",
-    "NUMBER_OF_PROCESSORS",
-    "OS",
-    "PATHEXT",
-    "PROCESSOR_ARCHITECTURE",
-    "PROGRAMDATA",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PROGRAMW6432",
-    "PUBLIC",
-    "SYSTEMDRIVE",
-    "SYSTEMROOT",
-    "TEMP",
-    "TMP",
-    "USERDOMAIN",
-    "USERNAME",
-    "USERPROFILE",
-    "WINDIR",
+    "ALLUSERSPROFILE", "APPDATA", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)",
+    "COMMONPROGRAMW6432", "COMPUTERNAME", "COMSPEC", "HOMEDRIVE", "HOMEPATH",
+    "LOCALAPPDATA", "NUMBER_OF_PROCESSORS", "OS", "PATHEXT", "PROCESSOR_ARCHITECTURE",
+    "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "PUBLIC",
+    "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERDOMAIN", "USERNAME",
+    "USERPROFILE", "WINDIR",
 })
-
 
 # ${VAR_NAME} interpolation; any non-} chars allowed so MY-VAR / my.var work.
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
@@ -120,45 +88,85 @@ def _workspace_folder() -> str:
     return os.getcwd()
 
 
+def _workspace_basename() -> str:
+    root = _core._workspace_folder()
+    return os.path.basename(root.rstrip("/\\")) or root
+
+
+# Cursor's case-sensitive context vars -> resolver.
+_CONTEXT_VAR_RESOLVERS = {
+    "userHome": lambda: os.path.expanduser("~"),
+    "workspaceFolder": lambda: _core._workspace_folder(),
+    "workspaceFolderBasename": _workspace_basename,
+    "pathSeparator": lambda: os.sep,
+    "/": lambda: os.sep,
+}
+
+
 def _context_var_value(ref: str) -> Optional[str]:
-    """Resolve Cursor's case-sensitive context vars (``userHome``,
-    ``workspaceFolder``, ``workspaceFolderBasename``, ``pathSeparator``/``/``).
-    Returns None for anything else so it falls through to env-var lookup."""
-    if ref == "userHome":
-        return os.path.expanduser("~")
-    if ref == "workspaceFolder":
-        return _core._workspace_folder()
-    if ref == "workspaceFolderBasename":
-        root = _core._workspace_folder()
-        return os.path.basename(root.rstrip("/\\")) or root
-    if ref in ("pathSeparator", "/"):
-        return os.sep
-    return None
+    """Resolve a Cursor context var; None for anything else so it falls through
+    to env-var lookup."""
+    resolver = _CONTEXT_VAR_RESOLVERS.get(ref)
+    return resolver() if resolver else None
 
 
 def _build_safe_env(user_env: Optional[dict]) -> dict:
-    """Filtered env for stdio subprocesses so API keys/tokens don't leak.
-
-    Passes only the safe baseline keys, ``XDG_*``, vars injected by an external
-    secret source (users configured that backend precisely so subprocesses can
-    consume them), plus the server config's own ``env``.
-    """
+    """Filtered env for stdio subprocesses so API keys/tokens don't leak: only
+    the safe baseline keys, ``XDG_*``, vars injected by an external secret
+    source (users configured that backend precisely so subprocesses can consume
+    them), plus the server config's own ``env``."""
     try:
         from hermes_cli.env_loader import get_secret_source
     except Exception:  # pragma: no cover — early bootstrap/import fallback
         get_secret_source = None
-    env = {}
-    for key, value in os.environ.items():
-        if (
-            key in _SAFE_ENV_KEYS
-            or key.upper() in _SAFE_ENV_KEYS_CASE_INSENSITIVE
-            or key.startswith("XDG_")
-            or (get_secret_source is not None and get_secret_source(key))
-        ):
-            env[key] = value
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _SAFE_ENV_KEYS
+        or key.upper() in _SAFE_ENV_KEYS_CASE_INSENSITIVE
+        or key.startswith("XDG_")
+        or (get_secret_source is not None and get_secret_source(key))
+    }
     if user_env:
         env.update(user_env)
     return env
+
+
+def _which_with_config_pathext(command: str, path_arg, env: dict):
+    """``shutil.which`` retried under the config env's PATHEXT (Windows only):
+    ``which(path=...)`` uses the PARENT's PATHEXT, not the config env's."""
+    cfg_pathext = next((v for k, v in env.items() if k.upper() == "PATHEXT" and isinstance(v, str) and v.strip()), None)
+    if not cfg_pathext or cfg_pathext == os.environ.get("PATHEXT"):
+        return None
+    saved = os.environ.get("PATHEXT")
+    try:
+        os.environ["PATHEXT"] = cfg_pathext
+        return shutil.which(command, path=path_arg)
+    finally:
+        if saved is None:
+            os.environ.pop("PATHEXT", None)
+        else:
+            os.environ["PATHEXT"] = saved
+
+
+def _node_fallback(command: str) -> str:
+    """Well-known Node install locations for bare ``npx``/``npm``/``node`` when
+    PATH lookup failed; returns *command* unchanged when none is executable."""
+    home = os.path.expanduser("~")
+    hermes_home = os.path.expanduser(os.getenv("HERMES_HOME", os.path.join(home, ".hermes")))
+    candidates = [
+        os.path.join(hermes_home, "node", "bin", command),
+        os.path.join(home, ".local", "bin", command),
+        # Canonical Node location for from-source Linux builds, the Hermes Docker
+        # image and Intel Homebrew. Needed when a user's hand-authored env.PATH
+        # omits it: npx's shebang re-execs /usr/bin/env node, so a symlink
+        # workaround fails one layer deeper.
+        os.path.join(os.sep, "usr", "local", "bin", command),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return command
 
 
 def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
@@ -171,82 +179,39 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
         path_arg = resolved_env.get("PATH")
         which_hit = shutil.which(resolved_command, path=path_arg)
         if which_hit is None and sys.platform == "win32" and resolved_env:
-            # shutil.which(path=...) uses the PARENT's PATHEXT, not the config
-            # env's, so retry with the config's PATHEXT (any key casing) applied.
-            cfg_pathext = next(
-                (v for k, v in resolved_env.items()
-                 if k.upper() == "PATHEXT" and isinstance(v, str) and v.strip()),
-                None,
-            )
-            if cfg_pathext and cfg_pathext != os.environ.get("PATHEXT"):
-                _saved = os.environ.get("PATHEXT")
-                try:
-                    os.environ["PATHEXT"] = cfg_pathext
-                    which_hit = shutil.which(resolved_command, path=path_arg)
-                finally:
-                    if _saved is None:
-                        os.environ.pop("PATHEXT", None)
-                    else:
-                        os.environ["PATHEXT"] = _saved
+            which_hit = _which_with_config_pathext(resolved_command, path_arg, resolved_env)
         if which_hit:
             resolved_command = which_hit
         elif resolved_command in {"npx", "npm", "node"}:
-            hermes_home = os.path.expanduser(
-                os.getenv(
-                    "HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes")
-                )
-            )
-            candidates = [
-                os.path.join(hermes_home, "node", "bin", resolved_command),
-                os.path.join(os.path.expanduser("~"), ".local", "bin", resolved_command),
-                # Canonical Node location for from-source Linux builds, the
-                # Hermes Docker image and Intel Homebrew. Needed when a user's
-                # hand-authored env.PATH omits it: npx's shebang re-execs
-                # /usr/bin/env node, so a symlink workaround fails one layer deeper.
-                os.path.join(os.sep, "usr", "local", "bin", resolved_command),
-            ]
-            for candidate in candidates:
-                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                    resolved_command = candidate
-                    break
+            resolved_command = _node_fallback(resolved_command)
 
     command_dir = os.path.dirname(resolved_command)
     if command_dir:
         resolved_env = _prepend_path(resolved_env, command_dir)
-
     return resolved_command, resolved_env
 
 
 def _wrap_command_with_watchdog(command: str, args: list) -> tuple[str, list]:
-    """Wrap a stdio command in the parent-death watchdog (POSIX only; the
-    watchdog polls ``getppid()`` against our PID). Unchanged on non-POSIX or
-    if the PID cannot be read — watchdog bookkeeping must never block a connection."""
+    """Wrap a stdio command in the parent-death watchdog (POSIX only — it relies
+    on process groups, same scope as the killpg-based orphan cleanup; the
+    watchdog polls ``getppid()`` against our PID). Unchanged on non-POSIX or if
+    the PID cannot be read — watchdog bookkeeping must never block a connection."""
     if os.name != "posix":
-        # Relies on process groups (getpgid/killpg), same scope as the
-        # killpg-based orphan cleanup.
         return command, args
     try:
         my_pid = os.getpid()
     except Exception:
         return command, args
-    watchdog_args = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_stdio_watchdog.py"),
-        "--ppid", str(my_pid),
-        "--",
-        command,
-        *args,
-    ]
-    return sys.executable, watchdog_args
+    watchdog = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_stdio_watchdog.py")
+    return sys.executable, [watchdog, "--ppid", str(my_pid), "--", command, *args]
 
 
 def _interpolate_env_vars(value):
-    """Recursively resolve ``${VAR}`` / Cursor ``${env:VAR}`` placeholders plus the
-    Cursor context vars (see ``_context_var_value``).
-
-    Env refs resolve from the active profile's secret scope when multiplexing
-    (so ``${API_KEY}`` picks up the routed profile's value, not another
-    profile's in ``os.environ``). Unset vars keep the literal placeholder.
-    """
+    """Recursively resolve ``${VAR}`` / Cursor ``${env:VAR}`` placeholders plus
+    the Cursor context vars (``_context_var_value``). Env refs resolve from the
+    active profile's secret scope when multiplexing (so ``${API_KEY}`` picks up
+    the routed profile's value, not another profile's in ``os.environ``). Unset
+    vars keep the literal placeholder."""
     from agent.secret_scope import get_secret as _get_secret
 
     if isinstance(value, str):
@@ -254,8 +219,7 @@ def _interpolate_env_vars(value):
             ctx = _context_var_value(m.group(1).strip())
             if ctx is not None:
                 return ctx
-            name = _env_ref_name(m.group(1))
-            return _get_secret(name, m.group(0)) or m.group(0)
+            return _get_secret(_env_ref_name(m.group(1)), m.group(0)) or m.group(0)
         return _ENV_VAR_PATTERN.sub(_replace, value)
     if isinstance(value, dict):
         return {k: _interpolate_env_vars(v) for k, v in value.items()}
@@ -271,12 +235,10 @@ _whitespace_warned: Set[Tuple[str, str]] = set()
 
 def _warn_hidden_whitespace(server_name: str, config: dict) -> List[str]:
     """Warn once per (server, key path) about string values with leading/trailing
-    whitespace — a pasted trailing newline or leading space causes opaque
-    auth/connect failures and is invisible in config.yaml.
-
-    Advisory only: values are never mutated (whitespace could be intentional)
-    and never logged (often secrets). Returns the flagged key paths.
-    """
+    whitespace — a pasted newline or leading space causes opaque auth/connect
+    failures and is invisible in config.yaml. Advisory only: values are never
+    mutated (whitespace could be intentional) and never logged (often secrets).
+    Returns the flagged key paths."""
     flagged: List[str] = []
 
     def _walk(value: Any, path: str) -> None:
@@ -301,8 +263,7 @@ def _warn_hidden_whitespace(server_name: str, config: dict) -> List[str]:
             "trailing whitespace — this often causes authentication or "
             "connection failures. Check for stray spaces/newlines in "
             "config.yaml (or the referenced env var).",
-            server_name,
-            key_path,
+            server_name, key_path,
         )
     return flagged
 
@@ -310,28 +271,35 @@ def _warn_hidden_whitespace(server_name: str, config: dict) -> List[str]:
 def _filter_suspicious_mcp_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
     """Drop exfiltration-shaped MCP configs before any stdio spawn path."""
     try:
-        from hermes_cli.mcp_security import validate_mcp_server_entry as _validate_mcp_server_entry
+        from hermes_cli.mcp_security import validate_mcp_server_entry
     except Exception:
-        _validate_mcp_server_entry: Callable[[str, dict[str, Any]], list[str]] | None = None
-
-    if _validate_mcp_server_entry is None:
         return servers
 
     safe_servers = {}
     for name, cfg in servers.items():
-        if not isinstance(cfg, dict):
-            safe_servers[name] = cfg
-            continue
-        issues = _validate_mcp_server_entry(name, cfg)
+        issues = validate_mcp_server_entry(name, cfg) if isinstance(cfg, dict) else None
         if issues:
-            logger.warning(
-                "Skipping suspicious MCP server '%s': %s",
-                name,
-                "; ".join(issues),
-            )
+            logger.warning("Skipping suspicious MCP server '%s': %s", name, "; ".join(issues))
             continue
         safe_servers[name] = cfg
     return safe_servers
+
+
+def _portable_mcp_servers(safe_servers: Dict[str, dict]) -> None:
+    """Merge plugin-provided (portable) MCP servers into *safe_servers*; native
+    config wins on a name clash. Never raises."""
+    try:
+        from hermes_cli.plugins import discover_plugins, get_plugin_manager
+
+        discover_plugins()
+        portable = get_plugin_manager().get_portable_mcp_servers()
+        for name, cfg in _core._filter_suspicious_mcp_servers(portable).items():
+            if name in safe_servers:
+                logger.warning("Portable MCP server '%s' conflicts with native config; skipping", name)
+                continue
+            safe_servers[name] = dict(cfg)
+    except Exception:
+        logger.debug("Failed to load portable MCP servers", exc_info=True)
 
 
 def _load_mcp_config() -> Dict[str, dict]:
@@ -345,8 +313,7 @@ def _load_mcp_config() -> Dict[str, dict]:
 
         if _env_enabled("HERMES_SAFE_MODE"):
             return {}
-        config = load_config()
-        servers = config.get("mcp_servers")
+        servers = load_config().get("mcp_servers")
         if not isinstance(servers, dict):
             servers = {}
         # Ensure .env vars are available for interpolation
@@ -361,21 +328,7 @@ def _load_mcp_config() -> Dict[str, dict]:
             if isinstance(interpolated, dict):
                 _warn_hidden_whitespace(name, interpolated)
                 safe_servers[name] = interpolated
-        try:
-            from hermes_cli.plugins import discover_plugins, get_plugin_manager
-
-            discover_plugins()
-            portable = get_plugin_manager().get_portable_mcp_servers()
-            for name, cfg in _core._filter_suspicious_mcp_servers(portable).items():
-                if name in safe_servers:
-                    logger.warning(
-                        "Portable MCP server '%s' conflicts with native config; skipping",
-                        name,
-                    )
-                    continue
-                safe_servers[name] = dict(cfg)
-        except Exception:
-            logger.debug("Failed to load portable MCP servers", exc_info=True)
+        _portable_mcp_servers(safe_servers)
         return safe_servers
     except Exception as exc:
         logger.debug("Failed to load MCP config: %s", exc)
