@@ -3332,26 +3332,25 @@ def _spawn_gateway_restart(profile: Optional[str] = None) -> Tuple[subprocess.Po
     return proc, False
 
 
-def _restart_gateway_after_webhook_enable(profile: Optional[str] = None) -> dict[str, Any]:
-    """Best-effort gateway restart after enabling the webhook platform."""
+def _restart_gateway_after(profile: Optional[str], *, what: str, label: str) -> dict[str, Any]:
+    """Best-effort gateway restart after a config change (webhooks, onboarding).
+
+    The config save stays authoritative; a failed spawn is reported in the
+    result (``restart_started: False`` + ``restart_error``) so the UI can fall
+    back to its manual restart banner instead of failing the request.
+    """
     try:
         proc, reused = _spawn_gateway_restart(profile)
     except Exception as exc:
-        _log.exception("Failed to auto-restart gateway after enabling webhooks")
-        return {
-            "restart_started": False,
-            "restart_error": str(exc),
-        }
+        _log.exception("Failed to auto-restart gateway after %s", what)
+        return {"restart_started": False, "restart_error": str(exc)}
     if reused:
-        _log.info(
-            "Webhook enable: reusing in-flight gateway restart (pid %s)",
-            proc.pid,
-        )
-    return {
-        "restart_started": True,
-        "restart_action": "gateway-restart",
-        "restart_pid": proc.pid,
-    }
+        _log.info("%s: reusing in-flight gateway restart (pid %s)", label, proc.pid)
+    return {"restart_started": True, "restart_action": "gateway-restart", "restart_pid": proc.pid}
+
+
+def _restart_gateway_after_webhook_enable(profile: Optional[str] = None) -> dict[str, Any]:
+    return _restart_gateway_after(profile, what="enabling webhooks", label="Webhook enable")
 
 
 from hermes_cli.web_routers import actions as _actions_routes  # noqa: E402
@@ -5759,24 +5758,7 @@ def _whatsapp_onboarding_payload(pairing_id: str, record: _WhatsAppOnboardingSes
 
 
 def _restart_gateway_after_whatsapp_onboarding(profile: Optional[str] = None) -> dict[str, Any]:
-    try:
-        proc, reused = _spawn_gateway_restart(profile)
-    except Exception as exc:
-        _log.exception("Failed to auto-restart gateway after WhatsApp onboarding")
-        return {
-            "restart_started": False,
-            "restart_error": str(exc),
-        }
-    if reused:
-        _log.info(
-            "WhatsApp onboarding: reusing in-flight gateway restart (pid %s)",
-            proc.pid,
-        )
-    return {
-        "restart_started": True,
-        "restart_action": "gateway-restart",
-        "restart_pid": proc.pid,
-    }
+    return _restart_gateway_after(profile, what="WhatsApp onboarding", label="WhatsApp onboarding")
 
 
 _TELEGRAM_ONBOARDING_DEFAULT_URL = "https://setup.hermes-agent.nousresearch.com"

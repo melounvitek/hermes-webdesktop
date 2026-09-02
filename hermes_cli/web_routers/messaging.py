@@ -35,7 +35,7 @@ _messaging_platform_payload = late("_messaging_platform_payload")
 _profile_scope = late("_profile_scope")
 _resolve_profile_dir = late("_resolve_profile_dir")
 _restart_gateway_after_whatsapp_onboarding = late("_restart_gateway_after_whatsapp_onboarding")
-_spawn_gateway_restart = late("_spawn_gateway_restart")
+_restart_gateway_after = late("_restart_gateway_after")
 _telegram_onboarding_error_message = late("_telegram_onboarding_error_message")
 _telegram_onboarding_request_sync = late("_telegram_onboarding_request_sync")
 _validate_messaging_env_value = late("_validate_messaging_env_value")
@@ -665,24 +665,7 @@ def _restart_gateway_after_telegram_onboarding(profile: Optional[str] = None) ->
     broken from the chat side. Keep the config save authoritative, but report
     restart failures so the UI can fall back to the existing manual banner.
     """
-    try:
-        proc, reused = _spawn_gateway_restart(profile)
-    except Exception as exc:
-        _log.exception("Failed to auto-restart gateway after Telegram onboarding")
-        return {
-            "restart_started": False,
-            "restart_error": str(exc),
-        }
-    if reused:
-        _log.info(
-            "Telegram onboarding: reusing in-flight gateway restart (pid %s)",
-            proc.pid,
-        )
-    return {
-        "restart_started": True,
-        "restart_action": "gateway-restart",
-        "restart_pid": proc.pid,
-    }
+    return _restart_gateway_after(profile, what="Telegram onboarding", label="Telegram onboarding")
 
 
 @router.post("/api/messaging/telegram/onboarding/{pairing_id}/apply")
