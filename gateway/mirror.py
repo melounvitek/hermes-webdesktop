@@ -1,12 +1,10 @@
 """
 Session mirroring for cross-platform message delivery.
 
-When a message is sent to a platform (via send_message or cron delivery),
-this module appends a "delivery-mirror" record to the target session's
-transcript so the receiving-side agent has context about what was sent.
-
-Standalone -- works from CLI, cron, and gateway contexts without needing
-the full SessionStore machinery.
+When a message is sent to a platform (send_message or cron delivery), append
+a "delivery-mirror" record to the target session's transcript so the
+receiving-side agent knows what was sent. Standalone: works from CLI, cron
+and gateway contexts without the full SessionStore machinery.
 """
 
 import json
@@ -22,139 +20,91 @@ _SESSIONS_DIR = get_hermes_home() / "sessions"
 _SESSIONS_INDEX = _SESSIONS_DIR / "sessions.json"
 
 
+def _origin_user_id(entry: dict) -> str:
+    return str((entry.get("origin") or {}).get("user_id") or "")
+
+
 def mirror_to_session(
-    platform: str,
-    chat_id: str,
-    message_text: str,
-    source_label: str = "cli",
-    thread_id: Optional[str] = None,
-    user_id: Optional[str] = None,
-    role: str = "assistant",
-    session_id: Optional[str] = None,
+    platform: str, chat_id: str, message_text: str, source_label: str = "cli",
+    thread_id: Optional[str] = None, user_id: Optional[str] = None,
+    role: str = "assistant", session_id: Optional[str] = None,
 ) -> bool:
-    """
-    Append a delivery-mirror message to the target session's transcript.
+    """Append a delivery-mirror message to the target session's SQLite transcript.
 
-    Finds the gateway session that matches the given platform + chat_id,
-    then writes a mirror entry to both the JSONL transcript and SQLite DB.
+    ``session_id``: pass it when the caller already holds the exact session
+    (e.g. the cron in_channel seed that just created the row) to skip the
+    origin scan. ``_find_session_id`` refuses to guess on a populated chat
+    (flat session + N thread sessions sharing one chat_id) and would silently
+    drop the mirror.
 
-    ``session_id``: when the caller already KNOWS the exact session (e.g. the
-    cron in_channel seed, which just created the row via
-    ``get_or_create_session``), pass it to skip the origin-scan heuristics
-    entirely. ``_find_session_id`` matches by origin (chat_id + user
-    preference with a multi-candidate bail-out), which is correct for
-    "mirror into whatever conversation lives here" callers but WRONG for a
-    caller holding the precise target — on a populated chat (flat session +
-    N per-message thread sessions sharing one chat_id) the scan can refuse
-    to guess and silently drop the mirror (live failure, Alice 2026-08-19:
-    'in_channel seed did NOT land').
+    ``role`` defaults to ``"assistant"``, correct when the mirrored text is
+    the agent's own outgoing reply. Text that is NOT the agent speaking (e.g.
+    a cron brief) must pass ``role="user"``: ``mirror``/``mirror_source``
+    metadata is dropped at the SQLite boundary, so an assistant-role mirror
+    replays as a real assistant turn and produces assistant→assistant pairs
+    that break strict-alternation providers; a user-role mirror collapses
+    safely via ``repair_message_sequence``'s consecutive-user merge.
 
-    ``role`` defaults to ``"assistant"`` — correct for the interactive
-    ``send_message`` mirror, where the mirrored text is the agent's own
-    outgoing reply (a genuine assistant turn). Callers mirroring text that is
-    NOT the agent speaking — e.g. a cron brief delivered out-of-band — must
-    pass ``role="user"``: the ``mirror``/``mirror_source`` metadata is dropped
-    at the SQLite boundary (only role+content persist), so on replay an
-    assistant-role mirror is indistinguishable from a real assistant turn and
-    produces ``assistant → assistant`` pairs that break strict-alternation
-    providers (issue #2221). A user-role mirror collapses safely via
-    ``repair_message_sequence``'s consecutive-user merge on every provider.
-
-    Returns True if mirrored successfully, False if no matching session or error.
-    All errors are caught -- this is never fatal.
+    Returns True if mirrored, False if no matching session or error. Never raises.
     """
     try:
         if not session_id:
-            session_id = _find_session_id(
-                platform,
-                str(chat_id),
-                thread_id=thread_id,
-                user_id=user_id,
-            )
+            session_id = _find_session_id(platform, str(chat_id), thread_id=thread_id, user_id=user_id)
         if not session_id:
             logger.warning(
                 "Mirror: no session found for %s:%s thread=%s user=%s "
                 "(explicit_id=none, origin-scan bailed)",
-                platform,
-                chat_id,
-                thread_id,
-                user_id,
+                platform, chat_id, thread_id, user_id,
             )
             return False
 
-        mirror_msg = {
+        _append_to_sqlite(session_id, {
             "role": role,
             "content": message_text,
             "timestamp": datetime.now().isoformat(),
             "mirror": True,
             "mirror_source": source_label,
-        }
-
-        _append_to_sqlite(session_id, mirror_msg)
-
+        })
         logger.debug("Mirror: wrote to session %s (from %s)", session_id, source_label)
         return True
-
     except Exception as e:
-        # WARNING with the exception: a silent mirror drop IS the cron
-        # continuation-amnesia bug (Alice 2026-08-19 — the seed's own
-        # deterministic session_id was in hand and the append STILL failed
-        # invisibly at debug level).
+        # WARNING, not debug: a silent mirror drop is the cron continuation-amnesia bug.
         logger.warning(
             "Mirror failed for %s:%s thread=%s user=%s session=%s: %s",
-            platform,
-            chat_id,
-            thread_id,
-            user_id,
-            session_id,
-            e,
+            platform, chat_id, thread_id, user_id, session_id, e,
         )
         return False
 
 
 def _find_session_id(
-    platform: str,
-    chat_id: str,
-    thread_id: Optional[str] = None,
-    user_id: Optional[str] = None,
+    platform: str, chat_id: str, thread_id: Optional[str] = None, user_id: Optional[str] = None,
 ) -> Optional[str]:
-    """
-    Find the active session_id for a platform + chat_id pair.
+    """Find the active session_id for a platform + chat_id pair.
 
-    Queries state.db gateway session rows (primary source since #9006);
-    falls back to scanning sessions.json for pre-migration databases.
-    DM session keys don't embed the chat_id (e.g. "agent:main:telegram:dm"),
-    so we match on the persisted chat origin, not the key.
+    state.db gateway session rows are primary; sessions.json is the fallback
+    for pre-migration databases. DM session keys don't embed the chat_id
+    (e.g. "agent:main:telegram:dm"), so matching is on the persisted origin.
 
-    When *user_id* is provided, prefer exact sender matches. If multiple
-    same-chat candidates exist and none matches the user, return None instead
-    of guessing and contaminating another participant's session.
+    With *user_id*, exact sender matches win. If several same-chat candidates
+    exist and none matches the user, return None rather than guess and
+    contaminate another participant's session.
     """
-    # Primary: state.db
     try:
-        from hermes_state import get_shared_session_db
+        from hermes_state import get_shared_session_db, release_or_close
         db = get_shared_session_db()
         try:
             finder = getattr(db, "find_session_by_origin", None)
             if callable(finder):
-                session_id = finder(
-                    platform=platform,
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                )
+                session_id = finder(platform=platform, chat_id=chat_id, thread_id=thread_id, user_id=user_id)
                 if session_id:
                     return str(session_id)
         finally:
-            from hermes_state import release_or_close
             release_or_close(db)
     except Exception as e:
         logger.debug("Mirror state.db session lookup failed: %s", e)
 
-    # Fallback: sessions.json (pre-migration databases)
     if not _SESSIONS_INDEX.exists():
         return None
-
     try:
         with open(_SESSIONS_INDEX, encoding="utf-8") as f:
             data = json.load(f)
@@ -163,65 +113,44 @@ def _find_session_id(
 
     platform_lower = platform.lower()
     candidates = []
-
     for _key, entry in data.items():
-        # Skip documentation/metadata sentinels (keys starting with "_", e.g.
-        # the gateway's "_README" note) — they are not session entries.
+        # Keys starting with "_" (e.g. the gateway's "_README") are metadata sentinels.
         if str(_key).startswith("_") or not isinstance(entry, dict):
             continue
         origin = entry.get("origin") or {}
-        entry_platform = (origin.get("platform") or entry.get("platform", "")).lower()
-
-        if entry_platform != platform_lower:
+        if (origin.get("platform") or entry.get("platform", "")).lower() != platform_lower:
             continue
-
-        origin_chat_id = str(origin.get("chat_id", ""))
-        if origin_chat_id == str(chat_id):
-            origin_thread_id = origin.get("thread_id")
-            if thread_id is not None and str(origin_thread_id or "") != str(thread_id):
-                continue
-            candidates.append(entry)
+        if str(origin.get("chat_id", "")) != str(chat_id):
+            continue
+        if thread_id is not None and str(origin.get("thread_id") or "") != str(thread_id):
+            continue
+        candidates.append(entry)
 
     if not candidates:
         return None
-
     if user_id:
-        exact_user_matches = [
-            entry for entry in candidates
-            if str((entry.get("origin") or {}).get("user_id") or "") == str(user_id)
-        ]
+        exact_user_matches = [e for e in candidates if _origin_user_id(e) == str(user_id)]
         if exact_user_matches:
             candidates = exact_user_matches
         elif len(candidates) > 1:
             return None
     elif len(candidates) > 1:
-        distinct_user_ids = {
-            str((entry.get("origin") or {}).get("user_id") or "").strip()
-            for entry in candidates
-            if str((entry.get("origin") or {}).get("user_id") or "").strip()
-        }
+        distinct_user_ids = {uid.strip() for uid in map(_origin_user_id, candidates) if uid.strip()}
         if len(distinct_user_ids) > 1:
             return None
 
-    best_entry = max(candidates, key=lambda entry: entry.get("updated_at", ""))
-    return best_entry.get("session_id")
-
+    return max(candidates, key=lambda entry: entry.get("updated_at", "")).get("session_id")
 
 
 def _append_to_sqlite(session_id: str, message: dict) -> None:
     """Append a message to the SQLite session database."""
     db = None
     try:
-        from hermes_state import get_shared_session_db
+        from hermes_state import get_shared_session_db, release_or_close
         db = get_shared_session_db()
-        db.append_message(
-            session_id=session_id,
-            role=message.get("role", "assistant"),
-            content=message.get("content"),
-        )
+        db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
     except Exception as e:
         logger.debug("Mirror SQLite write failed: %s", e)
     finally:
         if db is not None:
-            from hermes_state import release_or_close
             release_or_close(db)

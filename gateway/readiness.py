@@ -29,13 +29,10 @@ def _probe_state_db(home: Path) -> dict[str, Any]:
     if not path.exists():
         return _check("ok", "not initialized")
     try:
-        # A readiness probe must never compete with normal state writers. A
-        # read-only schema query still catches unreadable/corrupt databases
-        # without taking a write reservation on every health poll.
-        # ``closing(...)`` is required: sqlite3's connection context manager
-        # only commits/rolls back — it never closes, so a bare ``with
-        # sqlite3.connect(...)`` leaks one connection (and its fds) per
-        # health poll in the long-running gateway (#69678/#69567 bug class).
+        # Read-only schema query: catches unreadable/corrupt DBs without competing
+        # with state writers. ``closing`` is required — sqlite3's connection
+        # context manager only commits/rolls back, never closes, so a bare
+        # ``with connect()`` would leak one connection (and fds) per health poll.
         uri = f"file:{path.as_posix()}?mode=ro"
         with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as conn:
             conn.execute("PRAGMA query_only = ON")
@@ -71,32 +68,27 @@ def _probe_disk(home: Path) -> dict[str, Any]:
 def _probe_gateway(runtime_status: dict[str, Any]) -> dict[str, Any]:
     state = str(runtime_status.get("gateway_state") or "unknown")
     platforms = runtime_status.get("platforms")
-    connected = 0
-    configured = 0
-    if isinstance(platforms, dict):
-        configured = len(platforms)
-        connected = sum(
-            1
-            for value in platforms.values()
-            if isinstance(value, dict)
-            and str(value.get("state") or value.get("status") or "").lower()
-            in {"connected", "running", "ok"}
-        )
+    if not isinstance(platforms, dict):
+        platforms = {}
+    connected = sum(
+        1
+        for value in platforms.values()
+        if isinstance(value, dict)
+        and str(value.get("state") or value.get("status") or "").lower()
+        in {"connected", "running", "ok"}
+    )
     status = "ok" if state in {"running", "draining"} else "degraded"
-    return _check(status, state=state, connected_platforms=connected, platforms=configured)
+    return _check(status, state=state, connected_platforms=connected, platforms=len(platforms))
 
 
-def _probe_session_store(
-    runtime_status: dict[str, Any], state_db_probe: dict[str, Any]
-) -> dict[str, Any]:
+def _probe_session_store(runtime_status: dict[str, Any], state_db_probe: dict[str, Any]) -> dict[str, Any]:
     """Report the running gateway cache state, not an independent reopen."""
     runtime_store = runtime_status.get("session_store")
     if isinstance(runtime_store, dict):
         state = str(runtime_store.get("status") or "unknown")
         if state in {"ok", "unavailable", "retrying"}:
             return _check(state)
-    # Older gateways do not publish a cache state. Preserve their readiness
-    # behavior until their process restarts onto a version that does.
+    # Older gateways publish no cache state: fall back to the state_db probe.
     return _check("ok" if state_db_probe.get("status") == "ok" else "unavailable")
 
 
@@ -110,9 +102,8 @@ def collect_runtime_readiness(
 ) -> dict[str, Any]:
     """Return bounded readiness diagnostics without mutating runtime state.
 
-    The detailed health endpoint is authenticated. Even there, probes expose
-    status and counts only: never config values, credentials, paths, commands,
-    queue payloads, or exception messages.
+    Even on the authenticated endpoint, probes expose status and counts only:
+    never config values, credentials, paths, queue payloads, or exception messages.
     """
     home = get_hermes_home()
     runtime = runtime_status if isinstance(runtime_status, dict) else {}

@@ -1,15 +1,13 @@
 """SIGKILL any process left in this systemd unit's cgroup.
 
-Runs as ``ExecStopPost=`` so it only fires after the gateway's main process
-has exited. The gateway already reaps its own tool subprocesses on a clean
-shutdown; this is the safety net for long-lived helpers it doesn't track
-(``adb``, platform bridges, etc.) that would otherwise be orphaned in the
-cgroup and block ``Restart=always`` — issue #37454.
+Runs as ``ExecStopPost=`` after the gateway's main process has exited: the
+safety net for long-lived helpers the gateway doesn't track (``adb``, platform
+bridges) that would otherwise be orphaned in the cgroup and block
+``Restart=always``.
 
-We deliberately iterate ``cgroup.procs`` and send per-PID SIGKILLs instead
-of writing ``1`` to ``cgroup.kill``: the original failure mode in #37454
-was the kernel returning ``EINVAL`` on the cgroup-wide kill, while per-PID
-signal delivery uses a separate code path that still works.
+Per-PID SIGKILLs over ``cgroup.procs`` are used deliberately instead of writing
+``1`` to ``cgroup.kill``: the kernel has returned ``EINVAL`` on the cgroup-wide
+kill while per-PID signal delivery still works.
 """
 
 from __future__ import annotations
@@ -28,24 +26,18 @@ def _own_cgroup_path() -> str | None:
     except OSError:
         return None
     match = re.search(r"^0::(.+)$", text, re.MULTILINE)
-    if not match:
-        return None
-    return match.group(1).strip()
+    return match.group(1).strip() if match else None
 
 
 def _read_cgroup_pids(cgroup_path: str) -> list[int]:
-    procs_file = Path(f"/sys/fs/cgroup{cgroup_path}/cgroup.procs")
     try:
-        raw = procs_file.read_text(encoding="utf-8")
+        raw = Path(f"/sys/fs/cgroup{cgroup_path}/cgroup.procs").read_text(encoding="utf-8")
     except OSError:
         return []
     pids: list[int] = []
     for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
         try:
-            pids.append(int(line))
+            pids.append(int(line.strip()))
         except ValueError:
             continue
     return pids
@@ -65,9 +57,7 @@ def reap_cgroup(cgroup_path: str | None = None) -> int:
         try:
             os.kill(pid, signal.SIGKILL)  # windows-footgun: ok — Linux-only (reads /proc, /sys/fs/cgroup; runs from a systemd unit)
             killed += 1
-        except ProcessLookupError:
-            continue
-        except PermissionError:
+        except (ProcessLookupError, PermissionError):
             continue
     return killed
 

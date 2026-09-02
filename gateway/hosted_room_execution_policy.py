@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
 
@@ -20,22 +20,16 @@ class RoomExecutionPolicyError(ValueError):
     """A RoomLink execution policy is malformed or no longer current."""
 
 
-def _canonical_json(value: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
+def _policy_digest(unsigned: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")
     ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _identifier(value: Any, *, field: str) -> str:
     normalized = str(value or "").strip()
-    if (
-        not normalized
-        or len(normalized) > 128
-        or _IDENTIFIER_RE.fullmatch(normalized) is None
-    ):
+    if not normalized or len(normalized) > 128 or _IDENTIFIER_RE.fullmatch(normalized) is None:
         raise RoomExecutionPolicyError(f"{field} is invalid")
     return normalized
 
@@ -54,12 +48,8 @@ class RoomExecutionPolicy:
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "RoomExecutionPolicy":
         required = {
-            "version",
-            "target_profile",
-            "enabled_toolsets",
-            "approval_mode",
-            "max_iterations",
-            "policy_digest",
+            "version", "target_profile", "enabled_toolsets",
+            "approval_mode", "max_iterations", "policy_digest",
         }
         if not isinstance(value, Mapping) or set(value) != required:
             raise RoomExecutionPolicyError("execution policy fields are invalid")
@@ -95,23 +85,13 @@ class RoomExecutionPolicy:
             "approval_mode": approval_mode,
             "max_iterations": max_iterations,
         }
-        expected = hashlib.sha256(_canonical_json(unsigned)).hexdigest()
         supplied = str(value["policy_digest"] or "").strip().lower()
-        if supplied != expected:
-            raise RoomExecutionPolicyError(
-                "policy_digest does not match the execution policy"
-            )
+        if supplied != _policy_digest(unsigned):
+            raise RoomExecutionPolicyError("policy_digest does not match the execution policy")
         return cls(**unsigned, policy_digest=supplied)
 
     def as_mapping(self) -> dict[str, Any]:
-        return {
-            "version": self.version,
-            "target_profile": self.target_profile,
-            "enabled_toolsets": list(self.enabled_toolsets),
-            "approval_mode": self.approval_mode,
-            "max_iterations": self.max_iterations,
-            "policy_digest": self.policy_digest,
-        }
+        return {**asdict(self), "enabled_toolsets": list(self.enabled_toolsets)}
 
 
 def execution_policy_mapping(
@@ -137,32 +117,21 @@ def execution_policy_mapping(
     approvals = (
         config.get("approvals") if isinstance(config.get("approvals"), Mapping) else {}
     )
-    max_iterations = min(
-        resolve_turn_limit(agent.get("max_turns")),
-        MAX_POLICY_ITERATIONS,
-    )
-    approval_mode = (
-        "off"
-        if _YOLO_MODE_FROZEN
-        else _normalize_approval_mode(approvals.get("mode", "manual"))
-    )
     unsigned = {
         "version": POLICY_VERSION,
         "target_profile": _identifier(target_profile, field="target_profile"),
         "enabled_toolsets": toolsets,
-        "approval_mode": approval_mode,
-        "max_iterations": max_iterations,
+        "approval_mode": (
+            "off" if _YOLO_MODE_FROZEN else _normalize_approval_mode(approvals.get("mode", "manual"))
+        ),
+        "max_iterations": min(resolve_turn_limit(agent.get("max_turns")), MAX_POLICY_ITERATIONS),
     }
-    value = {
-        **unsigned,
-        "policy_digest": hashlib.sha256(_canonical_json(unsigned)).hexdigest(),
-    }
+    value = {**unsigned, "policy_digest": _policy_digest(unsigned)}
     return RoomExecutionPolicy.from_mapping(value).as_mapping()
 
 
 _CURRENT_POLICY: ContextVar[RoomExecutionPolicy | None] = ContextVar(
-    "hosted_room_execution_policy",
-    default=None,
+    "hosted_room_execution_policy", default=None
 )
 
 
