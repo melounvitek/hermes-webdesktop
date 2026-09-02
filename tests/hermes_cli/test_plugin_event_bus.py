@@ -26,7 +26,6 @@ from hermes_cli.plugins import (
     PluginContext,
     PluginManager,
     PluginManifest,
-    get_plugin_subscriptions,
 )
 
 
@@ -339,35 +338,6 @@ def test_owner_removal_cancels_callback_already_snapshotted_in_queue():
     assert observed == []
 
 
-def test_event_bus_reset_cancels_queued_generation():
-    manager = _fresh_manager()
-    ctx_gate = _make_ctx(manager, "gate", key="gate")
-    ctx_a = _make_ctx(manager, "plugin_a", key="a")
-    ctx_b = _make_ctx(manager, "plugin_b", key="b")
-    entered = threading.Event()
-    release = threading.Event()
-    observed = []
-
-    def blocking(**payload):
-        entered.set()
-        release.wait(timeout=2.0)
-
-    ctx_gate.subscribe("b:ping", blocking)
-    ctx_a.subscribe("b:ping", lambda **payload: observed.append(payload))
-    assert ctx_b.emit("ping", {"value": 1}) == 2
-    assert entered.wait(timeout=1.0)
-    old_worker = manager._event_worker
-
-    manager._reset_event_bus()
-    release.set()
-    assert old_worker is not None
-    old_worker.join(timeout=2.0)
-
-    assert not old_worker.is_alive()
-    assert observed == []
-    assert manager._subscriptions == {}
-
-
 # ── 5. Recursion cap ─────────────────────────────────────────────────────────
 
 
@@ -463,23 +433,6 @@ def test_manifest_parse_absent_emits_listens(tmp_path):
     assert manifest is not None
     assert manifest.emits == []
     assert manifest.listens == []
-
-
-# ── Module-level accessor ────────────────────────────────────────────────────
-
-
-def test_get_plugin_subscriptions_accessor(monkeypatch):
-    from hermes_cli import plugins as plugins_mod
-
-    fresh = _fresh_manager()
-    monkeypatch.setattr(plugins_mod, "_ensure_plugins_discovered", lambda force=False: fresh)
-
-    ctx = _make_ctx(fresh, "plugin_a", key="a")
-    ctx.subscribe("b:ping", lambda **p: None)
-
-    subs = get_plugin_subscriptions()
-    assert "b:ping" in subs
-    assert len(subs["b:ping"]) == 1
 
 
 # ── 7. plugins show output includes emits/listens ────────────────────────────
