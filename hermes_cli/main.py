@@ -11815,6 +11815,7 @@ def _guard_noninteractive_user_config(args) -> None:
 
 
 def _set_chat_arg_defaults(args) -> None:
+    """Fill the chat-parser attrs cmd_chat reads when chat was not parsed."""
     for attr, default in [
         ("query", None),
         ("model", None),
@@ -11827,6 +11828,22 @@ def _set_chat_arg_defaults(args) -> None:
     ]:
         if not hasattr(args, attr):
             setattr(args, attr, default)
+
+
+def _run_oneshot_from_args(args) -> None:
+    """Top-level --oneshot / -z: single-shot mode, stdout = final response only.
+
+    Bypasses cli.py entirely; _run_and_exit_oneshot never returns.
+    """
+    _confirm_startup_expensive_model_override(args)
+    _run_and_exit_oneshot(
+        args.oneshot,
+        model=getattr(args, "model", None),
+        provider=getattr(args, "provider", None),
+        toolsets=getattr(args, "toolsets", None),
+        skills=getattr(args, "skills", None),
+        usage_file=getattr(args, "usage_file", None),
+    )
 
 
 def _try_fast_serve_launch() -> bool:
@@ -11927,15 +11944,7 @@ def _try_fast_chat_launch() -> bool:
     _prepare_agent_startup(args)
 
     if getattr(args, "oneshot", None):
-        _confirm_startup_expensive_model_override(args)
-        _run_and_exit_oneshot(
-            args.oneshot,
-            model=getattr(args, "model", None),
-            provider=getattr(args, "provider", None),
-            toolsets=getattr(args, "toolsets", None),
-            skills=getattr(args, "skills", None),
-            usage_file=getattr(args, "usage_file", None),
-        )
+        _run_oneshot_from_args(args)
 
     if (args.resume or args.continue_last) and args.command is None:
         args.command = "chat"
@@ -11985,15 +11994,7 @@ def _try_termux_fast_cli_launch() -> bool:
 
     if getattr(args, "oneshot", None):
         _prepare_agent_startup(args)
-        _confirm_startup_expensive_model_override(args)
-        _run_and_exit_oneshot(
-            args.oneshot,
-            model=getattr(args, "model", None),
-            provider=getattr(args, "provider", None),
-            toolsets=getattr(args, "toolsets", None),
-            skills=getattr(args, "skills", None),
-            usage_file=getattr(args, "usage_file", None),
-        )
+        _run_oneshot_from_args(args)
 
     if (args.resume or args.continue_last) and args.command is None:
         args.command = "chat"
@@ -12577,22 +12578,10 @@ def _parse_cli_args(parser, subparsers, argv):
 
 
 def _default_to_chat(args) -> None:
-    """No subcommand given: run chat, filling the chat-parser attrs it expects."""
-    # Top-level --resume / --continue is a shortcut to chat.
+    """No subcommand given: run chat (top-level --resume/--continue is a chat shortcut)."""
     if args.resume or args.continue_last:
         args.command = "chat"
-    for attr, default in [
-        ("query", None),
-        ("model", None),
-        ("provider", None),
-        ("toolsets", None),
-        ("verbose", None),
-        ("resume", None),
-        ("continue_last", None),
-        ("worktree", False),
-    ]:
-        if not hasattr(args, attr):
-            setattr(args, attr, default)
+    _set_chat_arg_defaults(args)
     cmd_chat(args)
 
 
@@ -12704,18 +12693,8 @@ def main():
     # trigger consent prompts for hooks the user is still inspecting.
     _prepare_agent_startup(args)
 
-    # Handle top-level --oneshot / -z: single-shot mode, stdout = final
-    # response only, nothing else. Bypasses cli.py entirely.
     if getattr(args, "oneshot", None):
-        _confirm_startup_expensive_model_override(args)
-        _run_and_exit_oneshot(
-            args.oneshot,
-            model=getattr(args, "model", None),
-            provider=getattr(args, "provider", None),
-            toolsets=getattr(args, "toolsets", None),
-            skills=getattr(args, "skills", None),
-            usage_file=getattr(args, "usage_file", None),
-        )
+        _run_oneshot_from_args(args)
 
     # No subcommand (optionally with top-level --resume / --continue) → chat.
     if args.command is None:

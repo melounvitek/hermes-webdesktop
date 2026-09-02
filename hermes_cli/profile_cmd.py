@@ -82,6 +82,7 @@ def _render_distribution_plan(plan) -> None:
 
 
 def _profile_status(args):
+    """Bare ``hermes profile`` — show current profile status."""
     from hermes_constants import display_hermes_home
     from hermes_cli.profiles import (
         get_active_profile_name,
