@@ -9,6 +9,7 @@ import sys
 import subprocess
 import shutil
 import importlib.util
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from hermes_cli.config import (
@@ -1255,56 +1256,30 @@ def check_macos_full_disk_access() -> None:
     )
 
 
-def run_doctor(args):
-    """Run diagnostic checks."""
-    should_fix = getattr(args, 'fix', False)
-    ack_target = getattr(args, 'ack', None)
+@dataclass
+class Finding:
+    """What one doctor check contributed: auto-fixable issues, manual-only issues, fixes applied."""
 
-    # Doctor runs from the interactive CLI, so CLI-gated tool availability
-    # checks (like cronjob management) should see the same context as `hermes`.
-    os.environ.setdefault("HERMES_INTERACTIVE", "1")
+    issues: list = field(default_factory=list)
+    manual_issues: list = field(default_factory=list)
+    fixed: int = 0
 
-    # Handle `hermes doctor --ack <id>` as a fast path. Persist the ack and
-    # return without running the rest of the diagnostics — the user has
-    # already seen the advisory and just wants to silence it.
-    if ack_target:
-        from hermes_cli.security_advisories import (
-            ADVISORIES,
-            ack_advisory,
-        )
-        valid_ids = {a.id for a in ADVISORIES}
-        if ack_target not in valid_ids:
-            print(color(
-                f"Unknown advisory ID: {ack_target!r}. Known IDs: "
-                f"{', '.join(sorted(valid_ids)) or '(none)'}",
-                Colors.RED,
-            ))
-            sys.exit(2)
-        if ack_advisory(ack_target):
-            print(color(
-                f"  ✓ Acknowledged advisory {ack_target}. "
-                f"It will no longer trigger startup banners.",
-                Colors.GREEN,
-            ))
-        else:
-            print(color(
-                f"  ✗ Failed to persist ack for {ack_target}. "
-                f"Check ~/.hermes/config.yaml is writable.",
-                Colors.RED,
-            ))
-            sys.exit(1)
-        return
+    def merge(self, other: "Finding") -> None:
+        self.issues.extend(other.issues)
+        self.manual_issues.extend(other.manual_issues)
+        self.fixed += other.fixed
 
-    issues = []
-    manual_issues = []  # issues that can't be auto-fixed
-    fixed_count = 0
 
-    print()
-    print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
-    print(color("│                 🩺 Hermes Doctor                        │", Colors.CYAN))
-    print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
+def _memory_store_flags(hermes_home: Path) -> tuple:
+    from tools.memory_tool import get_builtin_memory_store_flags
 
-    _section("Security Advisories")
+    return get_builtin_memory_store_flags({"memory": _doctor_memory_config(hermes_home)})
+
+
+def _check_security_advisories(should_fix: bool) -> Finding:
+    """Compromised-package advisories; funnels remediation into manual issues."""
+    f = Finding()
+    manual_issues = f.manual_issues
     try:
         from hermes_cli.security_advisories import (
             detect_compromised,
@@ -1349,8 +1324,13 @@ def run_doctor(args):
     except Exception as e:
         # Never let a bug in the advisory check block the rest of doctor.
         check_warn(f"Security advisory check failed: {e}")
+    return f
 
-    _section("MCP Server Security")
+
+def _check_mcp_security(should_fix: bool) -> Finding:
+    """Flag mcp_servers entries with suspicious stdio commands."""
+    f = Finding()
+    manual_issues = f.manual_issues
     try:
         from hermes_cli.config import load_config
         from hermes_cli.mcp_security import validate_mcp_server_entry
@@ -1373,8 +1353,13 @@ def run_doctor(args):
             check_ok("No suspicious MCP stdio commands")
     except Exception as e:
         check_warn(f"MCP security check failed: {e}")
-    
-    _section("Python Environment")
+    return f
+
+
+def _check_python_environment(should_fix: bool) -> Finding:
+    """Interpreter, linked SQLite, venv, macOS TCC anchors, version-file drift."""
+    f = Finding()
+    issues = f.issues
     py_version = sys.version_info
     if py_version >= (3, 11):
         check_ok(f"Python {py_version.major}.{py_version.minor}.{py_version.micro}")
@@ -1442,11 +1427,19 @@ def run_doctor(args):
     # rebuild; a post-#73681 identifier-pinned DR survives, but grants made
     # to older binaries stay stale (toggle shows ON while macOS re-prompts).
     check_macos_tcc_grants()
+    return f
 
-    _section("SSL / CA Certificates")
+
+def _check_certificates(should_fix: bool) -> Finding:
+    f = Finding()
+    manual_issues = f.manual_issues
     check_certificates(should_fix=should_fix, issues=manual_issues)
+    return f
 
-    _section("Required Packages")
+
+def _check_required_packages(should_fix: bool) -> Finding:
+    f = Finding()
+    issues = f.issues
     required_packages = [
         ("openai", "OpenAI SDK"),
         ("rich", "Rich (terminal UI)"),
@@ -1474,9 +1467,13 @@ def run_doctor(args):
             check_ok(name, "(optional)")
         except ImportError:
             check_warn(name, "(optional, not installed)")
-    
-    _section("Configuration Files")
-    # Managed scope (administrator-pinned config/env), when present.
+    return f
+
+
+def _check_env_file(should_fix: bool) -> Finding:
+    """Managed scope plus ~/.hermes/.env presence and provider credentials."""
+    f = Finding()
+    issues = f.issues
     managed_scope_check()
     # Check ~/.hermes/.env (primary location for user config)
     env_path = HERMES_HOME / '.env'
@@ -1514,11 +1511,17 @@ def run_doctor(args):
                     pass
                 check_ok(f"Created empty {_DHH}/.env")
                 check_info("Run 'hermes setup' to configure API keys")
-                fixed_count += 1
+                f.fixed += 1
             else:
                 check_info("Run 'hermes setup' to create one")
                 issues.append("Run 'hermes setup' to create .env")
-    
+    return f
+
+
+def _check_config_file(should_fix: bool) -> Finding:
+    """config.yaml presence; validate model.provider / model.default and credentials."""
+    f = Finding()
+    issues = f.issues
     # Check ~/.hermes/config.yaml (primary) or project cli-config.yaml (fallback)
     config_path = HERMES_HOME / 'config.yaml'
     if config_path.exists():
@@ -1734,10 +1737,16 @@ def run_doctor(args):
                     from hermes_cli.config import DEFAULT_CONFIG, save_config
                     save_config(DEFAULT_CONFIG)
                     check_ok(f"Created {_DHH}/config.yaml from defaults")
-                fixed_count += 1
+                f.fixed += 1
             else:
                 check_warn("config.yaml not found", "(using defaults)")
+    return f
 
+
+def _check_config_drift(should_fix: bool) -> Finding:
+    """Config version, stale root keys, HERMES_MAX_ITERATIONS ghost, deprecations, structure."""
+    f = Finding()
+    issues, manual_issues = f.issues, f.manual_issues
     # Check config version and stale keys
     config_path = HERMES_HOME / 'config.yaml'
     if config_path.exists():
@@ -1753,7 +1762,7 @@ def run_doctor(args):
                     try:
                         migrate_config(interactive=False, quiet=False)
                         check_ok("Config migrated to latest version")
-                        fixed_count += 1
+                        f.fixed += 1
                     except Exception as mig_err:
                         check_warn(f"Auto-migration failed: {mig_err}")
                         issues.append("Run 'hermes setup' to migrate config")
@@ -1796,7 +1805,7 @@ def run_doctor(args):
                     from hermes_cli.config import atomic_config_write
                     atomic_config_write(config_path, raw_config)
                     check_ok("Migrated stale root-level keys into model section")
-                    fixed_count += 1
+                    f.fixed += 1
                 else:
                     issues.append("Stale root-level provider/base_url in config.yaml — run 'hermes doctor --fix'")
         except Exception:
@@ -1843,7 +1852,7 @@ def run_doctor(args):
                             "Removed stale HERMES_MAX_ITERATIONS from .env "
                             f"(config.yaml agent.max_turns={cfg_max_turns} is now authoritative)"
                         )
-                        fixed_count += 1
+                        f.fixed += 1
                     else:
                         check_warn("Could not remove HERMES_MAX_ITERATIONS from .env")
                         manual_issues.append(
@@ -1907,9 +1916,12 @@ def run_doctor(args):
             report_deprecated_config_and_env({}, _env_for_depr)
         except Exception:
             pass
+    return f
 
-    _section("xAI Model Retirement (May 15, 2026)")
 
+def _check_xai_retirement(should_fix: bool) -> Finding:
+    f = Finding()
+    manual_issues = f.manual_issues
     try:
         from hermes_cli.config import load_config
         from hermes_cli.xai_retirement import (
@@ -1932,9 +1944,12 @@ def run_doctor(args):
             )
     except Exception as _xai_check_err:
         check_warn("xAI retirement check skipped", f"({_xai_check_err})")
+    return f
 
-    _section("Auth Providers")
 
+def _check_auth_providers(should_fix: bool) -> Finding:
+    """Refresh-free OAuth status snapshot (doctor must never trigger a token refresh)."""
+    f = Finding()
     try:
         from hermes_cli.auth import (
             get_nous_auth_status_local,
@@ -1990,24 +2005,23 @@ def run_doctor(args):
                 check_info(xai_oauth_status["error"])
     except Exception:
         pass
+    return f
 
-    _section("Directory Structure")
+
+def _check_directory_structure(should_fix: bool) -> Finding:
+    """HERMES_HOME, expected subdirs, SOUL.md, and the enabled built-in memory files."""
+    f = Finding()
     hermes_home = HERMES_HOME
     if hermes_home.exists():
         check_ok(f"{_DHH} directory exists")
     elif should_fix:
         hermes_home.mkdir(parents=True, exist_ok=True)
         check_ok(f"Created {_DHH} directory")
-        fixed_count += 1
+        f.fixed += 1
     else:
         check_warn(f"{_DHH} not found", "(will be created on first use)")
     
-    from tools.memory_tool import get_builtin_memory_store_flags
-
-    _memory_config = _doctor_memory_config(hermes_home)
-    _memory_enabled, _user_profile_enabled = get_builtin_memory_store_flags(
-        {"memory": _memory_config}
-    )
+    _memory_enabled, _user_profile_enabled = _memory_store_flags(hermes_home)
 
     # Check expected subdirectories. The built-in file store does not create or
     # consume memories/ when both targets are disabled, so stale migration files
@@ -2022,7 +2036,7 @@ def run_doctor(args):
         elif should_fix:
             subdir_path.mkdir(parents=True, exist_ok=True)
             check_ok(f"Created {_DHH}/{subdir_name}/")
-            fixed_count += 1
+            f.fixed += 1
         else:
             check_warn(f"{_DHH}/{subdir_name}/ not found", "(will be created on first use)")
     
@@ -2047,7 +2061,7 @@ def run_doctor(args):
                 encoding="utf-8",
             )
             check_ok(f"Created {_DHH}/SOUL.md with basic template")
-            fixed_count += 1
+            f.fixed += 1
     
     # Check only enabled built-in stores. External providers are additive, but
     # users can explicitly disable either legacy file target; stale files left
@@ -2076,8 +2090,15 @@ def run_doctor(args):
         if should_fix:
             memories_dir.mkdir(parents=True, exist_ok=True)
             check_ok(f"Created {_DHH}/memories/")
-            fixed_count += 1
-    
+            f.fixed += 1
+    return f
+
+
+def _check_state_db(should_fix: bool) -> Finding:
+    """state.db session count, FTS write health, schema repair, stats snapshot, WAL size."""
+    f = Finding()
+    issues = f.issues
+    hermes_home = HERMES_HOME
     # Check SQLite session store
     state_db_path = hermes_home / "state.db"
     if state_db_path.exists():
@@ -2113,7 +2134,7 @@ def run_doctor(args):
                             "Repaired state.db FTS write health",
                             f"(strategy: {report.get('strategy')}; backup: {backup_name})",
                         )
-                        fixed_count += 1
+                        f.fixed += 1
                     else:
                         check_warn(
                             "state.db FTS write-health repair did not recover automatically",
@@ -2159,7 +2180,7 @@ def run_doctor(args):
                             f"Repaired state.db schema ({count} sessions recovered)",
                             f"(strategy: {report.get('strategy')}; backup: {backup_name})",
                         )
-                        fixed_count += 1
+                        f.fixed += 1
                     else:
                         check_warn(
                             "state.db schema repair did not recover automatically",
@@ -2226,17 +2247,28 @@ def run_doctor(args):
                     conn.close()
                     new_size = wal_path.stat().st_size if wal_path.exists() else 0
                     check_ok(f"WAL checkpoint performed ({wal_size // 1024}K → {new_size // 1024}K)")
-                    fixed_count += 1
+                    f.fixed += 1
                 else:
                     issues.append("Large WAL file — run 'hermes doctor --fix' to checkpoint")
             elif wal_size > 10 * 1024 * 1024:  # 10 MB
                 check_info(f"WAL file is {wal_size // (1024*1024)} MB (normal for active sessions)")
         except Exception:
             pass
+    return f
 
+
+def _check_gateway_supervision(should_fix: bool) -> Finding:
+    f = Finding()
+    issues = f.issues
     _check_gateway_service_linger(issues)
     _check_s6_supervision(issues)
+    return f
 
+
+def _check_command_installation(should_fix: bool) -> Finding:
+    """Venv entry point and the ~/.local/bin (or $PREFIX/bin) symlink; skipped on Windows."""
+    f = Finding()
+    issues, manual_issues = f.issues, f.manual_issues
     if sys.platform != "win32":
         _section("Command Installation")
         # Determine the venv entry point location
@@ -2284,7 +2316,7 @@ def run_doctor(args):
                         _cmd_link.unlink()
                         _cmd_link.symlink_to(_venv_bin)
                         check_ok(f"Fixed symlink: {_cmd_link_display}/hermes → {_venv_bin}")
-                        fixed_count += 1
+                        f.fixed += 1
                     else:
                         issues.append(f"Broken symlink at {_cmd_link_display}/hermes — run 'hermes doctor --fix'")
             elif _cmd_link.exists():
@@ -2299,7 +2331,7 @@ def run_doctor(args):
                     _cmd_link_dir.mkdir(parents=True, exist_ok=True)
                     _cmd_link.symlink_to(_venv_bin)
                     check_ok(f"Created symlink: {_cmd_link_display}/hermes → {_venv_bin}")
-                    fixed_count += 1
+                    f.fixed += 1
 
                     # Check if the link dir is on PATH
                     _path_dirs = os.environ.get("PATH", "").split(os.pathsep)
@@ -2311,8 +2343,11 @@ def run_doctor(args):
                         manual_issues.append(f"Add {_cmd_link_display} to your PATH")
                 else:
                     issues.append(f"Missing {_cmd_link_display}/hermes symlink — run 'hermes doctor --fix'")
+    return f
 
-    _section("External Tools")
+
+def _check_git_and_rg(should_fix: bool) -> Finding:
+    f = Finding()
     # Git
     if _safe_which("git"):
         check_ok("git")
@@ -2325,7 +2360,13 @@ def run_doctor(args):
     else:
         check_warn("ripgrep (rg) not found", "(file search uses grep fallback)")
         check_info(f"Install for faster search: {_system_package_install_cmd('ripgrep')}")
-    
+    return f
+
+
+def _check_terminal_backend(should_fix: bool) -> Finding:
+    """Docker/SSH/Daytona/Vercel/plugin terminal backends, gated on TERMINAL_ENV."""
+    f = Finding()
+    issues = f.issues
     # Docker (optional)
     terminal_env = os.getenv("TERMINAL_ENV", "local")
     try:
@@ -2523,7 +2564,12 @@ def run_doctor(args):
                     check_ok(_label, _detail)
                 else:
                     _fail_and_issue(_label, _detail, _detail.strip("()"), issues)
+    return f
 
+
+def _check_node_and_browser(should_fix: bool) -> Finding:
+    """Node.js, agent-browser resolution, Playwright Chromium, Lightpanda engine."""
+    f = Finding()
     # Node.js + agent-browser (for browser automation tools)
     if _safe_which("node"):
         check_ok("Node.js")
@@ -2660,7 +2706,13 @@ def run_doctor(args):
                     "(browser tools will fail until it is installed)",
                 )
                 check_info(LIGHTPANDA_INSTALL_HINT)
+    return f
 
+
+def _check_npm_audit(should_fix: bool) -> Finding:
+    """npm audit per Node package tree (root, web/ui-tui workspaces, WhatsApp bridge)."""
+    f = Finding()
+    issues = f.issues
     # npm audit for all Node.js packages
     _npm_bin = _safe_which("npm")
     if _npm_bin:
@@ -2764,8 +2816,13 @@ def run_doctor(args):
         check_info("Termux compatibility fallbacks:")
         for note in _termux_install_all_fallback_notes():
             check_info(note)
+    return f
 
-    _section("API Connectivity")
+
+def _check_api_connectivity(should_fix: bool) -> Finding:
+    """Parallel HTTP/SDK probes for every configured provider; results printed in submission order."""
+    f = Finding()
+    issues = f.issues
     # Refactor: every connectivity probe below is HTTP-bound and fully
     # independent. Running them in series spent ~5s wall on a typical
     # workstation (2s of that was boto3's IMDS lookup for AWS credentials,
@@ -3193,8 +3250,12 @@ def run_doctor(args):
             _issues_to_add = []
         for _issue in _issues_to_add:
             issues.append(_issue)
+    return f
 
-    _section("Tool Availability")
+
+def _check_tool_availability(should_fix: bool) -> Finding:
+    f = Finding()
+    issues = f.issues
     try:
         # Add project root to path for imports
         sys.path.insert(0, str(PROJECT_ROOT))
@@ -3239,8 +3300,11 @@ def run_doctor(args):
             issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
     except Exception as e:
         check_warn("Could not check tool availability", f"({e})")
-    
-    _section("Skills Hub")
+    return f
+
+
+def _check_skills_hub(should_fix: bool) -> Finding:
+    f = Finding()
     hub_dir = HERMES_HOME / "skills" / ".hub"
     if hub_dir.exists():
         check_ok("Skills Hub directory exists")
@@ -3280,9 +3344,13 @@ def run_doctor(args):
         check_ok("GitHub authenticated via gh CLI", "(full API access — no GITHUB_TOKEN needed)")
     else:
         check_warn("No GITHUB_TOKEN", f"(60 req/hr rate limit — set in {_DHH}/.env for better rates)")
+    return f
 
-    _section("Memory Provider")
-    _active_memory_provider = _memory_config.get("provider", "")
+
+def _check_memory_provider(should_fix: bool) -> Finding:
+    f = Finding()
+    issues = f.issues
+    _active_memory_provider = _doctor_memory_config(HERMES_HOME).get("provider", "")
 
     if not _active_memory_provider:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")
@@ -3368,7 +3436,11 @@ def run_doctor(args):
                 check_warn(f"{_active_memory_provider} plugin not found", "run: hermes memory setup")
         except Exception as _e:
             check_warn(f"{_active_memory_provider} check failed", str(_e))
+    return f
 
+
+def _check_profiles(should_fix: bool) -> Finding:
+    f = Finding()
     try:
         from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
         import re as _re
@@ -3411,17 +3483,71 @@ def run_doctor(args):
         pass
     except Exception:
         pass
+    return f
 
-    # Opt-in live backend probes run AFTER all static checks, only with
-    # `hermes doctor --live` (real network calls; bounded + read-only).
-    try:
-        from hermes_cli.doctor_live import maybe_run_live_checks
-        maybe_run_live_checks(args, manual_issues)
-    except Exception:
-        pass
 
+# Ordered (section title, check). A None title means the check prints its own
+# header (or none) — order is the user-visible output order, keep it.
+DOCTOR_CHECKS = (
+    ('Security Advisories', _check_security_advisories),
+    ('MCP Server Security', _check_mcp_security),
+    ('Python Environment', _check_python_environment),
+    ('SSL / CA Certificates', _check_certificates),
+    ('Required Packages', _check_required_packages),
+    ('Configuration Files', _check_env_file),
+    (None, _check_config_file),
+    (None, _check_config_drift),
+    ('xAI Model Retirement (May 15, 2026)', _check_xai_retirement),
+    ('Auth Providers', _check_auth_providers),
+    ('Directory Structure', _check_directory_structure),
+    (None, _check_state_db),
+    (None, _check_gateway_supervision),
+    (None, _check_command_installation),
+    ('External Tools', _check_git_and_rg),
+    (None, _check_terminal_backend),
+    (None, _check_node_and_browser),
+    (None, _check_npm_audit),
+    ('API Connectivity', _check_api_connectivity),
+    ('Tool Availability', _check_tool_availability),
+    ('Skills Hub', _check_skills_hub),
+    ('Memory Provider', _check_memory_provider),
+    (None, _check_profiles),
+)
+
+
+def _ack_advisory(ack_target: str) -> None:
+    """`hermes doctor --ack <id>`: persist the ack and return without running diagnostics."""
+    from hermes_cli.security_advisories import (
+        ADVISORIES,
+        ack_advisory,
+    )
+    valid_ids = {a.id for a in ADVISORIES}
+    if ack_target not in valid_ids:
+        print(color(
+            f"Unknown advisory ID: {ack_target!r}. Known IDs: "
+            f"{', '.join(sorted(valid_ids)) or '(none)'}",
+            Colors.RED,
+        ))
+        sys.exit(2)
+    if ack_advisory(ack_target):
+        print(color(
+            f"  ✓ Acknowledged advisory {ack_target}. "
+            f"It will no longer trigger startup banners.",
+            Colors.GREEN,
+        ))
+    else:
+        print(color(
+            f"  ✗ Failed to persist ack for {ack_target}. "
+            f"Check ~/.hermes/config.yaml is writable.",
+            Colors.RED,
+        ))
+        sys.exit(1)
+
+
+def _print_summary(should_fix: bool, total: Finding) -> None:
     print()
-    remaining_issues = issues + manual_issues
+    remaining_issues = total.issues + total.manual_issues
+    fixed_count = total.fixed
     if should_fix and fixed_count > 0:
         print(color("─" * 60, Colors.GREEN))
         print(color(f"  Fixed {fixed_count} issue(s).", Colors.GREEN, Colors.BOLD), end="")
@@ -3448,3 +3574,37 @@ def run_doctor(args):
         print(color("  All checks passed! 🎉", Colors.GREEN, Colors.BOLD))
     
     print()
+
+
+def run_doctor(args):
+    """Run diagnostic checks."""
+    should_fix = getattr(args, 'fix', False)
+    ack_target = getattr(args, 'ack', None)
+
+    # Doctor runs from the interactive CLI, so CLI-gated tool availability
+    # checks (like cronjob management) should see the same context as `hermes`.
+    os.environ.setdefault("HERMES_INTERACTIVE", "1")
+
+    if ack_target:
+        return _ack_advisory(ack_target)
+
+    print()
+    print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
+    print(color("│                 🩺 Hermes Doctor                        │", Colors.CYAN))
+    print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
+
+    total = Finding()
+    for title, check in DOCTOR_CHECKS:
+        if title:
+            _section(title)
+        total.merge(check(should_fix))
+
+    # Opt-in live backend probes run AFTER all static checks, only with
+    # `hermes doctor --live` (real network calls; bounded + read-only).
+    try:
+        from hermes_cli.doctor_live import maybe_run_live_checks
+        maybe_run_live_checks(args, total.manual_issues)
+    except Exception:
+        pass
+
+    _print_summary(should_fix, total)
