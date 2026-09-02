@@ -31,7 +31,6 @@ _stdio_pgids: Dict[int, int] = {}
 def _snapshot_child_pids() -> set:
     """Current direct-child PIDs: /proc on Linux, else psutil, else empty set."""
     my_pid = os.getpid()
-
     # /proc/<pid>/task/<tid>/children is per-THREAD, and stdio_client() spawns
     # from the MCP loop thread, so union every task's children — reading only
     # the main thread's file returns an empty set on every Linux install.
@@ -48,14 +47,11 @@ def _snapshot_child_pids() -> set:
         return found
     except (FileNotFoundError, OSError, ValueError):
         pass
-
     try:
         import psutil
         return {c.pid for c in psutil.Process(my_pid).children()}
     except Exception:
-        pass
-
-    return set()
+        return set()
 
 
 # argv markers of non-MCP gateway children that can race into the snapshot
@@ -81,17 +77,15 @@ def _filter_mcp_children(pids: set) -> set:
         import psutil
     except ImportError:
         return pids  # keep all PIDs (prior behavior)
-    filtered: set = set()
-    for pid in pids:
+
+    def _is_mcp(pid: int) -> bool:
         try:
             argv = psutil.Process(pid).cmdline()
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-            # Raced away or zombie — cannot be our fresh server, unsafe to track.
-            continue
-        if any(marker in arg for arg in argv[1:] for marker in _NON_MCP_CHILD_CMDLINE_MARKERS):
-            continue
-        filtered.add(pid)
-    return filtered
+            return False  # raced away or zombie — cannot be our fresh server, unsafe to track
+        return not any(marker in arg for arg in argv[1:] for marker in _NON_MCP_CHILD_CMDLINE_MARKERS)
+
+    return {pid for pid in pids if _is_mcp(pid)}
 
 
 def _clear_connect_cooldowns() -> None:
