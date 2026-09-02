@@ -5827,6 +5827,12 @@ def resolve_provider_client(
             client_obj, final_model_str, api_key_str, base_url_str, api_mode,
         )
 
+    def _route(client_obj, final_model_str):
+        """Return (client, model), converting to the async wrapper when ``async_mode``."""
+        if async_mode:
+            return _to_async_client(client_obj, final_model_str, is_vision=is_vision)
+        return client_obj, final_model_str
+
     # ── Auto: try all providers in priority order ────────────────────
     if provider == "auto":
         client, resolved, effective_provider = _resolve_auto_route(
@@ -5842,11 +5848,7 @@ def resolve_provider_client(
                 "Dropping OpenRouter-format model %r for non-OpenRouter "
                 "auxiliary provider (using %r instead)", model, resolved)
             model = None
-        final_model = model or resolved
-        routed_client, routed_model = (
-            _to_async_client(client, final_model, is_vision=is_vision)
-            if async_mode else (client, final_model)
-        )
+        routed_client, routed_model = _route(client, model or resolved)
         _tag_effective_provider(routed_client, effective_provider)
         return routed_client, routed_model
 
@@ -5863,8 +5865,7 @@ def resolve_provider_client(
             )
             return None, None
         final_model = _normalize_resolved_model(model or default, provider)
-        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                else (client, final_model))
+        return _route(client, final_model)
 
     # ── Nous Portal (OAuth) ──────────────────────────────────────────
     if provider == "nous":
@@ -5890,8 +5891,7 @@ def resolve_provider_client(
         client = _maybe_wrap_anthropic(
             client, final_model, api_key_str, base_url_str, portal_mode,
         )
-        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                else (client, final_model))
+        return _route(client, final_model)
 
     # ── OpenAI Codex (OAuth → Responses API) ─────────────────────────
     if provider == "openai-codex":
@@ -5923,8 +5923,7 @@ def resolve_provider_client(
                            "but no Codex OAuth token found (run: hermes model)")
             return None, None
         final_model = _normalize_resolved_model(model or default, provider)
-        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                else (client, final_model))
+        return _route(client, final_model)
 
     # ── xAI Grok OAuth (device code → Responses API) ───────────────
     # Without this branch xai-oauth falls to the generic oauth_external arm, returns (None, None),
@@ -5939,8 +5938,7 @@ def resolve_provider_client(
             )
             return None, None
         final_model = _normalize_resolved_model(model or default, provider)
-        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                else (client, final_model))
+        return _route(client, final_model)
 
     # ── Custom endpoint (OPENAI_BASE_URL + OPENAI_API_KEY) ───────────
     if provider == "custom":
@@ -6001,8 +5999,7 @@ def resolve_provider_client(
                 extra["default_headers"] = _merged_custom
             client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **extra)
             client = _wrap_if_needed(client, final_model, wrap_base or custom_base, custom_key)
-            return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                    else (client, final_model))
+            return _route(client, final_model)
         # Try custom first, then API-key providers (Codex excluded here:
         # falling through to Codex with no model is a stale-constant trap).
         for try_fn in (_try_custom_endpoint, _resolve_api_key_provider):
@@ -6015,8 +6012,7 @@ def resolve_provider_client(
                 _raw_ckey = getattr(client, "api_key", "")
                 _ckey = "" if (callable(_raw_ckey) and not isinstance(_raw_ckey, str)) else str(_raw_ckey or "")
                 client = _wrap_if_needed(client, final_model, _cbase, _ckey)
-                return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                        else (client, final_model))
+                return _route(client, final_model)
         logger.warning("resolve_provider_client: custom/main requested "
                        "but no endpoint credentials found")
         return None, None
@@ -6099,23 +6095,21 @@ def resolve_provider_client(
                     or "gpt-4o-mini",
                     provider,
                 )
-                # anthropic_messages hits /anthropic directly; OpenAI-wire paths need the /v1
-                # equivalent. Rewrite only on OpenAI-wire so the Anthropic SDK sees the original URL.
-                if entry_api_mode == "anthropic_messages":
-                    openai_base = custom_base
-                    raw_base_for_wrap = custom_base
-                else:
-                    openai_base = _to_openai_base_url(custom_base)
-                    raw_base_for_wrap = custom_base
-                _clean_base2, _dq2 = _extract_url_query_params(openai_base)
-                _extra2 = {"default_query": _dq2} if _dq2 else {}
-                _headers2 = _apply_user_default_headers(_extra2.get("default_headers"))
-                if _headers2:
-                    _extra2["default_headers"] = _headers2
                 logger.debug(
                     "resolve_provider_client: named custom provider %r (%s, api_mode=%s)",
                     provider, final_model, entry_api_mode or "chat_completions")
-                # anthropic_messages: route via AnthropicAuxiliaryClient (mirrors _try_custom_endpoint).
+
+                def _openai_wire_client():
+                    # OpenAI-wire paths need the /v1 equivalent of the configured base.
+                    _clean_base2, _dq2 = _extract_url_query_params(_to_openai_base_url(custom_base))
+                    _extra2 = {"default_query": _dq2} if _dq2 else {}
+                    _headers2 = _apply_user_default_headers(None)
+                    if _headers2:
+                        _extra2["default_headers"] = _headers2
+                    return _create_openai_client(api_key=custom_key, base_url=_clean_base2, **_extra2)
+
+                # anthropic_messages: route via AnthropicAuxiliaryClient (mirrors _try_custom_endpoint);
+                # the Anthropic SDK sees the original (un-rewritten) URL.
                 if entry_api_mode == "anthropic_messages":
                     try:
                         from agent.anthropic_adapter import build_anthropic_client
@@ -6127,33 +6121,18 @@ def resolve_provider_client(
                             "installed — falling back to OpenAI-wire.",
                             provider,
                         )
-                        # Fallback went OpenAI-wire — redo query extraction on the /v1 URL.
-                        _fallback_base = _to_openai_base_url(custom_base)
-                        _fb_clean, _fb_dq = _extract_url_query_params(_fallback_base)
-                        _fb_extra = {"default_query": _fb_dq} if _fb_dq else {}
-                        _fb_headers = _apply_user_default_headers(_fb_extra.get("default_headers"))
-                        if _fb_headers:
-                            _fb_extra["default_headers"] = _fb_headers
-                        client = _create_openai_client(api_key=custom_key, base_url=_fb_clean, **_fb_extra)
-                        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                                else (client, final_model))
-                    sync_anthropic = AnthropicAuxiliaryClient(
+                        return _route(_openai_wire_client(), final_model)
+                    return _route(AnthropicAuxiliaryClient(
                         real_client, final_model, custom_key, custom_base, is_oauth=False,
-                    )
-                    if async_mode:
-                        return AsyncAnthropicAuxiliaryClient(sync_anthropic), final_model
-                    return sync_anthropic, final_model
-                client = _create_openai_client(api_key=custom_key, base_url=_clean_base2, **_extra2)
+                    ), final_model)
+                client = _openai_wire_client()
                 # codex_responses, or auto-detect via _wrap_if_needed (which reads the
                 # closed-over task-level `api_mode`).
-                if entry_api_mode == "codex_responses" and not isinstance(
-                    client, CodexAuxiliaryClient
-                ):
+                if entry_api_mode == "codex_responses":
                     client = CodexAuxiliaryClient(client, final_model)
                 else:
-                    client = _wrap_if_needed(client, final_model, raw_base_for_wrap, custom_key)
-                return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                        else (client, final_model))
+                    client = _wrap_if_needed(client, final_model, custom_base, custom_key)
+                return _route(client, final_model)
             logger.warning(
                 "resolve_provider_client: named custom provider %r has no base_url",
                 provider)
@@ -6180,8 +6159,7 @@ def resolve_provider_client(
             )
             return None, None
         final_model = _normalize_resolved_model(model or default_model, provider)
-        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                else (client, final_model))
+        return _route(client, final_model)
 
     # ── API-key providers from PROVIDER_REGISTRY ─────────────────────
     try:
@@ -6209,7 +6187,7 @@ def resolve_provider_client(
                 logger.warning("resolve_provider_client: anthropic requested but no Anthropic credentials found")
                 return None, None
             final_model = _normalize_resolved_model(model or default_model, provider)
-            return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode else (client, final_model))
+            return _route(client, final_model)
 
         creds = resolve_api_key_provider_credentials(provider)
         api_key = str(creds.get("api_key", "")).strip()
@@ -6267,8 +6245,7 @@ def resolve_provider_client(
             if is_native_gemini_base_url(base_url):
                 client = GeminiNativeClient(api_key=api_key, base_url=base_url)
                 logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
-                return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                        else (client, final_model))
+                return _route(client, final_model)
 
         # Provider-specific headers
         headers = {}
@@ -6314,8 +6291,7 @@ def resolve_provider_client(
         client = _wrap_if_needed(client, final_model, raw_base_url, api_key)
 
         logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
-        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                else (client, final_model))
+        return _route(client, final_model)
 
     if pconfig.auth_type == "external_process":
         creds = resolve_external_process_provider_credentials(provider)
@@ -6372,8 +6348,7 @@ def resolve_provider_client(
                 client = None
             if client is not None:
                 logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
-                return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                        else (client, final_model))
+                return _route(client, final_model)
         if provider not in _LOGGED_UNSUPPORTED_EXTPROC_KEYS:
             _LOGGED_UNSUPPORTED_EXTPROC_KEYS.add(provider)
             logger.debug("resolve_provider_client: external-process provider %s not "
@@ -6413,8 +6388,7 @@ def resolve_provider_client(
                            "client: %s", exc)
             return None, None
         logger.debug("resolve_provider_client: vertex (%s)", final_model)
-        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                else (client, final_model))
+        return _route(client, final_model)
 
     elif pconfig.auth_type == "aws_sdk":
         # AWS SDK providers (Bedrock) — Claude models use the Anthropic Bedrock
@@ -6461,11 +6435,9 @@ def resolve_provider_client(
             client = OpenAI(**client_kwargs)
             logger.debug("resolve_provider_client: bedrock-openai (%s, %s)", final_model, region)
             if raw_codex:
-                return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                        else (client, final_model))
+                return _route(client, final_model)
             wrapped = CodexAuxiliaryClient(client, final_model)
-            return (_to_async_client(wrapped, final_model, is_vision=is_vision) if async_mode
-                    else (wrapped, final_model))
+            return _route(wrapped, final_model)
 
         base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
 
@@ -6487,8 +6459,7 @@ def resolve_provider_client(
             logger.debug("resolve_provider_client: bedrock converse (%s, %s)",
                          final_model, region)
 
-        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                else (client, final_model))
+        return _route(client, final_model)
 
     elif pconfig.auth_type in {"oauth_device_code", "oauth_external"}:
         # OAuth providers — route through their specific try functions
