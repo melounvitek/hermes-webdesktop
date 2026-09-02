@@ -28,6 +28,10 @@ def contextvar_set(var: contextvars.ContextVar, value) -> Iterator[None]:
         var.reset(token)
 
 
+def _event_field():
+    return field(default_factory=threading.Event, init=False, repr=False)
+
+
 @dataclass
 class DashboardOAuthFlow:
     flow_id: str
@@ -44,9 +48,9 @@ class DashboardOAuthFlow:
     expected_state: str | None = field(default=None, init=False)
     _callback: tuple[str, str | None] | None = field(default=None, init=False, repr=False)
     _callback_error: str | None = field(default=None, init=False, repr=False)
-    _authorization_ready: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
-    _callback_ready: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
-    _worker_done: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _authorization_ready: threading.Event = _event_field()
+    _callback_ready: threading.Event = _event_field()
+    _worker_done: threading.Event = _event_field()
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     async def publish_authorization_url(self, url: str) -> None:
@@ -68,9 +72,7 @@ class DashboardOAuthFlow:
             raise TimeoutError(message)
 
     async def wait_for_authorization_url(self, timeout: float = 30.0) -> str:
-        await self._await_event(
-            self._authorization_ready, timeout, "Timed out waiting for MCP authorization URL"
-        )
+        await self._await_event(self._authorization_ready, timeout, "Timed out waiting for MCP authorization URL")
         if not self.authorization_url:
             raise RuntimeError(self.error or "MCP OAuth flow ended before authorization")
         return self.authorization_url
@@ -80,11 +82,7 @@ class DashboardOAuthFlow:
         with self._lock:
             if self._callback_ready.is_set():
                 raise ValueError("OAuth callback already received")
-            if (
-                self.expected_state is None
-                or state is None
-                or not secrets.compare_digest(self.expected_state, state)
-            ):
+            if self.expected_state is None or state is None or not secrets.compare_digest(self.expected_state, state):
                 raise ValueError("OAuth callback state mismatch")
             if error:
                 self._callback_error = error
@@ -95,9 +93,7 @@ class DashboardOAuthFlow:
             self._callback_ready.set()
 
     async def wait_for_callback(self, timeout: float = 300.0) -> tuple[str, str | None]:
-        await self._await_event(
-            self._callback_ready, timeout, "Timed out waiting for MCP OAuth callback"
-        )
+        await self._await_event(self._callback_ready, timeout, "Timed out waiting for MCP OAuth callback")
         if self._callback_error:
             raise RuntimeError(f"OAuth authorization failed: {self._callback_error}")
         if self._callback is None:

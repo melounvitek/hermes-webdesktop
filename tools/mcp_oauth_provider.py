@@ -41,7 +41,8 @@ class HermesProviderMixin:
         super().__init__(*args, **kwargs)
         self._hermes_token_user_agent = token_user_agent
 
-    def _stamp_token_user_agent(self, request):
+    def _prepare_token_request(self, request):
+        """Stamp the configured User-Agent onto a token/refresh request."""
         ua = getattr(self, "_hermes_token_user_agent", None)  # tests build via __new__
         if ua:
             request.headers["User-Agent"] = ua
@@ -61,13 +62,11 @@ class HermesProviderMixin:
 
     async def _exchange_token_authorization_code(self, *args: Any, **kwargs: Any):
         self._coerce_client_secret_post()
-        request = await super()._exchange_token_authorization_code(*args, **kwargs)
-        return self._stamp_token_user_agent(request)
+        return self._prepare_token_request(await super()._exchange_token_authorization_code(*args, **kwargs))
 
     async def _refresh_token(self):
         self._coerce_client_secret_post()
-        request = await super()._refresh_token()
-        return self._stamp_token_user_agent(request)
+        return self._prepare_token_request(await super()._refresh_token())
 
     async def _store_tokens(self, token_response) -> None:
         self.context.current_tokens = token_response
@@ -109,9 +108,7 @@ class HermesProviderMixin:
         return True
 
 
-def prepare_oauth_config(
-    server_name: str, server_url: str, oauth_config: dict | None
-) -> tuple[dict, "HermesTokenStorage"]:
+def prepare_oauth_config(server_name: str, server_url: str, oauth_config: dict | None) -> tuple[dict, "HermesTokenStorage"]:
     """Copy the ``oauth:`` block, apply provider defaults, open its token storage.
 
     The copy matters: later steps record ``_resolved_port`` / ``_cimd_url`` in
@@ -124,9 +121,7 @@ def prepare_oauth_config(
     return cfg, mo.HermesTokenStorage(server_name)
 
 
-def build_provider_kwargs(
-    cfg: dict, storage: "HermesTokenStorage", *, ssh_proxy_hint: bool
-) -> dict[str, Any]:
+def build_provider_kwargs(cfg: dict, storage: "HermesTokenStorage", *, ssh_proxy_hint: bool) -> dict[str, Any]:
     """Resolve the callback port and return the shared provider constructor kwargs.
 
     Runs the port → client-metadata → pre-registration sequence (order matters:
