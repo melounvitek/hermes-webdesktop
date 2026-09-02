@@ -33,98 +33,18 @@ extract-capable backend.
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Dict, List, Optional
+from typing import Optional
 
+from agent.provider_registry import ProviderRegistry, is_available_safe
 from agent.web_search_provider import WebSearchProvider
-from hermes_constants import hermes_home_key
 
 logger = logging.getLogger(__name__)
 
 
-_providers: Dict[str, WebSearchProvider] = {}
-_scoped_providers: Dict[str, Dict[str, WebSearchProvider]] = {}
-_lock = threading.Lock()
-
-
-def register_provider(provider: WebSearchProvider, *, scope: Optional[str] = None) -> None:
-    """Register a web search/extract provider.
-
-    Re-registration (same ``name``) overwrites the previous entry and logs
-    a debug message — makes hot-reload scenarios (tests, dev loops) behave
-    predictably.
-    """
-    if not isinstance(provider, WebSearchProvider):
-        raise TypeError(
-            f"register_provider() expects a WebSearchProvider instance, "
-            f"got {type(provider).__name__}"
-        )
-    raw_name = provider.name
-    if not isinstance(raw_name, str) or not raw_name.strip():
-        raise ValueError("Web provider .name must be a non-empty string")
-    name = raw_name.strip()
-    with _lock:
-        target = _providers if scope is None else _scoped_providers.setdefault(scope, {})
-        existing = target.get(name)
-        target[name] = provider
-    if existing is not None:
-        logger.debug(
-            "Web provider '%s' re-registered (was %r)",
-            name, type(existing).__name__,
-        )
-    else:
-        logger.debug(
-            "Registered web provider '%s' (%s)",
-            name, type(provider).__name__,
-        )
-
-
-def list_providers(*, scope: Optional[str] = None) -> List[WebSearchProvider]:
-    """Return all registered providers, sorted by name."""
-    with _lock:
-        merged = dict(_providers)
-        merged.update(_scoped_providers.get(scope or hermes_home_key(), {}))
-        items = list(merged.values())
-    return sorted(items, key=lambda p: p.name)
-
-
-def get_provider(name: str, *, scope: Optional[str] = None) -> Optional[WebSearchProvider]:
-    """Return the provider registered under *name*, or None."""
-    if not isinstance(name, str):
-        return None
-    with _lock:
-        key = name.strip()
-        return _scoped_providers.get(scope or hermes_home_key(), {}).get(key) or _providers.get(key)
-
-
-def snapshot_registration(
-    name: str, *, scope: Optional[str] = None
-) -> Optional[WebSearchProvider]:
-    with _lock:
-        target = _providers if scope is None else _scoped_providers.get(scope, {})
-        return target.get(name.strip())
-
-
-def restore_registration(
-    name: str,
-    current: WebSearchProvider,
-    previous: Optional[WebSearchProvider],
-    *,
-    scope: Optional[str] = None,
-) -> bool:
-    """Restore a plugin registration only when *current* is still installed."""
-    key = name.strip()
-    with _lock:
-        target = _providers if scope is None else _scoped_providers.setdefault(scope, {})
-        if target.get(key) is not current:
-            return False
-        if previous is None:
-            target.pop(key, None)
-        else:
-            target[key] = previous
-        if scope is not None and not target:
-            _scoped_providers.pop(scope, None)
-    return True
+_registry: ProviderRegistry[WebSearchProvider] = ProviderRegistry(
+    label="Web", provider_cls=WebSearchProvider, logger=logger,
+)
+_registry.export(globals())
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +68,11 @@ def _read_config_key(*path: str) -> Optional[str]:
     except Exception as exc:
         logger.debug("Could not read config %s: %s", ".".join(path), exc)
     return None
+
+
+def _configured_backend(capability: str) -> Optional[str]:
+    """``web.<capability>_backend`` (preferred) or ``web.backend`` (shared fallback)."""
+    return _read_config_key("web", f"{capability}_backend") or _read_config_key("web", "backend")
 
 
 # Legacy preference order — preserves behaviour for users who set no
@@ -207,36 +132,13 @@ def _keyless_preference() -> tuple:
 def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearchProvider]:
     """Resolve the active provider for a capability ("search" | "extract").
 
-    Resolution rules (in order):
-
-    1. **Explicit config wins, ignoring availability.** If
-       ``web.{capability}_backend`` or ``web.backend`` names a registered
-       provider that supports *capability*, return it even if its
-       :meth:`is_available` returns False — the dispatcher will surface a
-       precise "X_API_KEY is not set" error to the user instead of silently
-       routing somewhere else. Matches legacy
-       :func:`tools.web_tools._get_backend` behavior for configured names.
-
-    2. **Single-provider shortcut.** When only one registered provider
-       supports *capability* AND ``is_available()`` reports True, return it.
-
-    3. **Legacy preference walk, filtered by availability.** Walk the
-       :data:`_LEGACY_PREFERENCE` order (firecrawl → parallel → tavily →
-       exa → searxng → brave-free → ddgs) looking for a provider whose
-       ``supports_<capability>()`` is True AND whose ``is_available()`` is
-       True. Matches the historic ``tools.web_tools._get_backend()``
-       candidate order so users with credentials but no explicit config
-       key keep landing on the same provider as pre-migration. This is
-       the path that fires when no config key is set — pick the
-       highest-priority backend the user actually has credentials for.
-
-    Returns None when no provider is configured AND no available provider
-    matches the legacy preference; the dispatcher then returns a "set up a
-    provider" error to the user.
+    Rules, in order (see module docstring): explicit config wins even when
+    ``is_available()`` is False (the dispatcher surfaces a precise
+    "X_API_KEY is not set" error instead of a silent switch); then the single
+    available capable provider; then the availability-filtered legacy walk;
+    then the keyless free-tier walk; else None.
     """
-    with _lock:
-        snapshot = dict(_providers)
-        snapshot.update(_scoped_providers.get(hermes_home_key(), {}))
+    snapshot = _registry.merged()
 
     def _capable(p: WebSearchProvider) -> bool:
         if capability == "search":
@@ -245,17 +147,9 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
             return bool(p.supports_extract())
         return False
 
-    def _is_available_safe(p: WebSearchProvider) -> bool:
-        """Wrap ``is_available()`` so a buggy provider doesn't kill resolution."""
-        try:
-            return bool(p.is_available())
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("provider %s.is_available() raised %s", p.name, exc)
-            return False
+    def _available(p: WebSearchProvider) -> bool:
+        return is_available_safe(p, logger, "provider %s.is_available() raised %s")
 
-    # 1. Explicit config wins — return regardless of is_available() so the
-    #    user gets a precise downstream error message rather than a silent
-    #    backend switch. Matches _get_backend() in web_tools.py.
     if configured:
         provider = snapshot.get(configured)
         if provider is not None and _capable(provider):
@@ -271,31 +165,20 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
                 configured, capability,
             )
 
-    # 2. + 3. Fallback path — filter by availability so we don't surface
-    #    a provider the user has no credentials for. Without this filter,
-    #    a registered-but-unconfigured provider could end up "active" on
-    #    a fresh install with no API keys at all.
-    eligible = [
-        p for p in snapshot.values()
-        if _capable(p) and _is_available_safe(p)
-    ]
+    # Fallbacks are availability-filtered so a registered-but-keyless provider
+    # never becomes "active" on a fresh install.
+    eligible = [p for p in snapshot.values() if _capable(p) and _available(p)]
     if len(eligible) == 1:
         return eligible[0]
 
     for legacy in _LEGACY_PREFERENCE:
         provider = snapshot.get(legacy)
-        if (
-            provider is not None
-            and _capable(provider)
-            and _is_available_safe(provider)
-        ):
+        if provider is not None and _capable(provider) and _available(provider):
             return provider
 
-    # 4. Keyless free-tier walk — the user has NO credentialed/importable
-    #    backend at all. Fall back to providers that can serve anonymously
-    #    (public MCP free tiers), unless disabled via
-    #    ``web.keyless_fallback: false``. This tier never pre-empts a keyed
-    #    setup: it is only reachable when the legacy walk found nothing.
+    # Keyless free tier (anonymous public MCP tiers) is last-resort only: it is
+    # reachable solely when the legacy walk found nothing, never pre-empting a
+    # keyed setup. Disabled via ``web.keyless_fallback: false``.
     if _keyless_tier_enabled():
         for name in _keyless_preference():
             provider = snapshot.get(name)
@@ -325,41 +208,23 @@ def _keyless_tier_enabled() -> bool:
 
 
 def _disabled_web_plugin_for(configured: Optional[str] = None, *, capability: Optional[str] = None) -> Optional[str]:
-    """Return the plugin key of a *disabled* bundled web plugin that would
-    have provided the configured backend, or None.
+    """Plugin key of a *disabled* bundled web plugin that would have provided
+    the configured backend (``web.<capability>_backend`` → ``web.backend``),
+    or None.
 
-    When a user sets ``web.extract_backend: firecrawl`` (or the search
-    equivalent) but also lists ``web-firecrawl`` in ``plugins.disabled``,
-    the provider never registers and the dispatcher would otherwise emit a
-    misleading "No web extract provider configured. Set web.extract_backend
-    to ..." error — even though the backend IS configured correctly. The
-    real fix is to re-enable the plugin. This helper detects that case so
-    the dispatcher can point the user at the actual cause (issue #40190
-    follow-up: pi314's disabled-plugin symptom).
-
-    Pass ``capability`` ("search" | "extract") to resolve the configured
-    name straight from ``config.yaml`` (``web.<capability>_backend`` →
-    ``web.backend``). This is more reliable than the resolved backend the
-    dispatcher fell back to, since a disabled provider fails the
-    ``_is_backend_available`` gate and the dispatcher silently drops to
-    the shared default. An explicit ``configured`` name still wins when
-    given.
-
-    Matching is by convention: bundled web plugins live under the
-    ``web/<vendor>`` key with the provider ``name`` differing only in
-    hyphen/underscore (``brave-free`` provider ⇄ ``web/brave_free`` key,
-    ``firecrawl`` ⇄ ``web/firecrawl``). We normalize both sides before
-    comparing so every bundled provider is covered without hardcoding a
-    per-vendor table.
+    Lets the dispatcher say "re-enable web-firecrawl" instead of a misleading
+    "No web extract provider configured" when the backend IS configured but
+    listed in ``plugins.disabled``. Resolving from config.yaml (rather than
+    the resolved backend) matters because a disabled provider fails the
+    availability gate and the dispatcher silently drops to the default.
+    Bundled web plugins live under ``web/<vendor>`` with the provider name
+    differing only by hyphen/underscore, so both sides are normalized.
     """
     def _norm(s: str) -> str:
         return s.strip().lower().replace("-", "_")
 
     if not configured and capability in ("search", "extract"):
-        configured = (
-            _read_config_key("web", f"{capability}_backend")
-            or _read_config_key("web", "backend")
-        )
+        configured = _configured_backend(capability)
     if not configured:
         return None
 
@@ -384,27 +249,11 @@ def _disabled_web_plugin_for(configured: Optional[str] = None, *, capability: Op
 
 
 def get_active_search_provider() -> Optional[WebSearchProvider]:
-    """Resolve the currently-active web search provider.
-
-    Reads ``web.search_backend`` (preferred) or ``web.backend`` (shared
-    fallback) from config.yaml; falls back per the module docstring.
-    """
-    explicit = _read_config_key("web", "search_backend") or _read_config_key("web", "backend")
-    return _resolve(explicit, capability="search")
+    """Resolve the currently-active web search provider."""
+    return _resolve(_configured_backend("search"), capability="search")
 
 
 def get_active_extract_provider() -> Optional[WebSearchProvider]:
-    """Resolve the currently-active web extract provider.
+    """Resolve the currently-active web extract provider."""
+    return _resolve(_configured_backend("extract"), capability="extract")
 
-    Reads ``web.extract_backend`` (preferred) or ``web.backend`` (shared
-    fallback) from config.yaml; falls back per the module docstring.
-    """
-    explicit = _read_config_key("web", "extract_backend") or _read_config_key("web", "backend")
-    return _resolve(explicit, capability="extract")
-
-
-def _reset_for_tests() -> None:
-    """Clear the registry. **Test-only.**"""
-    with _lock:
-        _providers.clear()
-        _scoped_providers.clear()
