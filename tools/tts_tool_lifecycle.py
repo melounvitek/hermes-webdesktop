@@ -31,6 +31,7 @@ from tools.tts_command_provider import (
     render_command_template as _render_command_tts_template,
 )
 from tools.tts_tool_local import _LOCAL_TTS_MODEL_CACHES
+from tools.tts_tool_plugins import _lookup_plugin_provider
 
 logger = logging.getLogger("tools.tts_tool")
 
@@ -95,11 +96,7 @@ def _signal_user_tts_provider(name: str, tts_config: Dict[str, Any], hook: str) 
 
             threading.Thread(target=_run, name=f"tts-{hook}-{name}", daemon=True).start()
             return hook
-        from agent.tts_registry import get_provider
-        from hermes_cli.plugins import _ensure_plugins_discovered
-
-        _ensure_plugins_discovered()
-        plugin_provider = get_provider(name)
+        plugin_provider = _lookup_plugin_provider(name)
         if plugin_provider is None:
             return None
         getattr(plugin_provider, hook)()

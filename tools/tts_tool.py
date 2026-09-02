@@ -173,6 +173,11 @@ from tools.tts_tool_speaker import (  # noqa: F401 — historical names re-expor
     stream_tts_to_speaker,
 )
 from tools.tts_text_normalize import _strip_markdown_for_tts  # noqa: F401 — historical name re-exported
+from tools.tts_tool_plugins import (  # noqa: F401 — historical names re-exported
+    _dispatch_to_plugin_provider,
+    _plugin_provider_is_available,
+    _plugin_provider_is_voice_compatible,
+)
 from tools.tts_tool_openai import (  # noqa: F401 — historical names re-exported
     DEFAULT_DEEPINFRA_TTS_VOICE,
     DEFAULT_OPENAI_BASE_URL,
@@ -334,92 +339,6 @@ OPUS_VOICE_PLATFORMS = frozenset({
 _NATIVE_OPUS_PROVIDERS = frozenset({"openai", "elevenlabs", "mistral", "gemini"})
 # Built-ins whose native output (MP3/WAV) needs ffmpeg for voice-bubble delivery.
 _FFMPEG_OPUS_PROVIDERS = frozenset({"edge", "neutts", "minimax", "xai", "kittentts", "piper"})
-
-
-def _dispatch_to_plugin_provider(
-    text: str,
-    output_path: str,
-    provider: str,
-    tts_config: Dict[str, Any],
-) -> Optional[str]:
-    """Route to a plugin-registered TTS provider; None means "fall through".
-
-    Invariants enforced here even though the caller checks them too, so a
-    caller refactor can't silently break them:
-
-    1. Built-in names never reach the plugin registry.
-    2. A same-named ``type: command`` provider wins over a plugin.
-    3. Dispatch fires only for a registered :class:`TTSProvider` whose name
-       equals the configured value; unknown names return None.
-
-    Plugin exceptions propagate — the outer ``text_to_speech_tool`` converts
-    them to the standard error envelope.
-    """
-    if not provider:
-        return None
-    key = provider.lower().strip()
-    if key in BUILTIN_TTS_PROVIDERS:
-        return None
-    if _is_command_provider_config(_get_named_provider_config(tts_config, key)):
-        return None
-    try:
-        from agent.tts_registry import get_provider
-        from hermes_cli.plugins import _ensure_plugins_discovered
-
-        _ensure_plugins_discovered()
-        plugin_provider = get_provider(key)
-        if plugin_provider is None:
-            # Long-lived sessions may have discovered plugins before this one
-            # was installed/enabled; retry once with a forced refresh.
-            _ensure_plugins_discovered(force=True)
-            plugin_provider = get_provider(key)
-    except Exception as exc:  # noqa: BLE001 — discovery failure is non-fatal
-        logger.debug("tts plugin dispatch skipped (discovery failed): %s", exc)
-        return None
-    if plugin_provider is None:
-        return None
-
-    # voice/model/speed/format are optional per the TTSProvider.synthesize
-    # contract; providers fall back to their own defaults on None.
-    cfg = tts_config if isinstance(tts_config, dict) else {}
-    voice = cfg.get("voice")
-    model = cfg.get("model")
-    speed = cfg.get("speed")
-    fmt = cfg.get("output_format", DEFAULT_COMMAND_TTS_OUTPUT_FORMAT)
-
-    logger.info("Generating speech with plugin TTS provider '%s'...", key)
-    written = plugin_provider.synthesize(
-        text,
-        output_path,
-        voice=voice if isinstance(voice, str) and voice else None,
-        model=model if isinstance(model, str) and model else None,
-        speed=float(speed) if isinstance(speed, (int, float)) else None,
-        format=str(fmt).lower() if fmt else "mp3",
-    )
-    # Contract: returns the (possibly rewritten) output path; tolerate None.
-    return written if isinstance(written, str) and written else output_path
-
-
-def _plugin_provider_is_voice_compatible(provider: str) -> bool:
-    """True when the registered plugin provider opts into voice-bubble delivery.
-
-    Any registry/property failure means False (safe default, like command providers).
-    """
-    if not provider:
-        return False
-    key = provider.lower().strip()
-    if key in BUILTIN_TTS_PROVIDERS:
-        return False
-    try:
-        from agent.tts_registry import get_provider
-
-        plugin_provider = get_provider(key)
-        if plugin_provider is None:
-            return False
-        return bool(plugin_provider.voice_compatible)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("tts plugin voice_compatible check failed for '%s': %s", key, exc)
-        return False
 
 
 def _has_any_command_tts_provider(tts_config: Optional[Dict[str, Any]] = None) -> bool:
@@ -938,15 +857,7 @@ def check_tts_requirements() -> bool:
     if check is not None:
         return check()
 
-    try:
-        from agent.tts_registry import get_provider
-        from hermes_cli.plugins import _ensure_plugins_discovered
-
-        _ensure_plugins_discovered()
-        plugin = get_provider(provider)
-        return bool(plugin and plugin.is_available())
-    except Exception:
-        return False
+    return _plugin_provider_is_available(provider)
 
 
 # ---------------------------------------------------------------------------
