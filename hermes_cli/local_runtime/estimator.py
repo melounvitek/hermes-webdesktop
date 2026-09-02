@@ -1,18 +1,7 @@
 """Per-layer context-memory estimator + physics check.
 
-The whole-model dense formula misprices 1M-context hybrids by ~100x; the
-per-layer walk fixes that, and every column is measured on real GGUFs:
-
-- full-attention layer: linear in T          (B1: 144.0 KiB/tok on Qwen3-4B
-                                              f16 — formula-exact)
-- SWA layer: capped at the sliding window
-- recurrent layer (n_head_kv == 0): constant (state is ~context-free)
-- q8_0 KV = exactly 34/64 of f16 (holds on CUDA and CPU)
-- weights: exact from the tensor table (within 0.01% of the loader)
-
-The estimator is ADVISORY: fit's allocation is authoritative at launch and
-the touch generation is ground truth after it. Unknown shapes round UP
-(never underestimate memory).
+The estimator is ADVISORY: fit's allocation is authoritative at launch and the touch generation is
+ground truth after it. Unknown shapes round UP (never underestimate memory).
 """
 
 from __future__ import annotations
@@ -46,9 +35,9 @@ class LayerKind(Enum):
 
 @dataclass
 class ModelProfile:
-    """Everything the policy needs, decoupled from GGUF parsing so the
-    decision-table tests can construct profiles directly (design's
-    verification plan)."""
+    """Everything the policy needs, decoupled from GGUF parsing so the decision-table tests can
+    construct profiles directly (design's verification plan).
+    """
 
     name: str
     weights_bytes: int
@@ -82,11 +71,9 @@ class ModelProfile:
 class HardwareBudget:
     """Memory the physics check may budget against.
 
-    Budget-source rule: discrete cards may trust the device query
-    (measured honest); unified-memory devices must budget from OS free
-    physical memory minus headroom — their device queries have been
-    observed off by 3x. Callers construct
-    this accordingly; the estimator just consumes it.
+    Budget-source rule: discrete cards may trust the device query (measured honest); unified-memory
+    devices must budget from OS free physical memory minus headroom — their device queries have been
+    observed off by 3x. Callers construct this accordingly; the estimator just consumes it.
     """
 
     usable_vram_bytes: int      # live free (discrete) / derived (UMA)
@@ -138,9 +125,9 @@ def kv_dtype_factor(flash_attention: bool) -> float:
 
 def ctx_bytes(profile: ModelProfile, window: int, *,
               flash_attention: bool = True) -> int:
-    """Context memory for one window: full layers linear in T, SWA layers
-    capped at the sliding window, recurrent layers constant. Scaled by
-    profile.kv_scale (MTP draft context)."""
+    """Context memory for one window: full layers linear in T, SWA layers capped at the sliding window,
+    recurrent layers constant. Scaled by profile.kv_scale (MTP draft context).
+    """
     factor = kv_dtype_factor(flash_attention)
     total = 0.0
     for kind, per_token_f16 in profile.layers:

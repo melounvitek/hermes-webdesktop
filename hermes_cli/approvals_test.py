@@ -1,32 +1,13 @@
 """``hermes approvals test`` — dry-run approval verdict for a command.
 
-Answers "what would the approval system do with this command?" WITHOUT
-running it, prompting anyone, or persisting anything. It composes the REAL
-runtime evaluators from ``tools.approval`` in the same order the runtime
-guard (``check_all_command_guards``) applies them:
+Answers "what would the approval system do with this command?" WITHOUT running it, prompting anyone,
+or persisting anything. It composes the REAL runtime evaluators from ``tools.approval`` in the same
+order the runtime guard (``check_all_command_guards``) applies them:
 
-    1. container-skip gate (isolated backends bypass all guards),
-    2. hardline blocklist (never bypassable, fires before yolo/off),
-    3. sudo-stdin guard (unconditional),
-    4. user ``approvals.deny`` rules (fire before yolo/off),
-    5. yolo / ``approvals.mode: off`` bypass,
-    6. permanent ``command_allowlist``,
-    7. dangerous-pattern detection → would ask for approval.
-
-Because the same functions run — including ``_command_detection_variants``'s
-normalization/de-obfuscation path — an obfuscated command (``r\\m -rf /``)
-gets exactly the verdict its plain form would get at runtime, and the trace
-shows the normalized variants that were actually evaluated.
-
-Read-only invariants: the command is never executed, no approval prompt is
-raised, nothing is written to config or approval history, no gateway
-notification fires.
-
-Exit codes (script-friendly):
-    0  allow (would run without a prompt)
-    1  usage error
-    2  ask-approval (would raise an interactive approval prompt)
-    3  deny (hardline blocklist, sudo-stdin guard, or user deny rule)
+1. container-skip gate (isolated backends bypass all guards), 2. hardline blocklist (never
+bypassable, fires before yolo/off), 3. sudo-stdin guard (unconditional), 4. user ``approvals.deny``
+rules (fire before yolo/off), 5. yolo / ``approvals.mode: off`` bypass, 6. permanent
+``command_allowlist``, 7.
 """
 
 from __future__ import annotations
@@ -49,10 +30,8 @@ _VERDICT_EXIT = {
 def evaluate_command(command: str, env_type: str = "local") -> dict:
     """Return the dry-run verdict for *command* on *env_type*.
 
-    Pure composition of the runtime evaluators — no execution, no prompt,
-    no persistence. Returns a dict with ``verdict``, ``exit_code``,
-    ``rule`` (matching guard/pattern name or None), ``detail`` (human
-    explanation), and ``normalized_variants`` (the trace of normalized /
+    Pure composition of the runtime evaluators — no execution, prompt or persistence. The dict
+    carries ``verdict``, ``exit_code``, ``rule``, ``detail`` and ``normalized_variants`` (the
     de-obfuscated forms the detectors actually evaluated).
     """
     import tools.approval as approval

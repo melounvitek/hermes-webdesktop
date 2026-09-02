@@ -1,16 +1,4 @@
-"""
-Skills configuration for Hermes Agent.
-`hermes skills` enters this module.
-
-Toggle individual skills or categories on/off, globally or per-platform.
-Config stored in ~/.hermes/config.yaml under:
-
-  skills:
-    disabled: [skill-a, skill-b]          # global disabled list
-    platform_disabled:                    # per-platform overrides
-      telegram: [skill-c]
-      cli: []
-"""
+"""Skills configuration for Hermes Agent. `hermes skills` enters this module."""
 from typing import List, Optional, Set
 
 from hermes_cli.config import cfg_get, load_config, save_config
@@ -27,9 +15,8 @@ PLATFORMS = {k: info.label for k, info in _PLATFORMS.items() if k != "api_server
 def _normalize_skill_names(values) -> Set[str]:
     """Normalize a config value into a set of skill names.
 
-    Mirrors ``agent.skill_utils._normalize_string_set``: ``None`` (YAML null)
-    means empty, a bare scalar (``disabled: my-skill``) means a single-item
-    list — NOT a set of its characters (#13026).
+    Mirrors ``agent.skill_utils._normalize_string_set``: ``None`` (YAML null) means empty, and a
+    bare scalar (``disabled: my-skill``) means a single-item list — NOT a set of its characters.
     """
     if values is None:
         return set()
@@ -42,12 +29,11 @@ def _normalize_skill_names(values) -> Set[str]:
 
 
 def get_disabled_skills(config: dict, platform: Optional[str] = None) -> Set[str]:
-    """Return disabled skill names: the global list unioned with the
-    platform-specific list when a platform is given.
+    """Return disabled skill names: the global list unioned with the platform list when given.
 
-    A globally-disabled skill stays disabled on every platform, so the
-    platform list adds to the global list rather than replacing it. This
-    mirrors ``agent.skill_utils.get_disabled_skill_names``.
+    A globally-disabled skill stays disabled on every platform, so the platform list adds to the
+    global list rather than replacing it (mirrors
+    ``agent.skill_utils.get_disabled_skill_names``).
     """
     skills_cfg = config.get("skills") or {}
     if not isinstance(skills_cfg, dict):
@@ -67,8 +53,8 @@ def get_disabled_skills(config: dict, platform: Optional[str] = None) -> Set[str
 def save_disabled_skills(config: dict, disabled: Set[str], platform: Optional[str] = None):
     """Persist disabled skill names to config.
 
-    Essential skills (e.g. ``hermes-agent``) are silently dropped from the
-    list — they cannot be disabled from any surface.
+    Essential skills (e.g. ``hermes-agent``) are silently dropped from the list — they cannot be
+    disabled from any surface.
     """
     from agent.skill_utils import ESSENTIAL_SKILLS
     disabled = set(disabled) - ESSENTIAL_SKILLS

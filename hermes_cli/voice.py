@@ -1,29 +1,11 @@
-"""Process-wide voice recording + TTS API for the TUI gateway.
-
-Wraps ``tools.voice_mode`` (recording/transcription) and ``tools.tts_tool``
-(text-to-speech) behind idempotent, stateful entry points that the gateway's
-``voice.record``, ``voice.toggle``, and ``voice.tts`` JSON-RPC handlers can
-call from a dedicated thread. The gateway imports this module lazily so that
-missing optional audio deps (sounddevice, faster-whisper, numpy) surface as
-an ``ImportError`` at call time, not at startup.
-
-Two usage modes are exposed:
-
-* **Push-to-talk** (``start_recording`` / ``stop_and_transcribe``) — single
-  manually-bounded capture used when the caller drives the start/stop pair
-  explicitly.
-* **Continuous (VAD)** (``start_continuous`` / ``stop_continuous``) — mirrors
-  the classic CLI voice mode: recording auto-stops on silence, transcribes,
-  hands the result to a callback, and then auto-restarts for the next turn.
-  Three consecutive no-speech cycles stop the loop and fire
-  ``on_silent_limit`` so the UI can turn the mode off.
-"""
+"""Process-wide voice recording + TTS API for the TUI gateway."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import sys
 import threading
 from typing import Any, Callable, Optional
@@ -87,62 +69,37 @@ _DEFAULT_PT_KEY = "c-b"
 def voice_record_key_from_config(cfg: Any) -> Any:
     """Shape-safe ``cfg.voice.record_key`` lookup.
 
-    ``load_config()`` deep-merges raw YAML and preserves scalar
-    overrides, so a hand-edited ``voice: true`` / ``voice: cmd+b``
-    leaves ``cfg["voice"]`` as a bool/str instead of a dict, and the
-    naive ``.get("voice", {}).get("record_key")`` chain raises
-    AttributeError before voice can even start (Copilot round-11 on
-    #19835). Return ``None`` for malformed shapes so call sites can
-    feed the result straight into the normalizer/formatter and get
-    the documented default.
+    ``load_config()`` deep-merges raw YAML and preserves scalar overrides, so a hand-edited ``voice:
+    true`` / ``voice: cmd+b`` leaves ``cfg["voice"]`` as a bool/str instead of a dict, and the naive
+    ``.get("voice", {}).get("record_key")`` chain raises AttributeError before voice can even start
+    (Copilot round-11 on #19835).
     """
-    if not isinstance(cfg, dict):
-        return None
-
-    voice = cfg.get("voice")
-    if not isinstance(voice, dict):
-        return None
-
-    return voice.get("record_key")
+    voice = cfg.get("voice") if isinstance(cfg, dict) else None
+    return voice.get("record_key") if isinstance(voice, dict) else None
 
 
 def normalize_voice_record_key_for_prompt_toolkit(raw: Any) -> str:
     """Coerce ``voice.record_key`` into prompt_toolkit's ``c-x`` / ``a-x`` format.
 
-    Mirrors the TUI parser contract (``ui-tui/src/lib/platform.ts``)
-    so one config value binds the same shortcut in both runtimes:
+    Mirrors the TUI parser contract (``ui-tui/src/lib/platform.ts``) so one config value binds the
+    same shortcut in both runtimes:
 
-    * non-string / empty / typo'd / bare-char / multi-modifier / reserved
-      ``ctrl+c|d|l`` → documented default ``c-b``
-    * single-char keys: ``ctrl+o`` → ``c-o``
-    * named keys: ``ctrl+space`` → ``c-space`` (aliases collapse:
-      ``ctrl+return`` → ``c-enter``)
-    * ``super`` / ``win`` / ``windows`` → ``c-b`` (TUI-only modifiers —
-      prompt_toolkit has no super mod; the CLI binding site is
-      expected to warn when this fallback fires so users see the
-      cross-runtime split, Copilot round-11 on #19835)
+    * non-string / empty / typo'd / bare-char / multi-modifier / reserved ``ctrl+c|d|l`` →
+    documented default ``c-b`` * single-char keys: ``ctrl+o`` → ``c-o`` * named keys: ``ctrl+space``
+    → ``c-space`` (aliases collapse: ``ctrl+return`` → ``c-enter``) * ``super`` / ``win`` /
+    ``windows`` → ``c-b`` (TUI-only modifiers — prompt_toolkit has no super mod; the CLI binding
+    site is expected to warn when this fallback fires so users see the cross-runtime split, Copilot
+    round-11 on #19835)
     """
     if not isinstance(raw, str):
         return _DEFAULT_PT_KEY
 
-    lowered = raw.strip().lower()
-    if not lowered:
-        return _DEFAULT_PT_KEY
-
-    parts = [p.strip() for p in lowered.split("+") if p.strip()]
-    if not parts:
-        return _DEFAULT_PT_KEY
-
-    # Multi-modifier chords like ``ctrl+alt+r`` bind different shortcuts
-    # in prompt_toolkit (a-c-r form) and hermes-ink rejects them; collapse
-    # to the documented default instead of silently diverging.
-    if len(parts) > 2:
-        return _DEFAULT_PT_KEY
-
-    # Bare char / bare named key (no explicit modifier) — the CLI's
-    # prompt_toolkit binds the raw key without a modifier, which the TUI
-    # parser refuses; reject here too so both runtimes agree.
-    if len(parts) == 1:
+    parts = [p.strip() for p in raw.strip().lower().split("+") if p.strip()]
+    # Exactly ``modifier+key``. Multi-modifier chords like ``ctrl+alt+r`` bind
+    # different shortcuts in prompt_toolkit (a-c-r form) and hermes-ink rejects
+    # them; a bare char / named key (no modifier) is refused by the TUI parser.
+    # Both collapse to the documented default so the runtimes agree.
+    if len(parts) != 2:
         return _DEFAULT_PT_KEY
 
     modifier_token, key_token = parts
@@ -163,32 +120,22 @@ def normalize_voice_record_key_for_prompt_toolkit(raw: Any) -> str:
     # Single-char key: reject reserved-ctrl chords that the TUI would
     # also block at parse time, plus the mac-only alt reservation.
     if len(key_token) == 1:
-        if normalized_mod == "c-" and key_token in _VOICE_RESERVED_CTRL_CHARS:
-            return _DEFAULT_PT_KEY
-        if (
-            normalized_mod == "a-"
-            and sys.platform == "darwin"
-            and key_token in _VOICE_RESERVED_ALT_CHARS_MAC
-        ):
-            return _DEFAULT_PT_KEY
-        return f"{normalized_mod}{key_token}"
+        reserved = (
+            _VOICE_RESERVED_CTRL_CHARS if normalized_mod == "c-"
+            else _VOICE_RESERVED_ALT_CHARS_MAC if sys.platform == "darwin"
+            else frozenset()
+        )
+        return _DEFAULT_PT_KEY if key_token in reserved else f"{normalized_mod}{key_token}"
 
     # Multi-char key token must be a known named key; typos like
     # ``ctrl+spcae`` fall back to the default rather than being passed
     # through as ``c-spcae`` (which prompt_toolkit would reject).
     named = _VOICE_NAMED_KEYS.get(key_token)
-    if not named:
-        return _DEFAULT_PT_KEY
-
-    return f"{normalized_mod}{named}"
+    return f"{normalized_mod}{named}" if named else _DEFAULT_PT_KEY
 
 
 def pt_key_to_sequence(pt_key: str) -> tuple[str, ...]:
-    """Convert a prompt_toolkit key specifier (e.g. 'c-b' or 'a-v') to a sequence tuple.
-
-    prompt_toolkit's ``@kb.add`` rejects 'a-x' strings directly (raises ValueError),
-    expecting ('escape', 'x') instead for Alt-modifier shortcuts.
-    """
+    """Convert a prompt_toolkit key specifier (e.g. 'c-b' or 'a-v') to a sequence tuple."""
     if isinstance(pt_key, str) and pt_key.startswith("a-"):
         return ("escape", pt_key[2:])
     return (pt_key,)
@@ -197,31 +144,14 @@ def pt_key_to_sequence(pt_key: str) -> tuple[str, ...]:
 def format_voice_record_key_for_status(raw: Any) -> str:
     """Render ``voice.record_key`` for ``/voice status`` in CLI-friendly form.
 
-    Mirrors the TUI's ``formatVoiceRecordKey``: returns ``Ctrl+B`` /
-    ``Alt+Space`` / ``Ctrl+Enter``. Malformed configs surface as the
-    documented default so status never advertises a shortcut that
+    Mirrors the TUI's ``formatVoiceRecordKey``: returns ``Ctrl+B`` / ``Alt+Space`` / ``Ctrl+Enter``.
+    Malformed configs surface as the documented default so status never advertises a shortcut that
     won't bind (Copilot round-10 on #19835).
     """
+    # The normalizer only ever yields ``c-<key>`` / ``a-<key>`` (or the default ``c-b``).
     normalized = normalize_voice_record_key_for_prompt_toolkit(raw)
-
-    if normalized.startswith("c-"):
-        prefix, key = "Ctrl+", normalized[2:]
-    elif normalized.startswith("a-"):
-        prefix, key = "Alt+", normalized[2:]
-    elif "+" in normalized:
-        # ``super+<key>`` / ``win+<key>`` — CLI won't bind them, but
-        # render in title case so status output is still readable.
-        mod, key = normalized.split("+", 1)
-        prefix = mod[0].upper() + mod[1:] + "+"
-    else:
-        return "Ctrl+B"
-
-    if not key:
-        return prefix.rstrip("+")
-
-    if len(key) == 1:
-        return prefix + key.upper()
-
+    prefix = "Alt+" if normalized.startswith("a-") else "Ctrl+"
+    key = normalized[2:]
     return prefix + key[0].upper() + key[1:]
 
 
@@ -239,15 +169,14 @@ logger = logging.getLogger(__name__)
 def _debug(msg: str) -> None:
     """Emit a debug breadcrumb when HERMES_VOICE_DEBUG=1.
 
-    Goes to stderr so the TUI gateway wraps it as a gateway.stderr event,
-    which createGatewayEventHandler shows as an Activity line — exactly
-    what we need to diagnose "why didn't the loop auto-restart?" in the
-    user's real terminal without shipping a separate debug RPC.
+    Goes to stderr so the TUI gateway wraps it as a gateway.stderr event, which
+    createGatewayEventHandler shows as an Activity line — exactly what we need to diagnose "why
+    didn't the loop auto-restart?" in the user's real terminal without shipping a separate debug
+    RPC.
 
-    Any OSError / BrokenPipeError is swallowed because this fires from
-    background threads (silence callback, TTS daemon, beep) where a
-    broken stderr pipe must not kill the whole gateway — the main
-    command pipe (stdin+stdout) is what actually matters.
+    Any OSError / BrokenPipeError is swallowed because this fires from background threads (silence
+    callback, TTS daemon, beep) where a broken stderr pipe must not kill the whole gateway — the
+    main command pipe (stdin+stdout) is what actually matters.
     """
     if os.environ.get("HERMES_VOICE_DEBUG", "").strip() != "1":
         return
@@ -276,10 +205,9 @@ def _beeps_enabled() -> bool:
 def _play_beep(frequency: int, count: int = 1) -> None:
     """Audible cue matching cli.py's record/stop beeps.
 
-    880 Hz single-beep on start (cli.py:_voice_start_recording line 7532),
-    660 Hz double-beep on stop (cli.py:_voice_stop_and_transcribe line 7585).
-    Best-effort — sounddevice failures are silently swallowed so the
-    voice loop never breaks because a speaker was unavailable.
+    880 Hz single-beep on start (cli.py:_voice_start_recording line 7532), 660 Hz double-beep on
+    stop (cli.py:_voice_stop_and_transcribe line 7585). Best-effort — sounddevice failures are
+    silently swallowed so the voice loop never breaks because a speaker was unavailable.
     """
     if not _beeps_enabled():
         return
@@ -289,6 +217,61 @@ def _play_beep(frequency: int, count: int = 1) -> None:
         play_beep(frequency=frequency, count=count)
     except Exception as e:
         _debug(f"beep {frequency}Hz failed: {e}")
+
+
+def _safe_call(cb: Optional[Callable], *args: Any, warn: Optional[str] = None) -> None:
+    """Invoke an optional consumer callback, swallowing its exceptions.
+
+    ``warn`` is a ``logger.warning`` format with one ``%s`` slot for the exception; without it
+    failures are silently ignored (status/limit callbacks are fire-and-forget).
+    """
+    if not cb:
+        return
+    try:
+        cb(*args)
+    except Exception as e:
+        if warn:
+            logger.warning(warn, e)
+
+
+def _transcribe_wav(wav_path: str, fail_msg: str, debug_prefix: Optional[str] = None) -> Optional[str]:
+    """Transcribe ``wav_path``, unlink it, and return the cleaned transcript (or None).
+
+    transcribe_recording returns {"success": bool, "transcript": str, "error": str?} — NOT
+    {"text": str}. Using the wrong key silently produced empty transcripts even when Groq/local
+    STT returned fine, which masqueraded as "not hearing the user" to the caller. Empty text and
+    Whisper hallucinations are dropped; failures are logged with ``fail_msg``.
+    """
+    try:
+        result = transcribe_recording(wav_path)
+        success = bool(result.get("success"))
+        text = (result.get("transcript") or "").strip()
+        if debug_prefix:
+            _debug(
+                f"{debug_prefix}: transcribe -> success={success} "
+                f"text={text!r} err={result.get('error')!r}"
+            )
+        if success and text and not is_whisper_hallucination(text):
+            return text
+    except Exception as e:
+        logger.warning(fail_msg, e)
+        if debug_prefix:
+            _debug(f"{debug_prefix}: transcribe raised {type(e).__name__}: {e}")
+    finally:
+        try:
+            if os.path.isfile(wav_path):
+                os.unlink(wav_path)
+        except Exception:
+            pass
+    return None
+
+
+def _deactivate(on_status: Optional[Callable[[str], None]] = None) -> None:
+    """Mark the continuous loop inactive and (optionally) report ``"idle"``."""
+    global _continuous_active
+    with _continuous_lock:
+        _continuous_active = False
+    _safe_call(on_status, "idle")
 
 # ── Push-to-talk state ───────────────────────────────────────────────
 _recorder = None
@@ -326,9 +309,9 @@ _voice_busy_probe: Optional[Callable[[], bool]] = None
 def set_voice_busy_probe(probe: Optional[Callable[[], bool]]) -> None:
     """Register a callable that returns True while the agent is mid-turn.
 
-    Called by the hosting surface (tui_gateway registers one that checks
-    every session's ``running`` flag). ``None`` clears it. The probe must
-    be cheap and thread-safe — it runs on the silence-callback thread.
+    Called by the hosting surface (tui_gateway registers one that checks every session's ``running``
+    flag). ``None`` clears it. The probe must be cheap and thread-safe — it runs on the silence-
+    callback thread.
     """
     global _voice_busy_probe
     _voice_busy_probe = probe
@@ -337,9 +320,8 @@ def set_voice_busy_probe(probe: Optional[Callable[[], bool]]) -> None:
 def _voice_activity_held() -> bool:
     """True while silent cycles must NOT count toward the no-speech limit.
 
-    Held when TTS is playing (the user is listening) or when the
-    registered busy probe reports the agent mid-turn (the user is
-    waiting). Fail-open to "not held" so a broken probe can never make
+    Held when TTS is playing (the user is listening) or when the registered busy probe reports the
+    agent mid-turn (the user is waiting). Fail-open to "not held" so a broken probe can never make
     the voice chat immortal.
     """
     if not _tts_playing.is_set():
@@ -370,10 +352,7 @@ _CONTINUOUS_NO_SPEECH_LIMIT = 3
 
 
 def start_recording() -> None:
-    """Begin capturing from the default input device (push-to-talk).
-
-    Idempotent — calling again while a recording is in progress is a no-op.
-    """
+    """Begin capturing from the default input device (push-to-talk)."""
     global _recorder
 
     with _recorder_lock:
@@ -385,11 +364,7 @@ def start_recording() -> None:
 
 
 def stop_and_transcribe() -> Optional[str]:
-    """Stop the active push-to-talk recording, transcribe, return text.
-
-    Returns ``None`` when no recording is active, when the microphone
-    captured no speech, or when Whisper returned a known hallucination.
-    """
+    """Stop the active push-to-talk recording, transcribe, return text."""
     global _recorder
 
     with _recorder_lock:
@@ -402,28 +377,7 @@ def stop_and_transcribe() -> Optional[str]:
     wav_path = rec.stop()
     if not wav_path:
         return None
-
-    try:
-        result = transcribe_recording(wav_path)
-    except Exception as e:
-        logger.warning("voice transcription failed: %s", e)
-        return None
-    finally:
-        try:
-            if os.path.isfile(wav_path):
-                os.unlink(wav_path)
-        except Exception:
-            pass
-
-    # transcribe_recording returns {"success": bool, "transcript": str, ...}
-    # — matches cli.py:_voice_stop_and_transcribe's result.get("transcript").
-    if not result.get("success"):
-        return None
-    text = (result.get("transcript") or "").strip()
-    if not text or is_whisper_hallucination(text):
-        return None
-
-    return text
+    return _transcribe_wav(wav_path, "voice transcription failed: %s")
 
 
 # ── Continuous (VAD) API ─────────────────────────────────────────────
@@ -441,30 +395,13 @@ def start_continuous(
 ) -> bool:
     """Start a VAD-driven continuous recording loop.
 
-    The loop calls ``on_transcript(text)`` each time speech is detected and
-    transcribed successfully. If ``auto_restart`` is True, it auto-restarts
-    for the next turn and resets the no-speech counter for that loop. If
-    ``auto_restart`` is False, the first silence-triggered transcription ends
-    the loop and reports ``"idle"``; no-speech counts are retained across
-    starts so a push-to-talk caller can still enforce the three-strikes guard.
-    After ``_CONTINUOUS_NO_SPEECH_LIMIT`` consecutive silent cycles (no speech
-    picked up at all) the loop stops itself and calls ``on_silent_limit`` so the
-    UI can reflect "voice off". Returns False if a previous stop is still
-    transcribing/cleaning up; otherwise returns True. Idempotent — calling while
-    already active is a successful no-op.
-
-    ``on_status`` is called with ``"listening"`` / ``"transcribing"`` /
-    ``"idle"`` so the UI can show a live indicator.
-
     ``max_recording_seconds`` is the hard cap on a single recording's length
-    (``voice.max_recording_seconds``); any non-positive or non-numeric value
-    disables the cap, preserving the previous unbounded behaviour.
+    (``voice.max_recording_seconds``); any non-positive or non-numeric value disables the cap,
+    preserving the previous unbounded behaviour.
 
-    ``on_stop_phrase`` is called with the (stripped) transcript when the user
-    utters a bare voice stop phrase (``voice.stop_phrases``, default "stop").
-    The loop halts first, so the consumer only needs to reflect "voice off" —
-    exactly like the user pressing the manual stop control. When omitted,
-    ``on_silent_limit`` fires instead so legacy callers still turn voice off.
+    ``on_stop_phrase`` is called with the (stripped) transcript when the user utters a bare voice
+    stop phrase (``voice.stop_phrases``, default "stop"). The loop halts first, so the consumer only
+    needs to reflect "voice off" — exactly like the user pressing the manual stop control.
     """
     global _continuous_active, _continuous_recorder, _continuous_auto_restart
     global _continuous_on_transcript, _continuous_on_status, _continuous_on_silent_limit
@@ -489,19 +426,18 @@ def start_continuous(
 
         if _continuous_recorder is None:
             _continuous_recorder = create_audio_recorder()
-
-        _continuous_recorder._silence_threshold = silence_threshold
-        _continuous_recorder._silence_duration = silence_duration
+        rec = _continuous_recorder
+        rec._silence_threshold = silence_threshold
+        rec._silence_duration = silence_duration
         # Same numeric-with-bool-excluded guard as the CLI wiring in
         # cli.py:_voice_start_recording — <= 0 (or garbage) disables the cap.
-        _continuous_recorder._max_recording_seconds = (
+        rec._max_recording_seconds = (
             max_recording_seconds
             if isinstance(max_recording_seconds, (int, float))
             and not isinstance(max_recording_seconds, bool)
             and max_recording_seconds > 0
             else 0.0
         )
-        rec = _continuous_recorder
 
     _debug(
         f"start_continuous: begin (threshold={silence_threshold}, duration={silence_duration}s)"
@@ -517,26 +453,19 @@ def start_continuous(
     except Exception as e:
         logger.error("failed to start continuous recording: %s", e)
         _debug(f"start_continuous: rec.start raised {type(e).__name__}: {e}")
-        with _continuous_lock:
-            _continuous_active = False
+        _deactivate()
         raise
 
-    if on_status:
-        try:
-            on_status("listening")
-        except Exception:
-            pass
-
+    _safe_call(on_status, "listening")
     return True
 
 
 def stop_continuous(force_transcribe: bool = False) -> None:
     """Stop the active continuous loop and release the microphone.
 
-    Idempotent — calling while not active is a no-op. If ``force_transcribe`` is
-    True, the recorder stops synchronously, then transcription/cleanup runs on a
-    background thread before reporting ``"idle"``. Otherwise the buffer is
-    discarded.
+    Idempotent — calling while not active is a no-op. If ``force_transcribe`` is True, the recorder
+    stops synchronously, then transcription/cleanup runs on a background thread before reporting
+    ``"idle"``. Otherwise the buffer is discarded.
     """
     global _continuous_active, _continuous_on_transcript, _continuous_stopping
     global _continuous_on_status, _continuous_on_silent_limit
@@ -564,11 +493,7 @@ def stop_continuous(force_transcribe: bool = False) -> None:
 
     if rec is not None:
         if force_transcribe and on_transcript:
-            if on_status:
-                try:
-                    on_status("transcribing")
-                except Exception:
-                    pass
+            _safe_call(on_status, "transcribing")
             try:
                 wav_path = rec.stop()
             except Exception as e:
@@ -583,82 +508,57 @@ def stop_continuous(force_transcribe: bool = False) -> None:
                 global _continuous_no_speech_count, _continuous_stopping
                 transcript: Optional[str] = None
                 should_halt = False
+                if wav_path:
+                    transcript = _transcribe_wav(wav_path, "failed to stop/transcribe recorder: %s")
 
-                try:
-                    if wav_path:
-                        try:
-                            result = transcribe_recording(wav_path)
-                            if result.get("success"):
-                                text = (result.get("transcript") or "").strip()
-                                if text and not is_whisper_hallucination(text):
-                                    transcript = text
-                        finally:
-                            if os.path.isfile(wav_path):
-                                os.unlink(wav_path)
-                except Exception as e:
-                    logger.warning("failed to stop/transcribe recorder: %s", e)
-                finally:
-                    stop_phrase = bool(transcript and is_voice_stop_phrase(transcript))
-                    if stop_phrase:
-                        # Bare stop phrase — explicit user intent to end the
-                        # voice chat. Never sent to the agent; fire the
-                        # dedicated signal so the consumer (TUI / desktop)
-                        # ends the conversation instead of silently re-arming
-                        # the next capture (with auto_restart=False the CLIENT
-                        # drives the loop, so discarding the transcript alone
-                        # would leave the conversation running forever).
-                        _debug(
-                            f"stop_continuous: stop phrase {transcript!r} — ending voice chat"
-                        )
-                        stop_text = transcript or ""
-                        transcript = None
-                        try:
-                            if on_stop_phrase is not None:
-                                on_stop_phrase(stop_text)
-                            elif on_silent_limit is not None:
-                                on_silent_limit()
-                        except Exception:
-                            pass
-                    if transcript:
-                        try:
-                            on_transcript(transcript)
-                        except Exception as e:
-                            logger.warning("on_transcript callback raised: %s", e)
+                stop_phrase = bool(transcript and is_voice_stop_phrase(transcript))
+                if stop_phrase:
+                    # Bare stop phrase — explicit user intent to end the
+                    # voice chat. Never sent to the agent; fire the
+                    # dedicated signal so the consumer (TUI / desktop)
+                    # ends the conversation instead of silently re-arming
+                    # the next capture (with auto_restart=False the CLIENT
+                    # drives the loop, so discarding the transcript alone
+                    # would leave the conversation running forever).
+                    _debug(
+                        f"stop_continuous: stop phrase {transcript!r} — ending voice chat"
+                    )
+                    stop_text = transcript or ""
+                    transcript = None
+                    if on_stop_phrase is not None:
+                        _safe_call(on_stop_phrase, stop_text)
+                    else:
+                        _safe_call(on_silent_limit)
+                if transcript:
+                    _safe_call(on_transcript, transcript, warn="on_transcript callback raised: %s")
 
-                    if track_no_speech:
-                        held = _voice_activity_held()
-                        with _continuous_lock:
-                            if transcript or stop_phrase:
-                                _continuous_no_speech_count = 0
-                            elif held:
-                                # Agent busy / TTS playing — the user is
-                                # correctly silent; don't count the cycle.
-                                _debug(
-                                    "stop_continuous: silent cycle ignored "
-                                    "(agent busy or TTS playing)"
-                                )
-                            else:
-                                _continuous_no_speech_count += 1
-                                should_halt = (
-                                    _continuous_no_speech_count
-                                    >= _CONTINUOUS_NO_SPEECH_LIMIT
-                                )
-                                if should_halt:
-                                    _continuous_no_speech_count = 0
-                        if should_halt and on_silent_limit:
-                            try:
-                                on_silent_limit()
-                            except Exception:
-                                pass
-
-                    _play_beep(frequency=660, count=2)
+                if track_no_speech:
+                    held = _voice_activity_held()
                     with _continuous_lock:
-                        _continuous_stopping = False
-                    if on_status:
-                        try:
-                            on_status("idle")
-                        except Exception:
-                            pass
+                        if transcript or stop_phrase:
+                            _continuous_no_speech_count = 0
+                        elif held:
+                            # Agent busy / TTS playing — the user is
+                            # correctly silent; don't count the cycle.
+                            _debug(
+                                "stop_continuous: silent cycle ignored "
+                                "(agent busy or TTS playing)"
+                            )
+                        else:
+                            _continuous_no_speech_count += 1
+                            should_halt = (
+                                _continuous_no_speech_count
+                                >= _CONTINUOUS_NO_SPEECH_LIMIT
+                            )
+                            if should_halt:
+                                _continuous_no_speech_count = 0
+                    if should_halt:
+                        _safe_call(on_silent_limit)
+
+                _play_beep(frequency=660, count=2)
+                with _continuous_lock:
+                    _continuous_stopping = False
+                _safe_call(on_status, "idle")
 
             threading.Thread(target=_transcribe_and_cleanup, daemon=True).start()
             return
@@ -676,12 +576,7 @@ def stop_continuous(force_transcribe: bool = False) -> None:
     # Audible "recording stopped" cue (CLI parity: same 660 Hz × 2 the
     # silence-auto-stop path plays).
     _play_beep(frequency=660, count=2)
-
-    if on_status:
-        try:
-            on_status("idle")
-        except Exception:
-            pass
+    _safe_call(on_status, "idle")
 
 
 def is_continuous_active() -> bool:
@@ -693,9 +588,9 @@ def is_continuous_active() -> bool:
 def _continuous_on_silence() -> None:
     """AudioRecorder silence callback — runs in a daemon thread.
 
-    Stops the current capture, transcribes, delivers the text via
-    ``on_transcript``, and — if the loop is still active — starts the
-    next capture. Three consecutive silent cycles end the loop.
+    Stops the current capture, transcribes, delivers text via ``on_transcript``, and — if the
+    loop is still active — starts the next capture. Three consecutive silent cycles end the
+    loop.
     """
     global _continuous_active, _continuous_no_speech_count
 
@@ -715,11 +610,7 @@ def _continuous_on_silence() -> None:
         _debug("_continuous_on_silence: no recorder — abort")
         return
 
-    if on_status:
-        try:
-            on_status("transcribing")
-        except Exception:
-            pass
+    _safe_call(on_status, "transcribing")
 
     wav_path = rec.stop()
     # Peak RMS is the critical diagnostic when stop() returns None despite
@@ -735,32 +626,10 @@ def _continuous_on_silence() -> None:
     _play_beep(frequency=660, count=2)
 
     transcript: Optional[str] = None
-
     if wav_path:
-        try:
-            result = transcribe_recording(wav_path)
-            # transcribe_recording returns {"success": bool, "transcript": str,
-            # "error": str?} — NOT {"text": str}.  Using the wrong key silently
-            # produced empty transcripts even when Groq/local STT returned fine,
-            # which masqueraded as "not hearing the user" to the caller.
-            success = bool(result.get("success"))
-            text = (result.get("transcript") or "").strip()
-            err = result.get("error")
-            _debug(
-                f"_continuous_on_silence: transcribe -> success={success} "
-                f"text={text!r} err={err!r}"
-            )
-            if success and text and not is_whisper_hallucination(text):
-                transcript = text
-        except Exception as e:
-            logger.warning("continuous transcription failed: %s", e)
-            _debug(f"_continuous_on_silence: transcribe raised {type(e).__name__}: {e}")
-        finally:
-            try:
-                if os.path.isfile(wav_path):
-                    os.unlink(wav_path)
-            except Exception:
-                pass
+        transcript = _transcribe_wav(
+            wav_path, "continuous transcription failed: %s", "_continuous_on_silence"
+        )
 
     stop_phrase = bool(transcript and is_voice_stop_phrase(transcript))
     stop_text = (transcript or "") if stop_phrase else ""
@@ -799,11 +668,8 @@ def _continuous_on_silence() -> None:
         )
         no_speech = _continuous_no_speech_count
 
-    if transcript and on_transcript:
-        try:
-            on_transcript(transcript)
-        except Exception as e:
-            logger.warning("on_transcript callback raised: %s", e)
+    if transcript:
+        _safe_call(on_transcript, transcript, warn="on_transcript callback raised: %s")
 
     if should_halt:
         _debug(
@@ -817,24 +683,11 @@ def _continuous_on_silence() -> None:
             # Explicit user-intent stop — distinct from the no-speech timeout
             # so consumers can report "voice chat ended" instead of "no
             # speech detected".
-            try:
-                on_stop_phrase(stop_text)
-            except Exception:
-                pass
-        elif on_silent_limit:
-            try:
-                on_silent_limit()
-            except Exception:
-                pass
-        try:
-            rec.cancel()
-        except Exception:
-            pass
-        if on_status:
-            try:
-                on_status("idle")
-            except Exception:
-                pass
+            _safe_call(on_stop_phrase, stop_text)
+        else:
+            _safe_call(on_silent_limit)
+        _safe_call(rec.cancel)
+        _safe_call(on_status, "idle")
         return
 
     # CLI parity (cli.py:10619-10621): wait for any in-flight TTS to
@@ -863,52 +716,45 @@ def _continuous_on_silence() -> None:
         except Exception as e:
             logger.error("failed to restart continuous recording: %s", e)
             _debug(f"_continuous_on_silence: restart raised {type(e).__name__}: {e}")
-            with _continuous_lock:
-                _continuous_active = False
-            if on_status:
-                try:
-                    on_status("idle")
-                except Exception:
-                    pass
+            _deactivate(on_status)
             return
 
-        if on_status:
-            try:
-                on_status("listening")
-            except Exception:
-                pass
+        _safe_call(on_status, "listening")
     else:
         # Do not auto-restart. Clean up state and notify idle.
         _debug("_continuous_on_silence: auto_restart=False, stopping loop")
-        with _continuous_lock:
-            _continuous_active = False
-        if on_status:
-            try:
-                on_status("idle")
-            except Exception:
-                pass
+        _deactivate(on_status)
 
 
 # ── TTS API ──────────────────────────────────────────────────────────
+
+# Legacy markdown stripper used only when tools.tts_text_normalize is unavailable.
+_LEGACY_TTS_STRIP = [
+    (re.compile(r'```[\s\S]*?```'), ' '),                       # fenced code blocks
+    (re.compile(r'\[([^\]]+)\]\([^)]+\)'), r'\1'),               # [text](url) → text
+    (re.compile(r'https?://\S+'), ''),                           # bare URLs
+    (re.compile(r'\*\*(.+?)\*\*'), r'\1'),                       # bold
+    (re.compile(r'\*(.+?)\*'), r'\1'),                           # italic
+    (re.compile(r'`(.+?)`'), r'\1'),                             # inline code
+    (re.compile(r'^#+\s*', re.MULTILINE), ''),                   # headers
+    (re.compile(r'^\s*[-*]\s+', re.MULTILINE), ''),              # list bullets
+    (re.compile(r'---+'), ''),                                   # horizontal rules
+    (re.compile(r'\n{3,}'), '\n\n'),                             # excess newlines
+]
 
 
 def _speak_text_streaming(text: str, stop_event: Optional[threading.Event] = None) -> bool:
     """Speak ``text`` via the generic streaming dispatcher; True on success.
 
-    Bridges the one-shot ``speak_text`` contract onto the shared
-    ``stream_tts_to_speaker`` pipeline (tools.tts_tool): the full reply is
-    fed as a single delta + end-of-text sentinel, and we block until the
-    pipeline's done event fires — same blocking semantics the sync path
-    has, so callers (and the mic re-arm logic in ``speak_text``) see no
-    behavioral difference beyond earlier first audio.
+    Bridges the one-shot ``speak_text`` contract onto the shared ``stream_tts_to_speaker`` pipeline
+    (tools.tts_tool): the full reply is fed as a single delta + end-of-text sentinel, and we block
+    until the pipeline's done event fires — same blocking semantics the sync path has, so callers
+    (and the mic re-arm logic in ``speak_text``) see no behavioral difference beyond earlier first
+    audio.
 
-    ``stop_event`` (optional) is wired straight into the pipeline so
-    external barge-in / stop paths can cut streaming playback — without
-    it the pipeline's stop event was private and speech over this path
-    was uninterruptible (the desktop/TUI fallback-speak hole).
-
-    Returns False when playback produced nothing (caller falls back to the
-    whole-file sync path).
+    ``stop_event`` (optional) is wired straight into the pipeline so external barge-in / stop paths
+    can cut streaming playback — without it the pipeline's stop event was private and speech over
+    this path was uninterruptible (the desktop/TUI fallback-speak hole).
     """
     import queue as _queue
     import threading as _threading
@@ -928,21 +774,13 @@ def _speak_text_streaming(text: str, stop_event: Optional[threading.Event] = Non
 def speak_text(text: str, stop_event: Optional[threading.Event] = None) -> None:
     """Synthesize ``text`` with the configured TTS provider and play it.
 
-    Mirrors cli.py:_voice_speak_response exactly — same markdown strip
-    pipeline, same 4000-char cap, same explicit mp3 output path, same
-    MP3-over-OGG playback choice (afplay misbehaves on OGG), same cleanup
-    of both extensions. Keeping these in sync means a voice-mode TTS
-    session in the TUI sounds identical to one in the classic CLI.
-
-    While playback is in flight the module-level _tts_playing Event is
-    cleared so the continuous-recording loop knows to wait before
-    re-arming the mic (otherwise the agent's spoken reply feedback-loops
-    through the microphone and the agent ends up replying to itself).
+    While playback is in flight the module-level _tts_playing Event is cleared so the continuous-
+    recording loop knows to wait before re-arming the mic (otherwise the agent's spoken reply
+    feedback-loops through the microphone and the agent ends up replying to itself).
     """
     if not text or not text.strip():
         return
 
-    import re
     import tempfile
     import time
 
@@ -979,9 +817,11 @@ def speak_text(text: str, stop_event: Optional[threading.Event] = None) -> None:
             from tools.tts_streaming import resolve_streaming_provider
             from tools.tts_tool import _load_tts_config
 
-            if resolve_streaming_provider(_load_tts_config()) is not None:
-                if _speak_text_streaming(text, stop_event):
-                    return
+            if (
+                resolve_streaming_provider(_load_tts_config()) is not None
+                and _speak_text_streaming(text, stop_event)
+            ):
+                return
         except Exception as e:
             _debug(f"speak_text: streaming dispatch unavailable ({e}); using sync path")
 
@@ -993,16 +833,9 @@ def speak_text(text: str, stop_event: Optional[threading.Event] = None) -> None:
             tts_text = prepare_spoken_text(text, max_chars=None)
         except Exception:
             # Legacy fallback pipeline — keep speak_text best-effort.
-            tts_text = re.sub(r'```[\s\S]*?```', ' ', text)             # fenced code blocks
-            tts_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', tts_text)    # [text](url) → text
-            tts_text = re.sub(r'https?://\S+', '', tts_text)                # bare URLs
-            tts_text = re.sub(r'\*\*(.+?)\*\*', r'\1', tts_text)            # bold
-            tts_text = re.sub(r'\*(.+?)\*', r'\1', tts_text)                # italic
-            tts_text = re.sub(r'`(.+?)`', r'\1', tts_text)                  # inline code
-            tts_text = re.sub(r'^#+\s*', '', tts_text, flags=re.MULTILINE)  # headers
-            tts_text = re.sub(r'^\s*[-*]\s+', '', tts_text, flags=re.MULTILINE)  # list bullets
-            tts_text = re.sub(r'---+', '', tts_text)                        # horizontal rules
-            tts_text = re.sub(r'\n{3,}', '\n\n', tts_text)                  # excess newlines
+            tts_text = text
+            for pattern, repl in _LEGACY_TTS_STRIP:
+                tts_text = pattern.sub(repl, tts_text)
             tts_text = tts_text.strip()
         if not tts_text:
             return
@@ -1038,8 +871,7 @@ def speak_text(text: str, stop_event: Optional[threading.Event] = None) -> None:
                 )
                 play_audio_file(play_path)
                 played_any = True
-        cleanup_paths = set(play_paths + [mp3_path, mp3_path.rsplit(".", 1)[0] + ".ogg"])
-        for path in cleanup_paths:
+        for path in set(play_paths + [mp3_path, mp3_path.rsplit(".", 1)[0] + ".ogg"]):
             if os.path.isfile(path):
                 try:
                     os.unlink(path)

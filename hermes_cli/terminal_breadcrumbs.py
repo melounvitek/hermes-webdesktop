@@ -1,17 +1,9 @@
 """Per-terminal session breadcrumbs for ``hermes -c`` / ``--continue``.
 
-Each CLI session writes a tiny breadcrumb file
-``$HERMES_HOME/terminal-sessions/<terminal-id>`` containing
-``{"session_id": ..., "cwd": ..., "ts": ...}``.  A bare ``hermes -c`` then
-resumes the session that belongs to THIS terminal (tty / tmux pane / kitty
-window / wezterm pane / ...) instead of the globally most-recent session —
-so two terminals side by side each continue their own conversation.
-
-Everything here is strictly best-effort: no function raises, and when no
-stable terminal identity can be derived (no tty and no known multiplexer
-env var) breadcrumbs are skipped entirely and ``-c`` falls back to the
-existing latest-session behavior.  Gated by ``session.terminal_continue``
-in config.yaml (default true).
+Everything here is strictly best-effort: no function raises, and when no stable terminal identity
+can be derived (no tty and no known multiplexer env var) breadcrumbs are skipped entirely and ``-c``
+falls back to the existing latest-session behavior. Gated by ``session.terminal_continue`` in
+config.yaml (default true).
 """
 
 from __future__ import annotations
@@ -57,9 +49,9 @@ def _sanitize(raw: str) -> str:
 def get_terminal_id() -> Optional[str]:
     """Derive a stable identity for the terminal this process runs in.
 
-    Prefers the real tty device path (stdin, then stdout), else the first
-    present multiplexer/emulator env var. Returns ``None`` when neither is
-    available — callers must then skip breadcrumbs entirely.
+    Prefers the real tty device path (stdin, then stdout), else the first present
+    multiplexer/emulator env var. Returns ``None`` when neither is available — callers must then
+    skip breadcrumbs entirely.
     """
     for fd in (sys.stdin, sys.stdout):
         try:
@@ -101,8 +93,8 @@ def _prune_stale(directory: Path, now: float) -> None:
 def write_breadcrumb(session_id: str, cwd: Optional[str] = None) -> None:
     """Record that this terminal's live session is ``session_id``.
 
-    Synchronous, best-effort, never raises. No-op when the feature is
-    disabled, the session id is empty, or no terminal identity exists.
+    Synchronous, best-effort, never raises. No-op when the feature is disabled, the session id is
+    empty, or no terminal identity exists.
     """
     try:
         if not session_id or not is_enabled():
@@ -150,10 +142,9 @@ def read_breadcrumb() -> Optional[dict]:
 def resolve_breadcrumb_session() -> Optional[str]:
     """Resolve a bare ``-c`` for this terminal, or ``None`` to fall back.
 
-    Returns the breadcrumb's session id only when it still exists in the
-    session DB, projected forward through the compression chain so the
-    resume lands on the live tip rather than a dead compressed parent
-    (same projection as ``main._resolve_session_by_name_or_id``).
+    Returns the breadcrumb's session id only when it still exists in the session DB, projected
+    forward through the compression chain so the resume lands on the live tip rather than a dead
+    compressed parent (same projection as ``main._resolve_session_by_name_or_id``).
     """
     if not is_enabled():
         return None

@@ -1,18 +1,12 @@
 """Terminal-native desktop notifications: OSC 9 and Warp's OSC 777 CLI-agent protocol.
 
-Both emitters ride on the existing ``display.bell_on_prompt`` /
-``display.bell_on_complete`` flags (see ``cli._ring_bell``) — no extra config.
+- **OSC 9** (``ESC ] 9 ; <body> BEL``): Ghostty, iTerm2, Kitty and WezTerm raise an OS notification;
+terminals that don't know the sequence drop it. - **OSC 777** (``ESC ] 777 ; notify ; warp://cli-
+agent ; <json> BEL``): Warp's structured CLI-agent protocol (tab status + notification mailbox).
 
-- **OSC 9** (``ESC ] 9 ; <body> BEL``): Ghostty, iTerm2, Kitty and WezTerm
-  raise an OS notification; terminals that don't know the sequence drop it.
-- **OSC 777** (``ESC ] 777 ; notify ; warp://cli-agent ; <json> BEL``): Warp's
-  structured CLI-agent protocol (tab status + notification mailbox). Only sent
-  when Warp advertises support and the build is newer than the last release
-  that set the protocol var without being able to render the payload.
-
-Sequences are written to ``/dev/tty`` because prompt_toolkit's stdout wrapper
-can buffer or strip raw escapes; when ``/dev/tty`` can't be opened (Windows,
-no controlling terminal) they fall back to ``sys.stdout``. Never raises.
+Sequences are written to ``/dev/tty`` because prompt_toolkit's stdout wrapper can buffer or strip
+raw escapes; when ``/dev/tty`` can't be opened (Windows, no controlling terminal) they fall back to
+``sys.stdout``. Never raises.
 """
 
 from __future__ import annotations
@@ -68,11 +62,7 @@ def warp_supported(env=None) -> bool:
 
 
 def warp_osc777(event: str, detail: str, session_id: str = "") -> str:
-    """OSC 777 ``warp://cli-agent`` notification; ``event`` is ``stop`` or ``permission_request``.
-
-    Payload mirrors the reference plugin's build-payload.sh: common fields plus
-    ``summary`` (permission_request) or ``response`` (stop), truncated to 200.
-    """
+    """OSC 777 ``warp://cli-agent`` notification; ``event`` is ``stop`` or ``permission_request``."""
     try:
         advertised = int(os.environ.get("WARP_CLI_AGENT_PROTOCOL_VERSION", "1"))
     except ValueError:

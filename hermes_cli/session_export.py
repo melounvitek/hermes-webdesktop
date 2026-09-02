@@ -1,9 +1,8 @@
 """Shared renderers for session export commands.
 
-The CLI, dashboard, and slash-command surfaces all deal with the same
-session-shaped data: a session dict with a ``messages`` list. Keep filtering
-and human-readable rendering here so each surface only has to load sessions
-and write bytes.
+The CLI, dashboard, and slash-command surfaces all deal with the same session-shaped data: a session
+dict with a ``messages`` list. Keep filtering and human-readable rendering here so each surface only
+has to load sessions and write bytes.
 """
 
 from __future__ import annotations
@@ -20,10 +19,8 @@ ExportOnly = Literal["user-prompts"]
 
 def normalize_export_format(fmt: str) -> ExportFormat:
     """Return the canonical export format name."""
-    value = (fmt or "jsonl").strip().lower()
-    if value == "md":
-        value = "markdown"
-    if value not in {"jsonl", "markdown"}:
+    value = {"jsonl": "jsonl", "markdown": "markdown", "md": "markdown"}.get((fmt or "jsonl").strip().lower())
+    if value is None:
         raise ValueError(f"Unsupported session export format: {fmt}")
     return value  # type: ignore[return-value]
 
@@ -32,8 +29,7 @@ def normalize_export_only(only: Optional[str]) -> Optional[ExportOnly]:
     """Return the canonical export filter name."""
     if only is None:
         return None
-    value = only.strip().lower()
-    if value in {"user", "prompts", "user-prompts", "user_prompts"}:
+    if only.strip().lower() in {"user", "prompts", "user-prompts", "user_prompts"}:
         return "user-prompts"
     raise ValueError(f"Unsupported session export filter: {only}")
 
@@ -46,18 +42,22 @@ def render_sessions_export(
 ) -> str:
     """Render exported sessions in a stable, reusable format.
 
-    ``fmt=jsonl`` with no filter intentionally preserves the legacy shape:
-    one full session object per line. ``only=user-prompts`` switches the unit
-    of export to one prompt record per line so the output is easy to pipe into
-    review, memory-ingestion, or prompt-library tooling.
+    ``fmt=jsonl`` with no filter intentionally preserves the legacy shape: one full session object
+    per line. ``only=user-prompts`` switches the unit of export to one prompt record per line so the
+    output is easy to pipe into review, memory-ingestion, or prompt-library tooling.
     """
     session_list = list(sessions)
     export_format = normalize_export_format(fmt)
     export_only = normalize_export_only(only)
 
+    prompts_only = export_only == "user-prompts"
     if export_format == "jsonl":
-        return _render_jsonl(session_list, only=export_only)
-    return _render_markdown(session_list, only=export_only)
+        rows = iter_user_prompt_records(session_list) if prompts_only else session_list
+        lines = [json.dumps(row, ensure_ascii=False) for row in rows]
+        return ("\n".join(lines) + "\n") if lines else ""
+    if prompts_only:
+        return _render_user_prompts_markdown(session_list)
+    return _render_full_markdown(session_list)
 
 
 def export_record_count(
@@ -65,8 +65,7 @@ def export_record_count(
 ) -> Tuple[int, str]:
     """Return ``(count, noun)`` for status messages after an export."""
     session_list = list(sessions)
-    export_only = normalize_export_only(only)
-    if export_only == "user-prompts":
+    if normalize_export_only(only) == "user-prompts":
         return sum(1 for _ in iter_user_prompt_records(session_list)), "prompt"
     return len(session_list), "session"
 
@@ -98,45 +97,31 @@ def iter_user_prompt_records(
             yield record
 
 
-def _render_jsonl(
-    sessions: List[Dict[str, Any]], *, only: Optional[ExportOnly]
-) -> str:
-    if only == "user-prompts":
-        rows = iter_user_prompt_records(sessions)
-    else:
-        rows = iter(sessions)
-    lines = [json.dumps(row, ensure_ascii=False) for row in rows]
-    return ("\n".join(lines) + "\n") if lines else ""
-
-
-def _render_markdown(
-    sessions: List[Dict[str, Any]], *, only: Optional[ExportOnly]
-) -> str:
-    if only == "user-prompts":
-        return _render_user_prompts_markdown(sessions)
-    return _render_full_markdown(sessions)
-
-
 def _render_user_prompts_markdown(sessions: List[Dict[str, Any]]) -> str:
+    lines = _render_sessions_markdown(
+        sessions, "User prompts export",
+        lambda session: f"User prompts for session {_heading_text(_session_id(session))}",
+        lambda session: f"Session {_heading_text(_session_id(session))}",
+        _append_prompt_records,
+    )
+    if not sessions:
+        lines += ["_No user prompts found._", ""]
+    return _finish_markdown(lines)
+
+
+def _render_sessions_markdown(sessions, multi_title, single_heading, multi_heading, append_body) -> List[str]:
+    """One session → its own H1 with body at H2; several → a shared H1, each session H2/H3."""
     lines: List[str] = []
     if len(sessions) == 1:
         session = sessions[0]
-        lines.append(f"# User prompts for session {_heading_text(_session_id(session))}")
-        lines.extend(_session_metadata_lines(session))
-        lines.append("")
-        _append_prompt_records(lines, session, heading_level=2)
+        lines += [f"# {single_heading(session)}", *_session_metadata_lines(session), ""]
+        append_body(lines, session, heading_level=2)
     else:
-        lines.append("# User prompts export")
-        lines.append("")
+        lines += [f"# {multi_title}", ""]
         for session in sessions:
-            lines.append(f"## Session {_heading_text(_session_id(session))}")
-            lines.extend(_session_metadata_lines(session))
-            lines.append("")
-            _append_prompt_records(lines, session, heading_level=3)
-    if not sessions:
-        lines.append("_No user prompts found._")
-        lines.append("")
-    return _finish_markdown(lines)
+            lines += [f"## {multi_heading(session)}", *_session_metadata_lines(session), ""]
+            append_body(lines, session, heading_level=3)
+    return lines
 
 
 def _append_prompt_records(
@@ -144,38 +129,24 @@ def _append_prompt_records(
 ) -> None:
     prompts = list(iter_user_prompt_records([session]))
     if not prompts:
-        lines.append("_No user prompts found._")
-        lines.append("")
+        lines += ["_No user prompts found._", ""]
         return
     marker = "#" * heading_level
     for prompt in prompts:
         timestamp = prompt.get("created_at") or "timestamp unavailable"
         lines.append(f"{marker} {prompt['index']}. {timestamp}")
-        message_id = prompt.get("message_id")
-        if message_id is not None:
-            lines.append(f"Message ID: `{message_id}`")
-            lines.append("")
-        lines.append(str(prompt.get("text") or ""))
-        lines.append("")
+        if (message_id := prompt.get("message_id")) is not None:
+            lines += [f"Message ID: `{message_id}`", ""]
+        lines += [str(prompt.get("text") or ""), ""]
 
 
 def _render_full_markdown(sessions: List[Dict[str, Any]]) -> str:
-    lines: List[str] = []
-    if len(sessions) == 1:
-        session = sessions[0]
-        lines.append(f"# Session: {_heading_text(_session_title_or_id(session))}")
-        lines.extend(_session_metadata_lines(session))
-        lines.append("")
-        _append_session_messages(lines, session, heading_level=2)
-    else:
-        lines.append("# Hermes sessions export")
-        lines.append("")
-        for session in sessions:
-            lines.append(f"## Session: {_heading_text(_session_title_or_id(session))}")
-            lines.extend(_session_metadata_lines(session))
-            lines.append("")
-            _append_session_messages(lines, session, heading_level=3)
-    return _finish_markdown(lines)
+    return _finish_markdown(_render_sessions_markdown(
+        sessions, "Hermes sessions export",
+        lambda session: f"Session: {_heading_text(_session_title_or_id(session))}",
+        lambda session: f"Session: {_heading_text(_session_title_or_id(session))}",
+        _append_session_messages,
+    ))
 
 
 def _append_session_messages(
@@ -186,34 +157,24 @@ def _append_session_messages(
         message for message in _messages(session) if message.get("role") != "system"
     ]
     if not visible_messages:
-        lines.append("_No messages found._")
-        lines.append("")
+        lines += ["_No messages found._", ""]
         return
 
     for message in visible_messages:
         role = str(message.get("role") or "unknown")
         timestamp = _format_timestamp(message.get("timestamp"))
         suffix = f" - {timestamp}" if timestamp else ""
+        text = _message_text(message.get("content"))
         if role == "tool":
             tool_name = str(message.get("tool_name") or message.get("name") or "tool")
-            lines.append(f"{marker} Tool: {_heading_text(tool_name)}{suffix}")
-            lines.append("")
-            lines.append(f"<details><summary>{html_escape(tool_name)}</summary>")
-            lines.append("")
-            lines.append(_fenced_text(_message_text(message.get("content"))))
-            lines.append("")
-            lines.append("</details>")
-            lines.append("")
+            lines += [
+                f"{marker} Tool: {_heading_text(tool_name)}{suffix}", "",
+                f"<details><summary>{html_escape(tool_name)}</summary>", "",
+                _fenced_text(text), "", "</details>", "",
+            ]
             continue
-
-        label = {
-            "user": "User",
-            "assistant": "Assistant",
-        }.get(role, role.title())
-        lines.append(f"{marker} {label}{suffix}")
-        lines.append("")
-        lines.append(_message_text(message.get("content")))
-        lines.append("")
+        label = {"user": "User", "assistant": "Assistant"}.get(role, role.title())
+        lines += [f"{marker} {label}{suffix}", "", text, ""]
 
 
 def _messages(session: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -224,18 +185,9 @@ def _messages(session: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _message_text(content: Any) -> str:
     if content is None:
         return ""
-    if isinstance(content, str):
-        return content
     if isinstance(content, list):
-        parts = [_content_part_text(part) for part in content]
-        return "\n".join(part for part in parts if part)
-    if isinstance(content, dict):
-        for key in ("text", "content"):
-            value = content.get(key)
-            if isinstance(value, str):
-                return value
-        return json.dumps(content, ensure_ascii=False, sort_keys=True)
-    return str(content)
+        return "\n".join(part for part in map(_content_part_text, content) if part)
+    return _content_part_text(content)
 
 
 def _content_part_text(part: Any) -> str:
@@ -254,35 +206,24 @@ def _format_timestamp(value: Any) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        return (
-            datetime.fromtimestamp(float(value), tz=timezone.utc)
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z")
-        )
-    if isinstance(value, datetime):
-        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
-            "+00:00", "Z"
-        )
-    return str(value)
+        dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    elif isinstance(value, datetime):
+        dt = (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    else:
+        return str(value)
+    return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _session_metadata_lines(session: Dict[str, Any]) -> List[str]:
     lines: List[str] = [f"- Session ID: `{_session_id(session)}`"]
-    source = session.get("source")
-    if source:
-        lines.append(f"- Source: `{source}`")
-    model = session.get("model")
-    if model:
-        lines.append(f"- Model: `{model}`")
-    title = session.get("title")
-    if title:
+    for key, label in (("source", "Source"), ("model", "Model")):
+        if session.get(key):
+            lines.append(f"- {label}: `{session[key]}`")
+    if title := session.get("title"):
         lines.append(f"- Title: {_inline_text(str(title))}")
-    started = _format_timestamp(session.get("started_at"))
-    if started:
+    if started := _format_timestamp(session.get("started_at")):
         lines.append(f"- Started: {started}")
-    message_count = session.get("message_count")
-    if message_count is not None:
+    if (message_count := session.get("message_count")) is not None:
         lines.append(f"- Messages: {message_count}")
     return lines
 
@@ -292,8 +233,7 @@ def _session_id(session: Dict[str, Any]) -> str:
 
 
 def _session_title_or_id(session: Dict[str, Any]) -> str:
-    title = str(session.get("title") or "").strip()
-    return title or _session_id(session)
+    return str(session.get("title") or "").strip() or _session_id(session)
 
 
 def _heading_text(value: str) -> str:
@@ -343,27 +283,19 @@ Examples:
   /save html session.html redact"""
 
 
-
 def normalize_save_format(fmt: Optional[str]) -> str:
     """Map a user-typed /save format token to a canonical format."""
     token = (fmt or "json").strip().lower()
-    if token in ("json", "snapshot"):
-        return "json"
-    if token in ("md", "markdown"):
-        return "md"
-    if token == "html":
-        return "html"
-    raise ValueError(
-        f"Unknown format {token!r} — expected one of: json, md, html"
-    )
+    canonical = {"json": "json", "snapshot": "json", "md": "md", "markdown": "md", "html": "html"}
+    if token not in canonical:
+        raise ValueError(
+            f"Unknown format {token!r} — expected one of: json, md, html"
+        )
+    return canonical[token]
 
 
 def render_session_for_save(session: Dict[str, Any], fmt: str) -> str:
-    """Render one exported session dict for /save.
-
-    ``json`` -> pretty-printed JSON; ``md`` -> the shared full-markdown
-    renderer; ``html`` -> the standalone single-file HTML export.
-    """
+    """Render one exported session dict for /save."""
     if fmt == "json":
         return json.dumps(session, indent=2, ensure_ascii=False, default=str)
     if fmt == "md":

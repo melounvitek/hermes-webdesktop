@@ -1,10 +1,4 @@
-"""
-Dump command for hermes CLI.
-
-Outputs a compact, plain-text summary of the user's Hermes setup
-that can be copy-pasted into Discord/GitHub/Telegram for support context.
-No ANSI colors, no checkmarks — just data.
-"""
+"""Dump command for hermes CLI."""
 
 import json
 import os
@@ -22,13 +16,10 @@ from agent.skill_utils import is_excluded_skill_path
 def _dotenv_key_names() -> set[str]:
     """Return the set of env-var names assigned a non-empty value in ~/.hermes/.env.
 
-    The managed backends (launchd / systemd / the desktop-spawned ``serve``
-    process) load credentials from this file — NOT from an interactive shell's
-    exports. ``hermes debug share`` runs in a terminal, so ``os.getenv`` reflects
-    the shell's environment, which can include exported keys the managed backend
-    never sees. Comparing against this set lets the dump flag that mismatch (the
-    exact trap behind #48504-style "no web_search" reports: key exported in the
-    shell, absent from .env, invisible to the launchd backend).
+    The managed backends (launchd / systemd / the desktop-spawned ``serve`` process) load
+    credentials from this file — NOT from an interactive shell's exports. ``hermes debug share``
+    runs in a terminal, so ``os.getenv`` reflects the shell's environment, which can include
+    exported keys the managed backend never sees.
     """
     try:
         env_path = get_env_path()
@@ -51,28 +42,31 @@ def _dotenv_key_names() -> set[str]:
     return names
 
 
-def _get_git_commit(project_root: Path) -> str:
-    """Return short git commit hash, or '(unknown)'.
-
-    Source installs and dev images resolve this live via ``git rev-parse``.
-    The published Docker image excludes ``.git`` from the build context, so
-    that lookup always fails — we fall back to the baked-in build SHA written
-    to ``<project_root>/.hermes_build_sha`` by the Dockerfile's
-    ``HERMES_GIT_SHA`` build-arg (see ``hermes_cli/build_info.py``).
-    The output format is identical regardless of source.
-    """
+def _git_output(project_root: Path, *args: str) -> str:
+    """Stripped stdout of ``git <args>`` run in *project_root*, or '' on any failure."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--short=8", "HEAD"],
+            ["git", *args],
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
             cwd=str(project_root),
         )
         if result.returncode == 0:
-            value = result.stdout.strip()
-            if value:
-                return value
+            return result.stdout.strip()
     except Exception:
         pass
+    return ""
+
+
+def _get_git_commit(project_root: Path) -> str:
+    """Return short git commit hash, or '(unknown)'.
+
+    Source installs resolve live via ``git rev-parse``. The published Docker image excludes
+    ``.git``, so fall back to the build SHA baked into ``<project_root>/.hermes_build_sha`` by the
+    Dockerfile. Output format is identical either way.
+    """
+    value = _git_output(project_root, "rev-parse", "--short=8", "HEAD")
+    if value:
+        return value
 
     # Fall back to the build-time baked SHA (populated in published Docker
     # images, absent otherwise).  Defers the import so the dump module
@@ -91,33 +85,18 @@ def _get_git_commit(project_root: Path) -> str:
 def _get_git_commit_date(project_root: Path) -> str:
     """Return the date the HEAD commit was authored (YYYY-MM-DD), or ''.
 
-    Resolves live via ``git log`` on source installs.  The published Docker
-    image excludes ``.git``, so this returns '' there — the dump line simply
-    drops the date suffix in that case (the baked SHA still identifies the
-    build).
+    The published Docker image excludes ``.git``, so this returns '' there and the dump line
+    drops the date suffix; the baked SHA still identifies the build.
     """
-    try:
-        result = subprocess.run(
-            ["git", "log", "-1", "--format=%cd", "--date=short", "HEAD"],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
-            cwd=str(project_root),
-        )
-        if result.returncode == 0:
-            value = result.stdout.strip()
-            if value:
-                return value
-    except Exception:
-        pass
-
-    return ""
+    return _git_output(project_root, "log", "-1", "--format=%cd", "--date=short", "HEAD")
 
 
 def _redact(value: str) -> str:
     """Redact all but first 4 and last 4 chars.
 
-    Thin wrapper over :func:`agent.redact.mask_secret`. Returns ``""`` for
-    an empty value (matches the historical behavior of this helper —
-    ``hermes dump`` formats empty values as blank, not as ``"(not set)"``).
+    Thin wrapper over :func:`agent.redact.mask_secret`. Returns ``""`` for an empty value (matches
+    the historical behavior of this helper — ``hermes dump`` formats empty values as blank, not as
+    ``"(not set)"``).
     """
     from agent.redact import mask_secret
     return mask_secret(value)
@@ -130,12 +109,8 @@ def _gateway_status() -> str:
 
         snapshot = get_gateway_runtime_snapshot()
         if snapshot.running:
-            mode = snapshot.manager
-            if snapshot.has_process_service_mismatch:
-                mode = "manual"
+            mode = "manual" if snapshot.has_process_service_mismatch else snapshot.manager
             return f"running ({mode}, pid {snapshot.gateway_pids[0]})"
-        if snapshot.service_installed and not snapshot.service_running:
-            return f"stopped ({snapshot.manager})"
         return f"stopped ({snapshot.manager})"
     except Exception:
         return "unknown" if sys.platform.startswith(("linux", "darwin")) else "N/A"
@@ -146,19 +121,12 @@ def _count_skills(hermes_home: Path) -> int:
     skills_dir = hermes_home / "skills"
     if not skills_dir.is_dir():
         return 0
-    count = 0
-    for item in skills_dir.rglob("SKILL.md"):
-        if is_excluded_skill_path(item):
-            continue
-        count += 1
-    return count
+    return sum(1 for item in skills_dir.rglob("SKILL.md") if not is_excluded_skill_path(item))
 
 
 def _count_mcp_servers(config: dict) -> int:
     """Count configured MCP servers."""
-    mcp = config.get("mcp", {})
-    servers = mcp.get("servers", {})
-    return len(servers)
+    return len(config.get("mcp", {}).get("servers", {}))
 
 
 def _cron_summary(hermes_home: Path) -> str:
@@ -178,34 +146,34 @@ def _cron_summary(hermes_home: Path) -> str:
         return "(error reading)"
 
 
+_PLATFORM_ENV_VARS = {
+    "telegram": "TELEGRAM_BOT_TOKEN",
+    "discord": "DISCORD_BOT_TOKEN",
+    "slack": "SLACK_BOT_TOKEN",
+    "whatsapp": "WHATSAPP_ENABLED",
+    "signal": "SIGNAL_HTTP_URL",
+    "email": "EMAIL_ADDRESS",
+    "sms": "TWILIO_ACCOUNT_SID",
+    "matrix": "MATRIX_HOMESERVER_URL",
+    "mattermost": "MATTERMOST_URL",
+    "homeassistant": "HASS_TOKEN",
+    "dingtalk": "DINGTALK_CLIENT_ID",
+    "feishu": "FEISHU_APP_ID",
+    "wecom": "WECOM_BOT_ID",
+    "wecom_callback": "WECOM_CALLBACK_CORP_ID",
+    "weixin": "WEIXIN_ACCOUNT_ID",
+    "qqbot": "QQ_APP_ID",
+}
+
+
 def _configured_platforms() -> list[str]:
     """Return list of configured messaging platform names."""
-    checks = {
-        "telegram": "TELEGRAM_BOT_TOKEN",
-        "discord": "DISCORD_BOT_TOKEN",
-        "slack": "SLACK_BOT_TOKEN",
-        "whatsapp": "WHATSAPP_ENABLED",
-        "signal": "SIGNAL_HTTP_URL",
-        "email": "EMAIL_ADDRESS",
-        "sms": "TWILIO_ACCOUNT_SID",
-        "matrix": "MATRIX_HOMESERVER_URL",
-        "mattermost": "MATTERMOST_URL",
-        "homeassistant": "HASS_TOKEN",
-        "dingtalk": "DINGTALK_CLIENT_ID",
-        "feishu": "FEISHU_APP_ID",
-        "wecom": "WECOM_BOT_ID",
-        "wecom_callback": "WECOM_CALLBACK_CORP_ID",
-        "weixin": "WEIXIN_ACCOUNT_ID",
-        "qqbot": "QQ_APP_ID",
-    }
-    return [name for name, env in checks.items() if os.getenv(env)]
+    return [name for name, env in _PLATFORM_ENV_VARS.items() if os.getenv(env)]
 
 
 def _memory_provider(config: dict) -> str:
     """Return the active memory provider name."""
-    mem = config.get("memory", {})
-    provider = mem.get("provider", "")
-    return provider if provider else "built-in"
+    return config.get("memory", {}).get("provider", "") or "built-in"
 
 
 def _get_model_and_provider(config: dict) -> tuple[str, str]:
@@ -213,21 +181,13 @@ def _get_model_and_provider(config: dict) -> tuple[str, str]:
     model_cfg = config.get("model", "")
     if isinstance(model_cfg, dict):
         model = model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "(not set)"
-        provider = model_cfg.get("provider") or "(auto)"
-    elif isinstance(model_cfg, str):
-        model = model_cfg or "(not set)"
-        provider = "(auto)"
-    else:
-        model = "(not set)"
-        provider = "(auto)"
-    return model, provider
+        return model, model_cfg.get("provider") or "(auto)"
+    model = model_cfg if isinstance(model_cfg, str) else ""
+    return model or "(not set)", "(auto)"
 
 
 def _config_overrides(config: dict) -> dict[str, str]:
-    """Find non-default config values worth reporting.
-    
-    Returns a flat dict of dotpath -> value for interesting overrides.
-    """
+    """Find non-default config values worth reporting."""
     from hermes_cli.config import DEFAULT_CONFIG
 
     overrides = {}
@@ -276,6 +236,38 @@ def _config_overrides(config: dict) -> dict[str, str]:
         overrides["fallback_providers"] = str(fallbacks)
 
     return overrides
+
+
+# (env var, dump label) in display order.
+_API_KEYS = [
+    ("OPENROUTER_API_KEY", "openrouter"),
+    ("OPENAI_API_KEY", "openai"),
+    ("ANTHROPIC_API_KEY", "anthropic"),
+    ("ANTHROPIC_TOKEN", "anthropic_token"),
+    ("NOUS_API_KEY", "nous"),
+    ("GOOGLE_API_KEY", "google/gemini"),
+    ("GEMINI_API_KEY", "gemini"),
+    ("GLM_API_KEY", "glm/zai"),
+    ("ZAI_API_KEY", "zai"),
+    ("KIMI_API_KEY", "kimi"),
+    ("MINIMAX_API_KEY", "minimax"),
+    ("DEEPSEEK_API_KEY", "deepseek"),
+    ("DASHSCOPE_API_KEY", "dashscope"),
+    ("HF_TOKEN", "huggingface"),
+    ("NVIDIA_API_KEY", "nvidia"),
+    ("AI_GATEWAY_API_KEY", "ai_gateway"),
+    ("OPENCODE_ZEN_API_KEY", "opencode_zen"),
+    ("OPENCODE_GO_API_KEY", "opencode_go"),
+    ("COMMANDCODE_API_KEY", "commandcode"),
+    ("KILOCODE_API_KEY", "kilocode"),
+    ("FIRECRAWL_API_KEY", "firecrawl"),
+    ("TAVILY_API_KEY", "tavily"),
+    ("KEENABLE_API_KEY", "keenable"),
+    ("BROWSERBASE_API_KEY", "browserbase"),
+    ("FAL_KEY", "fal"),
+    ("ELEVENLABS_API_KEY", "elevenlabs"),
+    ("GITHUB_TOKEN", "github"),
+]
 
 
 def run_dump(args):
@@ -343,67 +335,32 @@ def run_dump(args):
     # OS info
     os_info = f"{platform.system()} {platform.release()} {platform.machine()}"
 
-    lines = []
-    lines.append("--- hermes dump ---")
     # Identify the build by commit + the date that commit was made, resolved
     # live via git.  __release_date__ (the package release date) is
     # intentionally NOT shown here — it reads like a wall-clock timestamp and
     # confuses support triage.  The commit date is the real "as-of" date.
-    ver_str = f"{__version__}"
-    ver_str += f" [{commit}]"
+    ver_str = f"{__version__} [{commit}]"
     if commit_date:
         ver_str += f" ({commit_date})"
-    lines.append(f"version:          {ver_str}")
-    lines.append(f"os:               {os_info}")
-    lines.append(f"python:           {sys.version.split()[0]}")
-    lines.append(f"openai_sdk:       {openai_ver}")
-    lines.append(f"profile:          {profile}")
-    lines.append(f"hermes_home:      {display_hermes_home()}")
-    lines.append(f"model:            {model}")
-    lines.append(f"provider:         {provider}")
-    lines.append(f"terminal:         {backend}")
-
-    # API keys
-    lines.append("")
-    lines.append("api_keys:")
-    api_keys = [
-        ("OPENROUTER_API_KEY", "openrouter"),
-        ("OPENAI_API_KEY", "openai"),
-        ("ANTHROPIC_API_KEY", "anthropic"),
-        ("ANTHROPIC_TOKEN", "anthropic_token"),
-        ("NOUS_API_KEY", "nous"),
-        ("GOOGLE_API_KEY", "google/gemini"),
-        ("GEMINI_API_KEY", "gemini"),
-        ("GLM_API_KEY", "glm/zai"),
-        ("ZAI_API_KEY", "zai"),
-        ("KIMI_API_KEY", "kimi"),
-        ("MINIMAX_API_KEY", "minimax"),
-        ("DEEPSEEK_API_KEY", "deepseek"),
-        ("DASHSCOPE_API_KEY", "dashscope"),
-        ("HF_TOKEN", "huggingface"),
-        ("NVIDIA_API_KEY", "nvidia"),
-        ("AI_GATEWAY_API_KEY", "ai_gateway"),
-        ("OPENCODE_ZEN_API_KEY", "opencode_zen"),
-        ("OPENCODE_GO_API_KEY", "opencode_go"),
-        ("COMMANDCODE_API_KEY", "commandcode"),
-        ("KILOCODE_API_KEY", "kilocode"),
-        ("FIRECRAWL_API_KEY", "firecrawl"),
-        ("TAVILY_API_KEY", "tavily"),
-        ("KEENABLE_API_KEY", "keenable"),
-        ("BROWSERBASE_API_KEY", "browserbase"),
-        ("FAL_KEY", "fal"),
-        ("ELEVENLABS_API_KEY", "elevenlabs"),
-        ("GITHUB_TOKEN", "github"),
+    lines = [
+        "--- hermes dump ---",
+        f"version:          {ver_str}",
+        f"os:               {os_info}",
+        f"python:           {sys.version.split()[0]}",
+        f"openai_sdk:       {openai_ver}",
+        f"profile:          {profile}",
+        f"hermes_home:      {display_hermes_home()}",
+        f"model:            {model}",
+        f"provider:         {provider}",
+        f"terminal:         {backend}",
+        "",
+        "api_keys:",
     ]
-
     dotenv_keys = _dotenv_key_names()
 
-    for env_var, label in api_keys:
+    for env_var, label in _API_KEYS:
         val = os.getenv(env_var, "")
-        if show_keys and val:
-            display = _redact(val)
-        else:
-            display = "set" if val else "not set"
+        display = _redact(val) if show_keys and val else ("set" if val else "not set")
         # Set in this (shell) process but absent from ~/.hermes/.env: a managed
         # backend (launchd/systemd/desktop `serve`) loads .env, not the login
         # shell, so it likely can't see this key — even though the dump reads
@@ -425,29 +382,27 @@ def run_dump(args):
         lines.append(f"  {label:<20} {display}")
 
     # Features summary
-    lines.append("")
-    lines.append("features:")
-
     toolsets = config.get("toolsets", ["hermes-cli"])
-    lines.append(f"  toolsets:           {', '.join(toolsets) if toolsets else '(default)'}")
-    lines.append(f"  mcp_servers:        {_count_mcp_servers(config)}")
-    lines.append(f"  memory_provider:    {_memory_provider(config)}")
-    lines.append(f"  gateway:            {_gateway_status()}")
-
+    lines += [
+        "",
+        "features:",
+        f"  toolsets:           {', '.join(toolsets) if toolsets else '(default)'}",
+        f"  mcp_servers:        {_count_mcp_servers(config)}",
+        f"  memory_provider:    {_memory_provider(config)}",
+        f"  gateway:            {_gateway_status()}",
+    ]
     platforms = _configured_platforms()
-    lines.append(f"  platforms:          {', '.join(platforms) if platforms else 'none'}")
-    lines.append(f"  cron_jobs:          {_cron_summary(hermes_home)}")
-    lines.append(f"  skills:             {_count_skills(hermes_home)}")
+    lines += [
+        f"  platforms:          {', '.join(platforms) if platforms else 'none'}",
+        f"  cron_jobs:          {_cron_summary(hermes_home)}",
+        f"  skills:             {_count_skills(hermes_home)}",
+    ]
 
     # Config overrides (non-default values)
     overrides = _config_overrides(config)
     if overrides:
-        lines.append("")
-        lines.append("config_overrides:")
-        for key, val in overrides.items():
-            lines.append(f"  {key}: {val}")
+        lines += ["", "config_overrides:"]
+        lines += [f"  {key}: {val}" for key, val in overrides.items()]
 
     lines.append("--- end dump ---")
-
-    output = "\n".join(lines)
-    print(output)
+    print("\n".join(lines))

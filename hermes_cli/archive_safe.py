@@ -1,20 +1,4 @@
-"""Safe ``tar.gz`` primitives shared by the profile and kanban transfer paths.
-
-Both ``hermes profile export|import`` and ``hermes kanban export|import``
-ship a directory to another machine and unpack whatever comes back. The
-unpack side is the dangerous half: a hand-crafted archive can carry
-``../`` members, absolute paths, symlinks, or device nodes, any of which
-turn an import into an arbitrary-write primitive. These helpers are the
-one place that logic lives so a second transfer surface can't ship a
-second, subtly weaker extractor.
-
-The writer is deliberately not :func:`shutil.make_archive`: that emits
-PAX (Python's tarfile default since 3.8), whose fractional-mtime records
-macOS Archive Utility rejects — double-clicking an exported profile threw
-"Error 94 - Bad message." GNU format keeps long paths working (longlink
-extensions) and stays integer-mtime, so Finder, bsdtar, and gnutar all
-extract it.
-"""
+"""Safe ``tar.gz`` primitives shared by the profile and kanban transfer paths."""
 
 from __future__ import annotations
 
@@ -28,10 +12,9 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 def normalize_archive_parts(member_name: str) -> list[str]:
     """Return safe path parts for an archive member, or raise.
 
-    Rejects absolute paths (POSIX and Windows, including drive letters),
-    empty names, and any ``..`` component. Backslashes are folded to
-    ``/`` first so a Windows-authored archive can't smuggle a separator
-    past the POSIX parse.
+    Rejects absolute paths (POSIX and Windows, including drive letters), empty names, and any ``..``
+    component. Backslashes are folded to ``/`` first so a Windows-authored archive can't smuggle a
+    separator past the POSIX parse.
     """
     normalized_name = member_name.replace("\\", "/")
     posix_path = PurePosixPath(normalized_name)
@@ -54,12 +37,8 @@ def normalize_archive_parts(member_name: str) -> list[str]:
 def make_targz(base: str, root_dir: str, base_dir: str) -> str:
     """Create ``<base>.tar.gz`` of ``root_dir/base_dir`` in GNU tar format.
 
-    Writes to a sibling temp file and renames onto ``archive_path`` only
-    after the archive is fully written. ``tarfile.open`` on a path truncates
-    the destination the instant it opens, so writing there directly means a
-    failure partway through ``tf.add`` (disk full, permission loss,
-    interruption) destroys whatever was already at that path — including an
-    existing export the caller chose to overwrite.
+    Writes to a sibling temp file and renames onto ``archive_path`` only after the archive is fully
+    written.
     """
     archive_path = f"{base}.tar.gz"
     dest_dir = os.path.dirname(archive_path) or "."
@@ -83,9 +62,9 @@ def make_targz(base: str, root_dir: str, base_dir: str) -> str:
 def safe_extract_targz(archive: Path, destination: Path) -> None:
     """Extract ``archive`` into ``destination`` without path escapes or links.
 
-    Only directories and regular files are extracted; symlinks, hardlinks,
-    and device nodes raise rather than being silently skipped, so a
-    tampered archive fails the import instead of landing a partial tree.
+    Only directories and regular files are extracted; symlinks, hardlinks, and device nodes raise
+    rather than being silently skipped, so a tampered archive fails the import instead of landing a
+    partial tree.
     """
     with tarfile.open(archive, "r:gz") as tf:
         for member in tf.getmembers():
@@ -118,10 +97,9 @@ def safe_extract_targz(archive: Path, destination: Path) -> None:
 def archive_root_dirs(archive: Path) -> set[str]:
     """Return the archive's top-level directory names.
 
-    Transfer archives carry exactly one root directory, which names the
-    thing being imported. Inspecting the archive before extraction lets
-    the caller resolve the target name (and refuse a malformed archive)
-    without first mutating a live tree.
+    Transfer archives carry exactly one root directory, which names the thing being imported.
+    Inspecting the archive before extraction lets the caller resolve the target name (and refuse a
+    malformed archive) without first mutating a live tree.
     """
     with tarfile.open(archive, "r:gz") as tf:
         return {
@@ -135,9 +113,9 @@ def archive_root_dirs(archive: Path) -> set[str]:
 def copy_regular_files(src: Path, dst: Path) -> int:
     """Copy the regular files under ``src`` into ``dst``, skipping symlinks.
 
-    Used on the *export* side so a symlink planted in an attachments or
-    logs tree can't pull an arbitrary file into the archive. Returns the
-    number of files copied; a missing ``src`` copies nothing.
+    Used on the *export* side so a symlink planted in an attachments or logs tree can't pull an
+    arbitrary file into the archive. Returns the number of files copied; a missing ``src`` copies
+    nothing.
     """
     if not src.is_dir():
         return 0

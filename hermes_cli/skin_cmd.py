@@ -1,11 +1,8 @@
 """``hermes skin`` — list, switch, and tweak skins from the CLI.
 
-``set`` is the load-bearing verb: it changes ONE color of the ACTIVE skin **in
-place**, so tweaking (say) the tool marker never disturbs the rest of the look —
-background included. Editing the file bumps its mtime; the gateway's skin watcher
-repaints every live surface within ~a second. A built-in skin (no file) is forked
-into an editable copy that carries its full palette, so the current look is
-preserved and only the one key changes.
+``set`` is the load-bearing verb: it changes ONE color of the ACTIVE skin **in place**, so tweaking
+(say) the tool marker never disturbs the rest of the look — background included. Editing the file
+bumps its mtime; the gateway's skin watcher repaints every live surface within ~a second.
 """
 
 from __future__ import annotations

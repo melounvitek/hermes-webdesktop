@@ -1,38 +1,8 @@
 """Azure Foundry endpoint auto-detection.
 
-Inspect a Microsoft Foundry / Azure OpenAI endpoint to determine:
-  - API transport (OpenAI-style ``chat_completions`` vs
-    Anthropic-style ``anthropic_messages``)
-  - Available models (best effort — Azure does not expose a deployment
-    listing via the inference API key, but Azure OpenAI v1 endpoints
-    return the resource's model catalog via ``GET /models``)
-  - Context length for each discovered/entered model, via the existing
-    :func:`agent.model_metadata.get_model_context_length` resolver.
-
-Rationale:
-
-Azure has no pure-API-key deployment-listing endpoint — per Microsoft,
-deployment enumeration requires ARM management-plane auth.  Azure
-OpenAI v1 endpoints ``{resource}.openai.azure.com/openai/v1`` do return
-a ``/models`` list, but it reflects the resource's *available* models
-rather than the user's *deployed* deployment names.  In practice it is
-still a useful hint — the user picks a familiar model name and we look
-up its context length from the catalog.
-
-Authentication modes:
-  - ``api_key`` (default): the wizard passes an ``api_key`` string; the
-    probe sends both ``api-key:`` and ``Authorization: Bearer`` headers
-    so we hit any Azure deployment regardless of which header it expects.
-  - ``entra_id``: the wizard passes a ``token_provider`` callable from
-    :mod:`agent.azure_identity_adapter`. The probe mints exactly one
-    bearer JWT, sends **only** ``Authorization: Bearer <jwt>`` (never
-    ``api-key:``), and never persists the token. This matches Microsoft's
-    documented contract for keyless inference.
-
-The detector never crashes on errors (every HTTP call is wrapped in a
-broad try/except).  Callers get a :class:`DetectionResult` with whatever
-information could be gathered, and fall back to manual entry for the
-rest.
+The detector never crashes on errors (every HTTP call is wrapped in a broad try/except). Callers get
+a :class:`DetectionResult` with whatever information could be gathered, and fall back to manual
+entry for the rest.
 """
 
 from __future__ import annotations
@@ -96,55 +66,40 @@ def _resolve_credential(api_key: Any,
                         ) -> tuple[Optional[str], str]:
     """Coerce wizard inputs into a (token, mode) pair.
 
-    Returns ``(token_or_None, mode)`` where ``mode`` is:
-      - ``"entra_id"`` when a callable token provider was supplied — the
-        returned token is a freshly minted bearer JWT, sent ONLY in
-        ``Authorization: Bearer``.
-      - ``"api_key"`` when a string key was supplied — the returned token
-        is the raw API key, sent in BOTH ``api-key:`` and
-        ``Authorization: Bearer`` headers (preserves the original
-        broad-compat probe behaviour).
-      - ``("", "api_key")`` when neither yields a value.
-
-    Bearer minting failures degrade to ``("", "entra_id")`` so the caller
-    can still report "detection incomplete" rather than crashing.
+    Returns ``(token_or_None, mode)`` where ``mode`` is: - ``"entra_id"`` when a callable token
+    provider was supplied — the returned token is a freshly minted bearer JWT, sent ONLY in
+    ``Authorization: Bearer``.
     """
     # Token-provider path (callable wins when both supplied).
-    if token_provider is not None and callable(token_provider):
-        try:
-            token = token_provider()
-            return (str(token) if token else None), "entra_id"
-        except Exception as exc:
-            logger.debug("azure_detect: token_provider failed: %s", exc)
-            return None, "entra_id"
-    if callable(api_key) and not isinstance(api_key, str):
-        try:
-            token = api_key()
-            return (str(token) if token else None), "entra_id"
-        except Exception as exc:
-            logger.debug("azure_detect: api_key callable failed: %s", exc)
-            return None, "entra_id"
+    for provider, label in ((token_provider, "token_provider"), (api_key, "api_key callable")):
+        if callable(provider) and not isinstance(provider, str):
+            try:
+                token = provider()
+                return (str(token) if token else None), "entra_id"
+            except Exception as exc:
+                logger.debug("azure_detect: %s failed: %s", label, exc)
+                return None, "entra_id"
     # API-key path.
     if isinstance(api_key, str) and api_key:
         return api_key, "api_key"
     return None, "api_key"
 
 
-def _apply_auth_headers(req: urllib_request.Request,
-                        token: Optional[str],
-                        mode: str) -> None:
-    """Attach the right auth headers to ``req`` based on credential mode."""
-    if not token:
-        return
-    if mode == "entra_id":
-        # Bearer-only: do NOT also set api-key, which would log a JWT in
-        # a header slot intended for static keys.
+def _authed_request(url: str, api_key: Any, token_provider, *, method: str = "GET",
+                    data: Optional[bytes] = None) -> urllib_request.Request:
+    """Build a request carrying the right auth headers for the credential mode."""
+    token, mode = _resolve_credential(api_key, token_provider)
+    req = urllib_request.Request(url, method=method, data=data)
+    if token:
+        if mode != "entra_id":
+            # Legacy broad-compat behaviour: send both headers so we land on
+            # any Azure resource regardless of which it accepts.
+            req.add_header("api-key", token)
+        # Bearer-only in entra_id mode: do NOT also set api-key, which would
+        # log a JWT in a header slot intended for static keys.
         req.add_header("Authorization", f"Bearer {token}")
-    else:
-        # Legacy broad-compat behaviour: send both headers so we land on
-        # any Azure resource regardless of which it accepts.
-        req.add_header("api-key", token)
-        req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("User-Agent", "hermes-agent/azure-detect")
+    return req
 
 
 def _http_get_json(url: str,
@@ -155,10 +110,7 @@ def _http_get_json(url: str,
                    ) -> tuple[int, Optional[dict]]:
     """GET a URL with the appropriate auth headers.  Return
     ``(status_code, parsed_json_or_None)``.  Never raises."""
-    token, mode = _resolve_credential(api_key, token_provider)
-    req = urllib_request.Request(url, method="GET")
-    _apply_auth_headers(req, token, mode)
-    req.add_header("User-Agent", "hermes-agent/azure-detect")
+    req = _authed_request(url, api_key, token_provider)
     try:
         with open_credentialed_url(req, timeout=timeout) as resp:
             body = resp.read()
@@ -182,9 +134,9 @@ def _strip_trailing_v1(url: str) -> str:
 
 
 def _looks_like_anthropic_path(url: str) -> bool:
-    """Return True when the URL's path ends in ``/anthropic`` or
-    contains a ``/anthropic/`` segment.  Used by Azure Foundry
-    resources that route Claude traffic through a dedicated path."""
+    """Return True when the URL's path ends in ``/anthropic`` or contains a ``/anthropic/`` segment.
+    Used by Azure Foundry resources that route Claude traffic through a dedicated path.
+    """
     try:
         parsed = urlparse(url)
         path = (parsed.path or "").lower().rstrip("/")
@@ -215,20 +167,15 @@ def _probe_openai_models(base_url: str,
                          *,
                          token_provider: Optional[Callable[[], str]] = None,
                          ) -> tuple[bool, list[str]]:
-    """Probe ``<base>/models`` for an OpenAI-shaped response.
-
-    Returns ``(ok, models)``.  ``ok`` is True iff the endpoint accepted
-    us as an OpenAI-style caller (200 OK + OpenAI-shaped JSON body).
-    """
+    """Probe ``<base>/models`` for an OpenAI-shaped response."""
     base_url = base_url.rstrip("/")
 
     # Azure OpenAI v1: {resource}.openai.azure.com/openai/v1 — no
     # api-version required for GA paths, so probe without first.
-    candidates = [f"{base_url}/models"]
     # Fallback: explicit api-version for pre-v1 resources
-    for v in _AZURE_OPENAI_PROBE_API_VERSIONS:
-        candidates.append(f"{base_url}/models?api-version={v}")
-
+    candidates = [f"{base_url}/models"] + [
+        f"{base_url}/models?api-version={v}" for v in _AZURE_OPENAI_PROBE_API_VERSIONS
+    ]
     for url in candidates:
         status, body = _http_get_json(url, api_key, token_provider=token_provider)
         if status == 200 and body is not None:
@@ -251,11 +198,9 @@ def _probe_anthropic_messages(base_url: str,
                               *,
                               token_provider: Optional[Callable[[], str]] = None,
                               ) -> bool:
-    """Send a zero-token request to ``<base>/v1/messages`` and check
-    whether the endpoint at least *recognises* the Anthropic Messages
-    shape (any 4xx that mentions ``messages`` or ``model``, or a 400
-    ``invalid_request`` with an Anthropic error shape).  Never completes
-    a real chat.
+    """Send a zero-token request to ``<base>/v1/messages`` and check whether the endpoint at least
+    *recognises* the Anthropic Messages shape (any 4xx that mentions ``messages`` or ``model``, or a
+    400 ``invalid_request`` with an Anthropic error shape). Never completes a real chat.
     """
     base = _strip_trailing_v1(base_url)
     url = f"{base}/v1/messages?api-version={_AZURE_ANTHROPIC_API_VERSION}"
@@ -264,12 +209,9 @@ def _probe_anthropic_messages(base_url: str,
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "ping"}],
     }).encode("utf-8")
-    req = urllib_request.Request(url, method="POST", data=payload)
-    token, mode = _resolve_credential(api_key, token_provider)
-    _apply_auth_headers(req, token, mode)
+    req = _authed_request(url, api_key, token_provider, method="POST", data=payload)
     req.add_header("anthropic-version", "2023-06-01")
     req.add_header("content-type", "application/json")
-    req.add_header("User-Agent", "hermes-agent/azure-detect")
     try:
         with open_credentialed_url(req, timeout=6.0) as resp:
             # Should never 200 — "probe" isn't a real deployment.  But
@@ -303,16 +245,14 @@ def detect(base_url: str,
            ) -> DetectionResult:
     """Inspect an Azure endpoint and describe its transport + models.
 
-    Call this from the wizard before asking the user to pick an API
-    mode manually.  The caller should treat the returned
-    :class:`DetectionResult` as *advisory* — if ``api_mode`` is None,
-    fall back to asking the user.
+    Call this from the wizard before asking the user to pick an API mode manually. The caller should
+    treat the returned :class:`DetectionResult` as *advisory* — if ``api_mode`` is None, fall back
+    to asking the user.
 
-    ``api_key`` may be a string (legacy API-key auth — sends both
-    ``api-key:`` and ``Authorization: Bearer``) or a callable returning
-    a bearer JWT (Entra ID auth — sends ONLY ``Authorization: Bearer``).
-    ``token_provider`` is an alternative explicit name for the callable
-    form; if both are supplied the callable wins.
+    ``api_key`` may be a string (legacy API-key auth — sends both ``api-key:`` and ``Authorization:
+    Bearer``) or a callable returning a bearer JWT (Entra ID auth — sends ONLY ``Authorization:
+    Bearer``). ``token_provider`` is an alternative explicit name for the callable form; if both are
+    supplied the callable wins.
     """
     result = DetectionResult()
 
@@ -367,16 +307,9 @@ def lookup_context_length(model: str,
                           *,
                           token_provider: Optional[Callable[[], str]] = None,
                           ) -> Optional[int]:
-    """Thin wrapper around :func:`agent.model_metadata.get_model_context_length`
-    that returns ``None`` when only the fallback default (128k) would
-    fire, so the wizard can distinguish "we actually know this" from
-    "we guessed.
-
-    For Entra-ID mode pass a callable as ``api_key`` (or via
-    ``token_provider=``); the wrapped resolver expects a string, so we
-    mint one bearer JWT here for the single lookup. The resolver itself
-    only reads catalog metadata over HTTP — no SDK client is built — so
-    the minted token is consumed for at most one /models probe.
+    """Thin wrapper around :func:`agent.model_metadata.get_model_context_length` that returns ``None``
+    when only the fallback default (128k) would fire, so the wizard can distinguish "we actually
+    know this" from "we guessed.
     """
     model_id = str(model or "").strip()
     if not model_id:
@@ -391,11 +324,10 @@ def lookup_context_length(model: str,
 
     # Resolve the credential once. For Entra mode this calls the token
     # provider; for legacy api_key this is a no-op string pass-through.
-    token, mode = _resolve_credential(api_key, token_provider)
-    effective_key = token or ""
+    token, _mode = _resolve_credential(api_key, token_provider)
 
     try:
-        n = get_model_context_length(model_id, base_url=base_url, api_key=effective_key)
+        n = get_model_context_length(model_id, base_url=base_url, api_key=token or "")
     except Exception as exc:
         logger.debug("azure_detect: context length lookup failed: %s", exc)
         return None

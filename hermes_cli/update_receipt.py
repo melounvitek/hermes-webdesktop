@@ -1,29 +1,10 @@
 """Structured update receipts + post-update fleet version verification.
 
-Phase 1 of the fleet-update reliability plan (#91277): the updater must
-*prove* its outcome instead of assuming it.
+Phase 1 of the fleet-update reliability plan (#91277): the updater must *prove* its outcome instead
+of assuming it.
 
-Two additive capabilities, both designed so a failure inside them can never
-break an update (every public entry point is exception-swallowing):
-
-1. **Update receipt** — a machine-readable JSON record of what one
-   ``hermes update`` run discovered, did, skipped (and why), written to
-   ``<HERMES_HOME>/logs/update_receipts/``. Silent-failure classes this
-   makes visible: #88848 (helper died after "success" printed), #74973
-   (restart silently skipped), #85753 (restart phase never ran), #81193
-   (desktop shows failure for a successful update).
-
-2. **Fleet version verification** — after the restart phase, read every
-   profile's ``gateway_state.json``, compare each live gateway's stamped
-   ``code_sha`` (written by ``gateway/status.py`` on every runtime-status
-   write) against the freshly-updated checkout's HEAD, and print a fleet
-   version matrix. Mixed-version fleets (#88654, #69754, #77553, #56717)
-   become a loud, actionable report instead of a latent state.
-
-Deployment-kind awareness (docker/image-managed installs) rides on
-``hermes_cli.build_info.get_code_identity()``: an image build reports
-``source="build-file"`` and the receipt records that the install is not
-in-place updatable.
+Two additive capabilities, both designed so a failure inside them can never break an update (every
+public entry point is exception-swallowing):
 """
 
 from __future__ import annotations
@@ -51,6 +32,18 @@ _current: Optional["UpdateReceipt"] = None
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _str_records(entries: Any, keys: tuple[str, ...], *, pid: bool = False) -> list[dict[str, Any]]:
+    """Dict entries reduced to stringified ``keys`` (plus an int ``pid`` first when requested)."""
+    records = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        record: dict[str, Any] = {"pid": int(entry.get("pid", 0) or 0)} if pid else {}
+        record.update({key: str(entry.get(key, "")) for key in keys})
+        records.append(record)
+    return records
 
 
 class UpdateReceipt:
@@ -122,16 +115,10 @@ class UpdateReceipt:
                 key: [str(profile) for profile in fresh_recovery.get(key, [])]
                 for key in ("requested", "verified", "relaunch_attempted", "failed")
             }
-            persisted["skipped"] = [
-                {
-                    "profile": str(entry.get("profile", "")),
-                    "kind": str(entry.get("kind", "")),
-                    "supervisor": str(entry.get("supervisor", "")),
-                    "reason": str(entry.get("reason", "")),
-                }
-                for entry in fresh_recovery.get("skipped", [])
-                if isinstance(entry, dict)
-            ]
+            persisted["skipped"] = _str_records(
+                fresh_recovery.get("skipped", []),
+                ("profile", "kind", "supervisor", "reason"),
+            )
             # Serve/dashboard coverage (#92145). ``hermes serve`` hosts
             # tui_gateway and is not a gateway profile, so neither the
             # per-profile buckets above nor the fleet-version matrix can
@@ -143,16 +130,11 @@ class UpdateReceipt:
                 key: [str(unit) for unit in (serve_units.get(key) or [])]
                 for key in ("verified", "failed")
             }
-            persisted["stale_runtimes"] = [
-                {
-                    "pid": int(entry.get("pid", 0) or 0),
-                    "kind": str(entry.get("kind", "")),
-                    "profile": str(entry.get("profile", "")),
-                    "supervisor": str(entry.get("supervisor", "")),
-                }
-                for entry in fresh_recovery.get("stale_runtimes", [])
-                if isinstance(entry, dict)
-            ]
+            persisted["stale_runtimes"] = _str_records(
+                fresh_recovery.get("stale_runtimes", []),
+                ("kind", "profile", "supervisor"),
+                pid=True,
+            )
             result["fresh_recovery"] = persisted
         self.data["gateway_restart"] = result
 
@@ -183,31 +165,28 @@ def begin_update_receipt() -> None:
         _current = None
 
 
-def record_step(name: str, ok: bool, detail: str = "") -> None:
-    """Record one update step outcome. No-op when no receipt is active."""
+def _record(method: str, what: str, *args: Any, **kwargs: Any) -> None:
+    """Invoke ``method`` on the active receipt; no-op when none, never raises."""
     try:
         if _current is not None:
-            _current.step(name, ok, detail)
+            getattr(_current, method)(*args, **kwargs)
     except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("Could not record update step %s: %s", name, exc)
+        logger.debug("Could not record %s: %s", what, exc)
+
+
+def record_step(name: str, ok: bool, detail: str = "") -> None:
+    """Record one update step outcome. No-op when no receipt is active."""
+    _record("step", f"update step {name}", name, ok, detail)
 
 
 def record_skip(name: str, reason: str) -> None:
     """Record a skipped step WITH the reason it was skipped."""
-    try:
-        if _current is not None:
-            _current.skip(name, reason)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("Could not record update skip %s: %s", name, exc)
+    _record("skip", f"update skip {name}", name, reason)
 
 
 def record_gateway_restart(**kwargs: Any) -> None:
     """Record the gateway restart phase outcome (see UpdateReceipt)."""
-    try:
-        if _current is not None:
-            _current.gateway_restart_result(**kwargs)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("Could not record gateway restart result: %s", exc)
+    _record("gateway_restart_result", "gateway restart result", **kwargs)
 
 
 def finalize_update_receipt(
@@ -215,10 +194,9 @@ def finalize_update_receipt(
 ) -> Optional[Path]:
     """Finalize + persist the receipt. Returns the written path or None.
 
-    ``outcome`` is one of ``success`` / ``partial`` / ``failed`` /
-    ``refused``. Exactly-once by construction: the module singleton is
-    popped first, so a second call (e.g. the command-boundary safety net
-    after an inner path already finalized) is a no-op returning None.
+    ``outcome`` is one of ``success`` / ``partial`` / ``failed`` / ``refused``. Exactly-once by
+    construction: the module singleton is popped first, so a second call (e.g. the command-boundary
+    safety net after an inner path already finalized) is a no-op returning None.
     """
     global _current
     receipt = _current
@@ -235,15 +213,11 @@ def finalize_update_receipt(
         directory.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         path = directory / f"update_{stamp}_{os.getpid()}.json"
-        path.write_text(
-            json.dumps(receipt.data, indent=2, default=str), encoding="utf-8"
-        )
+        body = json.dumps(receipt.data, indent=2, default=str)
+        path.write_text(body, encoding="utf-8")
         # Stable pointer for the dashboard/desktop: latest receipt.
-        latest = directory / "latest.json"
         try:
-            latest.write_text(
-                json.dumps(receipt.data, indent=2, default=str), encoding="utf-8"
-            )
+            (directory / "latest.json").write_text(body, encoding="utf-8")
         except OSError:
             pass
         _prune_old_receipts(directory)
@@ -258,19 +232,12 @@ def finalize_pending_update_receipt(
 ) -> Optional[Path]:
     """Command-boundary safety net: persist a still-open receipt, if any.
 
-    ``hermes update`` has many early-termination paths (Windows
-    concurrent-instance preflight, venv-holder refusal, head-pinned no-op,
-    fetch failure — all ``sys.exit``) that predate the inner finalize
-    call sites. Any receipt still open when the update COMMAND unwinds is
-    finalized here so every post-begin run leaves a record — the
-    refused/failed runs are exactly the ones a receipt matters most for
-    (review on #91283). No-op when no receipt is open (the inner paths
-    already finalized — exactly-once via the popped singleton) or when
-    recording was never started. Never raises.
-
-    Outcome mapping: exit 0/None → ``success`` (a path that completed
-    without an explicit inner finalize), exit 2 → ``refused`` (the
-    updater's preflight-refusal convention), anything else → ``failed``.
+    ``hermes update`` has many early ``sys.exit`` paths (preflight refusals, venv-holder
+    refusal, fetch failure) predating the inner finalize calls; any receipt still open when the
+    command unwinds is finalized here so refused/failed runs — where a receipt matters most —
+    leave a record. No-op when nothing is open (inner paths finalize exactly-once via the popped
+    singleton). Never raises. Exit 0/None → ``success``, exit 2 → ``refused`` (preflight
+    convention), else → ``failed``.
     """
     if _current is None:
         return None
@@ -280,12 +247,11 @@ def finalize_pending_update_receipt(
         outcome = "refused"
     else:
         outcome = "failed"
-    try:
-        receipt = _current
-        if receipt is not None and exit_code is not None:
-            receipt.data["exit_code"] = int(exit_code)
-    except Exception:
-        pass
+    if exit_code is not None:
+        try:
+            _current.data["exit_code"] = int(exit_code)
+        except Exception:
+            pass
     return finalize_update_receipt(outcome, stop_reason=stop_reason)
 
 
@@ -321,35 +287,31 @@ def read_latest_receipt() -> Optional[dict[str, Any]]:
 # Fleet version verification
 # ---------------------------------------------------------------------------
 
+def _sha_state(code_sha: Any, expected_sha: Any) -> str:
+    if not code_sha or not expected_sha:
+        return "unknown"
+    return "current" if str(code_sha) == str(expected_sha) else "stale"
+
+
+def _fleet_row(profile: str, pid: int, code_sha: Any, code_version: Any, expected_sha: Any) -> dict[str, Any]:
+    return {
+        "profile": profile,
+        "pid": pid,
+        "code_sha": str(code_sha) if code_sha else None,
+        "code_version": code_version,
+        "state": _sha_state(code_sha, expected_sha),
+    }
+
+
 def collect_fleet_versions(
     *, pre_restart_pids: Optional[list[int]] = None
 ) -> list[dict[str, Any]]:
     """Snapshot every profile's gateway code identity vs. the current tree.
 
-    Returns one entry per profile home that has a ``gateway_state.json``
-    describing a gateway that is live — or that SHOULD be live::
-
-        {"profile": str, "pid": int, "code_sha": str|None,
-         "code_version": str|None, "state": "current"|"stale"|"unknown"|"down"}
-
-    ``stale``   — gateway stamped a code_sha that differs from the updated
-                  checkout's HEAD (it is still serving pre-update modules).
-    ``unknown`` — gateway predates the code-identity stamp (started before
-                  this feature landed) or identity could not be resolved.
-    ``down``    — the gateway was ALIVE when this update started
-                  (``pre_restart_pids``), its runtime status still says
-                  running, but the PID is dead and no successor rewrote the
-                  record: the restart phase stopped it and nothing came
-                  back. Without this row a killed-and-never-replaced gateway
-                  produced NO entry at all and the matrix passed silently
-                  (Phase-1 verification gap, #88848/#74973 class).
-
-    Rollout safety: ``down`` requires membership in ``pre_restart_pids`` —
-    a stale state file from a long-dead gateway (machine reboot, manual
-    kill weeks ago) must NOT fail every future update. Callers that don't
-    have a pre-restart snapshot (``None``/empty) get the historical
-    behavior: dead PIDs are skipped.
-    Never raises; a probe failure yields an empty list.
+    Rollout safety: ``down`` requires membership in ``pre_restart_pids`` — a stale state file from a
+    long-dead gateway (machine reboot, manual kill weeks ago) must NOT fail every future update.
+    Callers that don't have a pre-restart snapshot (``None``/empty) get the historical behavior:
+    dead PIDs are skipped.
     """
     # Runtime-status states that mean "this record does not describe a
     # gateway that should be running now" — no down row for these.
@@ -399,23 +361,12 @@ def collect_fleet_versions(
                 except (TypeError, ValueError):
                     pid = None
                 if pid is not None:
-                    code_sha = identity.get("code_sha")
-                    if not code_sha or not expected_sha:
-                        state = "unknown"
-                    elif str(code_sha) == str(expected_sha):
-                        state = "current"
-                    else:
-                        state = "stale"
-                    results.append(
-                        {
-                            "profile": profile,
-                            "pid": pid,
-                            "code_sha": str(code_sha) if code_sha else None,
-                            "code_version": identity.get("code_version"),
-                            "state": state,
-                            "source": "socket",
-                        }
+                    row = _fleet_row(
+                        profile, pid, identity.get("code_sha"),
+                        identity.get("code_version"), expected_sha,
                     )
+                    row["source"] = "socket"
+                    results.append(row)
                     continue
             status_path = home / "gateway_state.json"
             record = read_runtime_status(status_path)
@@ -458,21 +409,11 @@ def collect_fleet_versions(
                         }
                     )
                 continue
-            code_sha = record.get("code_sha")
-            if not code_sha or not expected_sha:
-                state = "unknown"
-            elif str(code_sha) == str(expected_sha):
-                state = "current"
-            else:
-                state = "stale"
             results.append(
-                {
-                    "profile": profile,
-                    "pid": pid,
-                    "code_sha": str(code_sha) if code_sha else None,
-                    "code_version": record.get("code_version"),
-                    "state": state,
-                }
+                _fleet_row(
+                    profile, pid, record.get("code_sha"),
+                    record.get("code_version"), expected_sha,
+                )
             )
     except Exception as exc:
         logger.debug("Fleet version probe failed: %s", exc)
@@ -482,13 +423,11 @@ def collect_fleet_versions(
 def print_fleet_version_matrix(fleet: list[dict[str, Any]]) -> bool:
     """Print the post-update fleet version matrix.
 
-    Returns True when at least one gateway is provably stale (still
-    serving pre-update code) OR provably down (was running, killed by the
-    restart phase, nothing came back), so the caller can escalate.
-    ``unknown`` entries are reported but do NOT fail the update: gateways
-    started before the code-identity stamp existed have no sha to compare,
-    and failing on them would turn this feature's own rollout into a
-    false-positive storm.
+    Returns True when at least one gateway is provably stale (still serving pre-update code) OR
+    provably down (killed by the restart phase, nothing came back), so the caller can escalate.
+    ``unknown`` entries are reported but do NOT fail the update: gateways started before the
+    code-identity stamp existed have no sha to compare, and failing them would be a false-
+    positive storm.
     """
     if not fleet:
         return False

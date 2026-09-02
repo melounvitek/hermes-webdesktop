@@ -1,21 +1,14 @@
-"""hermes webhook — manage dynamic webhook subscriptions from the CLI.
+"""hermes webhook — manage dynamic webhook subscriptions from the CLI."""
 
-Usage:
-    hermes webhook subscribe <name> [options]
-    hermes webhook list
-    hermes webhook remove <name>
-    hermes webhook test <name> [--payload '{"key": "value"}']
-
-Subscriptions persist to ~/.hermes/webhook_subscriptions.json and are
-hot-reloaded by the webhook adapter without a gateway restart.
-"""
-
+import hashlib
+import hmac
 import json
 import os
 import re
 import secrets
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 from typing import Dict
 
@@ -149,14 +142,9 @@ def webhook_command(args):
     if not _require_webhook_enabled():
         return
 
-    if sub in {"subscribe", "add"}:
-        _cmd_subscribe(args)
-    elif sub in {"list", "ls"}:
-        _cmd_list(args)
-    elif sub in {"remove", "rm"}:
-        _cmd_remove(args)
-    elif sub == "test":
-        _cmd_test(args)
+    handler = _ACTIONS.get(sub)
+    if handler is not None:
+        handler(args)
 
 
 def _cmd_subscribe(args):
@@ -190,9 +178,9 @@ def _cmd_subscribe(args):
             return
         route["deliver_only"] = True
 
-    script = getattr(args, "script", "") or ""
-    if script.strip():
-        route["script"] = script.strip()
+    script = (getattr(args, "script", "") or "").strip()
+    if script:
+        route["script"] = script
 
     if args.deliver_chat_id:
         route["deliver_extra"] = {"chat_id": args.deliver_chat_id}
@@ -206,10 +194,7 @@ def _cmd_subscribe(args):
     print(f"\n  {status} webhook subscription: {name}")
     print(f"  URL:    {base_url}/webhooks/{name}")
     print(f"  Secret: {secret}")
-    if events:
-        print(f"  Events: {', '.join(events)}")
-    else:
-        print("  Events: (all)")
+    print(f"  Events: {', '.join(events) or '(all)'}")
     print(f"  Deliver: {route['deliver']}")
     if route.get("deliver_only"):
         print("  Mode: direct delivery (no agent, zero LLM cost)")
@@ -273,22 +258,15 @@ def _cmd_test(args):
         print(f"  No subscription named '{name}'.")
         return
 
-    route = subs[name]
-    secret = route.get("secret", "")
+    secret = subs[name].get("secret", "")
     base_url = _get_webhook_base_url()
     url = f"{base_url}/webhooks/{name}"
 
     payload = args.payload or '{"test": true, "event_type": "test", "message": "Hello from hermes webhook test"}'
-
-    import hmac
-    import hashlib
-    sig = "sha256=" + hmac.new(
-        secret.encode(), payload.encode(), hashlib.sha256
-    ).hexdigest()
+    sig = "sha256=" + hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
     print(f"  Sending test POST to {url}")
     try:
-        import urllib.request
         req = urllib.request.Request(
             url,
             data=payload.encode(),
@@ -305,3 +283,11 @@ def _cmd_test(args):
     except Exception as e:
         print(f"  Error: {e}")
         print("  Is the gateway running? (hermes gateway run)")
+
+
+_ACTIONS = {
+    "subscribe": _cmd_subscribe, "add": _cmd_subscribe,
+    "list": _cmd_list, "ls": _cmd_list,
+    "remove": _cmd_remove, "rm": _cmd_remove,
+    "test": _cmd_test,
+}

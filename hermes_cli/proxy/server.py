@@ -1,20 +1,11 @@
 """HTTP server that forwards OpenAI-compatible requests to a configured upstream.
 
-Listens on ``http://<host>:<port>/v1/<path>`` and forwards each request to
-``<upstream-base-url>/<path>`` with the client's ``Authorization`` header
-replaced by a freshly-resolved bearer from the configured adapter. The
-response body is streamed through unchanged (SSE deltas preserved).
+One narrow SSE compatibility shim applies after a *clean* upstream EOF: when a ``text/event-stream``
+response carries a terminal ``finish_reason`` or ``lastOne: true`` but omits the OpenAI ``data:
+[DONE]`` sentinel, the proxy appends a single ``[DONE]`` frame.
 
-One narrow SSE compatibility shim applies after a *clean* upstream EOF:
-when a ``text/event-stream`` response carries a terminal ``finish_reason``
-or ``lastOne: true`` but omits the OpenAI ``data: [DONE]`` sentinel, the
-proxy appends a single ``[DONE]`` frame. It never rewrites earlier frames,
-never duplicates an upstream ``[DONE]``, and never synthesizes ``[DONE]``
-after an error event or a mid-stream interrupt (see
-:mod:`hermes_cli.proxy.sse_done`, issue #90848).
-
-Otherwise the server does not mediate, log, or rewrite request/response
-bodies — it is a credential-attaching forwarder.
+Otherwise the server does not mediate, log, or rewrite request/response bodies — it is a credential-
+attaching forwarder.
 """
 
 from __future__ import annotations
@@ -69,41 +60,31 @@ DEFAULT_HOST = "127.0.0.1"
 MAX_REQUEST_BYTES = 10_000_000
 
 
+def _require_aiohttp() -> None:
+    if not AIOHTTP_AVAILABLE:
+        raise RuntimeError(
+            "aiohttp is required for `hermes proxy`. Run `hermes setup` to install it."
+        )
+
+
 def _json_error(status: int, message: str, code: str = "proxy_error") -> "web.Response":
     """Return an OpenAI-style error JSON response."""
     body = {"error": {"message": message, "type": code, "code": code}}
     return web.json_response(body, status=status)
 
 
-def _filter_request_headers(headers: "aiohttp.typedefs.LooseHeaders") -> dict:
-    """Strip hop-by-hop + auth headers from the inbound request."""
-    out = {}
-    for key, value in headers.items():
-        if key.lower() in _HOP_BY_HOP_HEADERS:
-            continue
-        out[key] = value
-    return out
+# aiohttp recomputes Content-Encoding/Content-Length on stream — let it.
+_RESPONSE_DROP_HEADERS = _HOP_BY_HOP_HEADERS | {"content-encoding", "content-length"}
 
 
-def _filter_response_headers(headers) -> dict:
-    """Strip hop-by-hop headers from the upstream response."""
-    out = {}
-    for key, value in headers.items():
-        if key.lower() in _HOP_BY_HOP_HEADERS:
-            continue
-        # aiohttp recomputes Content-Encoding/Content-Length on stream — let it.
-        if key.lower() in {"content-encoding", "content-length"}:
-            continue
-        out[key] = value
-    return out
+def _filter_headers(headers, drop: frozenset = _HOP_BY_HOP_HEADERS) -> dict:
+    """Strip hop-by-hop (+ auth) headers; ``drop`` widens the set for upstream responses."""
+    return {key: value for key, value in headers.items() if key.lower() not in drop}
 
 
 def create_app(adapter: UpstreamAdapter) -> "web.Application":
     """Build the aiohttp application bound to a specific upstream adapter."""
-    if not AIOHTTP_AVAILABLE:
-        raise RuntimeError(
-            "aiohttp is required for `hermes proxy`. Run `hermes setup` to install it."
-        )
+    _require_aiohttp()
 
     app = web.Application(client_max_size=MAX_REQUEST_BYTES)
     # AppKey ensures forward-compat with future aiohttp versions that strip
@@ -166,7 +147,7 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
             if request.query_string:
                 upstream_url = f"{upstream_url}?{request.query_string}"
 
-            fwd_headers = _filter_request_headers(request.headers)
+            fwd_headers = _filter_headers(request.headers)
             fwd_headers["Authorization"] = f"{active_cred.token_type} {active_cred.bearer}"
 
             logger.debug(
@@ -199,23 +180,11 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
                 return _json_error(500, str(exc)), None
             except aiohttp.ClientError as exc:
                 logger.warning("proxy: upstream connection failed: %s", exc)
-                return (
-                    _json_error(
-                        502,
-                        f"upstream connection failed: {exc}",
-                        code="upstream_unreachable",
-                    ),
-                    None,
-                )
+                return _json_error(
+                    502, f"upstream connection failed: {exc}", code="upstream_unreachable"
+                ), None
             except asyncio.TimeoutError:
-                return (
-                    _json_error(
-                        504,
-                        "upstream request timed out",
-                        code="upstream_timeout",
-                    ),
-                    None,
-                )
+                return _json_error(504, "upstream request timed out", code="upstream_timeout"), None
 
         session_or_response, upstream_resp = await _open_upstream(cred)
         if upstream_resp is None:
@@ -251,7 +220,7 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
         # Stream response back. Headers first, then chunked body.
         resp = web.StreamResponse(
             status=upstream_resp.status,
-            headers=_filter_response_headers(upstream_resp.headers),
+            headers=_filter_headers(upstream_resp.headers, _RESPONSE_DROP_HEADERS),
         )
         await resp.prepare(request)
 
@@ -297,14 +266,8 @@ async def run_server(
     port: int = DEFAULT_PORT,
     shutdown_event: Optional[asyncio.Event] = None,
 ) -> None:
-    """Run the proxy in the current event loop until shutdown_event is set.
-
-    If shutdown_event is None, runs until cancelled (Ctrl+C or SIGTERM).
-    """
-    if not AIOHTTP_AVAILABLE:
-        raise RuntimeError(
-            "aiohttp is required for `hermes proxy`. Run `hermes setup` to install it."
-        )
+    """Run the proxy in the current event loop until shutdown_event is set."""
+    _require_aiohttp()
 
     app = create_app(adapter)
     runner = web.AppRunner(app, access_log=None)

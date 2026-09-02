@@ -1,20 +1,4 @@
-"""hermes hooks — inspect and manage shell-script hooks.
-
-Usage::
-
-    hermes hooks list
-    hermes hooks test <event> [--for-tool X] [--payload-file F]
-    hermes hooks revoke <command>
-    hermes hooks doctor
-
-Consent records live under ``~/.hermes/shell-hooks-allowlist.json`` and
-hook definitions come from the ``hooks:`` block in ``~/.hermes/config.yaml``
-(the same config read by the CLI / gateway at startup).
-
-This module is a thin CLI shell over :mod:`agent.shell_hooks`; every
-shared concern (payload serialisation, response parsing, allowlist
-format) lives there.
-"""
+"""hermes hooks — inspect and manage shell-script hooks."""
 
 from __future__ import annotations
 
@@ -32,16 +16,11 @@ def hooks_command(args) -> None:
         print("Run 'hermes hooks --help' for details.")
         return
 
-    if sub in {"list", "ls"}:
-        _cmd_list(args)
-    elif sub == "test":
-        _cmd_test(args)
-    elif sub in {"revoke", "remove", "rm"}:
-        _cmd_revoke(args)
-    elif sub == "doctor":
-        _cmd_doctor(args)
-    else:
+    handler = _ACTIONS.get(sub)
+    if handler is None:
         print(f"Unknown hooks subcommand: {sub}")
+        return
+    handler(args)
 
 
 # ---------------------------------------------------------------------------
@@ -70,52 +49,57 @@ def _cmd_list(_args) -> None:
         for spec in specs:
             by_event.setdefault(spec.event, []).append(spec)
 
-        allowlist = shell_hooks.load_allowlist()
         approved = {
             (e.get("event"), e.get("command"))
-            for e in allowlist.get("approvals", [])
+            for e in shell_hooks.load_allowlist().get("approvals", [])
             if isinstance(e, dict)
         }
 
         print(f"Configured shell hooks ({len(specs)} total):\n")
 
-        for event in sorted(by_event.keys()):
+        for event in sorted(by_event):
             print(f"  [{event}]")
             for spec in by_event[event]:
                 is_approved = (spec.event, spec.command) in approved
                 status = "✓ allowed" if is_approved else "✗ not allowlisted"
-                matcher_part = f" matcher={spec.matcher!r}" if spec.matcher else ""
-                print(
-                    f"    - {spec.command}{matcher_part} "
-                    f"(timeout={spec.timeout}s, {status})"
-                )
+                print(f"    - {spec.command}{_matcher_part(spec)} (timeout={spec.timeout}s, {status})")
 
-                if is_approved:
-                    entry = shell_hooks.allowlist_entry_for(spec.event, spec.command)
-                    if entry and entry.get("approved_at"):
-                        print(f"      approved_at: {entry['approved_at']}")
-                        mtime_now = shell_hooks.script_mtime_iso(spec.command)
-                        mtime_at = entry.get("script_mtime_at_approval")
-                        if mtime_now and mtime_at and mtime_now > mtime_at:
-                            print(
-                                f"      ⚠ script modified since approval "
-                                f"(was {mtime_at}, now {mtime_now}) — "
-                                f"run `hermes hooks doctor` to re-validate"
-                            )
+                entry = shell_hooks.allowlist_entry_for(spec.event, spec.command) if is_approved else None
+                if entry and entry.get("approved_at"):
+                    print(f"      approved_at: {entry['approved_at']}")
+                    drift, mtime_at, mtime_now = _mtime_drift(shell_hooks, spec, entry)
+                    if drift is True:
+                        print(
+                            f"      ⚠ script modified since approval "
+                            f"(was {mtime_at}, now {mtime_now}) — "
+                            f"run `hermes hooks doctor` to re-validate"
+                        )
             print()
 
     if outbound:
         print(f"Configured outbound webhooks ({len(outbound)} total):\n")
         for target in outbound:
             signed = "signed" if target.secret else "UNSIGNED"
-            matcher_part = f" matcher={target.matcher!r}" if target.matcher else ""
             print(f"  - {target.label}")
             print(f"      url:     {target.url}")
-            print(
-                f"      events:  {', '.join(target.events)}{matcher_part} "
-                f"(timeout={target.timeout}s, {signed})"
-            )
+            print(f"      events:  {', '.join(target.events)}{_matcher_part(target)} (timeout={target.timeout}s, {signed})")
         print()
+
+
+def _matcher_part(obj) -> str:
+    return f" matcher={obj.matcher!r}" if obj.matcher else ""
+
+
+def _mtime_drift(shell_hooks, spec, entry) -> tuple[bool | None, str, str]:
+    """Return ``(drift, mtime_at, mtime_now)``: drift is True if the script changed since approval,
+    False if unchanged, None when either mtime is unknown."""
+    mtime_now = shell_hooks.script_mtime_iso(spec.command)
+    mtime_at = entry.get("script_mtime_at_approval")
+    if not (mtime_now and mtime_at):
+        return None, mtime_at, mtime_now
+    if mtime_now > mtime_at:
+        return True, mtime_at, mtime_now
+    return (False if mtime_now == mtime_at else None), mtime_at, mtime_now
 
 
 # ---------------------------------------------------------------------------
@@ -255,9 +239,10 @@ def _cmd_test(args) -> None:
     # Synthetic kwargs in the same shape invoke_hook() would pass.  Merged
     # with --for-tool (overrides tool_name) and --payload-file (extra kwargs).
     payload = dict(_DEFAULT_PAYLOADS.get(event, {"session_id": "test-session"}))
+    for_tool = getattr(args, "for_tool", None)
 
-    if getattr(args, "for_tool", None):
-        payload["tool_name"] = args.for_tool
+    if for_tool:
+        payload["tool_name"] = for_tool
 
     if getattr(args, "payload_file", None):
         try:
@@ -270,20 +255,15 @@ def _cmd_test(args) -> None:
             print(f"Error reading payload file: {exc}")
             return
 
-    specs = shell_hooks.iter_configured_hooks(load_config())
-    specs = [s for s in specs if s.event == event]
+    specs = [s for s in shell_hooks.iter_configured_hooks(load_config()) if s.event == event]
 
-    if getattr(args, "for_tool", None):
-        specs = [
-            s for s in specs
-            if s.event not in {"pre_tool_call", "post_tool_call"}
-            or s.matches_tool(args.for_tool)
-        ]
+    if for_tool:
+        specs = [s for s in specs if s.event not in {"pre_tool_call", "post_tool_call"} or s.matches_tool(for_tool)]
 
     if not specs:
         print(f"No shell hooks configured for event: {event}")
-        if getattr(args, "for_tool", None):
-            print(f"(with matcher filter --for-tool={args.for_tool})")
+        if for_tool:
+            print(f"(with matcher filter --for-tool={for_tool})")
         return
 
     print(f"Firing {len(specs)} hook(s) for event '{event}':\n")
@@ -302,16 +282,12 @@ def _print_run_result(result: Dict[str, Any]) -> None:
         print(f"      ✗ timed out after {result['elapsed_seconds']}s")
         return
 
-    rc = result.get("returncode")
-    elapsed = result.get("elapsed_seconds", 0)
-    print(f"      exit={rc}  elapsed={elapsed}s")
+    print(f"      exit={result.get('returncode')}  elapsed={result.get('elapsed_seconds', 0)}s")
 
-    stdout = (result.get("stdout") or "").strip()
-    stderr = (result.get("stderr") or "").strip()
-    if stdout:
-        print(f"      stdout: {_truncate(stdout, 400)}")
-    if stderr:
-        print(f"      stderr: {_truncate(stderr, 400)}")
+    for stream in ("stdout", "stderr"):
+        text = (result.get(stream) or "").strip()
+        if text:
+            print(f"      {stream}: {_truncate(text, 400)}")
 
     parsed = result.get("parsed")
     if parsed:
@@ -364,10 +340,7 @@ def _cmd_doctor(_args) -> None:
         problems += _doctor_one(spec, shell_hooks)
         print()
 
-    if problems:
-        print(f"{problems} issue(s) found.  Fix before relying on these hooks.")
-    else:
-        print("All shell hooks look healthy.")
+    print(f"{problems} issue(s) found.  Fix before relying on these hooks." if problems else "All shell hooks look healthy.")
 
 
 def _doctor_one(spec, shell_hooks) -> int:
@@ -392,14 +365,13 @@ def _doctor_one(spec, shell_hooks) -> int:
 
     # 3. Mtime drift
     if entry and entry.get("script_mtime_at_approval"):
-        mtime_now = shell_hooks.script_mtime_iso(spec.command)
-        mtime_at = entry["script_mtime_at_approval"]
-        if mtime_now and mtime_at and mtime_now > mtime_at:
+        drift, mtime_at, mtime_now = _mtime_drift(shell_hooks, spec, entry)
+        if drift is True:
             problems += 1
             print(f"      ⚠ script modified since approval "
                   f"(was {mtime_at}, now {mtime_now}) — review changes, "
                   f"then `hermes hooks revoke` + re-approve to refresh")
-        elif mtime_now and mtime_at and mtime_now == mtime_at:
+        elif drift is False:
             print("      ✓ script unchanged since approval")
 
     # 4. Produces valid JSON for a synthetic payload — only when the entry
@@ -439,3 +411,11 @@ def _doctor_one(spec, shell_hooks) -> int:
                       f"(exit={rc}, {elapsed}s) — hook is observer-only")
 
     return problems
+
+
+_ACTIONS = {
+    "list": _cmd_list, "ls": _cmd_list,
+    "test": _cmd_test,
+    "revoke": _cmd_revoke, "remove": _cmd_revoke, "rm": _cmd_revoke,
+    "doctor": _cmd_doctor,
+}

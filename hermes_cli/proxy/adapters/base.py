@@ -1,13 +1,5 @@
 """Abstract base for proxy upstream adapters.
 
-An :class:`UpstreamAdapter` represents one OAuth-authenticated provider the
-local proxy can forward requests to. The adapter is responsible for:
-
-  - locating the user's auth state for that provider
-  - refreshing/minting credentials when needed
-  - reporting the resolved upstream base URL
-  - declaring which request paths it accepts
-
 The proxy server is otherwise provider-agnostic.
 """
 
@@ -53,32 +45,25 @@ class UpstreamAdapter(ABC):
     def allowed_paths(self) -> FrozenSet[str]:
         """Set of relative request paths the upstream accepts.
 
-        Paths are relative to the proxy's ``/v1`` mount point. For example,
-        ``"/chat/completions"`` corresponds to a client request to
-        ``http://127.0.0.1:<port>/v1/chat/completions``. Requests to paths
-        not in this set get a 404 with a helpful error body.
+        Paths are relative to the proxy's ``/v1`` mount (``"/chat/completions"`` ⇒
+        ``/v1/chat/completions``). Requests outside this set get a 404 with a helpful body.
         """
 
     @abstractmethod
     def is_authenticated(self) -> bool:
         """Return True if the user has usable credentials for this upstream.
 
-        Should be cheap — no network calls. Used by ``proxy start`` for a
-        clear up-front error before binding a port.
+        Should be cheap — no network calls. Used by ``proxy start`` for a clear up-front error
+        before binding a port.
         """
 
     @abstractmethod
     def get_credential(self) -> UpstreamCredential:
         """Return a fresh credential, refreshing or rotating if necessary.
 
-        Implementations should:
-          - refresh the access token if it's near expiry
-          - rotate the upstream bearer key if it's near expiry
-          - persist any refreshed state back to disk
-
-        Raises:
-            RuntimeError: if the user isn't authenticated or the upstream
-              refresh fails. The proxy will return 401 to the client.
+        Implementations refresh a near-expiry access token, rotate a near-expiry upstream bearer key
+        and persist refreshed state to disk. Raises RuntimeError when unauthenticated or refresh
+        fails; the proxy then returns 401 to the client.
         """
 
     def get_retry_credential(
@@ -89,8 +74,8 @@ class UpstreamAdapter(ABC):
     ) -> Optional[UpstreamCredential]:
         """Return an alternate credential after an upstream auth failure.
 
-        The default is no retry. Providers can override this for one-shot
-        fallback paths after the upstream rejects the first request.
+        The default is no retry. Providers can override this for one-shot fallback paths after the
+        upstream rejects the first request.
         """
         _ = failed_credential, status_code
         return None

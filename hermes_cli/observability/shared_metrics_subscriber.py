@@ -53,6 +53,21 @@ class SharedMetricsSubscriber:
         with self._lock:
             self._active = False
 
+    @staticmethod
+    def _classify(event: Any) -> tuple[str, dict] | None:
+        """Return ``(metric_name, dimensions)`` for the first matching contract, else None."""
+        metric = client_active_counter(event)
+        if metric is not None:
+            return metric
+        for metric_name, project in (
+            (MODEL_ROUTE_METRIC, model_call_dimensions),
+            (TOOL_CALL_METRIC, tool_call_dimensions),
+        ):
+            dimensions = project(event)
+            if dimensions is not None:
+                return metric_name, dimensions
+        return task_counter(event) or tool_approval_counter(event) or skill_counter(event)
+
     def __call__(self, event: Any) -> None:
         if self._runtime_id is not None:
             metadata = getattr(event, "metadata", None)
@@ -61,26 +76,10 @@ class SharedMetricsSubscriber:
                 or metadata.get(RUNTIME_INSTANCE_KEY) != self._runtime_id
             ):
                 return
-        metric = client_active_counter(event)
-        dimensions = None
-        metric_name = CLIENT_ACTIVE_METRIC
-        if metric is not None:
-            metric_name, dimensions = metric
-        if dimensions is None:
-            dimensions = model_call_dimensions(event)
-            metric_name = MODEL_ROUTE_METRIC
-        if dimensions is None:
-            dimensions = tool_call_dimensions(event)
-            metric_name = TOOL_CALL_METRIC
-        if dimensions is None:
-            metric = (
-                task_counter(event)
-                or tool_approval_counter(event)
-                or skill_counter(event)
-            )
-            if metric is None:
-                return
-            metric_name, dimensions = metric
+        metric = self._classify(event)
+        if metric is None:
+            return
+        metric_name, dimensions = metric
         with self._lock:
             if not self._active:
                 return

@@ -8,14 +8,18 @@ from typing import Any, List
 logger = logging.getLogger(__name__)
 
 
-def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
-    """Notify first-party observers, then invoke compatibility plugin hooks."""
+def _observe(hook_name: str, **kwargs: Any) -> None:
     try:
         from hermes_cli.observability import observe_lifecycle
 
         observe_lifecycle(hook_name, **kwargs)
     except Exception:
         logger.warning("Built-in observability hook failed", exc_info=True)
+
+
+def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
+    """Notify first-party observers, then invoke compatibility plugin hooks."""
+    _observe(hook_name, **kwargs)
 
     from hermes_cli import plugins
 
@@ -39,12 +43,7 @@ def has_hook(hook_name: str) -> bool:
 
 def finalize_session(**kwargs: Any) -> List[Any]:
     """Notify observers and hard-close one core-owned Relay conversation."""
-    try:
-        from hermes_cli.observability import observe_lifecycle
-
-        observe_lifecycle("on_session_finalize", **kwargs)
-    except Exception:
-        logger.warning("Built-in observability hook failed", exc_info=True)
+    _observe("on_session_finalize", **kwargs)
 
     session_id = str(kwargs.get("session_id") or "")
     if session_id:

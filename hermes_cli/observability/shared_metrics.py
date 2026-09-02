@@ -352,13 +352,11 @@ class SharedMetricsStore:
     def _add_send_columns(connection: sqlite3.Connection) -> None:
         """Add transmission bookkeeping to ``package_outbox``, idempotently.
 
-        These columns are ADDITIVE and nullable, and the store schema version
-        is deliberately NOT bumped. ``_ensure_schema_in_transaction`` raises on
-        any version it does not recognise and has no forward-compatibility
-        branch, so bumping would make an older Hermes — a second profile on an
-        older build, or a rollback — hard-fail against the same database file.
-        Old readers select named columns and never ``SELECT *``, so extra
-        columns are invisible to them.
+        The columns are ADDITIVE and nullable, and the schema version is deliberately NOT bumped:
+        ``_ensure_schema_in_transaction`` raises on unknown versions with no forward-compat branch,
+        so a bump would hard-fail an older Hermes (second profile, rollback) against the same
+        database. Old readers select named columns, never ``SELECT *``, so extra columns are
+        invisible to them.
         """
         existing = {
             str(row["name"])
@@ -395,32 +393,13 @@ class SharedMetricsStore:
     def _add_consent_tables(connection: sqlite3.Connection) -> None:
         """Create the consent-window tables, idempotently.
 
-        Additive like ``_add_send_columns`` — the schema version is
-        deliberately NOT bumped, and old readers never touch these tables.
+        Additive like ``_add_send_columns`` — the schema version is deliberately NOT bumped, and old
+        readers never touch these tables.
 
-        ``send_consent_windows`` records consent as explicit intervals rather
-        than a moving day-stamp: a window is opened when send consent is
-        observed, heartbeat-confirmed on every later observation, and closed
-        at the LAST CONFIRMED moment (never "now") when consent is observed
-        withdrawn. Consent is asserted only for time that was actually
-        observed, so unobserved gaps — a hand-edited config with no process
-        running — fail closed by construction.
-
-        ``consent_marks`` holds two monotonic high-water marks with strictly
-        separated roles:
-
-        - ``obs``: the latest observation stamp ever seen. Advanced only by
-          the reconciler. Confirms consent and clamps window closes.
-        - ``data``: the latest package ``period_end`` ever stored. Advanced
-          only by the package writer. Clamps window OPENS, so a rolled-back
-          clock can never open a window underneath packages that already
-          exist on disk.
-
-        The separation is load-bearing: letting data stamps confirm consent
-        re-created a refused-window leak (packages stored during an off
-        window would vouch for it), and letting observation stamps clamp
-        opens is not enough on its own to stop a rollback sliding a window
-        under existing refused data.
+        ``send_consent_windows`` records consent as explicit intervals rather than a moving day-
+        stamp: a window is opened when send consent is observed, heartbeat-confirmed on every later
+        observation, and closed at the LAST CONFIRMED moment (never "now") when consent is observed
+        withdrawn.
         """
         connection.execute(
             """

@@ -1,14 +1,4 @@
-"""``hermes project`` CLI — manage first-class, multi-folder Projects.
-
-A Project is a human-named workspace spanning one or more folders, with one
-designated primary repo. Projects anchor desktop session grouping and (when
-bound to a kanban board) give kanban tasks a deterministic worktree + branch
-convention. State lives in the per-profile ``$HERMES_HOME/projects.db`` store
-(see :mod:`hermes_cli.projects_db`).
-
-This is a footprint-ladder rung-2 capability: a CLI command + gateway RPC,
-with zero model-tool schema cost.
-"""
+"""``hermes project`` CLI — manage first-class, multi-folder Projects."""
 
 from __future__ import annotations
 
@@ -37,67 +27,42 @@ def build_parser(
 
     p_create = sub.add_parser("create", help="Create a new project")
     p_create.add_argument("name", help="Human name, e.g. 'Hermes Agent'")
-    p_create.add_argument(
-        "folders", nargs="*", help="Folder paths to include (first = primary)"
-    )
+    p_create.add_argument("folders", nargs="*", help="Folder paths to include (first = primary)")
     p_create.add_argument("--slug", default=None, help="Explicit slug override")
-    p_create.add_argument(
-        "--primary", default=None, metavar="PATH", help="Primary repo path"
-    )
+    p_create.add_argument("--primary", default=None, metavar="PATH", help="Primary repo path")
     p_create.add_argument("--description", default=None)
     p_create.add_argument("--icon", default=None)
     p_create.add_argument("--color", default=None)
-    p_create.add_argument(
-        "--board", default=None, metavar="SLUG", help="Bind a kanban board"
-    )
-    p_create.add_argument(
-        "--use", action="store_true", help="Set as the active project"
-    )
+    p_create.add_argument("--board", default=None, metavar="SLUG", help="Bind a kanban board")
+    p_create.add_argument("--use", action="store_true", help="Set as the active project")
 
     p_list = sub.add_parser("list", aliases=["ls"], help="List projects")
-    p_list.add_argument(
-        "--all", action="store_true", dest="include_archived",
-        help="Include archived projects",
-    )
+    p_list.add_argument("--all", action="store_true", dest="include_archived", help="Include archived projects")
 
-    p_show = sub.add_parser("show", help="Show a project's details")
-    p_show.add_argument("project", help="Project id or slug")
+    def project_sub(name: str, help: str) -> argparse.ArgumentParser:
+        sp = sub.add_parser(name, help=help)
+        sp.add_argument("project", help="Project id or slug")
+        return sp
 
-    p_add = sub.add_parser("add-folder", help="Add a folder to a project")
-    p_add.add_argument("project", help="Project id or slug")
+    project_sub("show", "Show a project's details")
+
+    p_add = project_sub("add-folder", "Add a folder to a project")
     p_add.add_argument("path", help="Folder path")
     p_add.add_argument("--label", default=None)
-    p_add.add_argument(
-        "--primary", action="store_true", help="Mark as primary repo"
+    p_add.add_argument("--primary", action="store_true", help="Mark as primary repo")
+
+    project_sub("remove-folder", "Remove a folder from a project").add_argument("path", help="Folder path")
+    project_sub("rename", "Rename a project").add_argument("name", help="New name")
+    project_sub("set-primary", "Set the primary folder").add_argument(
+        "path", help="Folder path (must already be in project)"
     )
-
-    p_rm = sub.add_parser("remove-folder", help="Remove a folder from a project")
-    p_rm.add_argument("project", help="Project id or slug")
-    p_rm.add_argument("path", help="Folder path")
-
-    p_rename = sub.add_parser("rename", help="Rename a project")
-    p_rename.add_argument("project", help="Project id or slug")
-    p_rename.add_argument("name", help="New name")
-
-    p_primary = sub.add_parser("set-primary", help="Set the primary folder")
-    p_primary.add_argument("project", help="Project id or slug")
-    p_primary.add_argument("path", help="Folder path (must already be in project)")
 
     p_use = sub.add_parser("use", help="Set the active project")
-    p_use.add_argument(
-        "project", nargs="?", default=None,
-        help="Project id or slug (omit to clear)",
-    )
+    p_use.add_argument("project", nargs="?", default=None, help="Project id or slug (omit to clear)")
 
-    p_archive = sub.add_parser("archive", help="Archive a project")
-    p_archive.add_argument("project", help="Project id or slug")
-
-    p_restore = sub.add_parser("restore", help="Restore an archived project")
-    p_restore.add_argument("project", help="Project id or slug")
-
-    p_bind = sub.add_parser("bind-board", help="Bind a kanban board to a project")
-    p_bind.add_argument("project", help="Project id or slug")
-    p_bind.add_argument(
+    project_sub("archive", "Archive a project")
+    project_sub("restore", "Restore an archived project")
+    project_sub("bind-board", "Bind a kanban board to a project").add_argument(
         "board", nargs="?", default="", help="Board slug (omit to unbind)"
     )
 
@@ -114,27 +79,12 @@ def projects_command(args: argparse.Namespace) -> int:
             parser.print_help()
         else:
             print(
-                "usage: hermes project <action> [options]\n"
-                "Run 'hermes project --help' for the full list.",
+                "usage: hermes project <action> [options]\nRun 'hermes project --help' for the full list.",
                 file=sys.stderr,
             )
         return 0
 
-    handlers = {
-        "create": _cmd_create,
-        "list": _cmd_list,
-        "ls": _cmd_list,
-        "show": _cmd_show,
-        "add-folder": _cmd_add_folder,
-        "remove-folder": _cmd_remove_folder,
-        "rename": _cmd_rename,
-        "set-primary": _cmd_set_primary,
-        "use": _cmd_use,
-        "archive": _cmd_archive,
-        "restore": _cmd_restore,
-        "bind-board": _cmd_bind_board,
-    }
-    handler = handlers.get(action)
+    handler = _HANDLERS.get(action)
     if handler is None:
         print(f"Unknown project action: {action}", file=sys.stderr)
         return 1
@@ -148,38 +98,38 @@ def _resolve(conn, ident: str):
     return proj
 
 
-def _with_project(fn):
-    """Open the DB, resolve ``args.project``, and run ``fn(args, conn, proj)``.
-
-    Collapses the connect / resolve / not-found(1) / bad-arg(2) boilerplate every
-    project-scoped subcommand repeated.
-    """
+def _db_command(fn):
+    """Open the DB and run ``fn(args, conn)``; a ``ValueError`` prints ``project: …`` and exits 2."""
 
     @functools.wraps(fn)
     def wrapper(args: argparse.Namespace) -> int:
-        with pdb.connect_closing() as conn:
-            proj = _resolve(conn, args.project)
-            if proj is None:
-                return 1
-            try:
-                return fn(args, conn, proj)
-            except ValueError as exc:
-                print(f"project: {exc}", file=sys.stderr)
-                return 2
+        try:
+            with pdb.connect_closing() as conn:
+                return fn(args, conn)
+        except ValueError as exc:
+            print(f"project: {exc}", file=sys.stderr)
+            return 2
 
     return wrapper
 
 
+def _with_project(fn):
+    """Like ``_db_command`` but also resolves ``args.project`` into ``fn(args, conn, proj)``."""
+
+    @functools.wraps(fn)
+    def wrapper(args: argparse.Namespace, conn) -> int:
+        proj = _resolve(conn, args.project)
+        return 1 if proj is None else fn(args, conn, proj)
+
+    return _db_command(wrapper)
+
+
 def _print_project(proj) -> None:
-    flags = " (archived)" if proj.archived else ""
-    print(f"{proj.slug}  [{proj.id}]{flags}")
+    print(f"{proj.slug}  [{proj.id}]{' (archived)' if proj.archived else ''}")
     print(f"  name:    {proj.name}")
-    if proj.description:
-        print(f"  about:   {proj.description}")
-    if proj.board_slug:
-        print(f"  board:   {proj.board_slug}")
-    if proj.primary_path:
-        print(f"  primary: {proj.primary_path}")
+    for label, value in (("about", proj.description), ("board", proj.board_slug), ("primary", proj.primary_path)):
+        if value:
+            print(f"  {label}:{' ' * (8 - len(label))}{value}")
     if proj.folders:
         print("  folders:")
         for f in proj.folders:
@@ -188,26 +138,22 @@ def _print_project(proj) -> None:
             print(f"   {mark} {f.path}{label}")
 
 
-def _cmd_create(args: argparse.Namespace) -> int:
-    try:
-        with pdb.connect_closing() as conn:
-            pid = pdb.create_project(
-                conn,
-                name=args.name,
-                slug=args.slug,
-                folders=args.folders,
-                primary_path=args.primary,
-                description=args.description,
-                icon=args.icon,
-                color=args.color,
-                board_slug=args.board,
-            )
-            if args.use:
-                pdb.set_active(conn, pid)
-            proj = pdb.get_project(conn, pid)
-    except ValueError as exc:
-        print(f"project: {exc}", file=sys.stderr)
-        return 2
+@_db_command
+def _cmd_create(args, conn) -> int:
+    pid = pdb.create_project(
+        conn,
+        name=args.name,
+        slug=args.slug,
+        folders=args.folders,
+        primary_path=args.primary,
+        description=args.description,
+        icon=args.icon,
+        color=args.color,
+        board_slug=args.board,
+    )
+    if args.use:
+        pdb.set_active(conn, pid)
+    proj = pdb.get_project(conn, pid)
     if proj is None:
         print("project: vanished after create", file=sys.stderr)
         return 2
@@ -216,20 +162,19 @@ def _cmd_create(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_list(args: argparse.Namespace) -> int:
-    with pdb.connect_closing() as conn:
-        active = pdb.get_active_id(conn)
-        projs = pdb.list_projects(
-            conn, include_archived=getattr(args, "include_archived", False)
-        )
+@_db_command
+def _cmd_list(args, conn) -> int:
+    active = pdb.get_active_id(conn)
+    projs = pdb.list_projects(
+        conn, include_archived=getattr(args, "include_archived", False)
+    )
     if not projs:
         print("No projects yet. Create one with `hermes project create <name>`.")
         return 0
     for p in projs:
         marker = "*" if p.id == active else " "
         flags = " (archived)" if p.archived else ""
-        nfolders = len(p.folders)
-        print(f"{marker} {p.slug:<24} {p.name}{flags}  [{nfolders} folder(s)]")
+        print(f"{marker} {p.slug:<24} {p.name}{flags}  [{len(p.folders)} folder(s)]")
     return 0
 
 
@@ -275,16 +220,16 @@ def _cmd_set_primary(args, conn, proj) -> int:
     return 0
 
 
-def _cmd_use(args: argparse.Namespace) -> int:
-    with pdb.connect_closing() as conn:
-        if not args.project:
-            pdb.set_active(conn, None)
-            print("Cleared active project")
-            return 0
-        proj = _resolve(conn, args.project)
-        if proj is None:
-            return 1
-        pdb.set_active(conn, proj.id)
+@_db_command
+def _cmd_use(args, conn) -> int:
+    if not args.project:
+        pdb.set_active(conn, None)
+        print("Cleared active project")
+        return 0
+    proj = _resolve(conn, args.project)
+    if proj is None:
+        return 1
+    pdb.set_active(conn, proj.id)
     print(f"Active project: {proj.slug}")
     return 0
 
@@ -315,11 +260,7 @@ def _cmd_bind_board(args, conn, proj) -> int:
 
 
 def _sync_board_default_workdir(proj, board_slug: str) -> None:
-    """Best-effort: point the bound board's default_workdir at the primary repo.
-
-    Keeps kanban task worktrees anchored to the project's repo. Failures here
-    are non-fatal — the binding itself already succeeded.
-    """
+    """Best-effort: point the bound board's default_workdir at the primary repo."""
     if not proj.primary_path:
         return
     try:
@@ -333,3 +274,19 @@ def _sync_board_default_workdir(proj, board_slug: str) -> None:
         kb.write_board_metadata(slug, default_workdir=proj.primary_path)
     except Exception:
         pass
+
+
+_HANDLERS = {
+    "create": _cmd_create,
+    "list": _cmd_list,
+    "ls": _cmd_list,
+    "show": _cmd_show,
+    "add-folder": _cmd_add_folder,
+    "remove-folder": _cmd_remove_folder,
+    "rename": _cmd_rename,
+    "set-primary": _cmd_set_primary,
+    "use": _cmd_use,
+    "archive": _cmd_archive,
+    "restore": _cmd_restore,
+    "bind-board": _cmd_bind_board,
+}

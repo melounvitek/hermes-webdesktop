@@ -1,23 +1,4 @@
-"""``hermes portal`` — the human-readable entry point for Nous Portal.
-
-Running ``hermes portal`` with no subcommand performs the one-shot Portal
-onboarding: OAuth login, pick a Nous model, switch the inference provider to
-Nous, and offer to enable the Tool Gateway. It is the friendly alias for
-``hermes auth add nous --type oauth`` (which still works), is identical to
-``hermes setup --portal``, and runs the same Nous flow as the first-time quick
-setup.
-
-Subcommands:
-  (none)   Log in to Nous Portal + set it up (one-shot onboarding).
-  login    Explicit alias for the default one-shot onboarding.
-  info     Show Portal auth state + which Tool Gateway tools are routed.
-  open     Open the Portal subscription page in the user's default browser.
-  tools    List Tool Gateway tools and which are active in the current config.
-
-This command is intentionally minimal — it does not duplicate functionality
-already in ``hermes auth`` or ``hermes tools``. It's the onboarding + discovery
-surface for the Portal subscription itself.
-"""
+"""``hermes portal`` — the human-readable entry point for Nous Portal."""
 from __future__ import annotations
 
 import sys
@@ -29,6 +10,17 @@ from hermes_cli.config import load_config
 DEFAULT_PORTAL_URL = "https://portal.nousresearch.com"
 SUBSCRIPTION_URL = "https://portal.nousresearch.com/manage-subscription"
 DOCS_URL = "https://hermes-agent.nousresearch.com/docs/user-guide/features/tool-gateway"
+
+
+def _feature_state(feat, *, via_nous: str) -> str:
+    """Routing column shared by `portal info` and `portal tools`."""
+    if feat.managed_by_nous:
+        return color(via_nous, Colors.GREEN)
+    if feat.active and feat.current_provider:
+        return feat.current_provider
+    if feat.active:
+        return "active"
+    return color("not configured", Colors.DIM)
 
 
 def _cmd_status(args) -> int:
@@ -82,17 +74,8 @@ def _cmd_status(args) -> int:
         print("  (could not resolve subscription state)")
         return 0
 
-    rows = []
-    for feat in features.items():
-        if feat.managed_by_nous:
-            state = color("via Nous Portal", Colors.GREEN)
-        elif feat.active and feat.current_provider:
-            state = feat.current_provider
-        elif feat.active:
-            state = "active"
-        else:
-            state = color("not configured", Colors.DIM)
-        rows.append((feat.label, state))
+    rows = [(feat.label, _feature_state(feat, via_nous="via Nous Portal"))
+            for feat in features.items()]
 
     width = max((len(r[0]) for r in rows), default=0)
     for label, state in rows:
@@ -152,14 +135,8 @@ def _cmd_tools(args) -> int:
         feat = features.features.get(key)
         if feat is None:
             state = color("unknown", Colors.DIM)
-        elif feat.managed_by_nous:
-            state = color("✓ via Nous Portal", Colors.GREEN)
-        elif feat.active and feat.current_provider:
-            state = feat.current_provider
-        elif feat.active:
-            state = "active"
         else:
-            state = color("not configured", Colors.DIM)
+            state = _feature_state(feat, via_nous="✓ via Nous Portal")
         print(f"  {label:<{label_width}}  partner: {partner:<14} {state}")
 
     print()
@@ -171,11 +148,9 @@ def _cmd_tools(args) -> int:
 def _cmd_login(args) -> int:
     """Run the one-shot Nous Portal onboarding (login + model + provider + tools).
 
-    This is the human-readable front door for `hermes auth add nous --type
-    oauth`. It reuses the exact wiring behind `hermes setup --portal` (which in
-    turn runs the same Nous flow as the first-time quick setup), so the
-    commands stay in lockstep: device-code login, pick a Nous model, switch the
-    inference provider to Nous, then offer the Tool Gateway opt-in.
+    Front door for ``hermes auth add nous --type oauth``. Reuses the exact wiring behind ``hermes
+    setup --portal`` so the commands stay in lockstep: device-code login, pick a Nous model, switch
+    the inference provider to Nous, then offer the Tool Gateway opt-in.
     """
     from hermes_cli.setup import _run_portal_one_shot
 
@@ -189,21 +164,26 @@ def _cmd_login(args) -> int:
     return 0
 
 
+# Default (None/"") is the one-shot onboarding — `hermes portal` is the
+# human-readable alias for `hermes auth add nous --type oauth` /
+# `hermes setup --portal`. `status` kept as a back-compat alias for `info`.
+_SUBCOMMANDS = {
+    None: _cmd_login,
+    "": _cmd_login,
+    "login": _cmd_login,
+    "info": _cmd_status,
+    "status": _cmd_status,
+    "open": _cmd_open,
+    "tools": _cmd_tools,
+}
+
+
 def portal_command(args) -> int:
     """Top-level dispatch for `hermes portal <subcommand>`."""
     sub = getattr(args, "portal_command", None)
-    if sub in {None, "", "login"}:
-        # Default to the one-shot onboarding — `hermes portal` is the
-        # human-readable alias for `hermes auth add nous --type oauth` /
-        # `hermes setup --portal`.
-        return _cmd_login(args)
-    if sub in {"info", "status"}:
-        # `status` kept as a back-compat alias for the prior default.
-        return _cmd_status(args)
-    if sub == "open":
-        return _cmd_open(args)
-    if sub == "tools":
-        return _cmd_tools(args)
+    handler = _SUBCOMMANDS.get(sub)
+    if handler is not None:
+        return handler(args)
     print(f"Unknown portal subcommand: {sub}", file=sys.stderr)
     print("Run `hermes portal -h` for usage.", file=sys.stderr)
     return 1
@@ -224,23 +204,15 @@ def add_parser(subparsers) -> None:
     )
     portal_sub = portal_parser.add_subparsers(dest="portal_command")
 
-    portal_sub.add_parser(
-        "login",
-        help="Log in to Nous Portal + set it up (default; one-shot onboarding)",
-    )
-    portal_sub.add_parser(
-        "info",
-        help="Show Portal auth + Tool Gateway routing summary",
-    )
-    # `status` retained as a hidden back-compat alias for `info`.
-    portal_sub.add_parser("status")
-    portal_sub.add_parser(
-        "open",
-        help="Open the Portal subscription page in your default browser",
-    )
-    portal_sub.add_parser(
-        "tools",
-        help="List Tool Gateway tools and which are routed via Nous",
-    )
+    # `status` retained as a hidden (no help) back-compat alias for `info`;
+    # registration order is the order shown in `hermes portal -h`.
+    for name, help_text in (
+        ("login", "Log in to Nous Portal + set it up (default; one-shot onboarding)"),
+        ("info", "Show Portal auth + Tool Gateway routing summary"),
+        ("status", None),
+        ("open", "Open the Portal subscription page in your default browser"),
+        ("tools", "List Tool Gateway tools and which are routed via Nous"),
+    ):
+        portal_sub.add_parser(name, **({} if help_text is None else {"help": help_text}))
 
     portal_parser.set_defaults(func=portal_command)

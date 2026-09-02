@@ -1,20 +1,7 @@
-"""Windows ConPTY bridge for the `hermes dashboard` chat tab.
-
-Drop-in counterpart to ``hermes_cli.pty_bridge.PtyBridge`` for native
-Windows. Mirrors the exact public surface the ``/api/pty`` WebSocket
-handler in ``hermes_cli.web_server`` consumes: ``spawn``, ``read``,
-``write``, ``resize``, ``close``, ``is_available``, plus the
-``PtyUnavailableError`` type.
-
-Backed by ``pywinpty`` (already a declared win32 dependency in
-pyproject.toml) instead of ``ptyprocess``/``fcntl``/``termios``, none of
-which exist on native Windows. The read/write/terminate calls here match
-the working winpty usage already shipping in ``tools/process_registry.py``.
-"""
+"""Windows ConPTY bridge for the `hermes dashboard` chat tab."""
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 from typing import Optional, Sequence
@@ -57,9 +44,9 @@ class PtyUnavailableError(RuntimeError):
 class WinPtyBridge:
     """pywinpty-backed bridge with the same interface as ``PtyBridge``.
 
-    ``web_server`` calls :meth:`read` inside ``run_in_executor``, so a
-    blocking/polling read here never stalls the event loop. ConPTY exposes
-    no selectable fd, so we poll with a short sleep instead of ``select``.
+    ``web_server`` calls :meth:`read` inside ``run_in_executor``, so a blocking/polling read here
+    never stalls the event loop. ConPTY exposes no selectable fd, so we poll with a short sleep
+    instead of ``select``.
     """
 
     def __init__(self, proc: "PtyProcess") -> None:  # type: ignore[name-defined]
@@ -121,11 +108,7 @@ class WinPtyBridge:
     # -- I/O --------------------------------------------------------------
 
     def read(self, timeout: float = 0.2) -> Optional[bytes]:
-        """Up to 64 KiB of child output.
-
-        Returns bytes, ``b""`` when nothing is available this tick, or
-        ``None`` once the child has exited (EOF).
-        """
+        """Up to 64 KiB of child output."""
         if self._closed:
             return None
         try:

@@ -100,13 +100,9 @@ def _normalize_soul(text: str) -> str:
 def is_legacy_template_soul(text: str) -> bool:
     """True if ``text`` is a non-customized, auto-seeded SOUL.md.
 
-    Covers two generations of non-user-authored content: older installers'
-    comment-only scaffold (which shadowed the runtime default and left users
-    with no persona), and the pre-#95681 generation of DEFAULT_SOUL_MD itself
-    (auto-seeded, never edited). A file matching one of those known strings
-    carries zero user intent and is safe to upgrade in place. Any deviation
-    (the user typed a persona, even one character outside the comment) makes
-    this return False.
+    Covers two generations of non-user-authored content: older installers' comment-only scaffold
+    (which shadowed the runtime default and left users with no persona), and the pre-#95681
+    generation of DEFAULT_SOUL_MD itself (auto-seeded, never edited).
     """
     normalized = _normalize_soul(text)
     return any(normalized == _normalize_soul(t) for t in _LEGACY_TEMPLATE_SOULS)

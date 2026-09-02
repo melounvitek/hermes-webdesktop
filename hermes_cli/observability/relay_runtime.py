@@ -1,9 +1,4 @@
-"""Compatibility alias for the core Hermes Relay runtime.
-
-New code should import :mod:`agent.relay_runtime`. This module remains an
-alias, rather than a copy, so existing plugins and tests share the same
-profile registry and test-reset state during the migration.
-"""
+"""Compatibility alias for the core Hermes Relay runtime."""
 
 from __future__ import annotations
 

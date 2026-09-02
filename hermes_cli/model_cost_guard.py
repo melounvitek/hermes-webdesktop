@@ -37,9 +37,7 @@ def _to_decimal(value: object) -> Optional[Decimal]:
 
 
 def _format_money(value: Optional[Decimal]) -> str:
-    if value is None:
-        return "unknown"
-    return f"${value:.2f}/M"
+    return "unknown" if value is None else f"${value:.2f}/M"
 
 
 def _pricing_from_model_info(
@@ -56,9 +54,7 @@ def _pricing_from_model_info(
 
 def _known_models_dev_provider(provider: Optional[str]) -> Optional[str]:
     normalized = (provider or "").strip().lower()
-    if not normalized:
-        return None
-    return PROVIDER_TO_MODELS_DEV.get(normalized)
+    return PROVIDER_TO_MODELS_DEV.get(normalized) if normalized else None
 
 
 def _can_trust_model_info_pricing(
@@ -98,8 +94,8 @@ def expensive_model_warning(
 ) -> Optional[ExpensiveModelWarning]:
     """Return a warning payload when known pricing exceeds safety thresholds.
 
-    The guard only triggers when pricing is known. Callers should use this after
-    model resolution so aliases and provider-specific model IDs have settled.
+    The guard only triggers when pricing is known. Callers should use this after model resolution so
+    aliases and provider-specific model IDs have settled.
     """
     model = (model_name or "").strip()
     if not model:
@@ -112,11 +108,10 @@ def expensive_model_warning(
     if _can_trust_model_info_pricing(provider, model_info):
         input_cost, output_cost, source = _pricing_from_model_info(model_info)
 
-    if (
-        input_cost is None
-        and output_cost is None
-        and _known_models_dev_provider(provider)
-    ):
+    def _unpriced() -> bool:
+        return input_cost is None and output_cost is None
+
+    if _unpriced() and _known_models_dev_provider(provider):
         try:
             from agent.models_dev import get_model_info
 
@@ -126,11 +121,7 @@ def expensive_model_warning(
         except Exception:
             pass
 
-    if (
-        input_cost is None
-        and output_cost is None
-        and _can_trust_pricing_lookup(model, provider=provider, base_url=base_url)
-    ):
+    if _unpriced() and _can_trust_pricing_lookup(model, provider=provider, base_url=base_url):
         try:
             from agent.usage_pricing import get_pricing_entry
 
@@ -149,12 +140,8 @@ def expensive_model_warning(
 
     is_known_gpt55_pro_confusion = model.lower() == GPT55_PRO_OPENROUTER_ID
 
-    over_input = (
-        input_cost is not None and input_cost > INPUT_COST_WARNING_THRESHOLD
-    )
-    over_output = (
-        output_cost is not None and output_cost > OUTPUT_COST_WARNING_THRESHOLD
-    )
+    over_input = input_cost is not None and input_cost > INPUT_COST_WARNING_THRESHOLD
+    over_output = output_cost is not None and output_cost > OUTPUT_COST_WARNING_THRESHOLD
     if not over_input and not over_output and not is_known_gpt55_pro_confusion:
         return None
 
@@ -164,10 +151,7 @@ def expensive_model_warning(
         f"{model} has known pricing above Hermes' safety threshold.",
         f"Input tokens: {_format_money(input_cost)}",
         f"Output tokens: {_format_money(output_cost)}",
-        (
-            "Threshold: more than $20/M input tokens or more than "
-            "$100/M output tokens."
-        ),
+        "Threshold: more than $20/M input tokens or more than $100/M output tokens.",
     ]
     if source:
         lines.append(f"Pricing source: {source}.")

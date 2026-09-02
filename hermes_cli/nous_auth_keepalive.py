@@ -160,8 +160,8 @@ def _refresh_selected_pool_entry(
 ) -> Optional[bool]:
     """Refresh the current Nous credential pool entry when it is stale.
 
-    Returns True when a pool entry exists and is usable/refreshed, False when a
-    pool exists but no entry can be used, and None when no Nous pool exists.
+    True = pool entry usable/refreshed; False = pool exists but no usable entry;
+    None = no Nous pool.
     """
     try:
         from agent.credential_pool import load_pool
@@ -191,12 +191,9 @@ def _refresh_selected_pool_entry(
     )
     key_usable = _agent_key_is_usable(_entry_state(entry), min_key_ttl_seconds)
     if access_expiring or not key_usable:
-        refreshed = pool.try_refresh_current()
-        if refreshed is None:
+        if pool.try_refresh_current() is None:
             return False
         logger.debug("Nous auth keepalive: refreshed credential pool entry")
-        return True
-
     return True
 
 
@@ -221,19 +218,14 @@ def refresh_nous_auth_keepalive_once(
         return False
 
     try:
-        resolve_nous_runtime_credentials(
-            timeout_seconds=_timeout_seconds(timeout_seconds),
-        )
+        resolve_nous_runtime_credentials(timeout_seconds=_timeout_seconds(timeout_seconds))
         logger.debug("Nous auth keepalive: refreshed singleton auth state")
         return True
-    except AuthError as exc:
-        if exc.relogin_required:
+    except Exception as exc:
+        if isinstance(exc, AuthError) and exc.relogin_required:
             logger.info("Nous auth keepalive requires re-login: %s", exc)
         else:
             logger.debug("Nous auth keepalive failed: %s", exc)
-        return False
-    except Exception as exc:
-        logger.debug("Nous auth keepalive failed: %s", exc)
         return False
 
 

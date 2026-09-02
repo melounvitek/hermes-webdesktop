@@ -1,24 +1,13 @@
 """SSE ``[DONE]`` sentinel normalization for OpenAI-compatible proxies.
 
-Some upstreams (notably Nous Portal for certain free models) deliver a
-complete chat-completions stream — content deltas, a non-null
-``finish_reason``, and often a ``lastOne: true`` usage frame — then close
-the connection without the conventional OpenAI terminal event::
+Strict OpenAI-compatible clients treat that shape as a truncated stream. This module watches the
+forwarded SSE byte stream and reports whether the proxy should append a single ``data: [DONE]``
+frame after a *clean* upstream EOF.
 
-    data: [DONE]
-
-Strict OpenAI-compatible clients treat that shape as a truncated stream.
-This module watches the forwarded SSE byte stream and reports whether the
-proxy should append a single ``data: [DONE]`` frame after a *clean*
-upstream EOF.
-
-Rules (issue #90848):
-- Retain every original delta unchanged (this helper never rewrites bytes).
-- Append ``[DONE]`` only after a complete terminal choice
-  (``finish_reason`` non-null) **or** an upstream ``lastOne: true`` marker.
-- Never synthesize ``[DONE]`` after an error event, or when the stream was
-  interrupted before clean EOF.
-- Never emit a second ``[DONE]`` when the upstream already sent one.
+- Append ``[DONE]`` only after a complete terminal choice (``finish_reason`` non-null) **or** an
+upstream ``lastOne: true`` marker. - Never synthesize ``[DONE]`` after an error event, or when the
+stream was interrupted before clean EOF. - Never emit a second ``[DONE]`` when the upstream already
+sent one.
 """
 
 from __future__ import annotations

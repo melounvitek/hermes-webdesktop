@@ -68,19 +68,16 @@ def prepare_patched_psutil_sdist(archive: Path, destination: Path) -> Path:
     """Safely extract the pinned psutil sdist and patch it for Android."""
     _safe_extract_tar_gz(archive, destination)
 
-    src_roots = sorted(
-        (
-            path for path in destination.iterdir()
-            if path.is_dir() and path.name.startswith("psutil-")
-        ),
-        key=lambda path: path.name,
-    )
+    src_roots = [
+        path for path in destination.iterdir()
+        if path.is_dir() and path.name.startswith("psutil-")
+    ]
     if not src_roots:
         raise PsutilAndroidInstallError(
             "psutil sdist did not contain a psutil-* directory"
         )
 
-    src_root = src_roots[0]
+    src_root = min(src_roots, key=lambda path: path.name)
     common_py = src_root / "psutil" / "_common.py"
     if not common_py.is_file():
         raise PsutilAndroidInstallError(

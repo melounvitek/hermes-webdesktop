@@ -1,21 +1,9 @@
 """Managed llama.cpp runtime.
 
-Hermes downloads, verifies, supervises, and updates one llama-server, and
-decides per machine which model build and context window to run. Key
-modules:
-
-- ``binaries``  — resolve/download/verify official llama.cpp release zips
-                  into ``$HERMES_HOME/runtimes/llamacpp/<tag>/``.
-- ``supervisor``— spawn and supervise one llama-server in router mode;
-                  readiness is a touch generation, never health-200 alone.
-- ``detect``    — find an already-running llama-server (external or ours).
-- ``estimator`` / ``context_policy`` / ``growth`` — price context memory
-  per architecture and run the window ladder (zero-spill start, grow
-  toward native max, compress only at the top).
-- ``catalog`` / ``presets`` — the curated model list and the per-model
-  launch flags that carry policy decisions to the router.
-
-Everything is driven by the ``local_runtime`` section of config.yaml.
+- ``binaries`` — resolve/download/verify official llama.cpp release zips into
+``$HERMES_HOME/runtimes/llamacpp/<tag>/``. - ``supervisor``— spawn and supervise one llama-server in
+router mode; readiness is a touch generation, never health-200 alone. - ``detect`` — find an
+already-running llama-server (external or ours).
 """
 
 from hermes_cli.local_runtime.binaries import (  # noqa: F401

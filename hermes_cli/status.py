@@ -1,9 +1,6 @@
-"""
-Status command for hermes CLI.
+"""Status command for hermes CLI."""
 
-Shows the status of all Hermes Agent components.
-"""
-
+import json
 import os
 import sys
 import time
@@ -28,17 +25,50 @@ from hermes_constants import OPENROUTER_MODELS_URL
 from tools.tool_backend_helpers import managed_nous_tools_enabled
 
 def check_mark(ok: bool) -> str:
-    if ok:
-        return color("✓", Colors.GREEN)
-    return color("✗", Colors.RED)
+    return color("✓", Colors.GREEN) if ok else color("✗", Colors.RED)
+
+
+def _section(title: str) -> None:
+    """Print a blank line followed by a bold cyan ``◆`` section heading."""
+    print()
+    print(color(f"◆ {title}", Colors.CYAN, Colors.BOLD))
+
+
+def _row(name: str, ok: bool, text: str, width: int = 12) -> None:
+    """Print one ``name  ✓/✗ text`` status row."""
+    print(f"  {name:<{width}}  {check_mark(ok)} {text}")
+
+
+def _detail(label: str, value) -> None:
+    """Print an indented ``label: value`` detail line under a status row."""
+    print(f"    {label:<12}{value}")
+
+
+def _oauth_block(name: str, status: dict, hint: str, details) -> bool:
+    """Print an OAuth provider row plus its conditional detail lines; returns logged-in state."""
+    logged_in = bool(status.get("logged_in"))
+    _row(name, logged_in, "logged in" if logged_in else f"not logged in (run: {hint})")
+    for label, value, show in details(logged_in):
+        if show:
+            _detail(label, value)
+    return logged_in
+
+
+def _first_env_value(names) -> str:
+    """Return the first non-empty env value among ``names`` (a str or tuple of names)."""
+    if isinstance(names, str):
+        names = (names,)
+    for candidate in names:
+        v = get_env_value(candidate) or ""
+        if v:
+            return v
+    return ""
 
 def redact_key(key: str) -> str:
     """Redact an API key for display.
 
-    Thin wrapper over :func:`agent.redact.mask_secret`. Preserves the
-    "(not set)" placeholder in dim color to match ``hermes config``'s
-    output (previously this variant was missing the DIM color —
-    consolidated via PR that also introduced ``mask_secret``).
+    Thin wrapper over :func:`agent.redact.mask_secret` that keeps the dim "(not set)" placeholder
+    consistent with ``hermes config`` output.
     """
     from agent.redact import mask_secret
     return mask_secret(key, empty=color("(not set)", Colors.DIM))
@@ -46,12 +76,10 @@ def redact_key(key: str) -> str:
 
 def _format_iso_timestamp(value) -> str:
     """Format ISO timestamps for status output, converting to local timezone."""
-    if not value or not isinstance(value, str):
-        return "(unknown)"
-    from datetime import datetime, timezone
-    text = value.strip()
+    text = value.strip() if isinstance(value, str) else ""
     if not text:
         return "(unknown)"
+    from datetime import datetime, timezone
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
@@ -63,23 +91,14 @@ def _format_iso_timestamp(value) -> str:
     return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def _format_relative_ts(ts: float) -> str:
-    """Format an epoch timestamp as a short relative age for status output."""
-    from hermes_cli.timefmt import relative_time
-
-    return relative_time(ts)
-
-
 def _configured_model_label(config: dict) -> str:
     """Return the configured default model from config.yaml."""
     model_cfg = config.get("model")
     if isinstance(model_cfg, dict):
-        model = (model_cfg.get("default") or model_cfg.get("name") or "").strip()
-    elif isinstance(model_cfg, str):
-        model = model_cfg.strip()
-    else:
-        model = ""
-    return model or "(not set)"
+        model_cfg = model_cfg.get("default") or model_cfg.get("name") or ""
+    elif not isinstance(model_cfg, str):
+        model_cfg = ""
+    return model_cfg.strip() or "(not set)"
 
 
 def _effective_provider_label() -> str:
@@ -96,13 +115,11 @@ def _effective_provider_label() -> str:
         # config.yaml as the single source of truth) or via the legacy
         # OPENAI_BASE_URL env var. Either way, labeling it "OpenRouter"
         # is misleading (#3296).
-        config_base_url = ""
         try:
             model_cfg = load_config().get("model")
-            if isinstance(model_cfg, dict):
-                config_base_url = (model_cfg.get("base_url") or "").strip()
+            config_base_url = (model_cfg.get("base_url") or "").strip() if isinstance(model_cfg, dict) else ""
         except Exception:
-            pass
+            config_base_url = ""
         if config_base_url or get_env_value("OPENAI_BASE_URL"):
             effective = "custom"
 
@@ -113,10 +130,7 @@ from hermes_constants import is_termux as _is_termux
 
 
 def _estop_status_line():
-    """One-line pause banner for `hermes status`, or None when not paused.
-
-    Cheap: a single stat on $HERMES_HOME/ESTOP via agent.estop.
-    """
+    """One-line pause banner for `hermes status`, or None when not paused."""
     try:
         from agent.estop import get_state
     except ImportError:
@@ -125,8 +139,7 @@ def _estop_status_line():
     if state is None:
         return None
     reason = state.get("reason")
-    suffix = f" — reason: {reason}" if reason else ""
-    return f"⏸️  PAUSED (global emergency stop{suffix}; `hermes resume` to lift)"
+    return f"⏸️  PAUSED (global emergency stop{f' — reason: {reason}' if reason else ''}; `hermes resume` to lift)"
 
 
 def show_status(args):
@@ -146,13 +159,12 @@ def show_status(args):
     # =========================================================================
     # Environment
     # =========================================================================
-    print()
-    print(color("◆ Environment", Colors.CYAN, Colors.BOLD))
+    _section("Environment")
     print(f"  Project:      {PROJECT_ROOT}")
     print(f"  Python:       {sys.version.split()[0]}")
 
-    env_path = get_env_path()
-    print(f"  .env file:    {check_mark(env_path.exists())} {'exists' if env_path.exists() else 'not found'}")
+    env_exists = get_env_path().exists()
+    print(f"  .env file:    {check_mark(env_exists)} {'exists' if env_exists else 'not found'}")
 
     try:
         config = load_config()
@@ -165,14 +177,12 @@ def show_status(args):
     # =========================================================================
     # API Keys
     # =========================================================================
-    print()
-    print(color("◆ API Keys", Colors.CYAN, Colors.BOLD))
+    _section("API Keys")
 
     # Values may be a single env var name (str) or a tuple of alternates (first found wins).
     keys: dict[str, str | tuple[str, ...]] = {
         "OpenRouter": "OPENROUTER_API_KEY",
         "OpenAI": "OPENAI_API_KEY",
-        "Anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"),
         "Google / Gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
         "DeepSeek": "DEEPSEEK_API_KEY",
         "xAI / Grok": "XAI_API_KEY",
@@ -193,37 +203,19 @@ def show_status(args):
         "GitHub": "GITHUB_TOKEN",
     }
 
-    def _resolve_env(env_ref) -> str:
-        """Return first non-empty env var value from a str or tuple of names."""
-        if isinstance(env_ref, tuple):
-            for candidate in env_ref:
-                v = get_env_value(candidate) or ""
-                if v:
-                    return v
-            return ""
-        return get_env_value(env_ref) or ""
-
     for name, env_ref in keys.items():
-        # Anthropic already has a dedicated lookup below; keep that as the
-        # single source of truth (it also resolves OAuth tokens), skip here
-        # so we don't print two "Anthropic" rows.
-        if name == "Anthropic":
-            continue
-        value = _resolve_env(env_ref)
-        has_key = bool(value)
-        display = redact_key(value)
-        print(f"  {name:<12}  {check_mark(has_key)} {display}")
+        value = _first_env_value(env_ref)
+        _row(name, bool(value), redact_key(value))
 
+    # Anthropic uses the dedicated lookup (it also resolves OAuth tokens).
     from hermes_cli.auth import get_anthropic_key
     anthropic_value = get_anthropic_key()
-    anthropic_display = redact_key(anthropic_value)
-    print(f"  {'Anthropic':<12}  {check_mark(bool(anthropic_value))} {anthropic_display}")
+    _row("Anthropic", bool(anthropic_value), redact_key(anthropic_value))
 
     # =========================================================================
     # Auth Providers (OAuth)
     # =========================================================================
-    print()
-    print(color("◆ Auth Providers", Colors.CYAN, Colors.BOLD))
+    _section("Auth Providers")
 
     try:
         from hermes_cli.auth import (
@@ -239,106 +231,78 @@ def show_status(args):
         qwen_status = get_qwen_auth_status()
         minimax_status = get_minimax_oauth_auth_status()
     except Exception:
-        nous_status = {}
-        codex_status = {}
-        qwen_status = {}
-        minimax_status = {}
+        nous_status = codex_status = qwen_status = minimax_status = {}
 
     nous_account_info = None
-    if (
-        nous_status.get("logged_in")
-        or nous_status.get("access_token")
-        or nous_status.get("portal_base_url")
-        or nous_status.get("inference_credential_present")
-        or nous_status.get("error_code")
-    ):
+    if any(nous_status.get(k) for k in (
+        "logged_in", "access_token", "portal_base_url", "inference_credential_present", "error_code"
+    )):
         try:
             nous_account_info = get_nous_portal_account_info()
         except Exception:
             nous_account_info = None
 
-    nous_logged_in = bool(
-        nous_status.get("logged_in")
-        or (nous_account_info and nous_account_info.logged_in)
-    )
+    nous_logged_in = bool(nous_status.get("logged_in") or (nous_account_info and nous_account_info.logged_in))
     nous_inference_present = bool(
         nous_status.get("inference_credential_present")
         or (nous_account_info and nous_account_info.inference_credential_present)
     )
     nous_error = nous_status.get("error")
-    if nous_logged_in:
-        nous_label = "logged in"
-    elif nous_inference_present:
-        nous_label = "not logged in (Nous inference key configured)"
-    else:
-        nous_label = "not logged in (run: hermes portal)"
-    print(
-        f"  {'Nous Portal':<12}  {check_mark(nous_logged_in)} "
-        f"{nous_label}"
+    _row(
+        "Nous Portal", nous_logged_in,
+        "logged in" if nous_logged_in
+        else "not logged in (Nous inference key configured)" if nous_inference_present
+        else "not logged in (run: hermes portal)",
     )
     portal_url = nous_status.get("portal_base_url") or "(unknown)"
-    inference_url = (
-        nous_status.get("inference_base_url")
-        or (nous_account_info.inference_base_url if nous_account_info else None)
+    inference_url = nous_status.get("inference_base_url") or (
+        nous_account_info.inference_base_url if nous_account_info else None
     )
-    access_exp = _format_iso_timestamp(nous_status.get("access_expires_at"))
-    key_exp = _format_iso_timestamp(nous_status.get("agent_key_expires_at"))
-    refresh_label = "yes" if nous_status.get("has_refresh_token") else "no"
-    if nous_logged_in or portal_url != "(unknown)" or nous_error:
-        print(f"    Portal URL: {portal_url}")
-    if nous_inference_present and inference_url:
-        print(f"    Inference:  {inference_url}")
-    if nous_logged_in or nous_status.get("access_expires_at"):
-        print(f"    Access exp: {access_exp}")
-    if nous_logged_in or nous_inference_present or nous_status.get("agent_key_expires_at"):
-        print(f"    Key exp:    {key_exp}")
-    if nous_logged_in or nous_status.get("has_refresh_token"):
-        print(f"    Refresh:    {refresh_label}")
-    if nous_error:
-        print(f"    Error:      {nous_error}")
+    for label, value, show in (
+        ("Portal URL:", portal_url, nous_logged_in or portal_url != "(unknown)" or nous_error),
+        ("Inference:", inference_url, nous_inference_present and inference_url),
+        ("Access exp:", _format_iso_timestamp(nous_status.get("access_expires_at")),
+         nous_logged_in or nous_status.get("access_expires_at")),
+        ("Key exp:", _format_iso_timestamp(nous_status.get("agent_key_expires_at")),
+         nous_logged_in or nous_inference_present or nous_status.get("agent_key_expires_at")),
+        ("Refresh:", "yes" if nous_status.get("has_refresh_token") else "no",
+         nous_logged_in or nous_status.get("has_refresh_token")),
+        ("Error:", nous_error, nous_error),
+    ):
+        if show:
+            _detail(label, value)
 
-    codex_logged_in = bool(codex_status.get("logged_in"))
-    print(
-        f"  {'OpenAI Codex':<12}  {check_mark(codex_logged_in)} "
-        f"{'logged in' if codex_logged_in else 'not logged in (run: hermes model)'}"
-    )
-    codex_auth_file = codex_status.get("auth_store")
-    if codex_auth_file:
-        print(f"    Auth file:  {codex_auth_file}")
-    codex_last_refresh = _format_iso_timestamp(codex_status.get("last_refresh"))
-    if codex_status.get("last_refresh"):
-        print(f"    Refreshed:  {codex_last_refresh}")
-    if codex_status.get("error") and not codex_logged_in:
-        print(f"    Error:      {codex_status.get('error')}")
+    def _file_refresh_error(status, file_key):
+        return lambda logged_in: (
+            ("Auth file:", status.get(file_key), status.get(file_key)),
+            ("Refreshed:", _format_iso_timestamp(status.get("last_refresh")), status.get("last_refresh")),
+            ("Error:", status.get("error"), status.get("error") and not logged_in),
+        )
 
-    qwen_logged_in = bool(qwen_status.get("logged_in"))
-    print(
-        f"  {'Qwen OAuth':<12}  {check_mark(qwen_logged_in)} "
-        f"{'logged in' if qwen_logged_in else 'not logged in (run: qwen auth qwen-oauth)'}"
-    )
-    qwen_auth_file = qwen_status.get("auth_file")
-    if qwen_auth_file:
-        print(f"    Auth file:  {qwen_auth_file}")
-    qwen_exp = qwen_status.get("expires_at_ms")
-    if qwen_exp:
-        from datetime import datetime, timezone
-        print(f"    Access exp: {datetime.fromtimestamp(int(qwen_exp) / 1000, tz=timezone.utc).isoformat()}")
-    if qwen_status.get("error") and not qwen_logged_in:
-        print(f"    Error:      {qwen_status.get('error')}")
+    _oauth_block("OpenAI Codex", codex_status, "hermes model", _file_refresh_error(codex_status, "auth_store"))
 
-    minimax_logged_in = bool(minimax_status.get("logged_in"))
-    print(
-        f"  {'MiniMax OAuth':<12}  {check_mark(minimax_logged_in)} "
-        f"{'logged in' if minimax_logged_in else 'not logged in (run: hermes auth add minimax-oauth)'}"
+    def _qwen_details(logged_in):
+        qwen_exp = qwen_status.get("expires_at_ms")
+        exp_text = ""
+        if qwen_exp:
+            from datetime import datetime, timezone
+            exp_text = datetime.fromtimestamp(int(qwen_exp) / 1000, tz=timezone.utc).isoformat()
+        return (
+            ("Auth file:", qwen_status.get("auth_file"), qwen_status.get("auth_file")),
+            ("Access exp:", exp_text, qwen_exp),
+            ("Error:", qwen_status.get("error"), qwen_status.get("error") and not logged_in),
+        )
+
+    _oauth_block("Qwen OAuth", qwen_status, "qwen auth qwen-oauth", _qwen_details)
+
+    _oauth_block(
+        "MiniMax OAuth", minimax_status, "hermes auth add minimax-oauth",
+        lambda logged_in: (
+            ("Region:", minimax_status.get("region"), logged_in and minimax_status.get("region")),
+            ("Access exp:", minimax_status.get("expires_at"), minimax_status.get("expires_at")),
+            ("Error:", minimax_status.get("error"), minimax_status.get("error") and not logged_in),
+        ),
     )
-    minimax_region = minimax_status.get("region")
-    if minimax_logged_in and minimax_region:
-        print(f"    Region:     {minimax_region}")
-    minimax_exp = minimax_status.get("expires_at")
-    if minimax_exp:
-        print(f"    Access exp: {minimax_exp}")
-    if minimax_status.get("error") and not minimax_logged_in:
-        print(f"    Error:      {minimax_status.get('error')}")
 
     # xAI OAuth — separate try/except so an import failure here cannot
     # disrupt the already-printed Nous/Codex/Qwen/MiniMax rows above.
@@ -348,30 +312,18 @@ def show_status(args):
     except Exception:
         xai_oauth_status = {}
 
-    xai_oauth_logged_in = bool(xai_oauth_status.get("logged_in"))
-    print(
-        f"  {'xAI OAuth':<12}  {check_mark(xai_oauth_logged_in)} "
-        f"{'logged in' if xai_oauth_logged_in else 'not logged in (run: hermes auth add xai-oauth)'}"
+    _oauth_block(
+        "xAI OAuth", xai_oauth_status, "hermes auth add xai-oauth",
+        _file_refresh_error(xai_oauth_status, "auth_store"),
     )
-    xai_auth_file = xai_oauth_status.get("auth_store")
-    if xai_auth_file:
-        print(f"    Auth file:  {xai_auth_file}")
-    if xai_oauth_status.get("last_refresh"):
-        print(f"    Refreshed:  {_format_iso_timestamp(xai_oauth_status.get('last_refresh'))}")
-    if xai_oauth_status.get("error") and not xai_oauth_logged_in:
-        print(f"    Error:      {xai_oauth_status.get('error')}")
 
     # =========================================================================
     # Nous Subscription Features
     # =========================================================================
     if managed_nous_tools_enabled():
         features = get_nous_subscription_features(config)
-        print()
-        print(color("◆ Nous Tool Gateway", Colors.CYAN, Colors.BOLD))
-        if not features.nous_auth_present:
-            print("  Nous Portal   ✗ not logged in")
-        else:
-            print("  Nous Portal   ✓ managed tools available")
+        _section("Nous Tool Gateway")
+        print("  Nous Portal   ✓ managed tools available" if features.nous_auth_present else "  Nous Portal   ✗ not logged in")
         for feature in features.items():
             if feature.managed_by_nous:
                 state = "active via Nous subscription"
@@ -388,21 +340,17 @@ def show_status(args):
     elif nous_logged_in or nous_inference_present:
         # Nous OAuth without entitlement, or an opaque inference key without
         # Portal account information, cannot enable the Tool Gateway.
-        print()
-        print(color("◆ Nous Tool Gateway", Colors.CYAN, Colors.BOLD))
+        _section("Nous Tool Gateway")
         message = format_nous_portal_entitlement_message(
-            nous_account_info,
-            capability="managed web, image, TTS, STT, browser, and Modal tools",
+            nous_account_info, capability="managed web, image, TTS, STT, browser, and Modal tools"
         )
-        if message:
-            for line in message.splitlines():
-                print(f"  {line}")
+        for line in (message or "").splitlines():
+            print(f"  {line}")
 
     # =========================================================================
     # API-Key Providers
     # =========================================================================
-    print()
-    print(color("◆ API-Key Providers", Colors.CYAN, Colors.BOLD))
+    _section("API-Key Providers")
 
     apikey_providers = {
         "Z.AI / GLM":       ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
@@ -413,12 +361,7 @@ def show_status(args):
         "DeepInfra":        ("DEEPINFRA_API_KEY",),
     }
     for pname, env_vars in apikey_providers.items():
-        key_val = ""
-        for ev in env_vars:
-            key_val = get_env_value(ev) or ""
-            if key_val:
-                break
-        configured = bool(key_val)
+        configured = bool(_first_env_value(env_vars))
         label = "configured" if configured else "not configured (run: hermes model)"
         print(f"  {pname:<16} {check_mark(configured)} {label}")
 
@@ -431,10 +374,8 @@ def show_status(args):
         base = (model_cfg.get("base_url") if isinstance(model_cfg, dict) else None) or get_env_value("LM_BASE_URL") or "http://127.0.0.1:1234/v1"
         try:
             models = probe_lmstudio_models(api_key=get_env_value("LM_API_KEY") or "", base_url=base, timeout=1.5)
-            if models is None:
-                ok, msg = False, f"unreachable at {base}"
-            else:
-                ok, msg = True, f"reachable ({len(models)} model(s)) at {base}"
+            ok = models is not None
+            msg = f"reachable ({len(models)} model(s)) at {base}" if ok else f"unreachable at {base}"
         except AuthError:
             ok, msg = False, "auth rejected — set LM_API_KEY"
         print(f"  {'LM Studio':<16} {check_mark(ok)} {msg}")
@@ -442,33 +383,27 @@ def show_status(args):
     # =========================================================================
     # Terminal Configuration
     # =========================================================================
-    print()
-    print(color("◆ Terminal Backend", Colors.CYAN, Colors.BOLD))
+    _section("Terminal Backend")
 
     terminal_cfg = config.get("terminal", {}) if isinstance(config.get("terminal"), dict) else {}
-    terminal_env = os.getenv("TERMINAL_ENV", "")
-    if not terminal_env:
-        terminal_env = terminal_cfg.get("backend", "local")
+    terminal_env = os.getenv("TERMINAL_ENV", "") or terminal_cfg.get("backend", "local")
     print(f"  Backend:      {terminal_env}")
 
     if terminal_env == "ssh":
-        ssh_host = os.getenv("TERMINAL_SSH_HOST", "")
-        ssh_user = os.getenv("TERMINAL_SSH_USER", "")
-        print(f"  SSH Host:     {ssh_host or '(not set)'}")
-        print(f"  SSH User:     {ssh_user or '(not set)'}")
+        print(f"  SSH Host:     {os.getenv('TERMINAL_SSH_HOST', '') or '(not set)'}")
+        print(f"  SSH User:     {os.getenv('TERMINAL_SSH_USER', '') or '(not set)'}")
     elif terminal_env == "docker":
-        docker_image = os.getenv("TERMINAL_DOCKER_IMAGE", "python:3.11-slim")
-        print(f"  Docker Image: {docker_image}")
+        print(f"  Docker Image: {os.getenv('TERMINAL_DOCKER_IMAGE', 'python:3.11-slim')}")
     elif terminal_env == "daytona":
-        daytona_image = os.getenv("TERMINAL_DAYTONA_IMAGE", "nikolaik/python-nodejs:python3.11-nodejs20")
-        print(f"  Daytona Image: {daytona_image}")
+        print(f"  Daytona Image: {os.getenv('TERMINAL_DAYTONA_IMAGE', 'nikolaik/python-nodejs:python3.11-nodejs20')}")
     elif terminal_env == "vercel_sandbox":
         runtime = os.getenv("TERMINAL_VERCEL_RUNTIME") or terminal_cfg.get("vercel_runtime") or "node24"
         persist = os.getenv("TERMINAL_CONTAINER_PERSISTENT")
-        if persist is None:
-            persist_enabled = bool(terminal_cfg.get("container_persistent", True))
-        else:
-            persist_enabled = persist.lower() in {"1", "true", "yes", "on"}
+        persist_enabled = (
+            bool(terminal_cfg.get("container_persistent", True))
+            if persist is None
+            else persist.lower() in {"1", "true", "yes", "on"}
+        )
         auth_status = describe_vercel_auth()
         sdk_ok = importlib.util.find_spec("vercel") is not None
         sdk_label = "installed" if sdk_ok else "missing (install: pip install 'hermes-agent[vercel]')"
@@ -490,8 +425,8 @@ def show_status(args):
 
             _provider = get_provider(terminal_env)
             if _provider is not None:
-                for _ok, _label, _detail in _provider.doctor_checks():
-                    print(f"  {_label}: {check_mark(bool(_ok))} {_detail}")
+                for _ok, _label, _text in _provider.doctor_checks():
+                    print(f"  {_label}: {check_mark(bool(_ok))} {_text}")
         except Exception:
             pass
 
@@ -501,8 +436,7 @@ def show_status(args):
     # =========================================================================
     # Messaging Platforms
     # =========================================================================
-    print()
-    print(color("◆ Messaging Platforms", Colors.CYAN, Colors.BOLD))
+    _section("Messaging Platforms")
 
     platforms = {
         "Telegram": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL"),
@@ -523,21 +457,15 @@ def show_status(args):
     }
 
     for name, (token_var, home_var) in platforms.items():
-        token = os.getenv(token_var, "")
-        has_token = bool(token)
-        
-        home_channel = ""
-        if home_var:
-            home_channel = os.getenv(home_var, "")
+        has_token = bool(os.getenv(token_var, ""))
+        home_channel = os.getenv(home_var, "") if home_var else ""
         # Back-compat: QQBot home channel was renamed from QQ_HOME_CHANNEL to QQBOT_HOME_CHANNEL
         if not home_channel and home_var == "QQBOT_HOME_CHANNEL":
             home_channel = os.getenv("QQ_HOME_CHANNEL", "")
-        
         status = "configured" if has_token else "not configured"
         if home_channel:
             status += f" (home: {home_channel})"
-        
-        print(f"  {name:<12}  {check_mark(has_token)} {status}")
+        _row(name, has_token, status)
 
     # Plugin-registered platforms
     try:
@@ -550,17 +478,14 @@ def show_status(args):
                 configured = bool(entry.check_fn())
             except Exception:
                 configured = False
-            status_str = "configured" if configured else "not configured"
-            label = entry.label
-            print(f"  {label:<12}  {check_mark(configured)} {status_str} (plugin)")
+            _row(entry.label, configured, f"{'configured' if configured else 'not configured'} (plugin)")
     except Exception:
         pass
 
     # =========================================================================
     # Gateway Status
     # =========================================================================
-    print()
-    print(color("◆ Gateway Service", Colors.CYAN, Colors.BOLD))
+    _section("Gateway Service")
 
     try:
         from hermes_cli.gateway import get_gateway_runtime_snapshot, _format_gateway_pids
@@ -580,35 +505,30 @@ def show_status(args):
             print("  Service:      installed but stopped")
     except Exception:
         if _is_termux():
-            print(f"  Status:       {color('unknown', Colors.DIM)}")
-            print("  Manager:      Termux / manual process")
+            status_text, manager = "unknown", "Termux / manual process"
         elif sys.platform.startswith('linux'):
-            print(f"  Status:       {color('unknown', Colors.DIM)}")
-            print("  Manager:      systemd/manual")
+            status_text, manager = "unknown", "systemd/manual"
         elif sys.platform == 'darwin':
-            print(f"  Status:       {color('unknown', Colors.DIM)}")
-            print("  Manager:      launchd")
+            status_text, manager = "unknown", "launchd"
         else:
-            print(f"  Status:       {color('N/A', Colors.DIM)}")
-            print("  Manager:      (not supported on this platform)")
+            status_text, manager = "N/A", "(not supported on this platform)"
+        print(f"  Status:       {color(status_text, Colors.DIM)}")
+        print(f"  Manager:      {manager}")
 
     # =========================================================================
     # Cron Jobs
     # =========================================================================
-    print()
-    print(color("◆ Scheduled Jobs", Colors.CYAN, Colors.BOLD))
+    _section("Scheduled Jobs")
 
     jobs_file = get_hermes_home() / "cron" / "jobs.json"
     if jobs_file.exists():
-        import json
         try:
             # utf-8-sig: same dialect as cron/jobs.load_jobs — Windows editors
             # may leave a UTF-8 BOM that plain utf-8 json.load rejects.
             with open(jobs_file, encoding="utf-8-sig") as f:
-                data = json.load(f)
-                jobs = data.get("jobs", [])
-                enabled_jobs = [j for j in jobs if j.get("enabled", True)]
-                print(f"  Jobs:         {len(enabled_jobs)} active, {len(jobs)} total")
+                jobs = json.load(f).get("jobs", [])
+            enabled = sum(1 for j in jobs if j.get("enabled", True))
+            print(f"  Jobs:         {enabled} active, {len(jobs)} total")
         except Exception:
             print("  Jobs:         (error reading jobs file)")
     else:
@@ -617,8 +537,7 @@ def show_status(args):
     # =========================================================================
     # Sessions
     # =========================================================================
-    print()
-    print(color("◆ Sessions", Colors.CYAN, Colors.BOLD))
+    _section("Sessions")
 
     # Gateway session count: state.db is the source of truth (#9006);
     # fall back to sessions.json for pre-migration installs.
@@ -638,30 +557,25 @@ def show_status(args):
         _session_count = None
         _gateway_rows = []
 
-    if _session_count is not None and _session_count > 0:
+    if _session_count:
         print(f"  Active:       {_session_count} session(s)")
-        freshest = max(
-            (float(r.get("last_active") or 0) for r in _gateway_rows),
-            default=0.0,
-        )
+        freshest = max((float(r.get("last_active") or 0) for r in _gateway_rows), default=0.0)
         if freshest > 0:
-            print(f"  Last activity:{_format_relative_ts(freshest):>13}")
+            from hermes_cli.timefmt import relative_time
+
+            print(f"  Last activity:{relative_time(freshest):>13}")
     else:
         sessions_file = get_hermes_home() / "sessions" / "sessions.json"
         if sessions_file.exists():
-            import json
             try:
                 with open(sessions_file, encoding="utf-8") as f:
                     data = json.load(f)
-                    _entries = {
-                        k: v for k, v in data.items()
-                        if not str(k).startswith("_")
-                    } if isinstance(data, dict) else {}
-                    print(f"  Active:       {len(_entries)} session(s)")
+                _entries = [k for k in data if not str(k).startswith("_")] if isinstance(data, dict) else []
+                print(f"  Active:       {len(_entries)} session(s)")
             except Exception:
                 print("  Active:       (error reading sessions file)")
         else:
-            print(f"  Active:       {_session_count if _session_count is not None else 0}")
+            print(f"  Active:       {_session_count or 0}")
 
     # Slot usage, only when max_concurrent_sessions is set. The cap is shared
     # across CLI, desktop/TUI and the messaging gateway, so the surface that
@@ -669,9 +583,7 @@ def show_status(args):
     # way to find out is reading runtime/active_sessions.json by hand.
     try:
         from hermes_cli.active_sessions import (
-            active_session_registry_snapshot,
-            format_age,
-            resolve_max_concurrent_sessions,
+            active_session_registry_snapshot, format_age, resolve_max_concurrent_sessions,
         )
 
         _cap = resolve_max_concurrent_sessions(config)
@@ -683,12 +595,7 @@ def show_status(args):
         except Exception:
             _held = []
         _full = len(_held) >= _cap
-        print(
-            "  Slots:        "
-            + color(
-                f"{len(_held)}/{_cap} in use", Colors.YELLOW if _full else Colors.GREEN
-            )
-        )
+        print("  Slots:        " + color(f"{len(_held)}/{_cap} in use", Colors.YELLOW if _full else Colors.GREEN))
         _now = time.time()
         for _entry in sorted(_held, key=lambda e: e.get("started_at") or 0):
             _age = format_age(_now - float(_entry.get("started_at") or _now))
@@ -701,19 +608,14 @@ def show_status(args):
     # Deep checks
     # =========================================================================
     if deep:
-        print()
-        print(color("◆ Deep Checks", Colors.CYAN, Colors.BOLD))
-        
+        _section("Deep Checks")
+
         # Check OpenRouter connectivity
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
         if openrouter_key:
             try:
                 import httpx
-                response = httpx.get(
-                    OPENROUTER_MODELS_URL,
-                    headers={"Authorization": f"Bearer {openrouter_key}"},
-                    timeout=10
-                )
+                response = httpx.get(OPENROUTER_MODELS_URL, headers={"Authorization": f"Bearer {openrouter_key}"}, timeout=10)
                 ok = response.status_code == 200
                 print(f"  OpenRouter:   {check_mark(ok)} {'reachable' if ok else f'error ({response.status_code})'}")
             except Exception as e:
@@ -724,11 +626,8 @@ def show_status(args):
             import socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
-            result = sock.connect_ex(('127.0.0.1', 18789))
+            port_in_use = sock.connect_ex(('127.0.0.1', 18789)) == 0  # informational: gateway likely running
             sock.close()
-            # Port in use = gateway likely running
-            port_in_use = result == 0
-            # This is informational, not necessarily bad
             print(f"  Port 18789:   {'in use' if port_in_use else 'available'}")
         except OSError:
             pass

@@ -1,16 +1,4 @@
-"""Implementation of the ``hermes bundles`` CLI subcommand.
-
-Mirrors the structure of ``hermes_cli/skills_hub.py`` but for skill
-bundles. Bundles are tiny YAML files that name a set of skills to load
-together via a single ``/<bundle>`` slash command.
-
-Subcommands:
-- list: show all bundles
-- show: dump one bundle's contents
-- create: build a new bundle from arguments or interactively
-- delete: remove a bundle
-- reload: re-scan the bundles directory
-"""
+"""Implementation of the ``hermes bundles`` CLI subcommand."""
 
 from __future__ import annotations
 from hermes_cli.cli_output import line_input
@@ -167,9 +155,8 @@ def _cmd_reload(args) -> None:
 def register_cli(subparser) -> None:
     """Build the ``hermes bundles`` argparse tree.
 
-    Called from ``hermes_cli/main.py`` where it owns the top-level
-    ``bundles`` subparser. Keeping registration here means the bundles
-    subcommand's argparse tree lives next to its handlers.
+    Called from ``hermes_cli/main.py``, which owns the top-level subparser; registering here keeps
+    the argparse tree next to its handlers.
     """
     subs = subparser.add_subparsers(dest="bundles_action")
 

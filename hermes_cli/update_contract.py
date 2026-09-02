@@ -1,21 +1,8 @@
 """Image-managed install refusal contract (#91277 Phase 3).
 
-One shared admission gate for every surface that can start an in-place
-``hermes update`` mutation (CLI apply, CLI --check, dashboard update
-endpoint). The decision layers:
-
-1. **Baked provenance marker** (``/etc/hermes/image-provenance.json``,
-   written by the image build — see :mod:`hermes_cli.image_provenance`):
-   authoritative ground truth that this filesystem came from an immutable
-   image. Fail-closed: a present-but-malformed marker still refuses.
-2. **Filesystem heuristics** (``detect_install_method()``): the pre-existing
-   docker/nix/apt detection, kept as the fallback for images built before
-   the marker existed and for package-managed installs that have no image
-   marker at all.
-
-A refusal prints the real update command for the deployment kind, records a
-``refused`` receipt (so fleet tooling sees "this install cannot self-update,
-use <command>" instead of a silent non-update), and exits 2 on CLI surfaces.
+A refusal prints the real update command for the deployment kind, records a ``refused`` receipt (so
+fleet tooling sees "this install cannot self-update, use <command>" instead of a silent non-update),
+and exits 2 on CLI surfaces.
 """
 
 from __future__ import annotations
@@ -40,9 +27,8 @@ class UpdateRefusal:
 def evaluate_update_admission(project_root: Path) -> Optional[UpdateRefusal]:
     """Return an :class:`UpdateRefusal` when in-place update must not run.
 
-    ``None`` means the install is eligible for in-place update (git checkout
-    or unknown-but-mutable). Never raises; on any internal error it falls
-    back to the heuristic layer only.
+    ``None`` means the install is eligible for in-place update (git checkout or unknown-but-
+    mutable). Never raises; on any internal error it falls back to the heuristic layer only.
     """
     # Layer 1: baked provenance marker — authoritative when present.
     try:
@@ -116,9 +102,8 @@ def evaluate_update_admission(project_root: Path) -> Optional[UpdateRefusal]:
 def record_refusal_receipt(refusal: UpdateRefusal) -> None:
     """Write a minimal ``refused`` receipt for a blocked update attempt.
 
-    Gives fleet tooling a durable record that an update was ATTEMPTED and
-    refused ("not updatable in place, use <command>") instead of a silent
-    nothing. Best-effort; never raises.
+    Gives fleet tooling a durable record that an update was ATTEMPTED and refused ("not updatable in
+    place, use <command>") instead of a silent nothing. Best-effort; never raises.
     """
     try:
         from hermes_cli.update_receipt import (

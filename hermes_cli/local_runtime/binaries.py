@@ -1,15 +1,4 @@
-"""Binary acquisition for the managed llama.cpp runtime.
-
-llama.cpp publishes per-tag assets (rolling ``bNNNN`` tags, no semver).
-Backends are dlopen'd plugins, so a runtime = CPU/base zip + backend zip
-extracted into one directory, plus the cudart runtime zip on Windows CUDA
-(end users have no CUDA toolkit). We pin the tag in config, sha256-verify
-every download, and keep the previous tag for rollback (N-1).
-
-Layout: ``$HERMES_HOME/runtimes/llamacpp/<tag>/<backend>/<binaries>``
-with a ``manifest.json`` recording zips, sha256s, and the verified
-llama-server version string.
-"""
+"""Binary acquisition for the managed llama.cpp runtime."""
 
 from __future__ import annotations
 
@@ -25,7 +14,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +56,11 @@ class AssetPlan:
 
 
 def runtimes_root() -> Path:
-    """Machine-scoped, deliberately NOT profile-scoped. Engine binaries,
-    presets, and server state describe this machine's hardware and its one
-    managed server (stable port) — a second profile re-downloading the
-    engine or fighting over the port would be the bug. Profile-scoped
-    things (which model is the default, enabled) live in each profile's
-    config.yaml as ever."""
+    """Machine-scoped, deliberately NOT profile-scoped. Engine binaries, presets, and server state
+    describe this machine's hardware and its one managed server (stable port) — a second profile
+    re-downloading the engine or fighting over the port would be the bug. Profile-scoped things
+    (which model is the default, enabled) live in each profile's config.yaml as ever.
+    """
     from hermes_constants import get_default_hermes_root
 
     return get_default_hermes_root() / "runtimes" / "llamacpp"
@@ -108,9 +95,9 @@ def installed_tags() -> list[str]:
 def _host_os_arch() -> tuple[str, str]:
     """(os, arch) normalized to release-asset vocabulary.
 
-    PITFALL: PROCESSOR_ARCHITECTURE lies under x64 emulation on
-    ARM64 Windows. platform.machine() reads the same env on some Pythons, so
-    on Windows prefer PROCESSOR_IDENTIFIER's text when present.
+    PITFALL: PROCESSOR_ARCHITECTURE lies under x64 emulation on ARM64 Windows. platform.machine()
+    reads the same env on some Pythons, so on Windows prefer PROCESSOR_IDENTIFIER's text when
+    present.
     """
     system = platform.system().lower()
     os_name = {"windows": "win", "darwin": "macos", "linux": "ubuntu"}.get(system, system)
@@ -118,8 +105,8 @@ def _host_os_arch() -> tuple[str, str]:
     arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
     if os_name == "win":
         import os as _os
-        ident = _os.environ.get("PROCESSOR_IDENTIFIER", "")
-        if "armv8" in ident.lower() or "arm " in ident.lower():
+        ident = _os.environ.get("PROCESSOR_IDENTIFIER", "").lower()
+        if "armv8" in ident or "arm " in ident:
             arch = "arm64"
     return os_name, arch
 
@@ -140,57 +127,52 @@ def select_backend(gpu_vendor: str | None, os_name: str | None = None) -> str:
     return "cpu"
 
 
+# Per-OS (human label, {backend: asset-name templates}). Windows CUDA pairs the
+# runtime zip with its cudart zip; ubuntu ships tarballs, win ships zips.
+_ASSET_TEMPLATES = {
+    "ubuntu": ("linux", {
+        "vulkan": ["llama-{tag}-bin-ubuntu-vulkan-{arch}.tar.gz"],
+        "hip": ["llama-{tag}-bin-ubuntu-rocm-7.2-{arch}.tar.gz"],
+        "cpu": ["llama-{tag}-bin-ubuntu-{arch}.tar.gz"],
+    }),
+    "win": ("windows", {
+        "cuda": ["llama-{tag}-bin-win-cuda-{cuda_ver}-{arch}.zip",
+                 "cudart-llama-bin-win-cuda-{cuda_ver}-{arch}.zip"],
+        "vulkan": ["llama-{tag}-bin-win-vulkan-x64.zip"],
+        "hip": ["llama-{tag}-bin-win-hip-radeon-x64.zip"],
+        "cpu": ["llama-{tag}-bin-win-cpu-{arch}.zip"],
+    }),
+}
+
+
 def resolve_assets(tag: str, backend: str, os_name: str | None = None,
                    arch: str | None = None) -> AssetPlan:
     """Compose the asset list for (tag, backend, platform).
 
-    Raises BinaryResolutionError for combinations the release does not ship
-    (a platform/backend pair upstream publishes no artifact for). Callers
-    fall back down the backend ladder: cuda -> vulkan -> cpu.
+    Raises BinaryResolutionError for platform/backend pairs the release ships no artifact for;
+    callers fall back down the backend ladder cuda -> vulkan -> cpu.
     """
     host_os, host_arch = _host_os_arch()
     os_name = os_name or host_os
     arch = arch or host_arch
-    plan = AssetPlan(tag=tag, backend=backend)
-
     if os_name == "macos":
         # macOS tarballs are unified (Metal built in).
-        plan.assets = [f"llama-{tag}-bin-macos-{arch}.tar.gz"]
-        return plan
-
-    if os_name == "ubuntu":
-        if backend == "cuda":
-            # No prebuilt Linux CUDA zips at current tags — Linux CUDA users
-            # build from source or use vulkan; resolver is honest about it.
-            raise BinaryResolutionError(
-                f"no prebuilt linux CUDA asset at {tag}; use vulkan/cpu or a source build")
-        suffix = {"vulkan": f"vulkan-{arch}", "hip": f"rocm-7.2-{arch}",
-                  "cpu": arch}.get(backend)
-        if suffix is None:
-            raise BinaryResolutionError(f"unsupported linux backend {backend}")
-        plan.assets = [f"llama-{tag}-bin-ubuntu-{suffix}.tar.gz"]
-        return plan
-
-    if os_name == "win":
-        if backend == "cuda":
-            cuda_ver = _WIN_CUDA_VERSION_ARM64 if arch == "arm64" else _WIN_CUDA_VERSION
-            plan.assets = [
-                f"llama-{tag}-bin-win-cuda-{cuda_ver}-{arch}.zip",
-                f"cudart-llama-bin-win-cuda-{cuda_ver}-{arch}.zip",
-            ]
-        elif backend == "vulkan":
-            if arch == "arm64":
-                raise BinaryResolutionError(f"no win-vulkan-arm64 asset at {tag}")
-            plan.assets = [f"llama-{tag}-bin-win-vulkan-x64.zip"]
-        elif backend == "hip":
-            plan.assets = [f"llama-{tag}-bin-win-hip-radeon-x64.zip"]
-        elif backend == "cpu":
-            plan.assets = [f"llama-{tag}-bin-win-cpu-{arch}.zip"]
-        else:
-            raise BinaryResolutionError(f"unsupported windows backend {backend}")
-        return plan
-
-    raise BinaryResolutionError(f"unsupported platform {os_name}-{arch}")
+        return AssetPlan(tag, backend, [f"llama-{tag}-bin-macos-{arch}.tar.gz"])
+    if os_name not in _ASSET_TEMPLATES:
+        raise BinaryResolutionError(f"unsupported platform {os_name}-{arch}")
+    if os_name == "ubuntu" and backend == "cuda":
+        # No prebuilt Linux CUDA zips at current tags — Linux CUDA users
+        # build from source or use vulkan; resolver is honest about it.
+        raise BinaryResolutionError(
+            f"no prebuilt linux CUDA asset at {tag}; use vulkan/cpu or a source build")
+    if os_name == "win" and backend == "vulkan" and arch == "arm64":
+        raise BinaryResolutionError(f"no win-vulkan-arm64 asset at {tag}")
+    label, templates = _ASSET_TEMPLATES[os_name]
+    if backend not in templates:
+        raise BinaryResolutionError(f"unsupported {label} backend {backend}")
+    cuda_ver = _WIN_CUDA_VERSION_ARM64 if arch == "arm64" else _WIN_CUDA_VERSION
+    return AssetPlan(tag, backend, [t.format(tag=tag, arch=arch, cuda_ver=cuda_ver)
+                                    for t in templates[backend]])
 
 
 def _sha256(path: Path) -> str:
@@ -227,26 +209,21 @@ def _extract(archive: Path, dest: Path,
     """Extract member by member so ``progress(done, total)`` can tick in
     uncompressed bytes — big archives take real time on laptop disks."""
     if archive.name.endswith(".zip"):
-        with zipfile.ZipFile(archive) as z:
-            members = z.infolist()
-            total = sum(m.file_size for m in members)
-            done = 0
-            for m in members:
-                z.extract(m, dest)
-                done += m.file_size
-                if progress is not None:
-                    progress(done, total)
+        opener, list_members, size = zipfile.ZipFile, "infolist", "file_size"
+        kwargs = {}
     else:
         import tarfile
-        with tarfile.open(archive) as t:
-            members = t.getmembers()
-            total = sum(m.size for m in members)
-            done = 0
-            for m in members:
-                t.extract(m, dest, filter="data")
-                done += m.size
-                if progress is not None:
-                    progress(done, total)
+        opener, list_members, size = tarfile.open, "getmembers", "size"
+        kwargs = {"filter": "data"}
+    with opener(archive) as ar:
+        members = getattr(ar, list_members)()
+        total = sum(getattr(m, size) for m in members)
+        done = 0
+        for m in members:
+            ar.extract(m, dest, **kwargs)
+            done += getattr(m, size)
+            if progress is not None:
+                progress(done, total)
 
 
 def server_binary(install_dir: Path) -> Path:
@@ -295,13 +272,10 @@ def ensure_runtime_installed(tag: str, backend: str,
                              progress: "Callable[[str, int, int, str], None] | None" = None) -> Path:
     """Idempotent: resolve, download, verify, extract, version-check.
 
-    ``expected_sha256`` maps asset name -> hash when the catalog pins them;
-    without pins the computed hash is recorded in the manifest (trust on
-    first download, verified on every reinstall).
-    ``progress(stage, done_bytes, total_bytes, label)`` ticks through the
-    slow parts — stage is "download" | "extract" | "verify", label is the
-    asset counter ("1/2") when the plan has several archives.
-    Returns the install directory containing llama-server.
+    ``expected_sha256`` pins hashes per asset when the catalog has them; without pins the computed
+    hash is recorded in the manifest (trust on first download, verified on every reinstall).
+    ``progress(stage, done, total, label)`` ticks through download/extract/verify. Returns the
+    install dir containing llama-server.
     """
     plan = resolve_assets(tag, backend)
     install_dir = plan.install_dir

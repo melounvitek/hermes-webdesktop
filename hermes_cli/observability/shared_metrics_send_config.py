@@ -1,10 +1,4 @@
-"""Configuration for shared-metrics transmission.
-
-Collection (``telemetry.shared_metrics.enabled``) and transmission
-(``telemetry.shared_metrics.send``) are separate opt-ins. See
-``docs/observability/relay-shared-metrics.md`` Appendix A for the consent,
-identity, rotation, retention, and deletion decisions behind this module.
-"""
+"""Configuration for shared-metrics transmission."""
 
 from __future__ import annotations
 
@@ -46,8 +40,8 @@ class SendConfig:
 def _endpoint_is_safe(endpoint: str) -> bool:
     """Reject plaintext destinations unless they are loopback.
 
-    Telemetry must not leave a machine in clear text because of a typo in a
-    config file. Loopback stays allowed so tests can use a local HTTP server.
+    Telemetry must not leave a machine in clear text because of a typo in a config file. Loopback
+    stays allowed so tests can use a local HTTP server.
     """
     try:
         parsed = urlparse(endpoint)
@@ -65,8 +59,8 @@ def resolve_send_config(config: dict | None) -> SendConfig:
 
     Endpoint precedence: config > production default.
 
-    ``send`` is returned as False whenever transmission cannot legitimately
-    happen, so callers never have to re-check the combination.
+    ``send`` is returned as False whenever transmission cannot legitimately happen, so callers never
+    have to re-check the combination.
     """
     global _warned_send_without_collection
 

@@ -1,33 +1,4 @@
-"""Shared ``/blueprint`` command logic for CLI, TUI, and gateway.
-
-The conversational counterpart to the dashboard's Automation Blueprints form. Where a
-surface has a screen, the user fills a form (dashboard / GUI app) and the API
-calls ``fill_blueprint`` -> ``create_job`` directly. Where a surface is just a
-chat line, the user picks a blueprint by name and the agent asks for what it
-needs — pick a blueprint by name and the agent asks you for what it needs, one
-question at a time (the messaging-assistant model: pick a blueprint → it asks you
-a couple things → done).
-
-Subcommand shapes:
-  /blueprint                      list the catalog
-  /blueprint <name>               name-match a blueprint, then SEED THE AGENT to
-                                    ask the user for each value conversationally
-  /blueprint <name> slot=val …    fill + create the cron job directly
-                                    (the deterministic dashboard / docs / power-
-                                    user shortcut — no agent turn)
-
-The ``<name>`` form is forgiving: exact key, unique prefix, or fuzzy match all
-resolve; an ambiguous query lists the candidates; an unknown one suggests the
-closest. When it resolves, the handler returns an ``agent_seed`` — a natural-
-language instruction built from the blueprint's typed slots + schedule/prompt
-templates — that the calling surface feeds to the agent as a normal user turn
-(gateway: rewrite ``event.text`` and fall through, the ``/steer`` pattern; CLI:
-a one-shot pending seed the main loop runs). The agent then asks for each slot
-and calls the existing ``cronjob`` tool. No new tool, no second job engine.
-
-Parsing is shlex-based so quoted free-text values (``criteria="from my boss"``)
-survive.
-"""
+"""Shared ``/blueprint`` command logic for CLI, TUI, and gateway."""
 
 from __future__ import annotations
 
@@ -44,12 +15,9 @@ logger = logging.getLogger(__name__)
 class BlueprintCommandResult:
     """Outcome of a ``/blueprint`` invocation.
 
-    ``text`` is always shown to the user. When ``agent_seed`` is set, the
-    calling surface should ALSO hand that seed to the agent as the user's next
-    turn (the blueprint was matched and now the agent gathers the slot values
-    conversationally). When ``agent_seed`` is None the command is fully handled
-    (catalog listing, direct create, or an error) and nothing is sent to the
-    agent.
+    ``text`` is always shown to the user. When ``agent_seed`` is set, the calling surface should
+    ALSO hand that seed to the agent as the user's next turn (the blueprint was matched and now the
+    agent gathers the slot values conversationally).
     """
 
     text: str
@@ -94,14 +62,9 @@ def _parse_kv(tokens) -> Tuple[Dict[str, str], list]:
 def match_blueprint(query: str) -> Tuple[Optional[Any], List[Any]]:
     """Resolve a free-typed blueprint name to a blueprint.
 
-    Returns ``(blueprint, candidates)``:
-      * exact key or unique prefix / fuzzy match -> ``(blueprint, [])``
-      * ambiguous (2+ plausible) -> ``(None, [candidates…])``
-      * no plausible match -> ``(None, [])``
-
-    Matching is forgiving because chat-line users type the name (unlike the
-    dashboard/Discord where it's picked): exact key first, then case-insensitive
-    prefix on key or title, then a difflib fuzzy pass.
+    Matching is forgiving because chat-line users type the name (unlike the dashboard/Discord where
+    it's picked): exact key first, then case-insensitive prefix on key or title, then a difflib
+    fuzzy pass.
     """
     from cron.blueprint_catalog import CATALOG, get_blueprint
 
@@ -157,9 +120,8 @@ def _humanize_schedule(blueprint) -> str:
 def build_blueprint_seed(blueprint) -> str:
     """Build the natural-language fill-request the agent will act on.
 
-    The agent reads this as a normal user turn, asks the user for each unfilled
-    slot one at a time, then calls the ``cronjob`` tool with the
-    cron expression it builds from the blueprint's ``schedule_template`` and the
+    The agent reads this as a normal user turn, asks for each unfilled slot one at a time, then
+    calls the ``cronjob`` tool with the cron expression built from ``schedule_template`` and the
     rendered prompt. Defaults are stated so the agent can offer them.
     """
     from cron.blueprint_catalog import WEEKDAY_PRESETS
@@ -235,9 +197,9 @@ def _fmt_no_match(query: str) -> str:
 
 
 def _manage_hint(surface: str) -> str:
-    """Post-create management hint. /cron is a CLI-only slash command; on
-    gateway platforms the user manages jobs by asking the agent (cronjob tool)
-    or from the dashboard."""
+    """Post-create management hint. /cron is a CLI-only slash command; on gateway platforms the user
+    manages jobs by asking the agent (cronjob tool) or from the dashboard.
+    """
     if surface == "cli":
         return "Manage it with /cron."
     return "Ask me to list, pause, or remove it any time."
@@ -251,14 +213,13 @@ def handle_blueprint_command(
 ) -> BlueprintCommandResult:
     """Dispatch a ``/blueprint`` invocation.
 
-    Returns a :class:`BlueprintCommandResult`. When ``agent_seed`` is set the
-    caller must feed it to the agent as the next user turn; otherwise the
-    command is fully handled and only ``text`` is shown.
+    Returns a :class:`BlueprintCommandResult`. When ``agent_seed`` is set the caller must feed it to
+    the agent as the next user turn; otherwise the command is fully handled and only ``text`` is
+    shown.
 
-    ``args`` is everything after ``/blueprint``. ``origin`` lets a directly
-    created job deliver back to the chat it was set up from. ``surface``
-    (``"cli"`` | ``"gateway"``) picks the right wording for follow-up hints —
-    ``/cron`` only exists on the CLI.
+    ``args`` is everything after ``/blueprint``. ``origin`` lets a directly created job deliver back
+    to the chat it was set up from. ``surface`` (``"cli"`` | ``"gateway"``) picks the right wording
+    for follow-up hints — ``/cron`` only exists on the CLI.
     """
     try:
         from cron.blueprint_catalog import fill_blueprint, BlueprintFillError

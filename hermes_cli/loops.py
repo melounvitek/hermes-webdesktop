@@ -1,46 +1,9 @@
 """Recurring in-session wakeups — the /loop command (Claude Code parity).
 
-``/loop [interval] <prompt>`` re-runs a prompt (or a slash command) on a
-recurring cadence INSIDE the current session. Each tick is a real agent
-turn: the wakeup prompt is injected through the exact same input path as
-a typed user message, so the agent always sees current state (latest CI
-result, newest queue depth, the file as it is now).
-
-Two cadence modes, mirroring Claude Code's ``/loop``:
-
-- **Fixed interval** — ``/loop 5m check the deploy`` fires every 5 minutes.
-- **Self-paced** — ``/loop keep refining the failing test until green``
-  (no interval token) lets the loop set its own rhythm: it starts fast and
-  backs off exponentially while the agent's replies stop changing, then
-  snaps back to the floor as soon as a reply differs. Zero extra LLM cost —
-  change detection is a local digest comparison.
-
-Stop conditions (any of):
-
-- The agent ends a wakeup reply with ``LOOP_COMPLETE`` on its own line
-  (the wakeup prompt teaches it to do so when the task is done/moot).
-- ``--times N`` — stop after N ticks.
-- ``--until <condition>`` — an evidence-based stop judged by the same
-  auxiliary judge that powers /goal (fail-open: a broken judge never
-  wedges the loop; the tick budget is the backstop).
-- ``/loop stop`` / ``/loop clear`` — user control.
-- ``loops.max_ticks`` config backstop (default 100, 0 = unlimited).
+- The agent ends a wakeup reply with ``LOOP_COMPLETE`` on its own line (the wakeup prompt teaches it
+to do so when the task is done/moot). - ``--times N`` — stop after N ticks.
 
 Design notes / invariants (same contract as ``hermes_cli/goals.py``):
-
-- A wakeup is just a normal user-role message appended via the surface's
-  ordinary input path. No system-prompt mutation, no toolset swap —
-  prompt caching stays intact and role alternation is preserved.
-- Wakeups only fire while the session is IDLE. A real user message always
-  wins; the tick just re-arms and fires at the next idle boundary.
-- State is persisted in SessionDB's ``state_meta`` table keyed by
-  ``loop:<session_id>`` so ``/resume`` picks the loop back up.
-- /goal mixing: an active /goal takes priority. When the goal loop has a
-  continuation queued (or the goal judge is mid-flight), the /loop tick
-  defers to the next interval instead of racing a second synthetic turn.
-  Goal-continuation turns never count as loop ticks and vice versa.
-- This module has zero hard dependency on ``cli.HermesCLI``, the gateway
-  runner, or the TUI gateway — all three drive the same ``LoopManager``.
 """
 
 from __future__ import annotations
@@ -50,7 +13,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -125,9 +88,8 @@ WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE = (
 def parse_interval_token(token: str) -> Optional[int]:
     """Parse a compact interval token (``30s``/``5m``/``2h``/``1h30m``).
 
-    Returns total seconds, or None when the token is not an interval.
-    A bare number is NOT an interval (too easy to collide with prompt
-    text like ``/loop 3 things to check``) — units are required.
+    Returns total seconds, or None when the token is not an interval. A bare number is NOT an
+    interval (it collides with prompt text like ``/loop 3 things to check``); units are required.
     """
     if not token:
         return None
@@ -142,27 +104,12 @@ def parse_interval_token(token: str) -> Optional[int]:
 def parse_loop_args(text: str) -> Dict[str, Any]:
     """Parse the argument string of ``/loop [interval] <prompt> [flags]``.
 
-    Recognized shapes::
-
-        /loop 5m check the deploy status
-        /loop every 10m /babysit-prs
-        /loop keep fixing the failing test until the suite passes
-        /loop 2m poll CI --times 30
-        /loop 5m watch the queue --until queue depth reaches zero
-
-    Returns ``{"interval_seconds": int|None, "prompt": str, "times": int,
-    "until": str, "error": str|None}``. ``interval_seconds`` None means
-    self-paced. ``error`` is set for unusable input (empty prompt,
-    interval-only, bad --times).
+    Returns ``{"interval_seconds": int|None, "prompt": str, "times": int, "until": str, "error":
+    str|None}``. ``interval_seconds`` None means self-paced. ``error`` is set for unusable input
+    (empty prompt, interval-only, bad --times).
     """
     raw = (text or "").strip()
-    result: Dict[str, Any] = {
-        "interval_seconds": None,
-        "prompt": "",
-        "times": 0,
-        "until": "",
-        "error": None,
-    }
+    result: Dict[str, Any] = {"interval_seconds": None, "prompt": "", "times": 0, "until": "", "error": None}
     if not raw:
         result["error"] = "empty"
         return result
@@ -171,9 +118,7 @@ def parse_loop_args(text: str) -> Dict[str, Any]:
     # --until clause can't confuse the front parse. Flags may appear in
     # either order at the end of the line; --until consumes to end-of-line
     # (or to a following --times).
-    times = 0
-    until = ""
-
+    times, until = 0, ""
     m_times = re.search(r"\s--times\s+(\S+)", raw)
     if m_times:
         try:
@@ -207,10 +152,7 @@ def parse_loop_args(text: str) -> Dict[str, Any]:
         result["error"] = "missing prompt (usage: /loop [interval] <prompt>)"
         return result
 
-    result["interval_seconds"] = interval
-    result["prompt"] = raw
-    result["times"] = times
-    result["until"] = until
+    result.update(interval_seconds=interval, prompt=raw, times=times, until=until)
     return result
 
 
@@ -239,44 +181,35 @@ def _loops_config() -> Dict[str, Any]:
     try:
         from hermes_cli.config import load_config
 
-        cfg = load_config() or {}
-        section = cfg.get("loops") or {}
+        section = (load_config() or {}).get("loops") or {}
         return section if isinstance(section, dict) else {}
     except Exception:
         return {}
 
 
-def min_interval_seconds() -> int:
+def _config_int(key: str, default: int, floor: int) -> int:
+    """``loops.<key>`` as an int clamped to ``floor``; ``default`` on any bad value."""
     try:
-        value = int(_loops_config().get("min_interval_seconds", DEFAULT_MIN_INTERVAL_SECONDS))
-        return max(5, value)
+        return max(floor, int(_loops_config().get(key, default)))
     except Exception:
-        return DEFAULT_MIN_INTERVAL_SECONDS
+        return default
+
+
+def min_interval_seconds() -> int:
+    return _config_int("min_interval_seconds", DEFAULT_MIN_INTERVAL_SECONDS, 5)
 
 
 def max_ticks_default() -> int:
-    try:
-        value = int(_loops_config().get("max_ticks", DEFAULT_MAX_TICKS))
-        return max(0, value)
-    except Exception:
-        return DEFAULT_MAX_TICKS
+    return _config_int("max_ticks", DEFAULT_MAX_TICKS, 0)
 
 
 def self_paced_floor_seconds() -> int:
-    try:
-        value = int(_loops_config().get("self_paced_floor_seconds", DEFAULT_SELF_PACED_FLOOR_SECONDS))
-        return max(10, value)
-    except Exception:
-        return DEFAULT_SELF_PACED_FLOOR_SECONDS
+    return _config_int("self_paced_floor_seconds", DEFAULT_SELF_PACED_FLOOR_SECONDS, 10)
 
 
 def self_paced_ceiling_seconds() -> int:
     floor = self_paced_floor_seconds()
-    try:
-        value = int(_loops_config().get("self_paced_ceiling_seconds", DEFAULT_SELF_PACED_CEILING_SECONDS))
-        return max(floor, value)
-    except Exception:
-        return max(floor, DEFAULT_SELF_PACED_CEILING_SECONDS)
+    return _config_int("self_paced_ceiling_seconds", max(floor, DEFAULT_SELF_PACED_CEILING_SECONDS), floor)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -321,25 +254,21 @@ class LoopState:
     def from_json(cls, raw: str) -> "LoopState":
         data = json.loads(raw)
         route = data.get("route")
-        return cls(
-            prompt=data.get("prompt", ""),
-            status=data.get("status", "active"),
-            mode=data.get("mode", "interval"),
-            interval_seconds=float(data.get("interval_seconds", 0.0) or 0.0),
-            current_delay=float(data.get("current_delay", 0.0) or 0.0),
-            times=int(data.get("times", 0) or 0),
-            until=str(data.get("until", "") or ""),
-            max_ticks=int(data.get("max_ticks", DEFAULT_MAX_TICKS) or 0),
-            ticks_fired=int(data.get("ticks_fired", 0) or 0),
-            created_at=float(data.get("created_at", 0.0) or 0.0),
-            last_fired_at=float(data.get("last_fired_at", 0.0) or 0.0),
-            next_due_at=float(data.get("next_due_at", 0.0) or 0.0),
-            awaiting_response=bool(data.get("awaiting_response", False)),
-            last_response_digest=str(data.get("last_response_digest", "") or ""),
-            paused_reason=data.get("paused_reason"),
-            last_stop_reason=data.get("last_stop_reason"),
-            route=route if isinstance(route, dict) else {},
-        )
+        kwargs: Dict[str, Any] = {
+            "prompt": data.get("prompt", ""),
+            "status": data.get("status", "active"),
+            "mode": data.get("mode", "interval"),
+            "awaiting_response": bool(data.get("awaiting_response", False)),
+            "paused_reason": data.get("paused_reason"),
+            "last_stop_reason": data.get("last_stop_reason"),
+            "route": route if isinstance(route, dict) else {},
+        }
+        for f in fields(cls):
+            if f.name not in kwargs:
+                # Missing key -> dataclass default; present-but-falsy -> the type's zero.
+                cast = {"str": str, "int": int, "float": float}[f.type]
+                kwargs[f.name] = cast(data.get(f.name, f.default) or cast())
+        return cls(**kwargs)
 
     # --- helpers -------------------------------------------------------
 
@@ -372,13 +301,10 @@ def _meta_key(session_id: str) -> str:
 def _get_session_db() -> Optional[Any]:
     """One SessionDB per HERMES_HOME.
 
-    Delegates to the goals module's cached SessionDB so goals, loops,
-    and heartbeats share one connection (same pattern as
-    ``hermes_cli/heartbeat.py``). The delegation also inherits the
-    off-loop bootstrap and the window logic: a cold cache on the loop
-    thread never runs ``SessionDB()`` inline. The previous copy here
-    did, which froze the loop for the init duration and dropped the
-    first ``loop:*`` write (the /goal bug class, #88965).
+    Delegates to the goals module's cached SessionDB so goals, loops, and heartbeats share one
+    connection (same pattern as ``hermes_cli/heartbeat.py``). The delegation also inherits the off-
+    loop bootstrap and the window logic: a cold cache on the loop thread never runs ``SessionDB()``
+    inline.
     """
     try:
         from hermes_cli.goals import _get_session_db as _goals_db
@@ -388,6 +314,15 @@ def _get_session_db() -> Optional[Any]:
     return _goals_db()
 
 
+def _db_op(label: str, fn, default=None):
+    """Run one SessionDB call; any error is logged at debug and yields ``default``."""
+    try:
+        return fn()
+    except Exception as exc:
+        logger.debug("LoopManager: %s failed: %s", label, exc)
+        return default
+
+
 def load_loop(session_id: str) -> Optional[LoopState]:
     """Load the loop for a session, or None if none exists."""
     if not session_id:
@@ -395,11 +330,7 @@ def load_loop(session_id: str) -> Optional[LoopState]:
     db = _get_session_db()
     if db is None:
         return None
-    try:
-        raw = db.get_meta(_meta_key(session_id))
-    except Exception as exc:
-        logger.debug("LoopManager: get_meta failed: %s", exc)
-        return None
+    raw = _db_op("get_meta", lambda: db.get_meta(_meta_key(session_id)))
     if not raw:
         return None
     try:
@@ -419,10 +350,7 @@ def save_loop(session_id: str, state: LoopState) -> None:
 
         _warn_dropped_write("LoopManager", "loop", session_id)
         return
-    try:
-        db.set_meta(_meta_key(session_id), state.to_json())
-    except Exception as exc:
-        logger.debug("LoopManager: set_meta failed: %s", exc)
+    _db_op("set_meta", lambda: db.set_meta(_meta_key(session_id), state.to_json()))
 
 
 def clear_loop(session_id: str) -> None:
@@ -437,20 +365,14 @@ def clear_loop(session_id: str) -> None:
 def list_active_loops() -> List[Tuple[str, LoopState]]:
     """Return ``[(session_id, LoopState), ...]`` for every ACTIVE loop.
 
-    Used by the gateway's idle wakeup watcher, which has no per-session
-    scheduler and instead scans for due loops on a coarse tick. Best-effort:
-    any DB error yields ``[]``.
+    Used by the gateway's idle wakeup watcher, which has no per-session scheduler and scans for
+    due loops on a coarse tick. Best-effort: any DB error yields ``[]``.
     """
     db = _get_session_db()
     if db is None:
         return []
-    try:
-        rows = db.list_meta_prefix(_META_PREFIX)
-    except Exception as exc:
-        logger.debug("LoopManager: list_meta_prefix failed: %s", exc)
-        return []
     out: List[Tuple[str, LoopState]] = []
-    for key, raw in rows:
+    for key, raw in _db_op("list_meta_prefix", lambda: db.list_meta_prefix(_META_PREFIX), []):
         session_id = key[len(_META_PREFIX):]
         if not session_id or not raw:
             continue
@@ -466,11 +388,9 @@ def list_active_loops() -> List[Tuple[str, LoopState]]:
 def migrate_loop_to_session(old_session_id: str, new_session_id: str, *, reason: str = "") -> bool:
     """Carry a persistent /loop from a parent session to its continuation.
 
-    Context compression rotates ``session_id`` to a fresh child session;
-    without this the loop silently dies at the compaction boundary (the
-    same hazard /goal hit in #33618). Copies the loop onto the new session
-    and archives the old row as ``cleared`` so exactly one active loop row
-    exists per logical conversation. Best-effort and never raises.
+    Context compression rotates ``session_id`` to a fresh child session; without this the loop
+    silently dies at the compaction boundary (the same hazard /goal hit in #33618). Best-effort and
+    never raises.
     """
     if not old_session_id or not new_session_id or old_session_id == new_session_id:
         return False
@@ -497,19 +417,20 @@ def migrate_loop_to_session(old_session_id: str, new_session_id: str, *, reason:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _ticks_label(n: int) -> str:
+    return f"{n} tick{'s' if n != 1 else ''}"
+
+
 def response_signals_complete(response: str) -> bool:
     """True when the agent ended its reply with the LOOP_COMPLETE marker."""
-    if not response:
-        return False
-    return _LOOP_COMPLETE_RE.search(response) is not None
+    return bool(response) and _LOOP_COMPLETE_RE.search(response) is not None
 
 
 def _digest_response(response: str) -> str:
     """Stable digest for self-paced change detection.
 
-    Normalizes whitespace and strips volatile timestamp-ish tokens so a
-    reply that differs only by 'checked at 14:02:33' doesn't defeat the
-    backoff.
+    Normalizes whitespace and strips volatile timestamp-ish tokens so a reply that differs only by
+    'checked at 14:02:33' doesn't defeat the backoff.
     """
     text = (response or "").strip().lower()
     # Drop clock/timestamp tokens (14:02:33, 2026-07-26, 1500s, 25m ago...).
@@ -528,15 +449,10 @@ def _digest_response(response: str) -> str:
 class LoopManager:
     """Per-session /loop state + tick decisions.
 
-    Drivers (CLI process_loop, gateway wakeup watcher, TUI ticker) call:
-
-    - ``set(...)`` / ``pause()`` / ``resume()`` / ``clear()`` — user controls.
-    - ``is_due()`` — should a wakeup fire now? (cheap, in-memory)
-    - ``fire_tick()`` — claim the tick; returns the wakeup message to inject.
-    - ``complete_tick(last_response)`` — evaluate the finished wakeup turn:
-      detect LOOP_COMPLETE, judge --until, apply --times / max_ticks caps,
-      schedule the next tick (with self-paced backoff when applicable).
-    - ``status_line()`` — printable one-liner.
+    Drivers (CLI process_loop, gateway wakeup watcher, TUI ticker) call ``set``/``pause``/
+    ``resume``/``clear`` for user controls, ``is_due()`` (cheap, in-memory), ``fire_tick()`` to
+    claim a tick and get the wakeup message, ``complete_tick()`` to evaluate the finished turn
+    (LOOP_COMPLETE, --until judge, --times caps, next-tick scheduling), and ``status_line()``.
     """
 
     def __init__(self, session_id: str):
@@ -563,22 +479,19 @@ class LoopManager:
         s = self._state
         if s is None or s.status == "cleared":
             return "No loop set. Start one with /loop [interval] <prompt>."
-        fired = f"{s.ticks_fired} tick{'s' if s.ticks_fired != 1 else ''}"
-        caps = []
+        fired = _ticks_label(s.ticks_fired)
         if s.times:
-            caps.append(f"{s.ticks_fired}/{s.times} runs")
+            caps = [f"{s.ticks_fired}/{s.times} runs"]
         elif s.max_ticks:
-            caps.append(f"{s.ticks_fired}/{s.max_ticks} budget")
+            caps = [f"{s.ticks_fired}/{s.max_ticks} budget"]
         else:
-            caps.append(fired)
+            caps = [fired]
         if s.until:
             caps.append(f"until: {s.until}")
         meta = f"{s.cadence_label()}, {', '.join(caps)}"
         if s.status == "active":
             remaining = s.remaining_label()
-            tail = f", {remaining}" if remaining else ""
-            if s.awaiting_response:
-                tail = ", wakeup running"
+            tail = ", wakeup running" if s.awaiting_response else (f", {remaining}" if remaining else "")
             return f"↻ Loop (active, {meta}{tail}): {s.prompt}"
         if s.status == "paused":
             extra = f" — {s.paused_reason}" if s.paused_reason else ""
@@ -599,39 +512,26 @@ class LoopManager:
         until: str = "",
         route: Optional[Dict[str, str]] = None,
     ) -> LoopState:
-        """Start a new loop (replaces any existing one for the session).
-
-        The first wakeup is due immediately (next idle poll / gateway
-        watcher scan); subsequent wakeups follow the cadence.
-        """
+        """Start a new loop (replaces any existing one for the session)."""
         prompt = (prompt or "").strip()
         if not prompt:
             raise ValueError("loop prompt is empty")
 
         now = time.time()
-        if interval_seconds is not None:
-            interval = max(int(interval_seconds), min_interval_seconds())
-            state = LoopState(
-                prompt=prompt,
-                mode="interval",
-                interval_seconds=float(interval),
-                current_delay=float(interval),
-                next_due_at=now,
-            )
-        else:
-            floor = self_paced_floor_seconds()
-            state = LoopState(
-                prompt=prompt,
-                mode="self_paced",
-                interval_seconds=0.0,
-                current_delay=float(floor),
-                next_due_at=now,
-            )
-        state.times = max(0, int(times or 0))
-        state.until = (until or "").strip()
-        state.max_ticks = max_ticks_default()
-        state.created_at = now
-        state.route = dict(route or {})
+        self_paced = interval_seconds is None
+        interval = 0.0 if self_paced else float(max(int(interval_seconds), min_interval_seconds()))
+        state = LoopState(
+            prompt=prompt,
+            mode="self_paced" if self_paced else "interval",
+            interval_seconds=interval,
+            current_delay=float(self_paced_floor_seconds()) if self_paced else interval,
+            times=max(0, int(times or 0)),
+            until=(until or "").strip(),
+            max_ticks=max_ticks_default(),
+            created_at=now,
+            next_due_at=now,
+            route=dict(route or {}),
+        )
         self._state = state
         save_loop(self.session_id, state)
         return state
@@ -665,14 +565,6 @@ class LoopManager:
         self._state = None
         return True
 
-    def mark_done(self, reason: str) -> None:
-        if not self._state:
-            return
-        self._state.status = "done"
-        self._state.last_stop_reason = reason
-        self._state.awaiting_response = False
-        save_loop(self.session_id, self._state)
-
     # --- tick lifecycle -------------------------------------------------
 
     def is_due(self, now: Optional[float] = None) -> bool:
@@ -685,12 +577,10 @@ class LoopManager:
     def fire_tick(self) -> Optional[str]:
         """Claim a due tick. Returns the message to inject, or None.
 
-        The returned text is either the wakeup-framed prompt or — when the
-        loop's prompt is itself a slash command (``/loop 10m /recap``) —
-        the raw command so the surface's normal slash dispatch handles it.
-        Marks ``awaiting_response`` so the tick can't double-fire while its
-        turn runs; drivers MUST follow up with ``complete_tick`` (or
-        ``abandon_tick`` on injection failure).
+        Returns the wakeup-framed prompt, or the raw command when the loop's prompt is itself a
+        slash command (``/loop 10m /recap``) so normal slash dispatch handles it. Marks
+        ``awaiting_response`` so the tick can't double-fire; drivers MUST follow up with
+        ``complete_tick`` (or ``abandon_tick`` on injection failure).
         """
         s = self._state
         if s is None or not self.is_due():
@@ -721,34 +611,35 @@ class LoopManager:
         s.ticks_fired = max(0, s.ticks_fired - 1)
         save_loop(self.session_id, s)
 
+    def _stop(self, status: str, reason: str, message: str) -> Dict[str, Any]:
+        """Persist a terminal (``done``) or recoverable (``paused``) stop and build the result."""
+        s = self._state
+        s.status = status
+        if status == "done":
+            s.last_stop_reason = reason
+        else:
+            s.paused_reason = reason
+        save_loop(self.session_id, s)
+        return {"status": status, "stopped": True, "reason": reason, "message": message}
+
     def complete_tick(self, last_response: str) -> Dict[str, Any]:
         """Evaluate the finished wakeup turn and schedule what's next.
 
-        Returns a decision dict::
-
-            {"status": "active|done|paused", "stopped": bool,
-             "reason": str, "message": str}
-
-        ``message`` is a user-visible one-liner ("" when nothing worth
-        saying — the common still-looping case stays quiet).
+        Returns ``{"status": "active|done|paused", "stopped": bool, "reason": str,
+        "message": str}``; ``message`` is a user-visible one-liner, "" in the common
+        still-looping case.
         """
         s = self._state
         if s is None or not s.awaiting_response:
             return {"status": s.status if s else None, "stopped": False, "reason": "no tick in flight", "message": ""}
         s.awaiting_response = False
         now = time.time()
+        ticks = _ticks_label(s.ticks_fired)
 
         # 1. Agent self-stop marker.
         if response_signals_complete(last_response):
-            s.status = "done"
-            s.last_stop_reason = "agent signaled the task is complete"
-            save_loop(self.session_id, s)
-            return {
-                "status": "done",
-                "stopped": True,
-                "reason": s.last_stop_reason,
-                "message": f"✓ Loop finished after {s.ticks_fired} tick{'s' if s.ticks_fired != 1 else ''} — task complete.",
-            }
+            return self._stop("done", "agent signaled the task is complete",
+                              f"✓ Loop finished after {ticks} — task complete.")
 
         # 2. Evidence-based --until judge (reuses the /goal judge; fail-open).
         if s.until and (last_response or "").strip():
@@ -759,54 +650,27 @@ class LoopManager:
             except Exception as exc:
                 verdict, reason = "continue", f"judge unavailable: {type(exc).__name__}"
             if verdict == "done":
-                s.status = "done"
-                s.last_stop_reason = f"stop condition met: {reason}"
-                save_loop(self.session_id, s)
-                return {
-                    "status": "done",
-                    "stopped": True,
-                    "reason": s.last_stop_reason,
-                    "message": f"✓ Loop finished after {s.ticks_fired} tick{'s' if s.ticks_fired != 1 else ''} — {reason}",
-                }
+                return self._stop("done", f"stop condition met: {reason}",
+                                  f"✓ Loop finished after {ticks} — {reason}")
             if verdict == "blocked":
                 # Judge ruled the stop condition unachievable — don't spin
                 # until the tick budget; pause so the user can re-scope.
-                s.status = "paused"
-                s.paused_reason = f"stop condition judged unachievable: {reason}"
-                save_loop(self.session_id, s)
-                return {
-                    "status": "paused",
-                    "stopped": True,
-                    "reason": s.paused_reason,
-                    "message": f"⏸ Loop paused — {s.paused_reason}. /loop resume to keep going, /loop stop to end it.",
-                }
+                why = f"stop condition judged unachievable: {reason}"
+                return self._stop("paused", why,
+                                  f"⏸ Loop paused — {why}. /loop resume to keep going, /loop stop to end it.")
 
         # 3. --times user cap.
         if s.times and s.ticks_fired >= s.times:
-            s.status = "done"
-            s.last_stop_reason = f"completed the requested {s.times} runs"
-            save_loop(self.session_id, s)
-            return {
-                "status": "done",
-                "stopped": True,
-                "reason": s.last_stop_reason,
-                "message": f"✓ Loop finished — ran {s.times}/{s.times} times.",
-            }
+            return self._stop("done", f"completed the requested {s.times} runs",
+                              f"✓ Loop finished — ran {s.times}/{s.times} times.")
 
         # 4. Config backstop budget → pause (recoverable), not done.
         if s.max_ticks and s.ticks_fired >= s.max_ticks:
-            s.status = "paused"
-            s.paused_reason = f"tick budget exhausted ({s.ticks_fired}/{s.max_ticks})"
-            save_loop(self.session_id, s)
-            return {
-                "status": "paused",
-                "stopped": True,
-                "reason": s.paused_reason,
-                "message": (
-                    f"⏸ Loop paused — {s.ticks_fired}/{s.max_ticks} ticks used "
-                    "(loops.max_ticks). /loop resume to keep going, /loop stop to end it."
-                ),
-            }
+            return self._stop(
+                "paused", f"tick budget exhausted ({s.ticks_fired}/{s.max_ticks})",
+                f"⏸ Loop paused — {s.ticks_fired}/{s.max_ticks} ticks used "
+                "(loops.max_ticks). /loop resume to keep going, /loop stop to end it.",
+            )
 
         # 5. Still looping — schedule the next tick from turn end.
         if s.mode == "self_paced":
@@ -823,12 +687,7 @@ class LoopManager:
             s.current_delay = s.interval_seconds
         s.next_due_at = now + s.current_delay
         save_loop(self.session_id, s)
-        return {
-            "status": "active",
-            "stopped": False,
-            "reason": "loop continues",
-            "message": "",
-        }
+        return {"status": "active", "stopped": False, "reason": "loop continues", "message": ""}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -839,22 +698,16 @@ class LoopManager:
 def goal_blocks_loop_tick(session_id: str) -> bool:
     """True when an ACTIVE /goal should defer this session's /loop tick.
 
-    Both features inject synthetic continuation turns at idle boundaries.
-    When a goal is actively driving the session (status ``active`` and not
-    parked on a wait barrier), its judge-driven continuations own the idle
-    boundary — firing a loop wakeup in between would interleave two
-    synthetic conversations and burn the goal's turn budget on loop chatter.
-    A goal that is parked (waiting on a pid/session/deadline), paused, or
-    done does NOT block the loop.
+    Both features inject synthetic turns at idle boundaries. An active, non-parked goal owns the
+    boundary; firing a loop wakeup in between would interleave two synthetic conversations and
+    burn the goal's turn budget. Parked, paused, or done goals do NOT block the loop.
     """
     try:
         from hermes_cli.goals import GoalManager
 
         mgr = GoalManager(session_id=session_id)
-        if not mgr.is_active():
-            return False
-        # Parked goal → the loop may use the idle time.
-        return not mgr.is_waiting()
+        # Parked (waiting) goal → the loop may use the idle time.
+        return mgr.is_active() and not mgr.is_waiting()
     except Exception:
         return False
 
@@ -862,6 +715,43 @@ def goal_blocks_loop_tick(session_id: str) -> bool:
 # ──────────────────────────────────────────────────────────────────────
 # Shared slash-command dispatch (CLI + gateway + TUI use the same logic)
 # ──────────────────────────────────────────────────────────────────────
+
+
+LOOP_HELP = (
+    "Usage: /loop [interval] <prompt> [--times N] [--until <condition>]\n"
+    "  /loop 5m check the deploy status      — first run now, then every 5m\n"
+    "  /loop every 10m /recap                — loop a slash command\n"
+    "  /loop keep fixing tests until green   — self-paced (backs off while output is unchanged)\n"
+    "  /loop 2m poll CI --times 30           — stop after 30 runs\n"
+    "  /loop 5m watch the queue --until queue is empty\n"
+    "Controls: /loop status · /loop pause · /loop resume · /loop stop\n"
+    "The loop also stops itself when the agent replies with "
+    f"{LOOP_COMPLETE_MARKER}."
+)
+
+
+def _pause_output(mgr: "LoopManager") -> str:
+    state = mgr.pause(reason="user-paused")
+    return "No loop set." if state is None else f"⏸ Loop paused: {state.prompt}\nUse /loop resume to continue."
+
+
+def _resume_output(mgr: "LoopManager") -> str:
+    state = mgr.resume()
+    return "No loop to resume." if state is None else f"▶ Loop resumed ({state.cadence_label()}): {state.prompt}"
+
+
+def _stop_output(mgr: "LoopManager") -> str:
+    return "✓ Loop stopped." if mgr.clear() else "No active loop."
+
+
+# Control words -> handler returning the output text. Anything else is a new loop spec.
+_CONTROL_COMMANDS = {
+    **dict.fromkeys(("", "status"), lambda mgr: mgr.status_line()),
+    "pause": _pause_output,
+    "resume": _resume_output,
+    **dict.fromkeys(("stop", "clear", "cancel"), _stop_output),
+    **dict.fromkeys(("help", "--help", "-h"), lambda mgr: LOOP_HELP),
+}
 
 
 def dispatch_loop_command(
@@ -872,52 +762,15 @@ def dispatch_loop_command(
 ) -> Dict[str, Any]:
     """Surface-agnostic handler for ``/loop <args>``.
 
-    Returns ``{"output": str, "created": bool}``. ``output`` is ready to
-    print/send verbatim; each surface only decorates it (dim colors on the
-    CLI, plain text on messaging platforms). ``route`` is stored on newly
-    created loops so the gateway's idle watcher can inject wakeups back
-    into the right chat; CLI/TUI pass None.
+    Returns ``{"output": str, "created": bool}``. ``output`` is ready to print/send verbatim; each
+    surface only decorates it (dim colors on the CLI, plain text on messaging platforms). ``route``
+    is stored on newly created loops so the gateway's idle watcher can inject wakeups back into the
+    right chat; CLI/TUI pass None.
     """
     arg = (args or "").strip()
-    lower = arg.lower()
-
-    if not arg or lower == "status":
-        return {"output": mgr.status_line(), "created": False}
-
-    if lower == "pause":
-        state = mgr.pause(reason="user-paused")
-        if state is None:
-            return {"output": "No loop set.", "created": False}
-        return {"output": f"⏸ Loop paused: {state.prompt}\nUse /loop resume to continue.", "created": False}
-
-    if lower == "resume":
-        state = mgr.resume()
-        if state is None:
-            return {"output": "No loop to resume.", "created": False}
-        return {
-            "output": f"▶ Loop resumed ({state.cadence_label()}): {state.prompt}",
-            "created": False,
-        }
-
-    if lower in {"stop", "clear", "cancel"}:
-        had = mgr.clear()
-        return {"output": "✓ Loop stopped." if had else "No active loop.", "created": False}
-
-    if lower in {"help", "--help", "-h"}:
-        return {
-            "output": (
-                "Usage: /loop [interval] <prompt> [--times N] [--until <condition>]\n"
-                "  /loop 5m check the deploy status      — first run now, then every 5m\n"
-                "  /loop every 10m /recap                — loop a slash command\n"
-                "  /loop keep fixing tests until green   — self-paced (backs off while output is unchanged)\n"
-                "  /loop 2m poll CI --times 30           — stop after 30 runs\n"
-                "  /loop 5m watch the queue --until queue is empty\n"
-                "Controls: /loop status · /loop pause · /loop resume · /loop stop\n"
-                "The loop also stops itself when the agent replies with "
-                f"{LOOP_COMPLETE_MARKER}."
-            ),
-            "created": False,
-        }
+    control = _CONTROL_COMMANDS.get(arg.lower())
+    if control is not None:
+        return {"output": control(mgr), "created": False}
 
     parsed = parse_loop_args(arg)
     if parsed["error"]:
@@ -964,22 +817,9 @@ def dispatch_loop_command(
 
 
 __all__ = [
-    "LoopState",
-    "LoopManager",
-    "parse_loop_args",
-    "parse_interval_token",
-    "format_interval",
-    "response_signals_complete",
-    "goal_blocks_loop_tick",
-    "load_loop",
-    "save_loop",
-    "clear_loop",
-    "list_active_loops",
-    "migrate_loop_to_session",
-    "dispatch_loop_command",
-    "LOOP_COMPLETE_MARKER",
-    "WAKEUP_PROMPT_TEMPLATE",
-    "WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE",
-    "DEFAULT_MIN_INTERVAL_SECONDS",
+    "LoopState", "LoopManager", "parse_loop_args", "parse_interval_token", "format_interval",
+    "response_signals_complete", "goal_blocks_loop_tick", "load_loop", "save_loop", "clear_loop",
+    "list_active_loops", "migrate_loop_to_session", "dispatch_loop_command", "LOOP_COMPLETE_MARKER",
+    "WAKEUP_PROMPT_TEMPLATE", "WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE", "DEFAULT_MIN_INTERVAL_SECONDS",
     "DEFAULT_MAX_TICKS",
 ]

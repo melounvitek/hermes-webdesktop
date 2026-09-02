@@ -1,21 +1,7 @@
 """Unified selection-time guard registry for model switching surfaces.
 
-Hermes has multiple model-selection surfaces (CLI picker, TUI, dashboard,
-gateway ``/model``, Telegram/Discord pickers, TUI-gateway RPC). Each of them
-previously imported ``model_cost_guard.expensive_model_warning`` directly, so
-every new guard class (e.g. the data-training-tier guard) had to be wired into
-every surface by hand — and inevitably missed some.
-
-This module is the single evaluation point: ``selection_warnings()`` runs every
-registered guard and returns the warnings that fired. Surfaces render the
-result with their own confirm UX (stdin prompt, modal, inline keyboard,
-``confirm_required`` JSON) — that half stays per-surface; the *evaluation* half
-lives here. Adding a guard to ``_GUARDS`` makes it appear on every surface at
-once.
-
-Guard modules (``model_cost_guard``, ``model_data_policy_guard``) keep their
-public APIs — existing tests and mock patch points remain valid; this module
-only aggregates them.
+Guard modules (``model_cost_guard``, ``model_data_policy_guard``) keep their public APIs — existing
+tests and mock patch points remain valid; this module only aggregates them.
 """
 
 from __future__ import annotations
@@ -37,6 +23,23 @@ class SelectionWarning:
     message: str
 
 
+def _wrap(kind: str, title: str, warning, model_name: str, provider: Optional[str]):
+    """Lift a raw guard payload into a :class:`SelectionWarning` (None passes through).
+
+    Duck-typed access: tests (and future guard payloads) may supply objects carrying only
+    ``.message``.
+    """
+    if warning is None:
+        return None
+    return SelectionWarning(
+        kind=kind,
+        title=title,
+        model=getattr(warning, "model", model_name),
+        provider=getattr(warning, "provider", provider or ""),
+        message=warning.message,
+    )
+
+
 def _cost_guard(
     model_name: str,
     provider: Optional[str],
@@ -47,23 +50,9 @@ def _cost_guard(
     from hermes_cli.model_cost_guard import expensive_model_warning
 
     warning = expensive_model_warning(
-        model_name,
-        provider=provider,
-        base_url=base_url,
-        api_key=api_key,
-        model_info=model_info,
+        model_name, provider=provider, base_url=base_url, api_key=api_key, model_info=model_info
     )
-    if warning is None:
-        return None
-    # Duck-typed access: tests (and future guard payloads) may supply objects
-    # carrying only ``.message``.
-    return SelectionWarning(
-        kind="cost",
-        title="Expensive Model Warning",
-        model=getattr(warning, "model", model_name),
-        provider=getattr(warning, "provider", provider or ""),
-        message=warning.message,
-    )
+    return _wrap("cost", "Expensive Model Warning", warning, model_name, provider)
 
 
 def _data_policy_guard(
@@ -75,28 +64,13 @@ def _data_policy_guard(
 ) -> Optional[SelectionWarning]:
     from hermes_cli.model_data_policy_guard import data_training_warning
 
-    warning = data_training_warning(
-        model_name,
-        provider=provider,
-        base_url=base_url,
-    )
-    if warning is None:
-        return None
-    return SelectionWarning(
-        kind="data_policy",
-        title="Data-Training Tier Warning",
-        model=getattr(warning, "model", model_name),
-        provider=getattr(warning, "provider", provider or ""),
-        message=warning.message,
-    )
+    warning = data_training_warning(model_name, provider=provider, base_url=base_url)
+    return _wrap("data_policy", "Data-Training Tier Warning", warning, model_name, provider)
 
 
 # Registry, evaluated in order. Add new guard classes here — never at the
 # individual surfaces.
-_GUARDS = (
-    _cost_guard,
-    _data_policy_guard,
-)
+_GUARDS = (_cost_guard, _data_policy_guard)
 
 
 def selection_warnings(
@@ -110,15 +84,11 @@ def selection_warnings(
 ) -> List[SelectionWarning]:
     """Run every registered selection guard and return the warnings that fired.
 
-    Returns an empty list in the common case (no guard fired). Callers should
-    run this after model resolution so aliases / provider-specific ids have
-    settled, then surface the messages as a confirm step. ``include_kinds``
-    optionally restricts which guard kinds run (e.g. auth.py's picker only runs
-    the cost guard when a provider is known, but always runs the data-policy
-    guard).
+    Returns an empty list in the common case (no guard fired). Callers should run this after model
+    resolution so aliases / provider-specific ids have settled, then surface the messages as a
+    confirm step. ``include_kinds`` optionally restricts which guard kinds run (e.g.
 
-    A misbehaving guard must never break model selection: individual guard
-    exceptions are swallowed.
+    A misbehaving guard must never break model selection: individual guard exceptions are swallowed.
     """
     wanted = set(include_kinds) if include_kinds is not None else None
     results: List[SelectionWarning] = []
@@ -127,20 +97,16 @@ def selection_warnings(
             warning = guard(model_name, provider, base_url, api_key, model_info)
         except Exception:
             continue
-        if warning is None:
-            continue
-        if wanted is not None and warning.kind not in wanted:
-            continue
-        results.append(warning)
+        if warning is not None and (wanted is None or warning.kind in wanted):
+            results.append(warning)
     return results
 
 
 def combined_message(warnings: List[SelectionWarning]) -> str:
     """Join multiple warnings into one confirm-prompt body.
 
-    Surfaces that show a single confirm dialog use this when more than one
-    guard fires (rare) — one prompt showing both blocks beats two sequential
-    prompts.
+    Used by surfaces with a single confirm dialog when more than one guard fires (rare) — one
+    prompt showing both blocks beats two sequential prompts.
     """
     return "\n\n".join(w.message for w in warnings)
 
@@ -155,18 +121,12 @@ def combined_selection_warning(
 ) -> Optional[SelectionWarning]:
     """Drop-in replacement for ``expensive_model_warning`` call sites.
 
-    Returns ``None`` when no guard fired, a single :class:`SelectionWarning`
-    when exactly one fired, or a merged warning (``kind="multiple"``) whose
-    ``message`` stacks every fired guard. Surfaces that render one confirm
-    dialog with ``warning.message`` can switch to this without reshaping their
-    control flow.
+    Returns ``None`` when no guard fired, the single :class:`SelectionWarning` when one fired,
+    or a merged ``kind="multiple"`` warning stacking every message — so surfaces rendering one
+    confirm dialog from ``warning.message`` can switch without reshaping control flow.
     """
     warnings = selection_warnings(
-        model_name,
-        provider=provider,
-        base_url=base_url,
-        api_key=api_key,
-        model_info=model_info,
+        model_name, provider=provider, base_url=base_url, api_key=api_key, model_info=model_info
     )
     if not warnings:
         return None

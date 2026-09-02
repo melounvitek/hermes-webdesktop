@@ -26,10 +26,7 @@ def _print_aiohttp_missing() -> None:
 
 
 def cmd_proxy_start(args: Any) -> int:
-    """Run the proxy server in the foreground.
-
-    Returns process exit code (0 on clean shutdown).
-    """
+    """Run the proxy server in the foreground."""
     if not AIOHTTP_AVAILABLE:
         _print_aiohttp_missing()
         return 1

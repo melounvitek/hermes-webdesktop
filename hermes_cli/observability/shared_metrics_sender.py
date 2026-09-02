@@ -1,26 +1,10 @@
 """Transmit exported shared-metrics packages to the Nous telemetry service.
 
-Implements the sender side of the ingest contract (see the telemetry repo's
-``CONTRACT.md``):
+Implements the sender side of the ingest contract (see the telemetry repo's ``CONTRACT.md``):
 
-* ``202`` — durably stored. Mark sent.
-* ``400`` — permanently malformed. Never retry.
-* ``429`` — keep, retry after ``Retry-After``.
-* ``5xx`` / timeout / connection error — keep, retry with backoff.
-
-Two properties are load-bearing and easy to get wrong:
-
-**The outbox directory is the user's local history, not a queue.** Packages
-are pruned by age; a ``202`` marks send state in SQLite and never deletes a
-file. See Appendix A.7 of ``docs/observability/relay-shared-metrics.md``.
-
-**Consent is gated on the package's PERIOD, not its creation time.** One
-period is split across packages created on different days, so a created-at
-gate would send a period's tail while dropping its head and silently
-undercount the first consented day. The gate itself is interval containment:
-the period must fall entirely inside a recorded consent window
-(``send_consent_windows``), maintained by the single ``reconcile_send_consent``
-writer below.
+* ``202`` — durably stored. Mark sent. * ``400`` — permanently malformed. Never retry. * ``429`` —
+keep, retry after ``Retry-After``. * ``5xx`` / timeout / connection error — keep, retry with
+backoff.
 """
 
 from __future__ import annotations
@@ -186,31 +170,9 @@ def reconcile_send_consent(
 ) -> None:
     """Reconcile the consent-window table with the observed config state.
 
-    THE ONLY writer of consent state. Must run inside a write transaction.
-    A pure function of (config, now, store): call it from anywhere, any
-    number of times, in any order — the resulting windows are the same. This
-    replaces the previous edge-detection design, whose three partial
-    observers (wizard, relay, mid-pass) each covered a different subset of
-    transitions and repeatedly leaked the transitions between the subsets.
-
-    Timestamp discipline (each rule is load-bearing; see the validation
-    harness in tests/hermes_cli/test_shared_metrics_consent_windows.py):
-
-    - The 'obs' mark advances to every observation stamp, monotonically —
-      but by at most ``MAX_OBS_ADVANCE_SECONDS`` per call. Unbounded, the
-      mark is monotonic in the LEAK direction: one glitched-forward sample
-      would drag ``last_confirmed_at`` decades ahead, a later close would
-      stamp that horizon, and the closed window would contain every future
-      refused period (reproduced in round 6). Bounded, a poisoned sample
-      costs at most one cap's width, and real time overtakes it.
-      An open window's ``last_confirmed_at`` follows the mark: consent is
-      asserted only for time that was actually observed.
-    - A close is stamped at ``last_confirmed_at`` — never "now" — so an
-      unobserved gap (hand-edited config, machine off for 90 days) is never
-      inside a window and fails closed.
-    - An open clamps to ``max(now, obs, data)``: a rolled-back clock cannot
-      open a window underneath refused packages already on disk, and cannot
-      make the new window adjacent to the previous close.
+    THE ONLY writer of consent state. Must run inside a write transaction. A pure function of
+    (config, now, store): call it from anywhere, any number of times, in any order — the resulting
+    windows are the same.
     """
     stamp = _isoformat(now or _utc_now())
     raw_stamp = stamp  # pre-cap observation time, used to clamp closes
@@ -288,23 +250,6 @@ CONSENT_GATE_SQL = """EXISTS (
 )"""
 
 
-def _state_get(connection: sqlite3.Connection, key: str) -> str | None:
-    row = connection.execute(
-        "SELECT value FROM telemetry_state WHERE key = ?", (key,)
-    ).fetchone()
-    return str(row[0]) if row is not None else None
-
-
-def _state_set(connection: sqlite3.Connection, key: str, value: str) -> None:
-    connection.execute(
-        """
-        INSERT INTO telemetry_state(key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        """,
-        (key, value),
-    )
-
-
 class SharedMetricsSender:
     """Sends exported packages, one bounded pass at a time."""
 
@@ -334,20 +279,11 @@ class SharedMetricsSender:
     def _claim_next(self, now: datetime, seen: set[str]) -> dict | None:
         """Claim exactly ONE package, immediately before it is sent.
 
-        Claiming a whole batch up front does not work: a single shared lease
-        has to cover the entire pass, and 20 retrying packages can legally run
-        far longer than any sane lease (three 30s timeouts plus backoff each).
-        The later rows' leases then expire while this pass still holds them in
-        memory, and another process re-sends them. Taking one row at a time
-        keeps the lease covering only the package actually in flight.
-
-        ``seen`` holds packages this pass has already finished with. They are
-        excluded IN SQL rather than by rejecting the fetched row: with
-        ``LIMIT 1``, returning None for an already-seen row would make the
-        caller believe the queue was empty and abandon every healthy package
-        behind it. A row can legitimately become eligible again mid-pass (a
-        short Retry-After, or a pass that outlives the 15-minute failure
-        backoff), so this is reachable in normal operation, not just in tests.
+        Claiming a batch up front fails: one shared lease would have to cover the whole pass, and 20
+        retrying packages can outlive any sane lease, so later rows expire and another process
+        re-sends them. ``seen`` (packages this pass finished with) is excluded IN SQL: with LIMIT 1,
+        returning None for a seen row would look like an empty queue and abandon everything behind
+        it, and rows can legitimately become eligible again mid-pass.
         """
         with self._store._connection() as connection:
             with write_txn(connection):
@@ -428,12 +364,10 @@ class SharedMetricsSender:
     ) -> str | None:
         """Record the transmitted id on the row, or reject an unusable one.
 
-        The stable install_id is transmitted as-is (product decision,
-        2026-08-27 — see the doc's A.2). What remains of "freezing" is the
-        validation and the audit column: ``sent_install_id`` records exactly
-        what the wire will carry, and rejecting unusable rows here rather
-        than raising matters because an exception rolls back the claim
-        transaction and blocks every healthy package behind this one.
+        What remains of "freezing" is the validation and the audit column: ``sent_install_id``
+        records exactly what the wire will carry, and rejecting unusable rows here rather than
+        raising matters because an exception rolls back the claim transaction and blocks every
+        healthy package behind this one.
         """
         reason = None
         install_id = None
@@ -476,11 +410,10 @@ class SharedMetricsSender:
     def _body(self, payload_json: str, transmitted_id: str) -> bytes:
         """Rebuild the exact bytes to send.
 
-        The payload is recomputed from the stored package rather than kept as
-        a second copy: json.dumps with these options is deterministic. The
-        install_id is written from the frozen ``sent_install_id`` column
-        rather than trusted implicitly, keeping "a resend is byte-identical"
-        anchored to one recorded value.
+        The payload is recomputed from the stored package rather than kept as a second copy:
+        json.dumps with these options is deterministic. The install_id is written from the frozen
+        ``sent_install_id`` column rather than trusted implicitly, keeping "a resend is byte-
+        identical" anchored to one recorded value.
         """
         payload = json.loads(payload_json)
         payload = dict(payload)
@@ -497,15 +430,14 @@ class SharedMetricsSender:
     ) -> None:
         """Write send state for one package.
 
-        Guarded on send_state so a pass whose lease lapsed cannot resurrect a
-        row another process has already finished: without this, a slow sender
-        could overwrite 'sent' back to 'pending' and cause a re-send.
+        Guarded on send_state so a pass whose lease lapsed cannot resurrect a row another process
+        has already finished: without this, a slow sender could overwrite 'sent' back to 'pending'
+        and cause a re-send.
 
-        When ``token`` is given, the write is additionally compare-and-set on
-        claim_token: it lands only if THIS claim is still the current one. A
-        claimant that lapsed and was superseded writes zero rows — its
-        settlement, backoff, and error strings all silently lose to the
-        newer claim's, which is the correct outcome.
+        When ``token`` is given, the write is additionally compare-and-set on claim_token: it lands
+        only if THIS claim is still the current one. A claimant that lapsed and was superseded
+        writes zero rows — its settlement, backoff, and error strings all silently lose to the newer
+        claim's, which is the correct outcome.
         """
         assignments = ", ".join(f"{name} = ?" for name in columns)
         predicate = (
@@ -528,21 +460,14 @@ class SharedMetricsSender:
     def _renew_claim(self, package_id: str, token: str | None) -> bool:
         """Atomically re-assert ownership and extend the lease. CAS, one row.
 
-        A read-only ownership check is not enough: a claimant whose lease
-        expired while suspended can pass the check (its token is still in
-        the row if no one reclaimed yet) and then POST while another process
-        legitimately reclaims — the check-to-POST expiry race a seventh
-        review reproduced. Renewal closes it by requiring, in ONE statement:
+        A read-only ownership check is not enough: a claimant whose lease expired while suspended
+        can pass the check (its token is still in the row if no one reclaimed yet) and then POST
+        while another process legitimately reclaims — the check-to-POST expiry race a seventh review
+        reproduced.
 
-        - the token still matches (nobody reclaimed), AND
-        - the current lease is UNEXPIRED (this claimant is not stale), AND
-        - the row is still pending,
-
-        and only then pushing next_attempt_at a fresh lease into the future,
-        so the upcoming POST (30s timeout, well under the 300s lease) runs
-        entirely inside renewed authority. rowcount == 1 is the only grant.
-        A claimant that wakes past its own lease fails the unexpired
-        condition and yields even though its token was never replaced.
+        and only then pushing next_attempt_at a fresh lease into the future, so the upcoming POST
+        (30s timeout, well under the 300s lease) runs entirely inside renewed authority. rowcount ==
+        1 is the only grant.
         """
         if token is None:
             return False
@@ -605,14 +530,10 @@ class SharedMetricsSender:
     def _send_one(self, package: dict) -> str:
         """Try one package. Returns 'sent', 'rejected', or 'deferred'.
 
-        Delivery is at-least-once. The pre-POST ownership check plus the
-        token-fenced writes close the claim->POST and settle-after-reclaim
-        gaps, but a suspension landing MID-POST (bytes already on the wire
-        when the machine sleeps) can still duplicate: no client-side check
-        can revoke a request in flight. The body is byte-identical across
-        retries by construction, so the residual duplicate is exactly one
-        redundant copy of identical content; collapsing it fully would need
-        package_id-keyed dedupe at the ingest service.
+        Delivery is at-least-once. The pre-POST ownership check plus the token-fenced writes close
+        the claim->POST and settle-after-reclaim gaps, but a suspension landing MID-POST (bytes
+        already on the wire when the machine sleeps) can still duplicate: no client-side check can
+        revoke a request in flight.
         """
         package_id = package["package_id"]
         token = package.get("claim_token")
@@ -711,9 +632,9 @@ class SharedMetricsSender:
     def send_pending(self) -> SendOutcome:
         """Run one bounded pass. Never raises.
 
-        Claims and sends ONE package at a time so each row's lease only has to
-        cover its own transmission, and re-checks consent before every send so
-        revoking `send` mid-pass stops the remaining packages.
+        Claims and sends ONE package at a time so each row's lease only has to cover its own
+        transmission, and re-checks consent before every send so revoking `send` mid-pass stops the
+        remaining packages.
         """
         outcome = SendOutcome()
         seen: set[str] = set()
@@ -774,10 +695,9 @@ class SharedMetricsSender:
     def _still_consented(self) -> bool:
         """Re-read profile-owned send consent.
 
-        Consent is a boundary, not cached configuration: the documentation
-        promises that setting `send: false` stops transmission immediately,
-        and a pass can run for minutes. Injected senders (tests, the staging
-        E2E) opt out by passing consent_check=None.
+        Consent is a boundary, not cached config: docs promise ``send: false`` stops transmission
+        immediately, and a pass can run for minutes. Injected senders opt out via
+        consent_check=None.
         """
         if self._consent_check is None:
             return True

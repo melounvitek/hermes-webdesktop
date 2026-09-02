@@ -1,12 +1,7 @@
 """``hermes_cli/_scan_venv_blockers.py`` — Standalone venv-process scan for JSON consumption.
 
-Invoked by the Desktop Electron app::
-
-    venv\\Scripts\\python.exe -m hermes_cli._scan_venv_blockers
-
-Exits 0 for valid clear or blocked results.  Non-zero exit signals probe
-failure (the detector itself crashed, psutil unavailable, etc.).  Exactly
-one JSON document on stdout; diagnostics on stderr only.
+Exits 0 for valid clear or blocked results. Non-zero exit signals probe failure (the detector itself
+crashed, psutil unavailable, etc.). Exactly one JSON document on stdout; diagnostics on stderr only.
 """
 
 from __future__ import annotations
@@ -33,10 +28,9 @@ _SENSITIVE_LONG_FLAGS: list[str] = [
 def _probe_fail_json(diagnostic: str = "probe failed") -> str:
     """Return the standard probe-failure JSON document.
 
-    ``ok: false`` plus ``probe_failed: true`` means the detector itself could
-    not run — this is *not* a clear scan. Callers must treat
-    ``ok is not True`` / non-zero exit as probe failure, never as
-    ``blocked: false`` "clear" (#83149).
+    ``ok: false`` plus ``probe_failed: true`` means the detector itself could not run — this is
+    *not* a clear scan. Callers must treat ``ok is not True`` / non-zero exit as probe failure,
+    never as ``blocked: false`` "clear" (#83149).
     """
     return json.dumps(
         {
@@ -57,11 +51,7 @@ def _emit_probe_fail(diagnostic: str) -> NoReturn:
 
 
 def _find_flag(text: str, flag: str) -> int:
-    """Return the index of *flag* when it starts the string or follows a space.
-
-    Returns -1 when not found.  This avoids matching ``--token`` inside an
-    embedded token or path like ``/some--token-thing``.
-    """
+    """Return the index of *flag* when it starts the string or follows a space."""
     low = text.lower()
     fl = flag.lower()
     pos = 0
@@ -75,11 +65,7 @@ def _find_flag(text: str, flag: str) -> int:
 
 
 def _redact_sensitive_cmdline(cmdline: str) -> str:
-    """Apply generic secret redaction then long-flag redaction.
-
-    If the generic redactor itself fails, return ``"<redacted>"`` — the PID
-    and process name still provide actionable diagnostics.
-    """
+    """Apply generic secret redaction then long-flag redaction."""
     # Generic pass: the project's shared secret redactor.
     try:
         from agent.redact import redact_sensitive_text  # noqa: PLC0415
@@ -94,14 +80,11 @@ def _redact_sensitive_cmdline(cmdline: str) -> str:
     # diagnostics (toolset, port, profile).
     earliest = len(cmdline)
     for flag in _SENSITIVE_LONG_FLAGS:
-        # --flag=value  →  preserve "--flag="
-        idx = _find_flag(cmdline, flag + "=")
-        if idx != -1 and idx + len(flag) + 1 < earliest:
-            earliest = idx + len(flag) + 1
-        # --flag value  →  preserve "--flag "
-        idx = _find_flag(cmdline, flag + " ")
-        if idx != -1 and idx + len(flag) + 1 < earliest:
-            earliest = idx + len(flag) + 1
+        # --flag=value → preserve "--flag="; --flag value → preserve "--flag "
+        for suffix in ("=", " "):
+            idx = _find_flag(cmdline, flag + suffix)
+            if idx != -1 and idx + len(flag) + 1 < earliest:
+                earliest = idx + len(flag) + 1
 
     if earliest < len(cmdline):
         return cmdline[:earliest] + "<redacted>"
@@ -111,9 +94,8 @@ def _redact_sensitive_cmdline(cmdline: str) -> str:
 def _classify_local_preview_args(args: object) -> dict[str, object]:
     """Return safe UI metadata for an exact ``python -m http.server`` argv.
 
-    The general holder detector intentionally truncates its diagnostic command
-    line. Reading argv separately preserves a useful directory label without
-    exposing an unbounded command line to the renderer.
+    The general holder detector truncates its diagnostic command line; reading argv separately
+    preserves a useful directory label without exposing an unbounded command line to the renderer.
     """
     if not isinstance(args, (list, tuple)) or not all(isinstance(arg, str) for arg in args):
         return {}
@@ -123,11 +105,10 @@ def _classify_local_preview_args(args: object) -> dict[str, object]:
     # to an unrelated script and must never authorize termination.
     if len(args) < 3 or args[1] != "-m" or args[2].lower() != "http.server":
         return {}
-    module_index = 1
 
     port = 8000
-    if module_index + 2 < len(args):
-        candidate = args[module_index + 2]
+    if len(args) > 3:
+        candidate = args[3]
         if candidate.isdigit() and 0 < int(candidate) <= 65535:
             port = int(candidate)
 
@@ -172,9 +153,9 @@ def _terminate_safe_preview(
 ) -> tuple[bool, str | None]:
     """Terminate one verified local preview process tree.
 
-    A fresh ``psutil.Process`` identity check and exact argv classification occur
-    immediately before termination. psutil guards mutating Process methods
-    against PID reuse, avoiding taskkill's stale-PID race.
+    A fresh ``psutil.Process`` identity check and exact argv classification occur immediately before
+    termination. psutil guards mutating Process methods against PID reuse, avoiding taskkill's
+    stale-PID race.
     """
     try:
         if psutil_module is None:
@@ -203,29 +184,13 @@ def _terminate_safe_preview(
 def _is_pausable_gateway(cmdline: str) -> bool:
     """Return True when *cmdline* is a gateway process the updater can pause.
 
-    A running gateway shows up in the venv-holder scan as one or both halves
-    of its launcher/worker chain (``venv\\Scripts\\python.exe -m
-    hermes_cli.main gateway run`` and the uv-side interpreter re-running the
-    same argv). Reporting those as blockers dead-ends the Desktop update:
-    the preflight aborts with ``venv-blocked`` *before* spawning
-    ``hermes-setup``, so the CLI updater's own
-    ``_pause_windows_gateways_for_update()`` — which exists precisely to
-    stop these processes (and is always active: ``hermes-setup`` invokes
-    ``hermes update --yes --gateway``) — never gets the chance to run.
+    Only gateway invocations are exempted. Anything else running from the venv (an operator's REPL,
+    a stray script, a ``serve`` backend that survived the desktop's own teardown) has no pause
+    machinery downstream and must keep blocking the handoff.
 
-    Only gateway invocations are exempted. Anything else running from the
-    venv (an operator's REPL, a stray script, a ``serve`` backend that
-    survived the desktop's own teardown) has no pause machinery downstream
-    and must keep blocking the handoff.
-
-    Delegates to ``gateway.status.looks_like_gateway_command_line`` — the
-    canonical ``gateway run`` matcher (profile-selector aware, shlex
-    tokenization, ``run``-only) — so this exemption, the pause discovery,
-    and the updater's guard fallback all share one parser. A hand-rolled
-    token scan here regressed ``--profile gateway gateway run``: the profile
-    *value* shadowed the subcommand token. An import failure counts as
-    not-pausable — the scan then reports the process as a blocker, which is
-    exactly the pre-exemption behavior.
+    Delegates to ``gateway.status.looks_like_gateway_command_line`` — the canonical ``gateway run``
+    matcher (profile-selector aware, shlex tokenization, ``run``-only) — so this exemption, the
+    pause discovery, and the updater's guard fallback all share one parser.
     """
     try:
         from gateway.status import looks_like_gateway_command_line  # noqa: PLC0415
@@ -237,33 +202,11 @@ def _is_pausable_gateway(cmdline: str) -> bool:
 def _is_updater_owned_backend(pid: int, cmdline: str) -> bool:
     """Return True when *pid* is a Hermes backend the CLI updater can stop.
 
-    The gateway exemption above keeps ``gateway run`` holders out of the
-    blocker list because the updater's own pause machinery stops and resumes
-    them. ``hermes serve`` / ``hermes dashboard`` backends had no such
-    deferral, so a leaked serve child (or a Desktop-owned backend the
-    teardown lost track of) dead-ended the hand-off with ``venv-blocked`` —
-    or, worse, survived the hand-off and made the shim quarantine fail with
-    ``os error 32`` (#98336) — even though the updater downstream owns
-    exactly this case with its ledger rungs (`_ledger_reapable_backend_pids`
-    reaps dead-spawner orphans; `_ledger_manual_serve_holders` stops manual
-    serves and relaunches them on their recorded host/port).
+    The gateway exemption above keeps ``gateway run`` holders out of the blocker list because the
+    updater's own pause machinery stops and resumes them.
 
-    Positive identity only — never name/substring matching (#90778, and the
-    #99558 identity-guard contract):
-
-    - the argv's parsed SUBCOMMAND (token-based) is ``serve``/``dashboard``;
-    - the machine spawn ledger has a live-verified ``(pid, create_time)``
-      entry for the process with a matching purpose;
-    - ownership is provable: the recorded spawner is dead or unrecorded
-      (the updater's rungs stop/relaunch those), or the spawner is an
-      ancestor of THIS scan — i.e. the Desktop app performing the hand-off,
-      which exits before the updater runs, turning the backend into exactly
-      the dead-spawner orphan the ledger rung reaps.
-
-    A backend whose recorded spawner is alive and is NOT this hand-off's
-    Desktop (a second Desktop window, another supervisor) keeps blocking:
-    that supervisor would respawn whatever the updater kills. Anything
-    unprovable → not exempt (fail closed, pre-exemption behavior).
+    Positive identity only — never name/substring matching (#90778, and the #99558 identity-guard
+    contract):
     """
     return _updater_owned_backend_entry(pid, cmdline) is not None
 
@@ -271,10 +214,9 @@ def _is_updater_owned_backend(pid: int, cmdline: str) -> bool:
 def _updater_owned_backend_entry(pid: int, cmdline: str) -> dict | None:
     """Ledger entry for a deferred backend, or ``None`` when it must block.
 
-    Same decision logic as ``_is_updater_owned_backend`` (which delegates
-    here); returning the matched ledger entry lets ``main()`` emit sanitized
-    decision evidence — structured identity fields only, never argv, which
-    can carry tokens or private endpoints (#98350).
+    Same decision logic as ``_is_updater_owned_backend`` (which delegates here); returning the
+    matched ledger entry lets ``main()`` emit sanitized decision evidence — structured identity
+    fields only, never argv, which can carry tokens or private endpoints (#98350).
     """
     try:
         from hermes_cli.update_cmd import _hermes_holder_subcommand  # noqa: PLC0415
@@ -312,10 +254,9 @@ def _updater_owned_backend_entry(pid: int, cmdline: str) -> dict | None:
 def _deferred_backend_evidence(entries: list[dict]) -> list[dict]:
     """Sanitized decision evidence for deferred serve/dashboard backends.
 
-    Structured ledger fields only — pid, purpose, recorded port — never the
-    command line, which can carry tokens or private endpoints. Lets the
-    scan result explain *why* a holder disappeared from ``processes``
-    without echoing argv (#98350).
+    Structured ledger fields only — pid, purpose, recorded port — never the command line, which can
+    carry tokens or private endpoints. Lets the scan result explain *why* a holder disappeared from
+    ``processes`` without echoing argv (#98350).
     """
     evidence = []
     for entry in entries:
@@ -331,9 +272,9 @@ def _deferred_backend_evidence(entries: list[dict]) -> list[dict]:
 def _spawner_is_this_handoff_desktop(entry: dict) -> bool:
     """True when the entry's live spawner is an ancestor of this scan.
 
-    The scan subprocess is spawned by the Desktop app's update preflight, so
-    the Desktop performing the hand-off is in our ancestor chain. Identity is
-    verified by ``(pid, create_time)`` — a recycled PID cannot forge the pair.
+    The scan subprocess is spawned by the Desktop app's update preflight, so the Desktop performing
+    the hand-off is in our ancestor chain. Identity is verified by ``(pid, create_time)`` — a
+    recycled PID cannot forge the pair.
     """
     spawner_pid = entry.get("spawner_pid")
     if not isinstance(spawner_pid, int) or spawner_pid <= 0:

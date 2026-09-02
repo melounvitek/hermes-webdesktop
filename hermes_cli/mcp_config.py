@@ -1,12 +1,4 @@
-"""
-MCP Server Management CLI — ``hermes mcp`` subcommand.
-
-Implements ``hermes mcp add/remove/list/test/configure`` for interactive
-MCP server lifecycle management (issue #690 Phase 2).
-
-Relies on tools/mcp_tool.py for connection/discovery and keeps
-configuration in ~/.hermes/config.yaml under the ``mcp_servers`` key.
-"""
+"""MCP Server Management CLI — ``hermes mcp`` subcommand."""
 
 import asyncio
 import logging
@@ -85,23 +77,52 @@ def _get_mcp_servers(config: Optional[dict] = None) -> Dict[str, dict]:
     return servers
 
 
+def _tool_filters(cfg: dict) -> Tuple[Optional[list], Optional[list]]:
+    """Return the ``(include, exclude)`` tool lists from a server config (non-empty lists only)."""
+    tools_cfg = cfg.get("tools", {})
+    if not isinstance(tools_cfg, dict):
+        return None, None
+    include = tools_cfg.get("include")
+    exclude = tools_cfg.get("exclude")
+    return (
+        include if include and isinstance(include, list) else None,
+        exclude if exclude and isinstance(exclude, list) else None,
+    )
+
+
 def _save_mcp_server(name: str, server_config: dict) -> bool:
     """Add or update a server entry in config.yaml.
 
-    Returns False when a high-signal exfiltration-shaped stdio command is
-    rejected. MCP stdio servers are user-chosen local commands, so this blocks
-    shell+egress payloads rather than whitelisting command families.
+    Returns False when a high-signal exfiltration-shaped stdio command is rejected. stdio servers
+    are user-chosen local commands, so this blocks shell+egress payloads rather than whitelisting
+    command families.
     """
-    issues = validate_mcp_server_entry(name, server_config)
-    if issues:
-        for issue in issues:
-            _warning(issue)
-        _warning(f"Server '{name}' was NOT saved due to suspicious configuration.")
+    if not _validate_or_warn(name, server_config):
         return False
     config = load_config()
     config.setdefault("mcp_servers", {})[name] = server_config
     save_config(config)
     return True
+
+
+def _validate_or_warn(name: str, server_config: dict) -> bool:
+    """Print every suspicious-config issue as a warning; True when the entry is clean."""
+    issues = validate_mcp_server_entry(name, server_config)
+    for issue in issues:
+        _warning(issue)
+    if issues:
+        _warning(f"Server '{name}' was NOT saved due to suspicious configuration.")
+    return not issues
+
+
+def _lookup_server(name: str, servers: Dict[str, dict], available_label: str = "Available servers") -> Optional[dict]:
+    """Return the named server config, or print the not-found hint and return None."""
+    if name in servers:
+        return servers[name]
+    _error(f"Server '{name}' not found in config.")
+    if servers:
+        _info(f"{available_label}: {', '.join(servers)}")
+    return None
 
 
 def _remove_mcp_server(name: str) -> bool:
@@ -120,16 +141,9 @@ def _remove_mcp_server(name: str) -> bool:
 def _replace_mcp_servers(servers: Dict[str, dict]) -> Tuple[bool, List[str]]:
     """Replace the WHOLE ``mcp_servers`` map in config.yaml.
 
-    Unlike ``_save_mcp_server`` (per-key upsert), this sets the entire map so
-    the GUI's mcp.json editor can delete servers, drop an ``enabled: false``
-    flag (re-enable), or remove nested fields and have those *removals* land on
-    disk.  A plain ``/api/config`` deep-merge can only add/override keys, never
-    delete them — which is why edits appeared to succeed but the old entry
-    survived (see MCP tab persistence bug).
-
-    Every entry is validated up front; on any suspicious command/args the whole
-    save is rejected (returns ``(False, issues)``) so a bad paste can't be
-    partially applied.  An empty map removes the key entirely.
+    Every entry is validated up front; on any suspicious command/args the whole save is rejected
+    (returns ``(False, issues)``) so a bad paste can't be partially applied. An empty map removes
+    the key entirely.
     """
     issues: List[str] = []
     for name, cfg in servers.items():
@@ -159,9 +173,8 @@ def _env_key_for_server(name: str) -> str:
 def _strip_bearer_prefix(token: str) -> str:
     """Strip a leading ``Bearer `` from a pasted token.
 
-    The header template stores ``Authorization: Bearer ${MCP_X_API_KEY}``, so
-    if a user pastes a token that already includes the ``Bearer `` prefix the
-    server receives ``Bearer Bearer <jwt>`` → 401. Normalize on save. (#37792)
+    The header template already stores ``Authorization: Bearer ${MCP_X_API_KEY}``; a token pasted
+    with its own prefix would send ``Bearer Bearer <jwt>`` and get a 401, so normalize on save.
     """
     if not isinstance(token, str):
         return token
@@ -174,9 +187,9 @@ def _strip_bearer_prefix(token: str) -> str:
 def _bearer_auth_headers(name: str) -> Dict[str, str]:
     """Build the persisted Authorization header for a named MCP server.
 
-    The secret itself lives in the active profile's ``.env`` file. Keeping
-    this template construction beside ``_env_key_for_server`` ensures the CLI
-    and Dashboard produce byte-equivalent MCP configuration.
+    The secret itself lives in the active profile's ``.env`` file. Keeping this template
+    construction beside ``_env_key_for_server`` ensures the CLI and Dashboard produce byte-
+    equivalent MCP configuration.
     """
     env_key = _env_key_for_server(name)
     return {"Authorization": f"Bearer ${{{env_key}}}"}
@@ -185,9 +198,8 @@ def _bearer_auth_headers(name: str) -> Dict[str, str]:
 def _save_bearer_auth_token(name: str, token: str) -> Dict[str, str]:
     """Persist a Bearer token in the active profile and return safe headers.
 
-    ``token`` is a one-time provisioning value. It is normalized and written
-    only to ``.env``; callers persist the returned interpolation template in
-    ``config.yaml``.
+    ``token`` is a one-time provisioning value. It is normalized and written only to ``.env``;
+    callers persist the returned interpolation template in ``config.yaml``.
     """
     normalized = _strip_bearer_prefix(token)
     if not normalized or normalized.lower() == "bearer":
@@ -254,13 +266,10 @@ def _apply_mcp_preset(
 def _resolve_mcp_server_config(config: dict) -> dict:
     """Resolve ``${ENV}`` placeholders in a server config before connecting.
 
-    Mirrors ``_load_mcp_config()`` in ``tools/mcp_tool.py``: load
-    ``~/.hermes/.env`` into ``os.environ`` and recursively interpolate any
-    ``${VAR}`` placeholders. The CLI builds header templates like
-    ``Authorization: Bearer ${MCP_X_API_KEY}`` but the probe path never
-    resolved them, so the discovery probe sent the literal placeholder and
-    auth-requiring servers (e.g. n8n) returned 401 — while runtime tool
-    loading worked because it interpolates. (#37792)
+    Mirrors ``_load_mcp_config()`` in ``tools/mcp_tool.py``: load ``~/.hermes/.env`` and interpolate
+    ``${VAR}`` recursively. Without this the discovery probe sent the literal placeholder in header
+    templates and auth-requiring servers returned 401 while runtime loading (which interpolates)
+    worked.
     """
     from tools.mcp_tool import _interpolate_env_vars
 
@@ -280,12 +289,9 @@ def _probe_single_server(
 ) -> List[Tuple[str, str]]:
     """Temporarily connect to one MCP server, list its tools, disconnect.
 
-    Returns list of ``(tool_name, description)`` tuples.
-    Raises on connection failure.
-
-    ``details``: optional dict the probe fills with extra capability counts
-    (``prompts``, ``resources``) — an out-param so the return shape stays
-    stable for existing CLI callers.
+    Returns ``(tool_name, description)`` tuples; raises on connection failure. ``details`` is an
+    out-param filled with extra capability counts (``prompts``, ``resources``) so the return shape
+    stays stable for existing callers.
     """
     issues = validate_mcp_server_entry(name, config)
     if issues:
@@ -404,9 +410,9 @@ def _probe_single_server(
 def _oauth_tokens_present(name: str) -> bool:
     """Return True if an OAuth token file exists on disk for ``name``.
 
-    Used after ``hermes mcp login`` to distinguish a genuine authentication
-    from a probe that succeeded only because the server allowed
-    initialize/tools-list without auth (so no token was ever acquired).
+    Used after ``hermes mcp login`` to distinguish a genuine authentication from a probe that
+    succeeded only because the server allowed initialize/tools-list without auth (so no token was
+    ever acquired).
     """
     try:
         from tools.mcp_oauth import HermesTokenStorage
@@ -420,10 +426,8 @@ def _oauth_tokens_present(name: str) -> bool:
 def _unwrap_exception_group(exc: BaseException) -> Exception:
     """Extract the root-cause exception from anyio TaskGroup wrappers.
 
-    The MCP SDK uses anyio task groups, which wrap errors in
-    ``BaseExceptionGroup`` / ``ExceptionGroup``.  This makes error
-    messages opaque ("unhandled errors in a TaskGroup").  We unwrap
-    to surface the real cause (e.g. "401 Unauthorized").
+    The MCP SDK's anyio task groups wrap errors in ``ExceptionGroup``, making messages opaque
+    ("unhandled errors in a TaskGroup"); unwrap to surface the real cause, e.g. "401 Unauthorized".
     """
     while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
         exc = exc.exceptions[0]
@@ -498,11 +502,7 @@ def cmd_mcp_add(args):
     if raw_connect_timeout is not None:
         server_config["connect_timeout"] = raw_connect_timeout
 
-    issues = validate_mcp_server_entry(name, server_config)
-    if issues:
-        for issue in issues:
-            _warning(issue)
-        _warning(f"Server '{name}' was NOT saved due to suspicious configuration.")
+    if not _validate_or_warn(name, server_config):
         return
 
     # ── Authentication ────────────────────────────────────────────────
@@ -527,10 +527,8 @@ def cmd_mcp_add(args):
 
         if not oauth_ok:
             _info("This server may not support OAuth.")
-            if _confirm("Continue without authentication?", default=True):
-                # Don't store auth: oauth — server doesn't support it
-                pass
-            else:
+            # Don't store auth: oauth — server doesn't support it
+            if not _confirm("Continue without authentication?", default=True):
                 _info("Cancelled.")
                 return
 
@@ -542,20 +540,14 @@ def cmd_mcp_add(args):
         if needs_auth:
             if auth_type == "header" or not auth_type:
                 env_key = _env_key_for_server(name)
-                existing_key = get_env_value(env_key)
-                if existing_key:
+                if get_env_value(env_key):
                     _success(f"{env_key}: already configured")
+                    server_config["headers"] = _bearer_auth_headers(name)  # env-var interpolation
                 else:
                     api_key = _prompt("API key / Bearer token", password=True)
                     if api_key:
-                        server_config["headers"] = _save_bearer_auth_token(
-                            name, api_key
-                        )
+                        server_config["headers"] = _save_bearer_auth_token(name, api_key)
                         _success(f"Saved to {display_hermes_home()}/.env as {env_key}")
-
-                # Set header with env var interpolation
-                if existing_key:
-                    server_config["headers"] = _bearer_auth_headers(name)
 
     # ── Discovery: connect and list tools ─────────────────────────────
 
@@ -623,13 +615,11 @@ def cmd_mcp_add(args):
 
         chosen_names = [tools[i][0] for i in sorted(chosen)]
         server_config.setdefault("tools", {})["include"] = chosen_names
-
         tool_count = len(chosen_names)
-        total = len(tools)
     else:
         # Enable all (no filter needed — default behaviour)
         tool_count = len(tools)
-        total = len(tools)
+    total = len(tools)
 
     # ── Save ──────────────────────────────────────────────────────────
 
@@ -645,13 +635,7 @@ def cmd_mcp_add(args):
 def cmd_mcp_remove(args):
     """Remove an MCP server from config."""
     name = args.name
-    existing = _get_mcp_servers()
-
-    if name not in existing:
-        _error(f"Server '{name}' not found in config.")
-        servers = list(existing.keys())
-        if servers:
-            _info(f"Available servers: {', '.join(servers)}")
+    if _lookup_server(name, _get_mcp_servers()) is None:
         return
 
     if not _confirm(f"Remove server '{name}'?", default=True):
@@ -699,34 +683,23 @@ def cmd_mcp_list(args=None):
     for name, cfg in servers.items():
         # Transport info
         if "url" in cfg:
-            url = cfg["url"]
-            # Truncate long URLs
-            if len(url) > 28:
-                url = url[:25] + "..."
-            transport = url
+            transport = cfg["url"]
         elif "command" in cfg:
-            cmd = cfg["command"]
+            transport = cfg["command"]
             cmd_args = cfg.get("args", [])
             if isinstance(cmd_args, list) and cmd_args:
-                transport = f"{cmd} {' '.join(str(a) for a in cmd_args[:2])}"
-            else:
-                transport = cmd
-            if len(transport) > 28:
-                transport = transport[:25] + "..."
+                transport = f"{transport} {' '.join(str(a) for a in cmd_args[:2])}"
         else:
             transport = "?"
+        if len(transport) > 28:
+            transport = transport[:25] + "..."
 
         # Tool count
-        tools_cfg = cfg.get("tools", {})
-        if isinstance(tools_cfg, dict):
-            include = tools_cfg.get("include")
-            exclude = tools_cfg.get("exclude")
-            if include and isinstance(include, list):
-                tools_str = f"{len(include)} selected"
-            elif exclude and isinstance(exclude, list):
-                tools_str = f"-{len(exclude)} excluded"
-            else:
-                tools_str = "all"
+        include, exclude = _tool_filters(cfg)
+        if include:
+            tools_str = f"{len(include)} selected"
+        elif exclude:
+            tools_str = f"-{len(exclude)} excluded"
         else:
             tools_str = "all"
 
@@ -746,16 +719,9 @@ def cmd_mcp_list(args=None):
 def cmd_mcp_test(args):
     """Test connection to an MCP server."""
     name = args.name
-    servers = _get_mcp_servers()
-
-    if name not in servers:
-        _error(f"Server '{name}' not found in config.")
-        available = list(servers.keys())
-        if available:
-            _info(f"Available: {', '.join(available)}")
+    cfg = _lookup_server(name, _get_mcp_servers(), "Available")
+    if cfg is None:
         return
-
-    cfg = servers[name]
     print()
     print(color(f"  Testing '{name}'...", Colors.CYAN))
 
@@ -810,10 +776,9 @@ def cmd_mcp_test(args):
 def _reauth_oauth_server(name: str, server_config: dict) -> bool:
     """Force a fresh OAuth flow for one server. Returns True on success.
 
-    Wipes cached OAuth state (disk + in-process MCPOAuthManager cache),
-    re-probes to trigger the browser flow, and verifies a token actually
-    landed before reporting success. Shared by ``hermes mcp login`` and
-    ``hermes mcp reauth`` so both behave identically for a single server.
+    Wipes cached OAuth state (disk + in-process MCPOAuthManager cache), re-probes to trigger the
+    browser flow, and verifies a token actually landed before reporting success. Shared by ``hermes
+    mcp login`` and ``hermes mcp reauth`` so both behave identically for a single server.
     """
     url = server_config.get("url")
     if not url:
@@ -910,40 +875,20 @@ def _reauth_oauth_server(name: str, server_config: dict) -> bool:
 def cmd_mcp_login(args):
     """Force re-authentication for an OAuth-based MCP server.
 
-    Deletes cached tokens (both on disk and in the running process's
-    MCPOAuthManager cache) and triggers a fresh OAuth flow via the
-    existing probe path.
-
-    Use this when:
-      - Tokens are stuck in a bad state (server revoked, refresh token
-        consumed by an external process, etc.)
-      - You want to re-authenticate to change scopes or account
-      - A tool call returned ``needs_reauth: true``
+    Deletes cached tokens (both on disk and in the running process's MCPOAuthManager cache) and
+    triggers a fresh OAuth flow via the existing probe path.
     """
     name = args.name
-    servers = _get_mcp_servers()
-
-    if name not in servers:
-        _error(f"Server '{name}' not found in config.")
-        if servers:
-            _info(f"Available servers: {', '.join(servers)}")
-        return
-
-    _reauth_oauth_server(name, servers[name])
+    cfg = _lookup_server(name, _get_mcp_servers())
+    if cfg is not None:
+        _reauth_oauth_server(name, cfg)
 
 
 def cmd_mcp_reauth(args):
     """Re-authenticate one OAuth MCP server, or all of them sequentially.
 
-    ``hermes mcp reauth <name>`` re-auths a single server (same as ``login``).
-    ``hermes mcp reauth --all`` discovers every ``auth: oauth`` server in
-    config and re-auths them ONE AT A TIME.
-
-    Serial-by-design: a human can only complete one browser OAuth flow at a
-    time, so re-authing all servers concurrently would open N tabs at once
-    and N-1 would time out. This is the self-service fix for the recurring
-    stale-client ritual in GH#36767 (and avoids the startup popup storm when
-    several servers go stale at once).
+    Serial-by-design: a human can only complete one browser OAuth flow at a time, so re-authing all
+    servers concurrently would open N tabs at once and N-1 would time out.
     """
     servers = _get_mcp_servers()
     do_all = getattr(args, "all", False)
@@ -973,13 +918,9 @@ def cmd_mcp_reauth(args):
         _error("Specify a server name, or use --all to re-auth every OAuth server.")
         _info("Usage: hermes mcp reauth <name>   |   hermes mcp reauth --all")
         return
-    if name not in servers:
-        _error(f"Server '{name}' not found in config.")
-        if servers:
-            _info(f"Available servers: {', '.join(servers)}")
-        return
-
-    _reauth_oauth_server(name, servers[name])
+    cfg = _lookup_server(name, servers)
+    if cfg is not None:
+        _reauth_oauth_server(name, cfg)
 
 
 # ─── hermes mcp configure ────────────────────────────────────────────────────
@@ -991,16 +932,9 @@ def cmd_mcp_configure(args):
         print("Error: 'hermes mcp configure' requires an interactive terminal.", file=_sys.stderr)
         _sys.exit(1)
     name = args.name
-    servers = _get_mcp_servers()
-
-    if name not in servers:
-        _error(f"Server '{name}' not found in config.")
-        available = list(servers.keys())
-        if available:
-            _info(f"Available: {', '.join(available)}")
+    cfg = _lookup_server(name, _get_mcp_servers(), "Available")
+    if cfg is None:
         return
-
-    cfg = servers[name]
 
     # Discover all available tools
     print()
@@ -1017,13 +951,7 @@ def cmd_mcp_configure(args):
         return
 
     # Determine which are currently enabled
-    tools_cfg = cfg.get("tools", {})
-    if isinstance(tools_cfg, dict):
-        include = tools_cfg.get("include")
-        exclude = tools_cfg.get("exclude")
-    else:
-        include = None
-        exclude = None
+    include, exclude = _tool_filters(cfg)
 
     tool_names = [t[0] for t in all_tools]
 
@@ -1035,13 +963,13 @@ def cmd_mcp_configure(args):
         def matches_name_filter(tool_name, patterns):
             return tool_name in patterns
 
-    if include and isinstance(include, list):
+    if include:
         include_set = {str(p) for p in include}
         pre_selected = {
             i for i, tn in enumerate(tool_names)
             if matches_name_filter(tn, include_set)
         }
-    elif exclude and isinstance(exclude, list):
+    elif exclude:
         exclude_set = {str(p) for p in exclude}
         pre_selected = {
             i for i, tn in enumerate(tool_names)
@@ -1074,7 +1002,7 @@ def cmd_mcp_configure(args):
     config = load_config()
     server_entry = cfg_get(config, "mcp_servers", name, default={})
 
-    exclude_mode = bool(exclude) and isinstance(exclude, list) and not include
+    exclude_mode = bool(exclude) and not include
 
     if len(chosen) == total and not exclude_mode:
         # All selected → remove include/exclude (register all)

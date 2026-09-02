@@ -1,12 +1,4 @@
-"""``hermes journey`` — what Hermes has learned, on a timeline.
-
-A terminal-native rendition of the desktop Star Map / Memory Graph: a horizontal
-timeline bar chart of learned skills and memories over time (oldest at top,
-newest at bottom) plus the playable constellation scrubber. Graph assembly,
-layout, and the (ported-from-desktop) palette all live in
-``agent.learning_graph`` / ``agent.learning_graph_render`` so the CLI, the TUI
-``/journey`` overlay, and the desktop panel draw the same data.
-"""
+"""``hermes journey`` — what Hermes has learned, on a timeline."""
 
 from __future__ import annotations
 
@@ -154,9 +146,12 @@ def _frame_renderable(payload, *, cols, rows, reveal, color):
 
     parts: list[Any] = []
 
+    def st(style: Optional[str]) -> Optional[str]:
+        return style if color else None
+
     title = Text()
-    title.append("✦ Journey ", style=f"bold {_TITLE_COLOR}" if color else None)
-    title.append("· learned skills & memories over time", style="grey62" if color else None)
+    title.append("✦ Journey ", style=st(f"bold {_TITLE_COLOR}"))
+    title.append("· learned skills & memories over time", style=st("grey62"))
     parts.append(title)
 
     legend_line = Text("  ")
@@ -164,7 +159,7 @@ def _frame_renderable(payload, *, cols, rows, reveal, color):
         if i:
             legend_line.append("   ")
         legend_line.append(item["glyph"] + " ", style=_resolve(item["style"], 1.0) if color else None)
-        legend_line.append(item["label"], style="grey62" if color else None)
+        legend_line.append(item["label"], style=st("grey62"))
     parts.append(legend_line)
 
     if categories:
@@ -173,7 +168,7 @@ def _frame_renderable(payload, *, cols, rows, reveal, color):
             if i:
                 cat_line.append("  ")
             cat_line.append(item["glyph"] + " ", style=_fade(item.get("color"), 1.0) if color else None)
-            cat_line.append(item["label"], style="grey54" if color else None)
+            cat_line.append(item["label"], style=st("grey54"))
         parts.append(cat_line)
 
     parts.append(Text(""))
@@ -185,28 +180,27 @@ def _frame_renderable(payload, *, cols, rows, reveal, color):
 
     # Date axis under the field (oldest → now), with the playhead date centered.
     axis_line = Text("  ")
-    axis_line.append(axis["start"], style="grey54" if color else None)
+    axis_line.append(axis["start"], style=st("grey54"))
     gap = max(1, inner - len(axis["start"]) - len(axis["end"]))
     axis_line.append(" " * gap)
-    axis_line.append(axis["end"], style="grey54" if color else None)
+    axis_line.append(axis["end"], style=st("grey54"))
     parts.append(axis_line)
 
     pct = int(round(reveal * 100))
     foot = Text("  ")
-    foot.append("◷ ", style="grey54" if color else None)
-    foot.append(frame["date"] or "—", style=_TITLE_COLOR if color else None)
-    foot.append(f"   {frame['visible']}/{count} revealed · {pct}%", style="grey54" if color else None)
+    foot.append("◷ ", style=st("grey54"))
+    foot.append(frame["date"] or "—", style=st(_TITLE_COLOR))
+    foot.append(f"   {frame['visible']}/{count} revealed · {pct}%", style=st("grey54"))
     parts.append(foot)
 
     labels = frame.get("labels", [])
     if labels:
         parts.append(Text(""))
-        heading = Text("  charted signals", style="grey62" if color else None)
-        parts.append(heading)
+        parts.append(Text("  charted signals", style=st("grey62")))
 
-        def label_row(item) -> Text:
+        for item in labels[:6]:
             row = Text("  ")
-            row.append(f"{item['key']} ", style="grey70" if color else None)
+            row.append(f"{item['key']} ", style=st("grey70"))
             signal_style = (
                 _resolve_charted_signal(item["style"], float(item.get("alpha", 1.0)))
                 if color
@@ -215,24 +209,20 @@ def _frame_renderable(payload, *, cols, rows, reveal, color):
             row.append(f"{item['glyph']} ", style=signal_style)
             row.append(str(item["label"]), style=signal_style)
             meta = str(item["meta"])
-            row.append(f"  {meta if len(meta) <= 32 else meta[:29] + '…'}", style="grey54" if color else None)
-            return row
-
-        for item in labels[:6]:
-            row = label_row(item)
+            row.append(f"  {meta if len(meta) <= 32 else meta[:29] + '…'}", style=st("grey54"))
             parts.append(row)
 
     for line_text in summary:
-        parts.append(Text("  " + line_text, style="grey62" if color else None))
+        parts.append(Text("  " + line_text, style=st("grey62")))
 
     return Group(*parts)
 
 
 def _console(*, color: bool, width: Optional[int] = None, force: bool = False):
-    """A Rich console. ``force`` emits truecolor ANSI even into a captured
-    stream — the interactive CLI grabs that output and re-renders it through
-    prompt_toolkit (raw escapes to a real terminal would otherwise be
-    swallowed). Mirrors the ``ChatConsole`` idiom in ``cli.py``."""
+    """A Rich console. ``force`` emits truecolor ANSI even into a captured stream — the interactive CLI
+    grabs that output and re-renders it through prompt_toolkit (raw escapes to a real terminal would
+    otherwise be swallowed). Mirrors the ``ChatConsole`` idiom in ``cli.py``.
+    """
     from rich.console import Console
 
     extra = {"force_terminal": True, "color_system": "truecolor"} if force else {}
@@ -308,12 +298,22 @@ def _cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_delete(args: argparse.Namespace) -> int:
-    from agent.learning_mutations import delete_node, node_detail
+def _lookup_node(node_id: str) -> Optional[dict]:
+    """Resolve a node id via ``node_detail``; print the failure and return None when missing."""
+    from agent.learning_mutations import node_detail
 
-    detail = node_detail(args.node)
+    detail = node_detail(node_id)
     if not detail.get("ok"):
         print(f"  {detail.get('message', 'not found')}")
+        return None
+    return detail
+
+
+def _cmd_delete(args: argparse.Namespace) -> int:
+    from agent.learning_mutations import delete_node
+
+    detail = _lookup_node(args.node)
+    if detail is None:
         return 1
     if not getattr(args, "yes", False):
         try:
@@ -329,11 +329,10 @@ def _cmd_delete(args: argparse.Namespace) -> int:
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
-    from agent.learning_mutations import edit_node, node_detail
+    from agent.learning_mutations import edit_node
 
-    detail = node_detail(args.node)
-    if not detail.get("ok"):
-        print(f"  {detail.get('message', 'not found')}")
+    detail = _lookup_node(args.node)
+    if detail is None:
         return 1
     suffix = ".md" if detail["kind"] == "skill" else ".txt"
     edited = _open_in_editor(detail["content"], suffix=suffix)
@@ -401,10 +400,6 @@ def register_cli(parent: argparse.ArgumentParser) -> None:
     p_edit = sub.add_parser("edit", help="Edit a learned skill or memory by node id in $EDITOR.")
     p_edit.add_argument("node", help="Node id (skill name or memory:<source>:<index>; see `journey list`).")
     p_edit.set_defaults(func=_cmd_edit)
-
-
-def cmd_journey(args: argparse.Namespace) -> int:
-    return _cmd_show(args)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,4 @@
-"""
-CLI commands for the DM pairing system.
-
-Usage:
-    hermes pairing list              # Show all pending + approved users
-    hermes pairing approve <platform> <request-id|code>  # Approve a pairing request
-    hermes pairing revoke <platform> <user_id> # Revoke user access
-    hermes pairing clear-pending     # Clear all expired/pending codes
-"""
+"""CLI commands for the DM pairing system."""
 
 def pairing_command(args):
     """Handle hermes pairing subcommands."""

@@ -1,7 +1,7 @@
 """CLI handlers for ``hermes migrate ...``.
 
-Currently exposes only ``hermes migrate xai`` — diagnoses and (with --apply)
-rewrites references to xAI models retired on May 15, 2026.
+Currently exposes only ``hermes migrate xai`` — diagnoses and (with --apply) rewrites references to
+xAI models retired on May 15, 2026.
 """
 from __future__ import annotations
 

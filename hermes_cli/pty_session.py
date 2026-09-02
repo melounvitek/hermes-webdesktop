@@ -1,16 +1,14 @@
 """Keep-alive PTY sessions for dashboard terminals.
 
-A PTY process outlives the WebSocket that created it: a single drain task
-always reads the PTY into a bounded RingBuffer and forwards to the attached
-socket when present. Reconnecting with the same opaque token replays the
-buffer and resumes live. See
-docs/superpowers/specs/2026-06-20-pty-keepalive-reattach-design.md.
+A PTY process outlives the WebSocket that created it: a single drain task always reads the PTY into
+a bounded RingBuffer and forwards to the attached socket when present. Reconnecting with the same
+opaque token replays the buffer and resumes live.
 """
 from __future__ import annotations
 
 import asyncio
 import time
-from typing import Optional
+from typing import Callable, Dict, Optional, Tuple
 
 WS_CLOSE_PROCESS_EXITED = 4410
 WS_CLOSE_SUPERSEDED = 4409
@@ -40,6 +38,15 @@ class RingBuffer:
         return self._truncated
 
 
+async def _close_ws(ws, code: int) -> None:
+    if ws is None:
+        return
+    try:
+        await ws.close(code=code)
+    except Exception:
+        pass
+
+
 class PtySession:
     def __init__(self, key: str, bridge, *, buffer_cap: int, read_timeout: float) -> None:
         self.key = key
@@ -61,12 +68,7 @@ class PtySession:
             chunk = await loop.run_in_executor(None, self.bridge.read, self._read_timeout)
             if chunk is None:                       # EOF — the agent process exited
                 self.alive = False
-                ws = self._ws
-                if ws is not None:
-                    try:
-                        await ws.close(code=WS_CLOSE_PROCESS_EXITED)
-                    except Exception:
-                        pass
+                await _close_ws(self._ws, WS_CLOSE_PROCESS_EXITED)
                 return
             if not chunk:                            # idle tick
                 await asyncio.sleep(0)
@@ -82,17 +84,12 @@ class PtySession:
     async def attach(self, ws, *, force_redraw: bool = False) -> None:
         """Attach a browser terminal and replay buffered PTY output.
 
-        The TUI uses an alternate screen and differential rendering, so a
-        bounded ANSI tail is not guaranteed to be a self-contained frame.
-        Reattaching a fresh xterm therefore asks the live TUI to emit one
-        complete redraw after the replay.
+        The TUI uses an alternate screen and differential rendering, so a bounded ANSI tail is not
+        guaranteed to be a self-contained frame. Reattaching a fresh xterm therefore asks the live
+        TUI to emit one complete redraw after the replay.
         """
-        old = self._ws
-        if old is not None and old is not ws:
-            try:
-                await old.close(code=WS_CLOSE_SUPERSEDED)
-            except Exception:
-                pass
+        if self._ws is not ws:
+            await _close_ws(self._ws, WS_CLOSE_SUPERSEDED)
         self._ws = ws
         self.attached = True
         self.last_detached_at = None
@@ -127,9 +124,6 @@ class PtySession:
             await asyncio.to_thread(self.bridge.close)
         except Exception:
             pass
-
-
-from typing import Callable, Dict, Tuple
 
 
 class RegistryFull(Exception):

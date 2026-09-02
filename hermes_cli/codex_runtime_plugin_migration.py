@@ -1,37 +1,5 @@
-"""Migrate Hermes' MCP server config and Codex's installed curated plugins
-to the format Codex expects in ~/.codex/config.toml.
-
-When the user enables the codex_app_server runtime, the codex subprocess
-runs its own MCP client and its own plugin runtime (Linear, Atlassian,
-Asana, plus per-account ChatGPT apps via app/list). For both of those to
-be useful, the user's choices need to be visible to codex too. This
-module:
-
-  1. Reads Hermes' YAML and writes equivalent [mcp_servers.<name>]
-     entries to ~/.codex/config.toml.
-  2. Queries codex's `plugin/list` for the openai-curated marketplace
-     and writes [plugins."<name>@<marketplace>"] entries for any plugin
-     the user has installed=true on their codex CLI. (This is what
-     OpenClaw calls "migrate native codex plugins" — the YouTube-video-
-     worthy bit Pash highlighted: Canva, GitHub, Calendar, Gmail
-     pre-configured.)
-  3. Writes a [permissions] default profile so users on this runtime
-     don't get an approval prompt on every write attempt.
-
-What translates (MCP servers):
-  Hermes mcp_servers.<n>.command/args/env  → codex stdio transport
-  Hermes mcp_servers.<n>.url/headers       → codex streamable_http transport
-  Hermes mcp_servers.<n>.timeout           → codex tool_timeout_sec
-  Hermes mcp_servers.<n>.connect_timeout   → codex startup_timeout_sec
-
-What does NOT translate (warned + skipped):
-  Hermes-specific keys (sampling, etc.) — codex's MCP client has no
-  equivalent. Listed in the per-server skipped[] field of the report.
-
-What's NOT migrated (intentional):
-  AGENTS.md — codex respects this file natively in its cwd. Hermes' own
-  AGENTS.md (project-level) is already in the worktree, so codex picks
-  it up without translation. No code needed.
+"""Migrate Hermes' MCP server config and Codex's installed curated plugins to the format Codex expects
+in ~/.codex/config.toml.
 """
 
 from __future__ import annotations
@@ -127,11 +95,9 @@ _KEYS_DROPPED_WITH_WARNING = {
 def _translate_one_server(
     name: str, hermes_cfg: dict
 ) -> tuple[Optional[dict], list[str]]:
-    """Translate one Hermes MCP server config to the codex inline-table dict
-    representation. Returns (codex_entry, skipped_keys).
-
-    codex_entry is a dict ready for TOML serialization, or None when the
-    server can't be translated (e.g. neither command nor url present)."""
+    """Translate one Hermes MCP server config to the codex inline-table dict representation. Returns
+    (codex_entry, skipped_keys).
+    """
     if not isinstance(hermes_cfg, dict):
         return None, []
 
@@ -199,8 +165,9 @@ def _translate_one_server(
 def _format_toml_value(value: Any) -> str:
     """Minimal TOML value formatter for the value types we emit.
 
-    We only emit strings, numbers, booleans, and tables of those — no nested
-    arrays of tables. This covers everything codex's MCP schema accepts."""
+    We only emit strings, numbers, booleans, and tables of those — no nested arrays of tables. This
+    covers everything codex's MCP schema accepts.
+    """
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
@@ -248,18 +215,11 @@ def render_codex_toml_section(
     plugins: Optional[list[dict]] = None,
     default_permission_profile: Optional[str] = None,
 ) -> str:
-    """Render the managed [mcp_servers.<n>] / [plugins.<id>] / [permissions]
-    block for ~/.codex/config.toml.
+    """Render the managed [mcp_servers.<n>] / [plugins.<id>] / [permissions] block for
+    ~/.codex/config.toml.
 
-    Args:
-        servers: dict of MCP server name → translated codex inline-table
-        plugins: optional list of {name, marketplace, enabled} for native
-            Codex plugins to enable. (E.g. the Linear / Atlassian / Asana
-            curated plugins, or per-account ChatGPT apps.)
-        default_permission_profile: when set, write `[permissions] default`
-            so the user doesn't get an approval prompt on every write
-            attempt. Common values: "workspace-write", "read-only",
-            "full-access".
+    ``default_permission_profile`` (e.g. "workspace-write", "read-only", "full-access") writes
+    ``[permissions] default`` so the user is not prompted on every write attempt.
     """
     out = [MIGRATION_MARKER]
     if not servers and not plugins and not default_permission_profile:
@@ -307,11 +267,9 @@ def render_codex_toml_section(
 def _insert_managed_block_at_top_level(user_text: str, managed_block: str) -> str:
     """Insert Hermes' managed Codex TOML block while keeping root keys root-scoped.
 
-    TOML has no syntax to return to the document root after a table header.
-    Therefore appending a root key like `default_permissions = ...` after a
-    user table such as `[features]` actually creates `features.default_permissions`,
-    which Codex rejects. Insert the managed block before the first table header
-    so its root keys remain top-level, while preserving user content verbatim.
+    TOML has no syntax to return to the document root after a table header. Therefore appending a
+    root key like `default_permissions = ...` after a user table such as `[features]` actually
+    creates `features.default_permissions`, which Codex rejects.
     """
     if not user_text.strip():
         return managed_block
@@ -336,28 +294,16 @@ def _insert_managed_block_at_top_level(user_text: str, managed_block: str) -> st
 
 
 def _strip_unmanaged_plugin_tables(toml_text: str) -> str:
-    """Remove ``[plugins."<name>@<marketplace>"]`` tables that live OUTSIDE the
-    managed block.
+    """Remove ``[plugins."<name>@<marketplace>"]`` tables that live OUTSIDE the managed block.
 
-    Codex itself writes these tables when the user runs ``codex plugins enable``
-    directly (i.e. before Hermes' migrate has ever touched the file). When we
-    later run migrate, ``_query_codex_plugins()`` reports the same plugins via
-    the live ``plugin/list`` RPC and we re-emit them inside the managed block.
-    The result without this strip is duplicate ``[plugins."X@Y"]`` table
-    headers — codex's strict TOML parser then refuses to load the file.
+    Codex itself writes these tables when the user runs ``codex plugins enable`` directly (i.e.
+    before Hermes' migrate has ever touched the file). When we later run migrate,
+    ``_query_codex_plugins()`` reports the same plugins via the live ``plugin/list`` RPC and we re-
+    emit them inside the managed block.
 
-    We own the ``[plugins.*]`` namespace once migrate has run, so dropping any
-    pre-existing ``[plugins.*]`` tables is safe: ``plugin/list`` is the source
-    of truth for what's actually installed. The caller is expected to only
-    invoke this strip when ``plugin/list`` succeeded — otherwise we'd lose
-    plugins the user installed via ``codex`` without a way to re-emit them.
-
-    Behavior:
-      * Lines beginning with ``[plugins.`` start a swallow region that ends at
-        the next non-``[plugins.`` table header or end-of-file.
-      * Content inside the managed block is untouched (callers should run
-        ``_strip_existing_managed_block`` first so the managed block has
-        already been removed when this runs).
+    We own the ``[plugins.*]`` namespace once migrate has run, so dropping any pre-existing
+    ``[plugins.*]`` tables is safe: ``plugin/list`` is the source of truth for what's actually
+    installed.
     """
     lines = toml_text.splitlines(keepends=True)
     out: list[str] = []
@@ -384,11 +330,9 @@ def _strip_unmanaged_plugin_tables(toml_text: str) -> str:
 def _looks_like_table_header(stripped_line: str) -> bool:
     """Return True if ``stripped_line`` is a TOML table header.
 
-    A header has the shape ``[name]`` or ``[[name]]`` (array-of-tables),
-    optionally followed by a comment. The closing ``]`` (or ``]]``) must
-    appear on the same line, and no key-assignment ``=`` can precede it.
-    This distinguishes real headers from multi-line array continuation
-    lines that also start with ``[`` after ``lstrip()``.
+    A header has the shape ``[name]`` or ``[[name]]`` (array-of-tables), optionally followed by a
+    comment. The closing ``]`` (or ``]]``) must appear on the same line, and no key-assignment ``=``
+    can precede it.
     """
     if not stripped_line.startswith("["):
         return False
@@ -404,16 +348,11 @@ def _looks_like_table_header(stripped_line: str) -> bool:
 def _strip_existing_managed_block(toml_text: str) -> str:
     """Remove any prior managed section so re-runs idempotently replace it.
 
-    The managed section is everything between MIGRATION_MARKER (start) and
-    MIGRATION_END_MARKER (end), inclusive of both markers. User-edited
-    sections above or below are preserved verbatim.
-
-    Backward compatibility: if the start marker is found but no end marker
-    follows, we fall back to the heuristic that swallows lines until we
-    hit a section that's not [mcp_servers.*]/[plugins.*]/[permissions]/
-    a `default_permissions =` key. This matches what older versions of
-    this code wrote so re-runs don't break configs from prior Hermes
-    versions."""
+    The managed section spans MIGRATION_MARKER through MIGRATION_END_MARKER inclusive; user text
+    outside it is preserved verbatim. If the start marker exists without an end marker (older
+    writers), fall back to swallowing lines until a section that is not [mcp_servers.*]/
+    [plugins.*]/[permissions]/``default_permissions =``, so prior-version configs still migrate.
+    """
     lines = toml_text.splitlines(keepends=True)
     out: list[str] = []
     in_managed = False
@@ -453,14 +392,9 @@ def _query_codex_plugins(
 ) -> tuple[list[dict], Optional[str]]:
     """Query codex's `plugin/list` for installed curated plugins.
 
-    Spawns `codex app-server` briefly, sends initialize + plugin/list,
-    extracts plugins where installed=true. Returns (plugins, error).
-    Plugins is a list of {name, marketplace, enabled} dicts ready for
-    render_codex_toml_section().
-
-    On any failure (codex not installed, RPC error, timeout) returns
-    ([], error_message). Migration treats this as non-fatal — MCP
-    servers and permissions still write through.
+    Spawns ``codex app-server`` briefly, sends initialize + plugin/list and keeps installed=true.
+    Returns ``(plugins, error)``; any failure (not installed, RPC error, timeout) yields ``([],
+    error)`` and is non-fatal — MCP servers and permissions still write through.
     """
     try:
         from agent.transports.codex_app_server import CodexAppServerClient
@@ -531,16 +465,10 @@ def _query_codex_plugins(
 def _looks_like_test_tempdir(path: str) -> bool:
     """Heuristic: does ``path`` look like a pytest/transient tempdir?
 
-    pytest tempdirs live under ``pytest-of-<user>/pytest-<n>/`` (created via
-    ``tmp_path`` / ``tmp_path_factory``) and are reaped between sessions.
-    macOS routes ``/tmp`` through ``/private/var/folders/<…>/T`` which is
-    what pytest's tempdir factory uses by default. If a HERMES_HOME pointing
-    at one of those paths is burned into ``~/.codex/config.toml``, every
-    codex-routed hermes-tools call fails silently once the directory is GC'd.
-
-    We err on the side of refusing — losing a (very unlikely) real
-    ``~/.hermes`` symlink that happens to live under ``/private/var/folders``
-    is much less harmful than silently bricking codex's tool surface.
+    pytest tempdirs (``pytest-of-<user>/pytest-<n>/``, on macOS under ``/private/var/folders/…/T``)
+    are reaped between sessions; a HERMES_HOME pointing there burned into ``~/.codex/config.toml``
+    makes every codex-routed call fail silently once GC'd. Err on refusing: a false positive is far
+    less harmful than silently bricking codex's tool surface.
     """
     if not path:
         return False
@@ -555,14 +483,10 @@ def _looks_like_test_tempdir(path: str) -> bool:
 
 
 def _build_hermes_tools_mcp_entry() -> dict:
-    """Build the codex stdio-transport entry that launches Hermes' own
-    tool surface as an MCP server. Codex's subprocess will call back into
-    this for browser/web/delegate_task/vision/memory/skills tools.
-
-    The command runs the worktree's Python via the current sys.executable
-    so a hermes installed under /opt/, /usr/local/, or a venv all work.
-    HERMES_HOME and PYTHONPATH are passed through so the spawned process
-    sees the same config + module layout the user is running."""
+    """Build the codex stdio-transport entry that launches Hermes' own tool surface as an MCP server.
+    Codex's subprocess will call back into this for browser/web/delegate_task/vision/memory/skills
+    tools.
+    """
     import sys
 
     env: dict[str, str] = {}
@@ -615,31 +539,13 @@ def migrate(
     default_permission_profile: Optional[str] = ":workspace",
     expose_hermes_tools: bool = True,
 ) -> MigrationReport:
-    """Translate Hermes mcp_servers config + Codex curated plugins into
-    ~/.codex/config.toml.
+    """Translate Hermes mcp_servers config + Codex curated plugins into ~/.codex/config.toml.
 
-    Args:
-        hermes_config: full ~/.hermes/config.yaml dict
-        codex_home: override CODEX_HOME (defaults to ~/.codex)
-        dry_run: skip the actual write; report what would happen
-        discover_plugins: when True (default), query `plugin/list` against
-            the live codex CLI to migrate any installed curated plugins
-            into [plugins."<name>@<marketplace>"] entries. Set False to
-            skip the subprocess spawn (for tests or restricted environments).
-        default_permission_profile: when set (default ":workspace"), write
-            top-level `default_permissions = "<name>"` so users on this
-            runtime don't get an approval prompt on every write attempt.
-            Built-in codex profile names are ":workspace", ":read-only",
-            ":danger-no-sandbox" (note the leading ":"). Also accepts a
-            user-defined profile name (no leading ":") that the user has
-            configured in their own [permissions.<name>] table. Set None
-            to leave permissions unset and let codex use its compiled-in
-            default (which is read-only).
-        expose_hermes_tools: when True (default), register Hermes' own
-            tool surface (web_search, browser_*, delegate_task, vision,
-            memory, skills, etc.) as an MCP server in ~/.codex/config.toml
-            so the codex subprocess can call back into Hermes for tools
-            codex doesn't have built in. Set False to opt out.
+    ``discover_plugins`` spawns the live codex CLI (set False in tests).
+    ``default_permission_profile`` (default ":workspace"; built-ins carry a leading ":", user
+    profiles do not; None leaves codex's read-only default) avoids an approval prompt on every
+    write. ``expose_hermes_tools`` registers Hermes' own tool surface as an MCP server so the codex
+    subprocess can call back for tools it lacks.
     """
     report = MigrationReport(dry_run=dry_run)
     codex_home = codex_home or Path.home() / ".codex"

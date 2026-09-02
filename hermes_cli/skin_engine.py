@@ -1,145 +1,4 @@
-"""Hermes skin/theme engine — the theme SDK for every surface.
-
-A data-driven skin system that lets users (and Hermes itself) customize the
-visual appearance across the CLI, the TUI, and the desktop GUI from a single
-file. Skins are defined as YAML files in ~/.hermes/skins/ or as built-in presets.
-No code changes are needed to add a new skin.
-
-This module is the source of truth: it resolves the active skin, and the gateway
-pushes the resolved palette to the TUI and desktop (see tui_gateway's
-``resolve_skin`` / ``skin.changed``). A skin dropped in ~/.hermes/skins/ therefore
-themes all three surfaces at once — the theme analogue of the plugin SDK.
-
-SKIN YAML SCHEMA
-================
-
-All fields are optional. Missing values inherit from the ``default`` skin.
-
-.. code-block:: yaml
-
-    # Required: skin identity
-    name: mytheme                         # Unique skin name (lowercase, hyphens ok)
-    description: Short description        # Shown in /skin listing
-
-    # Colors: hex values for Rich markup (banner, UI, response box)
-    colors:
-      background: "#0e0e12"               # App/base surface — the seed the TUI
-                                          # status bar and the desktop GUI derive
-                                          # their whole palette from (see below).
-      banner_border: "#CD7F32"            # Panel border color
-      banner_title: "#FFD700"             # Panel title text color
-      banner_accent: "#FFBF00"            # Section headers (Available Tools, etc.)
-      banner_dim: "#B8860B"               # Dim/muted text (separators, labels)
-      banner_text: "#FFF8DC"              # Body text (tool names, skill names)
-      ui_accent: "#FFBF00"               # General UI accent
-      ui_label: "#DAA520"                # UI labels (warm gold; teal clashed w/ default banner gold)
-      ui_ok: "#4caf50"                   # Success indicators
-      ui_error: "#ef5350"                # Error indicators
-      ui_warn: "#ffa726"                 # Warning indicators
-      ui_tool: "#FFBF00"                 # Tool-call markers (● / spinner); falls back to ui_accent
-      ui_thinking: "#CC9B1F"             # Reasoning/thinking text; falls back to banner_dim
-      diff_added: "#dcffdc"              # Diff added-line background (TUI)
-      diff_removed: "#ffdcdc"            # Diff removed-line background
-      diff_added_word: "#248a3d"         # Diff added word-level foreground
-      diff_removed_word: "#cf222e"       # Diff removed word-level foreground
-      syntax_string: "#FFBF00"           # Code strings; falls back to ui_accent
-      syntax_number: "#FFF8DC"           # Code numbers; falls back to ui_text
-      syntax_keyword: "#CD7F32"          # Code keywords; falls back to ui_border
-      syntax_comment: "#CC9B1F"          # Code comments; falls back to banner_dim
-      prompt: "#FFF8DC"                  # Prompt text color
-      input_rule: "#CD7F32"              # Input area horizontal rule
-      response_border: "#FFD700"         # Response box border (ANSI)
-      status_bar_bg: "#1a1a2e"           # Status bar background
-      status_bar_text: "#C0C0C0"         # Status bar default text
-      status_bar_strong: "#FFD700"       # Status bar highlighted text
-      status_bar_dim: "#8B8682"          # Status bar separators/muted text
-      status_bar_good: "#8FBC8F"         # Healthy context usage
-      status_bar_warn: "#FFD700"         # Warning context usage
-      status_bar_bad: "#FF8C00"          # High context usage
-      status_bar_critical: "#FF6B6B"     # Critical context usage
-      session_label: "#DAA520"           # Session label color
-      session_border: "#8B8682"          # Session ID dim color
-      status_bar_bg: "#1a1a2e"          # TUI status/usage bar background
-      voice_status_bg: "#1a1a2e"        # TUI voice status background
-      selection_bg: "#333355"           # TUI mouse-selection highlight background
-      completion_menu_bg: "#1a1a2e"      # Completion menu background
-      completion_menu_current_bg: "#333355"  # Active completion row background
-      completion_menu_meta_bg: "#1a1a2e"     # Completion meta column background
-      completion_menu_meta_current_bg: "#333355"  # Active completion meta background
-
-    # Optional paired palette for the opposite terminal polarity (mirrors the
-    # desktop app's colors/darkColors pairing). If `colors` above is authored
-    # for dark terminals, `light_colors` supplies the hand-tuned light-terminal
-    # variant (same keys); light-authored skins supply `dark_colors` instead.
-    # Without a paired block, the TUI adapts `colors` automatically
-    # (contrast-clamped foregrounds, polarity-corrected fills).
-    light_colors:
-      banner_title: "#8B6914"
-      # ... same keys as `colors` ...
-
-    # Spinner: customize the animated spinner during API calls
-    spinner:
-      waiting_faces:                      # Faces shown while waiting for API
-        - "(⚔)"
-        - "(⛨)"
-      thinking_faces:                     # Faces shown during reasoning
-        - "(⌁)"
-        - "(<>)"
-      thinking_verbs:                     # Verbs for spinner messages
-        - "forging"
-        - "plotting"
-      wings:                              # Optional left/right spinner decorations
-        - ["⟪⚔", "⚔⟫"]                  # Each entry is [left, right] pair
-        - ["⟪▲", "▲⟫"]
-
-    # Branding: text strings used throughout the CLI
-    branding:
-      agent_name: "Hermes Agent"          # Banner title, status display
-      welcome: "Welcome message"          # Shown at CLI startup
-      goodbye: "Goodbye! ⚕"              # Shown on exit
-      response_label: " ⚕ Hermes "       # Response box header label
-      prompt_symbol: "❯"                 # Input prompt symbol (bare token; renderers add trailing space)
-      help_header: "(^_^)? Commands"      # /help header text
-
-    # Tool prefix: character for tool output lines (default: ┊)
-    tool_prefix: "┊"
-
-    # Tool emojis: override the default emoji for any tool (used in spinners & progress)
-    tool_emojis:
-      terminal: "⚔"           # Override terminal tool emoji
-      web_search: "🔮"        # Override web_search tool emoji
-      # Any tool not listed here uses its registry default
-
-USAGE
-=====
-
-.. code-block:: python
-
-    from hermes_cli.skin_engine import get_active_skin, list_skins, set_active_skin
-
-    skin = get_active_skin()
-    print(skin.colors["banner_title"])    # "#FFD700"
-    print(skin.get_branding("agent_name"))  # "Hermes Agent"
-
-    set_active_skin("ares")               # Switch to built-in ares skin
-    set_active_skin("mytheme")            # Switch to user skin from ~/.hermes/skins/
-
-BUILT-IN SKINS
-==============
-
-- ``default`` — Classic Hermes gold/kawaii (the current look)
-- ``ares``    — Crimson/bronze war-god theme with custom spinner wings
-- ``mono``    — Clean grayscale monochrome
-- ``slate``   — Cool blue developer-focused theme
-- ``daylight`` — Light background theme with dark text and blue accents
-- ``warm-lightmode`` — Warm brown/gold text for light terminal backgrounds
-
-USER SKINS
-==========
-
-Drop a YAML file in ``~/.hermes/skins/<name>.yaml`` following the schema above.
-Activate with ``/skin <name>`` in the CLI or ``display.skin: <name>`` in config.yaml.
-"""
+"""Hermes skin/theme engine — the theme SDK for every surface."""
 
 import logging
 from dataclasses import dataclass, field
@@ -182,12 +41,11 @@ class SkinConfig:
 
     def get_spinner_wings(self) -> List[Tuple[str, str]]:
         """Get spinner wing pairs, or empty list if none."""
-        raw = self.spinner.get("wings", [])
-        result = []
-        for pair in raw:
-            if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                result.append((str(pair[0]), str(pair[1])))
-        return result
+        return [
+            (str(pair[0]), str(pair[1]))
+            for pair in self.spinner.get("wings", [])
+            if isinstance(pair, (list, tuple)) and len(pair) == 2
+        ]
 
     def get_branding(self, key: str, fallback: str = "") -> str:
         """Get a branding value with fallback."""
@@ -197,6 +55,16 @@ class SkinConfig:
 # =============================================================================
 # Built-in skin definitions
 # =============================================================================
+
+# Branding shared by every Hermes-named built-in (mono/daylight override help_header).
+_HERMES_BRANDING: Dict[str, str] = {
+    "agent_name": "Hermes Agent",
+    "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
+    "goodbye": "Goodbye! ⚕",
+    "response_label": " ⚕ Hermes ",
+    "prompt_symbol": "❯",
+    "help_header": "(^_^)? Available Commands",
+}
 
 _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
     "default": {
@@ -270,17 +138,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "status_bar_bg": "#F5F5F5",
             "voice_status_bg": "#F5F5F5",
         },
-        "spinner": {
-            # Empty = use hardcoded defaults in display.py
-        },
-        "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
-            "prompt_symbol": "❯",
-            "help_header": "(^_^)? Available Commands",
-        },
+        "spinner": {},  # empty = hardcoded defaults in display.py
+        "branding": _HERMES_BRANDING,
         "tool_prefix": "┊",
     },
     "ares": {
@@ -323,12 +182,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
                 "forging", "marching", "sizing the field", "holding the line",
                 "hammering plans", "tempering steel", "plotting impact", "raising the shield",
             ],
-            "wings": [
-                ["⟪⚔", "⚔⟫"],
-                ["⟪▲", "▲⟫"],
-                ["⟪╸", "╺⟫"],
-                ["⟪⛨", "⛨⟫"],
-            ],
+            "wings": [["⟪⚔", "⚔⟫"], ["⟪▲", "▲⟫"], ["⟪╸", "╺⟫"], ["⟪⛨", "⛨⟫"]],
         },
         "branding": {
             "agent_name": "Ares Agent",
@@ -394,14 +248,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "voice_status_bg": "#1F1F1F",
         },
         "spinner": {},
-        "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
-            "prompt_symbol": "❯",
-            "help_header": "[?] Available Commands",
-        },
+        "branding": {**_HERMES_BRANDING, "help_header": "[?] Available Commands"},
         "tool_prefix": "┊",
     },
     "slate": {
@@ -438,14 +285,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "voice_status_bg": "#151C2F",
         },
         "spinner": {},
-        "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
-            "prompt_symbol": "❯",
-            "help_header": "(^_^)? Available Commands",
-        },
+        "branding": _HERMES_BRANDING,
         "tool_prefix": "┊",
     },
     "daylight": {
@@ -484,14 +324,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "voice_status_bg": "#E5EDF8",
         },
         "spinner": {},
-        "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
-            "prompt_symbol": "❯",
-            "help_header": "[?] Available Commands",
-        },
+        "branding": {**_HERMES_BRANDING, "help_header": "[?] Available Commands"},
         "tool_prefix": "│",
     },
     "warm-lightmode": {
@@ -530,15 +363,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "voice_status_bg": "#F5F0E8",
         },
         "spinner": {},
-        "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! \u2695",
-            "response_label": " \u2695 Hermes ",
-            "prompt_symbol": "\u276f",
-            "help_header": "(^_^)? Available Commands",
-        },
-        "tool_prefix": "\u250a",
+        "branding": _HERMES_BRANDING,
+        "tool_prefix": "┊",
     },
     "poseidon": {
         "name": "poseidon",
@@ -581,12 +407,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
                 "steering the trident", "tracking undertow", "plotting sea lanes",
                 "calling the swell", "measuring pressure",
             ],
-            "wings": [
-                ["⟪≈", "≈⟫"],
-                ["⟪Ψ", "Ψ⟫"],
-                ["⟪∿", "∿⟫"],
-                ["⟪◌", "◌⟫"],
-            ],
+            "wings": [["⟪≈", "≈⟫"], ["⟪Ψ", "Ψ⟫"], ["⟪∿", "∿⟫"], ["⟪◌", "◌⟫"]],
         },
         "branding": {
             "agent_name": "Poseidon Agent",
@@ -658,12 +479,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
                 "counting the ascent", "testing leverage", "setting the shoulder",
                 "pushing uphill", "enduring the loop",
             ],
-            "wings": [
-                ["⟪◉", "◉⟫"],
-                ["⟪◬", "◬⟫"],
-                ["⟪◌", "◌⟫"],
-                ["⟪⬤", "⬤⟫"],
-            ],
+            "wings": [["⟪◉", "◉⟫"], ["⟪◬", "◬⟫"], ["⟪◌", "◌⟫"], ["⟪⬤", "⬤⟫"]],
         },
         "branding": {
             "agent_name": "Sisyphus Agent",
@@ -738,12 +554,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
                 "tracking ember fall", "setting wing angle", "holding the flame core",
                 "plotting a hot landing", "coiling for lift",
             ],
-            "wings": [
-                ["⟪✦", "✦⟫"],
-                ["⟪▲", "▲⟫"],
-                ["⟪◌", "◌⟫"],
-                ["⟪◇", "◇⟫"],
-            ],
+            "wings": [["⟪✦", "✦⟫"], ["⟪▲", "▲⟫"], ["⟪◌", "◌⟫"], ["⟪◇", "◇⟫"]],
         },
         "branding": {
             "agent_name": "Charizard Agent",
@@ -823,54 +634,41 @@ def _build_skin_config(data: Dict[str, Any]) -> SkinConfig:
     # Start with default values as base for missing keys
     default = _BUILTIN_SKINS["default"]
     skin_name = str(data.get("name", "unknown"))
-    color_overrides = _mapping_or_empty(data.get("colors"), section="colors", skin_name=skin_name)
-    spinner_overrides = _mapping_or_empty(data.get("spinner"), section="spinner", skin_name=skin_name)
-    branding_overrides = _mapping_or_empty(data.get("branding"), section="branding", skin_name=skin_name)
-    emoji_overrides = _mapping_or_empty(data.get("tool_emojis"), section="tool_emojis", skin_name=skin_name)
 
-    colors = dict(default.get("colors", {}))
-    colors.update(color_overrides)
-    spinner = dict(default.get("spinner", {}))
-    spinner.update(spinner_overrides)
-    branding = dict(default.get("branding", {}))
-    branding.update(branding_overrides)
+    def section(key: str) -> Dict[str, Any]:
+        return _mapping_or_empty(data.get(key), section=key, skin_name=skin_name)
 
+    def merged(key: str) -> Dict[str, Any]:
+        return {**default.get(key, {}), **section(key)}
+
+    colors, spinner, branding = merged("colors"), merged("spinner"), merged("branding")
+    tool_emojis = section("tool_emojis")
     # Paired palettes are NOT merged over the default skin's blocks: an empty
     # block means "this skin has no hand-tuned variant for that polarity", and
     # consumers (the TUI) fall back to `colors` + automatic adaptation. Merging
     # the default's gold light palette under a crimson skin would be worse
     # than adapting the crimson.
-    light_colors = _mapping_or_empty(data.get("light_colors"), section="light_colors", skin_name=skin_name)
-    dark_colors = _mapping_or_empty(data.get("dark_colors"), section="dark_colors", skin_name=skin_name)
-
     return SkinConfig(
         name=skin_name,
         description=data.get("description", ""),
         colors=colors,
-        light_colors=light_colors,
-        dark_colors=dark_colors,
+        light_colors=section("light_colors"),
+        dark_colors=section("dark_colors"),
         spinner=spinner,
         branding=branding,
         tool_prefix=data.get("tool_prefix", default.get("tool_prefix", "┊")),
-        tool_emojis=emoji_overrides,
+        tool_emojis=tool_emojis,
         banner_logo=data.get("banner_logo", ""),
         banner_hero=data.get("banner_hero", ""),
     )
 
 
 def list_skins() -> List[Dict[str, str]]:
-    """List all available skins (built-in + user-installed).
-
-    Returns list of {"name": ..., "description": ..., "source": "builtin"|"user"}.
-    """
-    result = []
-    for name, data in _BUILTIN_SKINS.items():
-        result.append({
-            "name": name,
-            "description": data.get("description", ""),
-            "source": "builtin",
-        })
-
+    """List all available skins (built-in + user-installed)."""
+    result = [
+        {"name": name, "description": data.get("description", ""), "source": "builtin"}
+        for name, data in _BUILTIN_SKINS.items()
+    ]
     skins_path = _skins_dir()
     if skins_path.is_dir():
         for f in sorted(skins_path.glob("*.yaml")):
@@ -880,12 +678,7 @@ def list_skins() -> List[Dict[str, str]]:
                 # Skip if it shadows a built-in
                 if any(s["name"] == skin_name for s in result):
                     continue
-                result.append({
-                    "name": skin_name,
-                    "description": data.get("description", ""),
-                    "source": "user",
-                })
-
+                result.append({"name": skin_name, "description": data.get("description", ""), "source": "user"})
     return result
 
 
@@ -930,18 +723,10 @@ def get_active_skin_name() -> str:
 
 
 def init_skin_from_config(config: dict) -> None:
-    """Initialize the active skin from CLI config at startup.
-
-    Call this once during CLI init with the loaded config dict.
-    """
+    """Initialize the active skin from CLI config at startup."""
     display = config.get("display") or {}
-    if not isinstance(display, dict):
-        display = {}
-    skin_name = display.get("skin", "default")
-    if isinstance(skin_name, str) and skin_name.strip():
-        set_active_skin(skin_name.strip())
-    else:
-        set_active_skin("default")
+    skin_name = display.get("skin", "default") if isinstance(display, dict) else "default"
+    set_active_skin(skin_name.strip() if isinstance(skin_name, str) and skin_name.strip() else "default")
 
 
 # =============================================================================
@@ -949,48 +734,35 @@ def init_skin_from_config(config: dict) -> None:
 # =============================================================================
 
 
+def _active_branding(key: str, fallback: str) -> str:
+    try:
+        return get_active_skin().get_branding(key, fallback)
+    except Exception:
+        return fallback
+
+
 def get_active_prompt_symbol(fallback: str = "❯") -> str:
     """Return the interactive prompt symbol with a single trailing space.
 
-    Skins store ``prompt_symbol`` as a bare token (no spaces). The trailing
-    space is appended here so callers can drop it straight into a rendered
-    prompt without hand-rolling whitespace.
+    Skins store ``prompt_symbol`` as a bare token; the space is appended here so callers can drop it
+    straight into a rendered prompt.
     """
-    try:
-        raw = get_active_skin().get_branding("prompt_symbol", fallback)
-    except Exception:
-        raw = fallback
-
-    cleaned = (raw or fallback).strip()
-
+    cleaned = (_active_branding("prompt_symbol", fallback) or fallback).strip()
     return f"{cleaned or fallback.strip()} "
-
 
 
 def get_active_help_header(fallback: str = "(^_^)? Available Commands") -> str:
     """Get the /help header from the active skin."""
-    try:
-        return get_active_skin().get_branding("help_header", fallback)
-    except Exception:
-        return fallback
-
+    return _active_branding("help_header", fallback)
 
 
 def get_active_goodbye(fallback: str = "Goodbye! ⚕") -> str:
     """Get the goodbye line from the active skin."""
-    try:
-        return get_active_skin().get_branding("goodbye", fallback)
-    except Exception:
-        return fallback
-
+    return _active_branding("goodbye", fallback)
 
 
 def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
-    """Return prompt_toolkit style overrides derived from the active skin.
-
-    These are layered on top of the CLI's base TUI style so /skin can refresh
-    the live prompt_toolkit UI immediately without rebuilding the app.
-    """
+    """Return prompt_toolkit style overrides derived from the active skin."""
     try:
         skin = get_active_skin()
     except Exception:
@@ -1000,27 +772,28 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
     # the terminal's foreground color (readable in both light and dark
     # color schemes).  Skins can opt into a colored prompt by setting
     # `prompt` explicitly in their YAML.
-    prompt = skin.get_color("prompt", "")
-    input_rule = skin.get_color("input_rule", "#CD7F32")
-    title = skin.get_color("banner_title", "#FFD700")
-    text = skin.get_color("banner_text", "#FFF8DC")
-    dim = skin.get_color("banner_dim", "#555555")
-    label = skin.get_color("ui_label", title)
-    warn = skin.get_color("ui_warn", "#FF8C00")
-    error = skin.get_color("ui_error", "#FF6B6B")
-    status_bg = skin.get_color("status_bar_bg", "#1a1a2e")
-    status_text = skin.get_color("status_bar_text", text)
-    status_strong = skin.get_color("status_bar_strong", title)
-    status_dim = skin.get_color("status_bar_dim", dim)
-    status_good = skin.get_color("status_bar_good", skin.get_color("ui_ok", "#8FBC8F"))
-    status_warn = skin.get_color("status_bar_warn", warn)
-    status_bad = skin.get_color("status_bar_bad", skin.get_color("banner_accent", warn))
-    status_critical = skin.get_color("status_bar_critical", error)
-    voice_bg = skin.get_color("voice_status_bg", status_bg)
-    menu_bg = skin.get_color("completion_menu_bg", "#1a1a2e")
-    menu_current_bg = skin.get_color("completion_menu_current_bg", "#333355")
-    menu_meta_bg = skin.get_color("completion_menu_meta_bg", menu_bg)
-    menu_meta_current_bg = skin.get_color("completion_menu_meta_current_bg", menu_current_bg)
+    c = skin.get_color
+    prompt = c("prompt", "")
+    input_rule = c("input_rule", "#CD7F32")
+    title = c("banner_title", "#FFD700")
+    text = c("banner_text", "#FFF8DC")
+    dim = c("banner_dim", "#555555")
+    label = c("ui_label", title)
+    warn = c("ui_warn", "#FF8C00")
+    error = c("ui_error", "#FF6B6B")
+    status_bg = c("status_bar_bg", "#1a1a2e")
+    status_text = c("status_bar_text", text)
+    status_strong = c("status_bar_strong", title)
+    status_dim = c("status_bar_dim", dim)
+    status_good = c("status_bar_good", c("ui_ok", "#8FBC8F"))
+    status_warn = c("status_bar_warn", warn)
+    status_bad = c("status_bar_bad", c("banner_accent", warn))
+    status_critical = c("status_bar_critical", error)
+    voice_bg = c("voice_status_bg", status_bg)
+    menu_bg = c("completion_menu_bg", "#1a1a2e")
+    menu_current_bg = c("completion_menu_current_bg", "#333355")
+    menu_meta_bg = c("completion_menu_meta_bg", menu_bg)
+    menu_meta_current_bg = c("completion_menu_meta_current_bg", menu_current_bg)
 
     return {
         # Typed input always uses terminal default fg/bg so it's

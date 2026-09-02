@@ -1,9 +1,8 @@
 """Detection of running llama-server instances.
 
-Probes well-known local roots and fingerprints genuine llama-server via
-/props (build_info + model fields — Ollama and LM Studio answer /v1/models
-but not /props). The credential is reachability; detection never needs a
-key, but honors one if the probed server requires it (401 -> detected,
+Probes well-known local roots and fingerprints genuine llama-server via /props (build_info + model
+fields — Ollama and LM Studio answer /v1/models but not /props). The credential is reachability;
+detection never needs a key, but honors one if the probed server requires it (401 -> detected,
 auth_required=True).
 """
 
@@ -51,10 +50,8 @@ def probe_port(port: int) -> DetectedServer | None:
     build = str(props.get("build_info", ""))
     if not build:
         return None  # answers /props but isn't llama-server
-    n_ctx = None
     dgs = props.get("default_generation_settings")
-    if isinstance(dgs, dict):
-        n_ctx = dgs.get("n_ctx")
+    n_ctx = dgs.get("n_ctx") if isinstance(dgs, dict) else None
     models_status, models = _get(f"{root}/models")
     return DetectedServer(
         base_url=f"{root}/v1",
@@ -69,11 +66,7 @@ def probe_port(port: int) -> DetectedServer | None:
 
 def detect_server(extra_ports: tuple[int, ...] = ()) -> DetectedServer | None:
     """First hit across default + extra ports (managed port, config port)."""
-    seen = set()
-    for port in (*DEFAULT_PROBE_PORTS, *extra_ports):
-        if port in seen:
-            continue
-        seen.add(port)
+    for port in dict.fromkeys((*DEFAULT_PROBE_PORTS, *extra_ports)):
         hit = probe_port(port)
         if hit:
             return hit

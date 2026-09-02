@@ -74,8 +74,8 @@ def _fsync_directory(path: Path) -> None:
 def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
     """Read or atomically mint the opaque id for the physical install.
 
-    ``None`` means the id could neither be read nor persisted. Returning an
-    ephemeral id would violate the authority and connection-registry contract.
+    ``None`` means the id could neither be read nor persisted. Returning an ephemeral id would
+    violate the authority and connection-registry contract.
     """
     root = get_default_hermes_root() if root is None else root
     path = root / _INSTALL_ID_FILENAME

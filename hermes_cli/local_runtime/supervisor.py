@@ -1,20 +1,12 @@
 """Supervision of one llama-server in router mode.
 
-The router process is ours (restart with backoff on crash); router children
-are its problem — child failures surface via GET /models exit_code, never
-auto-retried here.
+The router process is ours (restart with backoff on crash); router children are its problem — child
+failures surface via GET /models exit_code, never auto-retried here.
 
-Readiness rules (each learned the hard way on real hardware):
-- health-200 is NOT readiness; every readiness claim requires a touch
-  generation (temp-0, expected token, generous budget, reasoning_content
-  scanned).
-- Always dial 127.0.0.1 — resolving localhost adds ~2s per request on
-  Windows via IPv6 fallback.
-- /metrics is opt-in (--metrics) and carries no KV-usage metric;
-  idleness = requests_processing == 0 and no slot is_processing.
-- The router's LRU eviction has no pin for the primary model: until an
-  upstream pin exists, keep_primary_loaded re-touches the primary after
-  any other model load.
+Readiness rules (each learned the hard way on real hardware): - health-200 is NOT readiness; every
+readiness claim requires a touch generation (temp-0, expected token, generous budget,
+reasoning_content scanned). - Always dial 127.0.0.1 — resolving localhost adds ~2s per request on
+Windows via IPv6 fallback.
 """
 
 from __future__ import annotations
@@ -60,9 +52,9 @@ _DEFAULT_PORT = 18434
 
 
 def _stable_port() -> int:
-    """The stable default port, falling back to an ephemeral one only when
-    something else already listens there (and it isn't a leftover managed
-    server, which stop() would have cleaned up)."""
+    """The stable default port, falling back to an ephemeral one only when something else already
+    listens there (and it isn't a leftover managed server, which stop() would have cleaned up).
+    """
     try:
         with socket.socket() as s:
             s.bind(("127.0.0.1", _DEFAULT_PORT))
@@ -77,12 +69,9 @@ def _stable_port() -> int:
 def _stable_api_key() -> str:
     """One key for the life of the install, persisted beside the runtimes.
 
-    Endpoint identity must survive restarts as a UNIT — sessions persist the
-    resolved base_url + api_key, so a per-boot key strands every resumed
-    session on HTTP 401 exactly the way a per-boot port would strand them
-    on connection errors. Rotating it buys nothing: the key exists to stop
-    other loopback processes free-riding, and it lives on the same disk as
-    the state file that would leak it. Delete the file to rotate manually.
+    Endpoint identity must survive restarts as a UNIT — sessions persist the resolved base_url +
+    api_key, so a per-boot key strands every resumed session on HTTP 401 exactly the way a per-boot
+    port would strand them on connection errors.
     """
     key_path = runtimes_root() / ".api_key"
     try:
@@ -102,16 +91,7 @@ def _stable_api_key() -> str:
 
 
 class LlamaServerSupervisor:
-    """Own one llama-server router process for the life of a Hermes session.
-
-    Usage::
-
-        sup = LlamaServerSupervisor(install_dir, models_dir)
-        sup.start()                     # spawn + wait healthy
-        sup.ensure_model_ready(name)    # load + touch-generate
-        ... sup.base_url is the /v1 endpoint, sup.api_key its key ...
-        sup.stop()
-    """
+    """Own one llama-server router process for the life of a Hermes session."""
 
     def __init__(self, install_dir: Path, models_dir: Path, *,
                  models_max: int = 4, port: int | None = None,
@@ -143,14 +123,20 @@ class LlamaServerSupervisor:
     def _url(self, route: str) -> str:
         return f"http://127.0.0.1:{self.port}{route}"
 
-    def _request(self, route: str, body: dict | None = None, timeout_s: int = 30) -> dict:
+    def _open(self, route: str, body: dict | None = None, timeout_s: int = 30,
+              *, json_type: bool = True):
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        if json_type:
+            headers["Content-Type"] = "application/json"
         req = urllib.request.Request(
             self._url(route),
             data=json.dumps(body).encode() if body is not None else None,
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"},
+            headers=headers,
         )
-        with urllib.request.urlopen(req, timeout=timeout_s) as r:
+        return urllib.request.urlopen(req, timeout=timeout_s)
+
+    def _request(self, route: str, body: dict | None = None, timeout_s: int = 30) -> dict:
+        with self._open(route, body, timeout_s) as r:
             raw = r.read()
             return json.loads(raw) if raw else {}
 
@@ -182,9 +168,7 @@ class LlamaServerSupervisor:
         ]
         if self.preset_path and self.preset_path.exists():
             cmd += ["--models-preset", str(self.preset_path)]
-        cmd += [
-            *self.extra_args,
-        ]
+        cmd += self.extra_args
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         if self._log_handle is not None:
             # The crash-restart loop calls _spawn repeatedly; without
@@ -279,14 +263,10 @@ class LlamaServerSupervisor:
     def _terminate_tree(proc: subprocess.Popen) -> None:
         """Terminate the router AND its model children.
 
-        The router spawns one child llama-server per loaded model, each
-        holding gigabytes of VRAM. Terminating only the router (on
-        Windows, TerminateProcess — no signal handlers, no cleanup pass)
-        orphans those children: the port goes quiet but the weights stay
-        resident, and the next spawn re-loads models alongside a ghost
-        still holding the memory. Enumerate children FIRST (the parent
-        must be alive to walk them), then terminate parent and children
-        together, escalating to kill for stragglers.
+        The router spawns one child llama-server per loaded model, each holding gigabytes of VRAM.
+        Terminating only the router (on Windows, TerminateProcess with no cleanup) orphans them: the
+        port goes quiet but the weights stay resident. Enumerate children FIRST (the parent must be
+        alive to walk them), then terminate all together, escalating to kill for stragglers.
         """
         children: list = []
         try:
@@ -315,12 +295,10 @@ class LlamaServerSupervisor:
     def _reap_orphaned_children(self) -> None:
         """Kill model children orphaned by a router crash, before respawn.
 
-        A crashed router can't clean up its children, and a dead parent
-        can't be walked — so match by identity instead: any process
-        running OUR llama-server binary whose parent is gone is an
-        orphan of a previous router. Their VRAM must come back before
-        the new router loads models next to the ghosts. External
-        llama-servers (different binary path) never match.
+        A crashed router can't clean up its children, and a dead parent can't be walked — so match
+        by identity instead: any process running OUR llama-server binary whose parent is gone is an
+        orphan of a previous router. Their VRAM must come back before the new router loads models
+        next to the ghosts.
         """
         try:
             import psutil
@@ -350,31 +328,13 @@ class LlamaServerSupervisor:
         return {m["id"]: m.get("status", {}).get("value", "unknown")
                 for m in data.get("data", [])}
 
-    def model_failures(self) -> dict:
-        """{model_id: exit_code} for children that died — surfaced to the
-        UI, never auto-retried (design: router children are its problem)."""
-        data = self._request("/models")
-        out = {}
-        for m in data.get("data", []):
-            status = m.get("status", {})
-            if status.get("value") == "failed" or status.get("exit_code"):
-                out[m["id"]] = status.get("exit_code")
-        return out
-
     def load_model(self, model_id: str, timeout_s: int = 600) -> None:
         self._request("/models/load", {"model": model_id}, timeout_s=timeout_s)
 
     def unload_model(self, model_id: str) -> None:
-        """Free the child's VRAM now. Route existence verified empirically
-        on b10290 (POST /models/unload; bogus name -> 400 'model is not
-        found'). Momentary action: never touches primary_model — the
-        declaration is durable, an eject is not (residency design).
-
-        Settle before returning: for a few seconds after unload returns,
-        the router still routes to the dying child and answers chat with
-        500 'proxy error: Could not establish connection' (probed on
-        b10362). Waiting for the model to report unloaded means the next
-        message autoloads cleanly instead of racing the teardown.
+        """Free the child's VRAM now. Route existence verified empirically on b10290 (POST
+        /models/unload; bogus name -> 400 'model is not found'). Momentary action: never touches
+        primary_model — the declaration is durable, an eject is not (residency design).
         """
         self._request("/models/unload", {"model": model_id}, timeout_s=120)
         deadline = time.monotonic() + 15
@@ -406,10 +366,7 @@ class LlamaServerSupervisor:
         except Exception:  # noqa: BLE001
             return unloaded
         for model_id, status in statuses.items():
-            if status not in ("loaded", "ready"):
-                self._idle_since.pop(model_id, None)
-                continue
-            if not self.is_idle(model_id):
+            if status not in ("loaded", "ready") or not self.is_idle(model_id):
                 self._idle_since.pop(model_id, None)
                 continue
             first_idle = self._idle_since.setdefault(model_id, now)
@@ -425,9 +382,9 @@ class LlamaServerSupervisor:
         return unloaded
 
     def touch_generate(self, model_id: str, timeout_s: int = 300) -> bool:
-        """The readiness proof. Generous budget + reasoning_content scan —
-        small token budgets false-fail reasoning models, which spend their
-        first tokens thinking."""
+        """The readiness proof. Generous budget + reasoning_content scan — small token budgets
+        false-fail reasoning models, which spend their first tokens thinking.
+        """
         try:
             resp = self._request("/v1/chat/completions", {
                 "model": model_id,
@@ -450,32 +407,13 @@ class LlamaServerSupervisor:
             self.load_model(model_id, timeout_s=timeout_s)
         return self.touch_generate(model_id)
 
-    def actual_n_ctx(self, model_id: str) -> int | None:
-        """/props reconciliation: the granted window as the child reports
-        it — the compressor's budget and the picker's 'running at 87K of
-        262K' both read THIS value, never the request (design step 4)."""
-        try:
-            props = self._request(f"/props?model={model_id}")
-            return props.get("default_generation_settings", {}).get("n_ctx")
-        except Exception:  # noqa: BLE001
-            return None
-
-    def keep_primary_loaded(self) -> None:
-        """The router's LRU eviction has no pin, so after any other load
-        re-touch the primary to keep it most-recently-used. Best-effort
-        under bursty multi-model load — replaced when an upstream pin
-        exists."""
-        if self.primary_model and self.models().get(self.primary_model) in (
-                "loaded", "ready"):
-            self.touch_generate(self.primary_model, timeout_s=60)
-
     # ── telemetry ────────────────────────────────────────────
 
     def is_idle(self, model_id: str | None = None) -> bool:
-        """No processing requests and no busy slots. Router quirk: /slots
-        and /metrics are per-child and require ?model= (bare calls 400),
-        and no KV-usage metric exists. With ``model_id`` checks that one
-        child; without, every loaded child."""
+        """No processing requests and no busy slots. Router quirk: /slots and /metrics are per-child
+        and require ?model= (bare calls 400), and no KV-usage metric exists. With ``model_id``
+        checks that one child; without, every loaded child.
+        """
         try:
             if model_id is not None:
                 loaded = [model_id]
@@ -486,10 +424,7 @@ class LlamaServerSupervisor:
                 slots = self._request(f"/slots?model={mid}")
                 if any(s.get("is_processing") for s in slots):
                     return False
-                req = urllib.request.Request(
-                    self._url(f"/metrics?model={mid}"),
-                    headers={"Authorization": f"Bearer {self.api_key}"})
-                with urllib.request.urlopen(req, timeout=10) as r:
+                with self._open(f"/metrics?model={mid}", timeout_s=10, json_type=False) as r:
                     text = r.read().decode()
                 for line in text.splitlines():
                     if line.startswith("llamacpp:requests_processing"):

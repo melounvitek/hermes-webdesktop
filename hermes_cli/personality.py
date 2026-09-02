@@ -1,33 +1,11 @@
 """Single owner for personality overlays.
 
-Every surface (CLI ``/personality``, gateway ``/personality``, TUI + desktop
-``config.set personality`` RPC, agent-startup overlay resolution) goes through
-this module. Nothing else may:
+The v34 config migration resets the selection once; this module ensures the split cannot happen
+again.
 
-* define built-in personalities,
-* decide what counts as a "neutral" name,
-* render a personality definition into prompt text,
-* resolve the active overlay from config, or
-* persist the selection.
-
-History: personality state used to be written differently per surface — the
-old CLI/gateway wrote rendered personality TEXT into ``agent.system_prompt``
-while the TUI/desktop wrote the NAME to ``display.personality``. When
-``display.personality`` became authoritative (PR #81946), years of stale
-per-surface state resurrected personalities users had turned off. The v34
-config migration resets the selection once; this module ensures the split
-cannot happen again.
-
-Contract:
-
-* ``display.personality`` holds the selected NAME (empty = no overlay).
-* ``agent.system_prompt`` is the user-owned manual overlay. Personality code
-  never writes it.
-* ``agent.personalities`` holds user-defined/overridden personalities; they
-  overlay the built-ins by name.
-
-This module deliberately has no module-level imports from ``hermes_cli.config``
-(that module imports us), keeping the import direction acyclic.
+* ``display.personality`` holds the selected NAME (empty = no overlay). * ``agent.system_prompt`` is
+the user-owned manual overlay. Personality code never writes it. * ``agent.personalities`` holds
+user-defined/overridden personalities; they overlay the built-ins by name.
 """
 
 from __future__ import annotations
@@ -122,11 +100,7 @@ def available_personalities(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, A
 def resolve_personality(
     value: Any, cfg: Optional[Dict[str, Any]] = None
 ) -> Tuple[str, str]:
-    """Resolve a requested personality to ``(canonical_name, prompt_text)``.
-
-    Neutral names resolve to ``("", "")``. Unknown names raise ``ValueError``
-    with an availability listing usable verbatim in user-facing errors.
-    """
+    """Resolve a requested personality to ``(canonical_name, prompt_text)``."""
     name = normalize_personality_name(value)
     if not name:
         return "", ""
@@ -150,9 +124,9 @@ def active_personality_name(cfg: Optional[Dict[str, Any]]) -> str:
 def resolve_ephemeral_system_prompt(cfg: Optional[Dict[str, Any]]) -> str:
     """Resolve the session overlay from config.
 
-    ``display.personality`` wins when it names a known personality; otherwise
-    the user-owned ``agent.system_prompt`` applies. Callers should still
-    prefer ``HERMES_EPHEMERAL_SYSTEM_PROMPT`` when that env var is set.
+    ``display.personality`` wins when it names a known personality; otherwise the user-owned
+    ``agent.system_prompt`` applies. Callers should still prefer ``HERMES_EPHEMERAL_SYSTEM_PROMPT``
+    when that env var is set.
     """
     name = active_personality_name(cfg)
     if name:
@@ -163,9 +137,9 @@ def resolve_ephemeral_system_prompt(cfg: Optional[Dict[str, Any]]) -> str:
 def persist_personality(value: Any) -> bool:
     """Persist the personality selection — the ONLY sanctioned write path.
 
-    Writes the canonical name (or '') to ``display.personality`` in the active
-    HERMES_HOME config.yaml atomically, preserving comments and ordering.
-    Never touches ``agent.system_prompt``. Returns True on success.
+    Writes the canonical name (or '') to ``display.personality`` in the active HERMES_HOME
+    config.yaml atomically, preserving comments and ordering. Never touches ``agent.system_prompt``.
+    Returns True on success.
     """
     name = normalize_personality_name(value)
     try:
