@@ -93,10 +93,10 @@ def _detach_child(parent_agent: Any, child: Any) -> None:
         logger.debug("Could not remove child from active_children: %s", e)
 
 
-def _signal_child_stop(child: Any) -> None:
+def _signal_child_stop(child: Any, *reason: str) -> None:
     """Cooperative interrupt so the child's worker thread can exit cleanly."""
     try:
-        if child is not None and not request_hard_interrupt(child) and hasattr(child, "_interrupt_requested"):
+        if child is not None and not request_hard_interrupt(child, *reason) and hasattr(child, "_interrupt_requested"):
             child._interrupt_requested = True
     except Exception:
         pass

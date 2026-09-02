@@ -12,8 +12,7 @@ import logging
 from concurrent.futures import FIRST_COMPLETED, wait as _cf_wait
 from typing import Any, Dict, List, Optional
 
-from agent.interrupt_compat import request_hard_interrupt
-from tools.delegate_tool_child_run import _fabricated_entry
+from tools.delegate_tool_child_run import _detach_child, _fabricated_entry, _signal_child_stop
 from tools.delegate_tool_progress import (
     SUBAGENT_FAILURE_STATUSES,
     _clean_error_text,
@@ -228,24 +227,6 @@ def _resolve_async_session_key(parent_agent: Any, origin_ui_session_id: str) -> 
     return session_key, origin_ui_session_id
 
 
-def _detach_from_parent(parent_agent: Any, child_agents: List[Any]) -> None:
-    """Drop the children from the parent's interrupt-propagation list — the
-    batch's lifecycle is owned by the async registry now (_build_child_agent
-    attached them, correct for sync runs)."""
-    if not hasattr(parent_agent, "_active_children"):
-        return
-    lock = getattr(parent_agent, "_active_children_lock", None)
-    for c in child_agents:
-        try:
-            if lock:
-                with lock:
-                    parent_agent._active_children.remove(c)
-            else:
-                parent_agent._active_children.remove(c)
-        except ValueError:
-            pass
-
-
 def _batch_progress_token(child_agents: List[Any]) -> tuple:
     """Progress token for the async registry's stale monitor.
 
@@ -349,16 +330,16 @@ def _dispatch_background(
 
     session_key, origin_ui_session_id = _resolve_async_session_key(parent_agent, origin_ui_session_id)
     child_agents = [c for (_, _, c) in children]
-    _detach_from_parent(parent_agent, child_agents)
+    # The batch's lifecycle is owned by the async registry now: drop the children
+    # from the parent's interrupt-propagation list (_build_child_agent attached
+    # them, which is correct for sync runs).
+    for c in child_agents:
+        _detach_child(parent_agent, c)
 
     def _batch_interrupt():
         # Cancellation path for the detached batch (owned by the async registry).
         for c in child_agents:
-            try:
-                if not request_hard_interrupt(c, "Async delegation cancelled") and hasattr(c, "_interrupt_requested"):
-                    c._interrupt_requested = True
-            except Exception:
-                pass
+            _signal_child_stop(c, "Async delegation cancelled")
 
     goals = [t["goal"] for t in task_list]
     dispatch = dispatch_async_delegation_batch(

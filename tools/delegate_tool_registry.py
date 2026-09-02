@@ -50,21 +50,10 @@ def get_subagent_attribution(task_id: Optional[str]) -> Optional[Dict[str, Any]]
     if not task_id or not isinstance(task_id, str):
         return None
     with _active_subagents_lock:
-        record = _active_subagents.get(task_id)
-        if record is not None:
-            return {
-                "subagent_id": task_id,
-                "goal": record.get("goal"),
-                "delegation_id": record.get("delegation_id"),
-            }
-        retained = _recent_subagents.get(task_id)
-        if retained is not None:
-            return {
-                "subagent_id": task_id,
-                "goal": retained.get("goal"),
-                "delegation_id": retained.get("delegation_id"),
-            }
-    return None
+        record = _active_subagents.get(task_id) or _recent_subagents.get(task_id)
+    if record is None:
+        return None
+    return {"subagent_id": task_id, "goal": record.get("goal"), "delegation_id": record.get("delegation_id")}
 
 
 def set_spawn_paused(paused: bool) -> bool:
@@ -404,54 +393,41 @@ def _handle_control_action(
             "completion message). Use action='list' to see live children."
         )
 
-    if action == "stop":
-        if interrupt_subagent(sid):
-            return json.dumps(
-                {
-                    "action": "stop",
-                    "subagent_id": sid,
-                    "status": "interrupt_requested",
-                    "note": (
-                        "The subagent stops at its next iteration boundary "
-                        "(in-flight tool calls are asked to cancel). Its "
-                        "partial result still re-enters the conversation as a "
-                        "completion message — do not wait or poll."
-                    ),
-                },
-                ensure_ascii=False,
-            )
+    if action == "steer" and not (message or "").strip():
         return tool_error(
-            f"Could not interrupt '{sid}' — it likely finished in the last "
-            "moment. Its result arrives as a normal completion message."
+            "action='steer' requires a non-empty 'message' describing the "
+            "course correction."
         )
+    outcome = _CONTROL_OUTCOMES.get(action)
+    if outcome is None:
+        return tool_error(f"Unknown action '{action}'. Use spawn, list, steer, or stop.")
+    status, note, failure = outcome
+    ok = interrupt_subagent(sid) if action == "stop" else steer_subagent(sid, message.strip())
+    if ok:
+        return json.dumps({"action": action, "subagent_id": sid, "status": status, "note": note}, ensure_ascii=False)
+    return tool_error(failure.format(sid=sid))
 
-    if action == "steer":
-        text = (message or "").strip()
-        if not text:
-            return tool_error(
-                "action='steer' requires a non-empty 'message' describing the "
-                "course correction."
-            )
-        if steer_subagent(sid, text):
-            return json.dumps(
-                {
-                    "action": "steer",
-                    "subagent_id": sid,
-                    "status": "queued",
-                    "note": (
-                        "Steering text queued. The subagent sees it appended "
-                        "to its next tool result — the current tool call is "
-                        "never cut. If the child finishes before a delivery "
-                        "boundary remains, the text is reported back as "
-                        "missed_steer in its completion entry."
-                    ),
-                },
-                ensure_ascii=False,
-            )
-        return tool_error(
-            f"Subagent '{sid}' is no longer accepting steering (finishing or "
-            "already finished). Its result arrives as a normal completion "
-            "message; re-delegate a follow-up task if more work is needed."
-        )
 
-    return tool_error(f"Unknown action '{action}'. Use spawn, list, steer, or stop.")
+# action -> (success status, success note, failure error template)
+_CONTROL_OUTCOMES = {
+    "stop": (
+        "interrupt_requested",
+        "The subagent stops at its next iteration boundary "
+        "(in-flight tool calls are asked to cancel). Its "
+        "partial result still re-enters the conversation as a "
+        "completion message — do not wait or poll.",
+        "Could not interrupt '{sid}' — it likely finished in the last "
+        "moment. Its result arrives as a normal completion message.",
+    ),
+    "steer": (
+        "queued",
+        "Steering text queued. The subagent sees it appended "
+        "to its next tool result — the current tool call is "
+        "never cut. If the child finishes before a delivery "
+        "boundary remains, the text is reported back as "
+        "missed_steer in its completion entry.",
+        "Subagent '{sid}' is no longer accepting steering (finishing or "
+        "already finished). Its result arrives as a normal completion "
+        "message; re-delegate a follow-up task if more work is needed.",
+    ),
+}

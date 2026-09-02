@@ -71,6 +71,7 @@ from tools.delegate_tool_config import (  # noqa: F401
     _load_config,
     _merge_request_overrides,
     _resolve_child_credential_pool,
+    _require_pinned_command,
     _resolve_delegation_credentials,
     _subagent_auto_approve,
     _subagent_auto_deny,
@@ -307,28 +308,19 @@ def _resolve_child_toolsets(
     return child_toolsets, child_disabled_toolsets
 
 
-@dataclass
-class _ChildRuntime:
-    """Provider/transport/routing settings resolved for one child AIAgent."""
-
-    model: Any
-    provider: Any
-    base_url: Any
-    api_key: Any
-    api_mode: Any
-    capabilities: Optional[dict]
-    acp_command: Any
-    acp_args: list
-    reasoning: Any
-    fallback: Any
-    providers_allowed: Any
-    providers_ignored: Any
-    providers_order: Any
-    provider_sort: Any
-    provider_require_parameters: Any
-    provider_data_collection: Any
-    openrouter_min_coding_score: Any
-    optional_kwargs: Dict[str, Any]
+# OpenRouter routing filters: inherited from the parent, but reset to these
+# defaults under a pinned provider — parent filters (e.g. only=["Anthropic"])
+# would silently force the child back onto the parent's provider.
+# openrouter_min_coding_score stays inherited: model-gated, no-op elsewhere.
+_ROUTING_FILTER_DEFAULTS = (
+    ("providers_allowed", None),
+    ("providers_ignored", None),
+    ("providers_order", None),
+    ("provider_sort", None),
+    ("provider_require_parameters", False),
+    ("provider_data_collection", ""),
+)
+_NOUS_PROVIDERS = frozenset({"nous", "nous-portal", "nousresearch"})
 
 
 def _resolve_child_runtime(
@@ -344,8 +336,9 @@ def _resolve_child_runtime(
     override_max_tokens: Optional[int],
     override_acp_command: Optional[str],
     override_acp_args: Optional[List[str]],
-) -> _ChildRuntime:
-    """Resolve the child's credentials, transport and routing: config override > parent inherit.
+) -> Dict[str, Any]:
+    """Resolve the child's credentials, transport and routing (config override >
+    parent inherit) as ``AIAgent`` keyword arguments.
 
     Rules that are easy to break: api_mode is re-derived (not inherited) when
     the child's provider differs from the parent's or is Nous Portal (dual-wire);
@@ -355,22 +348,15 @@ def _resolve_child_runtime(
     """
     effective_model = model or parent_agent.model
     effective_provider = override_provider or getattr(parent_agent, "provider", None)
-    effective_base_url = override_base_url or parent_agent.base_url
-    if not override_base_url:
-        effective_base_url = _inherit_parent_base_url(parent_agent, effective_base_url)
-    effective_api_key = override_api_key or parent_api_key
-    child_capabilities = _inherit_parent_capabilities(
-        parent_agent, override_provider, override_base_url
-    )
+    effective_base_url = override_base_url or _inherit_parent_base_url(parent_agent, parent_agent.base_url)
     # api_mode: each provider has its own wire, so a different provider re-derives
     # (None) instead of inheriting (404s otherwise). Nous Portal is dual-wire
     # within one provider (anthropic/* → Messages, else chat_completions), so
     # same-provider inheritance would pin the child on the wrong wire — re-derive.
     _parent_provider = getattr(parent_agent, "provider", None) or ""
-    _effective_provider_norm = (effective_provider or "").strip().lower()
     if override_api_mode is not None:
         effective_api_mode = override_api_mode
-    elif _effective_provider_norm in {"nous", "nous-portal", "nousresearch"}:
+    elif (effective_provider or "").strip().lower() in _NOUS_PROVIDERS:
         from hermes_cli.providers import nous_api_mode
 
         effective_api_mode = nous_api_mode(effective_model)
@@ -380,34 +366,23 @@ def _resolve_child_runtime(
         effective_api_mode = getattr(parent_agent, "api_mode", None)
     # A pinned transport that cannot run must fail the spawn loudly, never fall
     # back silently (delegate_task pre-validates; this covers direct callers).
-    if override_acp_command:
-        import shutil as _shutil
-
-        if not _shutil.which(override_acp_command):
-            raise ValueError(
-                f"Pinned delegation command '{override_acp_command}' was not "
-                f"found on PATH. Install it or remove delegation.command from "
-                f"config.yaml."
-            )
-    effective_acp_command = override_acp_command or getattr(
-        parent_agent, "acp_command", None
+    _require_pinned_command(
+        override_acp_command,
+        f"Pinned delegation command '{override_acp_command}' was not "
+        f"found on PATH. Install it or remove delegation.command from "
+        f"config.yaml.",
     )
+    effective_acp_command = override_acp_command or getattr(parent_agent, "acp_command", None)
     effective_acp_args = list(
-        override_acp_args
-        if override_acp_args is not None
-        else (getattr(parent_agent, "acp_args", []) or [])
+        override_acp_args if override_acp_args is not None else (getattr(parent_agent, "acp_args", []) or [])
     )
-
     # A pinned provider must use direct API calls; inheriting the parent's ACP
     # transport would bypass the override credentials entirely.
     if override_provider and not override_acp_command:
-        effective_acp_command = None
-        effective_acp_args = []
-
+        effective_acp_command, effective_acp_args = None, []
     if override_acp_command:
         # Forced ACP transport requires provider copilot-acp for run_agent to init the client.
-        effective_provider = "copilot-acp"
-        effective_api_mode = "chat_completions"
+        effective_provider, effective_api_mode = "copilot-acp", "chat_completions"
 
     # Reasoning: delegation.reasoning_effort > parent. Keep the raw value — a
     # YAML ``false`` must disable thinking, not coerce to "" and inherit.
@@ -428,66 +403,32 @@ def _resolve_child_runtime(
     except Exception as exc:
         logger.debug("Could not load delegation reasoning_effort: %s", exc)
 
-    # Inherit the parent's fallback chain EXCEPT under a pinned provider: a
-    # mid-run 429/auth failure must not silently reroute the quiet child onto
-    # the parent's fallbacks. Predictability > liveness for explicit pins.
-    parent_fallback = (
-        None
-        if override_provider
-        else (getattr(parent_agent, "_fallback_chain", None) or None)
-    )
-
-    # OpenRouter routing filters are inherited, but cleared under a pinned
-    # provider — parent filters (e.g. only=["Anthropic"]) would silently force
-    # the child back onto the parent's provider.
-    child_providers_allowed = getattr(parent_agent, "providers_allowed", None)
-    child_providers_ignored = getattr(parent_agent, "providers_ignored", None)
-    child_providers_order = getattr(parent_agent, "providers_order", None)
-    child_provider_sort = getattr(parent_agent, "provider_sort", None)
-    child_provider_require_parameters = getattr(
-        parent_agent, "provider_require_parameters", False
-    )
-    child_provider_data_collection = getattr(
-        parent_agent, "provider_data_collection", None
-    ) or ""
-    child_openrouter_min_coding_score = getattr(parent_agent, "openrouter_min_coding_score", None)
-    if override_provider:
-        child_providers_allowed = None
-        child_providers_ignored = None
-        child_providers_order = None
-        child_provider_sort = None
-        child_provider_require_parameters = False
-        child_provider_data_collection = ""
-        # openrouter_min_coding_score stays inherited: model-gated, no-op elsewhere.
-
+    kwargs: Dict[str, Any] = {
+        "base_url": effective_base_url,
+        "api_key": override_api_key or parent_api_key,
+        "model": effective_model,
+        "provider": effective_provider,
+        "capabilities": _inherit_parent_capabilities(parent_agent, override_provider, override_base_url),
+        "api_mode": effective_api_mode,
+        "acp_command": effective_acp_command,
+        "acp_args": effective_acp_args,
+        "reasoning_config": child_reasoning,
+        # Inherit the parent's fallback chain EXCEPT under a pinned provider: a
+        # mid-run 429/auth failure must not silently reroute the quiet child onto
+        # the parent's fallbacks. Predictability > liveness for explicit pins.
+        "fallback_model": None if override_provider else (getattr(parent_agent, "_fallback_chain", None) or None),
+        "openrouter_min_coding_score": getattr(parent_agent, "openrouter_min_coding_score", None),
+    }
+    for attr, pinned_default in _ROUTING_FILTER_DEFAULTS:
+        kwargs[attr] = pinned_default if override_provider else getattr(parent_agent, attr, pinned_default)
+    if not override_provider:
+        kwargs["provider_data_collection"] = kwargs["provider_data_collection"] or ""
     child_max_tokens = (
-        override_max_tokens
-        if override_max_tokens is not None
-        else getattr(parent_agent, "max_tokens", None)
+        override_max_tokens if override_max_tokens is not None else getattr(parent_agent, "max_tokens", None)
     )
-    child_optional_kwargs: Dict[str, Any] = {}
     if isinstance(child_max_tokens, int):
-        child_optional_kwargs["max_tokens"] = child_max_tokens
-    return _ChildRuntime(
-        model=effective_model,
-        provider=effective_provider,
-        base_url=effective_base_url,
-        api_key=effective_api_key,
-        api_mode=effective_api_mode,
-        capabilities=child_capabilities,
-        acp_command=effective_acp_command,
-        acp_args=effective_acp_args,
-        reasoning=child_reasoning,
-        fallback=parent_fallback,
-        providers_allowed=child_providers_allowed,
-        providers_ignored=child_providers_ignored,
-        providers_order=child_providers_order,
-        provider_sort=child_provider_sort,
-        provider_require_parameters=child_provider_require_parameters,
-        provider_data_collection=child_provider_data_collection,
-        openrouter_min_coding_score=child_openrouter_min_coding_score,
-        optional_kwargs=child_optional_kwargs,
-    )
+        kwargs["max_tokens"] = child_max_tokens
+    return kwargs
 
 
 def _open_child_session_db(parent_agent) -> Any:
@@ -515,7 +456,7 @@ def _open_child_session_db(parent_agent) -> Any:
 
 
 def _construct_child_agent(
-    rt: _ChildRuntime,
+    rt: Dict[str, Any],
     *,
     task_index: int,
     max_iterations: int,
@@ -545,18 +486,9 @@ def _construct_child_agent(
     with delegated_child_context():
         try:
             return AIAgent(
-                base_url=rt.base_url,
-                api_key=rt.api_key,
-                model=rt.model,
-                provider=rt.provider,
-                capabilities=rt.capabilities,
-                api_mode=rt.api_mode,
-                acp_command=rt.acp_command,
-                acp_args=rt.acp_args,
+                **rt,
                 max_iterations=max_iterations,
-                reasoning_config=rt.reasoning,
                 prefill_messages=getattr(parent_agent, "prefill_messages", None),
-                fallback_model=rt.fallback,
                 enabled_toolsets=child_toolsets,
                 disabled_toolsets=child_disabled_toolsets,
                 quiet_mode=True,
@@ -569,12 +501,6 @@ def _construct_child_agent(
                 thinking_callback=child_thinking_cb,
                 session_db=child_session_db,
                 parent_session_id=getattr(parent_agent, "session_id", None),
-                providers_allowed=rt.providers_allowed,
-                providers_ignored=rt.providers_ignored,
-                providers_order=rt.providers_order,
-                provider_sort=rt.provider_sort,
-                provider_require_parameters=rt.provider_require_parameters,
-                provider_data_collection=rt.provider_data_collection,
                 request_overrides=(
                     # honored whenever set, incl. the inherit branch where
                     # _resolve_delegation_credentials already merged OVER the parent's
@@ -582,10 +508,8 @@ def _construct_child_agent(
                     if override_request_overrides is not None
                     else ({} if override_provider else dict(getattr(parent_agent, "request_overrides", {}) or {}))
                 ),
-                openrouter_min_coding_score=rt.openrouter_min_coding_score,
                 tool_progress_callback=child_progress_cb,
                 iteration_budget=None,  # fresh budget per subagent
-                **rt.optional_kwargs,
             )
         except BaseException:
             if child_session_db is not None:
@@ -735,7 +659,7 @@ def _build_child_agent(
         child._session_init_model_config["_delegate_from"] = parent_sid
 
     # Shared pool lets children rotate credentials on rate limits.
-    child_pool = _resolve_child_credential_pool(rt.provider, parent_agent, rt.base_url)
+    child_pool = _resolve_child_credential_pool(rt["provider"], parent_agent, rt["base_url"])
     if child_pool is not None:
         child._credential_pool = child_pool
 
