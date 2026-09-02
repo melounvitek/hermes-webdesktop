@@ -1424,10 +1424,5 @@ def check_execute_code_guard(code: str, env_type: str,
     )
 
 
-# =========================================================================
-# MCP elicitation entry point
-# =========================================================================
-
-
 # Load permanent allowlist from config on module import
 load_permanent_allowlist()

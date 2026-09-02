@@ -153,26 +153,17 @@ HARDLINE_PATTERNS = [
 _RE_FLAGS = re.IGNORECASE | re.DOTALL
 
 # Positionless hardline rules matched against quote-masked variants (see above).
-_QUOTE_MASKED_HARDLINE_DESCRIPTIONS = frozenset({
-    "redirect to raw block device",
-    "fork bomb",
-})
+_QUOTE_MASKED_HARDLINE_DESCRIPTIONS = frozenset({"redirect to raw block device", "fork bomb"})
 
 HARDLINE_PATTERNS_COMPILED = [
-    (
-        re.compile(pattern, _RE_FLAGS),
-        description,
-        description in _QUOTE_MASKED_HARDLINE_DESCRIPTIONS,
-    )
+    (re.compile(pattern, _RE_FLAGS), description, description in _QUOTE_MASKED_HARDLINE_DESCRIPTIONS)
     for pattern, description in HARDLINE_PATTERNS
 ]
 
 
 # Commands that hand a quoted argument to another shell to EXECUTE: quoted text
 # is code, not prose, so quote-masked hardline rules scan the raw string.
-_SHELL_CARRIER_NAMES = frozenset({
-    "eval", "sh", "bash", "zsh", "ksh", "dash", "source", ".",
-})
+_SHELL_CARRIER_NAMES = frozenset({"eval", "sh", "bash", "zsh", "ksh", "dash", "source", "."})
 
 
 def _contains_shell_carrier(command: str) -> bool:
@@ -543,12 +534,8 @@ _REMOVED_PATTERN_KEY_ALIASES = {
     "script execution via heredoc": "(python[23]?|perl|ruby|node)\\s+<<",
 }
 for _canonical_key, _legacy_key in _REMOVED_PATTERN_KEY_ALIASES.items():
-    _PATTERN_KEY_ALIASES.setdefault(_canonical_key, set()).update(
-        {_canonical_key, _legacy_key}
-    )
-    _PATTERN_KEY_ALIASES.setdefault(_legacy_key, set()).update(
-        {_legacy_key, _canonical_key}
-    )
+    _PATTERN_KEY_ALIASES.setdefault(_canonical_key, set()).update({_canonical_key, _legacy_key})
+    _PATTERN_KEY_ALIASES.setdefault(_legacy_key, set()).update({_legacy_key, _canonical_key})
 
 
 def _approval_key_aliases(pattern_key: str) -> set[str]:
@@ -674,22 +661,9 @@ _PARAM_REPLACEMENT_RE = re.compile(r"\$\{[^}/\s]+/[^}/]*/(?P<replacement>[^}]*)\
 _PARAM_DEFAULT_RE = re.compile(r"\$\{[^}:}\s]+:-(?P<default>[^}]*)\}")
 _SIMPLE_SHELL_LITERAL_RE = re.compile(r"^[A-Za-z0-9_./:@%+=,-]+$")
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
-_COMMAND_WRAPPER_WORDS = {
-    "sudo",
-    "env",
-    "exec",
-    "nohup",
-    "setsid",
-    "time",
-    "command",
-    "builtin",
-}
+_COMMAND_WRAPPER_WORDS = {"sudo", "env", "exec", "nohup", "setsid", "time", "command", "builtin"}
 _SUDO_OPTIONS_WITH_ARG = {
-    "-c", "--close-from",
-    "-g", "--group",
-    "-h", "--host",
-    "-p", "--prompt",
-    "-u", "--user",
+    "-c", "--close-from", "-g", "--group", "-h", "--host", "-p", "--prompt", "-u", "--user",
 }
 
 _INTERPRETER_EXEC_FLAGS = {
@@ -702,17 +676,17 @@ _INTERPRETER_EXEC_FLAGS = {
 }
 _INTERPRETER_WITH_ARG = {
     "python": {"-W", "-X", "--check-hash-based-pycs"},
-    "node": {"-C", "--conditions", "--cpu-prof-dir", "--diagnostic-dir", "--icu-data-dir", "--import", "--loader", "--openssl-config", "--require", "--title"},
+    "node": {"-C", "--conditions", "--cpu-prof-dir", "--diagnostic-dir", "--icu-data-dir",
+             "--import", "--loader", "--openssl-config", "--require", "--title"},
     "perl": {"-0", "-F", "-I", "-M", "-m", "-x"},
     "ruby": {"-C", "-E", "-F", "-I", "-K", "-r"},
     "php": {"-c", "-d", "-z"},
-    "powershell": {"-configurationname", "-custompipename", "-executionpolicy", "-inputformat", "-outputformat", "-settingsfile", "-version", "-windowstyle", "-workingdirectory"},
+    "powershell": {"-configurationname", "-custompipename", "-executionpolicy", "-inputformat",
+                   "-outputformat", "-settingsfile", "-version", "-windowstyle", "-workingdirectory"},
 }
 _READ_TOOL_EXEC_FLAGS = {
-    "sort": {"--compress-program"},
-    "rg": {"--pre", "--hostname-bin"},
-    "ag": {"--pager"},
-    "man": {"--pager", "--html", "-P", "-H"},
+    "sort": {"--compress-program"}, "rg": {"--pre", "--hostname-bin"},
+    "ag": {"--pager"}, "man": {"--pager", "--html", "-P", "-H"},
 }
 # Required-argument options are ownership boundaries: an option-looking next
 # token is data, not another option. These sets mirror the invocation grammar
@@ -747,10 +721,8 @@ _READ_TOOL_LONG_OPTIONS_WITH_ARG = {
     },
 }
 _READ_TOOL_SHORT_OPTIONS_WITH_ARG = {
-    "rg": frozenset("efEmjgdtTABCMr"),
-    "sort": frozenset("koStT"),
-    "man": frozenset("CRLmMSserEPp"),
-    "ag": frozenset("gGmpW"),
+    "rg": frozenset("efEmjgdtTABCMr"), "sort": frozenset("koStT"),
+    "man": frozenset("CRLmMSserEPp"), "ag": frozenset("gGmpW"),
 }
 _MAX_DETECTION_COMMAND_CHARS = 128_000
 _MAX_SEPARATOR_FREE_COMMAND_CHARS = 4_096
@@ -838,10 +810,9 @@ def _shell_tokens_with_spans(segment: str, start: int):
 
 
 _GREP_OPTIONS_WITH_ARG = {
-    "--after-context", "--before-context", "--binary-files", "--context",
-    "--directories", "--devices", "--exclude", "--exclude-dir",
-    "--exclude-from", "--include", "--label", "--max-count",
-    "--regexp", "--file",
+    "--after-context", "--before-context", "--binary-files", "--context", "--directories",
+    "--devices", "--exclude", "--exclude-dir", "--exclude-from", "--include", "--label",
+    "--max-count", "--regexp", "--file",
 }
 _GREP_SHORT_OPTIONS_WITH_ARG = {"A", "B", "C", "D", "d", "e", "f", "m"}
 
