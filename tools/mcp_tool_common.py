@@ -44,9 +44,8 @@ def mcp_field(obj, snake: str, camel: str, default=None):
     either SDK generation (``mcp`` is an optional extra at the user's version).
     """
     value = getattr(obj, snake, _MISSING)
-    if value is not _MISSING:
-        return value
-    value = getattr(obj, camel, _MISSING)
+    if value is _MISSING:
+        value = getattr(obj, camel, _MISSING)
     return default if value is _MISSING else value
 
 
@@ -78,8 +77,7 @@ _BACKOFF_JITTER = 0.2            # +/-20%
 
 def _jittered(seconds: float) -> float:
     """``seconds`` with +/-20% uniform jitter, floored at 0."""
-    return max(0.0, seconds * random.uniform(1.0 - _BACKOFF_JITTER,
-                                             1.0 + _BACKOFF_JITTER))
+    return max(0.0, seconds * random.uniform(1.0 - _BACKOFF_JITTER, 1.0 + _BACKOFF_JITTER))
 
 
 # Credential patterns to strip from error messages.
@@ -144,6 +142,10 @@ def _safe_numeric(value, default, coerce=int, minimum=1):
         return default
 
 
+_TRUE_WORDS = frozenset({"true", "1", "yes", "on"})
+_FALSE_WORDS = frozenset({"false", "0", "no", "off"})
+
+
 def _parse_boolish(value: Any, default: bool = True) -> bool:
     """Parse a bool-like config value with safe fallback."""
     if value is None:
@@ -152,16 +154,17 @@ def _parse_boolish(value: Any, default: bool = True) -> bool:
         return value
     if isinstance(value, str):
         lowered = value.strip().lower()
-        if lowered in {"true", "1", "yes", "on"}:
+        if lowered in _TRUE_WORDS:
             return True
-        if lowered in {"false", "0", "no", "off"}:
+        if lowered in _FALSE_WORDS:
             return False
     logger.warning("MCP config expected a boolean-ish value, got %r; using default=%s", value, default)
     return default
 
 
 def _get_lifecycle_seconds(config: dict, key: str) -> Optional[float]:
-    """Return an optional positive lifecycle timeout from top-level/nested config."""
+    """Return an optional positive lifecycle timeout from top-level/nested config
+    (``0`` disables; negatives and non-numbers are warned about and ignored)."""
     raw = config.get(key)
     lifecycle = config.get("lifecycle")
     if raw is None and isinstance(lifecycle, dict):
@@ -173,9 +176,7 @@ def _get_lifecycle_seconds(config: dict, key: str) -> Optional[float]:
     except (TypeError, ValueError):
         logger.warning("MCP config %s must be a number of seconds; ignoring %r", key, raw)
         return None
-    if seconds == 0:
-        return None
     if seconds < 0:
         logger.warning("MCP config %s must be positive; ignoring %r", key, raw)
         return None
-    return seconds
+    return seconds or None

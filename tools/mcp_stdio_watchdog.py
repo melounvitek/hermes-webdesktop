@@ -78,9 +78,7 @@ def _watchdog_loop(proc: subprocess.Popen, original_ppid: int) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Parent-death watchdog for a stdio MCP subprocess.",
-    )
+    parser = argparse.ArgumentParser(description="Parent-death watchdog for a stdio MCP subprocess.")
     parser.add_argument("--ppid", type=int, required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -94,13 +92,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # New process group so we can killpg() the whole tree the real command may
     # spawn, without touching our own group or the original parent's.
-    proc = subprocess.Popen(
-        real_argv,
-        stdin=sys.stdin,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        start_new_session=True,
-    )
+    proc = subprocess.Popen(real_argv, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, start_new_session=True)
 
     # The server lives in its OWN group, so the parent's shutdown killpg of
     # *our* group no longer reaches it. Forward SIGTERM/SIGINT to the child's
@@ -113,12 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _forward_shutdown)
     signal.signal(signal.SIGINT, _forward_shutdown)
 
-    watchdog = threading.Thread(
-        target=_watchdog_loop,
-        args=(proc, args.ppid),
-        daemon=True,
-    )
-    watchdog.start()
+    threading.Thread(target=_watchdog_loop, args=(proc, args.ppid), daemon=True).start()
 
     try:
         return proc.wait()

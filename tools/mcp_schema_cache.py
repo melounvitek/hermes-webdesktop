@@ -77,19 +77,16 @@ def get_cached_entry(server_name: str, fingerprint: str) -> Optional[dict]:
     """
     with _cache_lock:
         entry = _load_all().get(server_name)
-    if not isinstance(entry, dict):
-        return None
-    if entry.get("fingerprint") != fingerprint:
+    if not isinstance(entry, dict) or entry.get("fingerprint") != fingerprint:
         return None
     ttl_ms = entry.get("ttl_ms")
     written_at = entry.get("written_at")
-    if (
+    expired = (
         isinstance(ttl_ms, (int, float))
         and isinstance(written_at, (int, float))
         and (time.time() - written_at) * 1000.0 >= float(ttl_ms)
-    ):
-        return None
-    return entry
+    )
+    return None if expired else entry
 
 
 def write_cache_entry(
@@ -107,11 +104,7 @@ def write_cache_entry(
     ``tools/list`` result (2026-07-28 servers). ``written_at`` anchors TTL
     expiry in :func:`get_cached_entry`.
     """
-    entry = {
-        "fingerprint": fingerprint,
-        "tools": tools,
-        "utility_tools": utility_tools or [],
-    }
+    entry = {"fingerprint": fingerprint, "tools": tools, "utility_tools": utility_tools or []}
     if isinstance(ttl_ms, (int, float)):
         entry["ttl_ms"] = ttl_ms
         entry["written_at"] = time.time()
@@ -131,12 +124,16 @@ def write_cache_entry(
         _save_all(data)
 
 
+def _list_field(entry: dict, key: str) -> List[dict]:
+    value = entry.get(key)
+    return list(value) if isinstance(value, list) else []
+
+
 def tools_from_cache_entry(entry: dict) -> List[dict]:
     """Return cached MCP tool dicts (name, description, inputSchema)."""
-    tools = entry.get("tools")
-    return list(tools) if isinstance(tools, list) else []
+    return _list_field(entry, "tools")
 
 
 def utility_tools_from_cache_entry(entry: dict) -> List[dict]:
-    util = entry.get("utility_tools")
-    return list(util) if isinstance(util, list) else []
+    """Return cached ``{schema, handler_key}`` utility rows."""
+    return _list_field(entry, "utility_tools")
