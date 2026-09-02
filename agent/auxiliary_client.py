@@ -2698,6 +2698,8 @@ def _endpoint_default_headers(
 
 def _profile_default_headers(provider: str) -> Optional[dict]:
     """Client-level attribution headers from the provider profile (e.g. GMI User-Agent), or None."""
+    if not provider:
+        return None
     try:
         from providers import get_provider_profile
         profile = get_provider_profile(provider)
@@ -5553,44 +5555,24 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     if _client_declares(sync_client, "HERMES_SKIP_ASYNC_WRAP"):
         return sync_client, model
 
-    async_kwargs = {
-        "api_key": sync_client.api_key,
-        "base_url": str(sync_client.base_url),
-    }
     sync_base_url = str(sync_client.base_url)
+    async_kwargs = {"api_key": sync_client.api_key, "base_url": sync_base_url}
     if base_url_host_matches(sync_base_url, "openrouter.ai"):
-        async_kwargs["default_headers"] = build_or_headers()
-    elif base_url_host_matches(sync_base_url, "githubcopilot.com"):
-        from hermes_cli.copilot_auth import copilot_request_headers
-
-        async_kwargs["default_headers"] = copilot_request_headers(
-            is_agent_turn=True, is_vision=is_vision
-        )
-    elif base_url_host_matches(sync_base_url, "api.kimi.com"):
-        async_kwargs["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
-    elif base_url_host_matches(sync_base_url, "integrate.api.nvidia.com"):
-        async_kwargs["default_headers"] = build_nvidia_nim_headers(sync_base_url)
+        headers = _apply_user_default_headers(build_or_headers())
     elif _is_official_codex_base_url(sync_base_url):
-        async_kwargs["default_headers"] = _codex_cloudflare_headers(
-            sync_client.api_key, base_url=sync_base_url,
+        headers = _apply_user_default_headers(
+            _codex_cloudflare_headers(sync_client.api_key, base_url=sync_base_url)
         )
-    elif base_url_host_matches(sync_base_url, "x.ai"):
-        from tools.xai_http import hermes_xai_default_headers
-
-        async_kwargs["default_headers"] = hermes_xai_default_headers()
     else:
-        # profile.default_headers (e.g. attribution User-Agent); provider inferred from hostname.
+        # Provider for the profile-header fallback is inferred from the hostname.
         try:
             from agent.model_metadata import _infer_provider_from_url
-            _inferred = _infer_provider_from_url(sync_base_url)
+            inferred = _infer_provider_from_url(sync_base_url) or ""
         except Exception:
-            _inferred = None
-        _ph_async = _profile_default_headers(_inferred) if _inferred else None
-        if _ph_async:
-            async_kwargs["default_headers"] = _ph_async
-    _merged_async = _apply_user_default_headers(async_kwargs.get("default_headers"))
-    if _merged_async:
-        async_kwargs["default_headers"] = _merged_async
+            inferred = ""
+        headers = _endpoint_default_headers(sync_base_url, inferred, is_vision=is_vision, xai=True)
+    if headers:
+        async_kwargs["default_headers"] = headers
     _apply_required_codex_headers(
         async_kwargs, access_token=sync_client.api_key, base_url=sync_base_url,
     )
