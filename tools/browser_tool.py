@@ -1232,11 +1232,16 @@ def browser_snapshot(
             logger.debug("supervisor snapshot merge failed: %s", _sv_exc)
 
         return json.dumps(response, ensure_ascii=False)
-    else:
-        response = {
-            "success": False, "error": result.get("error", "Failed to get snapshot")
-        }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+    return _failed_response(result, "Failed to get snapshot")
+
+
+def _json_with_fallback(response: Dict[str, Any], result: Dict[str, Any]) -> str:
+    """``json.dumps`` of ``response`` with the Lightpanda fallback metadata copied from ``result``."""
+    return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+
+
+def _failed_response(result: Dict[str, Any], default_error: str) -> str:
+    return _json_with_fallback({"success": False, "error": result.get("error", default_error)}, result)
 
 
 def _tool_response(result: Dict[str, Any], ok: Dict[str, Any], default_error: str) -> str:
@@ -1246,11 +1251,9 @@ def _tool_response(result: Dict[str, Any], ok: Dict[str, Any], default_error: st
     "error": result.error or default_error}``. Lightpanda fallback metadata
     is copied onto either shape.
     """
-    if result.get("success"):
-        response = {"success": True, **ok}
-    else:
-        response = {"success": False, "error": result.get("error", default_error)}
-    return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+    if not result.get("success"):
+        return _failed_response(result, default_error)
+    return _json_with_fallback({"success": True, **ok}, result)
 
 
 def browser_click(ref: str, task_id: Optional[str] = None) -> str:
@@ -1720,20 +1723,12 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
             else:
                 images = raw_result
 
-            response = {
-                "success": True, "images": _redact_browser_output(images), "count": len(images)
-            }
-            return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+            return _json_with_fallback(
+                {"success": True, "images": _redact_browser_output(images), "count": len(images)}, result)
         except json.JSONDecodeError:
-            response = {
-                "success": True, "images": [], "count": 0, "warning": "Could not parse image data"
-            }
-            return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
-    else:
-        response = {
-            "success": False, "error": result.get("error", "Failed to get images")
-        }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+            return _json_with_fallback(
+                {"success": True, "images": [], "count": 0, "warning": "Could not parse image data"}, result)
+    return _failed_response(result, "Failed to get images")
 
 
 _LP_VISION_FALLBACK_REASON = (
@@ -1800,11 +1795,10 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
 
         if not result.get("success"):
             error_detail = result.get("error", "Unknown error")
-            error_response = {
+            return _json_with_fallback({
                 "success": False,
-                "error": f"Failed to take screenshot ({_vision_mode_label()} mode): {error_detail}"
-            }
-            return json.dumps(_copy_fallback_warning(error_response, result), ensure_ascii=False)
+                "error": f"Failed to take screenshot ({_vision_mode_label()} mode): {error_detail}",
+            }, result)
 
         actual_screenshot_path = result.get("data", {}).get("path")
         if actual_screenshot_path:
