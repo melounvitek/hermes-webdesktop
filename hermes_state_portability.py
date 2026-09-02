@@ -242,15 +242,12 @@ class SessionPortabilityMixin:
         Stranded-bot-session heal: before the desktop routed session RPCs by
         target session, a profile bot's rows accumulated in the DEFAULT
         profile's state.db; this moves the conversation to where routing now
-        looks. Pure composition: ``donor_db.export_session_lineage()`` ->
-        ``self.import_sessions()`` — routing/handoff/activity fields reset,
-        already-present ids skipped (idempotent re-adoption).
-
-        With ``retire_donor`` and a complete adoption, donor rows are ARCHIVED
-        (never deleted) with ``end_reason='adopted_by_profile'``. That
-        end_reason is deliberately NOT in the recoverable set
-        (agent_close/ws_orphan_reap): resurrection must not undo an adoption.
-
+        looks. Pure composition ``donor_db.export_session_lineage()`` ->
+        ``self.import_sessions()``: routing/handoff/activity fields reset,
+        already-present ids skipped (idempotent re-adoption). With
+        ``retire_donor`` and a complete adoption, donor rows are ARCHIVED
+        (never deleted) with ``end_reason='adopted_by_profile'`` — deliberately
+        NOT in the recoverable set, so resurrection cannot undo an adoption.
         Returns the ``import_sessions`` dict plus ``adopted`` and
         ``donor_retired`` (True only when EVERY segment's retirement applied).
         """

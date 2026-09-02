@@ -134,18 +134,14 @@ def schema_read_probe_statements() -> tuple:
     """SELECT statements that fail iff a live store is behind SCHEMA_SQL.
 
     Read-only opens skip ``_reconcile_columns()`` by design (no DDL against
-    another profile's live DB), so a store created before a schema addition
-    keeps failing on read paths until something opens it writable. Healing
-    callers (``_open_session_db_at_path`` in the web server) run these probes
-    after a read-only open: a missing table/column raises at prepare time.
-
-    Derived from SCHEMA_SQL so a column added there is covered automatically
-    (a hand-maintained list went stale within days). Each statement is
-    ``LIMIT 0`` (resolution at prepare time, zero rows read). Column
-    references are table-qualified: an unqualified double-quoted identifier
-    that fails to resolve silently degrades to a string literal (SQLite
-    misfeature), which would make the probe pass on exactly the stale store
-    it exists to catch.
+    another profile's live DB), so healing callers (``_open_session_db_at_path``
+    in the web server) run these probes after a read-only open: a missing
+    table/column raises at prepare time. Derived from SCHEMA_SQL so a column
+    added there is covered automatically (a hand-maintained list went stale
+    within days); ``LIMIT 0`` so zero rows are read. Column references are
+    table-qualified: an unqualified double-quoted identifier that fails to
+    resolve silently degrades to a string literal (SQLite misfeature), which
+    would make the probe pass on exactly the stale store it exists to catch.
     """
     global _READ_PROBE_STATEMENTS
     if _READ_PROBE_STATEMENTS is None:
@@ -470,19 +466,15 @@ class SessionSchemaMixin:
             return self._recover_stale_fts_locked(cursor, legacy=legacy)
 
     def retry_deferred_fts_recovery(self) -> bool:
-        """Retry a deferred stale-FTS rebuild on this open SessionDB.
-
-        ``_recover_stale_fts`` fails closed at open when holders or the rebuild
-        lock are busy, leaving ``_fts_stale`` set and search on LIKE. Live
-        write/search paths must never start a full rebuild, and a gateway
-        opens state.db once for days, so "next open" never comes. This is the
-        in-process retry from the gateway housekeeping tick: bounded backoff
-        (``_FTS_STALE_RETRY_SECONDS`` doubling to the max), non-blocking
-        admission (``timeout=0``), no new thread.
-
+        """Retry a deferred stale-FTS rebuild on this open SessionDB (gateway
+        housekeeping tick). ``_recover_stale_fts`` fails closed at open when
+        holders or the rebuild lock are busy, leaving ``_fts_stale`` set and
+        search on LIKE; live write/search paths must never start a full
+        rebuild, and a gateway opens state.db once for days, so "next open"
+        never comes. Bounded backoff (``_FTS_STALE_RETRY_SECONDS`` doubling to
+        the max), non-blocking admission (``timeout=0``), no new thread.
         Returns True only when the index was rebuilt and sync triggers
-        restored. Never raises.
-        """
+        restored. Never raises."""
         if not self._fts_stale or self.read_only or self._conn is None:
             return False
         now = time.monotonic()
@@ -1130,15 +1122,14 @@ class SessionSchemaMixin:
 
         Reached when the sync triggers were missing and the DDL just recreated
         them: the index has a gap of unknown extent. Two processes opening the
-        same DB after an update commonly hit this simultaneously — the
-        concurrent-rebuild interleaving that structurally corrupted state.db
-        in production — so this admits through ``fts_rebuild_admission`` and
-        FAILS CLOSED. On deferral the just-repaired triggers are dropped again
-        and the stale breadcrumb persisted (``_enter_fts_fail_open``'s
-        ordering contract: triggers must never be live over an unrebuilt gap);
-        the winner's rebuild, ``retry_deferred_fts_recovery``, or
-        ``_recover_stale_fts`` at next startup restores index and triggers.
-        """
+        same DB after an update commonly hit this simultaneously (the
+        interleaving that structurally corrupted state.db in production), so
+        this admits through ``fts_rebuild_admission`` and FAILS CLOSED. On
+        deferral the just-repaired triggers are dropped again and the stale
+        breadcrumb persisted — triggers must never be live over an unrebuilt
+        gap (``_enter_fts_fail_open``'s ordering contract); the winner's
+        rebuild, ``retry_deferred_fts_recovery`` or ``_recover_stale_fts`` at
+        next startup restores index and triggers."""
         with fts_rebuild_admission(self.db_path) as admitted:
             if admitted:
                 rebuild_fn()

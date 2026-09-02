@@ -662,19 +662,15 @@ class SessionSearchMixin:
         self, session_id: str, around_message_id: int, window: int = 5, bookend: int = 3,
         keep_roles: Optional[Tuple[str, ...]] = ("user", "assistant"),
     ) -> Dict[str, Any]:
-        """Anchored window (``get_messages_around``) plus session bookends.
-
-        - ``window``: filtered to ``keep_roles``, EXCEPT the anchor itself is
-          always kept regardless of role.
-        - ``bookend_start`` / ``bookend_end``: first/last ``bookend`` messages
-          with ids strictly outside the window (empty when the window already
-          overlaps the head/tail). Empty-content rows (tool-call-only turns)
-          are skipped so they don't crowd out prose.
-
-        Bookends let a hit anywhere in a long session yield the goal and the
-        resolution in one call. Empty slices + zero counts when the anchor
-        isn't in the session. ``keep_roles=None`` disables role filtering.
-        """
+        """Anchored window (``get_messages_around``) plus session bookends, so a
+        hit anywhere in a long session yields the goal and the resolution in
+        one call. ``window`` is filtered to ``keep_roles`` EXCEPT the anchor,
+        which is always kept; ``bookend_start`` / ``bookend_end`` are the
+        first/last ``bookend`` messages with ids strictly outside the window
+        (empty when the window already overlaps the head/tail), skipping
+        empty-content rows (tool-call-only turns) so they don't crowd out
+        prose. Empty slices + zero counts when the anchor isn't in the
+        session. ``keep_roles=None`` disables role filtering."""
         bookend = max(bookend, 0)
         primitive = self.get_messages_around(session_id, around_message_id, window=window)
         window_rows = primitive["window"]
@@ -1345,15 +1341,12 @@ class SessionSearchMixin:
     def rebuild_fts(self) -> int:
         """Rebuild FTS5 indexes from ``messages`` (``'rebuild'``) — the
         documented recovery for a corrupt index that rejects writes while
-        reads succeed.
-
-        A full structural rebuild must never run concurrently in two processes
-        sharing one state.db (that interleaving corrupted production DBs), so
-        this admits through ``fts_rebuild_admission`` and FAILS CLOSED,
-        returning 0 on deferral; callers treat 0 as "no progress" and fall
-        back to the stale-FTS breadcrumb path. Skips absent tables. Returns
-        the number of indexes rebuilt.
-        """
+        reads succeed. A full structural rebuild must never run concurrently
+        in two processes sharing one state.db (that interleaving corrupted
+        production DBs), so this admits through ``fts_rebuild_admission`` and
+        FAILS CLOSED, returning 0 on deferral (callers treat 0 as "no
+        progress" and fall back to the stale-FTS breadcrumb path). Skips
+        absent tables; returns the number of indexes rebuilt."""
         rebuilt = 0
         with fts_rebuild_admission(self.db_path) as admitted:
             if not admitted:
@@ -1379,22 +1372,17 @@ class SessionSearchMixin:
         """Run bounded FTS5 ``'merge'`` commands against each present index.
 
         A positive merge rank stops after ~that many output pages, so each
-        command holds the write lock for milliseconds regardless of index
-        size — unlike ``'optimize'`` (9-18 s per index on a 10 GB DB, enough
-        to exhaust a competing writer's lock-retry patience).
-
-        - ``usermerge`` is lowered to its minimum of 2 (persisted in the
-          ``%_config`` shadow table, once per instance) so a positive merge
-          acts on ANY level with >= 2 segments; at the default 4 a fragmented
-          index cannot converge.
-        - Up to *max_commands* per index, stopping on the documented
-          no-progress signal: ``total_changes`` delta < 2 (the command's own
-          INSERT is 1 change).
-
-        Each command is its own implicit transaction (``isolation_level=None``),
-        so competing processes interleave mid-pass. Missing tables are valid
-        variants (optimize_fts_storage drops + backfills them live) and are
-        skipped; other SQLite errors propagate. Returns commands executed.
+        command holds the write lock for milliseconds regardless of index size
+        (``'optimize'`` takes 9-18 s per index on a 10 GB DB, exhausting a
+        competing writer's lock-retry patience). ``usermerge`` is lowered to
+        its minimum of 2 (persisted in ``%_config``, once per instance) so a
+        positive merge acts on ANY level with >= 2 segments; at the default 4 a
+        fragmented index cannot converge. Up to *max_commands* per index,
+        stopping on the no-progress signal ``total_changes`` delta < 2 (the
+        command's own INSERT is 1 change). Each command is its own implicit
+        transaction, so competing processes interleave mid-pass. Missing tables
+        are valid variants (optimize_fts_storage drops + backfills them live)
+        and are skipped; other SQLite errors propagate. Returns commands executed.
         """
         if isinstance(max_pages, bool) or not isinstance(max_pages, int):
             raise TypeError("max_pages must be an integer")
