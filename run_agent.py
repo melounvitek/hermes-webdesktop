@@ -349,6 +349,29 @@ _ROUTE_DEFAULT_HEADERS = (
 )
 
 
+def _forward(module: str, name: str, *, static: bool = False):
+    """Build an AIAgent method that lazily forwards to ``module.name`` (``target(self, *args, **kwargs)``).
+
+    The target is resolved on every call, so ``patch("<module>.<name>")`` in tests still intercepts and
+    run_agent keeps its import-time cost. ``static=True`` drops ``self``.
+    """
+    import importlib
+
+    if static:
+        def forwarder(*args, **kwargs):
+            return getattr(importlib.import_module(module), name)(*args, **kwargs)
+    else:
+        def forwarder(self, *args, **kwargs):
+            return getattr(importlib.import_module(module), name)(self, *args, **kwargs)
+    forwarder.__name__ = forwarder.__qualname__ = name
+    forwarder.__doc__ = f"Forwarder — see ``{module}.{name}``."
+    return staticmethod(forwarder) if static else forwarder
+
+
+def _forward_static(module: str, name: str):
+    return _forward(module, name, static=True)
+
+
 def _safe_session_filename_component(session_id: str) -> str:
     """Return a stable, path-safe filename component for a session ID.
 
@@ -501,7 +524,8 @@ class AIAgent:
         requested_provider: str = None,
         capabilities: Dict[str, bool] | None = None,
     ):
-        """Forwarder — see ``agent.agent_init.init_agent``."""
+        """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``)."""
+        init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "tool_delay")}
         if tool_delay is not None:
             warnings.warn(
                 "tool_delay is deprecated and ignored; sequential tool calls "
@@ -510,88 +534,7 @@ class AIAgent:
                 stacklevel=2,
             )
         from agent.agent_init import init_agent
-        init_agent(
-            self,
-            base_url=base_url,
-            api_key=api_key,
-            provider=provider,
-            requested_provider=requested_provider,
-            capabilities=capabilities,
-            api_mode=api_mode,
-            acp_command=acp_command,
-            acp_args=acp_args,
-            command=command,
-            args=args,
-            model=model,
-            max_iterations=max_iterations,
-            enabled_toolsets=enabled_toolsets,
-            disabled_toolsets=disabled_toolsets,
-            save_trajectories=save_trajectories,
-            verbose_logging=verbose_logging,
-            quiet_mode=quiet_mode,
-            tool_progress_mode=tool_progress_mode,
-            ephemeral_system_prompt=ephemeral_system_prompt,
-            log_prefix_chars=log_prefix_chars,
-            log_prefix=log_prefix,
-            providers_allowed=providers_allowed,
-            providers_ignored=providers_ignored,
-            providers_order=providers_order,
-            provider_sort=provider_sort,
-            provider_require_parameters=provider_require_parameters,
-            provider_data_collection=provider_data_collection,
-            openrouter_min_coding_score=openrouter_min_coding_score,
-            session_id=session_id,
-            tool_progress_callback=tool_progress_callback,
-            tool_start_callback=tool_start_callback,
-            tool_complete_callback=tool_complete_callback,
-            thinking_callback=thinking_callback,
-            reasoning_callback=reasoning_callback,
-            clarify_callback=clarify_callback,
-            read_terminal_callback=read_terminal_callback,
-            read_preview_callback=read_preview_callback,
-            drive_preview_callback=drive_preview_callback,
-            read_window_below_callback=read_window_below_callback,
-            setup_mcp_callback=setup_mcp_callback,
-            tour_callback=tour_callback,
-            step_callback=step_callback,
-            stream_delta_callback=stream_delta_callback,
-            interim_assistant_callback=interim_assistant_callback,
-            tool_gen_callback=tool_gen_callback,
-            status_callback=status_callback,
-            notice_callback=notice_callback,
-            notice_clear_callback=notice_clear_callback,
-            event_callback=event_callback,
-            reaction_callback=reaction_callback,
-            max_tokens=max_tokens,
-            reasoning_config=reasoning_config,
-            service_tier=service_tier,
-            request_overrides=request_overrides,
-            prefill_messages=prefill_messages,
-            platform=platform,
-            user_id=user_id,
-            user_id_alt=user_id_alt,
-            user_name=user_name,
-            chat_id=chat_id,
-            chat_name=chat_name,
-            chat_type=chat_type,
-            thread_id=thread_id,
-            gateway_session_key=gateway_session_key,
-            skip_context_files=skip_context_files,
-            load_soul_identity=load_soul_identity,
-            skip_memory=skip_memory,
-            skip_background_review=skip_background_review,
-            session_db=session_db,
-            parent_session_id=parent_session_id,
-            iteration_budget=iteration_budget,
-            run_budget_seconds=run_budget_seconds,
-            fallback_model=fallback_model,
-            credential_pool=credential_pool,
-            checkpoints_enabled=checkpoints_enabled,
-            checkpoint_max_snapshots=checkpoint_max_snapshots,
-            checkpoint_max_total_size_mb=checkpoint_max_total_size_mb,
-            checkpoint_max_file_size_mb=checkpoint_max_file_size_mb,
-            pass_session_id=pass_session_id,
-        )
+        init_agent(self, **init_kwargs)
 
     def _get_session_db_for_recall(self):
         """Return a SessionDB for recall, lazily creating it if an entrypoint forgot.
@@ -863,26 +806,7 @@ class AIAgent:
             return_load_result=True,
         )
 
-    def switch_model(
-        self,
-        new_model,
-        new_provider,
-        api_key='',
-        base_url='',
-        api_mode='',
-        capabilities=None,
-    ):
-        """Forwarder — see ``agent.agent_runtime_helpers.switch_model``."""
-        from agent.agent_runtime_helpers import switch_model
-        return switch_model(
-            self,
-            new_model,
-            new_provider,
-            api_key,
-            base_url,
-            api_mode,
-            capabilities,
-        )
+    switch_model = _forward("agent.agent_runtime_helpers", "switch_model")
 
     def _safe_print(self, *args, **kwargs):
         """Print that silently handles broken pipes / closed stdout.
@@ -1181,11 +1105,7 @@ class AIAgent:
     # actual list lives in ``agent.stream_diag.STREAM_DIAG_HEADERS``.
     from agent.stream_diag import STREAM_DIAG_HEADERS as _STREAM_DIAG_HEADERS  # noqa: E402
 
-    @staticmethod
-    def _stream_diag_init() -> Dict[str, Any]:
-        """Forwarder — see ``agent.stream_diag.stream_diag_init``."""
-        from agent.stream_diag import stream_diag_init
-        return stream_diag_init()
+    _stream_diag_init = _forward_static("agent.stream_diag", "stream_diag_init")
 
     def _stream_diag_capture_response(
         self, diag: Dict[str, Any], http_response: Any
@@ -1194,11 +1114,7 @@ class AIAgent:
         from agent.stream_diag import stream_diag_capture_response
         stream_diag_capture_response(self, diag, http_response)
 
-    @staticmethod
-    def _flatten_exception_chain(error: BaseException) -> str:
-        """Forwarder — see ``agent.stream_diag.flatten_exception_chain``."""
-        from agent.stream_diag import flatten_exception_chain
-        return flatten_exception_chain(error)
+    _flatten_exception_chain = _forward_static("agent.stream_diag", "flatten_exception_chain")
 
     def _is_provider_stream_parse_error(self, error: BaseException) -> bool:
         """Return True for malformed provider streaming data from SDK parsers.
@@ -1452,35 +1368,9 @@ class AIAgent:
             in (getattr(self, "_base_url_lower", "") or "")
         )
 
-    def _anthropic_prompt_cache_policy(
-        self,
-        *,
-        provider: Optional[str] = None,
-        base_url: Optional[str] = None,
-        api_mode: Optional[str] = None,
-        model: Optional[str] = None,
-    ) -> tuple[bool, bool]:
-        """Forwarder — see ``agent.agent_runtime_helpers.anthropic_prompt_cache_policy``."""
-        from agent.agent_runtime_helpers import anthropic_prompt_cache_policy
-        return anthropic_prompt_cache_policy(self, provider=provider, base_url=base_url, api_mode=api_mode, model=model)
+    _anthropic_prompt_cache_policy = _forward("agent.agent_runtime_helpers", "anthropic_prompt_cache_policy")
 
-    def _direct_native_anthropic_tool_cache_capability(
-        self,
-        *,
-        provider: Optional[str] = None,
-        base_url: Optional[str] = None,
-        api_mode: Optional[str] = None,
-        model: Optional[str] = None,
-    ) -> bool:
-        """Forwarder for the request-local native Anthropic tool capability."""
-        from agent.agent_runtime_helpers import _direct_native_anthropic_tool_cache_capability
-        return _direct_native_anthropic_tool_cache_capability(
-            self,
-            provider=provider,
-            base_url=base_url,
-            api_mode=api_mode,
-            model=model,
-        )
+    _direct_native_anthropic_tool_cache_capability = _forward("agent.agent_runtime_helpers", "_direct_native_anthropic_tool_cache_capability")
 
     @staticmethod
     def _model_requires_responses_api(model: str) -> bool:
@@ -1566,10 +1456,7 @@ class AIAgent:
         # Check if there's any non-whitespace content remaining
         return bool(cleaned.strip())
 
-    def _strip_think_blocks(self, content: str) -> str:
-        """Forwarder — see ``agent.agent_runtime_helpers.strip_think_blocks``."""
-        from agent.agent_runtime_helpers import strip_think_blocks
-        return strip_think_blocks(self, content)
+    _strip_think_blocks = _forward("agent.agent_runtime_helpers", "strip_think_blocks")
 
     @staticmethod
     def _has_natural_response_ending(content: str) -> bool:
@@ -1643,28 +1530,11 @@ class AIAgent:
 
         return not self._has_natural_response_ending(visible_text)
 
-    def _looks_like_codex_intermediate_ack(
-        self,
-        user_message: str,
-        assistant_content: str,
-        messages: List[Dict[str, Any]],
-        require_workspace: bool = True,
-    ) -> bool:
-        """Forwarder — see ``agent.agent_runtime_helpers.looks_like_codex_intermediate_ack``."""
-        from agent.agent_runtime_helpers import looks_like_codex_intermediate_ack
-        return looks_like_codex_intermediate_ack(
-            self, user_message, assistant_content, messages, require_workspace
-        )
+    _looks_like_codex_intermediate_ack = _forward("agent.agent_runtime_helpers", "looks_like_codex_intermediate_ack")
 
-    def _extract_reasoning(self, assistant_message) -> Optional[str]:
-        """Forwarder — see ``agent.agent_runtime_helpers.extract_reasoning``."""
-        from agent.agent_runtime_helpers import extract_reasoning
-        return extract_reasoning(self, assistant_message)
+    _extract_reasoning = _forward("agent.agent_runtime_helpers", "extract_reasoning")
 
-    def _cleanup_task_resources(self, task_id: str) -> None:
-        """Forwarder — see ``agent.chat_completion_helpers.cleanup_task_resources``."""
-        from agent.chat_completion_helpers import cleanup_task_resources
-        return cleanup_task_resources(self, task_id)
+    _cleanup_task_resources = _forward("agent.chat_completion_helpers", "cleanup_task_resources")
 
     # Background memory/skill review — prompts live in agent.background_review.
     from agent.background_review import (
@@ -1835,23 +1705,7 @@ class AIAgent:
         except Exception:  # noqa: BLE001 — requeue is best-effort
             logger.debug("Preempted-review requeue failed", exc_info=True)
 
-    def _build_memory_write_metadata(
-        self,
-        *,
-        write_origin: Optional[str] = None,
-        execution_context: Optional[str] = None,
-        task_id: Optional[str] = None,
-        tool_call_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Forwarder — see ``agent.background_review.build_memory_write_metadata``."""
-        from agent.background_review import build_memory_write_metadata
-        return build_memory_write_metadata(
-            self,
-            write_origin=write_origin,
-            execution_context=execution_context,
-            task_id=task_id,
-            tool_call_id=tool_call_id,
-        )
+    _build_memory_write_metadata = _forward("agent.background_review", "build_memory_write_metadata")
 
     def _apply_persist_user_message_override(self, messages: List[Dict]) -> None:
         """Rewrite the current-turn user message before persistence/return.
@@ -1963,10 +1817,7 @@ class AIAgent:
         ):
             messages.pop()
 
-    def _repair_message_sequence(self, messages: List[Dict]) -> int:
-        """Forwarder — see ``agent.agent_runtime_helpers.repair_message_sequence``."""
-        from agent.agent_runtime_helpers import repair_message_sequence
-        return repair_message_sequence(self, messages)
+    _repair_message_sequence = _forward("agent.agent_runtime_helpers", "repair_message_sequence")
 
     def _flush_messages_to_session_db(
         self,
@@ -2304,15 +2155,9 @@ class AIAgent:
         # Return everything up to (not including) the last assistant message
         return messages[:last_assistant_idx]
 
-    def _format_tools_for_system_message(self) -> str:
-        """Forwarder — see ``agent.system_prompt.format_tools_for_system_message``."""
-        from agent.system_prompt import format_tools_for_system_message
-        return format_tools_for_system_message(self)
+    _format_tools_for_system_message = _forward("agent.system_prompt", "format_tools_for_system_message")
 
-    def _convert_to_trajectory_format(self, messages: List[Dict[str, Any]], user_query: str, completed: bool) -> List[Dict[str, Any]]:
-        """Forwarder — see ``agent.agent_runtime_helpers.convert_to_trajectory_format``."""
-        from agent.agent_runtime_helpers import convert_to_trajectory_format
-        return convert_to_trajectory_format(self, messages, user_query, completed)
+    _convert_to_trajectory_format = _forward("agent.agent_runtime_helpers", "convert_to_trajectory_format")
 
     def _save_trajectory(self, messages: List[Dict[str, Any]], user_query: str, completed: bool):
         """Save conversation trajectory to JSONL file."""
@@ -2547,11 +2392,7 @@ class AIAgent:
 
         return cleaned
 
-    @staticmethod
-    def _extract_api_error_context(error: Exception) -> Dict[str, Any]:
-        """Forwarder — see ``agent.agent_runtime_helpers.extract_api_error_context``."""
-        from agent.agent_runtime_helpers import extract_api_error_context
-        return extract_api_error_context(error)
+    _extract_api_error_context = _forward_static("agent.agent_runtime_helpers", "extract_api_error_context")
 
     def _usage_summary_for_api_request_hook(self, response: Any) -> Optional[Dict[str, Any]]:
         """Token buckets for ``post_api_request`` plugins (no raw ``response`` object)."""
@@ -2814,16 +2655,7 @@ class AIAgent:
         except Exception:
             pass
 
-    def _dump_api_request_debug(
-        self,
-        api_kwargs: Dict[str, Any],
-        *,
-        reason: str,
-        error: Optional[Exception] = None,
-    ) -> Optional[Path]:
-        """Forwarder — see ``agent.agent_runtime_helpers.dump_api_request_debug``."""
-        from agent.agent_runtime_helpers import dump_api_request_debug
-        return dump_api_request_debug(self, api_kwargs, reason=reason, error=error)
+    _dump_api_request_debug = _forward("agent.agent_runtime_helpers", "dump_api_request_debug")
 
     @staticmethod
     def _clean_session_content(content: str) -> str:
@@ -3685,10 +3517,7 @@ class AIAgent:
         # which already surfaces its own message) — don't second-guess.
         return ""
 
-    def _apply_pending_steer_to_tool_results(self, messages: list, num_tool_msgs: int) -> None:
-        """Forwarder — see ``agent.agent_runtime_helpers.apply_pending_steer_to_tool_results``."""
-        from agent.agent_runtime_helpers import apply_pending_steer_to_tool_results
-        return apply_pending_steer_to_tool_results(self, messages, num_tool_msgs)
+    _apply_pending_steer_to_tool_results = _forward("agent.agent_runtime_helpers", "apply_pending_steer_to_tool_results")
 
     def _liveness_activity_lock(self) -> "threading.Lock":
         """Shared lock for the activity clock and its generation counter.
@@ -4457,11 +4286,7 @@ class AIAgent:
 
     _VALID_API_ROLES = frozenset({"system", "user", "assistant", "tool", "function", "developer"})
 
-    @staticmethod
-    def _sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Forwarder — see ``agent.agent_runtime_helpers.sanitize_api_messages``."""
-        from agent.agent_runtime_helpers import sanitize_api_messages
-        return sanitize_api_messages(messages)
+    _sanitize_api_messages = _forward_static("agent.agent_runtime_helpers", "sanitize_api_messages")
 
     @staticmethod
     def _is_thinking_only_assistant(
@@ -4529,18 +4354,7 @@ class AIAgent:
             )
         return False
 
-    @staticmethod
-    def _drop_thinking_only_and_merge_users(
-        messages: List[Dict[str, Any]],
-        *,
-        drop_codex_reasoning_items: bool = True,
-    ) -> List[Dict[str, Any]]:
-        """Forwarder — see ``agent.agent_runtime_helpers.drop_thinking_only_and_merge_users``."""
-        from agent.agent_runtime_helpers import drop_thinking_only_and_merge_users
-        return drop_thinking_only_and_merge_users(
-            messages,
-            drop_codex_reasoning_items=drop_codex_reasoning_items,
-        )
+    _drop_thinking_only_and_merge_users = _forward_static("agent.agent_runtime_helpers", "drop_thinking_only_and_merge_users")
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
@@ -4605,10 +4419,7 @@ class AIAgent:
         """
         return _sanitize_uniquify_tool_call_ids(tool_calls)
 
-    def _repair_tool_call(self, tool_name: str) -> str | None:
-        """Forwarder — see ``agent.agent_runtime_helpers.repair_tool_call``."""
-        from agent.agent_runtime_helpers import repair_tool_call
-        return repair_tool_call(self, tool_name)
+    _repair_tool_call = _forward("agent.agent_runtime_helpers", "repair_tool_call")
 
     def _invalidate_system_prompt(self):
         """Forwarder — see ``agent.system_prompt.invalidate_system_prompt``."""
@@ -4690,16 +4501,9 @@ class AIAgent:
 
         return build_keepalive_http_client(base_url, verify=verify)
 
-    def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
-        """Forwarder — see ``agent.agent_runtime_helpers.create_openai_client``."""
-        from agent.agent_runtime_helpers import create_openai_client
-        return create_openai_client(self, client_kwargs, reason=reason, shared=shared)
+    _create_openai_client = _forward("agent.agent_runtime_helpers", "create_openai_client")
 
-    @staticmethod
-    def _force_close_tcp_sockets(client: Any) -> int:
-        """Forwarder — see ``agent.agent_runtime_helpers.force_close_tcp_sockets``."""
-        from agent.agent_runtime_helpers import force_close_tcp_sockets
-        return force_close_tcp_sockets(client)
+    _force_close_tcp_sockets = _forward_static("agent.agent_runtime_helpers", "force_close_tcp_sockets")
 
     def _close_openai_client(self, client: Any, *, reason: str, shared: bool) -> None:
         if client is None:
@@ -4882,10 +4686,7 @@ class AIAgent:
         self._close_openai_client(old_client, reason=f"replace:{reason}", shared=True)
         return new_client
 
-    def _cleanup_dead_connections(self) -> bool:
-        """Forwarder — see ``agent.agent_runtime_helpers.cleanup_dead_connections``."""
-        from agent.agent_runtime_helpers import cleanup_dead_connections
-        return cleanup_dead_connections(self)
+    _cleanup_dead_connections = _forward("agent.agent_runtime_helpers", "cleanup_dead_connections")
 
     @staticmethod
     def _api_kwargs_have_image_parts(api_kwargs: dict) -> bool:
@@ -5255,15 +5056,9 @@ class AIAgent:
                 exc,
             )
 
-    def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
-        """Forwarder — see ``agent.codex_runtime.run_codex_stream``."""
-        from agent.codex_runtime import run_codex_stream
-        return run_codex_stream(self, api_kwargs, client, on_first_delta)
+    _run_codex_stream = _forward("agent.codex_runtime", "run_codex_stream")
 
-    def _run_codex_create_stream_fallback(self, api_kwargs: dict, client: Any = None):
-        """Forwarder — see ``agent.codex_runtime.run_codex_create_stream_fallback``."""
-        from agent.codex_runtime import run_codex_create_stream_fallback
-        return run_codex_create_stream_fallback(self, api_kwargs, client)
+    _run_codex_create_stream_fallback = _forward("agent.codex_runtime", "run_codex_create_stream_fallback")
 
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider not in {"openai-codex", "xai-oauth"}:
@@ -5866,18 +5661,7 @@ class AIAgent:
             apply_user_headers=not route_changed,
         )
 
-    def _recover_with_credential_pool(
-        self,
-        *,
-        status_code: Optional[int],
-        has_retried_429: bool,
-        classified_reason: Optional[FailoverReason] = None,
-        error_context: Optional[Dict[str, Any]] = None,
-        billing_unverified: bool = False,
-    ) -> tuple[bool, bool]:
-        """Forwarder — see ``agent.agent_runtime_helpers.recover_with_credential_pool``."""
-        from agent.agent_runtime_helpers import recover_with_credential_pool
-        return recover_with_credential_pool(self, status_code=status_code, has_retried_429=has_retried_429, classified_reason=classified_reason, error_context=error_context, billing_unverified=billing_unverified)
+    _recover_with_credential_pool = _forward("agent.agent_runtime_helpers", "recover_with_credential_pool")
 
     def _anthropic_messages_create(self, api_kwargs: dict, *, client: Any = None):
         # A supplied request-local client was already refreshed in _create_request_anthropic_client.
@@ -5915,10 +5699,7 @@ class AIAgent:
                 drop_context_1m_beta=_drop_1m,
             )
 
-    def _interruptible_api_call(self, api_kwargs: dict):
-        """Forwarder — see ``agent.chat_completion_helpers.interruptible_api_call``."""
-        from agent.chat_completion_helpers import interruptible_api_call
-        return interruptible_api_call(self, api_kwargs)
+    _interruptible_api_call = _forward("agent.chat_completion_helpers", "interruptible_api_call")
 
     # ── Unified streaming API call ─────────────────────────────────────────
 
@@ -6359,17 +6140,9 @@ class AIAgent:
             or getattr(self, "_stream_callback", None) is not None
         )
 
-    def _interruptible_streaming_api_call(
-        self, api_kwargs: dict, *, on_first_delta: callable = None
-    ):
-        """Forwarder — see ``agent.chat_completion_helpers.interruptible_streaming_api_call``."""
-        from agent.chat_completion_helpers import interruptible_streaming_api_call
-        return interruptible_streaming_api_call(self, api_kwargs, on_first_delta=on_first_delta)
+    _interruptible_streaming_api_call = _forward("agent.chat_completion_helpers", "interruptible_streaming_api_call")
 
-    def _try_activate_fallback(self, reason: "FailoverReason | None" = None) -> bool:
-        """Forwarder — see ``agent.chat_completion_helpers.try_activate_fallback``."""
-        from agent.chat_completion_helpers import try_activate_fallback
-        return try_activate_fallback(self, reason)
+    _try_activate_fallback = _forward("agent.chat_completion_helpers", "try_activate_fallback")
 
     def _has_pending_fallback(self) -> bool:
         """Whether a fallback provider is actually available to switch to.
@@ -6383,17 +6156,9 @@ class AIAgent:
 
     # ── Per-turn primary restoration ─────────────────────────────────────
 
-    def _restore_primary_runtime(self) -> bool:
-        """Forwarder — see ``agent.agent_runtime_helpers.restore_primary_runtime``."""
-        from agent.agent_runtime_helpers import restore_primary_runtime
-        return restore_primary_runtime(self)
+    _restore_primary_runtime = _forward("agent.agent_runtime_helpers", "restore_primary_runtime")
 
-    def _try_recover_primary_transport(
-        self, api_error: Exception, *, retry_count: int, max_retries: int,
-    ) -> bool:
-        """Forwarder — see ``agent.agent_runtime_helpers.try_recover_primary_transport``."""
-        from agent.agent_runtime_helpers import try_recover_primary_transport
-        return try_recover_primary_transport(self, api_error, retry_count=retry_count, max_retries=max_retries)
+    _try_recover_primary_transport = _forward("agent.agent_runtime_helpers", "try_recover_primary_transport")
 
     @staticmethod
     def _content_has_image_parts(content: Any) -> bool:
@@ -7018,10 +6783,7 @@ class AIAgent:
 
         return {"effort": requested_effort}
 
-    def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
-        """Forwarder — see ``agent.chat_completion_helpers.build_assistant_message``."""
-        from agent.chat_completion_helpers import build_assistant_message
-        return build_assistant_message(self, assistant_message, finish_reason)
+    _build_assistant_message = _forward("agent.chat_completion_helpers", "build_assistant_message")
 
     def _needs_thinking_reasoning_pad(self) -> bool:
         """Return True when the active provider enforces ``reasoning_content`` echo-back on tool-call replays.
@@ -7100,15 +6862,9 @@ class AIAgent:
             "mimo", (self.provider or "").lower(), self.model, self.base_url
         )
 
-    def _copy_reasoning_content_for_api(self, source_msg: dict, api_msg: dict) -> None:
-        """Forwarder — see ``agent.agent_runtime_helpers.copy_reasoning_content_for_api``."""
-        from agent.agent_runtime_helpers import copy_reasoning_content_for_api
-        return copy_reasoning_content_for_api(self, source_msg, api_msg)
+    _copy_reasoning_content_for_api = _forward("agent.agent_runtime_helpers", "copy_reasoning_content_for_api")
 
-    def _reapply_reasoning_echo_for_provider(self, api_messages: list) -> int:
-        """Forwarder — see ``agent.agent_runtime_helpers.reapply_reasoning_echo_for_provider``."""
-        from agent.agent_runtime_helpers import reapply_reasoning_echo_for_provider
-        return reapply_reasoning_echo_for_provider(self, api_messages)
+    _reapply_reasoning_echo_for_provider = _forward("agent.agent_runtime_helpers", "reapply_reasoning_echo_for_provider")
 
     @staticmethod
     def _sanitize_tool_calls_for_strict_api(api_msg: dict, model: "str | None" = None) -> dict:
@@ -7133,19 +6889,7 @@ class AIAgent:
         ]
         return api_msg
 
-    @staticmethod
-    def _sanitize_tool_call_arguments(
-        messages: list,
-        *,
-        logger=None,
-        session_id: str = None,
-        cursor=None,
-    ) -> int:
-        """Forwarder — see ``agent.agent_runtime_helpers.sanitize_tool_call_arguments``."""
-        from agent.agent_runtime_helpers import sanitize_tool_call_arguments
-        return sanitize_tool_call_arguments(
-            messages, logger=logger, session_id=session_id, cursor=cursor
-        )
+    _sanitize_tool_call_arguments = _forward_static("agent.agent_runtime_helpers", "sanitize_tool_call_arguments")
 
     def _should_sanitize_tool_calls(self) -> bool:
         """Determine if tool_calls need sanitization (True for every non-Codex API).
@@ -7644,26 +7388,7 @@ class AIAgent:
             parent_agent=self,
         )
 
-    def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
-                     tool_call_id: Optional[str] = None, messages: list = None,
-                     pre_tool_block_checked: bool = False,
-                     skip_tool_request_middleware: bool = False,
-                     tool_request_middleware_trace: Optional[list[dict[str, Any]]] = None,
-                     skip_tool_execution_middleware: bool = False) -> str:
-        """Forwarder — see ``agent.agent_runtime_helpers.invoke_tool``."""
-        from agent.agent_runtime_helpers import invoke_tool
-        return invoke_tool(
-            self,
-            function_name,
-            function_args,
-            effective_task_id,
-            tool_call_id,
-            messages,
-            pre_tool_block_checked,
-            skip_tool_request_middleware,
-            tool_request_middleware_trace,
-            skip_tool_execution_middleware,
-        )
+    _invoke_tool = _forward("agent.agent_runtime_helpers", "invoke_tool")
 
     @staticmethod
     def _wrap_verbose(label: str, text: str, indent: str = "     ") -> str:
@@ -7687,20 +7412,11 @@ class AIAgent:
         body = ("\n" + indent).join(out_lines)
         return f"{indent}{label}{body}"
 
-    def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-        """Forwarder — see ``agent.tool_executor.execute_tool_calls_concurrent``."""
-        from agent.tool_executor import execute_tool_calls_concurrent
-        return execute_tool_calls_concurrent(self, assistant_message, messages, effective_task_id, api_call_count)
+    _execute_tool_calls_concurrent = _forward("agent.tool_executor", "execute_tool_calls_concurrent")
 
-    def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-        """Forwarder — see ``agent.tool_executor.execute_tool_calls_sequential``."""
-        from agent.tool_executor import execute_tool_calls_sequential
-        return execute_tool_calls_sequential(self, assistant_message, messages, effective_task_id, api_call_count)
+    _execute_tool_calls_sequential = _forward("agent.tool_executor", "execute_tool_calls_sequential")
 
-    def _handle_max_iterations(self, messages: list, api_call_count: int) -> str:
-        """Forwarder — see ``agent.chat_completion_helpers.handle_max_iterations``."""
-        from agent.chat_completion_helpers import handle_max_iterations
-        return handle_max_iterations(self, messages, api_call_count)
+    _handle_max_iterations = _forward("agent.chat_completion_helpers", "handle_max_iterations")
 
     def _conversation_root_id(self) -> Optional[str]:
         """Resolve the stable conversation id for Portal usage attribution.
@@ -8321,18 +8037,7 @@ class AIAgent:
         result = self.run_conversation(message, stream_callback=stream_callback)
         return result["final_response"]
 
-    def _run_codex_app_server_turn(
-        self,
-        *,
-        user_message: str,
-        original_user_message: Any,
-        messages: List[Dict[str, Any]],
-        effective_task_id: str,
-        should_review_memory: bool = False,
-    ) -> Dict[str, Any]:
-        """Forwarder — see ``agent.codex_runtime.run_codex_app_server_turn``."""
-        from agent.codex_runtime import run_codex_app_server_turn
-        return run_codex_app_server_turn(self, user_message=user_message, original_user_message=original_user_message, messages=messages, effective_task_id=effective_task_id, should_review_memory=should_review_memory)
+    _run_codex_app_server_turn = _forward("agent.codex_runtime", "run_codex_app_server_turn")
 
 def main(
     query: str = None,
