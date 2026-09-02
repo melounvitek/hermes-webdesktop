@@ -1167,37 +1167,23 @@ def _inline_nonstream_hard_timeout(stale_timeout: float):
 def direct_api_call(agent, api_kwargs: dict):
     """Run a non-streaming LLM call inline on the conversation thread.
 
-    Used when ``should_use_direct_api_call`` is True (cron turns and
-    delegated children). Skips the interrupt worker (whose only job is
-    interactive-interrupt responsiveness, which these contexts do not have)
-    so the nested-pool deadlock (#62151, #60203) cannot occur.
-
-    While the inline request blocks, a lightweight activity heartbeat keeps
-    ``last_activity_ts`` advancing. Subagents use this path (non-streaming),
-    and without mid-call ticks the async stall monitor / sync heartbeat treat
-    a slow-but-healthy local model wait as "no progress" and interrupt around
-    450s — surfacing as ``Operation interrupted: waiting for model response``.
-
-    A stale-call watchdog bounds the request the same way the interrupt
-    worker's poll loop does (#80759). The keepalive httpx client uses
-    ``read=None`` (SSE), so the socket itself is not a usable bound: a
-    provider that accepts the request and then goes silent never trips a
-    read timeout, and a stranger-thread abort cannot ``close()`` the FD
-    (#29507). The watchdog aborts in-flight sockets through the already-
-    registered abort hook; a per-call ``timeout`` matching the stale budget
-    is the hard backstop when that abort finds nothing to shut down
-    (#85252). Either path surfaces a retryable ``TimeoutError`` so the
-    outer retry loop reconnects with backoff / credential rotation /
-    provider fallback.
+    Used when ``should_use_direct_api_call`` is True (cron turns, delegated
+    children): no interrupt worker, so the nested-pool deadlock (#62151,
+    #60203) cannot occur. An activity heartbeat keeps ``last_activity_ts``
+    advancing or the stall monitor interrupts a slow-but-healthy wait at
+    ~450s. A stale-call watchdog bounds the request (#80759): the keepalive
+    client uses ``read=None``, so a silent provider never trips a read
+    timeout — the timer aborts in-flight sockets via the registered hook, and
+    a per-call ``timeout`` equal to the stale budget is the backstop when the
+    abort finds nothing to shut down (#85252). Both surface a retryable
+    ``TimeoutError`` for the outer retry loop.
     """
     _check_stale_giveup(agent)
     agent._touch_activity("waiting for non-streaming API response")
-    # Request-lifecycle state, every transition under ``request_client_lock``
-    # (ported from the #75301 design): ``done`` stops a late timer from
-    # bumping the stale streak after the call already unwound; ``cancelled``
-    # marks a user/monitor interrupt as the owner of the outcome so a racing
-    # stale timer cannot misclassify the kill as provider staleness;
-    # ``stale`` is the one-shot stale transition itself.
+    # Lifecycle state, every transition under the lock (#75301): ``done``
+    # stops a late timer bumping the stale streak after unwind; ``cancelled``
+    # makes a user/monitor interrupt own the outcome so a racing timer can't
+    # misclassify the kill as staleness; ``stale`` is the one-shot transition.
     request_state = {"client": None, "done": False, "stale": False, "cancelled": False}
     request_client_lock = threading.Lock()
     activity_hb_stop = threading.Event()
@@ -1209,30 +1195,23 @@ def direct_api_call(agent, api_kwargs: dict):
         timer callback only reports/bumps once, and never after an
         interrupt or a completed request).
         """
-        # Abort while still holding the holder lock: the instant it is
-        # released, the inline finally may pop + cache the client for reuse
-        # and the NEXT call check it out — a late abort would then poison
-        # the slot and shut down an innocent in-flight request's sockets
-        # (same atomicity contract as _close_request_client_once in the
-        # interruptible variants; the abort itself never blocks).
+        # Abort under the lock (same contract as _RequestClientRegistry):
+        # once released the finally may cache the client and the NEXT call
+        # check it out, so a late abort would poison an innocent request.
         with request_client_lock:
             if request_state["done"]:
                 return False
             if reason == "stale_call_kill" and request_state["cancelled"]:
                 return False
             if reason != "stale_call_kill":
-                # A user interrupt/redirect that wins this lock owns the
-                # request outcome. Do not let a later timer misclassify the
-                # cancelled call as provider staleness and advance the
-                # cross-turn circuit breaker.
+                # Interrupt wins the lock -> owns the outcome; a later timer
+                # must not count it as staleness.
                 request_state["cancelled"] = True
             newly_stale = reason == "stale_call_kill" and not request_state["stale"]
             if newly_stale:
                 request_state["stale"] = True
-                # Advance the breaker before releasing the lock: the inline
-                # owner can unwind the moment the socket abort lands, and a
-                # fast retry's success/reset must not be overtaken by this
-                # older timer restoring the streak afterwards.
+                # Bump BEFORE releasing: a fast retry's reset must not be
+                # overtaken by this older timer restoring the streak.
                 _bump_stale_streak(agent)
             request_client = request_state["client"]
             if request_client is not None:
@@ -1245,23 +1224,17 @@ def direct_api_call(agent, api_kwargs: dict):
             return newly_stale
 
     def _make_client(reason: str, kind: str = "openai"):
-        # direct_api_call only runs for OpenAI-wire chat_completions cron
-        # requests (see should_use_direct_api_call), so the anthropic branch of
-        # the dispatch — the only caller that passes kind — is never reached
-        # here; the ``kind`` parameter exists purely for signature parity.
+        # Only OpenAI-wire requests reach direct_api_call; ``kind`` exists
+        # for signature parity with the dispatch helper.
         client = agent._create_request_openai_client(reason=reason, api_kwargs=api_kwargs)
         stale_before_dispatch = False
         with request_client_lock:
             request_state["client"] = client
             if request_state["stale"]:
-                # The timer expired while client construction was in flight
-                # (registration race): the abort found no sockets to kill, so
-                # handing this client to dispatch would open a brand-new
-                # socket after the only watchdog already fired. Abort it here
-                # and fail the call instead. (The residual window — timer
-                # firing between this registration and httpx opening its
-                # socket — is accepted: it is ms-scale against a >=90s budget
-                # and self-bounds at the OS connect-retry cap.)
+                # Timer fired during client construction: the abort found no
+                # socket, so dispatching now would open one AFTER the only
+                # watchdog fired. Fail here instead. (Residual ms-scale window
+                # before httpx opens its socket is accepted.)
                 stale_before_dispatch = True
                 try:
                     agent._abort_request_openai_client(
@@ -1295,16 +1268,13 @@ def direct_api_call(agent, api_kwargs: dict):
         name="direct-api-activity-hb",
         daemon=True,
     )
-    # Resolve the budget BEFORE starting the heartbeat: the resolver may
-    # raise (fail-closed contract), and a raise after start() would leak the
-    # heartbeat thread — ticking last_activity_ts forever and masking real
-    # stalls from the stall monitor.
+    # Resolve the budget BEFORE start(): the resolver may raise (fail-closed),
+    # and a leaked heartbeat thread would mask real stalls forever.
     call_start = time.time()
     stale_timeout = _resolve_direct_stale_timeout(agent, api_kwargs)
-    # Do not override an explicit per-call timeout (provider config /
-    # transport already set one). Otherwise pin read=stale_timeout so a
-    # no-op stranger-thread abort cannot leave the keepalive client's
-    # read=None socket hanging until TCP dies (#85252).
+    # Never override an explicit per-call timeout; otherwise pin
+    # read=stale_timeout so a no-op abort can't leave the read=None socket
+    # hanging until TCP dies (#85252).
     hard_timeout = _inline_nonstream_hard_timeout(stale_timeout)
     if hard_timeout is not None and "timeout" not in api_kwargs:
         api_kwargs = dict(api_kwargs)
@@ -1312,12 +1282,9 @@ def direct_api_call(agent, api_kwargs: dict):
     activity_hb.start()
 
     def _on_stale() -> None:
-        # Runs on the timer thread. It only aborts the in-flight sockets —
-        # it never issues a request — so the inline / no-worker property that
-        # fixes #62151 and #60203 is preserved. The abort helper owns the
-        # stale transition under the request lock: it returns False (and this
-        # callback stays silent) when the request already finished or a user
-        # interrupt owns the outcome.
+        # Timer thread: aborts sockets only, never issues a request (keeps
+        # the no-worker property). False = request finished or an interrupt
+        # owns the outcome; stay silent.
         if not _abort_active_request("stale_call_kill"):
             return
         elapsed = time.time() - call_start
@@ -1333,9 +1300,8 @@ def direct_api_call(agent, api_kwargs: dict):
         stale_watchdog.daemon = True
         stale_watchdog.start()
 
-    # Only a clean return may report the reuse reason (request_complete):
-    # after an error or interrupt the wire client is really closed so the
-    # retry builds a fresh pool (see _REQUEST_CLIENT_REUSE_REASONS).
+    # Only a clean return reports the reuse reason; errors/interrupts really
+    # close the client so the retry builds a fresh pool.
     succeeded = False
     try:
         response = _dispatch_nonstreaming_api_request(
@@ -1347,10 +1313,8 @@ def direct_api_call(agent, api_kwargs: dict):
         with request_client_lock:
             was_stale = request_state["stale"]
         if was_stale:
-            # The transport error is the expected consequence of our own
-            # abort. Raise a retryable TimeoutError (never InterruptedError,
-            # which the outer loop treats as "the user wants to stop") so the
-            # retry loop reconnects on a fresh pool.
+            # Our own abort caused the transport error: raise a retryable
+            # TimeoutError, never InterruptedError ("the user wants to stop").
             raise TimeoutError(
                 f"Non-streaming API call timed out after "
                 f"{int(time.time() - call_start)}s with no response "
@@ -1360,13 +1324,10 @@ def direct_api_call(agent, api_kwargs: dict):
     else:
         if getattr(agent, "_interrupt_requested", False):
             raise InterruptedError("Agent interrupted during API call")
-        # Close the race window against a timer firing between response
-        # arrival and this unwind: marking ``done`` under the lock makes any
-        # later timer callback a no-op, so the reset below cannot be
-        # overwritten by a stray bump after a successful call. A timer that
-        # already won the lock left ``stale`` set — the request still
-        # completed, so return the response (the streak reset undoes the
-        # bump; the poisoned client is discarded by the finally).
+        # Mark ``done`` under the lock so a timer firing between response
+        # arrival and unwind is a no-op and cannot overwrite the reset below.
+        # If a timer already won, the request still completed: return it (the
+        # reset undoes the bump; the finally discards the poisoned client).
         with request_client_lock:
             request_state["done"] = True
         _reset_stale_streak(agent)
@@ -1643,24 +1604,17 @@ def interruptible_api_call(agent, api_kwargs: dict):
     _check_stale_giveup(agent)
 
     _clients = _RequestClientRegistry(agent)
-    # Request-local cancellation flag. Distinct from agent._interrupt_requested
-    # because that flag is cleared at run_conversation() turn boundaries, but
-    # this daemon worker thread can outlive the turn (the gateway caches
-    # AIAgent instances per session). Tracks whether THIS specific request was
-    # cancelled by the main thread's interrupt handler, so the transport error
-    # that is the expected consequence of our own force-close isn't misread as
-    # a network bug and surfaced to the caller. (PR #6600 — cascading interrupt
-    # hang.)
+    # Request-local cancel flag: agent._interrupt_requested is cleared at turn
+    # boundaries but this daemon worker can outlive the turn, so the worker
+    # needs to know THIS request was force-closed and not surface the
+    # resulting transport error as a network bug (#6600).
     _request_cancelled = {"value": False}
-    # Codex Responses retirement token (codex_responses only). The worker
-    # thread reads it through ``agent._active_codex_stream_request_token`` to
-    # tell whether it still owns the turn. When a watchdog below force-closes
-    # the connection it clears the agent-level token, so a worker still
-    # draining SSE frames raises instead of returning its partial output as a
-    # "completed" response (see run_codex_stream's _request_is_current).
-    # ``_codex_request_retired`` is the request-local mirror, used to swallow
-    # the transport error our own force-close causes — same split as
-    # ``_request_cancelled`` above.
+    # Codex retirement token: the worker checks
+    # ``agent._active_codex_stream_request_token`` to know it still owns the
+    # turn; a watchdog kill clears it so a worker still draining SSE raises
+    # instead of returning partial output as "completed"
+    # (run_codex_stream._request_is_current). ``_codex_request_retired`` is
+    # the request-local mirror used to swallow our own force-close error.
     _codex_request_token = object() if agent.api_mode == "codex_responses" else None
     _codex_request_retired = {"value": False}
 
@@ -1685,11 +1639,9 @@ def interruptible_api_call(agent, api_kwargs: dict):
     def _call():
         try:
             _install_codex_request_token()
-            # _clients.set_client registers each per-request client with the
-            # stranger-thread abort machinery above; the shared dispatch helper
-            # builds it via this callback (openai- or anthropic-kind) so the
-            # interrupt / stale-call detectors can force-close the worker's
-            # connection without touching the shared client (#67142).
+            # Per-request clients are registered with the abort machinery so
+            # the watchdogs force-close the worker's connection, never the
+            # shared client (#67142).
             result["response"] = _dispatch_nonstreaming_api_request(
                 agent,
                 api_kwargs,
@@ -1703,16 +1655,11 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 ),
             )
         except Exception as e:
-            # If the request was cancelled by the main thread's interrupt
-            # handler, the transport error is the expected consequence of our
-            # own force-close, NOT a network bug. Swallow it instead of
-            # surfacing — the main thread raises InterruptedError. (#6600)
+            # Our own force-close caused this error: swallow it, the main
+            # thread raises InterruptedError (#6600). Retirement logs at info
+            # (a watchdog discarded output the provider already sent — what an
+            # operator debugging a truncated reply needs); cancellation at debug.
             if _request_cancelled["value"] or _codex_request_retired["value"]:
-                # Retirement is logged at info: it means a watchdog discarded
-                # output the provider had already sent, which is exactly the
-                # event an operator debugging a truncated reply needs to see.
-                # Cancellation stays at debug — a user interrupt is a normal,
-                # high-frequency outcome and the caller already surfaces it.
                 if _codex_request_retired["value"]:
                     logger.info(
                         "Codex worker caught %s after request retirement — "
@@ -1731,14 +1678,11 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 return
             result["error"] = e
         finally:
-            # Retire first: _clients.close_once can raise (every other
-            # call site wraps it in try/except), and a leaked token would let a
-            # later worker mistake itself for the owning attempt.
+            # Retire first: close_once can raise, and a leaked token would let
+            # a later worker mistake itself for the owning attempt.
             _retire_codex_request_token()
-            # Reuse reason only on a clean response; any other outcome —
-            # error, or the cancel-swallow return above (which leaves both
-            # result slots None) — really closes so the next attempt builds
-            # a fresh pool (see _REQUEST_CLIENT_REUSE_REASONS).
+            # Reuse reason only on a clean response; error or cancel-swallow
+            # really closes so the next attempt builds a fresh pool.
             _clients.close_once(
                 "request_complete"
                 if result["response"] is not None
@@ -1785,11 +1729,8 @@ def interruptible_api_call(agent, api_kwargs: dict):
         t.join(timeout=0.3)
         _poll_count += 1
 
-        # Every ~30s: touch activity for the gateway inactivity monitor AND
-        # rewrite the live spinner/status line so CLI/TUI/Desktop users see
-        # what the agent is waiting on instead of an unexplained generic
-        # spinner (the "infinite thinking" complaint — the wait itself is
-        # usually a slow/overloaded provider, but the UI never said so).
+        # Every ~30s: gateway inactivity heartbeat + rewrite the status line
+        # so users see WHAT the wait is (the "infinite thinking" complaint).
         if _poll_count % 100 == 0:  # 100 × 0.3s = 30s
             _elapsed = time.time() - _call_start
             try:
@@ -1815,11 +1756,8 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
         _elapsed = time.time() - _call_start
 
-        # TTFB detector: the Codex stream has produced no event at all and
-        # we're past the first-byte cutoff → the backend opened the
-        # connection but isn't responding. Kill it so the retry loop can
-        # reconnect (a fresh connection typically succeeds in seconds),
-        # instead of waiting out the much longer wall-clock stale timeout.
+        # TTFB detector: no Codex event past the first-byte cutoff — kill so
+        # the retry loop reconnects instead of waiting out the stale timeout.
         if (
             _ttfb_enabled
             and _elapsed > _ttfb_timeout
@@ -1860,9 +1798,8 @@ def interruptible_api_call(agent, api_kwargs: dict):
             )
             break
 
-        # Stream-idle detector: the Codex backend emitted at least one SSE
-        # frame, then stopped emitting events. Valid keepalive / in_progress
-        # frames refresh _codex_stream_last_event_ts and should not be killed.
+        # Stream-idle detector: first byte arrived, then events stopped
+        # (keepalive/in_progress frames refresh the timestamp and don't count).
         _last_codex_event_ts = getattr(agent, "_codex_stream_last_event_ts", None)
         if (
             _codex_idle_enabled
@@ -1922,26 +1859,17 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     and getattr(agent, "_codex_stream_last_event_ts", None) is not None
                 ),
             )
-            # Mark THIS request cancelled before force-closing so the worker's
-            # exception handler recognizes the forced transport error as a
-            # cancel and exits cleanly instead of surfacing a network error or
-            # (in the streaming path) burning full retry cycles. (#6600)
+            # Mark cancelled BEFORE force-closing so the worker treats the
+            # transport error as a cancel (#6600).
             _request_cancelled["value"] = True
             logger.debug(
                 "Force-closing httpx client due to interrupt (not a network error)."
             )
-            # Force-close the in-flight worker-local HTTP connection to stop
-            # token generation without poisoning the shared client used to
-            # seed future retries. #67142: for anthropic this aborts the
-            # request-local client's sockets from this poll (stranger) thread
-            # rather than closing the shared _anthropic_client, which could
-            # release a TLS FD mid-SSL-BIO and corrupt an unrelated SQLite DB.
+            # Force-close the worker-local connection (never the shared client:
+            # releasing a TLS FD mid-SSL-BIO corrupted an unrelated SQLite DB,
+            # #67142), then let the worker unwind Relay scopes before raising
+            # (#81521).
             _abort_request("interrupt_abort")
-            # #81521 (sibling of the streaming-path fix): wait for the worker
-            # to unwind Relay-managed scopes before surfacing
-            # InterruptedError, so turn teardown cannot race a still-open
-            # physical scope and corrupt the LIFO stack. No-op when Relay
-            # managed execution is not live.
             _join_worker_for_relay_teardown(t, label="Non-streaming")
             raise InterruptedError("Agent interrupted during API call")
     if result["error"] is not None:
