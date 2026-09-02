@@ -845,6 +845,118 @@ def _pre_dispatch_guards(
     return function_args, None
 
 
+def _execute_tool(
+    function_name: str,
+    function_args: Dict[str, Any],
+    original_args: Dict[str, Any],
+    *,
+    task_id: Optional[str],
+    session_id: Optional[str],
+    tool_call_id: Optional[str],
+    turn_id: Optional[str],
+    api_request_id: Optional[str],
+    user_task: Optional[str],
+    enabled_tools: Optional[List[str]],
+    skip_tool_execution_middleware: bool,
+) -> Any:
+    """Run the registry handler (through tool-execution middleware unless skipped)
+    with the approval observability context bound for the duration."""
+    approval_tokens = None
+    reset_obs = None
+    try:
+        from tools.approval import (
+            reset_current_observability_context as reset_obs,
+            set_current_observability_context,
+        )
+        approval_tokens = set_current_observability_context(
+            turn_id=turn_id or "",
+            tool_call_id=tool_call_id or "",
+            session_id=session_id or "",
+        )
+    except Exception:
+        reset_obs = None
+    try:
+        dispatch_kwargs: Dict[str, Any] = {"task_id": task_id, "session_id": session_id}
+        if function_name == "execute_code":
+            # Prefer the caller's list so subagents can't overwrite the
+            # parent's tool set via the process-global.
+            dispatch_kwargs["enabled_tools"] = (
+                enabled_tools if enabled_tools is not None else _last_resolved_tool_names
+            )
+        else:
+            dispatch_kwargs["user_task"] = user_task
+
+        def _dispatch(next_args: Dict[str, Any]) -> Any:
+            return registry.dispatch(function_name, next_args, **dispatch_kwargs)
+
+        if skip_tool_execution_middleware:
+            return _dispatch(function_args)
+        from hermes_cli.middleware import run_tool_execution_middleware
+
+        return run_tool_execution_middleware(
+            function_name,
+            function_args,
+            _dispatch,
+            original_args=original_args,
+            task_id=task_id or "",
+            session_id=session_id or "",
+            tool_call_id=tool_call_id or "",
+            turn_id=turn_id or "",
+            api_request_id=api_request_id or "",
+        )
+    finally:
+        if approval_tokens is not None and reset_obs is not None:
+            try:
+                reset_obs(approval_tokens)
+            except Exception:
+                pass
+
+
+def _apply_transform_tool_result_hook(
+    function_name: str,
+    function_args: Dict[str, Any],
+    result: Any,
+    duration_ms: int,
+    *,
+    task_id: Optional[str],
+    session_id: Optional[str],
+    tool_call_id: Optional[str],
+    turn_id: Optional[str],
+    api_request_id: Optional[str],
+) -> Any:
+    """transform_tool_result: plugins may replace the final result string.
+
+    Runs after post_tool_call (observational) and before the result enters
+    context. Fail-open; first valid string return wins; non-strings ignored.
+    Gated on has_hook so the no-listener path skips result-field derivation.
+    """
+    try:
+        from hermes_cli.lifecycle import has_hook, invoke_hook
+        if has_hook("transform_tool_result"):
+            status, error_type, error_message = _tool_result_observer_fields(function_name, result)
+            hook_results = invoke_hook(
+                "transform_tool_result",
+                tool_name=function_name,
+                args=function_args,
+                result=result,
+                task_id=task_id or "",
+                session_id=session_id or "",
+                tool_call_id=tool_call_id or "",
+                turn_id=turn_id or "",
+                api_request_id=api_request_id or "",
+                duration_ms=duration_ms,
+                status=status,
+                error_type=error_type,
+                error_message=error_message,
+            )
+            for hook_result in hook_results:
+                if isinstance(hook_result, str):
+                    return hook_result
+    except Exception as _hook_err:
+        logger.debug("transform_tool_result hook error: %s", _hook_err)
+    return result
+
+
 def handle_function_call(
     function_name: str,
     function_args: Dict[str, Any],
@@ -968,92 +1080,21 @@ def handle_function_call(
 
         # duration_ms (monotonic) is exposed to post_tool_call / transform_tool_result.
         _dispatch_start = time.monotonic()
-        _approval_tokens = None
-        _reset_obs = None
-        try:
-            from tools.approval import (
-                reset_current_observability_context as _reset_obs,
-                set_current_observability_context,
-            )
-            _approval_tokens = set_current_observability_context(
-                turn_id=turn_id or "",
-                tool_call_id=tool_call_id or "",
-                session_id=session_id or "",
-            )
-        except Exception:
-            _reset_obs = None
-        try:
-            dispatch_kwargs: Dict[str, Any] = {"task_id": task_id, "session_id": session_id}
-            if function_name == "execute_code":
-                # Prefer the caller's list so subagents can't overwrite the
-                # parent's tool set via the process-global.
-                dispatch_kwargs["enabled_tools"] = (
-                    enabled_tools if enabled_tools is not None else _last_resolved_tool_names
-                )
-            else:
-                dispatch_kwargs["user_task"] = user_task
-
-            def _dispatch(next_args: Dict[str, Any]) -> Any:
-                return registry.dispatch(function_name, next_args, **dispatch_kwargs)
-
-            if skip_tool_execution_middleware:
-                result = _dispatch(function_args)
-            else:
-                from hermes_cli.middleware import run_tool_execution_middleware
-
-                result = run_tool_execution_middleware(
-                    function_name,
-                    function_args,
-                    _dispatch,
-                    original_args=_tool_original_args,
-                    task_id=task_id or "",
-                    session_id=session_id or "",
-                    tool_call_id=tool_call_id or "",
-                    turn_id=turn_id or "",
-                    api_request_id=api_request_id or "",
-                )
-        finally:
-            if _approval_tokens is not None and _reset_obs is not None:
-                try:
-                    _reset_obs(_approval_tokens)
-                except Exception:
-                    pass
+        result = _execute_tool(
+            function_name, function_args, _tool_original_args,
+            task_id=task_id, session_id=session_id, tool_call_id=tool_call_id, turn_id=turn_id,
+            api_request_id=api_request_id, user_task=user_task, enabled_tools=enabled_tools,
+            skip_tool_execution_middleware=skip_tool_execution_middleware,
+        )
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
 
         _emit(result, duration_ms=duration_ms)
 
-        # transform_tool_result: plugins may replace the final result string.
-        # Runs after post_tool_call (observational) and before the result enters
-        # context. Fail-open; first valid string return wins; non-strings ignored.
-        try:
-            from hermes_cli.lifecycle import has_hook, invoke_hook
-            if has_hook("transform_tool_result"):
-                status, error_type, error_message = _tool_result_observer_fields(
-                    function_name,
-                    result,
-                )
-                hook_results = invoke_hook(
-                    "transform_tool_result",
-                    tool_name=function_name,
-                    args=function_args,
-                    result=result,
-                    task_id=task_id or "",
-                    session_id=session_id or "",
-                    tool_call_id=tool_call_id or "",
-                    turn_id=turn_id or "",
-                    api_request_id=api_request_id or "",
-                    duration_ms=duration_ms,
-                    status=status,
-                    error_type=error_type,
-                    error_message=error_message,
-                )
-                for hook_result in hook_results:
-                    if isinstance(hook_result, str):
-                        result = hook_result
-                        break
-        except Exception as _hook_err:
-            logger.debug("transform_tool_result hook error: %s", _hook_err)
-
+        result = _apply_transform_tool_result_hook(
+            function_name, function_args, result, duration_ms,
+            task_id=task_id, session_id=session_id, tool_call_id=tool_call_id, turn_id=turn_id,
+            api_request_id=api_request_id,
+        )
         return result
 
     except Exception as e:
