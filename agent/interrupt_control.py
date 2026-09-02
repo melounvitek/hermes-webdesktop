@@ -57,8 +57,7 @@ class InterruptControlMixin:
                 return
             if not getattr(fence, "commit_in_flight", False):
                 # No commit in flight — cancel_before_commit here WOULD cancel the pending commit; leave it to
-                # the
-                # destructive half.
+                # the destructive half.
                 return
             cancel_before_commit = getattr(
                 type(fence), "cancel_before_commit", None
@@ -66,8 +65,7 @@ class InterruptControlMixin:
             if callable(cancel_before_commit):
                 try:
                     # A commit holds the fence lock through finish_commit: this blocks until it finishes and
-                    # returns
-                    # False WITHOUT setting _cancelled.
+                    # returns False WITHOUT setting _cancelled.
                     cancel_before_commit(fence)
                 except Exception:
                     logger.debug(
@@ -90,8 +88,7 @@ class InterruptControlMixin:
             if callable(cancel_before_commit):
                 try:
                     # Marks the fence cancelled (or waits out a just-started commit) without touching the
-                    # hard-stop
-                    # Event, which was published at the claim edge.
+                    # hard-stop Event, which was published at the claim edge.
                     cancel_before_commit(fence)
                 except Exception:
                     logger.debug(
@@ -116,8 +113,7 @@ class InterruptControlMixin:
             # activity stamp, or the stamp landed first and the abort declines without publishing.
             if require_generation is None:
                 # No claim to race: publish WITHOUT the liveness lock. Bare AIAgent stand-ins in other suites
-                # lack
-                # the liveness seam and would AttributeError.
+                # lack the liveness seam and would AttributeError.
                 _publish_interrupt_state()
                 return True
             with self._liveness_activity_lock():
@@ -142,8 +138,7 @@ class InterruptControlMixin:
         if _redirect_lock is not None:
             with _redirect_lock:
                 # The blocking in-flight-commit wait runs BEFORE the atomic claim edge (redirect lock still
-                # held);
-                # the destructive pending-commit cancel runs AFTER the claim survives (#99758 P1).
+                # held); the destructive pending-commit cancel runs AFTER the claim survives (#99758 P1).
                 if hard_cancel:
                     _wait_for_compression_commit()
                 if not _consume_claim_and_publish_first_state():

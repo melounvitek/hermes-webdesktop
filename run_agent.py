@@ -44,9 +44,8 @@ import threading
 import uuid
 import warnings
 from typing import List, Dict, Any, Optional, Callable
-# `OpenAI` is a lazy proxy (SDK import costs ~240ms) that keeps the single `OpenAI(**kw)` call site
-# and `patch("run_agent.OpenAI")` working. `fire` is imported only in __main__ so library imports never need
-# it.
+# `OpenAI` is a lazy proxy (SDK import costs ~240ms) that keeps the single `OpenAI(**kw)` call site and
+# `patch("run_agent.OpenAI")` working. `fire` is imported only in __main__ so library imports never need it.
 from datetime import datetime
 from pathlib import Path
 
@@ -461,8 +460,7 @@ class AIAgent(
                 from hermes_cli.profiles import get_active_profile_name
                 _profile_for_session = get_active_profile_name()
                 # Persist the profile name explicitly, including "default": profile-keyed consumers treat NULL
-                # as
-                # unowned (#94724 backfill, #99222).
+                # as unowned (#94724 backfill, #99222).
             except Exception:
                 _profile_for_session = None
             # Carry the live YOLO bypass into model_config: the row is created lazily on the first turn, so
@@ -1109,8 +1107,7 @@ class AIAgent(
         if "glm" not in model_lower and provider_lower != "zai":
             return False
         base = self._base_url_lower
-        # Ollama Cloud (hosted service or :cloud proxy) forwards finish_reason
-        # faithfully — do not rewrite.
+        # Ollama Cloud (hosted service or :cloud proxy) forwards finish_reason faithfully — do not rewrite.
         if "ollama.com" in base or ":cloud" in model_lower:
             return False
         if "ollama" in base or ":11434" in base:
@@ -1578,8 +1575,8 @@ class AIAgent(
         except Exception:
             pass
 
-        # 7. Free conversation history proactively (close() is the hard teardown; callers may still hold
-        # the closed agent).
+        # 7. Free conversation history proactively (close() is the hard teardown; callers may still hold the
+        # closed agent).
         try:
             self._session_messages = []
         except Exception:
@@ -2772,23 +2769,20 @@ class AIAgent(
             else:
                 def _snapshot_worker(fence=None):
                     # #76354 F3: the pooled worker must NEVER share the caller's live transcript — a late
-                    # engine after a
-                    # host timeout could rewrite it. Deep-snapshot on the worker; results publish only via an
-                    # ADMITTED commit.
+                    # engine after a host timeout could rewrite it. Deep-snapshot on the worker; results
+                    # publish only via an ADMITTED commit.
                     snapshot = copy.deepcopy(messages)
                     result_msgs, result_prompt = _run(
                         fence, target_messages=snapshot
                     )
                     if result_msgs is snapshot:
                         # No-op/abort returned the snapshot unchanged: hand back the ORIGINAL list so
-                        # identity-based
-                        # semantics keep working.
+                        # identity-based semantics keep working.
                         return messages, result_prompt
                     return result_msgs, result_prompt
 
                 # Resolve the fallback prompt lazily: an eager rebuild would raise before compress_context
-                # runs
-                # when _cached_system_prompt is unset and _build_system_prompt fails.
+                # runs when _cached_system_prompt is unset and _build_system_prompt fails.
                 def _fallback_prompt():
                     cached = getattr(self, "_cached_system_prompt", None)
                     if cached:
@@ -2911,8 +2905,7 @@ class AIAgent(
 
                 def _publish_new_fence():
                     # The stall-fallback retry (#78981) needs a fence the aborted attempt cannot veto; publish
-                    # it on
-                    # the slot hard_interrupt() reads. The finally restores the caller's fence.
+                    # it on the slot hard_interrupt() reads. The finally restores the caller's fence.
                     retry_fence = CompressionCommitFence()
                     with fence_registration_lock:
                         self._active_compression_commit_fence = retry_fence
@@ -2945,8 +2938,7 @@ class AIAgent(
                 ):
                     return
                 # Stamps land on the worker's snapshot first; mirror them onto the live lists by scoped
-                # identity.
-                # Timestamp-less repeated content is ambiguous, so every scoped match is stamped.
+                # identity. Timestamp-less repeated content is ambiguous, so every scoped match is stamped.
                 for source_message in source_messages:
                     if not (
                         isinstance(source_message, dict)
@@ -3335,8 +3327,7 @@ class AIAgent(
                     _durable_session_exists = _turn_db.get_session(session_id) is not None
                 except Exception:
                     # A locked / non-WAL read is not proof the row is absent; treating probe failure as
-                    # "fresh" ran
-                    # fail-open at the exact contention point (#84234). Acquire, or fail closed.
+                    # "fresh" ran fail-open at the exact contention point (#84234). Acquire, or fail closed.
                     logger.warning(
                         "Could not check durable session before turn lease; "
                         "will acquire rather than run without serialization",
@@ -3348,8 +3339,7 @@ class AIAgent(
                 and session_id
                 and not getattr(self, "_persist_disabled", False)
                 # A fresh session id has no durable transcript to race over, and callers may supply an in-
-                # memory
-                # seed before the row exists — reloading would erase it.
+                # memory seed before the row exists — reloading would erase it.
                 and _durable_session_exists
                 # Check the concrete type: MagicMock-style shims accept any attribute without the protocol.
                 and callable(
@@ -3458,8 +3448,7 @@ class AIAgent(
                     )
 
                 # The holder may have compressed/rotated the session while we waited: reload only AFTER
-                # admission,
-                # and skip when acquisition was immediate (avoids a needless prompt-cache miss).
+                # admission, and skip when acquisition was immediate (avoids a needless prompt-cache miss).
                 if _lease_waited:
                     latest_session_id = _turn_db.resolve_resume_session_id(session_id)
                     if latest_session_id:
@@ -3472,8 +3461,7 @@ class AIAgent(
                     )
 
                 # Long turns outlive a fixed TTL: refresh in a daemon thread; holder-qualified UPDATE/DELETE
-                # fence
-                # a late refresher from a successor lease.
+                # fence a late refresher from a successor lease.
                 durable_turn_lease_stop = threading.Event()
                 _lease_refresh_interval = float(
                     getattr(self, "_session_turn_lease_refresh_interval", 60.0)
@@ -3498,8 +3486,8 @@ class AIAgent(
 
                 def _interrupt_turn(message: str) -> None:
                     # Lease-loss interrupts fire UNCONDITIONALLY (no generation claim): a lost lease means
-                    # this
-                    # process no longer owns the session. Only the watchdog's stalls can be spuriously stale.
+                    # this process no longer owns the session. Only the watchdog's stalls can be spuriously
+                    # stale.
                     nonlocal durable_turn_lease_interrupt_message
                     with durable_turn_lease_activity_lock:
                         if (
@@ -3553,8 +3541,7 @@ class AIAgent(
                         )
                     except Exception:
                         # Round-4 (#95663): fail closed — an exceptional path must not turn an unvalidated
-                        # claim into
-                        # unconditional abort authority.
+                        # claim into unconditional abort authority.
                         logger.debug(
                             "Turn liveness abort interrupt raised; "
                             "declining the abort",
@@ -3682,9 +3669,8 @@ class AIAgent(
                         with durable_turn_lease_activity_lock:
                             durable_turn_lease_turn_active = True
                         # Stamp the activity clock at turn entry (#95663): `_last_activity_ts` persists across
-                        # turns, so
-                        # without this the watchdog would measure idle from the PREVIOUS turn and abort a
-                        # fresh one.
+                        # turns, so without this the watchdog would measure idle from the PREVIOUS turn and
+                        # abort a fresh one.
                         self._touch_activity("starting new turn")
                         durable_turn_lease_thread.start()
                         if durable_turn_liveness_thread is not None:
@@ -3707,8 +3693,7 @@ class AIAgent(
                     # Post-loop relay/task finalization must not receive a late refresh interrupt.
                     _stop_durable_turn_lease_refresher()
                     # Interrupt clear is deferred until after thread join (outer finally) so a refresher
-                    # firing
-                    # between stop and join cannot leave an interrupt behind.
+                    # firing between stop and join cannot leave an interrupt behind.
             terminal = result if isinstance(result, dict) else {}
             if terminal.get("interrupted") is True:
                 relay_outcome = "cancelled"

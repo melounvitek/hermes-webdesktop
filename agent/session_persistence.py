@@ -53,11 +53,11 @@ def _is_ephemeral_scaffolding(msg: Any) -> bool:
     )
 
 
-# `_DB_PERSISTED_MARKER` (agent.context_compressor) — intrinsic "already written to SQLite" marker. An id(msg) dedup set can alias a freed dict's address onto
-# a new message and silently skip persisting it; a marker on the dict cannot. The `_` prefix is mandatory:
-# wire sanitizers strip `_`-prefixed keys. CONTRACT (#92231): the marker asserts the dict's CONTENT is
-# durable as written — any in-place mutation that must persist MUST pop it (see turn_finalizer,
-# context_compressor).
+# `_DB_PERSISTED_MARKER` (agent.context_compressor) — intrinsic "already written to SQLite" marker. An id(msg)
+# dedup set can alias a freed dict's address onto a new message and silently skip persisting it; a marker on
+# the dict cannot. The `_` prefix is mandatory: wire sanitizers strip `_`-prefixed keys. CONTRACT (#92231):
+# the marker asserts the dict's CONTENT is durable as written — any in-place mutation that must persist MUST
+# pop it (see turn_finalizer, context_compressor).
 
 
 def _safe_session_filename_component(session_id: str) -> str:
@@ -99,11 +99,9 @@ class SessionPersistenceMixin:
             msg = messages[idx]
             if isinstance(msg, dict) and msg.get("role") == "user":
                 # A plain-text override must not replace native image/audio blocks; a list override is the
-                # clean
-                # multimodal payload and does. Preflight compaction may re-anchor this index at a message
-                # MERGED
-                # with the compaction summary — overwriting it would drop the summary (see the twin guard in
-                # _flush_messages_to_session_db_unlocked).
+                # clean multimodal payload and does. Preflight compaction may re-anchor this index at a
+                # message MERGED with the compaction summary — overwriting it would drop the summary (see the
+                # twin guard in _flush_messages_to_session_db_unlocked).
                 if (
                     override is not None
                     and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
@@ -249,8 +247,7 @@ class SessionPersistenceMixin:
             }
 
             # Bounded scan: skip the identity-matched prefix of the previous flush's snapshot. Every message
-            # in
-            # it already got its final disposition, and no live dict has its marker popped in place.
+            # in it already got its final disposition, and no live dict has its marker popped in place.
             _scan_start = 0
             _prev_prefix = getattr(self, "_db_flush_scan_prefix", None)
             if isinstance(_prev_prefix, list):
@@ -271,8 +268,8 @@ class SessionPersistenceMixin:
                 if not isinstance(msg, dict):
                     continue
                 # Never write ephemeral scaffolding: the flush is append-only, so a mid-turn persist could
-                # commit a
-                # synthetic turn that the end-of-turn drop cannot un-write. Skip regardless of position.
+                # commit a synthetic turn that the end-of-turn drop cannot un-write. Skip regardless of
+                # position.
                 if _is_ephemeral_scaffolding(msg):
                     continue
                 if msg.get(_DB_PERSISTED_MARKER):
@@ -285,34 +282,30 @@ class SessionPersistenceMixin:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
                 # api_content sidecar: exact bytes sent to the API when they differ from clean content, so
-                # replay
-                # reproduces the sent prefix byte-for-byte.
+                # replay reproduces the sent prefix byte-for-byte.
                 _row_api_content = msg.get("api_content")
                 if not isinstance(_row_api_content, str):
                     _row_api_content = None
                 _row_timestamp = msg.get("timestamp")
                 # Apply the persist override to THIS row only. A list override replaces a noted payload; a
-                # text
-                # override must not erase an image/audio summary. Also match the staged CLI dict by identity —
-                # the close safety-net may flush a shortened snapshot whose turn index refers to the full
-                # history.
+                # text override must not erase an image/audio summary. Also match the staged CLI dict by
+                # identity — the close safety-net may flush a shortened snapshot whose turn index refers to
+                # the full history.
                 pending_cli_message = getattr(self, "_pending_cli_user_message", None)
                 is_current_turn_user = (
                     _ov_idx == _msg_idx or msg is pending_cli_message
                 )
                 if is_current_turn_user and msg.get("role") == "user":
                     # Preflight compaction may have re-anchored the index at a message MERGED with the
-                    # compaction
-                    # summary; overwriting it with the clean text would drop the summary from the durable
-                    # transcript.
+                    # compaction summary; overwriting it with the clean text would drop the summary from the
+                    # durable transcript.
                     if (
                         _ov_content is not None
                         and (not isinstance(content, list) or isinstance(_ov_content, list))
                         and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
                     ):
                         # Live content is what the wire sent, the override is the clean transcript; keep the
-                        # sent bytes in
-                        # api_content so replay matches the wire (#48677).
+                        # sent bytes in api_content so replay matches the wire (#48677).
                         if (
                             _row_api_content is None
                             and isinstance(content, str)
@@ -374,8 +367,7 @@ class SessionPersistenceMixin:
                     "timestamp": _row_timestamp,
                     "api_content": _row_api_content,
                     # Standalone reference handoffs are always hidden so they never occupy the active user
-                    # slot in
-                    # retry/undo dispatch (#80622); merge-into-tail carriers keep prior visibility.
+                    # slot in retry/undo dispatch (#80622); merge-into-tail carriers keep prior visibility.
                     "display_kind": (
                         "hidden"
                         if (
@@ -461,8 +453,7 @@ class SessionPersistenceMixin:
             if isinstance(e, CompressionSessionClosedError):
                 # Compression race: another path rotated this session mid-write. Adopt the continuation tip
                 # (get_compression_tip) ONLY when it is a different, live row, and retry exactly once; a
-                # second
-                # closed-parent write fails closed. tip == session_id means no continuation exists.
+                # second closed-parent write fails closed. tip == session_id means no continuation exists.
                 if _adoption_budget > 0:
                     old_id = self.session_id
                     tip = None
@@ -497,8 +488,7 @@ class SessionPersistenceMixin:
                                 _adoption_budget=0,
                             )
                 # No live tip or budget exhausted: fail closed. The flag lets the turn explanation name
-                # compression
-                # rotation instead of misleading full-disk advice.
+                # compression rotation instead of misleading full-disk advice.
                 self._compression_adoption_failed = True
                 logger.warning("Session DB append_message failed: %s", e)
                 return False

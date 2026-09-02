@@ -755,8 +755,8 @@ class ClientLifecycleMixin:
     ) -> bool:
         if self.provider != "nous":
             return False
-        # Portal serves anthropic/* on the native Messages route, so either client kind may hold the
-        # expiring invoke JWT.
+        # Portal serves anthropic/* on the native Messages route, so either client kind may hold the expiring
+        # invoke JWT.
         if self.api_mode not in ("chat_completions", "anthropic_messages"):
             return False
 
