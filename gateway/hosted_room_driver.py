@@ -250,16 +250,14 @@ def _create_task_table(conn: sqlite3.Connection, table: str = "hosted_room_drive
             source_event_seq INTEGER NOT NULL CHECK (source_event_seq >= 1),
             payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL,
             status TEXT NOT NULL CHECK (status IN (
-                'queued', 'running', 'settled', 'failed', 'cancelled', 'indeterminate', 'deferred', 'stopping'
-            )),
+                'queued', 'running', 'settled', 'failed', 'cancelled', 'indeterminate', 'deferred', 'stopping')),
             execution_generation INTEGER NOT NULL DEFAULT 0 CHECK (execution_generation >= 0),
             cancel_generation INTEGER NOT NULL DEFAULT 0 CHECK (cancel_generation >= 0),
-            run_gateway_id TEXT, run_process_generation TEXT, run_lease_generation INTEGER,
-            cancel_id TEXT, settlement_id TEXT, settlement_status TEXT, result_json TEXT,
-            created_at REAL NOT NULL, updated_at REAL NOT NULL, started_at REAL, terminal_at REAL, indeterminate_at REAL,
+            run_gateway_id TEXT, run_process_generation TEXT, run_lease_generation INTEGER, cancel_id TEXT,
+            settlement_id TEXT, settlement_status TEXT, result_json TEXT, created_at REAL NOT NULL,
+            updated_at REAL NOT NULL, started_at REAL, terminal_at REAL, indeterminate_at REAL,
             PRIMARY KEY (room_id, task_id), UNIQUE (room_id, thread_id, turn_id),
-            FOREIGN KEY (room_id) REFERENCES hosted_rooms(room_id)
-        )"""
+            FOREIGN KEY (room_id) REFERENCES hosted_rooms(room_id))"""
     )
 
 
@@ -267,12 +265,10 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """CREATE TABLE IF NOT EXISTS hosted_room_driver_leases (
             room_id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL,
-            authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 1),
-            process_generation TEXT NOT NULL,
+            authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 1), process_generation TEXT NOT NULL,
             lease_generation INTEGER NOT NULL CHECK (lease_generation >= 1),
             expires_at REAL NOT NULL, acquired_at REAL NOT NULL, updated_at REAL NOT NULL, released_at REAL,
-            FOREIGN KEY (room_id) REFERENCES hosted_rooms(room_id)
-        )"""
+            FOREIGN KEY (room_id) REFERENCES hosted_rooms(room_id))"""
     )
     _create_task_table(conn)
     _validate_schema(conn)
@@ -540,11 +536,10 @@ def _transition(
 ) -> dict[str, Any]:
     """Run one fenced task transition: load -> idempotent replay -> lease/fence guard -> UPDATE.
 
-    ``sql`` binds ``(*set_params, room_id, task_id, *fence_params)``. ``lease_first``
-    controls whether the active-lease check precedes the row load (recovery paths)
-    or follows the idempotent replay (settlement paths, so an identical replay still
-    succeeds after the lease moved on). The UPDATE must hit exactly one row or
-    ``stale`` is raised.
+    ``sql`` binds ``(*set_params, room_id, task_id, *fence_params)`` and must hit exactly one row
+    or ``stale`` is raised. ``lease_first`` puts the active-lease check before the row load
+    (recovery paths) instead of after the replay (settlement paths: an identical replay still
+    succeeds after the lease moved on).
     """
     params = (*set_params, identity.room_id, identity.task_id, *fence_params)
     with _transaction(db_path) as conn:
@@ -621,8 +616,8 @@ def acquire_lease(
             """UPDATE hosted_room_driver_leases
                SET gateway_id=?, authority_epoch=?, process_generation=?, lease_generation=lease_generation + 1,
                    expires_at=?, acquired_at=?, updated_at=?, released_at=NULL
-               WHERE room_id=? AND lease_generation=?
-                 AND (gateway_id != ? OR authority_epoch != ? OR released_at IS NOT NULL OR expires_at <= ?)""",
+               WHERE room_id=? AND lease_generation=? AND (
+                   gateway_id != ? OR authority_epoch != ? OR released_at IS NOT NULL OR expires_at <= ?)""",
             (
                 gateway_id, authority_epoch, process_generation, expires_at, now, now,
                 room_id, int(row["lease_generation"]), gateway_id, authority_epoch, now,
@@ -1051,11 +1046,9 @@ def prune_published_terminal_tasks(
         rows = conn.execute(
             """SELECT t.task_id, t.terminal_at FROM hosted_room_driver_tasks t
                 WHERE t.room_id=? AND t.status IN ('settled', 'failed', 'cancelled')
-                  AND EXISTS (
-                      SELECT 1 FROM hosted_room_policy_publications p
-                       WHERE p.room_id=t.room_id AND p.task_id=t.task_id
-                         AND p.kind IN ('turn.settled', 'turn.failed', 'turn.cancelled')
-                  )
+                  AND EXISTS (SELECT 1 FROM hosted_room_policy_publications p
+                              WHERE p.room_id=t.room_id AND p.task_id=t.task_id
+                                AND p.kind IN ('turn.settled', 'turn.failed', 'turn.cancelled'))
                 ORDER BY t.terminal_at DESC, t.task_id ASC""",
             (room_id,),
         ).fetchall()
