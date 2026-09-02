@@ -1413,7 +1413,7 @@ class TestAvailability:
             )
 
         monkeypatch.setattr(
-            "plugins.memory.hindsight.importlib.import_module",
+            "importlib.import_module",
             _raise,
         )
         p = HindsightMemoryProvider()
@@ -1432,7 +1432,7 @@ class TestAvailability:
             raise RuntimeError("x86_64-v2 unsupported")
 
         monkeypatch.setattr(
-            "plugins.memory.hindsight.importlib.import_module",
+            "importlib.import_module",
             _raise,
         )
 
