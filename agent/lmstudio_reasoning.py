@@ -1,34 +1,27 @@
 """LM Studio reasoning-effort resolution shared by the chat-completions
 transport and run_agent's iteration-limit summary path.
 
-LM Studio publishes per-model ``capabilities.reasoning.allowed_options`` (e.g.
-``["off","on"]`` for toggle-style models, ``["off","minimal","low"]`` for
-graduated models). We map the user's ``reasoning_config`` onto LM Studio's
-OpenAI-compatible vocabulary, then clamp against the model's allowed set so
-the server doesn't 400 on an unsupported effort.
+LM Studio publishes per-model ``capabilities.reasoning.allowed_options``
+(``["off","on"]`` for toggle models, ``["off","minimal","low"]`` for graduated
+ones). We map the user's ``reasoning_config`` onto LM Studio's OpenAI-compatible
+vocabulary, then clamp against the model's allowed set so the server doesn't 400.
 """
 
 from __future__ import annotations
 
 from typing import List, Optional
 
-# LM Studio accepts these top-level reasoning_effort values via its
-# OpenAI-compatible chat.completions endpoint.
+# Top-level reasoning_effort values LM Studio's OpenAI-compatible endpoint accepts.
 _LM_VALID_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
-# Toggle-style models publish allowed_options as ["off","on"] in /api/v1/models.
-# Map them onto the OpenAI-compatible request vocabulary.
+# Toggle-style models publish allowed_options as ["off","on"]; map onto the
+# request vocabulary. Also applied to the published allowed_options themselves.
 _LM_EFFORT_ALIASES = {"off": "none", "on": "medium"}
 
-# Hermes' generic effort ladder grew past LM Studio's vocabulary ("max",
-# "ultra"). Clamp the stronger generic levels onto LM Studio's ceiling: left
-# alone they miss _LM_VALID_EFFORTS, keep the initialized "medium" default and
-# are thereby conflated with unparseable input, so asking for more reasoning
-# yields less than "xhigh". Mirrors the ceiling clamp every other provider
-# applies (see agent/transports/codex.py).
-#
-# Deliberately separate from _LM_EFFORT_ALIASES: that mapping is also applied
-# to the model's published allowed_options, which must not be rewritten.
+# Hermes' ladder grew past LM Studio's vocabulary ("max", "ultra"). Without this
+# ceiling clamp they miss _LM_VALID_EFFORTS, keep the "medium" default and are
+# conflated with unparseable input — asking for more yields less than "xhigh".
+# Kept separate from _LM_EFFORT_ALIASES, which must not rewrite allowed_options.
 _LM_EFFORT_CLAMP = {"max": "xhigh", "ultra": "xhigh"}
 
 
@@ -36,12 +29,12 @@ def resolve_lmstudio_effort(
     reasoning_config: Optional[dict],
     allowed_options: Optional[List[str]],
 ) -> Optional[str]:
-    """Return the ``reasoning_effort`` string to send to LM Studio, or ``None``.
+    """Return the ``reasoning_effort`` to send to LM Studio, or ``None``.
 
     ``None`` means "omit the field": the user picked a level the model can't
-    honor, so let LM Studio fall back to the model's declared default rather
-    than silently substituting a different effort. When ``allowed_options`` is
-    falsy (probe failed), skip clamping and send the resolved effort anyway.
+    honor, so LM Studio falls back to the model's declared default rather than
+    a silently substituted effort. Falsy ``allowed_options`` (probe failed)
+    skips clamping and sends the resolved effort anyway.
     """
     effort = "medium"
     if reasoning_config and isinstance(reasoning_config, dict):
