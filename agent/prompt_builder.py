@@ -11,6 +11,7 @@ import sys
 import threading
 import contextvars
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 
 from hermes_constants import (
@@ -34,7 +35,6 @@ from agent.skill_utils import (
     get_all_skills_dirs,
     get_disabled_skill_names,
     iter_skill_index_files,
-    org_id_of_path,
     parse_frontmatter,
     read_active_org_id,
     skill_matches_environment,
@@ -59,21 +59,15 @@ from tools.threat_patterns import scan_for_threats as _scan_for_threats
 
 
 def _scan_context_content(content: str, filename: str) -> str:
-    """Scan context file content for injection. Returns sanitized content.
+    """Scan a context file for injection; matches are BLOCKED (placeholder returned).
 
-    Uses the "context" scope from the shared threat-pattern library, which
-    covers classic injection + promptware/C2 patterns + role-play hijack.
-    Strict-scope patterns (SSH backdoor, persistence, exfil-URL) are NOT
-    applied here — those are too aggressive for a context file in a
-    cloned repo (security research, infra docs).  Content matching is
-    BLOCKED at this layer because the file would otherwise enter the
-    system prompt verbatim and the user has no chance to intervene.
+    Uses the "context" threat scope (classic injection + promptware/C2 + role-play
+    hijack). Strict-scope patterns (SSH backdoor, persistence, exfil-URL) are NOT
+    applied — too aggressive for a cloned repo's docs. Blocking, not warning,
+    because the file would otherwise enter the system prompt verbatim.
     """
-    # Editors (Windows Notepad, PowerShell Out-File without -Encoding
-    # utf8NoBOM, some VS Code profiles) prefix a UTF-8 BOM as an encoding
-    # artifact, not a prompt injection. Strip a leading U+FEFF silently so a
-    # context file (SOUL.md, AGENTS.md, ...) is not blocked wholesale; BOMs
-    # elsewhere in the content remain subject to the threat scan below.
+    # A leading UTF-8 BOM is a Windows-editor artifact, not an injection; BOMs
+    # elsewhere in the content remain subject to the scan.
     if content.startswith("\ufeff"):
         content = content[1:]
 
@@ -86,11 +80,7 @@ def _scan_context_content(content: str, filename: str) -> str:
 
 
 def _find_git_root(start: Path) -> Optional[Path]:
-    """Walk *start* and its parents looking for a ``.git`` directory.
-
-    Returns the directory containing ``.git``, or ``None`` if we hit the
-    filesystem root without finding one.
-    """
+    """Nearest ancestor (or *start* itself) containing ``.git``, else None."""
     current = start.resolve()
     for parent in [current, *current.parents]:
         if (parent / ".git").exists():
@@ -102,17 +92,12 @@ _HERMES_MD_NAMES = (".hermes.md", "HERMES.md")
 
 
 def _find_hermes_md(cwd: Path) -> Optional[Path]:
-    """Discover the nearest ``.hermes.md`` or ``HERMES.md``.
-
-    Search order: *cwd* first, then each parent directory up to (and
-    including) the git repository root.  Returns the first match, or
-    ``None`` if nothing is found.
-    """
+    """Nearest ``.hermes.md`` / ``HERMES.md`` from *cwd* up to the git root, else None."""
     stop_at = _find_git_root(cwd)
     current = cwd.resolve()
 
-    # When there is no git root, only check cwd itself – walking parents
-    # could pick up a .hermes.md planted in /tmp, /home, etc.
+    # No git root: check cwd only — walking parents could pick up a
+    # .hermes.md planted in /tmp, /home, etc.
     search_dirs = [current, *current.parents] if stop_at else [current]
 
     for directory in search_dirs:
@@ -126,13 +111,7 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
 
 
 def _strip_yaml_frontmatter(content: str) -> str:
-    """Remove optional YAML frontmatter (``---`` delimited) from *content*.
-
-    The frontmatter may contain structured config (model overrides, tool
-    settings) that will be handled separately in a future PR.  For now we
-    strip it so only the human-readable markdown body is injected into the
-    system prompt.
-    """
+    """Drop optional ``---`` YAML frontmatter so only the markdown body is injected."""
     content = content.lstrip("\ufeff")  # tolerate UTF-8 BOM (Windows editors)
     if content.startswith("---"):
         end = content.find("\n---", 3)
@@ -148,15 +127,9 @@ def _strip_yaml_frontmatter(content: str) -> str:
 # =========================================================================
 
 DEFAULT_AGENT_IDENTITY = (
-    # Rewritten (#95681, maintainer-directed): the old text was a trait list
-    # ("helpful, knowledgeable, direct") — every model already believes that
-    # of itself, so it changed nothing. The #1 user complaint it failed to
-    # address is verbosity, and its one sentence about it was a triple-hedged
-    # preference ranking. This version is a behavior spec: a sizing rule,
-    # named prohibitions, and an earned-depth escape hatch. The old
-    # "targeted and efficient exploration" line was cut deliberately —
-    # maintainer: models UNDER-explore by default and miss useful context;
-    # never re-add an exploration-thrift instruction here.
+    # A behavior spec (sizing rule, named prohibitions, earned-depth escape
+    # hatch), not a trait list — trait lists change nothing. Maintainer rule:
+    # models UNDER-explore by default; never re-add an exploration-thrift line.
     "You are Hermes Agent, built by Nous Research. Be direct: match the "
     "length of your reply to the weight of the ask — a one-line question "
     "gets a one-line answer, and finished work gets a short report of what "
@@ -171,11 +144,9 @@ DEFAULT_AGENT_IDENTITY = (
 )
 
 HERMES_AGENT_HELP_GUIDANCE = (
-    # "when the two differ" was cut (#95681): a model that just read the
-    # skill won't ALSO fetch the docs to diff them, so the clause was dead
-    # weight — the docs-are-authoritative sentence already carries the
-    # precedence. Injected only when skill_view exists AND the hermes-agent
-    # skill is actually installed (see system_prompt.py slot resolution).
+    # Injected only when skill_view exists AND the hermes-agent skill is
+    # installed (system_prompt.py slot resolution). No "when the two differ"
+    # clause: docs-are-authoritative already carries the precedence.
     "You run on Hermes Agent (by Nous Research). When the user needs help with "
     "Hermes itself — configuring, setting up, using, extending, or troubleshooting "
     "it — or when you need to understand your own features, tools, or capabilities, "
@@ -186,10 +157,8 @@ HERMES_AGENT_HELP_GUIDANCE = (
     "modifying, or troubleshooting Hermes so you don't guess or invent workarounds."
 )
 
-# Variant injected when the skill tools are not in the session's toolset
-# (e.g. a Blank Slate install with the skills toolset disabled). Pointing the
-# model at skill_view() there would be a dangling reference — the docs URL is
-# the only actionable pointer.
+# Variant for sessions without the skills toolset (e.g. Blank Slate): naming
+# skill_view() there would be a dangling reference, so only the docs URL remains.
 HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = (
     "You run on Hermes Agent (by Nous Research). When the user needs help with "
     "Hermes itself — configuring, setting up, using, extending, or troubleshooting "
@@ -200,18 +169,12 @@ HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = (
     "fetch web content)."
 )
 
-# Memory guidance (#95681, consolidated): ONE block from ONE builder.
-# The opening frame adapts to which stores config enables; everything else
-# is written exactly once. Leads with the positive posture (save
-# proactively, replace when full) — the routing rules come after, as
-# refinements, not as the headline. WHAT belongs in memory is the memory
-# tool schema's job and is never re-taught here.
-
 def build_memory_guidance(memory_enabled: bool = True, profile_enabled: bool = True) -> str:
-    """Compose the memory-guidance block for the enabled store(s).
+    """ONE memory-guidance block: the opening frame adapts to the enabled store(s).
 
-    Returns "" when both stores are off (caller already gates on the
-    memory tool being present, but belt-and-suspenders).
+    Leads with the positive posture (save proactively, replace when full); routing
+    rules follow as refinements. WHAT belongs in memory is the memory tool schema's
+    job and is never re-taught here. Returns "" when both stores are off.
     """
     if not memory_enabled and not profile_enabled:
         return ""
@@ -241,10 +204,8 @@ def build_memory_guidance(memory_enabled: bool = True, profile_enabled: bool = T
     )
 
 
-# Legacy constant aliases — existing call sites and tests import these
-# names; both now come from the single builder.
+# Legacy aliases still imported by call sites and tests.
 MEMORY_GUIDANCE = build_memory_guidance(True, True)
-
 USER_PROFILE_GUIDANCE = build_memory_guidance(False, True)
 
 SESSION_SEARCH_GUIDANCE = (
@@ -253,24 +214,15 @@ SESSION_SEARCH_GUIDANCE = (
     "asking them to repeat themselves."
 )
 
-# NOTE (#82154): the opening sentence is worded deliberately. Anthropic's
-# server-side content filter rejects the previous phrasing ("After completing a
-# complex task (5+ tool calls), fixing a tricky error, or discovering a
-# non-trivial workflow, save the approach as a skill with skill_manage so you
-# can reuse it next time.") on subscription OAuth credentials, and surfaces that
-# rejection as a billing-shaped HTTP 400 ("You're out of extra usage"), which
-# sends users to buy quota they do not need. Bisected against the live API: that
-# sentence alone reproduces the 400 and removing it alone clears it; size and
-# the system[0] identity gate were both ruled out. The reword is empirically
-# validated, not understood — if you rewrite this sentence, re-verify against a
-# subscription OAuth token, not an sk-ant-api… key, which does not hit the
-# filter.
-# Dieted (#95681, maintainer-directed): the record-it / patch-it coaching that
-# used to open this block duplicated the ## Skills section (which teaches both
-# "offer to save as a skill" and "fix it with skill_manage(action='patch')")
-# and skill_manage's own schema. Only the compaction-pruning contract lives
-# here — nothing else teaches it. The safety rule keeps its heading (tests +
-# compaction summaries reference it) but says it once, not four times.
+# The opening sentence is worded deliberately: Anthropic's server-side filter
+# rejected the previous phrasing ("After completing a complex task (5+ tool
+# calls)... save the approach as a skill...") on subscription OAuth credentials,
+# surfacing as a billing-shaped HTTP 400 ("You're out of extra usage"). Bisected
+# live: that sentence alone reproduces it. If you rewrite it, re-verify with a
+# subscription OAuth token — sk-ant-api keys do not hit the filter.
+# Only the compaction-pruning contract lives here (nothing else teaches it);
+# save/patch coaching belongs to the ## Skills section and skill_manage's schema.
+# The safety-rule heading is referenced by tests and compaction summaries.
 SKILLS_GUIDANCE = (
     "When you work out a non-trivial workflow, record it with skill_manage "
     "for future reuse.\n"
@@ -415,44 +367,25 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 )
 
 # Model name substrings that trigger tool-use enforcement guidance.
-# Add new patterns here when a model family needs explicit steering.
 TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
 
-# Model name substrings whose sessions receive OPENAI_MODEL_EXECUTION_GUIDANCE
-# (execution discipline: tool persistence, mandatory tool use for arithmetic,
-# external-write read-back, count reconciliation, literal preservation,
-# verification-gated completion) when agent.execution_guidance is "auto".
-#
-# gpt/codex/grok are the historical set; deepseek/kimi/qwen/glm/minimax/
-# mimo/mistral were added after Composio agentic-eval traces showed the same
-# failure modes on those families (financial math in prose, no read-back after
-# external writes, identifier "repair", completeness claims despite count
-# mismatches). GLM's tool-calls-as-plain-text stall (#53847) and MiMo (#41874)
-# are covered here too. Gemini/Gemma are excluded — they get the more specific
-# GOOGLE_MODEL_OPERATIONAL_GUIDANCE block instead. Claude is excluded because
-# it does not exhibit these failure modes; users can opt any model in via
-# config.yaml `agent.execution_guidance: true` or a substring list.
+# Model name substrings that receive OPENAI_MODEL_EXECUTION_GUIDANCE when
+# agent.execution_guidance is "auto". gpt/codex/grok are historical; the rest
+# were added after agentic-eval traces showed the same failure modes (math in
+# prose, no read-back after external writes, identifier "repair", completeness
+# claims despite count mismatches). Gemini/Gemma get the more specific
+# GOOGLE_MODEL_OPERATIONAL_GUIDANCE instead; Claude does not exhibit these modes.
+# Any model can opt in via config.yaml (`true` or a substring list).
 EXECUTION_GUIDANCE_MODELS = (
     "gpt", "codex", "grok",
     "deepseek", "kimi", "qwen", "glm", "minimax", "mimo", "mistral",
 )
 
-# Universal "finish the job" guidance — applied to ALL models, not gated
-# by model family.  Addresses two cross-model failure modes:
-#   1. Stopping after a stub: writing a tiny file or running one command
-#      and then ending the turn with a description of the plan instead
-#      of the finished artifact.  (Observed on Opus during a real
-#      Sarasota real-estate build task: 3 API calls, 85-byte file,
-#      one terminal command, finish_reason=stop.)
-#   2. Fabricating output when a real path is blocked.  When `pip` or a
-#      tool fails, some models will synthesize plausible-looking results
-#      (fake addresses, fake JSON, fake numbers) instead of reporting
-#      the blocker.  (Observed on DeepSeek v4-flash on the same task:
-#      pushed through PEP-668 wall, then returned fabricated listings.)
-#
-# Short on purpose.  This block is shipped to every user, every session,
-# in the cached system prompt — token cost is paid once at install and
-# then amortised across all sessions via prefix caching.  Keep it tight.
+# Universal "finish the job" guidance (ALL models). Two observed cross-model
+# failure modes: stopping after a stub (a tiny file + one command, then a plan
+# instead of the artifact) and fabricating output when a real path is blocked
+# (fake data instead of reporting the blocker). Ships in every cached system
+# prompt — keep it tight.
 TASK_COMPLETION_GUIDANCE = (
     "# Finishing the job\n"
     "When the user asks you to build, run, or verify something, the deliverable is "
@@ -468,34 +401,12 @@ TASK_COMPLETION_GUIDANCE = (
     "is always better than inventing a result."
 )
 
-# Universal parallel-tool-call guidance — applied to ALL models.
-#
-# Why this matters for cost: every assistant turn resends the entire
-# accumulated conversation (and, on cache-friendly providers, re-reads the
-# cached prefix and pays for the newly-appended turn). A model that issues
-# one tool call per turn multiplies the number of round-trips — and therefore
-# the resent context — for any task that needs several independent reads,
-# searches, or safe lookups. Batching independent calls into a single
-# assistant response collapses N turns into one, cutting both latency and the
-# resent-context cost that compounds over a long conversation.
-#
-# The hermes-agent runtime already executes a batch of tool calls
-# concurrently when they are independent (read-only tools always; path-scoped
-# file ops when their targets don't overlap — see
-# run_agent._execute_tool_calls / tool_dispatch_helpers). The missing piece
-# was telling the *model* to emit those calls together in the first place.
-# Until now the only batching steer in the prompt lived in
-# GOOGLE_MODEL_OPERATIONAL_GUIDANCE — Gemini/Gemma got it, every other model
-# got nothing. This block makes the steer universal; the now-redundant
-# Google-only bullet has been dropped so no model receives it twice.
-#
-# Short on purpose — shipped in the cached system prompt to every user, every
-# session. Token cost is paid once at install and amortised across all
-# sessions via prefix caching. Keep it tight.
-#
-# Ported from cline/cline#11514 ("encourage parallel tool calls"), adapted
-# from Cline's TypeScript tool-surface guidance to hermes-agent's Python
-# prompt-assembly architecture.
+# Universal parallel-tool-call guidance (ALL models). One tool call per turn
+# multiplies round-trips and therefore the resent conversation context; the
+# runtime already executes independent calls concurrently (tool_dispatch_helpers),
+# the model just has to emit them together. Supersedes the former Google-only
+# bullet so no model receives the steer twice. Ships in every cached system
+# prompt — keep it tight. (Ported from cline/cline#11514.)
 PARALLEL_TOOL_CALL_GUIDANCE = (
     "# Parallel tool calls\n"
     "When you need several pieces of information that don't depend on each "
@@ -509,23 +420,12 @@ PARALLEL_TOOL_CALL_GUIDANCE = (
     "in doubt and the calls are independent, batch them."
 )
 
-# OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
-# where GPT models abandon work on partial results, skip prerequisite lookups,
-# hallucinate instead of using tools, and declare "done" without verification.
-# Inspired by patterns from OpenAI's GPT-5.4 prompting guide & OpenClaw PR #38953.
-# Also applied to xAI Grok — same failure modes in practice (claims completion
-# without tool calls, suggests workarounds instead of using existing tools,
-# replies with plans/suggestions instead of executing). The body is
-# family-agnostic; the OPENAI_ prefix reflects origin, not exclusivity.
-#
-# As of the Composio agentic-eval follow-up, the block is no longer fenced to
-# gpt/codex/grok: eval traces showed DeepSeek/Kimi doing financial math in
-# prose, skipping read-back verification after external writes, "repairing"
-# malformed identifiers, and claiming completeness despite count mismatches —
-# exactly the failure modes this block targets. The injection gate lives in
-# agent/system_prompt.py and is controlled by config.yaml
-# ``agent.execution_guidance`` (auto/true/false/list); "auto" matches the
-# EXECUTION_GUIDANCE_MODELS substring tuple below.
+# Execution-discipline guidance for models that abandon partial results, skip
+# prerequisite lookups, answer from memory instead of tools, or declare "done"
+# unverified. Body is family-agnostic (the OPENAI_ prefix reflects origin, not
+# exclusivity). Injection gate: agent/system_prompt.py via config.yaml
+# ``agent.execution_guidance`` (auto/true/false/list); "auto" matches
+# EXECUTION_GUIDANCE_MODELS.
 OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "# Execution discipline\n"
     "<tool_persistence>\n"
@@ -641,10 +541,8 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
     "package.json, requirements.txt, Cargo.toml, etc. before importing.\n"
     "- **Conciseness:** Keep explanatory text brief — a few sentences, not "
     "paragraphs. Focus on actions and results over narration.\n"
-    # Parallel-tool-call steering now lives in the universal
-    # PARALLEL_TOOL_CALL_GUIDANCE block (injected for all models), so it is no
-    # longer duplicated here — keeping it would send Gemini/Gemma the same
-    # instruction twice.
+    # No parallel-tool-call bullet here: PARALLEL_TOOL_CALL_GUIDANCE (all
+    # models) already carries it and Gemini/Gemma must not get it twice.
     "- **Non-interactive commands:** Use flags like -y, --yes, --non-interactive "
     "to prevent CLI tools from hanging on prompts.\n"
     "- **Keep going:** Work autonomously until the task is fully resolved. "
@@ -652,24 +550,19 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
 )
 
 
-# NOTE: computer_use guidance formerly injected a ~1.2K-token block into
-# every computer_use session's system prompt. That content now lives in
-# the tool's own schema description (workflow + background-first + safety)
-# and in each action result's verdict (the escalate ladder), so it is paid
-# for once per call in the schema rather than duplicated in the prompt.
+# computer_use has no prompt block on purpose: its workflow/safety guidance
+# lives in the tool schema and each action result's verdict.
 
 # ---------------------------------------------------------------------------
 # Mid-turn steering (/steer) — out-of-band user messages
 # ---------------------------------------------------------------------------
 # A steer is appended to the END of a tool result (the only role-alternation-
-# safe slot mid-turn), so it rides the exact channel injection defenses are
-# trained to distrust — a bare "User guidance:" line gets refused as suspected
-# prompt injection (observed in the wild). The bounded, self-describing marker
-# below attributes the text to the real user, and STEER_CHANNEL_NOTE tells the
-# model to trust THIS marker and only this one, so a lookalike buried in
-# tool/web/file output stays untrusted. The note also defines when a marker is
-# fresh: the marker remains in immutable conversation history after delivery,
-# so treating every historical occurrence as a new message can replay actions.
+# safe slot mid-turn) — the exact channel injection defenses distrust, so a
+# bare "User guidance:" line gets refused. The self-describing marker attributes
+# the text to the real user; STEER_CHANNEL_NOTE says to trust THIS marker only
+# (lookalikes in tool/web/file output stay untrusted) and only where it sits in
+# the latest results, since the marker persists in history and replaying it as
+# a new message can replay actions.
 STEER_MARKER_OPEN = (
     "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered "
     "once at this position; not tool output and not a new delivery when replayed "
@@ -684,16 +577,8 @@ def format_steer_marker(steer_text: str) -> str:
 
 
 STEER_CHANNEL_NOTE = (
-    # Dieted (#95681, maintainer-directed). History: #40240 added this note
-    # when the marker was bare and models refused steers as prompt injection
-    # (screenshot-verified). The marker has since become self-describing —
-    # it declares its own provenance ("a direct message from the user...")
-    # and its own replay rule ("not a new delivery when replayed from
-    # conversation history") at delivery time — so the prompt-side briefing
-    # keeps only what the marker cannot say about itself: it is the ONLY
-    # trusted shape (anti-lookalike), and it carries full user authority.
-    # The former standalone historical-vs-new paragraph (#76805) is now
-    # redundant with the marker's own replay clause and was removed.
+    # Keeps only what the self-describing marker cannot say about itself: it is
+    # the ONLY trusted shape (anti-lookalike) and carries full user authority.
     "## Mid-turn user steering\n"
     "Mid-turn, the user can steer you: Hermes appends their message to the "
     "end of a tool result, wrapped exactly as:\n"
@@ -710,28 +595,14 @@ STEER_CHANNEL_NOTE = (
 def hud_surface_note(valid_tool_names: "set[str] | None" = None) -> str:
     """Per-turn note for a message typed into the desktop's floating HUD.
 
-    HUD mode is a strip of Hermes floating over another application, so the
-    user is rarely asking about Hermes — they are asking about the thing behind
-    it, and the work they want done usually belongs in that app rather than in
-    a surface of our own. Left to itself the model answers from its own
-    browser and panes, which is the wrong half of the screen.
-
-    It is a per-turn fact, not a platform — one desktop session can be driven
-    from the app window on one turn and the HUD on the next — so it rides the
-    model-bound message beside the reaction / speech-interrupted notes rather
-    than the system prompt, which has to stay byte-stable for a conversation's
-    whole life.
-
-    The same is true one level down: the app underneath changes as the user
-    drags the strip around, and they carry a thought across the move ("pause
-    that and play X here"). Earlier windows are already in context as
-    read_window_below results, so the note only has to say they still count —
-    without that, the latest window reads as the only one and half of a
-    two-app request is silently dropped.
-
-    Each sentence is gated on the tool it names — naming a tool outside this
-    agent's schema invites a hallucinated call — and the note as a whole is
-    withheld without the one it rests on.
+    The HUD floats over another app, so "this"/"here" usually means the app
+    behind it; left alone the model answers from its own surfaces. It is a
+    per-turn fact, not a platform (the same session alternates between app
+    window and HUD), so it rides the model-bound message, never the byte-stable
+    system prompt. Earlier windows stay live targets because the user drags the
+    strip between apps mid-thought. Each sentence is gated on the tool it names
+    (an unknown tool name invites a hallucinated call); without
+    read_window_below the whole note is withheld.
     """
     names = valid_tool_names or set()
     if "read_window_below" not in names:
@@ -767,11 +638,9 @@ def hud_surface_note(valid_tool_names: "set[str] | None" = None) -> str:
     return " ".join(sentences)
 
 
-# Model name substrings that should use the 'developer' role instead of
-# 'system' for the system prompt.  OpenAI's newer models (GPT-5, Codex)
-# give stronger instruction-following weight to the 'developer' role.
-# The swap happens at the API boundary in _build_api_kwargs() so internal
-# message representation stays consistent ("system" everywhere).
+# Models whose system prompt is sent as the 'developer' role (stronger
+# instruction-following weight). Swapped at the API boundary in
+# _build_api_kwargs() so internal messages stay "system" everywhere.
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
 _MEDIA_NATIVE = (
@@ -868,8 +737,7 @@ PLATFORM_HINTS = {
         "destination — put the primary content directly in your response."
     ),
     "cli": (
-        # Maintainer-verified 2026-08-29 (live screenshot): the CLI prints
-        # raw text — markdown control characters render literally.
+        # Maintainer-verified live: the CLI prints raw text.
         "You are in a plain terminal (CLI). Markdown does NOT render — "
         "asterisks, headers, and fences appear as literal characters, so "
         "write plain text (indentation and blank lines are your only "
@@ -880,8 +748,7 @@ PLATFORM_HINTS = {
         + _LOCAL_CRON_DELIVERY_NOTE
     ),
     "tui": (
-        # Same file-delivery reality as the CLI (maintainer-confirmed):
-        # no MEDIA: interception in tui/ — tags would print literally.
+        # Same file-delivery reality as the CLI: no MEDIA: interception in tui/.
         "You are in the Hermes terminal UI (TUI). Files: there is no "
         "attachment channel and MEDIA:/path tags are NOT intercepted "
         "here (they print as literal text) — deliver a file by stating "
@@ -889,16 +756,11 @@ PLATFORM_HINTS = {
         + _LOCAL_CRON_DELIVERY_NOTE
     ),
     "desktop": (
-        # Dieted (#95681, maintainer-directed) after a live premise battery
-        # verified every claim against the shipping renderer. Widget section
-        # rewritten recipe-first: the old text listed style commandments
-        # without ever saying HOW (an inline widget IS a ::preview'd HTML
-        # file) or WHY (the frame injects the theme prelude FIRST — the
-        # widget's job is to not override it; width adopts the content's
-        # first measured span — a centering wrapper measures full-bleed).
-        # Mechanics cited from inline-preview-directive.tsx. The setup_mcp
-        # sentence moved out entirely — its tool schema teaches the same
-        # trigger + consent-card + never-hand-edit rule on every call.
+        # Every claim verified against the shipping renderer
+        # (inline-preview-directive.tsx). Widget text is recipe-first: HOW (an
+        # inline widget IS a ::preview'd HTML file) and WHY (the frame injects
+        # the theme prelude first; width adopts the first measured span).
+        # setup_mcp is taught by its own tool schema, not here.
         "You are chatting inside the Hermes desktop app, a graphical chat "
         "surface. Markdown renders with full GitHub flavor (tables, "
         "syntax-highlighted code, math via $...$, task lists, callouts). "
@@ -1015,23 +877,13 @@ PLATFORM_HINTS = {
         "a raw host filesystem path. For those cases, state the plain file path "
         "in your response text instead of a MEDIA: tag."
     ),
-    # NOTE: a "webui" hint lived here until 2026-08-29. It was a ghost
-    # (verified in the all-platform hint audit, PR #97873): no code path
-    # constructs platform="webui" — the dashboard chat resolves to
-    # 'desktop' or 'tui' (tui_gateway/server.py:_resolve_session_platform),
-    # and the browser chat tab is an xterm.js PTY hosting the TUI, not an
-    # HTML chat renderer. Its content (tables/LaTeX/Mermaid, MEDIA: rich
-    # previews incl. Excalidraw) described a renderer that does not exist
-    # anywhere in web/. If a real WebUI chat surface ships, write a hint
-    # from its actual renderer — do not resurrect this text.
+    # No "webui" hint on purpose: nothing constructs platform="webui" (the
+    # dashboard chat resolves to 'desktop' or 'tui'). If a real WebUI chat
+    # surface ships, write a hint from its actual renderer.
 }
 
-# Telegram rich-messages extension — only injected when the user has opted in
-# to ``gateway.platforms.telegram.extra.rich_messages: true`` (or the
-# top-level ``platforms.telegram.extra.rich_messages``).  The base
-# PLATFORM_HINTS["telegram"] covers MarkdownV2-compatible constructs; this
-# extension adds the Bot API 10.1 rich-Markdown guidance (tables, task lists,
-# collapsible details, math, etc.).
+# Telegram rich-messages extension — injected only with
+# ``platforms.telegram.extra.rich_messages: true`` (gateway.* or top-level).
 TELEGRAM_RICH_MESSAGES_HINT = (
     "Telegram now supports rich Markdown, so lean into it: whenever it "
     "makes the answer clearer or easier to scan, actively reach for real "
@@ -1049,9 +901,8 @@ TELEGRAM_RICH_MESSAGES_HINT = (
 )
 
 # ---------------------------------------------------------------------------
-# Environment hints — execution-environment awareness for the agent.
-# Unlike PLATFORM_HINTS (which describe the messaging channel), these describe
-# the machine/OS the agent's tools actually run on.
+# Environment hints — the machine/OS the agent's tools actually run on
+# (PLATFORM_HINTS describe the messaging channel instead).
 # ---------------------------------------------------------------------------
 
 WSL_ENVIRONMENT_HINT = (
@@ -1066,26 +917,20 @@ WSL_ENVIRONMENT_HINT = (
 )
 
 
-# Non-local terminal backends that run commands (and therefore every file
-# tool: read_file, write_file, patch, search_files) inside a separate
-# container / remote host rather than on the machine where Hermes itself
-# runs. For these backends, host info (Windows/Linux/macOS, $HOME, cwd) is
-# misleading — the agent should only see the machine it can actually touch.
+# Backends that run commands (and every file tool) in a separate container /
+# remote host: host OS/$HOME/cwd would mislead, so the agent only sees the
+# machine it can touch.
 _REMOTE_TERMINAL_BACKENDS = frozenset({
     "docker", "singularity", "modal", "daytona", "ssh",
     "vercel_sandbox", "managed_modal",
 })
 
 
-# Per-backend fallback descriptions — used when the live probe fails.
-# Only states what we know from the backend choice itself (container type,
-# likely OS family). Does NOT invent cwd, user, or $HOME — the agent is
-# told to probe those directly if it needs them.
 def _plugin_backend_is_remote(backend: str) -> bool:
     """Whether a plugin-registered terminal backend runs commands remotely.
 
-    Fail-soft: unknown names return False (treated as local, matching the
-    historical behavior for unrecognized TERMINAL_ENV values).
+    Fail-soft: unknown names are local (historical behavior for unrecognized
+    TERMINAL_ENV values).
     """
     if not backend or backend in _REMOTE_TERMINAL_BACKENDS or backend == "local":
         return False
@@ -1110,6 +955,8 @@ def _plugin_backend_description(backend: str) -> str | None:
     return None
 
 
+# Used when the live probe fails: only what the backend choice itself implies
+# (container type, likely OS family) — never an invented cwd/user/$HOME.
 _BACKEND_FALLBACK_DESCRIPTIONS: dict[str, str] = {
     "docker": "a Docker container (Linux)",
     "singularity": "a Singularity container (Linux)",
@@ -1121,28 +968,20 @@ _BACKEND_FALLBACK_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-# Cache the backend probe result per process so we only pay the probe cost
-# on the first prompt build of a session. Keyed by (env_type, cwd_hint) so
-# a mid-process backend switch rebuilds the string. Kept in-module (not on
-# disk) because the probe captures live backend state that may change
+# Per-process probe cache keyed by (env_type, cwd_hint) so a mid-process
+# backend switch rebuilds; in-memory only because the probed state may change
 # across Hermes restarts.
 _BACKEND_PROBE_CACHE: dict[tuple[str, str], str] = {}
 
 
 def _windows_marketing_version() -> str:
-    """Return the marketing Windows version ("10", "11", ...) for the prompt.
+    """Marketing Windows version ("10"/"11"): ``platform.release()`` says 10 for both.
 
-    ``platform.release()`` reports the kernel version, which is ``10`` for
-    BOTH Windows 10 and Windows 11 — the prompt then claims "Windows (10)"
-    on Windows 11 hosts and misleads the model about the OS (#51755).
-    Windows 11 is distinguished by build number: >= 22000 is 11.
-    Falls back to ``platform.release()`` on any lookup failure.
+    Windows 11 is build >= 22000; falls back to ``platform.release()`` on failure.
     """
     try:
         build = sys.getwindowsversion().build  # type: ignore[attr-defined]
-        if build >= 22000:
-            return "11"
-        return "10"
+        return "11" if build >= 22000 else "10"
     except Exception:
         import platform
 
@@ -1176,13 +1015,10 @@ _WINDOWS_BASH_SHELL_HINT = (
 def _tenv_read(name: str, default: str = "") -> str:
     """Scope-aware TERMINAL_* read (tools.terminal_scope.terminal_env).
 
-    The per-turn terminal scope installed by the multiplexing gateway carries
-    the active profile's terminal settings; a raw os.getenv would read a value
-    a previous profile's turn pinned into the process env.
-
-    Only an import failure falls back: an active refusal scope must raise —
-    swapping it for the ambient process value would defeat the fail-closed
-    boundary.
+    The multiplexing gateway's per-turn scope carries the active profile's
+    settings; raw os.getenv could read a previous profile's pinned value. Only
+    an import failure falls back — an active refusal scope must raise
+    (fail-closed).
     """
     try:
         from tools.terminal_scope import terminal_env
@@ -1191,111 +1027,77 @@ def _tenv_read(name: str, default: str = "") -> str:
     return terminal_env(name, default)
 
 
-def _probe_remote_backend(env_type: str) -> str | None:
-    """Run a tiny introspection command inside the active terminal backend.
+_BACKEND_IMAGE_KEYS = {
+    "docker": "docker_image",
+    "singularity": "singularity_image",
+    "modal": "modal_image",
+    "daytona": "daytona_image",
+}
+# (config key, default) pairs forwarded to _create_environment's container_config.
+_CONTAINER_CONFIG_DEFAULTS = (
+    ("container_cpu", 1),
+    ("container_memory", 5120),
+    ("container_disk", 51200),
+    ("container_persistent", True),
+    ("modal_mode", "auto"),
+    ("docker_volumes", []),
+    ("docker_mount_cwd_to_workspace", False),
+    ("docker_forward_env", []),
+    ("docker_env", {}),
+    ("docker_run_as_host_user", False),
+    ("docker_extra_args", []),
+    ("docker_shm_size", "1g"),
+    ("docker_persist_across_processes", True),
+    ("docker_shared_container_key", ""),
+    ("docker_orphan_reaper", True),
+)
+# Single-line POSIX probe; `2>/dev/null` keeps a missing binary from polluting output.
+_BACKEND_PROBE_CMD = (
+    "printf 'os=%s\\nkernel=%s\\nhome=%s\\ncwd=%s\\nuser=%s\\n' "
+    "\"$(uname -s 2>/dev/null || echo unknown)\" "
+    "\"$(uname -r 2>/dev/null || echo unknown)\" "
+    "\"$HOME\" \"$(pwd)\" \"$(whoami 2>/dev/null || id -un 2>/dev/null || echo unknown)\""
+)
 
-    Returns a pre-formatted multi-line string describing the backend's OS,
-    $HOME, cwd, and user — or None if the probe failed. Result is cached
-    per process. Used only for non-local backends where the agent's tools
-    operate on a different machine than the host Hermes runs on.
-    """
-    cwd_hint = _tenv_read("TERMINAL_CWD", "")
-    cache_key = (env_type, cwd_hint)
-    cached = _BACKEND_PROBE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached or None
 
-    try:
-        # Import locally: tools/ imports are heavy and only relevant when a
-        # non-local backend is actually configured.
-        from tools.terminal_tool import _create_environment, _get_env_config  # type: ignore
-    except Exception as e:
-        logger.debug("Backend probe unavailable (import failed): %s", e)
-        _BACKEND_PROBE_CACHE[cache_key] = ""
-        return None
+def _run_backend_probe(env_type: str, terminal_tool) -> str:
+    """Execute the probe command inside a freshly built backend; "" when it yields nothing."""
+    config = terminal_tool._get_env_config()
+    # Mirror tools/terminal_tool.py's live-command assembly (`_create_environment`
+    # is the real factory — there is no `get_environment`).
+    ssh_config = None
+    if env_type == "ssh":
+        ssh_config = {
+            "host": config.get("ssh_host", ""),
+            "user": config.get("ssh_user", ""),
+            "port": config.get("ssh_port", 22),
+            "key": config.get("ssh_key", ""),
+            "persistent": config.get("ssh_persistent", False),
+        }
+    container_config = None
+    if terminal_tool._is_container_backend(env_type):
+        container_config = {k: config.get(k, d) for k, d in _CONTAINER_CONFIG_DEFAULTS}
 
-    try:
-        config = _get_env_config()
-        # Build the environment the same way tools/terminal_tool.py does for a
-        # live command: select the backend image, then assemble ssh/container
-        # config from the env-derived dict. (There is no `get_environment`
-        # factory — the real entry point is `_create_environment`.)
-        if env_type == "docker":
-            image = config.get("docker_image", "")
-        elif env_type == "singularity":
-            image = config.get("singularity_image", "")
-        elif env_type == "modal":
-            image = config.get("modal_image", "")
-        elif env_type == "daytona":
-            image = config.get("daytona_image", "")
-        else:
-            image = ""
+    image_key = _BACKEND_IMAGE_KEYS.get(env_type)
+    env = terminal_tool._create_environment(
+        env_type=env_type,
+        image=config.get(image_key, "") if image_key else "",
+        cwd=config.get("cwd", ""),
+        timeout=config.get("timeout", 180),
+        ssh_config=ssh_config,
+        container_config=container_config,
+        task_id="prompt-backend-probe",
+        host_cwd=config.get("host_cwd"),
+    )
+    result = env.execute(_BACKEND_PROBE_CMD, timeout=4)
+    if result.get("returncode") != 0:
+        logger.debug("Backend probe returned non-zero: %r", result)
+        return ""
+    return (result.get("output") or "").strip()
 
-        ssh_config = None
-        if env_type == "ssh":
-            ssh_config = {
-                "host": config.get("ssh_host", ""),
-                "user": config.get("ssh_user", ""),
-                "port": config.get("ssh_port", 22),
-                "key": config.get("ssh_key", ""),
-                "persistent": config.get("ssh_persistent", False),
-            }
 
-        container_config = None
-        from tools.terminal_tool import _is_container_backend as _is_container
-
-        if _is_container(env_type):
-            container_config = {
-                "container_cpu": config.get("container_cpu", 1),
-                "container_memory": config.get("container_memory", 5120),
-                "container_disk": config.get("container_disk", 51200),
-                "container_persistent": config.get("container_persistent", True),
-                "modal_mode": config.get("modal_mode", "auto"),
-                "docker_volumes": config.get("docker_volumes", []),
-                "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
-                "docker_forward_env": config.get("docker_forward_env", []),
-                "docker_env": config.get("docker_env", {}),
-                "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
-                "docker_extra_args": config.get("docker_extra_args", []),
-                "docker_shm_size": config.get("docker_shm_size", "1g"),
-                "docker_persist_across_processes": config.get("docker_persist_across_processes", True),
-                "docker_shared_container_key": config.get("docker_shared_container_key", ""),
-                "docker_orphan_reaper": config.get("docker_orphan_reaper", True),
-            }
-
-        env = _create_environment(
-            env_type=env_type,
-            image=image,
-            cwd=config.get("cwd", ""),
-            timeout=config.get("timeout", 180),
-            ssh_config=ssh_config,
-            container_config=container_config,
-            task_id="prompt-backend-probe",
-            host_cwd=config.get("host_cwd"),
-        )
-        # Single-line POSIX probe — works on any Unixy backend. Wrapped in
-        # `2>/dev/null` so a missing binary doesn't pollute the output.
-        probe_cmd = (
-            "printf 'os=%s\\nkernel=%s\\nhome=%s\\ncwd=%s\\nuser=%s\\n' "
-            "\"$(uname -s 2>/dev/null || echo unknown)\" "
-            "\"$(uname -r 2>/dev/null || echo unknown)\" "
-            "\"$HOME\" \"$(pwd)\" \"$(whoami 2>/dev/null || id -un 2>/dev/null || echo unknown)\""
-        )
-        result = env.execute(probe_cmd, timeout=4)
-        if result.get("returncode") != 0:
-            logger.debug("Backend probe returned non-zero: %r", result)
-            _BACKEND_PROBE_CACHE[cache_key] = ""
-            return None
-        output = (result.get("output") or "").strip()
-        if not output:
-            _BACKEND_PROBE_CACHE[cache_key] = ""
-            return None
-    except Exception as e:
-        logger.debug("Backend probe failed: %s", e)
-        _BACKEND_PROBE_CACHE[cache_key] = ""
-        return None
-
-    # Parse key=value lines back into a tidy summary.
+def _format_backend_probe(output: str) -> str:
+    """Render the probe's key=value lines as an indented summary ("" if nothing usable)."""
     parsed: dict[str, str] = {}
     for line in output.splitlines():
         if "=" in line:
@@ -1312,116 +1114,108 @@ def _probe_remote_backend(env_type: str) -> str | None:
         pieces.append(f"Home: {parsed['home']}")
     if parsed.get("cwd"):
         pieces.append(f"Working directory: {parsed['cwd']}")
-
-    if not pieces:
-        _BACKEND_PROBE_CACHE[cache_key] = ""
-        return None
-
-    formatted = "\n".join(f"  {p}" for p in pieces)
-    _BACKEND_PROBE_CACHE[cache_key] = formatted
-    return formatted
+    return "\n".join(f"  {p}" for p in pieces)
 
 
-def _clear_backend_probe_cache() -> None:
-    """Test helper — drop the backend probe cache so monkeypatched backends take effect."""
-    _BACKEND_PROBE_CACHE.clear()
+def _probe_remote_backend(env_type: str) -> str | None:
+    """Describe the active non-local backend (OS, $HOME, cwd, user) via a live probe.
 
-
-def build_environment_hints() -> str:
-    """Return environment-specific guidance for the system prompt.
-
-    Always emits a factual block describing the execution environment:
-    - For **local** terminal backends: the host OS, user home, current
-      working directory (plus a Windows-only note about hostname != user
-      and a Windows-only note that `terminal` shells out to bash, not
-      PowerShell).
-    - For **remote / sandbox** terminal backends (docker, singularity,
-      modal, daytona, ssh, vercel_sandbox): host info is **suppressed**
-      because the agent's tools can't touch the host — only the backend
-      matters. A live probe inside the backend reports its OS, user, $HOME,
-      and cwd. Falls back to a static summary if the probe fails.
-
-    The WSL environment hint is appended unchanged when running under WSL.
+    Returns a pre-formatted multi-line string, or None if the probe failed.
+    Cached per process (including failures) keyed by (env_type, TERMINAL_CWD).
     """
-    import platform
-    import sys
+    cache_key = (env_type, _tenv_read("TERMINAL_CWD", ""))
+    cached = _BACKEND_PROBE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached or None
 
-    hints: list[str] = []
-
-    backend = (_tenv_read("TERMINAL_ENV") or "local").strip().lower()
-    is_remote_backend = backend in _REMOTE_TERMINAL_BACKENDS or _plugin_backend_is_remote(backend)
-
-    if not is_remote_backend:
-        # --- Host info block (local backend: host == where tools run) ---
-        host_lines: list[str] = []
-        if is_wsl():
-            host_lines.append("Host: WSL (Windows Subsystem for Linux)")
-        elif sys.platform == "win32":
-            host_lines.append(f"Host: Windows ({_windows_marketing_version()})")
-        elif sys.platform == "darwin":
-            mac_ver = platform.mac_ver()[0]
-            host_lines.append(f"Host: macOS ({mac_ver or platform.release()})")
-        else:
-            host_lines.append(f"Host: {platform.system()} ({platform.release()})")
-
-        host_lines.append(f"User home directory: {os.path.expanduser('~')}")
-        try:
-            host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
-        except OSError:
-            pass
-
-        if sys.platform == "win32" and not is_wsl():
-            host_lines.append(
-                "Note: on Windows, the machine hostname (e.g. from `hostname` "
-                "or uname) is NOT the username. Use the 'User home directory' "
-                "above to construct paths under C:\\Users\\<user>\\, never the "
-                "hostname."
-            )
-        hints.append("\n".join(host_lines))
-
-        # Windows-local terminal runs bash, not PowerShell — the model must
-        # know this or it will issue PowerShell syntax and fail.
-        if sys.platform == "win32" and not is_wsl():
-            hints.append(_WINDOWS_BASH_SHELL_HINT)
+    formatted = ""
+    try:
+        # Local import: tools/ is heavy and only needed when a non-local backend is configured.
+        import tools.terminal_tool as terminal_tool
+    except Exception as e:
+        logger.debug("Backend probe unavailable (import failed): %s", e)
     else:
-        # --- Remote backend block (host info suppressed) ---
-        probe = _probe_remote_backend(backend)
-        if probe:
-            hints.append(
-                f"Terminal backend: {backend}. Your `terminal`, `read_file`, "
-                f"`write_file`, `patch`, and `search_files` tools all operate "
-                f"inside this {backend} environment — NOT on the machine "
-                f"where Hermes itself is running. The host OS, home, and cwd "
-                f"of the Hermes process are irrelevant; only the following "
-                f"backend state matters:\n{probe}"
-            )
-        else:
-            description = _BACKEND_FALLBACK_DESCRIPTIONS.get(
-                backend,
-            ) or _plugin_backend_description(backend) or (
-                f"a {backend} environment (likely Linux)"
-            )
-            hints.append(
-                f"Terminal backend: {backend}. Your `terminal`, `read_file`, "
-                f"`write_file`, `patch`, and `search_files` tools all operate "
-                f"inside {description} — NOT on the machine where Hermes "
-                f"itself runs. The backend probe didn't respond at "
-                f"prompt-build time, so the sandbox's current user, $HOME, "
-                f"and working directory are unknown from here. If you need "
-                f"them, probe directly with a terminal call like "
-                f"`uname -a && whoami && pwd`."
-            )
+        try:
+            formatted = _format_backend_probe(_run_backend_probe(env_type, terminal_tool))
+        except Exception as e:
+            logger.debug("Backend probe failed: %s", e)
+    _BACKEND_PROBE_CACHE[cache_key] = formatted
+    return formatted or None
 
+
+def _local_host_hints() -> list[str]:
+    """Host OS / home / cwd block for a local terminal backend (tools run on this host)."""
+    import platform
+
+    host_lines: list[str] = []
     if is_wsl():
-        hints.append(WSL_ENVIRONMENT_HINT)
+        host_lines.append("Host: WSL (Windows Subsystem for Linux)")
+    elif sys.platform == "win32":
+        host_lines.append(f"Host: Windows ({_windows_marketing_version()})")
+    elif sys.platform == "darwin":
+        mac_ver = platform.mac_ver()[0]
+        host_lines.append(f"Host: macOS ({mac_ver or platform.release()})")
+    else:
+        host_lines.append(f"Host: {platform.system()} ({platform.release()})")
 
-    # Embedder-supplied environment description. Lets a host that wraps Hermes
-    # (e.g. a sandbox runner / managed platform) explain the environment the
-    # agent is running in — proxy, credential handling, mount layout — without
-    # forking the identity slot (SOUL.md). Read once at prompt-build time, so
-    # it's part of the stable, cache-safe system prompt. The env var is the
-    # build-time/embedder mechanism (set in a container ENV); config.yaml
-    # ``agent.environment_hint`` is the user-facing surface. Env var wins.
+    host_lines.append(f"User home directory: {os.path.expanduser('~')}")
+    try:
+        host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
+    except OSError:
+        pass
+
+    native_windows = sys.platform == "win32" and not is_wsl()
+    if native_windows:
+        host_lines.append(
+            "Note: on Windows, the machine hostname (e.g. from `hostname` "
+            "or uname) is NOT the username. Use the 'User home directory' "
+            "above to construct paths under C:\\Users\\<user>\\, never the "
+            "hostname."
+        )
+    hints = ["\n".join(host_lines)]
+    # Windows-local terminal runs bash, not PowerShell — without this the
+    # model issues PowerShell syntax and fails.
+    if native_windows:
+        hints.append(_WINDOWS_BASH_SHELL_HINT)
+    return hints
+
+
+def _remote_backend_hint(backend: str) -> str:
+    """Backend-only block for remote/sandbox backends (host info deliberately suppressed)."""
+    probe = _probe_remote_backend(backend)
+    if probe:
+        return (
+            f"Terminal backend: {backend}. Your `terminal`, `read_file`, "
+            f"`write_file`, `patch`, and `search_files` tools all operate "
+            f"inside this {backend} environment — NOT on the machine "
+            f"where Hermes itself is running. The host OS, home, and cwd "
+            f"of the Hermes process are irrelevant; only the following "
+            f"backend state matters:\n{probe}"
+        )
+    description = _BACKEND_FALLBACK_DESCRIPTIONS.get(
+        backend,
+    ) or _plugin_backend_description(backend) or (
+        f"a {backend} environment (likely Linux)"
+    )
+    return (
+        f"Terminal backend: {backend}. Your `terminal`, `read_file`, "
+        f"`write_file`, `patch`, and `search_files` tools all operate "
+        f"inside {description} — NOT on the machine where Hermes "
+        f"itself runs. The backend probe didn't respond at "
+        f"prompt-build time, so the sandbox's current user, $HOME, "
+        f"and working directory are unknown from here. If you need "
+        f"them, probe directly with a terminal call like "
+        f"`uname -a && whoami && pwd`."
+    )
+
+
+def _embedder_environment_hint() -> str:
+    """Embedder-supplied environment description (proxy, credentials, mounts, ...).
+
+    HERMES_ENVIRONMENT_HINT (container ENV, build-time mechanism) wins over the
+    user-facing config.yaml ``agent.environment_hint``. Read once at prompt-build
+    time so it stays part of the cache-stable system prompt.
+    """
     extra = (os.getenv("HERMES_ENVIRONMENT_HINT") or "").strip()
     if not extra:
         try:
@@ -1432,9 +1226,25 @@ def build_environment_hints() -> str:
             ).strip()
         except Exception as e:
             logger.debug("Could not read agent.environment_hint from config: %s", e)
+    return extra
+
+
+def build_environment_hints() -> str:
+    """Execution-environment block for the system prompt.
+
+    Local backends get host OS/home/cwd (plus Windows-only notes). Remote/sandbox
+    backends get ONLY the backend's own state (live probe, static fallback) since
+    the agent's tools cannot touch the host. WSL and embedder hints are appended.
+    """
+    backend = (_tenv_read("TERMINAL_ENV") or "local").strip().lower()
+    is_remote_backend = backend in _REMOTE_TERMINAL_BACKENDS or _plugin_backend_is_remote(backend)
+
+    hints = [_remote_backend_hint(backend)] if is_remote_backend else _local_host_hints()
+    if is_wsl():
+        hints.append(WSL_ENVIRONMENT_HINT)
+    extra = _embedder_environment_hint()
     if extra:
         hints.append(extra)
-
     return "\n\n".join(hints)
 
 
@@ -1442,24 +1252,16 @@ CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 
-# Dynamic-cap parameters (used when no explicit context_file_max_chars is set).
-# The cap scales with the model's context window so large-context models rarely
-# truncate a project doc, while small-context models stay at the historical
-# 20K floor. ~4 chars/token is the usual English heuristic; we spend a small
-# slice of the window on context files since they share the cached prefix with
-# the system prompt, tools, memory, and the whole conversation.
+# Dynamic cap (no explicit context_file_max_chars): scales with the model's
+# window (~4 chars/token, a small slice since context files share the cached
+# prefix with everything else); small-context models stay at the 20K floor.
 _CONTEXT_FILE_CHARS_PER_TOKEN = 4
 _CONTEXT_FILE_WINDOW_FRACTION = 0.06
 _CONTEXT_FILE_DYNAMIC_CEILING = 500_000
 
 
 def _dynamic_context_file_max_chars(context_length: Optional[int]) -> int:
-    """Derive a char cap from the model's context window.
-
-    Returns at least ``CONTEXT_FILE_MAX_CHARS`` (the historical 20K floor) and
-    at most ``_CONTEXT_FILE_DYNAMIC_CEILING``. When ``context_length`` is
-    unknown/invalid, returns the flat default so behavior is unchanged.
-    """
+    """Char cap from the model's window, clamped to [20K floor, 500K ceiling]; flat default when unknown."""
     if not isinstance(context_length, int) or context_length <= 0:
         return CONTEXT_FILE_MAX_CHARS
     budget = int(
@@ -1469,15 +1271,7 @@ def _dynamic_context_file_max_chars(context_length: Optional[int]) -> int:
 
 
 def _get_context_file_max_chars(context_length: Optional[int] = None) -> int:
-    """Return the context-file truncation limit.
-
-    Resolution order:
-      1. Explicit ``context_file_max_chars`` in config.yaml — user knows best,
-         always wins (including over the dynamic cap).
-      2. Dynamic cap derived from the model's ``context_length`` when provided
-         (scales the budget to the window; floor 20K, ceiling 500K).
-      3. ``CONTEXT_FILE_MAX_CHARS`` (20K) as the upstream-compatible fallback.
-    """
+    """Context-file truncation limit: explicit config.yaml ``context_file_max_chars`` always wins, else the dynamic cap."""
     try:
         from hermes_cli.config import load_config_readonly
 
@@ -1488,11 +1282,9 @@ def _get_context_file_max_chars(context_length: Optional[int] = None) -> int:
         logger.debug("Could not read context_file_max_chars from config: %s", e)
     return _dynamic_context_file_max_chars(context_length)
 
-# Collect truncation warnings so the caller (run_agent) can surface them.
-# A ContextVar (not a module-global list) isolates accumulation per thread /
-# per async task, so concurrent gateway-session prompt builds can't drain or
-# clear each other's pending warnings (cross-session leak). Each build runs in
-# its own context, collects its own warnings, and drains them synchronously.
+# Truncation warnings for the caller (run_agent) to surface. A ContextVar, not a
+# module list, so concurrent gateway-session prompt builds cannot drain each
+# other's pending warnings.
 _truncation_warnings: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
     "context_file_truncation_warnings", default=None
 )
@@ -1521,16 +1313,13 @@ def drain_truncation_warnings() -> list:
 # Skills prompt cache
 # =========================================================================
 
-# Sized for multi-profile processes: since #86313 the cache key carries a
-# per-profile skills_dir (one entry per profile × platform), so the old cap
-# of 8 could thrash on a gateway multiplexing default + several bots (each
-# miss = full os.walk manifest rebuild). ~32 costs low single-digit MB worst
-# case.
+# One entry per profile × platform (key carries skills_dir), so a multiplexing
+# gateway needs more than a handful; each miss is a full os.walk. ~32 costs a
+# few MB worst case.
 _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
-# v2: entries gained org provenance fields (org_id/org_author/rel_dir) for M2
-# org-shared skills; older snapshots are discarded and rebuilt.
+# v2 added org provenance fields (org_id/org_author); older snapshots are rebuilt.
 _SKILLS_SNAPSHOT_VERSION = 2
 
 
@@ -1550,11 +1339,10 @@ def clear_skills_system_prompt_cache(*, clear_snapshot: bool = False) -> None:
 
 
 def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
-    """Build an mtime/size manifest of all SKILL.md and DESCRIPTION.md files.
+    """mtime/size manifest of every SKILL.md and DESCRIPTION.md.
 
-    Org mirrors (M2): only the ACTIVE org's mirror participates, and the
-    ``.active_org`` marker itself is included — so switching/leaving an org
-    invalidates the snapshot even when no SKILL.md changed.
+    Only the ACTIVE org mirror participates, and the ``.active_org`` marker is
+    included so switching/leaving an org invalidates the snapshot by itself.
     """
     manifest: dict[str, list[int]] = {}
     skills_dir_str = str(skills_dir)
@@ -1603,11 +1391,11 @@ def _load_skills_snapshot(skills_dir: Path) -> Optional[dict]:
         snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if not isinstance(snapshot, dict):
-        return None
-    if snapshot.get("version") != _SKILLS_SNAPSHOT_VERSION:
-        return None
-    if snapshot.get("manifest") != _build_skills_manifest(skills_dir):
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("version") != _SKILLS_SNAPSHOT_VERSION
+        or snapshot.get("manifest") != _build_skills_manifest(skills_dir)
+    ):
         return None
     return snapshot
 
@@ -1641,9 +1429,8 @@ def _build_snapshot_entry(
     rel_path = skill_file.relative_to(skills_dir)
     parts = rel_path.parts
 
-    # M2 org mirror: strip the `_org/<org_id>/` prefix so category/name derive
-    # from the path WITHIN the mirror (same shape the org tree was built
-    # from), and record provenance for labeling + fail-loud collisions.
+    # Org mirror: category/name derive from the path WITHIN `_org/<org_id>/`;
+    # org_id is recorded for labeling + fail-loud collisions.
     org_id: str | None = None
     if len(parts) >= 3 and parts[0] == ORG_MIRROR_DIR_NAME:
         org_id = parts[1]
@@ -1670,15 +1457,10 @@ def _build_snapshot_entry(
     }
     if org_id:
         entry["org_id"] = org_id
-        # Author from the pull-time provenance sidecar (token-verified at
-        # push by the plane's author_mismatch guard). Best-effort.
+        # Author from the pull-time provenance sidecar; best-effort.
         try:
-            import json as _json
-
-            prov_path = (
-                skills_dir / ORG_MIRROR_DIR_NAME / org_id / ORG_PROVENANCE_FILE
-            )
-            prov = _json.loads(prov_path.read_text(encoding="utf-8"))
+            prov_path = skills_dir / ORG_MIRROR_DIR_NAME / org_id / ORG_PROVENANCE_FILE
+            prov = json.loads(prov_path.read_text(encoding="utf-8"))
             device = str(prov.get("author_device") or "")
             entry["org_author"] = device or str(prov.get("author_user_id") or "")
         except Exception:
@@ -1691,25 +1473,16 @@ def _build_snapshot_entry(
 # =========================================================================
 
 def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
-    """Read a SKILL.md once and return platform compatibility, frontmatter, and description.
+    """Read a SKILL.md once -> (is_compatible, frontmatter, description).
 
-    Returns (is_compatible, frontmatter, description). On any error, returns
-    (True, {}, "") to err on the side of showing the skill.
+    Any error yields (True, {}, "") — err on the side of showing the skill.
     """
     try:
-        raw = skill_file.read_text(encoding="utf-8")
-        frontmatter, _ = parse_frontmatter(raw)
-
-        if not skill_matches_platform(frontmatter):
+        frontmatter, _ = parse_frontmatter(skill_file.read_text(encoding="utf-8"))
+        # Host-platform and runtime-environment gates are offer-time only;
+        # explicit loads (skill_view / --skills) bypass them.
+        if not skill_matches_platform(frontmatter) or not skill_matches_environment(frontmatter):
             return False, frontmatter, ""
-
-        # Environment relevance gate (offer-time only): hide skills tagged for
-        # a runtime environment that isn't active (e.g. kanban-only skills for
-        # non-kanban users, s6-only skills outside the container). Explicit
-        # loads (skill_view / --skills) bypass this — see skill_matches_environment.
-        if not skill_matches_environment(frontmatter):
-            return False, frontmatter, ""
-
         return True, frontmatter, extract_skill_description(frontmatter)
     except Exception as e:
         logger.warning("Failed to parse skill file %s: %s", skill_file, e)
@@ -1723,43 +1496,29 @@ def _skill_should_show(
     session_platform: "str | None" = None,
 ) -> bool:
     """Return False if the skill's conditional activation rules exclude it."""
-    # Gateway-channel gate: independent of tool filtering info, because a
-    # channel-specific skill (e.g. teams-meeting-pipeline) is noise on every
-    # other channel regardless of what tools are available. Fail-open when
-    # the session platform is unknown (offline builds, tests) — hiding a
-    # skill someone might need is worse than one spare index line.
+    # Gateway-channel gate runs regardless of tool info (a channel-specific
+    # skill is noise everywhere else); fails open when the platform is unknown.
     wanted_platforms = [
         str(p).strip().lower()
         for p in (conditions.get("session_platforms") or [])
         if str(p).strip()
     ]
-    if wanted_platforms and session_platform:
-        if session_platform.strip().lower() not in wanted_platforms:
-            return False
+    if wanted_platforms and session_platform and session_platform.strip().lower() not in wanted_platforms:
+        return False
 
     if available_tools is None and available_toolsets is None:
         return True  # No filtering info — show everything (backward compat)
 
     at = available_tools or set()
     ats = available_toolsets or set()
-
-    # fallback_for: hide when the primary tool/toolset IS available
-    for ts in conditions.get("fallback_for_toolsets", []):
-        if ts in ats:
-            return False
-    for t in conditions.get("fallback_for_tools", []):
-        if t in at:
-            return False
-
-    # requires: hide when a required tool/toolset is NOT available
-    for ts in conditions.get("requires_toolsets", []):
-        if ts not in ats:
-            return False
-    for t in conditions.get("requires_tools", []):
-        if t not in at:
-            return False
-
-    return True
+    # fallback_for: hide when the primary tool/toolset IS available;
+    # requires: hide when a required tool/toolset is NOT available.
+    return not (
+        any(ts in ats for ts in conditions.get("fallback_for_toolsets", []))
+        or any(t in at for t in conditions.get("fallback_for_tools", []))
+        or any(ts not in ats for ts in conditions.get("requires_toolsets", []))
+        or any(t not in at for t in conditions.get("requires_tools", []))
+    )
 
 
 def _current_session_platform_hint() -> str:
@@ -1786,44 +1545,26 @@ def build_skills_system_prompt(
 ) -> str:
     """Build a compact skill index for the system prompt.
 
-    Two-layer cache:
-      1. In-process LRU dict keyed by (skills_dir, tools, toolsets, hidden)
-      2. Disk snapshot (``.skills_prompt_snapshot.json``) validated by
-         mtime/size manifest — survives process restarts
-
-    Falls back to a full filesystem scan when both layers miss.
-
-    External skill directories (``skills.external_dirs`` in config.yaml) are
-    scanned alongside the local ``~/.hermes/skills/`` directory.  External dirs
-    are read-only — they appear in the index but new skills are always created
-    in the local dir (or ``skills.create_dir`` when configured).  Local skills
-    take precedence when names collide.
-
-    ``compact_categories`` (e.g. from the coding posture — see
-    agent/coding_context.py) demotes whole categories to a names-only line in
-    the rendered index. Nothing is ever hidden: every skill name stays
-    visible and loadable via ``skill_view`` / ``skills_list``; only the
-    descriptions are dropped, and a footer note explains the demotion.
+    Two-layer cache: in-process LRU keyed by (skills_dir, tools, toolsets,
+    hidden), then the disk snapshot validated by an mtime/size manifest; a full
+    scan when both miss. External dirs (``skills.external_dirs``) are read-only
+    and lose name collisions to local skills. ``compact_categories`` (coding
+    posture) demotes categories to a names-only line — nothing is ever hidden.
     """
-    # Home resolution is EXPLICIT when a caller passes skills_dir_override
-    # (the agent knows its own profile home from its session_db path). This
-    # avoids the ContextVar-on-a-thread trap: build threads that didn't bind
-    # HERMES_HOME would otherwise fall back to the launch (default) home and
-    # leak the default profile's skills into a bot's prompt (confirmed: a
-    # no-override thread builds default's full index). Snapshot + external
-    # dirs are scoped to the same home so nothing reads ambient state.
+    # skills_dir_override makes home resolution EXPLICIT: a build thread that
+    # never bound the HERMES_HOME ContextVar would otherwise fall back to the
+    # launch home and leak the default profile's skills into a bot's prompt.
+    # Snapshot + external dirs are scoped to the same home.
+    _home_token = None
     if skills_dir_override is not None:
         skills_dir = Path(skills_dir_override)
         _home_token = set_hermes_home_override(str(skills_dir.parent))
     else:
         skills_dir = get_skills_dir()
-        _home_token = None
     try:
         external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
-        # Trusted project-local dirs (./.hermes/skills, ./.agents/skills at
-        # the git root) — highest-precedence tier, scanned before local.
-        # Resolved once here; cwd and trust are stable for the session, so
-        # the index (and the system prompt) stays byte-stable.
+        # Trusted project-local dirs — highest-precedence tier. Resolved once;
+        # cwd and trust are session-stable so the index stays byte-stable.
         from agent.skill_utils import get_project_skills_dirs
         project_dirs = get_project_skills_dirs()
 
@@ -1843,6 +1584,162 @@ def build_skills_system_prompt(
             reset_hermes_home_override(_home_token)
 
 
+@dataclass(frozen=True, slots=True)
+class _SkillFilter:
+    """Per-build visibility rules shared by every skill source (snapshot, scan, project, external)."""
+
+    available_tools: "set[str] | None"
+    available_toolsets: "set[str] | None"
+    platform_hint: str
+    disabled: set
+
+    def hides(self, frontmatter_name: str, skill_name: str, conditions: dict) -> bool:
+        if frontmatter_name in self.disabled or skill_name in self.disabled:
+            return True
+        return not _skill_should_show(
+            conditions, self.available_tools, self.available_toolsets, self.platform_hint or None
+        )
+
+
+def _read_category_descriptions(root: Path, log_fmt: str) -> dict[str, str]:
+    """Collect ``description`` from every DESCRIPTION.md under *root*, keyed by category path."""
+    found: dict[str, str] = {}
+    for desc_file in iter_skill_index_files(root, "DESCRIPTION.md"):
+        try:
+            fm, _ = parse_frontmatter(desc_file.read_text(encoding="utf-8"))
+            cat_desc = fm.get("description")
+            if not cat_desc:
+                continue
+            rel = desc_file.relative_to(root)
+            cat = "/".join(rel.parts[:-1]) if len(rel.parts) > 1 else "general"
+            found[cat] = str(cat_desc).strip().strip("'\"")
+        except Exception as e:
+            logger.debug(log_fmt, desc_file, e)
+    return found
+
+
+def _collect_extra_skills(
+    root: Path,
+    skill_files,
+    flt: _SkillFilter,
+    claimed: set[str],
+    skills_by_category: dict[str, list[tuple[str, str]]],
+    *,
+    desc_prefix: str,
+    log_fmt: str,
+) -> None:
+    """Add visible skills from a project/external dir; names already in *claimed* are skipped."""
+    for skill_file in skill_files:
+        try:
+            is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
+            if not is_compatible:
+                continue
+            entry = _build_snapshot_entry(skill_file, root, frontmatter, desc)
+            fm_name = entry["frontmatter_name"]
+            if fm_name in claimed:
+                continue
+            if flt.hides(fm_name, entry["skill_name"], extract_skill_conditions(frontmatter)):
+                continue
+            claimed.add(fm_name)
+            skills_by_category.setdefault(entry["category"], []).append(
+                (fm_name, f"{desc_prefix}{entry['description']}".strip())
+            )
+        except Exception as e:
+            logger.debug(log_fmt, skill_file, e)
+
+
+def _label_visible_entries(
+    visible_entries: list[dict],
+    skills_by_category: dict[str, list[tuple[str, str]]],
+) -> None:
+    """Org labeling + FAIL-LOUD collisions: a personal/org name clash flags BOTH
+    entries (neither silently wins) and skill_view refuses the bare name."""
+    def _name(entry: dict) -> str:
+        return entry.get("frontmatter_name") or entry.get("skill_name") or ""
+
+    name_owners: dict[str, set[str]] = {}
+    for entry in visible_entries:
+        name_owners.setdefault(_name(entry), set()).add("org" if entry.get("org_id") else "personal")
+    for entry in visible_entries:
+        fm = _name(entry)
+        desc = entry.get("description", "")
+        org_id = entry.get("org_id")
+        collided = len(name_owners[fm]) > 1
+        if org_id:
+            author = entry.get("org_author") or ""
+            tag = f"[org-shared{': by ' + author if author else ''}]"
+            desc = f"{tag} {desc}".strip()
+            category = f"org:{org_id}"
+        else:
+            category = entry.get("category") or "general"
+        if collided:
+            desc = f"[name collision — also exists {'personally' if org_id else 'in your org'}; load via category path] {desc}".strip()
+        skills_by_category.setdefault(category, []).append((fm, desc))
+
+
+def _render_skills_index(
+    skills_by_category: dict[str, list[tuple[str, str]]],
+    category_descriptions: dict[str, str],
+    compact_categories: "frozenset[str] | None",
+    available_tools: "set[str] | None",
+) -> str:
+    """Render the ## Skills block; "" when there is nothing to list."""
+    if not skills_by_category:
+        return ""
+    # Demoted categories collapse to one names-only line. NEVER drop entries —
+    # agent-created skills are the model's project memory and it won't
+    # rediscover them via skills_list. Nested categories follow their parent.
+    demoted = frozenset(
+        cat for cat in skills_by_category
+        if cat.split("/", 1)[0] in (compact_categories or frozenset())
+    )
+    hidden_note = (
+        "\n(Categories marked [names only] are outside the current coding "
+        "context, so their descriptions are omitted — the skills work "
+        "normally and load with skill_view(name) as usual.)"
+    ) if demoted else ""
+    # Don't name web_search when the session has no web tools (dangling reference).
+    _basic_tools = "terminal" if available_tools is not None and "web_search" not in available_tools else "web_search or terminal"
+    index_lines = []
+    for category in sorted(skills_by_category):
+        entries = skills_by_category[category]
+        if category in demoted:
+            index_lines.append(f"  {category} [names only]: {', '.join(sorted({n for n, _ in entries}))}")
+            continue
+        cat_desc = category_descriptions.get(category, "")
+        index_lines.append(f"  {category}: {cat_desc}" if cat_desc else f"  {category}:")
+        seen = set()
+        for name, desc in sorted(entries, key=lambda x: x[0]):  # stable: first entry per name wins
+            if name not in seen:
+                seen.add(name)
+                index_lines.append(f"    - {name}: {desc}" if desc else f"    - {name}")
+
+    return (
+        "## Skills\n"
+        "Before replying, scan the skills below. If a skill matches or is even partially relevant "
+        "to your task, you MUST load it with skill_view(name) and follow its instructions. "
+        "Err on the side of loading — it is always better to have context you don't need "
+        "than to miss critical steps, pitfalls, or established workflows. "
+        "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
+        "and proven workflows that outperform general-purpose approaches. Load the skill "
+        f"even if you think you could handle the task with basic tools like {_basic_tools}. "
+        "Skills also encode the user's preferred approach, conventions, and quality standards "
+        "for tasks like code review, planning, and testing — load them even for tasks you "
+        "already know how to do, because the skill defines how it should be done here.\n"
+        "If a skill has issues, fix it with skill_manage(action='patch').\n"
+        "After difficult/iterative tasks, offer to save as a skill. "
+        "If a skill you loaded was missing steps, had wrong commands, or needed "
+        "pitfalls you discovered, update it before finishing.\n"
+        "\n"
+        "<available_skills>\n"
+        + "\n".join(index_lines) + "\n"
+        "</available_skills>\n"
+        "\n"
+        "Only proceed without loading a skill if genuinely none are relevant to the task."
+        + hidden_note
+    )
+
+
 def _build_skills_system_prompt_inner(
     skills_dir: "Path",
     external_dirs: "list[Path]",
@@ -1851,8 +1748,8 @@ def _build_skills_system_prompt_inner(
     compact_categories: "frozenset[str] | None",
     project_dirs: "list[Path] | None" = None,
 ) -> str:
-    # Include the resolved platform so per-platform disabled-skill lists
-    # produce distinct cache entries (gateway serves multiple platforms).
+    # The resolved platform is part of the key: per-platform disabled-skill lists
+    # must produce distinct cache entries (the gateway serves several platforms).
     _platform_hint = _current_session_platform_hint()
     disabled = get_disabled_skill_names(_platform_hint or None)
     project_dirs = project_dirs or []
@@ -1872,101 +1769,57 @@ def _build_skills_system_prompt_inner(
             _SKILLS_PROMPT_CACHE.move_to_end(cache_key)
             return cached
 
-    # ── Layer 2: disk snapshot ────────────────────────────────────────
-    snapshot = _load_skills_snapshot(skills_dir)
-
+    flt = _SkillFilter(available_tools, available_toolsets, _platform_hint, disabled)
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
     category_descriptions: dict[str, str] = {}
-    # Unified visible-entry list (both paths) so the org labeling +
-    # fail-loud collision pass below runs identically for snapshot and scan.
-    visible_entries: list[dict] = []
-    skill_entries: list[dict] = []
 
+    # ── Layer 2: disk snapshot (fast path) vs. full scan (cold path) ────
+    # Both yield (entry, is_compatible) pairs so org labeling + collision
+    # flagging below run identically whichever source produced the metadata.
+    snapshot = _load_skills_snapshot(skills_dir)
     if snapshot is not None:
-        # Fast path: use pre-parsed metadata from disk
-        for entry in snapshot.get("skills", []):
-            if not isinstance(entry, dict):
-                continue
-            skill_name = entry.get("skill_name") or ""
-            frontmatter_name = entry.get("frontmatter_name") or skill_name
-            platforms = entry.get("platforms") or []
-            if not skill_matches_platform_list(platforms):
-                continue
-            if frontmatter_name in disabled or skill_name in disabled:
-                continue
-            if not _skill_should_show(
-                entry.get("conditions") or {},
-                available_tools,
-                available_toolsets,
-                _platform_hint or None,
-            ):
-                continue
-            visible_entries.append(entry)
+        candidates = [
+            (entry, skill_matches_platform_list(entry.get("platforms") or []))
+            for entry in snapshot.get("skills", [])
+            if isinstance(entry, dict)
+        ]
         category_descriptions = {
             str(k): str(v)
             for k, v in (snapshot.get("category_descriptions") or {}).items()
         }
     else:
-        # Cold path: full filesystem scan + write snapshot for next time
+        candidates = []
         for skill_file in iter_skill_index_files(skills_dir, "SKILL.md"):
             is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
-            entry = _build_snapshot_entry(skill_file, skills_dir, frontmatter, desc)
-            skill_entries.append(entry)
-            if not is_compatible:
-                continue
-            skill_name = entry["skill_name"]
-            if entry["frontmatter_name"] in disabled or skill_name in disabled:
-                continue
-            if not _skill_should_show(
-                extract_skill_conditions(frontmatter),
-                available_tools,
-                available_toolsets,
-                _platform_hint or None,
-            ):
-                continue
-            visible_entries.append(entry)
+            candidates.append((_build_snapshot_entry(skill_file, skills_dir, frontmatter, desc), is_compatible))
+    visible_entries: list[dict] = [
+        entry
+        for entry, is_compatible in candidates
+        if is_compatible
+        and not flt.hides(
+            entry.get("frontmatter_name") or entry.get("skill_name") or "",
+            entry.get("skill_name") or "",
+            entry.get("conditions") or {},
+        )
+    ]
 
     # ── Project-local skills (highest precedence) ──────────────────────
-    # Scanned before the local/org pass; names claimed here shadow same-named
-    # profile-local skills below (that's the feature — vendored repo skills
-    # win inside their repo). Each entry is tagged so the model and the user
-    # can see where it came from.
+    # Names claimed here shadow same-named profile-local skills (vendored repo
+    # skills win inside their repo); entries are tagged [project] for provenance.
     project_names: set[str] = set()
     if project_dirs:
         from agent.skill_utils import iter_project_skill_files
 
         for proj_dir in project_dirs:
-            if not proj_dir.exists():
-                continue
-            for skill_file in iter_project_skill_files(proj_dir):
-                try:
-                    is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
-                    if not is_compatible:
-                        continue
-                    entry = _build_snapshot_entry(skill_file, proj_dir, frontmatter, desc)
-                    fm_name = entry["frontmatter_name"]
-                    if fm_name in project_names:
-                        continue
-                    if fm_name in disabled or entry["skill_name"] in disabled:
-                        continue
-                    if not _skill_should_show(
-                        extract_skill_conditions(frontmatter),
-                        available_tools,
-                        available_toolsets,
-                        _platform_hint or None,
-                    ):
-                        continue
-                    project_names.add(fm_name)
-                    skills_by_category.setdefault(entry["category"], []).append(
-                        (fm_name, f"[project] {entry['description']}".strip())
-                    )
-                except Exception as e:
-                    logger.debug("Error reading project skill %s: %s", skill_file, e)
-
+            if proj_dir.exists():
+                _collect_extra_skills(
+                    proj_dir, iter_project_skill_files(proj_dir), flt, project_names,
+                    skills_by_category, desc_prefix="[project] ",
+                    log_fmt="Error reading project skill %s: %s",
+                )
     if project_names:
-        # Drop profile-local entries shadowed by a project skill BEFORE the
-        # org-labeling pass so collision flags don't fire on intentional
-        # project-over-local overrides.
+        # Drop shadowed profile-local entries BEFORE org labeling so collision
+        # flags don't fire on intentional project-over-local overrides.
         visible_entries = [
             e
             for e in visible_entries
@@ -1974,187 +1827,38 @@ def _build_skills_system_prompt_inner(
             not in project_names
         ]
 
-    # ── M2 org labeling + FAIL-LOUD collisions ─────────────────────────
-    # An org skill lists with an explicit provenance tag. When a personal and
-    # an org skill share a name, NEITHER silently wins: both list qualified
-    # (personal keeps the bare name is the wrong default — silent divergence
-    # from the org set; org winning silently shadows the user's own work) —
-    # so both entries carry a [name collision] flag and skill_view refuses
-    # the ambiguous bare name (its existing multi-candidate guard).
-    name_owners: dict[str, set[str]] = {}
-    for entry in visible_entries:
-        fm = entry.get("frontmatter_name") or entry.get("skill_name") or ""
-        kind = "org" if entry.get("org_id") else "personal"
-        name_owners.setdefault(fm, set()).add(kind)
-    for entry in visible_entries:
-        fm = entry.get("frontmatter_name") or entry.get("skill_name") or ""
-        desc = entry.get("description", "")
-        org_id = entry.get("org_id")
-        collided = len(name_owners.get(fm, set())) > 1
-        if org_id:
-            author = entry.get("org_author") or ""
-            tag = f"[org-shared{': by ' + author if author else ''}]"
-            desc = f"{tag} {desc}".strip()
-            category = f"org:{org_id}"
-        else:
-            category = entry.get("category") or "general"
-        if collided:
-            desc = f"[name collision — also exists {'personally' if org_id else 'in your org'}; load via category path] {desc}".strip()
-        skills_by_category.setdefault(category, []).append((fm, desc))
+    _label_visible_entries(visible_entries, skills_by_category)
 
     if snapshot is None:
-        # (continuation of the cold path below: category descriptions + write)
-        # Read category-level DESCRIPTION.md files
-        for desc_file in iter_skill_index_files(skills_dir, "DESCRIPTION.md"):
-            try:
-                content = desc_file.read_text(encoding="utf-8")
-                fm, _ = parse_frontmatter(content)
-                cat_desc = fm.get("description")
-                if not cat_desc:
-                    continue
-                rel = desc_file.relative_to(skills_dir)
-                cat = "/".join(rel.parts[:-1]) if len(rel.parts) > 1 else "general"
-                category_descriptions[cat] = str(cat_desc).strip().strip("'\"")
-            except Exception as e:
-                logger.debug("Could not read skill description %s: %s", desc_file, e)
-
+        category_descriptions.update(
+            _read_category_descriptions(skills_dir, "Could not read skill description %s: %s")
+        )
         _write_skills_snapshot(
             skills_dir,
             _build_skills_manifest(skills_dir),
-            skill_entries,
+            [entry for entry, _ in candidates],
             category_descriptions,
         )
 
     # ── External skill directories ─────────────────────────────────────
-    # Scan external dirs directly (no snapshot caching — they're read-only
-    # and typically small).  Local skills already in skills_by_category take
-    # precedence: we track seen names and skip duplicates from external dirs.
-    seen_skill_names: set[str] = set()
-    for cat_skills in skills_by_category.values():
-        for name, _desc in cat_skills:
-            seen_skill_names.add(name)
-
+    # Scanned directly (no snapshot — read-only and small). Local skills take
+    # precedence: names already indexed are skipped.
+    seen_skill_names: set[str] = {name for cat in skills_by_category.values() for name, _ in cat}
     for ext_dir in external_dirs:
         if not ext_dir.exists():
             continue
-        for skill_file in iter_skill_index_files(ext_dir, "SKILL.md"):
-            try:
-                is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
-                if not is_compatible:
-                    continue
-                entry = _build_snapshot_entry(skill_file, ext_dir, frontmatter, desc)
-                skill_name = entry["skill_name"]
-                frontmatter_name = entry["frontmatter_name"]
-                if frontmatter_name in seen_skill_names:
-                    continue
-                if frontmatter_name in disabled or skill_name in disabled:
-                    continue
-                if not _skill_should_show(
-                    extract_skill_conditions(frontmatter),
-                    available_tools,
-                    available_toolsets,
-                    _platform_hint or None,
-                ):
-                    continue
-                seen_skill_names.add(frontmatter_name)
-                skills_by_category.setdefault(entry["category"], []).append(
-                    (frontmatter_name, entry["description"])
-                )
-            except Exception as e:
-                logger.debug("Error reading external skill %s: %s", skill_file, e)
-
-        # External category descriptions
-        for desc_file in iter_skill_index_files(ext_dir, "DESCRIPTION.md"):
-            try:
-                content = desc_file.read_text(encoding="utf-8")
-                fm, _ = parse_frontmatter(content)
-                cat_desc = fm.get("description")
-                if not cat_desc:
-                    continue
-                rel = desc_file.relative_to(ext_dir)
-                cat = "/".join(rel.parts[:-1]) if len(rel.parts) > 1 else "general"
-                category_descriptions.setdefault(cat, str(cat_desc).strip().strip("'\""))
-            except Exception as e:
-                logger.debug("Could not read external skill description %s: %s", desc_file, e)
-
-    # Posture-driven category demotion (e.g. non-coding skills while pairing
-    # on code). Demoted categories stay in the index as a single names-only
-    # line — descriptions are dropped to cut noise, but every skill name
-    # remains visible so memory-anchored recall ("load <name>") keeps working.
-    # NEVER remove entries entirely: agent-created skills are the model's
-    # project memory, and models don't reach for skills_list to rediscover
-    # what the index stops showing them. Match on the top-level category
-    # segment so nested categories ("social-media/twitter") are demoted with
-    # their parent.
-    demoted = frozenset(
-        cat for cat in skills_by_category
-        if cat.split("/", 1)[0] in (compact_categories or frozenset())
-    )
-
-    hidden_note = ""
-    if demoted:
-        hidden_note = (
-            "\n(Categories marked [names only] are outside the current coding "
-            "context, so their descriptions are omitted — the skills work "
-            "normally and load with skill_view(name) as usual.)"
+        _collect_extra_skills(
+            ext_dir, iter_skill_index_files(ext_dir, "SKILL.md"), flt, seen_skill_names,
+            skills_by_category, desc_prefix="",
+            log_fmt="Error reading external skill %s: %s",
         )
+        for cat, cat_desc in _read_category_descriptions(
+            ext_dir, "Could not read external skill description %s: %s"
+        ).items():
+            category_descriptions.setdefault(cat, cat_desc)
 
-    if not skills_by_category:
-        result = ""
-    else:
-        # "basic tools like web_search or terminal" — don't name web_search
-        # when the session has no web tools (dangling reference otherwise).
-        _basic_tools = "web_search or terminal"
-        if available_tools is not None and "web_search" not in available_tools:
-            _basic_tools = "terminal"
-        index_lines = []
-        for category in sorted(skills_by_category.keys()):
-            # Deduplicate and sort skills within each category
-            seen = set()
-            if category in demoted:
-                names = sorted({name for name, _ in skills_by_category[category]})
-                index_lines.append(f"  {category} [names only]: {', '.join(names)}")
-                continue
-            cat_desc = category_descriptions.get(category, "")
-            if cat_desc:
-                index_lines.append(f"  {category}: {cat_desc}")
-            else:
-                index_lines.append(f"  {category}:")
-            for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
-                if name in seen:
-                    continue
-                seen.add(name)
-                if desc:
-                    index_lines.append(f"    - {name}: {desc}")
-                else:
-                    index_lines.append(f"    - {name}")
+    result = _render_skills_index(skills_by_category, category_descriptions, compact_categories, available_tools)
 
-        result = (
-            "## Skills\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
-            "Err on the side of loading — it is always better to have context you don't need "
-            "than to miss critical steps, pitfalls, or established workflows. "
-            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. Load the skill "
-            f"even if you think you could handle the task with basic tools like {_basic_tools}. "
-            "Skills also encode the user's preferred approach, conventions, and quality standards "
-            "for tasks like code review, planning, and testing — load them even for tasks you "
-            "already know how to do, because the skill defines how it should be done here.\n"
-            "If a skill has issues, fix it with skill_manage(action='patch').\n"
-            "After difficult/iterative tasks, offer to save as a skill. "
-            "If a skill you loaded was missing steps, had wrong commands, or needed "
-            "pitfalls you discovered, update it before finishing.\n"
-            "\n"
-            "<available_skills>\n"
-            + "\n".join(index_lines) + "\n"
-            "</available_skills>\n"
-            "\n"
-            "Only proceed without loading a skill if genuinely none are relevant to the task."
-            + hidden_note
-        )
-
-    # ── Store in LRU cache ────────────────────────────────────────────
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)
@@ -2197,32 +1901,25 @@ def _truncate_content(
     _record_truncation_warning(msg)
     head_chars = int(max_chars * CONTEXT_TRUNCATE_HEAD_RATIO)
     tail_chars = int(max_chars * CONTEXT_TRUNCATE_TAIL_RATIO)
-    head = content[:head_chars]
-    tail = content[-tail_chars:]
     marker = (
         f"\n\n[...truncated {filename}: kept {head_chars}+{tail_chars} of "
         f"{len(content)} chars. The middle is omitted — if you need the full "
         f"instructions, read the complete file with the read_file tool: "
         f"{target}]\n\n"
     )
-    return head + marker + tail
+    return content[:head_chars] + marker + content[-tail_chars:]
 
 
 def load_soul_md(
     context_length: Optional[int] = None,
     home_override: "Path | None" = None,
 ) -> Optional[str]:
-    """Load SOUL.md from HERMES_HOME and return its content, or None.
+    """SOUL.md from HERMES_HOME (identity slot #1), or None.
 
-    Used as the agent identity (slot #1 in the system prompt).  When this
-    returns content, ``build_context_files_prompt`` should be called with
-    ``skip_soul=True`` so SOUL.md isn't injected twice.
-
-    ``home_override`` scopes the read to an explicit profile home (the agent
-    knows its own home from its session_db path). Without it, resolution is
-    ambient — which on a thread that lost the HERMES_HOME ContextVar falls
-    back to the launch home and reads the wrong profile's SOUL.md (#50233,
-    same class as the skills-index leak fixed in #86313).
+    Callers that use it must pass ``skip_soul=True`` to
+    ``build_context_files_prompt`` so it isn't injected twice. ``home_override``
+    pins the profile home: ambient resolution on a thread that lost the
+    HERMES_HOME ContextVar reads the wrong profile's SOUL.md.
     """
     try:
         from hermes_cli.config import ensure_hermes_home
@@ -2238,123 +1935,113 @@ def load_soul_md(
         content = soul_path.read_text(encoding="utf-8").strip()
         if not content:
             return None
-        content = _scan_context_content(content, "SOUL.md")
-        content = _truncate_content(
-            content, "SOUL.md", context_length=context_length,
-            read_path=str(soul_path),
+        return _truncate_content(
+            _scan_context_content(content, "SOUL.md"), "SOUL.md",
+            context_length=context_length, read_path=str(soul_path),
         )
-        return content
     except Exception as e:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
         return None
 
 
+def _read_context_file(path: Path) -> str:
+    """Stripped text of *path*; "" when empty or unreadable (logged at debug)."""
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except Exception as e:
+        logger.debug("Could not read %s: %s", path, e)
+        return ""
+
+
+def _context_section(
+    content: str,
+    label: str,
+    warn_name: str,
+    path: Path,
+    context_length: Optional[int],
+    *,
+    strip_frontmatter: bool = False,
+) -> str:
+    """Threat-scan *content*, render it as ``## <label>``, and cap it to the context-file budget.
+
+    *warn_name* is the label used in truncation warnings; *path* is what the
+    agent is told to ``read_file`` to recover the full text.
+    """
+    if strip_frontmatter:
+        content = _strip_yaml_frontmatter(content)
+    return _truncate_content(
+        f"## {label}\n\n{_scan_context_content(content, label)}", warn_name,
+        context_length=context_length, read_path=str(path),
+    )
+
+
 def _load_hermes_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
-    """.hermes.md / HERMES.md — walk to git root."""
+    """.hermes.md / HERMES.md — nearest match walking up to the git root."""
     hermes_md_path = _find_hermes_md(cwd_path)
     if not hermes_md_path:
         return ""
-    try:
-        content = hermes_md_path.read_text(encoding="utf-8").strip()
-        if not content:
-            return ""
-        content = _strip_yaml_frontmatter(content)
-        rel = hermes_md_path.name
-        try:
-            rel = str(hermes_md_path.relative_to(cwd_path))
-        except ValueError:
-            pass
-        content = _scan_context_content(content, rel)
-        result = f"## {rel}\n\n{content}"
-        return _truncate_content(
-            result, ".hermes.md", context_length=context_length,
-            read_path=str(hermes_md_path),
-        )
-    except Exception as e:
-        logger.debug("Could not read %s: %s", hermes_md_path, e)
+    content = _read_context_file(hermes_md_path)
+    if not content:
         return ""
+    try:
+        label = str(hermes_md_path.relative_to(cwd_path))
+    except ValueError:
+        label = hermes_md_path.name
+    return _context_section(
+        content, label, ".hermes.md", hermes_md_path, context_length, strip_frontmatter=True,
+    )
 
 
 def _agents_md_directory_chain(cwd_path: Path) -> List[Path]:
     """Directories to check for AGENTS.md: git root first, cwd last.
 
-    Ported from superagent-ai/grok-cli ``src/utils/instructions.ts``
-    (``directoryChain``): the chain runs from the git repository root down
-    through every intermediate directory to *cwd*, so deeper directories can
-    add more specific guidance that appears later (and therefore takes
-    precedence) in the merged prompt.  Without a git root — or when *cwd*
-    sits outside it — only *cwd* itself is checked, matching the historical
-    single-directory behavior.
+    Deeper directories appear later in the merged prompt and so take precedence.
+    Without a git root (or with cwd outside it) only cwd is checked.
     """
     current = cwd_path.resolve()
     root = _find_git_root(current)
     if root is None or root == current:
         return [current]
     try:
-        rel = current.relative_to(root)
+        parts = current.relative_to(root).parts
     except ValueError:
         return [current]
-    chain = [root]
-    acc = root
-    for part in rel.parts:
-        acc = acc / part
-        chain.append(acc)
-    return chain
+    return [root] + [root.joinpath(*parts[: i + 1]) for i in range(len(parts))]
 
 
 def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """AGENTS.md — merged directory chain from git root down to cwd.
 
-    Each directory on the chain (see ``_agents_md_directory_chain``)
-    contributes its ``AGENTS.override.md`` / ``AGENTS.md`` / ``agents.md``
-    (first name wins per directory) as its own provenance-labelled section.
-    ``AGENTS.override.md`` wins over ``AGENTS.md`` so a developer can keep a
-    personal, typically-gitignored override next to the committed project
-    instructions without editing the tracked file (same convention as
-    earendil-works/pi#7681).  Identical content encountered again further
-    down the chain (copied or symlinked files) is deduplicated.  With a
-    single match — the common case, and always the case outside a git repo —
-    output is identical to the historical single-file behavior.
+    Per directory the first of ``AGENTS.override.md`` / ``AGENTS.md`` / ``agents.md``
+    wins (the override lets a gitignored personal file shadow the committed one);
+    identical content seen again further down the chain is skipped. A single
+    match renders exactly like the historical single-file output.
     """
     cwd_resolved = cwd_path.resolve()
     sections: List[str] = []
     seen_content: set = set()
     for directory in _agents_md_directory_chain(cwd_resolved):
-        for name in ["AGENTS.override.md", "AGENTS.md", "agents.md"]:
+        for name in ("AGENTS.override.md", "AGENTS.md", "agents.md"):
             candidate = directory / name
             if not candidate.exists():
                 continue
-            try:
-                content = candidate.read_text(encoding="utf-8").strip()
-            except Exception as e:
-                logger.debug("Could not read %s: %s", candidate, e)
-                continue
+            content = _read_context_file(candidate)
             if not content:
                 continue
             if content in seen_content:
                 break  # identical copy along the chain — skip duplicate
             seen_content.add(content)
-            if directory == cwd_resolved:
-                label = name
-            else:
-                label = os.path.relpath(candidate, cwd_resolved)
-            scanned = _scan_context_content(content, label)
-            section = f"## {label}\n\n{scanned}"
-            section = _truncate_content(
-                section, label, context_length=context_length,
-                read_path=str(candidate),
-            )
-            sections.append(section)
+            label = name if directory == cwd_resolved else os.path.relpath(candidate, cwd_resolved)
+            sections.append(_context_section(content, label, label, candidate, context_length))
             break  # first name match wins per directory
     if not sections:
         return ""
     if len(sections) == 1:
         return sections[0]
-    # Per-file budgets were already applied above; also cap the merged chain
-    # so a deep monorepo cannot multiply the context-file budget unbounded.
-    merged = "\n\n".join(sections)
+    # Per-file budgets were applied above; also cap the merged chain so a deep
+    # monorepo cannot multiply the context-file budget unbounded.
     return _truncate_content(
-        merged, "AGENTS.md (directory chain)",
+        "\n\n".join(sections), "AGENTS.md (directory chain)",
         context_length=context_length,
         read_path=str(cwd_resolved / "AGENTS.md"),
     )
@@ -2362,48 +2049,27 @@ def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str
 
 def _load_claude_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """CLAUDE.md / claude.md — cwd only."""
-    for name in ["CLAUDE.md", "claude.md"]:
+    for name in ("CLAUDE.md", "claude.md"):
         candidate = cwd_path / name
         if candidate.exists():
-            try:
-                content = candidate.read_text(encoding="utf-8").strip()
-                if content:
-                    content = _scan_context_content(content, name)
-                    result = f"## {name}\n\n{content}"
-                    return _truncate_content(
-                        result, "CLAUDE.md", context_length=context_length,
-                        read_path=str(candidate),
-                    )
-            except Exception as e:
-                logger.debug("Could not read %s: %s", candidate, e)
+            content = _read_context_file(candidate)
+            if content:
+                return _context_section(content, name, "CLAUDE.md", candidate, context_length)
     return ""
 
 
 def _load_cursorrules(cwd_path: Path, context_length: Optional[int] = None) -> str:
-    """.cursorrules + .cursor/rules/*.mdc — cwd only."""
-    cursorrules_content = ""
-    cursorrules_file = cwd_path / ".cursorrules"
-    if cursorrules_file.exists():
-        try:
-            content = cursorrules_file.read_text(encoding="utf-8").strip()
-            if content:
-                content = _scan_context_content(content, ".cursorrules")
-                cursorrules_content += f"## .cursorrules\n\n{content}\n\n"
-        except Exception as e:
-            logger.debug("Could not read .cursorrules: %s", e)
-
+    """.cursorrules + .cursor/rules/*.mdc — cwd only, concatenated."""
+    candidates: list[tuple[Path, str]] = [(cwd_path / ".cursorrules", ".cursorrules")]
     cursor_rules_dir = cwd_path / ".cursor" / "rules"
-    if cursor_rules_dir.exists() and cursor_rules_dir.is_dir():
-        mdc_files = sorted(cursor_rules_dir.glob("*.mdc"))
-        for mdc_file in mdc_files:
-            try:
-                content = mdc_file.read_text(encoding="utf-8").strip()
-                if content:
-                    content = _scan_context_content(content, f".cursor/rules/{mdc_file.name}")
-                    cursorrules_content += f"## .cursor/rules/{mdc_file.name}\n\n{content}\n\n"
-            except Exception as e:
-                logger.debug("Could not read %s: %s", mdc_file, e)
+    if cursor_rules_dir.is_dir():
+        candidates += [(f, f".cursor/rules/{f.name}") for f in sorted(cursor_rules_dir.glob("*.mdc"))]
 
+    cursorrules_content = ""
+    for path, label in candidates:
+        content = _read_context_file(path) if path.exists() else ""
+        if content:
+            cursorrules_content += f"## {label}\n\n{_scan_context_content(content, label)}\n\n"
     if not cursorrules_content:
         return ""
     return _truncate_content(
@@ -2421,39 +2087,20 @@ def build_context_files_prompt(
 ) -> str:
     """Discover and load context files for the system prompt.
 
-    Priority (first found wins — only ONE project context type is loaded):
-      1. .hermes.md / HERMES.md  (walk to git root)
-      2. AGENTS.md / agents.md   (merged chain: git root → cwd)
-      3. CLAUDE.md / claude.md   (cwd only)
-      4. .cursorrules / .cursor/rules/*.mdc  (cwd only)
-
-    SOUL.md from HERMES_HOME is independent and always included when present.
-
-    Each context source is capped before injection. The cap defaults to the
-    model's context window (scaled — see ``_dynamic_context_file_max_chars``)
-    when *context_length* is provided, falling back to 20,000 chars otherwise.
-    An explicit ``context_file_max_chars`` in config.yaml always wins.
-
-    When *skip_soul* is True, SOUL.md is not included here (it was already
-    loaded via ``load_soul_md()`` for the identity slot).
+    Only ONE project context type loads, first found wins: .hermes.md/HERMES.md
+    (walk to git root) → AGENTS.md chain (git root → cwd) → CLAUDE.md (cwd) →
+    .cursorrules + .cursor/rules/*.mdc (cwd). SOUL.md from HERMES_HOME is
+    independent and always included unless *skip_soul* (already loaded as the
+    identity slot). Each source is capped (see ``_get_context_file_max_chars``).
     """
-    if cwd is None:
-        cwd = os.getcwd()
-        cwd_is_fallback = True
-    else:
-        cwd_is_fallback = False
-
-    cwd_path = Path(cwd).resolve()
+    cwd_is_fallback = cwd is None
+    cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
     sections = []
 
-    # Never let a FALLBACK-picked directory inside the Hermes install/source
-    # tree gain system-prompt authority. A backend that self-spawns into that
-    # tree (the desktop app default) would otherwise load this repo's
-    # contributor AGENTS.md as authoritative project context (#64590). An
-    # explicitly configured cwd is honored verbatim — the Hermes tree is a
-    # legitimate workspace when the user deliberately points a session at it —
-    # and CLI-style surfaces pass allow_install_tree_fallback=True because
-    # their launch dir IS the user's shell cwd (developing Hermes in-tree).
+    # A FALLBACK-picked cwd inside the Hermes install tree must not gain
+    # system-prompt authority (the desktop default would load this repo's
+    # contributor AGENTS.md). An explicit cwd is honored verbatim, and CLI
+    # surfaces pass allow_install_tree_fallback=True (launch dir IS the shell cwd).
     from agent.runtime_cwd import _is_install_tree
 
     if (

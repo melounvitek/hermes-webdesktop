@@ -84,8 +84,8 @@ class TestDesktopHintBlockRemoved:
     def test_build_environment_hints_has_no_runtime_surface_line(self, monkeypatch):
         monkeypatch.setenv("HERMES_DESKTOP", "1")
         monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
-        from agent.prompt_builder import _clear_backend_probe_cache
-        _clear_backend_probe_cache()
+        from agent.prompt_builder import _BACKEND_PROBE_CACHE
+        _BACKEND_PROBE_CACHE.clear()
         hints = build_environment_hints()
         assert "Runtime surface:" not in hints
         assert "desktop GUI app" not in hints
@@ -95,8 +95,8 @@ class TestDesktopHintBlockRemoved:
         resolution site (system_prompt.py), not build_environment_hints()."""
         monkeypatch.setenv("HERMES_DESKTOP", "1")
         monkeypatch.setenv("HERMES_DESKTOP_TERMINAL", "1")
-        from agent.prompt_builder import _clear_backend_probe_cache
-        _clear_backend_probe_cache()
+        from agent.prompt_builder import _BACKEND_PROBE_CACHE
+        _BACKEND_PROBE_CACHE.clear()
         hints = build_environment_hints()
         assert "embedded terminal pane" not in hints
         assert "Shift-drag" not in hints

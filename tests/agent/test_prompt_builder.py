@@ -746,7 +746,7 @@ class TestEnvironmentHints:
         # Force the probe to fail so we exercise the static fallback path
         # deterministically (the live probe would try to spin up docker).
         monkeypatch.setattr(_pb, "_probe_remote_backend", lambda _t: None)
-        _pb._clear_backend_probe_cache()
+        _pb._BACKEND_PROBE_CACHE.clear()
         result = _pb.build_environment_hints()
         # Host suppression: none of the local-backend lines should appear.
         assert "Host:" not in result
@@ -766,7 +766,7 @@ class TestEnvironmentHints:
         configured.mkdir()
         monkeypatch.setenv("TERMINAL_CWD", str(configured))
         monkeypatch.chdir(tmp_path)
-        _pb._clear_backend_probe_cache()
+        _pb._BACKEND_PROBE_CACHE.clear()
         assert f"Current working directory: {configured}" in _pb.build_environment_hints()
 
     def test_build_environment_hints_falls_back_to_launch_dir(self, monkeypatch, tmp_path):
@@ -776,7 +776,7 @@ class TestEnvironmentHints:
         monkeypatch.delenv("TERMINAL_ENV", raising=False)
         monkeypatch.delenv("TERMINAL_CWD", raising=False)
         monkeypatch.chdir(tmp_path)
-        _pb._clear_backend_probe_cache()
+        _pb._BACKEND_PROBE_CACHE.clear()
         assert f"Current working directory: {tmp_path}" in _pb.build_environment_hints()
 
 
@@ -791,7 +791,7 @@ class TestEnvironmentHints:
         import agent.prompt_builder as _pb
 
         monkeypatch.setenv("TERMINAL_ENV", "docker")
-        _pb._clear_backend_probe_cache()
+        _pb._BACKEND_PROBE_CACHE.clear()
 
         class _FakeEnv:
             def execute(self, cmd, timeout=None):
@@ -827,7 +827,7 @@ class TestEnvironmentHints:
         monkeypatch.setattr(_pb, "is_wsl", lambda: False)
         monkeypatch.delenv("TERMINAL_ENV", raising=False)
         monkeypatch.setenv("HERMES_ENVIRONMENT_HINT", "Running inside an OpenShell sandbox.")
-        _pb._clear_backend_probe_cache()
+        _pb._BACKEND_PROBE_CACHE.clear()
         result = _pb.build_environment_hints()
         assert "Running inside an OpenShell sandbox." in result
         # The factual host block must still come first.
