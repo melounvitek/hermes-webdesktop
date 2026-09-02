@@ -37,6 +37,7 @@ import time
 import uuid
 import textwrap
 from collections import deque
+from dataclasses import dataclass
 from urllib.parse import unquote, urlparse
 from contextlib import contextmanager
 from pathlib import Path
@@ -5205,6 +5206,28 @@ def _append_blank_panel_line(lines, border_style: str, box_width: int) -> None:
     lines.append((border_style, "│" + (" " * box_width) + "│\n"))
 
 
+@dataclass
+class _ChatTurn:
+    """Per-turn state shared by the ``chat()`` phases and the agent worker thread.
+
+    ``result`` is written by the worker thread and read by the main thread after the join
+    (same object, so late writes from an abandoned thread stay visible exactly as before).
+    ``box_opened`` is flipped by the TTS display callback; ``normal_exit`` is set only when
+    the TTS worker drained on its own so the ``finally`` never cuts the last sentence.
+    """
+
+    result: Optional[dict] = None
+    use_streaming_tts: bool = False
+    box_opened: bool = False
+    thinking_started: bool = False
+    text_queue: Optional[queue.Queue] = None
+    tts_thread: Optional[threading.Thread] = None
+    stream_callback: Optional[Any] = None
+    stop_event: Optional[threading.Event] = None
+    tts_normal_exit: bool = False
+    voice_prefix: str = ""
+
+
 class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMixin, CLIStatusBarMixin, CLIVoiceMixin, CLIModelSwitchMixin, CLISessionMixin, CLIStreamMixin, CLIModalMixin, CLITerminalMixin, CLIInfoMixin, CLILoopsMixin):
     """
     Interactive CLI for the Hermes Agent.
@@ -6789,10 +6812,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
         print(flush=True)
         
+        turn = _ChatTurn()
         try:
-            # Run the conversation with interrupt monitoring
-            result = None
-
             # Reset streaming display state for this turn
             self._reset_stream_state()
             # Separate from _reset_stream_state because this must persist
@@ -6800,219 +6821,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             # reset at the start of each user turn.
             self._reasoning_shown_this_turn = False
 
-            # Full-duplex agent-turn listener (continuous voice mode): arm
-            # the mic NOW — at utterance-submit — not when TTS playback
-            # starts. It spans generation (speech interrupts the turn) and
-            # playback (speech cuts TTS), and disarms itself when the turn
-            # is fully done. See _voice_full_duplex_listener.
-            if self._voice_mode and self._voice_continuous:
-                self._voice_last_tts_text = ""
-                threading.Thread(
-                    target=self._voice_full_duplex_listener, daemon=True
-                ).start()
-
-            # --- Streaming TTS setup ---
-            # Any working TTS provider streams sentence-by-sentence as the agent
-            # generates tokens: PCM-streaming providers (ElevenLabs, OpenAI) play
-            # chunks as they arrive, everything else synthesizes per sentence.
-            use_streaming_tts = False
-            _streaming_box_opened = False
-            _thinking_started = False
-            text_queue = None
-            tts_thread = None
-            stream_callback = None
-            stop_event = None
-            _tts_normal_exit = False
-
-            if self._voice_tts:
-                try:
-                    from tools.tts_tool import (
-                        _import_sounddevice,
-                        check_tts_requirements,
-                        stream_tts_to_speaker,
-                    )
-                    _import_sounddevice()
-                    use_streaming_tts = check_tts_requirements()
-                except Exception:
-                    pass
-
-            if use_streaming_tts:
-                text_queue = queue.Queue()
-                stop_event = threading.Event()
-
-                # When token streaming is enabled (the common case), the
-                # CLI's _stream_delta already renders text token-by-token as
-                # the model generates it. Passing a display_callback here too
-                # would render every sentence a second time. Only attach the
-                # callback when streaming is disabled, so the TTS consumer
-                # becomes the sole display path.
-                _tts_display_cb = None
-                if not self.streaming_enabled:
-                    def display_callback(sentence: str):
-                        """Called by TTS consumer when a sentence is ready to display + speak."""
-                        nonlocal _streaming_box_opened
-                        if not _streaming_box_opened:
-                            _streaming_box_opened = True
-                            w = self._scrollback_box_width(getattr(self.console, "width", 80))
-                            label = " ⚕ Hermes "
-                            if self.show_timestamps:
-                                label = f"{label}{datetime.now().strftime(getattr(self, 'timestamp_format', '%H:%M'))} "
-                            fill = w - 2 - HermesCLI._status_bar_display_width(label)
-                            _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
-                        _cprint(f"{_STREAM_PAD}{sentence.rstrip()}")
-                    _tts_display_cb = display_callback
-
-                tts_thread = threading.Thread(
-                    target=stream_tts_to_speaker,
-                    args=(text_queue, stop_event, self._voice_tts_done),
-                    kwargs={"display_callback": _tts_display_cb},
-                    daemon=True,
-                )
-                tts_thread.start()
-                # Expose the pipeline's stop event so barge-in paths (voice
-                # key, full-duplex listener) can cut playback from outside
-                # this turn. The full-duplex listener itself was armed at
-                # turn start (see above) — it spans generation AND playback.
-                self._voice_tts_stop = stop_event
-
-                def stream_callback(delta: str):
-                    if text_queue is not None:
-                        text_queue.put(delta)
-                    # Track what's actually being spoken so a playback-phase
-                    # barge capture can be checked against it (echo guard,
-                    # #75780).
-                    self._voice_last_tts_text = (self._voice_last_tts_text or "") + delta
-
-            # When voice mode is active, prepend a brief instruction so the
-            # model responds concisely. The prefix is API-call-local only —
-            # run_conversation persists the original clean user message.
-            _voice_prefix = ""
-            if voice_input and isinstance(message, str):
-                _voice_prefix = (
-                    "[Voice input — respond concisely and conversationally, "
-                    "2-3 sentences max. No code blocks or markdown.] "
-                )
-
-            def run_agent():
-                nonlocal result
-                # Set callbacks inside the agent thread so thread-local storage
-                # in terminal_tool is populated for this thread.  The main thread
-                # registration (run() line ~9046) is invisible here because
-                # _callback_tls is threading.local().  Matches the pattern used
-                # by acp_adapter/server.py for ACP sessions.
-                set_sudo_password_callback(self._sudo_password_callback)
-                set_approval_callback(self._approval_callback)
-                try:
-                    set_secret_capture_callback(self._secret_capture_callback)
-                except Exception:
-                    pass
-                # Bind this turn's approval session key into the contextvar so
-                # ``tools.approval.is_current_session_yolo_enabled()`` resolves
-                # against the same key that ``/yolo`` toggles under (see
-                # ``_toggle_yolo`` → ``enable_session_yolo(self.session_id)``).
-                # Mirrors ``tui_gateway/server.py`` and ``gateway/run.py`` which
-                # bind the same contextvar before invoking the agent.
-                try:
-                    from tools.approval import (
-                        reset_current_session_key,
-                        set_current_session_key,
-                    )
-                    _approval_session_token = set_current_session_key(
-                        self.session_id or "default"
-                    )
-                except Exception:
-                    reset_current_session_key = None  # type: ignore[assignment]
-                    _approval_session_token = None
-                agent_message = _voice_prefix + message if _voice_prefix else message
-                # Prepend pending notes via _prepend_note_to_message, which
-                # handles both plain-string and multimodal content-parts list
-                # messages. Naive ``note + "\n\n" + agent_message`` crashed with
-                # TypeError when an image was attached (agent_message is a list)
-                # and a /model or /reload-skills note was queued for the turn.
-                _msn = getattr(self, '_pending_model_switch_note', None)
-                if _msn:
-                    agent_message = _prepend_note_to_message(agent_message, _msn)
-                    self._pending_model_switch_note = None
-                # Prepend pending /reload-skills note so the model sees which
-                # skills were added/removed before handling this turn. Same
-                # one-shot queue pattern as the model-switch note above.
-                _srn = getattr(self, '_pending_skills_reload_note', None)
-                if _srn:
-                    agent_message = _prepend_note_to_message(agent_message, _srn)
-                    self._pending_skills_reload_note = None
-                # Barged mid-speech (VAD or record key)? Tell the model it was
-                # cut off — same one-shot, API-local note channel as above.
-                from tools.tts_streaming import SPEECH_INTERRUPTED_NOTE, take_speech_interrupted
-                if take_speech_interrupted():
-                    agent_message = _prepend_note_to_message(agent_message, SPEECH_INTERRUPTED_NOTE)
-                _moa_cfg = getattr(self, "_pending_moa_config", None)
-                self._pending_moa_config = None
-                if _moa_cfg is None:
-                    _moa_cfg = None
-                # Model/skill notes and voice instructions are API-local. Keep
-                # the original staged input as the durable transcript value so a
-                # close-path marker follows the same dict into turn setup rather
-                # than producing a second noted user row (#63766).
-                _persist_clean_user_message = (
-                    message if (_voice_prefix or agent_message != message) else None
-                )
-                _one_turn_model_restore = getattr(
-                    self, "_pending_one_turn_model_restore", None
-                )
-                self._pending_one_turn_model_restore = None
-                try:
-                    result = self.agent.run_conversation(
-                        user_message=agent_message,
-                        conversation_history=self.conversation_history[:-1],  # Exclude the message we just added
-                        stream_callback=stream_callback,
-                        task_id=self.session_id,
-                        persist_user_message=_persist_clean_user_message,
-                        moa_config=_moa_cfg,
-                    )
-                    if getattr(self, "_pending_moa_disable_after_turn", False):
-                        _restore = getattr(self, "_pending_moa_restore_model", None) or {}
-                        for _key, _value in _restore.items():
-                            if _value is not None:
-                                setattr(self, _key, _value)
-                        self.agent = None
-                        self._pending_moa_restore_model = None
-                        self._pending_moa_disable_after_turn = False
-                except Exception as exc:
-                    logging.error("run_conversation raised: %s", exc, exc_info=True)
-                    _summary = getattr(self.agent, '_summarize_api_error', lambda e: str(e)[:300])(exc)
-                    result = {
-                        "final_response": f"Error: {_summary}",
-                        "messages": [],
-                        "api_calls": 0,
-                        "completed": False,
-                        "failed": True,
-                        "error": _summary,
-                    }
-                finally:
-                    if _one_turn_model_restore:
-                        self._restore_model_runtime_snapshot(_one_turn_model_restore)
-                    # Surface any credit notices queued during the turn (cold-start
-                    # seed / per-turn capture) now that the response is done — printing
-                    # at this boundary paints cleanly above the prompt instead of being
-                    # buried behind the streaming output.
-                    self._flush_credit_notices()
-                    # Clear thread-local callbacks so a reused thread doesn't
-                    # hold stale references to a disposed CLI instance.
-                    try:
-                        set_sudo_password_callback(None)
-                        set_approval_callback(None)
-                        set_secret_capture_callback(None)
-                    except Exception:
-                        pass
-                    # Release the per-turn approval session key. ``_session_yolo``
-                    # state itself is preserved across turns (so /yolo persists
-                    # for the whole CLI run); we just unbind the contextvar so a
-                    # reused thread doesn't see stale identity on its next run.
-                    if _approval_session_token is not None and reset_current_session_key is not None:
-                        try:
-                            reset_current_session_key(_approval_session_token)
-                        except Exception:
-                            pass
+            self._chat_setup_turn_audio(turn, message, voice_input)
 
             # Start agent in background thread (daemon so it cannot keep the
             # process alive when the user closes the terminal tab — SIGHUP
@@ -7021,422 +6830,24 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             # finishes; reset on the next turn.
             self._prompt_start_time = time.time()
             self._prompt_duration = 0.0
-            agent_thread = threading.Thread(target=run_agent, daemon=True)
+            agent_thread = threading.Thread(
+                target=self._chat_run_agent, args=(turn, message), daemon=True
+            )
             agent_thread.start()
 
-            # Ambient "thinking" sound: calm bubble blips while the agent
-            # works in voice mode with no audio flowing, so the user knows
-            # it's alive during long thinking/tool stretches. Skipped per-blip
-            # while TTS speaks, the mic records, or a barge capture is live;
-            # stopped outright as soon as the turn ends. voice.thinking_sound
-            # gates it (default on); macOS is handled inside (TCC-safe skip).
-            _thinking_started = False
-            if self._voice_mode:
-                try:
-                    from tools.voice_mode import start_thinking_sound
+            interrupt_msg = self._chat_monitor_agent_thread(turn, agent_thread)
 
-                    _thinking_started = start_thinking_sound(
-                        should_play=lambda: (
-                            self._voice_tts_done.is_set()
-                            and not self._voice_recording
-                            and not self._voice_barge_capture.is_set()
-                        )
-                    )
-                except Exception:
-                    _thinking_started = False
+            self._chat_settle_turn(turn)
 
-            # Monitor the dedicated interrupt queue while the agent runs.
-            # _interrupt_queue is separate from _pending_input, so process_loop
-            # and chat() never compete for the same queue.
-            # When a clarify question is active, user input is handled entirely
-            # by the Enter key binding (routed to the clarify response queue),
-            # so we skip interrupt processing to avoid stealing that input.
-            interrupt_msg = None
-            while agent_thread.is_alive():
-                if hasattr(self, '_interrupt_queue'):
-                    try:
-                        interrupt_msg = self._interrupt_queue.get(timeout=0.1)
-                        if interrupt_msg:
-                            # If clarify is active, the Enter handler routes
-                            # input directly; this queue shouldn't have anything.
-                            # But if it does (race condition), don't interrupt —
-                            # and don't drop the message either: park it in
-                            # _pending_input so it runs as the next turn.
-                            if self._clarify_state or self._clarify_freetext:
-                                try:
-                                    self._pending_input.put(interrupt_msg)
-                                except Exception:
-                                    pass
-                                interrupt_msg = None
-                                continue
-                            print("\n⚡ New message detected, interrupting...")
-                            # Signal TTS to stop on interrupt
-                            if stop_event is not None:
-                                stop_event.set()
-                            self.agent.interrupt(interrupt_msg)
-                            # Clear any active overlay states the interrupted agent
-                            # left behind.  approval/clarify/sudo/secret prompts gate
-                            # input (read_only condition + keypress filter) until
-                            # explicitly reset — without this the CLI freezes after
-                            # an interrupt until the prompt's own timeout expires (#14026).
-                            self._clear_active_overlays_for_interrupt()
-                            # Debug: log to file (stdout may be devnull from redirect_stdout)
-                            try:
-                                _dbg = _hermes_home / "interrupt_debug.log"
-                                with open(_dbg, "a", encoding="utf-8") as _f:
-                                    _f.write(f"{time.strftime('%H:%M:%S')} interrupt fired: msg={str(interrupt_msg)[:60]!r}, "
-                                             f"children={len(self.agent._active_children)}, "
-                                             f"parent._interrupt={self.agent._interrupt_requested}\n")
-                                    for _ci, _ch in enumerate(self.agent._active_children):
-                                        _f.write(f"  child[{_ci}]._interrupt={_ch._interrupt_requested}\n")
-                            except Exception:
-                                pass
-                            break
-                    except queue.Empty:
-                        # Force prompt_toolkit to flush any pending stdout
-                        # output from the agent thread.  Without this, the
-                        # StdoutProxy buffer only flushes on renderer passes
-                        # triggered by input events — on macOS this causes
-                        # the CLI to appear frozen until the user types. (#1624)
-                        self._invalidate(min_interval=0.15)
-                else:
-                    # Fallback for non-interactive mode (e.g., single-query)
-                    agent_thread.join(0.1)
+            return self._chat_render_turn(turn, agent_thread, interrupt_msg)
 
-            # Wait for the agent thread to finish.  After an interrupt the
-            # agent may take a few seconds to clean up (kill subprocess, persist
-            # session).  Poll instead of a blocking join so the process_loop
-            # stays responsive — if the user sent another interrupt or the
-            # agent gets stuck, we can break out instead of freezing forever.
-            if interrupt_msg is not None:
-                # Interrupt path: poll briefly, then move on.  The agent
-                # thread is daemon — it dies on process exit regardless.
-                for _wait_tick in range(50):  # 50 * 0.2s = 10s max
-                    agent_thread.join(timeout=0.2)
-                    if not agent_thread.is_alive():
-                        break
-                    # Check if user fired ANOTHER interrupt (Ctrl+C sets
-                    # _should_exit which process_loop checks on next pass).
-                    if getattr(self, '_should_exit', False):
-                        break
-                if agent_thread.is_alive():
-                    logger.warning(
-                        "Agent thread still alive after interrupt "
-                        "(thread %s). Daemon thread will be cleaned up "
-                        "on exit.",
-                        agent_thread.ident,
-                    )
-            else:
-                # Normal completion: agent thread should be done already,
-                # but guard against edge cases.
-                agent_thread.join(timeout=30)
-
-            # Freeze per-prompt elapsed timer once the agent thread has
-            # exited (or been abandoned as a daemon after interrupt).
-            if self._prompt_start_time is not None:
-                self._prompt_duration = max(0.0, time.time() - self._prompt_start_time)
-                self._prompt_start_time = None
-            # Record when this agent loop finished so the status bar can show
-            # idle time since the last final response.
-            self._last_turn_finished_at = time.time()
-
-            # Proactively clean up async clients whose event loop is dead.
-            # The agent thread may have created AsyncOpenAI clients bound
-            # to a per-thread event loop; if that loop is now closed, those
-            # clients' __del__ would crash prompt_toolkit's loop on GC.
-            try:
-                from agent.auxiliary_client import cleanup_stale_async_clients
-                cleanup_stale_async_clients()
-            except Exception:
-                pass
-
-            # Flush any remaining streamed text and close the box
-            self._flush_stream()
-
-            # Signal end-of-text to TTS consumer and wait for it to finish
-            if use_streaming_tts and text_queue is not None:
-                text_queue.put(None)  # sentinel
-                if tts_thread is not None:
-                    tts_thread.join(timeout=120)
-                # Mark normal completion only if the thread actually
-                # finished.  If join() timed out and the thread is still
-                # alive, leave _tts_normal_exit False so the finally block
-                # sets stop_event to kill the runaway worker.
-                if tts_thread is not None and not tts_thread.is_alive():
-                    _tts_normal_exit = True
-
-            # Drain any remaining agent output still in the StdoutProxy
-            # buffer so tool/status lines render ABOVE our response box.
-            # The flush pushes data into the renderer queue; the short
-            # sleep lets the renderer actually paint it before we draw.
-            sys.stdout.flush()
-            time.sleep(0.15)
-
-            # Update history with full conversation
-            self.conversation_history = result.get("messages", self.conversation_history) if result else self.conversation_history
-
-            # If auto-compression fired mid-turn, the agent created a new
-            # continuation session and mutated self.agent.session_id. Sync
-            # the CLI's session_id so /status, /resume, title generation,
-            # and the exit summary all target the live child session rather
-            # than the ended parent. Mirrors the gateway's post-run sync
-            # (gateway/run.py around line 9983).
-            if (
-                self.agent
-                and getattr(self.agent, "session_id", None)
-                and self.agent.session_id != self.session_id
-            ):
-                self._transfer_session_yolo(self.session_id, self.agent.session_id)
-                self.session_id = self.agent.session_id
-                getattr(self, "_write_terminal_breadcrumb", lambda: None)()
-                self._pending_title = None
-
-            # Get the final response
-            response = result.get("final_response", "") if result else ""
-
-            # Session titling now runs at TURN START (agent/turn_context.py)
-            # from the user's message alone, so it is already done — or in
-            # flight — by the time we get here, instead of waiting on a final
-            # response that a failed or interrupted turn never produces.
-
-            # Handle failed or partial results (e.g., non-retryable errors, rate limits,
-            # truncated output, invalid tool calls). Both "failed" and "partial" with
-            # an empty final_response mean the agent couldn't produce a usable answer.
-            if result and (result.get("failed") or result.get("partial")) and not response:
-                error_detail = result.get("error", "Unknown error")
-                response = f"Error: {error_detail}"
-                # Stop continuous voice mode on persistent errors (e.g. 429 rate limit)
-                # to avoid an infinite error → record → error loop
-                if self._voice_continuous:
-                    self._voice_continuous = False
-                    _cprint(f"\n{_DIM}Continuous voice mode stopped due to error.{_RST}")
-
-            # Handle interrupt - check if we were interrupted
-            pending_message = None
-            _show_interrupt_marker = False
-            _interrupted_this_turn = bool(result and result.get("interrupted"))
-            # Expose the flag for post-turn hooks (e.g. goal continuation)
-            # so they can skip themselves when the turn was user-cancelled.
-            self._last_turn_interrupted = _interrupted_this_turn
-            if _interrupted_this_turn:
-                pending_message = result.get("interrupt_message") or interrupt_msg
-                # #60920: Don't append the interruption marker to response so it
-                # is never recorded in _OUTPUT_HISTORY by the Panel rendering
-                # below. The marker is printed separately with _suspend_output_history
-                # after the response Panel to preserve the visual while avoiding
-                # duplicates on terminal redraw (_recover_terminal_after_interrupt).
-                _show_interrupt_marker = bool(response and pending_message)
-            elif interrupt_msg:
-                # We fired agent.interrupt(interrupt_msg) but the turn result
-                # doesn't acknowledge it. Two ways this happens, both racy:
-                #   1. The agent thread had already passed its last interrupt
-                #      check (or finished) when the interrupt landed — the turn
-                #      completed normally and finalize_turn() never saw the flag.
-                #   2. The 10s post-interrupt wait above expired and we
-                #      abandoned the daemon thread; `result` is still None.
-                # In both cases the user's message must NOT be dropped —
-                # re-queue it as the next turn (#interrupt-vacuumed-into-void).
-                pending_message = interrupt_msg
-                # If the interrupt landed after finalize_turn()'s
-                # clear_interrupt(), the stale flag would instantly abort the
-                # NEXT turn at its first loop check. Clear it now that we've
-                # claimed the message — but ONLY if the agent thread actually
-                # exited. If it's still alive (abandoned after the 10s wait),
-                # the flag is what makes the wedged tool eventually unwind;
-                # clearing it would un-signal that thread.
-                try:
-                    if (
-                        not agent_thread.is_alive()
-                        and self.agent
-                        and getattr(self.agent, "_interrupt_requested", False)
-                    ):
-                        self.agent.clear_interrupt()
-                except Exception:
-                    pass
-
-            response_previewed = result.get("response_previewed", False) if result else False
-
-            # Display reasoning (thinking) box if enabled and available.
-            # Skip when streaming already showed reasoning live.  Use the
-            # turn-persistent flag (_reasoning_shown_this_turn) instead of
-            # _reasoning_stream_started — the latter gets reset during
-            # intermediate turn boundaries (tool-calling loops), which caused
-            # the reasoning box to re-render after the final response.
-            _reasoning_already_shown = getattr(self, '_reasoning_shown_this_turn', False)
-            if self.show_reasoning and result and not _reasoning_already_shown:
-                reasoning = result.get("last_reasoning")
-                if reasoning:
-                    w = self._scrollback_box_width()
-                    r_label = " Reasoning "
-                    r_fill = w - 2 - len(r_label)
-                    r_top = f"{_DIM}┌─{r_label}{'─' * max(r_fill - 1, 0)}┐{_RST}"
-                    r_bot = f"{_DIM}└{'─' * (w - 2)}┘{_RST}"
-                    # Collapse long reasoning to the first 10 lines unless the
-                    # user opted into full display via /reasoning full.
-                    lines = reasoning.strip().splitlines()
-                    if len(lines) > 10 and not getattr(self, "reasoning_full", False):
-                        display_reasoning = "\n".join(lines[:10])
-                        display_reasoning += f"\n{_DIM}  ... ({len(lines) - 10} more lines — /reasoning full to show){_RST}"
-                    else:
-                        display_reasoning = reasoning.strip()
-                    _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
-
-            if response and not response_previewed:
-                # Use skin engine for label/color with fallback
-                try:
-                    from hermes_cli.skin_engine import get_active_skin
-                    _skin = get_active_skin()
-                    label = _skin.get_branding("response_label", "⚕ Hermes")
-                    _resp_color = _maybe_remap_for_light_mode(_skin.get_color("response_border", "#CD7F32"))
-                    _resp_text = _maybe_remap_for_light_mode(_skin.get_color("banner_text", "#FFF8DC"))
-                except Exception:
-                    label = "⚕ Hermes"
-                    _resp_color = _maybe_remap_for_light_mode("#CD7F32")
-                    _resp_text = _maybe_remap_for_light_mode("#FFF8DC")
-
-                is_error_response = result and (result.get("failed") or result.get("partial"))
-                already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
-                if use_streaming_tts and _streaming_box_opened and not is_error_response:
-                    # Text was already printed sentence-by-sentence; just close the box
-                    w = self._scrollback_box_width()
-                    _cprint(f"\n{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
-                elif already_streamed:
-                    # Response was already streamed token-by-token with box framing;
-                    # _flush_stream() already closed the box. Skip Rich Panel.
-                    # A transform hook runs after streaming. Show a suffix for
-                    # append-only changes, or the complete replacement otherwise.
-                    _post_stream_text = _post_stream_transform_output(response, result)
-                    if _post_stream_text.strip():
-                        _cprint(_post_stream_text)
-                else:
-                    _chat_console = ChatConsole()
-                    _chat_console.print(Panel(
-                        _render_final_assistant_content(response, mode=self.final_response_markdown),
-                        title=f"[{_resp_color} bold]{label}[/]",
-                        title_align="left",
-                        border_style=_resp_color,
-                        style=_resp_text,
-                        box=rich_box.HORIZONTALS,
-                        padding=(1, 0),
-                        width=self._scrollback_box_width(),
-                    ))
-
-                # Durable, provider-agnostic billing CTA below the response. The
-                # response panel carries the full guidance; this pins the single
-                # action to take (Nous → /topup, other providers → their billing
-                # page) so it stays visible instead of scrolling away as prose.
-                if result and result.get("failure_reason") == "billing":
-                    _bb = result.get("billing_block") or {}
-                    _prov_label = _bb.get("provider_label") or "your provider"
-                    if _bb.get("is_nous"):
-                        _cta_lines = [
-                            "Run [bold]/topup[/] to add credits, or "
-                            "[bold]/subscription[/] to change plan.",
-                        ]
-                    else:
-                        _url = _bb.get("billing_url")
-                        _cta_lines = [
-                            f"Add credits with {_prov_label}"
-                            + (f": [bold]{_url}[/]" if _url else ".")
-                        ]
-                    _cta_lines.append(
-                        "Or switch providers with "
-                        "[bold]/model <model> --provider <provider>[/]."
-                    )
-                    try:
-                        ChatConsole().print(Panel(
-                            "\n".join(_cta_lines),
-                            title="[#CD7F32 bold]⚡ Out of credits[/]",
-                            title_align="left",
-                            border_style="#CD7F32",
-                            box=rich_box.HORIZONTALS,
-                            padding=(1, 4),
-                            width=self._scrollback_box_width(),
-                        ))
-                    except Exception:
-                        pass
-
-            # #60920: Print interruption marker with history suppressed so it
-            # is never recorded in _OUTPUT_HISTORY. The marker was previously
-            # appended to `response` which caused a duplicate on terminal redraw
-            # when _replay_output_history replayed it. Printing it here with
-            # _suspend_output_history preserves the user-visible indicator while
-            # keeping _OUTPUT_HISTORY clean for replay.
-            if _show_interrupt_marker:
-                with _suspend_output_history():
-                    _cprint(f"\n{_DIM}── [Interrupted — processing new message] ──{_RST}")
-
-
-            # Focus view: dim recovery line reporting what was hidden this turn
-            # (and how to reveal it). Printed after the response so the turn
-            # reads prompt → answer → "⋯ N tool lines hidden". Display-only;
-            # resets the counter for the next turn.
-            try:
-                self._emit_focus_recovery_line()
-            except Exception:
-                pass
-
-            # Play terminal bell when agent finishes (if enabled).
-            # Works over SSH — the bell propagates to the user's terminal.
-            self._ring_bell(context="turn complete")
-
-            # Notify when iteration budget was hit
-            if result and not result.get("completed") and not result.get("interrupted"):
-                _api_calls = result.get("api_calls", 0)
-                if _api_calls >= getattr(self.agent, "max_iterations", 500):
-                    _max_iter = getattr(self.agent, "max_iterations", 500)
-                    _cprint(
-                        f"\n{_DIM}⚠ Iteration budget reached "
-                        f"({_api_calls}/{_max_iter}) — "
-                        f"response may be incomplete{_RST}"
-                    )
-
-            # Speak response aloud if voice TTS is enabled
-            # Skip batch TTS when streaming TTS already handled it
-            if self._voice_tts and response and not use_streaming_tts:
-                self._voice_speak_response_async(response)
-
-
-            # Re-queue the interrupt message (and any that arrived while we were
-            # processing the first) as the next prompt for process_loop.
-            # Only reached when busy_input_mode == "interrupt" (the default).
-            # In "queue" mode Enter routes directly to _pending_input so this
-            # block is never hit.
-            if pending_message and hasattr(self, '_pending_input'):
-                all_parts = [pending_message]
-                while not self._interrupt_queue.empty():
-                    try:
-                        extra = self._interrupt_queue.get_nowait()
-                        if extra:
-                            all_parts.append(extra)
-                    except queue.Empty:
-                        break
-                combined = "\n".join(all_parts)
-                n = len(all_parts)
-                preview = combined[:50] + ("..." if len(combined) > 50 else "")
-                if n > 1:
-                    print(f"\n⚡ Sending {n} messages after interrupt: '{preview}'")
-                else:
-                    print(f"\n⚡ Sending after interrupt: '{preview}'")
-                self._pending_input.put(combined)
-
-            # If a /steer was left over (agent finished before another tool
-            # batch could absorb it), deliver it as the next user turn.
-            _leftover_steer = result.get("pending_steer") if result else None
-            if _leftover_steer and hasattr(self, '_pending_input'):
-                preview = _leftover_steer[:60] + ("..." if len(_leftover_steer) > 60 else "")
-                print(f"\n⏩ Delivering leftover /steer as next turn: '{preview}'")
-                self._pending_input.put(_leftover_steer)
-
-            return response
-            
         except Exception as e:
             print(f"Error: {e}")
             return None
         finally:
             # Stop the ambient thinking sound the moment the turn ends —
             # every exit path (normal, error, interrupt) lands here.
-            if _thinking_started:
+            if turn.thinking_started:
                 try:
                     from tools.voice_mode import stop_thinking_sound
                     stop_thinking_sound()
@@ -7451,16 +6862,635 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             # (_tts_normal_exit is True) the pipeline has already drained —
             # setting stop_event here would race the playback worker and
             # could cut the final sentence mid-audio.
-            if text_queue is not None:
+            if turn.text_queue is not None:
                 try:
-                    text_queue.put_nowait(None)
+                    turn.text_queue.put_nowait(None)
                 except Exception:
                     pass
-            if stop_event is not None and not _tts_normal_exit:
+            if turn.stop_event is not None and not turn.tts_normal_exit:
                 logger.info("TTS CUT: exception finally block setting stop_event")
-                stop_event.set()
-            if tts_thread is not None and tts_thread.is_alive():
-                tts_thread.join(timeout=5)
+                turn.stop_event.set()
+            if turn.tts_thread is not None and turn.tts_thread.is_alive():
+                turn.tts_thread.join(timeout=5)
+
+    def _chat_setup_turn_audio(self, turn, message, voice_input):
+        """Arm the full-duplex listener and the streaming-TTS pipeline for this turn (voice mode only)."""
+        # Full-duplex agent-turn listener (continuous voice mode): arm
+        # the mic NOW — at utterance-submit — not when TTS playback
+        # starts. It spans generation (speech interrupts the turn) and
+        # playback (speech cuts TTS), and disarms itself when the turn
+        # is fully done. See _voice_full_duplex_listener.
+        if self._voice_mode and self._voice_continuous:
+            self._voice_last_tts_text = ""
+            threading.Thread(
+                target=self._voice_full_duplex_listener, daemon=True
+            ).start()
+
+        # --- Streaming TTS setup ---
+        # Any working TTS provider streams sentence-by-sentence as the agent
+        # generates tokens: PCM-streaming providers (ElevenLabs, OpenAI) play
+        # chunks as they arrive, everything else synthesizes per sentence.
+
+        if self._voice_tts:
+            try:
+                from tools.tts_tool import (
+                    _import_sounddevice,
+                    check_tts_requirements,
+                    stream_tts_to_speaker,
+                )
+                _import_sounddevice()
+                turn.use_streaming_tts = check_tts_requirements()
+            except Exception:
+                pass
+
+        if turn.use_streaming_tts:
+            turn.text_queue = queue.Queue()
+            turn.stop_event = threading.Event()
+
+            # When token streaming is enabled (the common case), the
+            # CLI's _stream_delta already renders text token-by-token as
+            # the model generates it. Passing a display_callback here too
+            # would render every sentence a second time. Only attach the
+            # callback when streaming is disabled, so the TTS consumer
+            # becomes the sole display path.
+            _tts_display_cb = None
+            if not self.streaming_enabled:
+                def display_callback(sentence: str):
+                    """Called by TTS consumer when a sentence is ready to display + speak."""
+                    if not turn.box_opened:
+                        turn.box_opened = True
+                        w = self._scrollback_box_width(getattr(self.console, "width", 80))
+                        label = " ⚕ Hermes "
+                        if self.show_timestamps:
+                            label = f"{label}{datetime.now().strftime(getattr(self, 'timestamp_format', '%H:%M'))} "
+                        fill = w - 2 - HermesCLI._status_bar_display_width(label)
+                        _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
+                    _cprint(f"{_STREAM_PAD}{sentence.rstrip()}")
+                _tts_display_cb = display_callback
+
+            turn.tts_thread = threading.Thread(
+                target=stream_tts_to_speaker,
+                args=(turn.text_queue, turn.stop_event, self._voice_tts_done),
+                kwargs={"display_callback": _tts_display_cb},
+                daemon=True,
+            )
+            turn.tts_thread.start()
+            # Expose the pipeline's stop event so barge-in paths (voice
+            # key, full-duplex listener) can cut playback from outside
+            # this turn. The full-duplex listener itself was armed at
+            # turn start (see above) — it spans generation AND playback.
+            self._voice_tts_stop = turn.stop_event
+
+            def stream_callback(delta: str):
+                if turn.text_queue is not None:
+                    turn.text_queue.put(delta)
+                # Track what's actually being spoken so a playback-phase
+                # barge capture can be checked against it (echo guard,
+                # #75780).
+                self._voice_last_tts_text = (self._voice_last_tts_text or "") + delta
+            turn.stream_callback = stream_callback
+
+        # When voice mode is active, prepend a brief instruction so the
+        # model responds concisely. The prefix is API-call-local only —
+        # run_conversation persists the original clean user message.
+        if voice_input and isinstance(message, str):
+            turn.voice_prefix = (
+                "[Voice input — respond concisely and conversationally, "
+                "2-3 sentences max. No code blocks or markdown.] "
+            )
+
+    def _chat_run_agent(self, turn, message):
+        """Agent-thread body: bind per-thread callbacks/approval key, prepend one-shot notes, run the turn."""
+        # Set callbacks inside the agent thread so thread-local storage
+        # in terminal_tool is populated for this thread.  The main thread
+        # registration (run() line ~9046) is invisible here because
+        # _callback_tls is threading.local().  Matches the pattern used
+        # by acp_adapter/server.py for ACP sessions.
+        set_sudo_password_callback(self._sudo_password_callback)
+        set_approval_callback(self._approval_callback)
+        try:
+            set_secret_capture_callback(self._secret_capture_callback)
+        except Exception:
+            pass
+        # Bind this turn's approval session key into the contextvar so
+        # ``tools.approval.is_current_session_yolo_enabled()`` resolves
+        # against the same key that ``/yolo`` toggles under (see
+        # ``_toggle_yolo`` → ``enable_session_yolo(self.session_id)``).
+        # Mirrors ``tui_gateway/server.py`` and ``gateway/run.py`` which
+        # bind the same contextvar before invoking the agent.
+        try:
+            from tools.approval import (
+                reset_current_session_key,
+                set_current_session_key,
+            )
+            _approval_session_token = set_current_session_key(
+                self.session_id or "default"
+            )
+        except Exception:
+            reset_current_session_key = None  # type: ignore[assignment]
+            _approval_session_token = None
+        agent_message = turn.voice_prefix + message if turn.voice_prefix else message
+        # Prepend pending notes via _prepend_note_to_message, which
+        # handles both plain-string and multimodal content-parts list
+        # messages. Naive ``note + "\n\n" + agent_message`` crashed with
+        # TypeError when an image was attached (agent_message is a list)
+        # and a /model or /reload-skills note was queued for the turn.
+        _msn = getattr(self, '_pending_model_switch_note', None)
+        if _msn:
+            agent_message = _prepend_note_to_message(agent_message, _msn)
+            self._pending_model_switch_note = None
+        # Prepend pending /reload-skills note so the model sees which
+        # skills were added/removed before handling this turn. Same
+        # one-shot queue pattern as the model-switch note above.
+        _srn = getattr(self, '_pending_skills_reload_note', None)
+        if _srn:
+            agent_message = _prepend_note_to_message(agent_message, _srn)
+            self._pending_skills_reload_note = None
+        # Barged mid-speech (VAD or record key)? Tell the model it was
+        # cut off — same one-shot, API-local note channel as above.
+        from tools.tts_streaming import SPEECH_INTERRUPTED_NOTE, take_speech_interrupted
+        if take_speech_interrupted():
+            agent_message = _prepend_note_to_message(agent_message, SPEECH_INTERRUPTED_NOTE)
+        _moa_cfg = getattr(self, "_pending_moa_config", None)
+        self._pending_moa_config = None
+        if _moa_cfg is None:
+            _moa_cfg = None
+        # Model/skill notes and voice instructions are API-local. Keep
+        # the original staged input as the durable transcript value so a
+        # close-path marker follows the same dict into turn setup rather
+        # than producing a second noted user row (#63766).
+        _persist_clean_user_message = (
+            message if (turn.voice_prefix or agent_message != message) else None
+        )
+        _one_turn_model_restore = getattr(
+            self, "_pending_one_turn_model_restore", None
+        )
+        self._pending_one_turn_model_restore = None
+        try:
+            turn.result = self.agent.run_conversation(
+                user_message=agent_message,
+                conversation_history=self.conversation_history[:-1],  # Exclude the message we just added
+                stream_callback=turn.stream_callback,
+                task_id=self.session_id,
+                persist_user_message=_persist_clean_user_message,
+                moa_config=_moa_cfg,
+            )
+            if getattr(self, "_pending_moa_disable_after_turn", False):
+                _restore = getattr(self, "_pending_moa_restore_model", None) or {}
+                for _key, _value in _restore.items():
+                    if _value is not None:
+                        setattr(self, _key, _value)
+                self.agent = None
+                self._pending_moa_restore_model = None
+                self._pending_moa_disable_after_turn = False
+        except Exception as exc:
+            logging.error("run_conversation raised: %s", exc, exc_info=True)
+            _summary = getattr(self.agent, '_summarize_api_error', lambda e: str(e)[:300])(exc)
+            turn.result = {
+                "final_response": f"Error: {_summary}",
+                "messages": [],
+                "api_calls": 0,
+                "completed": False,
+                "failed": True,
+                "error": _summary,
+            }
+        finally:
+            if _one_turn_model_restore:
+                self._restore_model_runtime_snapshot(_one_turn_model_restore)
+            # Surface any credit notices queued during the turn (cold-start
+            # seed / per-turn capture) now that the response is done — printing
+            # at this boundary paints cleanly above the prompt instead of being
+            # buried behind the streaming output.
+            self._flush_credit_notices()
+            # Clear thread-local callbacks so a reused thread doesn't
+            # hold stale references to a disposed CLI instance.
+            try:
+                set_sudo_password_callback(None)
+                set_approval_callback(None)
+                set_secret_capture_callback(None)
+            except Exception:
+                pass
+            # Release the per-turn approval session key. ``_session_yolo``
+            # state itself is preserved across turns (so /yolo persists
+            # for the whole CLI run); we just unbind the contextvar so a
+            # reused thread doesn't see stale identity on its next run.
+            if _approval_session_token is not None and reset_current_session_key is not None:
+                try:
+                    reset_current_session_key(_approval_session_token)
+                except Exception:
+                    pass
+
+    def _chat_monitor_agent_thread(self, turn, agent_thread):
+        """Poll the interrupt queue while the agent thread runs; returns the interrupting message (or None)."""
+        # Ambient "thinking" sound: calm bubble blips while the agent
+        # works in voice mode with no audio flowing, so the user knows
+        # it's alive during long thinking/tool stretches. Skipped per-blip
+        # while TTS speaks, the mic records, or a barge capture is live;
+        # stopped outright as soon as the turn ends. voice.thinking_sound
+        # gates it (default on); macOS is handled inside (TCC-safe skip).
+        if self._voice_mode:
+            try:
+                from tools.voice_mode import start_thinking_sound
+
+                turn.thinking_started = start_thinking_sound(
+                    should_play=lambda: (
+                        self._voice_tts_done.is_set()
+                        and not self._voice_recording
+                        and not self._voice_barge_capture.is_set()
+                    )
+                )
+            except Exception:
+                turn.thinking_started = False
+
+        # Monitor the dedicated interrupt queue while the agent runs.
+        # _interrupt_queue is separate from _pending_input, so process_loop
+        # and chat() never compete for the same queue.
+        # When a clarify question is active, user input is handled entirely
+        # by the Enter key binding (routed to the clarify response queue),
+        # so we skip interrupt processing to avoid stealing that input.
+        interrupt_msg = None
+        while agent_thread.is_alive():
+            if hasattr(self, '_interrupt_queue'):
+                try:
+                    interrupt_msg = self._interrupt_queue.get(timeout=0.1)
+                    if interrupt_msg:
+                        # If clarify is active, the Enter handler routes
+                        # input directly; this queue shouldn't have anything.
+                        # But if it does (race condition), don't interrupt —
+                        # and don't drop the message either: park it in
+                        # _pending_input so it runs as the next turn.
+                        if self._clarify_state or self._clarify_freetext:
+                            try:
+                                self._pending_input.put(interrupt_msg)
+                            except Exception:
+                                pass
+                            interrupt_msg = None
+                            continue
+                        print("\n⚡ New message detected, interrupting...")
+                        # Signal TTS to stop on interrupt
+                        if turn.stop_event is not None:
+                            turn.stop_event.set()
+                        self.agent.interrupt(interrupt_msg)
+                        # Clear any active overlay states the interrupted agent
+                        # left behind.  approval/clarify/sudo/secret prompts gate
+                        # input (read_only condition + keypress filter) until
+                        # explicitly reset — without this the CLI freezes after
+                        # an interrupt until the prompt's own timeout expires (#14026).
+                        self._clear_active_overlays_for_interrupt()
+                        # Debug: log to file (stdout may be devnull from redirect_stdout)
+                        try:
+                            _dbg = _hermes_home / "interrupt_debug.log"
+                            with open(_dbg, "a", encoding="utf-8") as _f:
+                                _f.write(f"{time.strftime('%H:%M:%S')} interrupt fired: msg={str(interrupt_msg)[:60]!r}, "
+                                         f"children={len(self.agent._active_children)}, "
+                                         f"parent._interrupt={self.agent._interrupt_requested}\n")
+                                for _ci, _ch in enumerate(self.agent._active_children):
+                                    _f.write(f"  child[{_ci}]._interrupt={_ch._interrupt_requested}\n")
+                        except Exception:
+                            pass
+                        break
+                except queue.Empty:
+                    # Force prompt_toolkit to flush any pending stdout
+                    # output from the agent thread.  Without this, the
+                    # StdoutProxy buffer only flushes on renderer passes
+                    # triggered by input events — on macOS this causes
+                    # the CLI to appear frozen until the user types. (#1624)
+                    self._invalidate(min_interval=0.15)
+            else:
+                # Fallback for non-interactive mode (e.g., single-query)
+                agent_thread.join(0.1)
+
+        # Wait for the agent thread to finish.  After an interrupt the
+        # agent may take a few seconds to clean up (kill subprocess, persist
+        # session).  Poll instead of a blocking join so the process_loop
+        # stays responsive — if the user sent another interrupt or the
+        # agent gets stuck, we can break out instead of freezing forever.
+        if interrupt_msg is not None:
+            # Interrupt path: poll briefly, then move on.  The agent
+            # thread is daemon — it dies on process exit regardless.
+            for _wait_tick in range(50):  # 50 * 0.2s = 10s max
+                agent_thread.join(timeout=0.2)
+                if not agent_thread.is_alive():
+                    break
+                # Check if user fired ANOTHER interrupt (Ctrl+C sets
+                # _should_exit which process_loop checks on next pass).
+                if getattr(self, '_should_exit', False):
+                    break
+            if agent_thread.is_alive():
+                logger.warning(
+                    "Agent thread still alive after interrupt "
+                    "(thread %s). Daemon thread will be cleaned up "
+                    "on exit.",
+                    agent_thread.ident,
+                )
+        else:
+            # Normal completion: agent thread should be done already,
+            # but guard against edge cases.
+            agent_thread.join(timeout=30)
+        return interrupt_msg
+
+    def _chat_settle_turn(self, turn):
+        """After the agent thread ends: freeze timers, flush streams, drain TTS, sync history/session id."""
+        # Freeze per-prompt elapsed timer once the agent thread has
+        # exited (or been abandoned as a daemon after interrupt).
+        if self._prompt_start_time is not None:
+            self._prompt_duration = max(0.0, time.time() - self._prompt_start_time)
+            self._prompt_start_time = None
+        # Record when this agent loop finished so the status bar can show
+        # idle time since the last final response.
+        self._last_turn_finished_at = time.time()
+
+        # Proactively clean up async clients whose event loop is dead.
+        # The agent thread may have created AsyncOpenAI clients bound
+        # to a per-thread event loop; if that loop is now closed, those
+        # clients' __del__ would crash prompt_toolkit's loop on GC.
+        try:
+            from agent.auxiliary_client import cleanup_stale_async_clients
+            cleanup_stale_async_clients()
+        except Exception:
+            pass
+
+        # Flush any remaining streamed text and close the box
+        self._flush_stream()
+
+        # Signal end-of-text to TTS consumer and wait for it to finish
+        if turn.use_streaming_tts and turn.text_queue is not None:
+            turn.text_queue.put(None)  # sentinel
+            if turn.tts_thread is not None:
+                turn.tts_thread.join(timeout=120)
+            # Mark normal completion only if the thread actually
+            # finished.  If join() timed out and the thread is still
+            # alive, leave _tts_normal_exit False so the finally block
+            # sets stop_event to kill the runaway worker.
+            if turn.tts_thread is not None and not turn.tts_thread.is_alive():
+                turn.tts_normal_exit = True
+
+        # Drain any remaining agent output still in the StdoutProxy
+        # buffer so tool/status lines render ABOVE our response box.
+        # The flush pushes data into the renderer queue; the short
+        # sleep lets the renderer actually paint it before we draw.
+        sys.stdout.flush()
+        time.sleep(0.15)
+
+        # Update history with full conversation
+        self.conversation_history = turn.result.get("messages", self.conversation_history) if turn.result else self.conversation_history
+
+        # If auto-compression fired mid-turn, the agent created a new
+        # continuation session and mutated self.agent.session_id. Sync
+        # the CLI's session_id so /status, /resume, title generation,
+        # and the exit summary all target the live child session rather
+        # than the ended parent. Mirrors the gateway's post-run sync
+        # (gateway/run.py around line 9983).
+        if (
+            self.agent
+            and getattr(self.agent, "session_id", None)
+            and self.agent.session_id != self.session_id
+        ):
+            self._transfer_session_yolo(self.session_id, self.agent.session_id)
+            self.session_id = self.agent.session_id
+            getattr(self, "_write_terminal_breadcrumb", lambda: None)()
+            self._pending_title = None
+
+    def _chat_render_turn(self, turn, agent_thread, interrupt_msg):
+        """Post-turn display: error/interrupt handling, reasoning + response panels, bell, re-queues. Returns the response text."""
+        # Get the final response
+        response = turn.result.get("final_response", "") if turn.result else ""
+
+        # Session titling now runs at TURN START (agent/turn_context.py)
+        # from the user's message alone, so it is already done — or in
+        # flight — by the time we get here, instead of waiting on a final
+        # response that a failed or interrupted turn never produces.
+
+        # Handle failed or partial results (e.g., non-retryable errors, rate limits,
+        # truncated output, invalid tool calls). Both "failed" and "partial" with
+        # an empty final_response mean the agent couldn't produce a usable answer.
+        if turn.result and (turn.result.get("failed") or turn.result.get("partial")) and not response:
+            error_detail = turn.result.get("error", "Unknown error")
+            response = f"Error: {error_detail}"
+            # Stop continuous voice mode on persistent errors (e.g. 429 rate limit)
+            # to avoid an infinite error → record → error loop
+            if self._voice_continuous:
+                self._voice_continuous = False
+                _cprint(f"\n{_DIM}Continuous voice mode stopped due to error.{_RST}")
+
+        # Handle interrupt - check if we were interrupted
+        pending_message = None
+        _show_interrupt_marker = False
+        _interrupted_this_turn = bool(turn.result and turn.result.get("interrupted"))
+        # Expose the flag for post-turn hooks (e.g. goal continuation)
+        # so they can skip themselves when the turn was user-cancelled.
+        self._last_turn_interrupted = _interrupted_this_turn
+        if _interrupted_this_turn:
+            pending_message = turn.result.get("interrupt_message") or interrupt_msg
+            # #60920: Don't append the interruption marker to response so it
+            # is never recorded in _OUTPUT_HISTORY by the Panel rendering
+            # below. The marker is printed separately with _suspend_output_history
+            # after the response Panel to preserve the visual while avoiding
+            # duplicates on terminal redraw (_recover_terminal_after_interrupt).
+            _show_interrupt_marker = bool(response and pending_message)
+        elif interrupt_msg:
+            # We fired agent.interrupt(interrupt_msg) but the turn result
+            # doesn't acknowledge it. Two ways this happens, both racy:
+            #   1. The agent thread had already passed its last interrupt
+            #      check (or finished) when the interrupt landed — the turn
+            #      completed normally and finalize_turn() never saw the flag.
+            #   2. The 10s post-interrupt wait above expired and we
+            #      abandoned the daemon thread; `result` is still None.
+            # In both cases the user's message must NOT be dropped —
+            # re-queue it as the next turn (#interrupt-vacuumed-into-void).
+            pending_message = interrupt_msg
+            # If the interrupt landed after finalize_turn()'s
+            # clear_interrupt(), the stale flag would instantly abort the
+            # NEXT turn at its first loop check. Clear it now that we've
+            # claimed the message — but ONLY if the agent thread actually
+            # exited. If it's still alive (abandoned after the 10s wait),
+            # the flag is what makes the wedged tool eventually unwind;
+            # clearing it would un-signal that thread.
+            try:
+                if (
+                    not agent_thread.is_alive()
+                    and self.agent
+                    and getattr(self.agent, "_interrupt_requested", False)
+                ):
+                    self.agent.clear_interrupt()
+            except Exception:
+                pass
+
+        response_previewed = turn.result.get("response_previewed", False) if turn.result else False
+
+        # Display reasoning (thinking) box if enabled and available.
+        # Skip when streaming already showed reasoning live.  Use the
+        # turn-persistent flag (_reasoning_shown_this_turn) instead of
+        # _reasoning_stream_started — the latter gets reset during
+        # intermediate turn boundaries (tool-calling loops), which caused
+        # the reasoning box to re-render after the final response.
+        _reasoning_already_shown = getattr(self, '_reasoning_shown_this_turn', False)
+        if self.show_reasoning and turn.result and not _reasoning_already_shown:
+            reasoning = turn.result.get("last_reasoning")
+            if reasoning:
+                w = self._scrollback_box_width()
+                r_label = " Reasoning "
+                r_fill = w - 2 - len(r_label)
+                r_top = f"{_DIM}┌─{r_label}{'─' * max(r_fill - 1, 0)}┐{_RST}"
+                r_bot = f"{_DIM}└{'─' * (w - 2)}┘{_RST}"
+                # Collapse long reasoning to the first 10 lines unless the
+                # user opted into full display via /reasoning full.
+                lines = reasoning.strip().splitlines()
+                if len(lines) > 10 and not getattr(self, "reasoning_full", False):
+                    display_reasoning = "\n".join(lines[:10])
+                    display_reasoning += f"\n{_DIM}  ... ({len(lines) - 10} more lines — /reasoning full to show){_RST}"
+                else:
+                    display_reasoning = reasoning.strip()
+                _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
+
+        if response and not response_previewed:
+            # Use skin engine for label/color with fallback
+            try:
+                from hermes_cli.skin_engine import get_active_skin
+                _skin = get_active_skin()
+                label = _skin.get_branding("response_label", "⚕ Hermes")
+                _resp_color = _maybe_remap_for_light_mode(_skin.get_color("response_border", "#CD7F32"))
+                _resp_text = _maybe_remap_for_light_mode(_skin.get_color("banner_text", "#FFF8DC"))
+            except Exception:
+                label = "⚕ Hermes"
+                _resp_color = _maybe_remap_for_light_mode("#CD7F32")
+                _resp_text = _maybe_remap_for_light_mode("#FFF8DC")
+
+            is_error_response = turn.result and (turn.result.get("failed") or turn.result.get("partial"))
+            already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
+            if turn.use_streaming_tts and turn.box_opened and not is_error_response:
+                # Text was already printed sentence-by-sentence; just close the box
+                w = self._scrollback_box_width()
+                _cprint(f"\n{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
+            elif already_streamed:
+                # Response was already streamed token-by-token with box framing;
+                # _flush_stream() already closed the box. Skip Rich Panel.
+                # A transform hook runs after streaming. Show a suffix for
+                # append-only changes, or the complete replacement otherwise.
+                _post_stream_text = _post_stream_transform_output(response, turn.result)
+                if _post_stream_text.strip():
+                    _cprint(_post_stream_text)
+            else:
+                _chat_console = ChatConsole()
+                _chat_console.print(Panel(
+                    _render_final_assistant_content(response, mode=self.final_response_markdown),
+                    title=f"[{_resp_color} bold]{label}[/]",
+                    title_align="left",
+                    border_style=_resp_color,
+                    style=_resp_text,
+                    box=rich_box.HORIZONTALS,
+                    padding=(1, 0),
+                    width=self._scrollback_box_width(),
+                ))
+
+            # Durable, provider-agnostic billing CTA below the response. The
+            # response panel carries the full guidance; this pins the single
+            # action to take (Nous → /topup, other providers → their billing
+            # page) so it stays visible instead of scrolling away as prose.
+            if turn.result and turn.result.get("failure_reason") == "billing":
+                _bb = turn.result.get("billing_block") or {}
+                _prov_label = _bb.get("provider_label") or "your provider"
+                if _bb.get("is_nous"):
+                    _cta_lines = [
+                        "Run [bold]/topup[/] to add credits, or "
+                        "[bold]/subscription[/] to change plan.",
+                    ]
+                else:
+                    _url = _bb.get("billing_url")
+                    _cta_lines = [
+                        f"Add credits with {_prov_label}"
+                        + (f": [bold]{_url}[/]" if _url else ".")
+                    ]
+                _cta_lines.append(
+                    "Or switch providers with "
+                    "[bold]/model <model> --provider <provider>[/]."
+                )
+                try:
+                    ChatConsole().print(Panel(
+                        "\n".join(_cta_lines),
+                        title="[#CD7F32 bold]⚡ Out of credits[/]",
+                        title_align="left",
+                        border_style="#CD7F32",
+                        box=rich_box.HORIZONTALS,
+                        padding=(1, 4),
+                        width=self._scrollback_box_width(),
+                    ))
+                except Exception:
+                    pass
+
+        # #60920: Print interruption marker with history suppressed so it
+        # is never recorded in _OUTPUT_HISTORY. The marker was previously
+        # appended to `response` which caused a duplicate on terminal redraw
+        # when _replay_output_history replayed it. Printing it here with
+        # _suspend_output_history preserves the user-visible indicator while
+        # keeping _OUTPUT_HISTORY clean for replay.
+        if _show_interrupt_marker:
+            with _suspend_output_history():
+                _cprint(f"\n{_DIM}── [Interrupted — processing new message] ──{_RST}")
+
+
+        # Focus view: dim recovery line reporting what was hidden this turn
+        # (and how to reveal it). Printed after the response so the turn
+        # reads prompt → answer → "⋯ N tool lines hidden". Display-only;
+        # resets the counter for the next turn.
+        try:
+            self._emit_focus_recovery_line()
+        except Exception:
+            pass
+
+        # Play terminal bell when agent finishes (if enabled).
+        # Works over SSH — the bell propagates to the user's terminal.
+        self._ring_bell(context="turn complete")
+
+        # Notify when iteration budget was hit
+        if turn.result and not turn.result.get("completed") and not turn.result.get("interrupted"):
+            _api_calls = turn.result.get("api_calls", 0)
+            if _api_calls >= getattr(self.agent, "max_iterations", 500):
+                _max_iter = getattr(self.agent, "max_iterations", 500)
+                _cprint(
+                    f"\n{_DIM}⚠ Iteration budget reached "
+                    f"({_api_calls}/{_max_iter}) — "
+                    f"response may be incomplete{_RST}"
+                )
+
+        # Speak response aloud if voice TTS is enabled
+        # Skip batch TTS when streaming TTS already handled it
+        if self._voice_tts and response and not turn.use_streaming_tts:
+            self._voice_speak_response_async(response)
+
+
+        # Re-queue the interrupt message (and any that arrived while we were
+        # processing the first) as the next prompt for process_loop.
+        # Only reached when busy_input_mode == "interrupt" (the default).
+        # In "queue" mode Enter routes directly to _pending_input so this
+        # block is never hit.
+        if pending_message and hasattr(self, '_pending_input'):
+            all_parts = [pending_message]
+            while not self._interrupt_queue.empty():
+                try:
+                    extra = self._interrupt_queue.get_nowait()
+                    if extra:
+                        all_parts.append(extra)
+                except queue.Empty:
+                    break
+            combined = "\n".join(all_parts)
+            n = len(all_parts)
+            preview = combined[:50] + ("..." if len(combined) > 50 else "")
+            if n > 1:
+                print(f"\n⚡ Sending {n} messages after interrupt: '{preview}'")
+            else:
+                print(f"\n⚡ Sending after interrupt: '{preview}'")
+            self._pending_input.put(combined)
+
+        # If a /steer was left over (agent finished before another tool
+        # batch could absorb it), deliver it as the next user turn.
+        _leftover_steer = turn.result.get("pending_steer") if turn.result else None
+        if _leftover_steer and hasattr(self, '_pending_input'):
+            preview = _leftover_steer[:60] + ("..." if len(_leftover_steer) > 60 else "")
+            print(f"\n⏩ Delivering leftover /steer as next turn: '{preview}'")
+            self._pending_input.put(_leftover_steer)
+
+        return response
     
     # --- Protected TUI extension hooks for wrapper CLIs ---
 
