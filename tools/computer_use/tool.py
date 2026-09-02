@@ -382,9 +382,8 @@ def _request_approval(action: str, args: Dict[str, Any], session_id: str = "") -
                 _session_auto_approve[session_id] = True
         return None
     if verdict == "timeout":
-        return json.dumps({"error": ("approval prompt timed out — the user did not respond. "
-                                     "Silence is not consent; do not retry without the user."),
-                           "action": action})
+        return json.dumps({"error": ("approval prompt timed out — the user did not respond. Silence is not "
+                                     "consent; do not retry without the user."), "action": action})
     return json.dumps({"error": "denied by user", "action": action})
 
 # action -> (forced button or None, click_count)
@@ -522,11 +521,9 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         if mismatch is not None:
             return json.dumps({
                 "ok": False, "action": action, "code": "input_target_mismatch",
-                "error": (f"{action} would go to the current target "
-                          f"{mismatch!r}, not {requested_app.strip()!r} — input "
-                          "actions always hit the sticky target from the last "
-                          f"capture/focus_app. Call capture(app={requested_app.strip()!r}) "
-                          "or focus_app first, then retry."),
+                "error": (f"{action} would go to the current target {mismatch!r}, not {requested_app.strip()!r} "
+                          "— input actions always hit the sticky target from the last capture/focus_app. "
+                          f"Call capture(app={requested_app.strip()!r}) or focus_app first, then retry."),
             })
     # delivery_mode / bring_to_front thread through every input action so the
     # model can escalate background → foreground per cua-driver's ladder.
@@ -546,23 +543,20 @@ def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
         return {"decision": "done"}
     if res.effect == "unverifiable":
         return {"decision": "verify_fresh_state",
-                "hint": ("Input was delivered but not confirmed. Re-capture and check "
-                         "the result BEFORE any retry — do not repeat the input on an "
-                         "escalation recommendation alone.")}
+                "hint": ("Input was delivered but not confirmed. Re-capture and check the result BEFORE any "
+                         "retry — do not repeat the input on an escalation recommendation alone.")}
     if res.effect == "suspected_noop" or not res.ok or res.code is not None:
         decision: Dict[str, Any] = {"decision": "escalate"}
         if isinstance(res.escalation, dict):
             decision["recommended"] = res.escalation.get("recommended")
-        decision["hint"] = ("The input likely did not land. Climb one rung following "
-                            "`recommended`: 'px' → re-issue by coordinate; 'foreground' (or a "
-                            "failed pixel click) → re-issue with delivery_mode='foreground' "
-                            "(separate approval). Do not predict the rung from the app being "
-                            "Electron/Chromium — react to this signal.")
+        decision["hint"] = ("The input likely did not land. Climb one rung following `recommended`: 'px' → "
+                            "re-issue by coordinate; 'foreground' (or a failed pixel click) → re-issue with "
+                            "delivery_mode='foreground' (separate approval). Do not predict the rung from the "
+                            "app being Electron/Chromium — react to this signal.")
         return decision
     # Transport success without semantic proof is not proof of effect.
     return {"decision": "verify_fresh_state",
-            "hint": ("Transport succeeded but the effect is unproven. Re-capture and "
-                     "confirm before continuing.")}
+            "hint": "Transport succeeded but the effect is unproven. Re-capture and confirm before continuing."}
 
 def _action_payload(res: ActionResult) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"ok": res.ok, "action": res.action}
@@ -623,11 +617,9 @@ def _present(**fields: Any) -> Dict[str, Any]:
     return {k: v for k, v in fields.items() if v}
 
 def _text_capture_payload(
-    cap: CaptureResult, elements: List[UIElement], total_elements: int,
-    width: int, height: int, summary: str, *,
-    extra: Optional[Dict[str, Any]] = None, truncated_elements: int = 0,
-    elements_file: Optional[str] = None, screenshot_path: Optional[str] = None,
-    bounds_scale: Optional[float] = None,
+    cap: CaptureResult, elements: List[UIElement], total_elements: int, width: int, height: int, summary: str,
+    *, extra: Optional[Dict[str, Any]] = None, truncated_elements: int = 0, elements_file: Optional[str] = None,
+    screenshot_path: Optional[str] = None, bounds_scale: Optional[float] = None,
 ) -> str:
     """JSON text payload shared by the AX, vision-unavailable and aux-vision branches.
     Key order is contract: fixed fields, ``extra`` branch markers, then set optionals."""
@@ -643,9 +635,8 @@ def _text_capture_payload(
     return json.dumps(payload)
 
 def _capture_summary_lines(
-    cap: CaptureResult, visible: List[UIElement], total: int, width: int, height: int,
-    bounds_scale: Optional[float], elements_file: Optional[str], screenshot_path: Optional[str],
-    omitted_dims: Optional[Tuple[int, int]],
+    cap: CaptureResult, visible: List[UIElement], total: int, width: int, height: int, bounds_scale: Optional[float],
+    elements_file: Optional[str], screenshot_path: Optional[str], omitted_dims: Optional[Tuple[int, int]],
 ) -> List[str]:
     """Human-readable capture summary; line ORDER is contract. Indexes only what is
     surfaced in `elements`, otherwise the summary names indices the model can't find."""
@@ -802,12 +793,11 @@ def _capture_after_mode() -> str:
     mode = str(raw or "som").strip().lower()
     return mode if mode in {"som", "vision", "ax"} else "som"
 
-_VISION_PROMPT = ("Describe what is visible in this desktop application screenshot in "
-                  "concise but specific terms. Mention the app name and window "
-                  "title if visible, the overall layout, any labelled buttons, "
-                  "menus or text fields, and any prominent text content the user "
-                  "would need to know about. Do not invent details that are not "
-                  "actually visible.\n\nAX/SOM index for cross-reference:\n")
+_VISION_PROMPT = ("Describe what is visible in this desktop application screenshot in concise but specific "
+                  "terms. Mention the app name and window title if visible, the overall layout, any labelled "
+                  "buttons, menus or text fields, and any prominent text content the user would need to know "
+                  "about. Do not invent details that are not actually visible.\n\nAX/SOM index for "
+                  "cross-reference:\n")
 
 def _route_capture_through_aux_vision(
     cap: CaptureResult, summary: str, *, visible_elements: Optional[List[UIElement]] = None,
@@ -847,8 +837,7 @@ def _route_capture_through_aux_vision(
     if isinstance(result_json, str):
         try:
             parsed = json.loads(result_json)
-            if isinstance(parsed, dict):
-                analysis_text = str(parsed.get("analysis") or "").strip()
+            analysis_text = str(parsed.get("analysis") or "").strip() if isinstance(parsed, dict) else ""
         except (TypeError, json.JSONDecodeError):
             analysis_text = result_json.strip()
     if not analysis_text:
