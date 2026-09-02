@@ -448,24 +448,20 @@ class SessionGatewayMixin:
         ``ws_orphan_reap`` are recoverable; explicit boundaries (/new, /resume
         switches, compression splits) are not.
 
-        Ordering: rank by ``last_activity_at`` (falling back to ``started_at``)
-        — ``started_at`` alone resurrected days-old zombie rows over the live
-        conversation. Rows with messages win, but an empty keyed row is still
-        returned rather than ``None``: ``None`` mints a brand-new session id,
-        worse than resuming an empty-but-correctly-keyed row (whose transcript
-        may live under a compression child).
-
-        Reset fence: an intentional boundary (``session_reset`` or any
-        non-recoverable end_reason) must block fallback to an *older* row for
-        the same peer, or the has-messages ranking could reach behind a /new
-        and restore the exact context the user reset — so a candidate is
-        rejected when a peer boundary row ended *after* its last activity.
+        Ranked by ``last_activity_at`` (falling back to ``started_at``) —
+        ``started_at`` alone resurrected days-old zombie rows.  Rows with
+        messages win, but an empty keyed row is still returned rather than
+        ``None`` (``None`` mints a brand-new session id; the transcript may
+        live under a compression child).  Reset fence: a candidate is rejected
+        when a peer boundary row (``session_reset`` or any non-recoverable
+        end_reason) ended *after* its last activity, or the has-messages
+        ranking could reach behind a /new and restore the reset context.
 
         Fallback for a temporarily-missing exact key still requires the
-        complete peer tuple (never cross chats/threads/users) and a profile
+        complete peer tuple (never cross chats/threads/users) plus a profile
         fence: a Telegram DM's peer tuple is identical for every bot (chat_id
         == user_id, no thread), so a sibling profile's legacy row would
-        otherwise be adopted. A row is ours when profile_name is the owner or
+        otherwise be adopted.  A row is ours when profile_name is the owner or
         NULL; stores outside the profile tree derive no owner and stay unfenced.
         """
         if not session_key:

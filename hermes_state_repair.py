@@ -617,7 +617,7 @@ def _backup_db_file(db_path: Path) -> "Tuple[Optional[Path], Optional[str]]":
     Dedupe: if the newest existing backup is byte-identical to the current
     recovery image (``_backup_content_identity`` — NOT mtime, NOT
     ``_db_fingerprint``), reuse it; a repair loop once copied the same damaged
-    bytes on every restart. The copy lands under a staging name OUTSIDE the
+    bytes on every restart.  The copy lands under a staging name OUTSIDE the
     ``.malformed-backup-`` prefix: a staging name inside it counts as a backup,
     sorts NEWEST (prune kept partials and deleted intact copies) and dedupe
     could return it with no real forensic copy on disk.
@@ -1022,16 +1022,13 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
     indexes reject writes.
 
     Two corruption classes: malformed schema / "duplicate object definition"
-    (even ``PRAGMA`` fails), and FTS write-corruption (base tables read fine,
-    ``integrity_check`` passes, writes fail through ``messages_fts*``
-    triggers). Least-destructive first: (1) rebuild FTS in place via FTS5
-    ``'rebuild'``; (2) de-duplicate ``sqlite_master`` (lowest rowid per
-    ``type``/``name``), FTS preserved; (3) drop the FTS schema + ``VACUUM``,
-    rebuilt on the next ``SessionDB()`` open. Canonical rows are never
-    modified by a failed attempt: strategies run on a complete SQLite snapshot
-    and a successful result is copied back transactionally. A raw backup is
-    taken first unless ``backup=False``. Surgery is serialised across
-    processes (:func:`_cross_process_repair_lock`): the gateway, Desktop
+    (even ``PRAGMA`` fails), and FTS write-corruption (reads and
+    ``integrity_check`` pass, writes fail through ``messages_fts*`` triggers).
+    Strategies run least-destructive first (see ``_REPAIR_STRATEGIES``) on a
+    complete SQLite snapshot; a successful result is copied back
+    transactionally, so canonical rows are never modified by a failed attempt.
+    A raw backup is taken first unless ``backup=False``.  Surgery is serialised
+    across processes (:func:`_cross_process_repair_lock`): the gateway, Desktop
     backend and CLI all open the same file, and concurrent ``writable_schema``
     surgery is itself a corruption source.
 

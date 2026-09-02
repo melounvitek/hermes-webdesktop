@@ -252,28 +252,24 @@ def apply_wal_with_fallback(
     """Set ``journal_mode=WAL`` on ``conn``, falling back to DELETE on failure.
 
     Returns the mode actually set (``"wal"`` or ``"delete"``). Shared by
-    :class:`SessionDB` and ``hermes_cli.kanban_db.connect``.
+    :class:`SessionDB` and ``hermes_cli.kanban_db.connect``.  On
+    WAL-incompatible filesystems SQLite either raises ``OperationalError``
+    ("locking protocol" / "disk I/O error") or — macOS NFS / SMB / AgentFS —
+    silently refuses and leaves the DB in DELETE; either way we log at ERROR
+    (once per process per ``db_label``) and fall back to DELETE.
+    ``require_wal=True`` raises :class:`WalUnsupportedError` instead.
 
-    On WAL-incompatible filesystems SQLite either raises ``OperationalError``
-    ("locking protocol" / "disk I/O error") or — macOS NFS / SMB / AgentFS NFS
-    overlay — silently refuses and leaves the DB in DELETE. Either way we log
-    at ERROR (a write now blocks readers) and fall back to DELETE so the
-    feature keeps working. ``require_wal=True`` raises
-    :class:`WalUnsupportedError` instead.
-
-    On SQLite builds with the WAL-reset bug (https://sqlite.org/wal.html#walresetbug,
-    fixed 3.51.3+, backports 3.50.7 / 3.44.6), refuse to enable WAL on
-    fresh / non-WAL databases; an already-WAL DB keeps WAL with a warning.
-    This gate is deliberately RETAINED: an attempt to revert it was confounded
-    by a newer SQLite; re-measured on the bundled 3.50.4, WAL and DELETE are
-    both clean, so there is no evidence WAL is safer.
+    WAL-reset-bug builds (https://sqlite.org/wal.html#walresetbug, fixed
+    3.51.3+, backports 3.50.7 / 3.44.6) never enable WAL on fresh / non-WAL
+    databases; an already-WAL DB keeps WAL with a warning.  This gate is
+    deliberately RETAINED: the attempt to revert it was confounded by a newer
+    SQLite, and re-measured on the bundled 3.50.4 there is no evidence WAL is
+    safer.
 
     Invariant on every path: never downgrade to DELETE if the on-disk header
-    reports WAL or the mode cannot be read (see _on_disk_journal_mode). Other
-    gateway/cron/worker connections may hold the DB open, and a live downgrade
-    destroys their committed-but-uncheckpointed transactions.
-
-    The ERROR is deduplicated per ``db_label``: once per process per DB.
+    reports WAL or the mode cannot be read — other gateway/cron/worker
+    connections may hold the DB open, and a live downgrade destroys their
+    committed-but-uncheckpointed transactions.
     """
     from hermes_state import is_sqlite_wal_reset_vulnerable, resolve_journal_mode
     configured = resolve_journal_mode()

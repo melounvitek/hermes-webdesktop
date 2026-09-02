@@ -118,17 +118,15 @@ class SessionMaintenanceMixin:
 
         The TUI/desktop gateway reaps disconnected sessions with an in-process
         grace timer; a restart destroys the timer and leaves ``ended_at IS
-        NULL`` forever.  This closes rows for ``sources`` whose ``started_at``
-        AND canonical last activity are both older than ``max_idle_seconds``,
-        with ``end_reason='startup_orphan_reap'``.  The separate ``started_at``
+        NULL`` forever.  Closes rows for ``sources`` whose ``started_at`` AND
+        canonical last activity are both older than ``max_idle_seconds`` with
+        ``end_reason='startup_orphan_reap'`` (the separate ``started_at``
         predicate protects fresh compression/branch children whose copied
-        activity is old.
-
-        Only pass sources whose lifecycle the caller owns — never messaging
-        platforms like ``telegram`` (ending those triggers a routing loop).
-        ``exclude_ids`` spares rows this process still holds in memory.
-        Non-destructive: messages are kept and the row stays resumable;
-        first-reason-wins via ``ended_at IS NULL``.
+        activity is old).  Only pass sources whose lifecycle the caller owns —
+        never messaging platforms like ``telegram`` (ending those triggers a
+        routing loop).  ``exclude_ids`` spares rows this process still holds in
+        memory.  Non-destructive: messages are kept and the row stays
+        resumable; first-reason-wins via ``ended_at IS NULL``.
 
         Cross-backend liveness: with ``respect_gateway_heartbeats``, a row is
         reaped only when stale AND no live backend (heartbeat within
@@ -140,8 +138,7 @@ class SessionMaintenanceMixin:
         Disable the gate only for sources owned by state.db itself.
 
         SELECT, live-lease validation and UPDATE run in one ``BEGIN IMMEDIATE``
-        transaction.  Active turn leases / compression locks spare the row;
-        expired guards are removed so their former owner is fenced.
+        transaction; active turn leases / compression locks spare the row.
         """
         from hermes_state import SessionCompressionInProgressError, SessionTurnLeaseLostError
         srcs = tuple(s for s in sources if s)
