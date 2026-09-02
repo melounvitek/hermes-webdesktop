@@ -7711,6 +7711,58 @@ def _contains_profile_reasoning_fields(value: Any) -> bool:
     return False
 
 
+_NOUS_PROVIDER_NAMES = frozenset({"nous", "nous-portal", "nousresearch"})
+
+
+def _nous_on_messages_wire(provider_norm: str, model: str) -> bool:
+    """True when a Nous Portal route serves ``model`` over /v1/messages (dual-wire catalog)."""
+    if provider_norm not in _NOUS_PROVIDER_NAMES:
+        return False
+    from hermes_cli.providers import nous_api_mode
+
+    return nous_api_mode(model) == "anthropic_messages"
+
+
+def _forwards_max_tokens(
+    provider: str, provider_norm: str, model: str, effective_base: str, task: Optional[str],
+) -> bool:
+    """Whether an explicit max_tokens is forwarded on this route.
+
+    No default output cap: omitted max_tokens means "model's max output" on most
+    providers and sidesteps wire quirks (max_completion_tokens on GPT-5/Copilot,
+    ZAI vision rejecting it). Forward only where mandatory or meaningfully honored:
+    Anthropic Messages wire (hard 400 without it); NVIDIA NIM (some models return
+    200 with empty choices[] when omitted); MoA reference slots; Gemini native
+    (fixed 65,535 ceiling when omitted, so MoA reference_max_tokens needs the cap);
+    OpenRouter (budgets credit against the FULL output window when omitted → 402
+    on low-credit accounts); managed local llama-server (uncapped decode with no
+    EOS burns the GPU to the full context window).
+    """
+    if _is_anthropic_compat_endpoint(provider, effective_base):
+        return True
+    if _nous_on_messages_wire(provider_norm, model):
+        return True
+    if (
+        provider_norm in {"nvidia", "nvidia-nim", "nim", "build-nvidia", "nemotron"}
+        or base_url_host_matches(effective_base, "integrate.api.nvidia.com")
+    ):
+        return True
+    if bool(task) and str(task) == "moa_reference":
+        return True
+    is_gemini_native = provider_norm in {"gemini", "google", "google-gemini", "google-ai-studio"}
+    if not is_gemini_native and effective_base:
+        try:
+            from agent.gemini_native_adapter import is_native_gemini_base_url
+            is_gemini_native = is_native_gemini_base_url(effective_base)
+        except Exception:
+            pass
+    if is_gemini_native:
+        return True
+    if provider_norm == "openrouter" or base_url_host_matches(effective_base, "openrouter.ai"):
+        return True
+    return _is_managed_local_endpoint(effective_base)
+
+
 def _build_call_kwargs(
     provider: str,
     model: str,
@@ -7747,60 +7799,16 @@ def _build_call_kwargs(
     if temperature is not None:
         kwargs["temperature"] = temperature
 
-    if max_tokens is not None:
-        # No default output cap: omitted max_tokens means "model's max output" on
-        # most providers and sidesteps wire quirks (max_completion_tokens on
-        # GPT-5/Copilot, ZAI vision rejecting it). Forward the cap only where it
-        # is mandatory or meaningfully honored, enumerated below.
-        _effective_base = base_url or (
-            _current_custom_base_url() if provider == "custom" else ""
-        )
-        _provider_norm = str(provider or "").strip().lower()
-        # NVIDIA NIM: some models (minimaxai/minimax-m3) return 200 with empty
-        # choices[] when max_tokens is omitted.
-        _is_nvidia_nim = (
-            _provider_norm in {"nvidia", "nvidia-nim", "nim", "build-nvidia", "nemotron"}
-            or base_url_host_matches(_effective_base, "integrate.api.nvidia.com")
-        )
-        _is_moa = bool(task) and str(task) == "moa_reference"
-        # Gemini native maps max_tokens → maxOutputTokens with a fixed 65,535
-        # ceiling when omitted; an explicit cap is the only way MoA's
-        # reference_max_tokens takes effect for gemini advisors.
-        _is_gemini_native = _provider_norm in {
-            "gemini", "google", "google-gemini", "google-ai-studio",
-        }
-        if not _is_gemini_native and _effective_base:
-            try:
-                from agent.gemini_native_adapter import is_native_gemini_base_url
-                _is_gemini_native = is_native_gemini_base_url(_effective_base)
-            except Exception:
-                pass
-        _nous_on_messages = False
-        if _provider_norm in {"nous", "nous-portal", "nousresearch"}:
-            from hermes_cli.providers import nous_api_mode
+    effective_base = base_url or (
+        _current_custom_base_url() if provider == "custom" else ""
+    )
+    provider_norm = str(provider or "").strip().lower()
 
-            _nous_on_messages = nous_api_mode(model) == "anthropic_messages"
-        # OpenRouter budgets credit against the requested cap and assumes the
-        # model's FULL output window when omitted, so low-credit accounts 402.
-        _is_openrouter = (
-            _provider_norm == "openrouter"
-            or base_url_host_matches(_effective_base, "openrouter.ai")
-        )
-        # Managed local llama-server: an uncapped decode with no EOS burns the
-        # user's GPU to the full context window, so explicit caps are honored.
-        _is_managed_local = _is_managed_local_endpoint(_effective_base)
-        if (
-            _is_anthropic_compat_endpoint(provider, _effective_base)
-            or _nous_on_messages
-            or _is_nvidia_nim
-            or _is_moa
-            or _is_gemini_native
-            or _is_openrouter
-            or _is_managed_local
-        ):
-            # Anthropic Messages wire requires max_tokens (hard 400 if omitted).
-            # auxiliary_max_tokens_param() picks max_completion_tokens where needed.
-            kwargs.update(auxiliary_max_tokens_param(max_tokens, model=model))
+    if max_tokens is not None and _forwards_max_tokens(
+        provider, provider_norm, model, effective_base, task,
+    ):
+        # auxiliary_max_tokens_param() picks max_completion_tokens where needed.
+        kwargs.update(auxiliary_max_tokens_param(max_tokens, model=model))
 
     if tools:
         # Vertex/Azure/Bedrock 400 on duplicate tool names; upstream dedups
@@ -7824,9 +7832,6 @@ def _build_call_kwargs(
     # Provider profiles are the source of truth for reasoning wire shapes
     # (top-level, nested body, or extra_body.reasoning); providers without a
     # reasoning-aware profile keep the generic ``extra_body.reasoning`` fallback.
-    effective_base = base_url or (
-        _current_custom_base_url() if provider == "custom" else ""
-    )
     profile_body: Dict[str, Any] = {}
     profile_reasoning_extra: Dict[str, Any] = {}
     profile_top_level: Dict[str, Any] = {}
@@ -7835,7 +7840,7 @@ def _build_call_kwargs(
         from providers import get_provider_profile
         from providers.base import ProviderProfile
 
-        profile = get_provider_profile(str(provider or "").strip().lower())
+        profile = get_provider_profile(provider_norm)
         if profile is not None:
             profile_body = profile.build_extra_body(
                 model=model,
@@ -7883,8 +7888,7 @@ def _build_call_kwargs(
     # Portal tags + sticky session_id fallback when the profile didn't supply
     # them; session_id keeps aux calls on the main turn's upstream instance
     # (cache warmth) — tags alone are not enough on /v1/messages.
-    _provider_for_portal = str(provider or "").strip().lower()
-    if _provider_for_portal in {"nous", "nous-portal", "nousresearch"}:
+    if provider_norm in _NOUS_PROVIDER_NAMES:
         if "tags" not in merged_extra:
             merged_extra["tags"] = _nous_portal_tags()
         if "session_id" not in merged_extra:
@@ -7903,18 +7907,12 @@ def _build_call_kwargs(
     # OpenAI SDK clients would reject; Portal Claude is dual-wire, so include it
     # only when the catalog id selects /v1/messages.
     if reasoning_config and isinstance(reasoning_config, dict):
-        provider_norm = str(provider or "").strip().lower()
-        effective_base = base_url or ""
-        _nous_on_messages = False
-        if provider_norm in {"nous", "nous-portal", "nousresearch"}:
-            from hermes_cli.providers import nous_api_mode
-
-            _nous_on_messages = nous_api_mode(model) == "anthropic_messages"
+        raw_base = base_url or ""
         if (
             provider_norm == "anthropic"
-            or _nous_on_messages
-            or _endpoint_speaks_anthropic_messages(effective_base)
-            or _is_anthropic_compat_endpoint(provider_norm, effective_base)
+            or _nous_on_messages_wire(provider_norm, model)
+            or _endpoint_speaks_anthropic_messages(raw_base)
+            or _is_anthropic_compat_endpoint(provider_norm, raw_base)
         ):
             kwargs["_reasoning_config"] = dict(reasoning_config)
 
