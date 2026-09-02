@@ -2498,12 +2498,13 @@ def _resolve_nous_pool_runtime_api(*, force_refresh: bool = False) -> Optional[t
     if entry is None:
         return None
 
-    state = {
-        "agent_key": getattr(entry, "agent_key", None),
-        "agent_key_expires_at": getattr(entry, "agent_key_expires_at", None),
-        "scope": getattr(entry, "scope", None),
-    }
-    if force_refresh or not _agent_key_is_usable(state, _nous_min_key_ttl_seconds()):
+    def _entry_state(e: Any) -> Dict[str, Any]:
+        return {
+            k: getattr(e, k, None)
+            for k in ("agent_key", "agent_key_expires_at", "access_token", "expires_at", "scope")
+        }
+
+    if force_refresh or not _agent_key_is_usable(_entry_state(entry), _nous_min_key_ttl_seconds()):
         try:
             refreshed = pool.try_refresh_current()
         except Exception as exc:
@@ -2513,14 +2514,7 @@ def _resolve_nous_pool_runtime_api(*, force_refresh: bool = False) -> Optional[t
             return None
         entry = refreshed
 
-    provider = {
-        "agent_key": getattr(entry, "agent_key", None),
-        "agent_key_expires_at": getattr(entry, "agent_key_expires_at", None),
-        "access_token": getattr(entry, "access_token", None),
-        "expires_at": getattr(entry, "expires_at", None),
-        "scope": getattr(entry, "scope", None),
-    }
-    api_key = _nous_api_key(provider)
+    api_key = _nous_api_key(_entry_state(entry))
     base_url = _pool_runtime_base_url(entry, _NOUS_DEFAULT_BASE_URL)
     if not api_key or not base_url:
         return None
@@ -2547,6 +2541,11 @@ def _resolve_nous_runtime_api(*, force_refresh: bool = False) -> Optional[tuple[
         logger.debug("Auxiliary Nous runtime credential resolution failed: %s", exc)
         return None
 
+    return _creds_pair(creds)
+
+
+def _creds_pair(creds: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """``(api_key, base_url)`` from a runtime-credentials dict, or None when either is missing."""
     api_key = str(creds.get("api_key") or "").strip()
     base_url = str(creds.get("base_url") or "").strip().rstrip("/")
     if not api_key or not base_url:
@@ -2594,12 +2593,7 @@ def _resolve_xai_oauth_for_aux() -> Optional[Tuple[str, str]]:
     except Exception as exc:
         logger.debug("Auxiliary xAI OAuth runtime credential resolution failed: %s", exc)
         return None
-
-    api_key = str(creds.get("api_key") or "").strip()
-    base_url = str(creds.get("base_url") or "").strip().rstrip("/")
-    if not api_key or not base_url:
-        return None
-    return api_key, base_url
+    return _creds_pair(creds)
 
 
 def _read_codex_access_token() -> Optional[str]:
