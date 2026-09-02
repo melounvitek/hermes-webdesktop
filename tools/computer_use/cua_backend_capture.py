@@ -1,5 +1,5 @@
 """Capture side of the cua-driver backend: window discovery, capture-target
-selection, Linux display diagnostics and the capture()/list_windows() methods
+selection and the capture()/list_windows()/list_apps()/focus_app() methods
 (mixed into ``CuaDriverBackend``).
 
 Logger name is kept as ``tools.computer_use.cua_backend`` so log-based tests
@@ -36,29 +36,46 @@ from tools.computer_use.cua_backend_parse import (
 
 logger = logging.getLogger("tools.computer_use.cua_backend")
 
-
 # Whole-screen intents: app="screen"/... -> composited `get_desktop_state`
 # (pixels only); app="desktop" -> the OS shell window via list_windows, WITH
 # interactable elements (desktop icons, taskbar).
 _FULL_SCREEN_SENTINELS = {"screen", "fullscreen", "full screen", "all"}
-
-
 _DESKTOP_SHELL_SENTINELS = {"desktop"}
-
-
 # Shell window identifiers (substring of app_name + title, case-insensitive).
 # Windows: Progman/WorkerW = desktop, Shell_TrayWnd = taskbar; macOS: Finder/Dock.
 _DESKTOP_WINDOW_NAMES = (
     "progman", "workerw", "program manager", "shell_traywnd", "taskbar",
     "finder", "desktop", "dock",
 )
-
-
 # Backdrop subset preferred over the taskbar when both are present.
 _DESKTOP_BACKDROP_NAMES = ("progman", "workerw", "program manager", "finder", "desktop")
 
-
 _WINDOW_TITLE_RE = re.compile(r'AXWindow\s+"([^"]+)"')
+_LEGACY_APP_LINE_RE = re.compile(r'(.+?)\s+\(pid\s+(\d+)\)')
+
+_NO_DESKTOP_WINDOW_MSG = (
+    "<no desktop/shell window found for app={app!r}; cua-driver captures one "
+    "window at a time and exposes no whole-virtual-desktop or per-monitor "
+    "capture. Call list_apps / capture(app='<AppName>') to target a specific "
+    "window instead. On Windows the taskbar is 'Shell_TrayWnd' and the desktop "
+    "is 'Progman'.>"
+)
+_NO_APP_MATCH_MSG = (
+    "<no on-screen window matched app={app!r}; call list_apps to see available "
+    "app names or bundle IDs (macOS reports localized names, e.g. '計算機' "
+    "instead of 'Calculator'; some Linux/Qt apps only resolve via list_apps "
+    "metadata)>"
+)
+_NO_DESKTOP_IMAGE_MSG = (
+    "<get_desktop_state returned no image; the driver may predate the desktop "
+    "capture lane — try capture(app='<AppName>') for a specific window>"
+)
+_FULL_SCREEN_NOTE = (
+    "full-screen capture has no interactable elements; to act on what you see, "
+    "call capture(app='<AppName>') for that app's clickable element list, or "
+    "capture(app='desktop') for the desktop shell (wallpaper icons / taskbar) "
+    "with elements"
+)
 
 
 def _linux_x11_active_window_id() -> Optional[int]:
@@ -88,12 +105,9 @@ def _select_capture_target(
     ``z_index`` (the common X11 case) ``_NET_ACTIVE_WINDOW`` beats list order.
     Exact-target captures never pay for the ``xprop`` probe.
     """
-    candidates = [w for w in windows if not w["off_screen"]]
-    pool = candidates
+    pool = [w for w in windows if not w["off_screen"]]
     if not exact_target and not app_requested and sys.platform == "linux":
-        real_apps = [w for w in candidates if _is_real_app_window(w)]
-        if real_apps:
-            pool = real_apps
+        pool = [w for w in pool if _is_real_app_window(w)] or pool
         if pool and _z_index_uninformative(pool):
             active_id = _linux_x11_active_window_id()
             if active_id is not None:
@@ -101,6 +115,22 @@ def _select_capture_target(
                     if w.get("window_id") == active_id:
                         return w
     return pool[0] if pool else windows[0]
+
+
+def _sorted_windows(out: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Normalised windows from a list_windows result, ``z_index`` DESCENDING
+    (frontmost at index 0 — the default target for capture()/focus_app())."""
+    windows = _ingest_windows(_windows_from_tool_result(out))
+    windows.sort(key=lambda w: w["z_index"], reverse=True)
+    return windows
+
+
+def _tree_and_title(out: Dict[str, Any]) -> Tuple[str, str]:
+    """``(tree_markdown, window_title)`` from a get_window_state result."""
+    data = out.get("data")
+    _, tree = _split_tree_text(data if isinstance(data, str) else "")
+    match = _WINDOW_TITLE_RE.search(tree)
+    return tree, (match.group(1) if match else "")
 
 
 def _gws_is_empty(out: Dict[str, Any]) -> bool:
@@ -112,18 +142,8 @@ def _gws_is_empty(out: Dict[str, Any]) -> bool:
     sc_ = out.get("structuredContent") or {}
     if sc_.get("elements") or sc_.get("screenshot_png_b64"):
         return False
-    txt = out.get("data") if isinstance(out.get("data"), str) else ""
-    _, tr = _split_tree_text(txt or "")
-    return not (tr and tr.strip())
-
-
-def _tree_text(out: Dict[str, Any]) -> str:
-    return out["data"] if isinstance(out["data"], str) else ""
-
-
-def _window_title_from_tree(tree: str) -> str:
-    wt = _WINDOW_TITLE_RE.search(tree)
-    return wt.group(1) if wt else ""
+    tree, _ = _tree_and_title(out)
+    return not tree.strip()
 
 
 def _png_metrics(png_b64: str, width: int, height: int) -> Tuple[int, int, int]:
@@ -145,39 +165,80 @@ def _is_desktop_window(w: Dict[str, Any], names: Tuple[str, ...] = _DESKTOP_WIND
     return any(name in haystack for name in names)
 
 
+def _app_aliases(raw_app: Dict[str, Any]) -> set:
+    return {
+        value.strip().lower()
+        for key in ("bundle_id", "bundleId", "name", "app_name", "display_name")
+        if isinstance((value := raw_app.get(key)), str) and value.strip()
+    }
+
+
 class _CaptureMixin:
-    """capture()/list_windows() and their window-discovery helpers."""
+    """capture()/list_windows()/list_apps()/focus_app() and their window-discovery helpers."""
+
+    # ── Failure plumbing ───────────────────────────────────────────
+    def _failed_capture(self, mode: str, message: str = "") -> CaptureResult:
+        """Return an empty capture after disarming any prior target context."""
+        self._clear_active_target()
+        return CaptureResult(mode=mode, width=0, height=0, png_b64=None, elements=[],
+                             app="", window_title=message, png_bytes_len=0)
+
+    def _call_capture_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Call a capture-stage tool and disarm state on transport or logical failure."""
+        try:
+            out = self._session.call_tool(name, args)
+        except Exception:
+            self._clear_active_target()
+            raise
+        if out.get("isError") is True:
+            message = out.get("data")
+            self._clear_active_target()
+            raise RuntimeError(
+                f"cua-driver {name} failed"
+                + (f": {message}" if isinstance(message, str) and message else "")
+            )
+        return out
+
+    def _cli_refetch(self, name: str, args: Dict[str, Any], timeout: float,
+                     what: str) -> Optional[Dict[str, Any]]:
+        """One-shot call over the CLI transport (different daemon socket) after
+        MCP came back empty/imageless without raising. None on failure."""
+        try:
+            cli_out = self._session._call_tool_via_cli(name, args, timeout)
+        except Exception as cli_exc:
+            logger.error("cua-driver CLI re-fetch for %s failed: %s", what, cli_exc)
+            return None
+        if cli_out.get("isError") is True:
+            if name == "list_windows":
+                logger.error("cua-driver CLI re-fetch for list_windows returned an error")
+            self._clear_active_target()
+            return None
+        return cli_out
 
     # ── Window discovery ───────────────────────────────────────────
     def _list_windows_args(self) -> Dict[str, Any]:
         return {"on_screen_only": True, "session": self._session_id}
 
     def _load_windows(self) -> List[Dict[str, Any]]:
-        """Load normalized visible windows sorted by ``z_index`` DESCENDING
-        (frontmost at index 0 — the default target for capture()/focus_app()),
-        re-fetching over the CLI transport when MCP returns nothing."""
-        out = self._call_capture_tool("list_windows", self._list_windows_args())
-        windows = _ingest_windows(_windows_from_tool_result(out))
-        windows.sort(key=lambda w: w["z_index"], reverse=True)
+        """Visible windows frontmost-first, re-fetching over the CLI transport
+        when MCP returns nothing."""
+        windows = _sorted_windows(self._call_capture_tool("list_windows", self._list_windows_args()))
         if windows:
             return windows
-
         logger.warning(
             "cua-driver list_windows returned no windows over MCP; "
             "re-fetching via CLI transport",
         )
+        cli_out = self._cli_refetch("list_windows", self._list_windows_args(), 20.0, "list_windows")
+        return _sorted_windows(cli_out) if cli_out is not None else []
+
+    def _load_windows_or_disarm(self) -> List[Dict[str, Any]]:
+        """``_load_windows`` that forgets the sticky target when discovery raises."""
         try:
-            cli_out = self._session._call_tool_via_cli("list_windows", self._list_windows_args(), 20.0)
-        except Exception as exc:
-            logger.error("cua-driver CLI re-fetch for list_windows failed: %s", exc)
-            return []
-        if cli_out.get("isError") is True:
-            logger.error("cua-driver CLI re-fetch for list_windows returned an error")
+            return self._load_windows()
+        except Exception:
             self._clear_active_target()
-            return []
-        windows = _ingest_windows(_windows_from_tool_result(cli_out))
-        windows.sort(key=lambda w: w["z_index"], reverse=True)
-        return windows
+            raise
 
     def _match_windows_for_app(
         self, windows: List[Dict[str, Any]], app: str
@@ -218,11 +279,7 @@ class _CaptureMixin:
             pid = _positive_int(raw_app.get("pid"))
             if pid is None:
                 continue
-            aliases = {
-                value.strip().lower()
-                for key in ("bundle_id", "bundleId", "name", "app_name", "display_name")
-                if isinstance((value := raw_app.get(key)), str) and value.strip()
-            }
+            aliases = _app_aliases(raw_app)
             if app_lower in aliases:
                 exact_pids.add(pid)
             elif any(app_lower in alias for alias in aliases):
@@ -257,11 +314,8 @@ class _CaptureMixin:
             # An exact pid/window pair is both the stable capture_after target
             # and the escape hatch when discovery is unavailable on X11.
             if pid is None or window_id is None:
-                return self._failed_capture(
-                    mode, "<capture targeting requires both pid and window_id>",
-                )
-            target_pid = _positive_int(pid)
-            target_window_id = _positive_int(window_id)
+                return self._failed_capture(mode, "<capture targeting requires both pid and window_id>")
+            target_pid, target_window_id = _positive_int(pid), _positive_int(window_id)
             if target_pid is None or target_window_id is None:
                 return self._failed_capture(
                     mode, "<capture targeting requires positive integer pid and window_id>",
@@ -269,11 +323,7 @@ class _CaptureMixin:
             return [{"app_name": app or "", "pid": target_pid, "window_id": target_window_id,
                      "off_screen": False, "title": "", "z_index": 0}]
 
-        try:
-            windows = self._load_windows()
-        except Exception:
-            self._clear_active_target()
-            raise
+        windows = self._load_windows_or_disarm()
         if not windows:
             # Diagnose instead of a bare 0x0: the dominant real-world cause on
             # Linux is a locked desktop session.
@@ -285,58 +335,23 @@ class _CaptureMixin:
 
         if app.strip().lower() in _DESKTOP_SHELL_SENTINELS:
             # Desktop-shell request: the OS shell window WITH its interactable
-            # elements (desktop icons), so "click the taskbar" works.
+            # elements (desktop icons), so "click the taskbar" works. Prefer the
+            # backdrop (Progman/WorkerW/Finder) over the taskbar so the capture
+            # shows the full desktop rather than the task strip.
             desktop = [w for w in windows if _is_desktop_window(w)]
             if not desktop:
-                return self._failed_capture(mode, (
-                    f"<no desktop/shell window found for app={app!r}; "
-                    f"cua-driver captures one window at a time and exposes "
-                    f"no whole-virtual-desktop or per-monitor capture. "
-                    f"Call list_apps / capture(app='<AppName>') to target a "
-                    f"specific window instead. On Windows the taskbar is "
-                    f"'Shell_TrayWnd' and the desktop is 'Progman'.>"
-                ))
-            # Prefer the backdrop (Progman/WorkerW/Finder) over the taskbar so
-            # the capture shows the full desktop rather than the task strip.
-            return sorted(
-                desktop,
-                key=lambda w: 0 if _is_desktop_window(w, _DESKTOP_BACKDROP_NAMES) else 1,
-            )
+                return self._failed_capture(mode, _NO_DESKTOP_WINDOW_MSG.format(app=app))
+            return sorted(desktop, key=lambda w: 0 if _is_desktop_window(w, _DESKTOP_BACKDROP_NAMES) else 1)
 
         # When the filter matches nothing, say so instead of silently capturing
         # the frontmost window — on macOS list_windows returns the localized
         # app name (e.g. "計算機"), so `app="Calculator"` legitimately misses.
-        filtered = self._match_windows_for_app(windows, app)
-        if not filtered:
-            return self._failed_capture(mode, (
-                f"<no on-screen window matched app={app!r}; "
-                f"call list_apps to see available app names or bundle IDs "
-                f"(macOS reports localized names, e.g. '計算機' "
-                f"instead of 'Calculator'; some Linux/Qt apps only "
-                f"resolve via list_apps metadata)>"
-            ))
-        return filtered
+        return (self._match_windows_for_app(windows, app)
+                or self._failed_capture(mode, _NO_APP_MATCH_MSG.format(app=app)))
 
     # ── Capture ────────────────────────────────────────────────────
     def _gws_args(self) -> Dict[str, Any]:
-        return {
-            "pid": self._active_pid,
-            "window_id": self._active_window_id,
-            "session": self._session_id,
-        }
-
-    def _cli_refetch_window_state(self, what: str) -> Optional[Dict[str, Any]]:
-        """One-shot get_window_state over the CLI transport (different daemon
-        socket) after MCP came back imageless/empty without raising."""
-        try:
-            cli_out = self._session._call_tool_via_cli("get_window_state", self._gws_args(), 30.0)
-        except Exception as cli_exc:
-            logger.error("cua-driver CLI re-fetch for %s failed: %s", what, cli_exc)
-            return None
-        if cli_out.get("isError") is True:
-            self._clear_active_target()
-            return None
-        return cli_out
+        return {"pid": self._active_pid, "window_id": self._active_window_id, "session": self._session_id}
 
     def _capture_vision(self) -> Tuple[Optional[str], Optional[str], str]:
         """Pixels only, no elements. Returns ``(png_b64, mime, window_title)``.
@@ -361,18 +376,16 @@ class _CaptureMixin:
             gws_out = self._call_capture_tool("get_window_state", self._gws_args())
             png_b64, image_mime_type = _image_from_tool_result(gws_out)
             # The title is cheap and useful; `elements` stays empty by contract.
-            _, tree = _split_tree_text(_tree_text(gws_out))
-            window_title = _window_title_from_tree(tree)
+            _, window_title = _tree_and_title(gws_out)
         if not png_b64:
             logger.warning(
                 "cua-driver vision capture returned no image over MCP "
                 "(window_id=%s); re-fetching via CLI transport",
                 self._active_window_id,
             )
-            cli_out = self._cli_refetch_window_state("vision screenshot")
+            cli_out = self._cli_refetch("get_window_state", self._gws_args(), 30.0, "vision screenshot")
             if cli_out is not None and cli_out.get("images"):
-                png_b64 = cli_out["images"][0]
-                image_mime_type = "image/png"
+                png_b64, image_mime_type = cli_out["images"][0], "image/png"
         return png_b64, image_mime_type, window_title
 
     def _capture_window_state(self) -> Tuple[Optional[str], Optional[str], List[UIElement], str]:
@@ -387,11 +400,11 @@ class _CaptureMixin:
                 "(pid=%s window_id=%s); re-fetching via CLI transport",
                 self._active_pid, self._active_window_id,
             )
-            cli_out = self._cli_refetch_window_state("get_window_state")
+            cli_out = self._cli_refetch("get_window_state", self._gws_args(), 30.0, "get_window_state")
             if cli_out is not None and not _gws_is_empty(cli_out):
                 gws_out = cli_out
 
-        _, tree = _split_tree_text(_tree_text(gws_out))
+        tree, window_title = _tree_and_title(gws_out)
         # Prefer the canonical structuredContent.elements (real frames); the
         # markdown regex fallback yields (0,0,0,0) bounds.
         sc_elements = (gws_out.get("structuredContent") or {}).get("elements")
@@ -403,7 +416,7 @@ class _CaptureMixin:
         # it when the new capture carries none).
         self._snapshot_tokens = {e.index: e.element_token for e in elements if e.element_token}
         png_b64, image_mime_type = _image_from_tool_result(gws_out)
-        return png_b64, image_mime_type, elements, _window_title_from_tree(tree)
+        return png_b64, image_mime_type, elements, window_title
 
     def capture(
         self,
@@ -420,10 +433,8 @@ class _CaptureMixin:
         """
         # Drop schema-filler ids (models that zero-fill every optional
         # property) before they read as a targeting request.
-        if _is_placeholder_id(pid):
-            pid = None
-        if _is_placeholder_id(window_id):
-            window_id = None
+        pid = None if _is_placeholder_id(pid) else pid
+        window_id = None if _is_placeholder_id(window_id) else window_id
         exact_target = pid is not None or window_id is not None
         # Full-screen lane bypasses enumeration entirely (also keeps
         # screenshots working when Windows UIA enumeration hangs).
@@ -449,10 +460,7 @@ class _CaptureMixin:
         else:
             png_b64, image_mime_type, elements, window_title = self._capture_window_state()
 
-        png_bytes_len = width = height = 0
-        if png_b64:
-            png_bytes_len, width, height = _png_metrics(png_b64, 0, 0)
-
+        png_bytes_len, width, height = _png_metrics(png_b64, 0, 0) if png_b64 else (0, 0, 0)
         return CaptureResult(mode=mode, width=width, height=height, png_b64=png_b64,
                              elements=elements, app=app_name, window_title=window_title,
                              png_bytes_len=png_bytes_len, image_mime_type=image_mime_type)
@@ -495,9 +503,7 @@ class _CaptureMixin:
 
         png_b64, image_mime_type = _image_from_tool_result(out)
         if not png_b64:
-            return self._failed_capture(mode, "<get_desktop_state returned no image; the driver may "
-                                              "predate the desktop capture lane — try "
-                                              "capture(app='<AppName>') for a specific window>")
+            return self._failed_capture(mode, _NO_DESKTOP_IMAGE_MSG)
         structured = out.get("structuredContent") or {}
         png_bytes_len, width, height = _png_metrics(
             png_b64,
@@ -507,69 +513,39 @@ class _CaptureMixin:
         return CaptureResult(
             mode="vision", width=width, height=height, png_b64=png_b64, elements=[],
             app="screen", window_title="Full screen (composited)",
-            png_bytes_len=png_bytes_len, image_mime_type=image_mime_type,
-            note=("full-screen capture has no interactable elements; to act on "
-                  "what you see, call capture(app='<AppName>') for that app's "
-                  "clickable element list, or capture(app='desktop') for the "
-                  "desktop shell (wallpaper icons / taskbar) with elements"),
+            png_bytes_len=png_bytes_len, image_mime_type=image_mime_type, note=_FULL_SCREEN_NOTE,
         )
 
+    # ── Introspection ──────────────────────────────────────────────
     def list_windows(self) -> List[Dict[str, Any]]:
         return self._load_windows()
 
-    def _failed_capture(self, mode: str, message: str = "") -> CaptureResult:
-        """Return an empty capture after disarming any prior target context."""
-        self._clear_active_target()
-        return CaptureResult(mode=mode, width=0, height=0, png_b64=None, elements=[],
-                             app="", window_title=message, png_bytes_len=0)
-
-    def _call_capture_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Call a capture-stage tool and disarm state on transport or logical failure."""
-        try:
-            out = self._session.call_tool(name, args)
-        except Exception:
-            self._clear_active_target()
-            raise
-        if out.get("isError") is True:
-            message = out.get("data")
-            self._clear_active_target()
-            raise RuntimeError(
-                f"cua-driver {name} failed"
-                + (f": {message}" if isinstance(message, str) and message else "")
-            )
-        return out
-
-    # ── Introspection ──────────────────────────────────────────────
     def list_apps(self) -> List[Dict[str, Any]]:
         out = self._session.call_tool("list_apps", {"session": self._session_id})
         structured = out.get("structuredContent")
         data = out.get("data")
-
         # structuredContent is canonical; empty lists fall through so a
         # populated compatibility envelope (older drivers, CLI fallback) can
         # still recover.
-        if isinstance(structured, dict):
-            apps = structured.get("apps")
-            if isinstance(apps, list) and apps:
-                return apps
+        def _apps_in(container: Any) -> List[Any]:
+            apps = container.get("apps") if isinstance(container, dict) else None
+            return apps if isinstance(apps, list) else []
+
+        if _apps_in(structured):
+            return _apps_in(structured)
         if isinstance(data, list) and data:
             return data
         for container in (data, out):
-            if isinstance(container, dict):
-                apps = container.get("apps")
-                if isinstance(apps, list) and apps:
-                    return apps
-
+            if _apps_in(container):
+                return _apps_in(container)
         derived = _apps_from_windows(_windows_from_tool_result(out))
         if derived:
             return derived
-
         # Old text-only drivers retain a small, name/PID-only fallback.
         if isinstance(data, str):
             return [
                 {"name": m.group(1).strip(), "pid": int(m.group(2))}
-                for m in (re.search(r'(.+?)\s+\(pid\s+(\d+)\)', line) for line in data.splitlines())
-                if m
+                for m in map(_LEGACY_APP_LINE_RE.search, data.splitlines()) if m
             ]
         return []
 
@@ -579,13 +555,7 @@ class _CaptureMixin:
         raise a window. ``raise_window=True`` is explicit, separately approved,
         and uses the standalone ``bring_to_front`` tool.
         """
-        try:
-            windows = self._load_windows()
-        except Exception:
-            self._clear_active_target()
-            raise
-
-        matched = self._match_windows_for_app(windows, app)
+        matched = self._match_windows_for_app(self._load_windows_or_disarm(), app)
         # No silent fallback to the frontmost window: that hides the real
         # failure (often a localized macOS app-name mismatch).
         if not matched:
