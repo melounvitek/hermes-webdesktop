@@ -298,6 +298,22 @@ def _http_error_detail(response, extract) -> str:
         return response.text[:300]
 
 
+def _rest_transcript(response, label: str, extract_detail, extract_text):
+    """Turn a multipart STT response into ``(text, body, None)`` or ``(None, None, error_envelope)``.
+
+    Non-200 -> ``"<label> API error (HTTP n): detail"``; empty text -> the
+    ``no_speech`` envelope so callers treat silence as non-fatal.
+    """
+    if response.status_code != 200:
+        detail = _http_error_detail(response, extract_detail)
+        return None, None, _error_result(f"{label} API error (HTTP {response.status_code}): {detail}")
+    body = response.json()
+    text = extract_text(body)
+    if not text:
+        return None, None, _error_result(f"{label} returned empty transcript", no_speech=True)
+    return text, body, None
+
+
 def _elevenlabs_error_detail(err_body: Dict[str, Any]) -> str:
     error_value = err_body.get("detail") or err_body.get("error")
     if isinstance(error_value, dict):
@@ -400,24 +416,17 @@ def _transcribe_xai(
                     retry_exc,
                 )
 
-        if response.status_code != 200:
-            detail = _http_error_detail(response, lambda body: body.get("error", {}).get("message", ""))
-            return _error_result(f"xAI STT API error (HTTP {response.status_code}): {detail}")
-
-        result = response.json()
-        transcript_text = result.get("text", "").strip()
-
-        if not transcript_text:
-            return _error_result("xAI STT returned empty transcript", no_speech=True)
-
+        transcript_text, result, error = _rest_transcript(
+            response, "xAI STT",
+            lambda body: body.get("error", {}).get("message", ""),
+            lambda body: body.get("text", "").strip(),
+        )
+        if error:
+            return error
         logger.info(
             "Transcribed %s via xAI Grok STT (lang=%s, %.1fs audio, %d chars)",
-            Path(file_path).name,
-            result.get("language", language),
-            result.get("duration", 0),
-            len(transcript_text),
+            Path(file_path).name, result.get("language", language), result.get("duration", 0), len(transcript_text),
         )
-
         return _ok_result(transcript_text, "xai")
 
     except Exception as e:
@@ -443,14 +452,10 @@ def _transcribe_elevenlabs(
     stt_config = _load_stt_config()
     elevenlabs_config = stt_config.get("elevenlabs") or {}
     base_url = str(
-        elevenlabs_config.get("base_url")
-        or get_env_value("ELEVENLABS_STT_BASE_URL")
-        or ELEVENLABS_STT_BASE_URL
+        elevenlabs_config.get("base_url") or get_env_value("ELEVENLABS_STT_BASE_URL") or ELEVENLABS_STT_BASE_URL
     ).strip().rstrip("/")
     # Language: hook override > stt.elevenlabs.language(_code) > stt.language.
-    language_code = language or _resolve_stt_language(
-        "elevenlabs", stt_config, extra_keys=("language_code",)
-    ) or ""
+    language_code = language or _resolve_stt_language("elevenlabs", stt_config, extra_keys=("language_code",)) or ""
     tag_audio_events = is_truthy_value(elevenlabs_config.get("tag_audio_events", False))
     diarize = is_truthy_value(elevenlabs_config.get("diarize", False))
 
@@ -467,21 +472,15 @@ def _transcribe_elevenlabs(
             f"{base_url}/speech-to-text", {"xi-api-key": api_key}, file_path, data,
         )
 
-        if response.status_code != 200:
-            detail = _http_error_detail(response, _elevenlabs_error_detail)
-            return _error_result(f"ElevenLabs STT API error (HTTP {response.status_code}): {detail}")
-
-        transcript_text = _extract_transcript_text(response.json())
-        if not transcript_text:
-            return _error_result("ElevenLabs STT returned empty transcript", no_speech=True)
-
+        transcript_text, _body, error = _rest_transcript(
+            response, "ElevenLabs STT", _elevenlabs_error_detail, _extract_transcript_text,
+        )
+        if error:
+            return error
         logger.info(
             "Transcribed %s via ElevenLabs Scribe (%s, %d chars)",
-            Path(file_path).name,
-            model_name,
-            len(transcript_text),
+            Path(file_path).name, model_name, len(transcript_text),
         )
-
         return _ok_result(transcript_text, "elevenlabs")
 
     except Exception as e:

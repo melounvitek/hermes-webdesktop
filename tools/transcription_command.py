@@ -187,44 +187,23 @@ def _transcribe_command_stt(
                 "model": str(model),
             }
             command = _render_command_stt_template(command_template, placeholders)
-            logger.info(
-                "Transcribing %s via command STT provider '%s'...",
-                audio.name, provider_name,
-            )
-            try:
-                result = _run_command_stt(
-                    command,
-                    timeout,
-                    env_passthrough=_command_stt_env_passthrough(config),
-                )
-            except subprocess.TimeoutExpired:
-                return fail(f"STT command provider '{provider_name}' timed out after {timeout:g}s")
-            except subprocess.CalledProcessError as exc:
-                detail_parts = [
-                    f"{stream}: {text.strip()}"
-                    for stream, text in (("stderr", exc.stderr), ("stdout", exc.stdout))
-                    if text
-                ]
-                detail = "; ".join(detail_parts) or "no command output"
-                return fail(
-                    f"STT command provider '{provider_name}' exited with code "
-                    f"{exc.returncode}: {detail}"
-                )
-
-            try:
-                transcript_text = _read_command_stt_output(
-                    output_path, result.stdout or "", output_format,
-                )
-            except RuntimeError as exc:
-                return fail(str(exc))
-
+            logger.info("Transcribing %s via command STT provider '%s'...", audio.name, provider_name)
+            result = _run_command_stt(command, timeout, env_passthrough=_command_stt_env_passthrough(config))
+            transcript_text = _read_command_stt_output(output_path, result.stdout or "", output_format)
+    except subprocess.TimeoutExpired:
+        return fail(f"STT command provider '{provider_name}' timed out after {timeout:g}s")
+    except subprocess.CalledProcessError as exc:
+        detail_parts = [
+            f"{stream}: {text.strip()}" for stream, text in (("stderr", exc.stderr), ("stdout", exc.stdout)) if text
+        ]
+        detail = "; ".join(detail_parts) or "no command output"
+        return fail(f"STT command provider '{provider_name}' exited with code {exc.returncode}: {detail}")
+    except RuntimeError as exc:
+        return fail(str(exc))
     except OSError as exc:
         return fail(f"STT command provider '{provider_name}' failed: {exc}")
 
-    logger.info(
-        "Transcribed %s via command STT provider '%s' (%d chars)",
-        audio.name, provider_name, len(transcript_text),
-    )
+    logger.info("Transcribed %s via command STT provider '%s' (%d chars)", audio.name, provider_name, len(transcript_text))
     return _ok_result(transcript_text, provider_name)
 
 
@@ -291,38 +270,24 @@ def _dispatch_to_plugin_provider(
         available = plugin_provider.is_available()
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "STT plugin provider '%s' is_available() raised: %s — "
-            "treating as unavailable", key, exc, exc_info=True,
+            "STT plugin provider '%s' is_available() raised: %s — treating as unavailable", key, exc, exc_info=True,
         )
         available = False
     if not available:
-        logger.info(
-            "STT plugin provider '%s' reports not available; returning "
-            "unavailability envelope.", key,
-        )
+        logger.info("STT plugin provider '%s' reports not available; returning unavailability envelope.", key)
         return _error_result(
-            f"STT plugin '{key}' is not available — check that its "
-            "required credentials / dependencies are configured.",
+            f"STT plugin '{key}' is not available — check that its required credentials / dependencies are configured.",
             provider=key,
         )
 
     logger.info("Transcribing with plugin STT provider '%s'...", key)
     # The prompt travels via the ABC's ``**extra`` kwargs and is only sent when
     # set, so pre-prompt providers see byte-identical calls on the no-prompt path.
-    extra_kwargs: Dict[str, Any] = {}
-    if prompt is not None:
-        extra_kwargs["prompt"] = prompt
+    extra_kwargs: Dict[str, Any] = {} if prompt is None else {"prompt": prompt}
     try:
-        result = plugin_provider.transcribe(
-            file_path,
-            model=model,
-            language=language,
-            **extra_kwargs,
-        )
+        result = plugin_provider.transcribe(file_path, model=model, language=language, **extra_kwargs)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "STT plugin provider '%s' raised: %s", key, exc, exc_info=True,
-        )
+        logger.warning("STT plugin provider '%s' raised: %s", key, exc, exc_info=True)
         return _error_result(f"STT plugin '{key}' raised: {exc}", provider=key)
 
     if not isinstance(result, dict):
@@ -335,24 +300,15 @@ def _dispatch_to_plugin_provider(
 # attempts to change it are logged and dropped.
 _PRE_TRANSCRIPTION_MUTABLE_FIELDS = ("prompt", "language", "model")
 
-
 # Whisper-family models only use the final ~224 tokens of the prompt; longer
 # values waste upload bytes and can trip stricter OpenAI-compatible servers.
 # Enforced client-side (truncate with a warning, never error), ~4 chars/token.
 _WHISPER_PROMPT_TOKEN_CAP = 224
-
-
 _PROMPT_CHARS_PER_TOKEN = 4
+_WHISPER_PROMPT_CAPPED_PROVIDERS = frozenset({"local", "openai", "groq", "deepinfra"})
 
 
-_WHISPER_PROMPT_CAPPED_PROVIDERS = frozenset(
-    {"local", "openai", "groq", "deepinfra"}
-)
-
-
-def _enforce_prompt_length_limit(
-    prompt: Optional[str], provider: str
-) -> Optional[str]:
+def _enforce_prompt_length_limit(prompt: Optional[str], provider: str) -> Optional[str]:
     """Truncate *prompt* to the whisper-family token cap, keeping the TAIL (fail-open).
 
     Whisper conditions on the final context window, so the most recently
@@ -421,20 +377,14 @@ def _apply_pre_transcription_hook(
                         "pre_transcription hook attempted to change "
                         "file_path (read-only) — ignoring the attempt."
                     )
-                    continue
-                if key not in _PRE_TRANSCRIPTION_MUTABLE_FIELDS:
+                elif key not in _PRE_TRANSCRIPTION_MUTABLE_FIELDS:
+                    logger.debug("pre_transcription hook returned unsupported field %r — ignoring.", key)
+                elif not isinstance(value, str):
                     logger.debug(
-                        "pre_transcription hook returned unsupported field "
-                        "%r — ignoring.", key,
+                        "pre_transcription hook returned non-string value %r for field %r — ignoring.", value, key,
                     )
-                    continue
-                if not isinstance(value, str):
-                    logger.debug(
-                        "pre_transcription hook returned non-string value "
-                        "%r for field %r — ignoring.", value, key,
-                    )
-                    continue
-                overrides[key] = value
+                else:
+                    overrides[key] = value
 
         if "model" in overrides:
             model = overrides["model"]
