@@ -15,7 +15,7 @@ Features:
 
 Usage:
     from run_agent import AIAgent
-    
+
     agent = AIAgent(base_url="http://localhost:30000/v1", model="claude-opus-4-20250514")
     response = agent.run_conversation("Tell me about the latest Python updates")
 """
@@ -25,10 +25,7 @@ Usage:
 try:
     import hermes_bootstrap  # noqa: F401
 except ModuleNotFoundError:
-    # Graceful fallback when hermes_bootstrap isn't registered in the venv
-    # yet — happens during partial ``hermes update`` where git-reset landed
-    # new code but ``uv pip install -e .`` didn't finish.  Missing bootstrap
-    # means UTF-8 stdio setup is skipped on Windows; POSIX is unaffected.
+    # Missing hermes_bootstrap (partial `hermes update`) only skips Windows UTF-8 stdio setup.
     pass
 
 import asyncio
@@ -47,18 +44,9 @@ import threading
 import uuid
 import warnings
 from typing import List, Dict, Any, Optional, Callable
-# NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
-# SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
-# that imports the SDK on first call/isinstance check. This preserves:
-#   (a) the single in-module `OpenAI(**client_kwargs)` call site at
-#       _create_openai_client, and
-#   (b) `patch("run_agent.OpenAI", ...)` test patterns used by ~28 test files.
-#
-# NOTE: `fire` is ONLY used in the `__main__` block below (for running
-# run_agent.py directly as a CLI) — it is NOT needed for library usage.
-# It is imported there, not here, so that importing run_agent from a
-# daemon thread (e.g. curator's forked review agent) never fails with
-# ModuleNotFoundError on broken/partial installs where `fire` isn't present.
+# `OpenAI` is a lazy proxy (SDK import costs ~240ms) that keeps the single `OpenAI(**kw)` call site
+# and `patch("run_agent.OpenAI")` working. `fire` is imported only in __main__ so library imports never need
+# it.
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -69,14 +57,9 @@ from hermes_constants import get_hermes_home
 def _launch_cwd_for_session(source: str) -> Optional[str]:
     """Working directory to stamp on a new session row, or None.
 
-    Only local CLI sessions get a recorded cwd: the directory the process was
-    launched from is meaningful for ``hermes -c`` / ``--resume`` (relaunch
-    where you left off). Gateway/cron/remote-backend sessions have no stable
-    host cwd to restore, so they record nothing.
-
-    ``TERMINAL_ENV`` is set by the CLI's config bridge (``load_cli_config``);
-    a non-"local" backend (docker/ssh/modal/...) means the host cwd is
-    irrelevant to the agent's tools, so we skip it there too.
+    Only local CLI sessions record a cwd (meaningful for ``hermes -c`` / ``--resume``). Gateway/cron/remote
+    backends (non-"local" ``TERMINAL_ENV``) have no stable host cwd for the agent's tools, so they record
+    nothing.
     """
     if source != "cli":
         return None
@@ -106,13 +89,8 @@ def _session_source_for_agent(platform: Optional[str]) -> str:
 def _gateway_origin_json(agent: "AIAgent") -> Optional[str]:
     """Build the gateway routing ``origin_json`` for a session row.
 
-    Mirrors the shape of ``SessionSource.to_dict()`` (platform, chat_id,
-    chat_name, chat_type, user_id, user_name, thread_id, optional
-    user_id_alt / profile) so consumers that read ``origin_json`` from
-    state.db (channel directory, mcp_serve, mirror) see the same fields the
-    gateway's own ``record_gateway_session_peer`` would write. Returns None
-    when the agent carries no gateway identity (plain CLI session), matching
-    the previous identity-less creation.
+    Mirrors ``SessionSource.to_dict()`` so state.db consumers see the same fields
+    ``record_gateway_session_peer`` writes. None when the agent carries no gateway identity.
     """
     chat_id = getattr(agent, "_chat_id", None)
     session_key = getattr(agent, "_gateway_session_key", None)
@@ -148,12 +126,8 @@ def _gateway_origin_json(agent: "AIAgent") -> Optional[str]:
         return None
 
 
-# OpenAI lazy proxy + safe stdio + proxy URL helpers — see agent/process_bootstrap.py.
-# `OpenAI` is re-exported here so `patch("run_agent.OpenAI", ...)` in tests works.
-# The other `# noqa: F401` re-exports below cover names accessed via
-# `mock.patch("run_agent.<X>")`, `from run_agent import <X>` in production
-# siblings, or the `_ra().<X>` indirection in agent/system_prompt.py — none
-# of which ruff's in-module usage scan can see.
+# OpenAI lazy proxy + stdio/proxy helpers live in agent/process_bootstrap.py. The `# noqa: F401`
+# re-exports below are reached via `patch("run_agent.<X>")`, `from run_agent import X`, or `_ra().<X>`.
 from agent.process_bootstrap import (
     OpenAI,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.OpenAI")
     _SafeWriter,  # noqa: F401  # re-exported for tests that `from run_agent import _SafeWriter`
@@ -269,40 +243,26 @@ from agent.tool_dispatch_helpers import (
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_float, is_truthy_value, model_forces_max_completion_tokens
 
 
-# Internal flags that mark a message as ephemeral empty-response/prefill
-# recovery scaffolding: the synthetic assistant "(empty)" turn and user nudge
-# injected after an empty response, the terminal "(empty)" sentinel, and the
-# thinking-only prefill placeholder. These exist only to drive the next API
-# retry; the in-memory loop pops them before appending the real response.
-# Persistence must mirror that, otherwise an append-only flush can commit them
-# to the session store and a resumed session replays synthetic "(empty)"/nudge
-# turns as if they were genuine context.
+# Flags marking ephemeral empty-response/prefill recovery scaffolding. The loop pops these before
+# appending the real response; persistence must skip them or a resumed session replays synthetic turns.
 _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_empty_recovery_synthetic",
     "_empty_terminal_sentinel",
     "_thinking_prefill",
-    # verify-on-stop and pre_verify nudges append a synthetic user nudge to
-    # keep the agent going one more turn before it can claim completion.
-    # The nudge exists only to drive the verification loop; persisting it
-    # poisons the resumed transcript and breaks prompt-prefix cache reuse
-    # on later turns. The assistant candidate is NOT synthetic — it is
-    # persisted and emitted as an interim message (#65919).
+    # verify-on-stop / pre_verify nudges: persisting them poisons the resumed transcript and breaks
+    # prompt-prefix cache reuse. The assistant candidate is NOT synthetic (#65919).
     "_verification_stop_synthetic",
     "_pre_verify_synthetic",
     # kanban worker stop-guard: narrated exit without kanban_complete/block
     "_kanban_stop_synthetic",
-    # dropped tool-call re-prompt pair (finish_reason=tool_calls with an
-    # empty tool_calls array): the interim narration-only assistant turn
-    # and the "issue the actual tool call now" user nudge exist only to
-    # drive the bounded retry. Persisting them would replay the internal
-    # retry instruction as user-authored context on resume.
+    # dropped tool-call re-prompt pair: internal retry instruction, must not replay as user context on resume.
     "_dropped_toolcall_nudge",
 )
 
 
 def _is_ephemeral_scaffolding(msg: Any) -> bool:
-    """Return True when ``msg`` is internal recovery scaffolding that must never
-    be persisted to the durable transcript (SQLite session store or JSON log)."""
+    """Return True when ``msg`` is internal recovery scaffolding that must never be persisted to the
+    durable transcript (SQLite session store or JSON log)."""
     return isinstance(msg, dict) and any(
         msg.get(flag) for flag in _EPHEMERAL_SCAFFOLDING_FLAGS
     )
@@ -310,46 +270,21 @@ def _is_ephemeral_scaffolding(msg: Any) -> bool:
 
 _MAX_TOOL_WORKERS = 8
 
-# Intrinsic marker stamped on a message dict once it has been written to the
-# SQLite session store.  Used by ``_flush_messages_to_session_db`` to decide
-# what is already durable.  An object-identity (``id(msg)``) dedup set cannot be
-# trusted across turns: once a flushed message dict is dropped from the live
-# list (e.g. by scaffolding rewind or in-place compaction) and garbage-
-# collected, CPython is free to hand its address to a brand-new assistant/tool
-# message, whose ``id()`` then collides with the stale entry and the real turn
-# is silently never persisted.  A marker bound to the dict itself cannot be
-# aliased that way.  The ``_`` prefix is mandatory: the wire sanitizers
-# (agent/transports/chat_completions.py, agent/chat_completion_helpers.py) strip
-# every top-level ``_``-prefixed key before the request leaves the process, so
-# this never reaches a strict OpenAI-compatible gateway.
-#
-# CONTRACT (#92231): the marker asserts "this dict's CONTENT is durable as
-# written". Loaded rows are stamped at materialization time
-# (hermes_state._rows_to_conversation), so any code that mutates a loaded or
-# flushed dict's content in place and needs the change persisted MUST pop the
-# marker (and invalidate _db_flush_scan_prefix if the dict may sit inside the
-# bounded-scan prefix) — see agent/turn_finalizer.py (fill-empty-tail) and
-# agent/context_compressor.py (micro-compaction defrag) for the two canonical
-# pop sites. Mutating without popping leaves the DB silently stale.
+# Intrinsic "already written to SQLite" marker. An id(msg) dedup set can alias a freed dict's address onto
+# a new message and silently skip persisting it; a marker on the dict cannot. The `_` prefix is mandatory:
+# wire sanitizers strip `_`-prefixed keys. CONTRACT (#92231): the marker asserts the dict's CONTENT is
+# durable as written — any in-place mutation that must persist MUST pop it (see turn_finalizer,
+# context_compressor).
 _DB_PERSISTED_MARKER = "_db_persisted"
 
 
-# Guard so the OpenRouter metadata pre-warm thread is only spawned once per
-# process, not once per AIAgent instantiation.  Without this, long-running
-# gateway processes leak one OS thread per incoming message and eventually
-# exhaust the system thread limit (RuntimeError: can't start new thread).
+# Spawn the OpenRouter pre-warm thread once per process, not per AIAgent (gateway thread leak).
 _openrouter_prewarm_done = threading.Event()
 
-# =========================================================================
-# Large tool result handler — save oversized output to temp file
-# =========================================================================
 
 
-# =========================================================================
-# Qwen Portal headers — mimics QwenCode CLI for portal.qwen.ai compatibility.
-# Extracted as a module-level helper so both __init__ and
-# _apply_client_headers_for_base_url can share it.
-# =========================================================================
+# Qwen Portal headers — mimics QwenCode CLI for portal.qwen.ai; shared by __init__ and
+# _apply_client_headers_for_base_url.
 _QWEN_CODE_VERSION = "0.14.1"
 
 
@@ -365,20 +300,9 @@ def _routermint_headers() -> dict:
 def _pool_may_recover_from_rate_limit(pool) -> bool:
     """Decide whether to wait for credential-pool rotation instead of falling back.
 
-    The existing pool-rotation path requires the pool to (1) exist and (2) have
-    at least one entry not currently in exhaustion cooldown.  But rotation is
-    only meaningful when the pool has more than one entry.
-
-    With a single-credential pool (common for Vertex service accounts and any
-    "one personal key" configuration), the primary entry just 429'd and there
-    is nothing to rotate to.  Waiting for the pool cooldown to expire means
-    retrying against the same exhausted quota — the daily-quota 429 will recur
-    immediately, and the retry budget is burned.
-
-    In that case we must fall back to the configured ``fallback_model``
-    instead.  Returns True only when rotation has somewhere to go.
-
-    See issues #11314 and #13636.
+    Rotation only helps when the pool has somewhere to go: with a single-credential pool the entry that
+    just 429'd is the only one, so waiting retries the same exhausted quota. Fall back to ``fallback_model``
+    instead.
     """
     if pool is None:
         return False
@@ -403,16 +327,9 @@ def _qwen_portal_headers() -> dict:
 def _safe_session_filename_component(session_id: str) -> str:
     """Return a stable, path-safe filename component for a session ID.
 
-    Session IDs can originate from untrusted input (e.g. the
-    ``X-Hermes-Session-Id`` API header) and are otherwise interpolated raw
-    into on-disk artifact filenames under ``~/.hermes/sessions/``.  Without
-    sanitization, a traversal-shaped ID such as ``../../../../etc/pwned``
-    would let a caller write the session snapshot / request dump outside the
-    sessions directory.  This collapses every non ``[A-Za-z0-9_-]`` character
-    to ``_`` (so no path separators or ``.`` survive), caps the length, and —
-    when sanitization changed the string — appends a short content hash so two
-    distinct IDs that sanitize to the same component don't collide.  The
-    result is always a single, traversal-free path segment.
+    Session IDs may be untrusted (``X-Hermes-Session-Id``) and are interpolated into ``~/.hermes/sessions/``
+    filenames. Collapses non ``[A-Za-z0-9_-]`` chars to ``_``, caps length, and appends a short content
+    hash when sanitization changed the string so distinct IDs cannot collide.
     """
     raw = str(session_id or "").strip()
     sanitized = re.sub(r"[^\w-]", "_", raw).strip("._")
@@ -428,15 +345,9 @@ def _safe_session_filename_component(session_id: str) -> str:
 class _StreamErrorEvent(Exception):
     """Synthesized provider error surfaced from a Responses ``error`` SSE frame.
 
-    Some Codex-style Responses backends (xAI for subscription/quota
-    failures, custom relays under malformed-tool-call conditions) emit a
-    standalone ``type=error`` frame instead of routing the failure
-    through ``response.failed`` or returning an HTTP 4xx.  The fallback
-    streaming path raises this exception so ``_summarize_api_error`` and
-    ``_extract_api_error_context`` see a familiar ``.body`` /
-    ``.status_code`` shape and the entitlement detector can match the
-    underlying provider message ("do not have an active Grok
-    subscription", etc.).
+    Some Codex-style backends emit a standalone ``type=error`` frame instead of ``response.failed`` or an HTTP
+    4xx. Raising this gives ``_summarize_api_error`` / the entitlement detector the familiar ``.body`` /
+    ``.status_code`` shape.
     """
 
     def __init__(
@@ -465,12 +376,7 @@ class _StreamErrorEvent(Exception):
 
 
 class AIAgent:
-    """
-    AI Agent with tool calling capabilities.
-
-    This class manages the conversation flow, tool execution, and response handling
-    for AI models that support function calling.
-    """
+    """AI Agent with tool calling capabilities."""
 
     _TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER = (
         "[hermes-agent: tool call arguments were corrupted in this session and "
@@ -665,15 +571,11 @@ class AIAgent:
     def _get_session_db_for_recall(self):
         """Return a SessionDB for recall, lazily creating it if an entrypoint forgot.
 
-        Most frontends pass ``session_db`` into ``AIAgent`` explicitly, but recall
-        is important enough that a missing constructor argument should degrade by
-        opening the default state DB instead of making the advertised
-        ``session_search`` tool unusable.
+        A missing ``session_db`` constructor arg degrades to opening the default state DB rather than
+        making the advertised ``session_search`` tool unusable.
         """
-        # Persistence-isolated forks (background review) must not lazily open the
-        # canonical state DB: doing so would re-arm _flush_messages_to_session_db
-        # to write the fork's harness turn into the user's real session. Recall
-        # degrades to None for them (they don't use session_search anyway).
+        # Persistence-isolated forks (background review) must not lazily open the canonical state DB —
+        # that would re-arm the flush to write the fork's harness turn into the user's real session.
         if getattr(self, "_persist_disabled", False):
             return None
         if self._session_db is not None:
@@ -701,20 +603,13 @@ class AIAgent:
             try:
                 from hermes_cli.profiles import get_active_profile_name
                 _profile_for_session = get_active_profile_name()
-                # Persist the profile name EXPLICITLY, including "default".
-                # NULL used to stand in for the default profile, but the
-                # #94724 legacy-owner backfill already stamps literal
-                # "default" onto old rows, and profile-keyed consumers
-                # (sidebar scope matching, @session:<profile>/<id> deep
-                # links) treat NULL as unowned — rows minted NULL after the
-                # one-shot backfill vanished from the sidebar (#99222).
+                # Persist the profile name explicitly, including "default": profile-keyed consumers treat NULL
+                # as
+                # unowned (#94724 backfill, #99222).
             except Exception:
                 _profile_for_session = None
-            # Carry the live YOLO bypass into the creation-time model_config so
-            # a session whose /yolo was toggled BEFORE the row existed (the row
-            # is created lazily on the first turn) still persists the flag for
-            # `hermes --resume`. set_session_yolo() no-ops on a missing row, so
-            # this is the only chance to record a pre-first-turn toggle.
+            # Carry the live YOLO bypass into model_config: the row is created lazily on the first turn, so
+            # this is the only chance to record a pre-first-turn /yolo toggle for `hermes --resume`.
             _init_model_config = self._session_init_model_config
             try:
                 from tools.approval import is_session_yolo_enabled
@@ -723,18 +618,8 @@ class AIAgent:
                     _init_model_config["yolo_mode"] = True
             except Exception:
                 pass
-            # Persist the gateway routing identity with the row. The gateway's
-            # SessionStore normally creates the row first (db_create_kwargs) and
-            # record_gateway_session_peer self-heals a missing row (#82616), but
-            # when the default/global state.db is corrupt or unavailable at
-            # gateway startup the SessionStore degrades to a JSONL fallback
-            # (_db=None) and the peer recorder no-ops. In that degraded mode
-            # this lazy creation is the ONLY durable write for the session, so
-            # it must carry session_key/chat_id/chat_type/thread_id/user_id/
-            # display_name/origin_json or the row is identity-less and
-            # unrecoverable by find_latest_gateway_session_for_peer (regression:
-            # Telegram rows with chat_id=NULL/session_key=NULL under multiplexed
-            # profile routes).
+            # Carry the gateway routing identity: when the gateway SessionStore degraded to JSONL (corrupt
+            # state.db) this lazy create is the ONLY durable write, and an identity-less row is unrecoverable.
             self._session_db.create_session(
                 session_id=self.session_id,
                 source=source,
@@ -775,12 +660,10 @@ class AIAgent:
     ) -> None:
         """Notify the active context engine about a host session transition.
 
-        Generic host-side lifecycle helper. The built-in compressor keeps its
-        existing reset behavior; plugin engines that implement richer hooks
-        (``on_session_end``, ``on_session_reset``, ``on_session_start``,
-        ``carry_over_new_session_context``) can flush old-session state,
-        reset runtime counters, bind to the new session, and optionally
-        carry retained context forward.
+        The built-in compressor keeps its reset behavior; plugin engines with richer hooks (``on_session_end``
+        /
+        ``on_session_reset`` / ``on_session_start`` / ``carry_over_new_session_context``) can flush, rebind
+        and carry context.
         """
         engine = getattr(self, "context_compressor", None)
         if not engine:
@@ -838,25 +721,11 @@ class AIAgent:
         old_session_id: Optional[str] = None,
         carry_over_context: bool = False,
     ):
-        """Reset all session-scoped token counters to 0 for a fresh session.
-        
-        This method encapsulates the reset logic for all session-level metrics
-        including:
-        - Token usage counters (input, output, total, prompt, completion)
-        - Cache read/write tokens
-        - API call count
-        - Reasoning tokens
-        - Estimated cost tracking
-        - Context compressor internal counters
-        
-        The method safely handles optional attributes (e.g., context compressor)
-        using ``hasattr`` checks.
+        """Reset all session-scoped token/cost counters and compressor state for a fresh session.
 
-        When ``previous_messages`` / ``old_session_id`` / ``carry_over_context``
-        are provided, the active context engine is notified through the
-        full transition lifecycle (``_transition_context_engine_session``)
-        instead of a bare reset. Default callers pass nothing and keep the
-        existing reset-only behavior.
+        When ``previous_messages`` / ``old_session_id`` / ``carry_over_context`` are given, the context engine
+        gets
+        the full transition lifecycle (``_transition_context_engine_session``) instead of a bare reset.
         """
         # Token usage counters
         self.session_total_tokens = 0
@@ -872,12 +741,10 @@ class AIAgent:
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
 
-        # Session boundary: the usage anchor describes the OLD session's
-        # transcript — a fresh/branched/resumed session must fall back to
-        # full estimation until its first provider response re-anchors.
+        # Session boundary: the usage anchor describes the OLD transcript; fall back to full estimation.
         self._usage_anchor = None
         self._turn_base_usage_anchor = None
-        
+
         # Turn counter (added after reset_session_state was first written — #2635)
         self._user_turn_count = 0
 
@@ -894,10 +761,8 @@ class AIAgent:
             reset_engine=True,
         )
 
-        # Reset-only session switches (/new, /resume, /branch) update
-        # agent.session_id before calling reset_session_state(). The built-in
-        # compressor keeps durable cooldown state keyed by its bound session,
-        # so rebind it when the active session changed but no full start hook ran.
+        # Reset-only switches (/new, /resume, /branch) change session_id before this call; rebind the
+        # built-in compressor's session-keyed cooldown state when no full start hook ran.
         engine = getattr(self, "context_compressor", None)
         target_session_id = getattr(self, "session_id", "") or ""
         bound_session_id = getattr(engine, "_session_id", "") if engine is not None else ""
@@ -997,14 +862,9 @@ class AIAgent:
     def _safe_print(self, *args, **kwargs):
         """Print that silently handles broken pipes / closed stdout.
 
-        In headless environments (systemd, Docker, nohup) stdout may become
-        unavailable mid-session.  A raw ``print()`` raises ``OSError`` which
-        can crash cron jobs and lose completed work.
-
-        Internally routes through ``self._print_fn`` (default: builtin
-        ``print``) so callers such as the CLI can inject a renderer that
-        handles ANSI escape sequences properly (e.g. prompt_toolkit's
-        ``print_formatted_text(ANSI(...))``) without touching this method.
+        Headless stdout (systemd, Docker, nohup) can vanish mid-session and a raw ``print()`` would crash cron
+        jobs.
+        Routes through ``self._print_fn`` so the CLI can inject an ANSI-aware renderer.
         """
         try:
             fn = self._print_fn or print
@@ -1015,21 +875,9 @@ class AIAgent:
     def _vprint(self, *args, force: bool = False, **kwargs):
         """Verbose print — suppressed when actively streaming tokens.
 
-        Pass ``force=True`` for error/warning messages that should always be
-        shown even during streaming playback (TTS or display).
-
-        During tool execution (``_executing_tools`` is True), printing is
-        allowed even with stream consumers registered because no tokens
-        are being streamed at that point.
-
-        After the main response has been delivered and the remaining tool
-        calls are post-response housekeeping (``_mute_post_response``),
-        all non-forced output is suppressed.
-
-        ``suppress_status_output`` is a stricter CLI automation mode used by
-        parseable single-query flows such as ``hermes chat -q``. In that mode,
-        all status/diagnostic prints routed through ``_vprint`` are suppressed
-        so stdout stays machine-readable.
+        ``force=True`` always shows (errors/warnings). Printing is allowed during tool execution (no tokens
+        streaming), muted after the main response (``_mute_post_response``), and fully suppressed under
+        ``suppress_status_output`` (machine-readable ``hermes chat -q``).
         """
         if getattr(self, "suppress_status_output", False):
             return
@@ -1042,11 +890,9 @@ class AIAgent:
     def _should_start_quiet_spinner(self) -> bool:
         """Return True when quiet-mode spinner output has a safe sink.
 
-        In headless/stdio-protocol environments, a raw spinner with no custom
-        ``_print_fn`` falls back to ``sys.stdout`` and can corrupt protocol
-        streams such as ACP JSON-RPC. Allow quiet spinners only when either:
-        - output is explicitly rerouted via ``_print_fn``; or
-        - stdout is a real TTY.
+        A raw spinner falling back to ``sys.stdout`` can corrupt protocol streams (ACP JSON-RPC); allow it
+        only
+        when output is rerouted via ``_print_fn`` or stdout is a real TTY.
         """
         if self._print_fn is not None:
             return True
@@ -1061,16 +907,8 @@ class AIAgent:
     def _should_emit_quiet_tool_messages(self) -> bool:
         """Return True when quiet-mode tool summaries should print directly.
 
-        Quiet mode is used by both the interactive CLI and embedded/library
-        callers. The CLI may still want compact progress hints when no callback
-        owns rendering. Embedded/library callers, on the other hand, expect
-        quiet mode to be truly silent.
-
-        ``suppress_status_output`` (the strict machine-readable mode used by
-        ``hermes chat -Q``) always wins: those flows neutralize the rendering
-        callbacks, and without this gate the "no callback owns rendering"
-        fallback would print ``[tool]``/``[done]`` spinner lines into the
-        captured stdout it exists to keep clean (#93220).
+        The CLI wants compact hints when no callback owns rendering; embedded callers expect true silence.
+        ``suppress_status_output`` always wins so ``[tool]``/``[done]`` lines never land in captured stdout.
         """
         if getattr(self, "suppress_status_output", False):
             return False
@@ -1081,14 +919,10 @@ class AIAgent:
         )
 
     def _emit_status(self, message: str) -> None:
-        """Emit a lifecycle status message to both CLI and gateway channels.
+        """Emit a lifecycle status message to both CLI (``_vprint(force=True)``) and gateway
+        (``status_callback``).
 
-        CLI users see the message via ``_vprint(force=True)`` so it is always
-        visible regardless of verbose/quiet mode.  Gateway consumers receive
-        it through ``status_callback("lifecycle", ...)``.
-
-        This helper never raises — exceptions are swallowed so it cannot
-        interrupt the retry/fallback logic.
+        Never raises — it must not interrupt the retry/fallback logic.
         """
         try:
             self._vprint(f"{self.log_prefix}{message}", force=True)
@@ -1103,9 +937,8 @@ class AIAgent:
     def _emit_warning(self, message: str) -> None:
         """Emit a user-visible warning through the same status plumbing.
 
-        Unlike debug logs, these warnings are meant for degraded side paths
-        such as auxiliary compression or memory flushes where the main turn can
-        continue but the user needs to know something important failed.
+        For degraded side paths (auxiliary compression, memory flushes) where the turn continues but the user
+        must know.
         """
         try:
             self._vprint(f"{self.log_prefix}{message}", force=True)
@@ -1120,21 +953,12 @@ class AIAgent:
     def _warn_context_overflow_blocked(
         self, reason: str, preflight_tokens: int, threshold_tokens: int
     ) -> None:
-        """Surface a deduped warning when the context is over the compression
-        threshold but compression is blocked (summary-LLM cooldown or
-        anti-thrashing).
+        """Warn (deduped) when context is over the compression threshold but compression is blocked.
 
-        Without this signal the session keeps growing until the model silently
-        stops answering — the conversation hits the hard provider token limit
-        with no explanation. Centralised here so every caller that checks
-        ``should_compress_info`` (turn-context preflight, conversation-loop
-        guards) shares identical dedup/reset logic.
-
-        Dedup is on the *kind* of block (``cooldown`` / ``ineffective``), not the
-        exact countdown string, so a cooldown ticking down 30→29→… doesn't
-        re-fire the warning every turn. The dedup key is cleared when the block
-        clears (see ``_clear_context_overflow_warn``), so the warning can fire
-        again on the next blocked-over-threshold turn.
+        Without this the session grows until the provider hard limit with no explanation. Dedup is on the
+        block
+        *kind* (``cooldown`` / ``ineffective``), not the countdown string; cleared by
+        ``_clear_context_overflow_warn``.
         """
         _warn_kind = (reason or "unknown").split(":", 1)[0]
         _warn_key = ("ctx_overflow_blocked", _warn_kind)
@@ -1160,12 +984,9 @@ class AIAgent:
     def _warn_uncompressed_context_overflow(
         self, preflight_tokens: int, context_length: int
     ) -> None:
-        """Surface a deduped warning when uncompressed context exceeds model limit.
+        """Surface a deduped warning when uncompressed context exceeds the model limit.
 
-        When compression is explicitly disabled (compression.enabled: false), long
-        sessions can grow past the model context window with no compression to shrink
-        them (#89297). Surface an actionable warning so the user knows to run /compact
-        or enable compression.
+        With compression disabled the session can outgrow the window silently; point the user at /compact.
         """
         _warn_key = ("uncompressed_ctx_overflow", context_length)
         if getattr(self, "_last_ctx_overflow_warn", None) != _warn_key:
@@ -1178,20 +999,13 @@ class AIAgent:
             )
 
     def _clear_context_overflow_warn(self) -> None:
-        """Reset the dedup state for the blocked-overflow warning.
-
-        Call this whenever compression is no longer blocked while the context
-        is over threshold (e.g. the cooldown elapsed, or compression ran
-        successfully), so the warning can re-fire on the next blocked turn.
-        """
+        """Reset the blocked-overflow warning dedup so it can re-fire on the next blocked turn."""
         self._last_ctx_overflow_warn = None
 
     def _emit_notice(self, notice) -> None:
         """Fire a structured ``AgentNotice`` to the active driver (TUI / CLI).
 
-        Driver-agnostic: the bound ``notice_callback`` renders it however that
-        driver does (TUI status-bar override, CLI console line). Swallows all
-        callback errors — a notice must NEVER break the agent loop (D-D fail-open).
+        Driver-agnostic; swallows callback errors — a notice must never break the agent loop.
         """
         if self.notice_callback:
             try:
@@ -1210,18 +1024,9 @@ class AIAgent:
     def _emit_wait_notice(self, text: str) -> None:
         """Surface a live wait-state explanation on every driver.
 
-        Long provider waits (slow/overloaded backend, no first byte, reasoning
-        model thinking for minutes) used to leave the user staring at a generic
-        "cogitating..." spinner with no hint of what the agent was waiting on.
-        This helper rewrites the live status line with an explanation:
-
-        - CLI: ``thinking_callback`` updates the prompt_toolkit spinner text.
-        - TUI / Desktop: the same callback is bridged to the ``thinking.delta``
-          event, which both render as the live spinner/status line.
-        - Gateway: ``_touch_activity`` stores the text as the activity
-          description, which the "⏳ Working — N min" heartbeat includes.
-
-        Never raises — a wait notice must not break the API-call wait loop.
+        Rewrites the live status line (CLI spinner via ``thinking_callback``, TUI/Desktop ``thinking.delta``,
+        gateway ``_touch_activity`` description) so long provider waits are not an anonymous spinner. Never
+        raises.
         """
         self._touch_activity(text)
         _thinking_cb = getattr(self, "thinking_callback", None)
@@ -1231,26 +1036,15 @@ class AIAgent:
             except Exception:
                 logger.debug("thinking_callback error in _emit_wait_notice", exc_info=True)
 
-    # ── Buffered retry/fallback status ────────────────────────────────────
-    # Retry and fallback chains were flooding the CLI/gateway with status
-    # noise that users found confusing: a single transient 429 could produce
-    # 10+ "Provider/Endpoint/Retrying in 5s..." lines before the request
-    # eventually succeeded.  The buffered helpers below capture these
-    # status messages instead of emitting them immediately.  They are
-    # flushed (shown to the user) ONLY when every retry and fallback has
-    # been exhausted; on success they are silently dropped.  Backend logs
-    # (agent.log) are unaffected — every individual emission site still
-    # writes to ``logger.warning`` / ``logger.info`` for diagnosis.
+    # ── Buffered retry/fallback status ──
+    # Retry chatter is buffered and shown only when every retry/fallback is exhausted; dropped on
+    # success. Backend logs are unaffected (every site still logs).
 
     def _buffer_status(self, message: str) -> None:
-        """Buffer a retry/fallback status message.
+        """Buffer a retry/fallback status message as ``(kind, text)``.
 
-        Stored as a (kind, text) tuple where ``kind`` is one of:
-        - ``"status"``  -> replays via ``_emit_status``
-        - ``"vprint"``  -> replays via ``_vprint(force=True)``
-        - ``"warn"``    -> replays via ``_emit_warning``
-        Used to defer noisy retry chatter until we know whether the
-        turn ultimately recovered or failed.
+        ``kind`` is ``"status"`` (replays via ``_emit_status``), ``"vprint"`` (``_vprint(force=True)``) or
+        ``"warn"`` (``_emit_warning``). Deferred until we know whether the turn recovered.
         """
         try:
             buf = getattr(self, "_retry_status_buffer", None)
@@ -1285,14 +1079,9 @@ class AIAgent:
     def _emit_pending_fallback_notice(self) -> None:
         """Surface the one-shot fallback-switch notice on successful recovery.
 
-        A provider/model switch is a durable state change operators must see,
-        unlike transient retry chatter that ``_clear_status_buffer`` drops.
-        ``try_activate_fallback`` records the switch in
-        ``self._pending_fallback_notice``; this emits it exactly once via
-        ``_emit_status`` and then clears it, so a successful fallback still
-        produces one visible notice.  On terminal failure the buffered switch
-        line is flushed instead (and this notice discarded) — see
-        ``_flush_status_buffer`` — so the user always sees the switch once.
+        A provider switch is durable state operators must see, unlike the transient retry chatter
+        ``_clear_status_buffer`` drops. Emitted exactly once, then cleared; on terminal failure the buffered
+        switch line is flushed instead (``_flush_status_buffer``).
         """
         try:
             notice = getattr(self, "_pending_fallback_notice", None)
@@ -1313,15 +1102,10 @@ class AIAgent:
             pass
 
     def _flush_status_buffer(self) -> None:
-        """Emit buffered retry messages — call on terminal failure.
-
-        Surfaces the full retry/fallback trace so the user can see what
-        was tried before the turn gave up.
-        """
+        """Emit buffered retry messages — call on terminal failure so the user sees what was tried."""
         try:
-            # The buffered trace already carries the fallback switch line, so
-            # drop any one-shot fallback notice to avoid a stale duplicate
-            # leaking into a later successful turn.
+            # The buffered trace already carries the switch line; drop the one-shot notice to avoid a stale
+            # duplicate.
             self._pending_fallback_notice = None
             buf = getattr(self, "_retry_status_buffer", None)
             if not buf:
@@ -1348,17 +1132,10 @@ class AIAgent:
     ) -> Dict[str, int]:
         """Disable Responses encrypted reasoning replay and strip cached state.
 
-        Called from the conversation_loop retry path when the provider
-        rejects a replayed ``codex_reasoning_items`` blob with HTTP 400
-        ``invalid_encrypted_content``.  Sets ``self._codex_reasoning_replay_enabled``
-        to ``False`` (consumed by ``codex_responses_adapter._chat_messages_to_responses_input``
-        and ``transports/codex.py`` to drop ``reasoning.encrypted_content``
-        from subsequent requests) and pops ``codex_reasoning_items`` from
-        every assistant message in ``messages`` so they cannot be replayed
-        again later in the session.
-
-        Returns a small stats dict ``{"messages": int, "items": int}``
-        counting what was stripped — purely for diagnostic logging.
+        Called on HTTP 400 ``invalid_encrypted_content``. Sets ``_codex_reasoning_replay_enabled=False``
+        (consumed by
+        the codex adapter/transport) and pops ``codex_reasoning_items`` from every assistant message.
+        Returns ``{"messages": int, "items": int}`` for diagnostic logging.
         """
         stripped_messages = 0
         stripped_items = 0
@@ -1401,11 +1178,9 @@ class AIAgent:
     def _is_provider_stream_parse_error(self, error: BaseException) -> bool:
         """Return True for malformed provider streaming data from SDK parsers.
 
-        Some Anthropic-compatible streaming providers can send a malformed
-        event-stream frame.  The Anthropic SDK surfaces that as a plain
-        ``ValueError`` such as ``expected ident at line 1 column 149``.  That
-        is provider wire-format trouble, not local request validation, so it
-        should follow the same retry path as a truncated JSON body.
+        The Anthropic SDK surfaces a malformed event-stream frame as a plain ``ValueError``; that is wire-
+        format
+        trouble, not local validation, so it follows the truncated-JSON retry path.
         """
         if getattr(self, "api_mode", None) != "anthropic_messages":
             return False
@@ -1494,12 +1269,8 @@ class AIAgent:
     def _is_azure_openai_url(self, base_url: str = None) -> bool:
         """Return True when a base URL targets Azure OpenAI.
 
-        Azure OpenAI exposes an OpenAI-compatible endpoint at
-        ``{resource}.openai.azure.com/openai/v1`` that accepts the
-        standard ``openai`` Python client.  Unlike api.openai.com it
-        does NOT support the Responses API — gpt-5.x models are served
-        on the regular ``/chat/completions`` path — so routing decisions
-        must treat Azure separately from direct OpenAI.
+        Azure accepts the standard ``openai`` client but does NOT support the Responses API, so routing
+        must treat it separately from direct OpenAI.
         """
         if base_url is not None:
             url = str(base_url).lower()
@@ -1522,17 +1293,8 @@ class AIAgent:
     def _resolved_api_call_timeout(self) -> float:
         """Resolve the effective per-call request timeout in seconds.
 
-        Priority:
-          1. ``providers.<id>.models.<model>.timeout_seconds`` (per-model override)
-          2. ``providers.<id>.request_timeout_seconds`` (provider-wide)
-          3. ``HERMES_API_TIMEOUT`` env var (legacy escape hatch)
-          4. 1800.0s default
-
-        Used by OpenAI-wire chat completions (streaming and non-streaming) so
-        the per-provider config knob wins over the 1800s default.  Without this
-        helper, the hardcoded ``HERMES_API_TIMEOUT`` fallback would always be
-        passed as a per-call ``timeout=`` kwarg, overriding the client-level
-        timeout the AIAgent.__init__ path configured.
+        Priority: per-model ``timeout_seconds`` > provider ``request_timeout_seconds`` >
+        ``HERMES_API_TIMEOUT`` > 1800s.
         """
         cfg = get_provider_request_timeout(self.provider, self.model)
         if cfg is not None:
@@ -1542,20 +1304,10 @@ class AIAgent:
     def _resolved_api_call_stale_timeout_base(self) -> tuple[float, bool]:
         """Resolve the base non-stream stale timeout and whether it is implicit.
 
-        Priority:
-          1. ``providers.<id>.models.<model>.stale_timeout_seconds``
-          2. ``providers.<id>.stale_timeout_seconds``
-          3. ``HERMES_API_CALL_STALE_TIMEOUT`` env var
-          4. 90.0s default (time-to-first-byte for non-streaming / Codex
-             internal-streaming requests; lowered from 300s in May 2026 so
-             fallback providers kick in faster when upstream providers
-             stall).  The detector still scales up for large contexts in
-             ``_compute_non_stream_stale_timeout``.
-
-        Returns ``(timeout_seconds, uses_implicit_default)`` so the caller can
-        preserve legacy behaviors that only apply when the user has *not*
-        explicitly configured a stale timeout, such as auto-disabling the
-        detector for local endpoints.
+        Priority: per-model ``stale_timeout_seconds`` > provider-wide > ``HERMES_API_CALL_STALE_TIMEOUT`` >
+        90s.
+        Returns ``(seconds, uses_implicit_default)`` so callers can keep legacy behaviors (e.g. auto-disabling
+        the detector for local endpoints) that apply only when the user did not configure one.
         """
         cfg = get_provider_stale_timeout(self.provider, self.model)
         if cfg is not None:
@@ -1565,14 +1317,8 @@ class AIAgent:
         if env_timeout is not None:
             return float(env_timeout), False
 
-        # Reasoning-model floor: auto-mitigation for known reasoning models
-        # (Nemotron 3 Ultra, OpenAI o1/o3, Anthropic Opus 4.x thinking,
-        # DeepSeek R1, Qwen QwQ, xAI Grok reasoning, etc.) whose cloud
-        # gateways idle-kill before the model's thinking phase ends.
-        # uses_implicit_default is False here so the local-endpoint
-        # short-circuit in _compute_non_stream_stale_timeout does not
-        # disable stale detection for users running reasoning models on a
-        # local NIM endpoint.
+        # Reasoning-model floor for models whose cloud gateways idle-kill mid-think. uses_implicit_default
+        # stays False so the local-endpoint short-circuit does not disable stale detection here.
         from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
         reasoning_floor = get_reasoning_stale_timeout_floor(self.model)
         if reasoning_floor is not None:
@@ -1583,10 +1329,8 @@ class AIAgent:
     def _compute_non_stream_stale_timeout(self, api_payload: Any) -> float:
         """Compute the effective non-stream stale timeout for this request.
 
-        Accepts either the full ``api_kwargs`` dict (Chat Completions or
-        Responses API) or a legacy ``messages`` list.  Context-size scaling
-        applies the same way to both shapes via
-        :func:`agent.chat_completion_helpers.estimate_request_context_tokens`.
+        Accepts a full ``api_kwargs`` dict (Chat Completions or Responses) or a legacy ``messages`` list;
+        context-size scaling applies identically via ``estimate_request_context_tokens``.
         """
         stale_base, uses_implicit_default = self._resolved_api_call_stale_timeout_base()
         base_url = getattr(self, "_base_url", None) or self.base_url or ""
@@ -1602,13 +1346,8 @@ class AIAgent:
         else:
             timeout = stale_base
 
-        # Wall-clock run budget cap: when a run budget is active, an implicit
-        # (floor-/default-derived) stale timeout is capped at half the
-        # remaining budget (>= 60s) so a single hung provider call cannot eat
-        # the whole run — e.g. deepseek-v4-pro's 600s reasoning floor inside a
-        # 900s eval ceiling. NEVER raises the timeout above what it would
-        # otherwise be, and an explicit user-configured stale_timeout_seconds
-        # (or env var) still wins untouched.
+        # Run-budget cap: an implicit stale timeout is capped at half the remaining budget (>= 60s) so one
+        # hung call cannot eat the run. Never raises the timeout; explicit user config still wins.
         run_budget = getattr(self, "run_budget_seconds", None)
         if run_budget and not self._stale_timeout_is_explicit():
             started = getattr(self, "_run_budget_started_at", None)
@@ -1620,38 +1359,21 @@ class AIAgent:
         return timeout
 
     def _stale_timeout_is_explicit(self) -> bool:
-        """True when the user explicitly configured the non-stream stale timeout.
+        """True when the user explicitly configured the non-stream stale timeout (config or env var).
 
-        Explicit = provider/model ``stale_timeout_seconds`` in config.yaml or
-        the ``HERMES_API_CALL_STALE_TIMEOUT`` env var. Reasoning-model floors
-        and the 90s default are implicit — they yield to the wall-clock run
-        budget cap; explicit user configuration never does.
+        Implicit values (reasoning floors, the 90s default) yield to the run-budget cap; explicit ones never
+        do.
         """
         if get_provider_stale_timeout(self.provider, self.model) is not None:
             return True
         return os.getenv("HERMES_API_CALL_STALE_TIMEOUT") is not None
 
     def _codex_silent_hang_hint(self, model: Optional[str] = None) -> Optional[str]:
-        """Return an actionable hint when this request matches a known
-        Codex silent-reject configuration, else ``None``.
+        """Actionable hint when this request matches a known Codex silent-reject configuration, else ``None``.
 
-        The ChatGPT Codex backend (``chatgpt.com/backend-api/codex``) has
-        historically silently dropped certain model requests: the connection
-        is accepted but no stream events are emitted and no error is raised.
-        The stale-call detector ends the hang, but a generic "timed out"
-        message gives the user no path forward.
-
-        This helper substitutes an actionable hint into the stale-timeout
-        warning when the request matches a known silent-reject pattern.
-        Currently flagged: ``gpt-5.5`` family on the Codex backend.  See
-        hermes-agent #21444 for the symptom history.  The upstream backend
-        behavior has historically come and gone with ChatGPT entitlement
-        changes — the heuristic stays in place as future-proofing even when
-        the symptom is dormant.
-
-        Does NOT fix the backend issue.  Only converts an opaque stale-timeout
-        into actionable text so users learn the workaround in seconds rather
-        than digging through logs.
+        The ChatGPT Codex backend has silently dropped some model requests (connection accepted, no events,
+        no error); the stale detector ends the hang but a generic timeout gives no path forward. Currently
+        flags the ``gpt-5.5`` family. Does not fix the backend — only makes the timeout actionable.
         """
         if self.api_mode != "codex_responses":
             return None
@@ -1661,10 +1383,7 @@ class AIAgent:
             return None
         eff_model = (model if model is not None else self.model) or ""
         model_lower = eff_model.lower()
-        # Match the gpt-5.5 family — bare ``gpt-5.5``, ``gpt-5.5-codex``,
-        # vendor-prefixed variants like ``openai/gpt-5.5``, and any future
-        # ``gpt-5.5-*`` SKU.  Anchor at a word boundary on either side so
-        # unrelated tokens like ``gpt-5.50`` do not match.
+        # Match the gpt-5.5 family at word boundaries (bare, -codex, vendor-prefixed) but not gpt-5.50.
         if not re.search(r"(?:^|[/\-_])gpt-5\.5(?:$|[\-_])", model_lower):
             return None
         return (
@@ -1692,13 +1411,8 @@ class AIAgent:
     def _is_copilot_provider(self) -> bool:
         """True when the active provider is GitHub Copilot, however spelled.
 
-        ``self.provider`` is not always the normalized slug: ``/model`` and
-        profile configs can leave the alias ``github-copilot`` (or ``github``)
-        in place — a single session log can show both ``provider=copilot`` and
-        ``provider=github-copilot`` for the same account. A bare
-        ``provider == "copilot"`` gate silently skips credential recovery for
-        the alias spellings, so this is the single owner of the check; the
-        Copilot base URL is accepted as a fallback signal.
+        ``self.provider`` may hold the alias ``github-copilot`` / ``github`` rather than ``copilot``; a bare
+        equality check silently skips credential recovery. Base URL is accepted as a fallback signal.
         """
         if (self.provider or "").strip().lower() in {"copilot", "github-copilot", "github"}:
             return True
@@ -1747,10 +1461,7 @@ class AIAgent:
     def _model_requires_responses_api(model: str) -> bool:
         """Return True for models that require the Responses API path.
 
-        GPT-5.x models are rejected on /v1/chat/completions by both
-        OpenAI and OpenRouter (error: ``unsupported_api_for_model``).
-        Detect these so the correct api_mode is set regardless of
-        which provider is serving the model.
+        GPT-5.x is rejected on /v1/chat/completions (``unsupported_api_for_model``) by OpenAI and OpenRouter.
         """
         m = model.lower()
         # Strip vendor prefix (e.g. "openai/gpt-5.4" → "gpt-5.4")
@@ -1771,9 +1482,8 @@ class AIAgent:
         if normalized_provider == "nous":
             return False
         if normalized_provider == "custom":
-            # Generic custom endpoints are conservative by default. They may
-            # relay GPT-5 models without full Responses semantics, so only
-            # direct OpenAI/xAI URL detection should auto-upgrade them.
+            # Generic custom endpoints may relay GPT-5 without full Responses semantics — only direct
+            # OpenAI/xAI URLs auto-upgrade.
             return False
         if normalized_provider == "copilot":
             try:
@@ -1788,17 +1498,9 @@ class AIAgent:
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
 
-        OpenAI's newer models (gpt-4o, gpt-4.1, gpt-5+, o-series) require
-        'max_completion_tokens'. Azure OpenAI and GitHub Copilot also require
-        'max_completion_tokens' for those families served via their
-        OpenAI-compatible endpoints. OpenRouter, local models, and older
-        OpenAI models use 'max_tokens'.
-
-        The check is URL-first (api.openai.com / Azure / Copilot all use the
-        new kwarg), then falls back to a model-name check so third-party
-        OpenAI-compatible endpoints fronting those models are recognised —
-        URL-only detection misses that case and silently sends the wrong
-        kwarg, which the upstream model rejects with a 400.
+        Newer OpenAI families (and Azure / Copilot serving them) need ``max_completion_tokens``; others use
+        ``max_tokens``. URL-first, then model-name fallback so third-party endpoints fronting those models
+        work.
         """
         if (
             self._is_direct_openai_url()
@@ -1825,18 +1527,10 @@ class AIAgent:
         return None
 
     def _has_content_after_think_block(self, content: str) -> bool:
-        """
-        Check if content has actual text after any reasoning/thinking blocks.
+        """Check if content has actual text after any reasoning/thinking blocks.
 
-        This detects cases where the model only outputs reasoning but no actual
-        response, which indicates an incomplete generation that should be retried.
-        Must stay in sync with _strip_think_blocks() tag variants.
-
-        Args:
-            content: The assistant message content to check
-
-        Returns:
-            True if there's meaningful content after think blocks, False otherwise
+        Reasoning-only output is an incomplete generation to retry. Must stay in sync with
+        ``_strip_think_blocks()`` tag variants.
         """
         if not content:
             return False
@@ -1873,27 +1567,12 @@ class AIAgent:
         return False
 
     def _is_ollama_glm_backend(self) -> bool:
-        """Detect Ollama-hosted GLM models affected by stop misreports.
+        """Detect Ollama-hosted GLM models affected by finish_reason='stop' misreports.
 
-        Ollama can misreport truncated output as finish_reason='stop'.
-        Detection relies on explicit Ollama signatures:
-        - Port 11434 (Ollama default)
-        - "ollama" in the base URL (e.g. ollama.local, /ollama/ path)
-        - provider explicitly set to "ollama"
-
-        Crucially it does NOT match arbitrary local/private endpoints
-        (LiteLLM/sglang/vLLM/LM Studio proxies, Tailscale boxes), which
-        report finish_reason correctly and were the source of #13971's
-        false-positive truncation continuations.
-
-        Also excludes Ollama Cloud — the hosted service correctly reports
-        finish_reason and is not affected by the local Ollama stop-reason
-        bug (GH-72316).  Two signatures identify it: the ``ollama.com`` host
-        (provider ``ollama-cloud``) and the ``:cloud`` model suffix (cloud
-        generation proxied through a local 11434 endpoint, #98406).  Applying
-        the stop→length rewrite to them manufactures false truncations and
-        causes the continuation nudge to consume the model's output budget
-        on the next retry, making further false-positives more likely.
+        Matches only explicit Ollama signatures (port 11434, "ollama" in URL, provider ollama) — never
+        arbitrary
+        local proxies, which report correctly. Excludes Ollama Cloud (``ollama.com`` host, ``:cloud`` suffix):
+        rewriting its stop→length manufactures false truncations and burns the continuation budget.
         """
         model_lower = (self.model or "").lower()
         provider_lower = (self.provider or "").lower()
@@ -1962,9 +1641,7 @@ class AIAgent:
         from agent.chat_completion_helpers import cleanup_task_resources
         return cleanup_task_resources(self, task_id)
 
-    # ------------------------------------------------------------------
-    # Background memory/skill review — prompts live in agent.background_review
-    # ------------------------------------------------------------------
+    # Background memory/skill review — prompts live in agent.background_review.
     from agent.background_review import (
         _MEMORY_REVIEW_PROMPT,
         _SKILL_REVIEW_PROMPT,
@@ -1995,23 +1672,13 @@ class AIAgent:
     ) -> None:
         """Post-turn review entry point: decide WHEN, then spawn.
 
-        The decision to review (nudge intervals, enabled gate) already
-        happened at the call site. This wrapper adds one policy: a review
-        whose runtime resolves to the MANAGED LOCAL llama-server is queued
-        for machine idle instead of spawned into the user's GPU mid-session
-        (auxiliary.background_review.defer: auto|never). Everything else —
-        cloud runtimes, external local servers, explicit /refine — spawns
-        immediately, exactly as before.
-
-        ``explicit`` marks a user-initiated review (/refine, with or
-        without focus text): never deferred. It does NOT touch the
-        delegate/enabled gates below — those stay keyed on ``focus`` so a
-        bare /refine keeps its historical gating behavior.
+        A review whose runtime is the MANAGED LOCAL llama-server is queued for machine idle (``defer:
+        auto|never``)
+        instead of hitting the user's GPU mid-session; everything else spawns immediately. ``explicit``
+        (/refine)
+        is never deferred but does not touch the ``focus``-keyed delegate/enabled gates.
         """
-        # Delegation-subagent and enabled gates run here at enqueue/spawn
-        # time; the idle dispatcher re-checks the enabled gate again at
-        # dispatch time so a review queued for minutes cannot be
-        # resurrected after the user disables reviews.
+        # Gates run at enqueue/spawn time; the idle dispatcher re-checks `enabled` at dispatch time.
         if focus is None and getattr(self, "_delegate_depth", 0) > 0:
             return
         task_cfg = None
@@ -2021,10 +1688,8 @@ class AIAgent:
             if not enabled:
                 return
 
-        # Structural clone at the single chokepoint every review path
-        # (automatic, /refine, idle-queue deferral) goes through. The fork
-        # sanitizes its transcript in place; a shallow copy would alias the
-        # nested tool_calls/content containers of the live history (#100795).
+        # Structural clone at the single chokepoint: the fork sanitizes in place, and a shallow copy would
+        # alias the live history's nested tool_calls/content (#100795).
         from agent.turn_finalizer import _clone_background_review_messages
         messages_snapshot = _clone_background_review_messages(messages_snapshot)
 
@@ -2059,25 +1724,11 @@ class AIAgent:
     ) -> None:
         """Spawn the background memory/skill review thread.
 
-        Thin wrapper — the heavy lifting lives in
-        ``agent.background_review.spawn_background_review_thread`` which
-        returns the thread target.  ``threading.Thread`` is constructed
-        here so existing tests that patch ``run_agent.threading.Thread``
-        keep working.
-
-        ``focus`` is optional user-supplied steering (from ``/refine``)
-        appended to the review prompt — e.g. "save the deploy workflow as a
-        skill". The automatic post-turn triggers never set it.
-
-        ``task_cfg`` is the pre-loaded ``auxiliary.background_review``
-        block from the entry wrapper (None on direct calls, e.g. /refine —
-        the spawn path reads config itself then).
-
-        A deferred review preempted by a live turn is REQUEUED (bounded by
-        ``_requeue_attempts``) instead of lost: on the managed local
-        runtime a review takes minutes, so cancel-and-forget — harmless on
-        cloud, where reviews finish in seconds — would silently discard
-        most learning on an active session.
+        ``threading.Thread`` is constructed here so tests patching ``run_agent.threading.Thread`` keep
+        working.
+        ``focus`` is /refine steering text; ``task_cfg`` is the pre-loaded config block (None on direct
+        calls).
+        A deferred review preempted by a live turn is requeued (bounded) rather than lost.
         """
         from agent.background_review import (
             finish_background_review_run,
@@ -2131,11 +1782,8 @@ class AIAgent:
     def _maybe_requeue_preempted_review(self, review_run, kwargs) -> None:
         """Requeue a deferred-mode review that a live turn cancelled.
 
-        Only fires for automatic reviews whose runtime targets the managed
-        local server (the deferred population); bounded attempts prevent a
-        busy box from cycling one review forever — past the cap it is
-        dropped exactly like the pre-deferral behavior dropped every
-        cancelled review.
+        Only for automatic reviews on the managed local runtime; bounded attempts stop a busy box cycling
+        forever.
         """
         try:
             if not review_run.cancel_requested.is_set():
@@ -2183,12 +1831,9 @@ class AIAgent:
     def _apply_persist_user_message_override(self, messages: List[Dict]) -> None:
         """Rewrite the current-turn user message before persistence/return.
 
-        Some call paths need an API-only user-message variant without letting
-        that synthetic text leak into persisted transcripts or resumed session
-        history. When an override is configured for the active turn, mutate the
-        in-memory messages list in place so both persistence and returned
-        history stay clean.  A paired timestamp override preserves the platform
-        event time as message metadata, rather than embedding it in content.
+        Some paths use an API-only user-message variant that must not leak into transcripts or resumed
+        history;
+        mutate the in-memory list in place so both persistence and returned history stay clean.
         """
         idx = getattr(self, "_persist_user_message_idx", None)
         override = getattr(self, "_persist_user_message_override", None)
@@ -2201,22 +1846,12 @@ class AIAgent:
         if 0 <= idx < len(messages):
             msg = messages[idx]
             if isinstance(msg, dict) and msg.get("role") == "user":
-                # Text-only call paths may pass a synthetic API-facing prompt
-                # and a cleaner transcript string separately. Before the API
-                # call, a plain-text override must not replace native image/audio
-                # blocks. A list override, however, is the original clean
-                # multimodal payload (for example before a queued /model note)
-                # and must replace the API-local list once the turn is final.
-                # Preflight compaction can re-anchor this index at a message
-                # whose content was MERGED with the compaction summary
-                # (merge-summary-into-tail).  That is not an accident:
-                # ``reanchor_current_turn_user_idx`` falls back to the last
-                # user row precisely BECAUSE the merge rewrote the content and
-                # the exact-match lookup misses.  Overwriting it with the clean
-                # text would drop the summary from the continuation history the
-                # next turn is built from — the same hazard the DB-write twin
-                # below already refuses (see the sibling guard in
-                # ``_flush_messages_to_session_db_unlocked``).
+                # A plain-text override must not replace native image/audio blocks; a list override is the
+                # clean
+                # multimodal payload and does. Preflight compaction may re-anchor this index at a message
+                # MERGED
+                # with the compaction summary — overwriting it would drop the summary (see the twin guard in
+                # _flush_messages_to_session_db_unlocked).
                 if (
                     override is not None
                     and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
@@ -2228,32 +1863,19 @@ class AIAgent:
                     msg["content"] = override
                 if timestamp is not None:
                     msg["timestamp"] = timestamp
-                # Platform-side message id (e.g. the Discord/Telegram message
-                # id) — metadata, load-bearing for restart drain-window
-                # recovery dedup: it lets a recovery pass ask
-                # ``has_platform_message_id`` whether an interrupted turn
-                # already reached the transcript. Stamped here in addition to
-                # ``build_turn_context`` so it survives the override path.
+                # Platform message id: load-bearing for restart drain-window recovery dedup
+                # (has_platform_message_id). Stamped here too so it survives the override path.
                 if platform_id is not None:
                     msg["platform_message_id"] = platform_id
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
 
-        Ensures conversations are never lost, even on errors or early returns.
-
-        Trailing empty-response scaffolding is dropped from the live list in
-        place (it is ephemeral junk the real transcript should shed). The
-        persist user-message *override* is NOT applied here — it is resolved
-        inside ``_flush_messages_to_session_db`` and written only to the DB row,
-        never mutating the live message list used by the API call (#48677 is
-        thus closed for every persist caller, not just this one).
+        Trailing empty-response scaffolding is dropped from the live list. The persist user-message override
+        is NOT applied here — ``_flush_messages_to_session_db`` writes it to the DB row only.
         """
-        # Scaffolding removal mutates the live list (desired — ephemeral
-        # retry/failure sentinels must not survive into the real transcript).
-        # Close and turn-start persistence can run on separate CLI threads; the
-        # marker test-and-append below must be one critical section or both can
-        # observe the same unmarked dict and write duplicate durable rows.
+        # Scaffolding removal mutates the live list on purpose. Close and turn-start persistence can run on
+        # separate CLI threads, so the marker test-and-append below must be one critical section.
         from agent.agent_runtime_helpers import note_turn_persisted
 
         persist_lock = getattr(self, "_session_persist_lock", None)
@@ -2263,9 +1885,7 @@ class AIAgent:
             self._session_messages = messages
             self._save_session_log(messages)
             self._flush_messages_to_session_db(messages, conversation_history)
-            # Drain async token-accounting deltas at every persist point (turn
-            # finalize + error exits) so a crash after this line loses at most
-            # the in-flight API call's delta. Cheap no-op when nothing queued.
+            # Drain async token-accounting deltas at every persist point; cheap no-op when nothing queued.
             if self._session_db is not None:
                 self._session_db.flush_token_counts()
             note_turn_persisted(self)
@@ -2280,12 +1900,8 @@ class AIAgent:
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
 
-        Also rewinds past any trailing tool-result / assistant(tool_calls) pair
-        that the failed iteration left hanging. Without this, the tail ends at
-        a raw ``tool`` message and the next user turn lands as
-        ``...tool, user, user`` — a protocol-invalid sequence that most
-        providers silently reject (returns empty content), causing the
-        empty-retry loop to fire forever. (issue number to be backfilled once filed)
+        Also rewinds a trailing tool-result / assistant(tool_calls) pair the failed iteration left hanging;
+        otherwise the next user turn lands as ``...tool, user`` and providers return empty content forever.
         """
         # Pass 1: strip the flagged scaffolding messages themselves.
         dropped_scaffolding = False
@@ -2300,12 +1916,8 @@ class AIAgent:
             messages.pop()
             dropped_scaffolding = True
 
-        # Pass 2: if we stripped scaffolding, rewind through any trailing
-        # tool-result messages plus the assistant(tool_calls) message that
-        # produced them. This preserves role alternation so the next user
-        # message follows a user or assistant message, not an orphan tool
-        # result. Only runs when scaffolding was actually present — normal
-        # conversation tails (real tool loops mid-progress) are untouched.
+        # Pass 2: after stripping scaffolding, rewind trailing tool results and the assistant(tool_calls)
+        # that produced them, so role alternation holds. Only runs when scaffolding was present.
         if not dropped_scaffolding:
             return
 
@@ -2317,11 +1929,7 @@ class AIAgent:
         ):
             messages.pop()
 
-        # Drop the assistant message that issued the tool calls, if the tail
-        # now ends in an assistant-with-tool_calls (the pair that owned the
-        # just-popped tool results). Without this, the tail is
-        # ``assistant(tool_calls=...)`` with no tool answers, which some
-        # providers also reject.
+        # Drop the assistant(tool_calls) whose results were just popped — providers reject a dangling one.
         if (
             messages
             and isinstance(messages[-1], dict)
@@ -2355,40 +1963,19 @@ class AIAgent:
     ):
         """Persist any un-flushed messages to the SQLite session store.
 
-        Deduplicates via an intrinsic ``_DB_PERSISTED_MARKER`` stamped on each
-        written message dict, so repeated calls (from multiple exit paths) only
-        write truly new messages — preventing the duplicate-write bug (#860)
-        without relying on positional slices that can drift after
-        message-sequence repair, and without a retained ``id(msg)`` set that
-        CPython could alias onto a freed-then-reused address (#50372). The
-        ``_flushed_db_message_ids`` attribute is now only a one-shot seed
-        (translated to markers, then cleared each flush), not a persisted set.
-
-        Note: the marker is stamped on the live/shared conversation dict, which
-        correctly makes re-persistence idempotent across turns. No code path
-        edits a persisted message's content/role in place expecting a re-write
-        (in-place compaction resets the seed and re-diffs by identity).
+        Dedup is an intrinsic ``_DB_PERSISTED_MARKER`` on each written dict — not positional slices (drift
+        after
+        sequence repair) nor a retained ``id(msg)`` set (address reuse). ``_flushed_db_message_ids`` is only a
+        one-shot seed translated to markers and cleared each flush.
         """
-        # Persistence-isolated agents (e.g. the background skill/memory review
-        # fork) must NEVER write into the canonical session store. The fork
-        # shares the parent's session_id for prompt-cache warmth, so any write
-        # here would land its harness turn ("Review the conversation above and
-        # update the skill library…") inside the user's real session history,
-        # where the next live turn re-reads it as an instruction and the agent
-        # "becomes" the curator. Hard-stop before any DB touch.
+        # Persistence-isolated agents (background review fork) share the parent's session_id for cache
+        # warmth; a write here would land the curator's harness turn in the user's real history. Hard-stop.
         if getattr(self, "_persist_disabled", False):
             return None
         if not self._session_db:
             return None
-        # Persist user-message override (#48677 chokepoint): historically this
-        # mutated the live `messages` list in place, which — on the early
-        # crash-resilience persist that runs BEFORE the API call is built —
-        # stripped observed group-chat context off the live user message and
-        # silently dropped it. Instead, resolve the override here and apply it
-        # ONLY to the value written to the DB (see the write loop below); the
-        # live dict is never mutated, so every caller (early persist, mid-loop
-        # flush, /resume, /branch) is protected uniformly. Timestamp override is
-        # metadata and is likewise applied only to the written row.
+        # Persist user-message override (#48677): resolved here and applied ONLY to the written row, never
+        # to the live dict — the early crash-resilience persist runs before the API call is built.
         _ov_idx = getattr(self, "_persist_user_message_idx", None)
         _ov_content = getattr(self, "_persist_user_message_override", None)
         _ov_timestamp = getattr(self, "_persist_user_message_timestamp", None)
@@ -2396,29 +1983,9 @@ class AIAgent:
             # Retry row creation if the earlier attempt failed transiently.
             if not self._session_db_created:
                 self._ensure_db_session()
-            # Positional flushing used to slice at
-            # max(len(conversation_history), _last_flushed_db_idx). That
-            # assumes the live `messages` list is the original history plus a
-            # new tail. repair_message_sequence can shrink/merge the history
-            # copy before the final flush, making len(conversation_history)
-            # larger than len(messages); the slice is then empty and delivered
-            # assistant responses never reach state.db (#46053).
-            #
-            # Track persistence with an intrinsic per-message marker rather than
-            # id(msg). `messages` is a shallow copy of `conversation_history`, so
-            # history dicts are skipped by identity, and new dicts appended
-            # during this turn are written once even if repair compacts the list
-            # around them. Unlike an id()-keyed set, a marker bound to the dict
-            # cannot be aliased onto a freed-then-reused address, so a real turn
-            # can never be silently skipped (see _DB_PERSISTED_MARKER).
-            #
-            # `self._flushed_db_message_ids` is still honoured as a *one-shot*
-            # seed: external callers (gateway shutdown, tests) populate it with
-            # {id(m) for m in already_persisted} immediately before the flush,
-            # while those objects are alive — so the ids are valid at that
-            # instant. We translate the seed into durable markers and then clear
-            # the set, so stale ids can never accumulate across turns and alias a
-            # future message.
+            # Positional slicing broke when repair_message_sequence shrank the list (#46053). Persistence is
+            # tracked by an intrinsic per-message marker (see _DB_PERSISTED_MARKER); `_flushed_db_message_ids`
+            # is honoured only as a one-shot seed translated to markers and then cleared.
             current_session_id = getattr(self, "session_id", None)
             flushed_session_id = getattr(self, "_flushed_db_message_session_id", None)
             if flushed_session_id != current_session_id or self._last_flushed_db_idx == 0:
@@ -2433,15 +2000,9 @@ class AIAgent:
                 if isinstance(item, dict)
             }
 
-            # Bounded scan: skip the longest identity-matched prefix of the
-            # list snapshot taken at the end of the previous successful flush.
-            # Every message in that snapshot was already given its final
-            # disposition (written+stamped, stamped as durable history, or
-            # skipped as ephemeral scaffolding / non-dict), and no code path
-            # pops _DB_PERSISTED_MARKER from a live dict in place (compression
-            # strips markers on fresh copies, which breaks identity here and
-            # forces a full re-scan). Identity match ⇒ identical skip decision,
-            # so starting after the matched prefix is behavior-preserving.
+            # Bounded scan: skip the identity-matched prefix of the previous flush's snapshot. Every message
+            # in
+            # it already got its final disposition, and no live dict has its marker popped in place.
             _scan_start = 0
             _prev_prefix = getattr(self, "_db_flush_scan_prefix", None)
             if isinstance(_prev_prefix, list):
@@ -2461,67 +2022,49 @@ class AIAgent:
                 msg = messages[_msg_idx]
                 if not isinstance(msg, dict):
                     continue
-                # Never write ephemeral recovery scaffolding to the session
-                # store. The flush is append-only (it only advances
-                # _last_flushed_db_idx via identity tracking), so a synthetic
-                # message committed by a mid-turn persist cannot be un-written
-                # when the end-of-turn drop removes it from the in-memory list —
-                # the resumed transcript would then replay synthetic
-                # "(empty)"/nudge/thinking-prefill turns as if they were genuine
-                # context. Skip regardless of position: an answered nudge leaves
-                # the synthetic pair buried mid-list, not just at the tail.
+                # Never write ephemeral scaffolding: the flush is append-only, so a mid-turn persist could
+                # commit a
+                # synthetic turn that the end-of-turn drop cannot un-write. Skip regardless of position.
                 if _is_ephemeral_scaffolding(msg):
                     continue
                 if msg.get(_DB_PERSISTED_MARKER):
                     continue
-                # Already-durable messages: either carried over from the loaded
-                # history copy, or seeded by a caller. Stamp them so future
-                # flushes skip them without consulting any id() set again.
+                # Already-durable (history copy or caller-seeded): stamp so future flushes skip without id()
+                # sets.
                 if id(msg) in history_ids or id(msg) in seed_ids:
                     msg[_DB_PERSISTED_MARKER] = True
                     continue
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
-                # api_content sidecar: the exact bytes sent to the API when
-                # they differ from the clean content (stamped by the turn
-                # prologue for prefetch/plugin injections). Written verbatim
-                # so replay can reproduce the sent prefix byte-for-byte.
+                # api_content sidecar: exact bytes sent to the API when they differ from clean content, so
+                # replay
+                # reproduces the sent prefix byte-for-byte.
                 _row_api_content = msg.get("api_content")
                 if not isinstance(_row_api_content, str):
                     _row_api_content = None
                 _row_timestamp = msg.get("timestamp")
-                # Apply the persist override to THIS row's written values only
-                # (never to the live dict). A multimodal override is a complete
-                # clean replacement for an API-local noted payload. Preserve the
-                # historical text-only guard for a list payload, though: a plain
-                # text override must not erase its image/audio transcript summary.
-                # The close safety-net may flush a shortened snapshot while
-                # turn setup still owns its staged CLI dict. In that shape the
-                # normal turn index refers to the full history, not this list;
-                # preserve the API-local override by recognizing the same dict.
+                # Apply the persist override to THIS row only. A list override replaces a noted payload; a
+                # text
+                # override must not erase an image/audio summary. Also match the staged CLI dict by identity —
+                # the close safety-net may flush a shortened snapshot whose turn index refers to the full
+                # history.
                 pending_cli_message = getattr(self, "_pending_cli_user_message", None)
                 is_current_turn_user = (
                     _ov_idx == _msg_idx or msg is pending_cli_message
                 )
                 if is_current_turn_user and msg.get("role") == "user":
-                    # Preflight compaction can re-anchor the override index at
-                    # a message whose content was MERGED with the compaction
-                    # summary (merge-summary-into-tail). Overwriting that with
-                    # the clean gateway text would silently drop the summary
-                    # from the durable transcript. The wire is already
-                    # consistent — the merge popped the sidecar and the merged
-                    # content is what gets sent — so keep it.
+                    # Preflight compaction may have re-anchored the index at a message MERGED with the
+                    # compaction
+                    # summary; overwriting it with the clean text would drop the summary from the durable
+                    # transcript.
                     if (
                         _ov_content is not None
                         and (not isinstance(content, list) or isinstance(_ov_content, list))
                         and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
                     ):
-                        # The live content is what the API call sends; the
-                        # override is the cleaned transcript value. If they
-                        # differ and no injection already stamped the sidecar,
-                        # keep the sent bytes in api_content so replay matches
-                        # the wire (#48677 divergence, closed for the cache
-                        # prefix too).
+                        # Live content is what the wire sent, the override is the clean transcript; keep the
+                        # sent bytes in
+                        # api_content so replay matches the wire (#48677).
                         if (
                             _row_api_content is None
                             and isinstance(content, str)
@@ -2534,17 +2077,9 @@ class AIAgent:
                 # Store the sidecar only when it actually differs.
                 if _row_api_content == content:
                     _row_api_content = None
-                # Load-time sanitize divergence: get_messages_as_conversation
-                # replays user/assistant rows through
-                # ``sanitize_context(content).strip()``, so content that
-                # sanitize would rewrite (echoed/pasted <memory-context>
-                # fences or system notes) replays different bytes after a
-                # session reload even though THIS turn sent it verbatim.
-                # Capture the sent bytes in the sidecar so a reloaded session
-                # replays what was actually on the wire. Compared in wire form
-                # (both sides .strip()-ed — the api_messages build strips
-                # every outgoing content string) so plain surrounding
-                # whitespace doesn't grow redundant sidecars.
+                # Load-time sanitize divergence: get_messages_as_conversation replays rows through
+                # sanitize_context().strip(); capture the sent bytes when they would differ (compared in wire
+                # form).
                 if (
                     _row_api_content is None
                     and role in ("user", "assistant")
@@ -2553,9 +2088,7 @@ class AIAgent:
                     and sanitize_context(content).strip() != content.strip()
                 ):
                     _row_api_content = content
-                # Persist multimodal tool results as their text summary only —
-                # base64 images would bloat the session DB and aren't useful
-                # for cross-session replay.
+                # Persist multimodal tool results as text summary only — base64 images bloat the DB.
                 if _is_multimodal_tool_result(content):
                     content = _multimodal_text_summary(content)
                 elif isinstance(content, list):
@@ -2592,12 +2125,9 @@ class AIAgent:
                     "_compressed_summary": bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY)),
                     "timestamp": _row_timestamp,
                     "api_content": _row_api_content,
-                    # Standalone reference handoffs are always hidden, even
-                    # when the summarized transcript contained a user turn —
-                    # otherwise they occupy the active user slot in
-                    # retry/undo/session dispatch (#80622). Merge-into-tail
-                    # carriers keep prior visibility rules so preserved tail
-                    # content stays readable.
+                    # Standalone reference handoffs are always hidden so they never occupy the active user
+                    # slot in
+                    # retry/undo dispatch (#80622); merge-into-tail carriers keep prior visibility.
                     "display_kind": (
                         "hidden"
                         if (
@@ -2616,23 +2146,15 @@ class AIAgent:
                         else msg.get("display_kind")
                     ),
                     "display_metadata": msg.get("display_metadata"),
-                    # Platform-side message id (e.g. the Discord/Telegram
-                    # message id). _insert_message_rows reads it off the row
-                    # dict; load-bearing for restart drain-window recovery
-                    # dedup via has_platform_message_id.
+                    # Platform message id — load-bearing for restart drain-window recovery dedup.
                     "platform_message_id": msg.get("platform_message_id"),
                 }
                 if isinstance(msg.get("_row_id"), int):
                     _row["_row_id"] = msg["_row_id"]
                 _batch_rows.append(_row)
                 _batch_msgs.append(msg)
-            # One transaction for the whole turn's new rows (typically 3-8
-            # messages): one BEGIN IMMEDIATE / commit — and, off WAL, one
-            # fsync — instead of one per row. All-or-nothing pairs exactly
-            # with the marker stamping below: on failure NO rows landed and
-            # NO markers were stamped, so the next flush re-scans and
-            # re-writes the whole tail (same recovery contract as before,
-            # minus the partial-prefix case that could double-pay counters).
+            # One transaction for the turn's new rows. All-or-nothing pairs with the marker stamping below:
+            # on failure no rows landed and no markers were stamped, so the next flush re-writes the tail.
             if _batch_rows:
                 self._session_db.append_messages_batch(
                     session_id=self.session_id,
@@ -2651,9 +2173,7 @@ class AIAgent:
                 from agent.transcript_repair import sync_flushed_message_markers
 
                 sync_flushed_message_markers(_batch_msgs, _batch_rows)
-            # The intrinsic markers are now the sole source of truth. Reset the
-            # one-shot seed so no id() outlives this flush to alias a message
-            # allocated next turn at a recycled address.
+            # Markers are now the sole truth; reset the one-shot seed so no id() outlives this flush.
             self._flushed_db_message_ids = set()
             self._last_flushed_db_idx = len(messages)
             # Snapshot for the bounded scan above — only on full success, so
@@ -2664,10 +2184,8 @@ class AIAgent:
             # Force a full re-scan on the next flush: an exception mid-loop
             # leaves messages with mixed dispositions.
             self._db_flush_scan_prefix = None
-            # This is the one place the underlying SQLite error is visible
-            # before it is swallowed into a bare ``False`` — classify it here
-            # so the turn-end explanation can distinguish lock contention
-            # ("storage was busy, send it again") from disk-full/read-only.
+            # The only place the SQLite error is visible before it becomes a bare False — classify it so the
+            # turn-end explanation can distinguish lock contention from disk-full/read-only.
             from hermes_state import (
                 CompressionSessionClosedError,
                 StateDbCorruptError,
@@ -2678,9 +2196,8 @@ class AIAgent:
 
             self._last_persistence_error_cause = classify_persistence_error(e)
             if isinstance(e, (StateDbReplacedError, StateDbCorruptError)):
-                # Replaced generation or quarantined (structurally corrupt)
-                # handle: SQLite will not take this batch again, so keep it
-                # on disk instead of only in RAM.
+                # Replaced/quarantined handle will not take this batch again — keep it on disk, not only in
+                # RAM.
                 try:
                     divert_session_transcript_jsonl(
                         getattr(self, "session_id", "") or "",
@@ -2694,17 +2211,10 @@ class AIAgent:
                         exc_info=True,
                     )
             if isinstance(e, CompressionSessionClosedError):
-                # Compression race: another path rotated this session while
-                # this turn was still writing against it. The store resolves
-                # the continuation chain transitively via the canonical API
-                # ``get_compression_tip`` (bounded walk, excludes branch/
-                # delegate/tool children, prefers live children over stale
-                # closed siblings such as ``ws_orphan_reap``). Adopt the tip
-                # ONLY when it is a different row AND still live, and retry
-                # the flush exactly once (adoption budget) — a second
-                # closed-parent write must fail closed, never loop. The tip
-                # walk returns the input id when no continuation exists, so
-                # ``tip == session_id`` means fail closed.
+                # Compression race: another path rotated this session mid-write. Adopt the continuation tip
+                # (get_compression_tip) ONLY when it is a different, live row, and retry exactly once; a
+                # second
+                # closed-parent write fails closed. tip == session_id means no continuation exists.
                 if _adoption_budget > 0:
                     old_id = self.session_id
                     tip = None
@@ -2738,10 +2248,9 @@ class AIAgent:
                                 conversation_history,
                                 _adoption_budget=0,
                             )
-                # No live tip (or budget exhausted): fail closed — never guess
-                # a target session. The per-turn diagnostic flag lets the
-                # turn-completion explanation name compression rotation
-                # instead of the historical (misleading) full-disk advice.
+                # No live tip or budget exhausted: fail closed. The flag lets the turn explanation name
+                # compression
+                # rotation instead of misleading full-disk advice.
                 self._compression_adoption_failed = True
                 logger.warning("Session DB append_message failed: %s", e)
                 return False
@@ -2749,33 +2258,24 @@ class AIAgent:
             return False
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
-        """
-        Get messages up to (but not including) the last assistant turn.
-        
-        This is used when we need to "roll back" to the last successful point
-        in the conversation, typically when the final assistant message is
-        incomplete or malformed.
-        
-        Args:
-            messages: Full message list
-            
-        Returns:
-            Messages up to the last complete assistant turn (ending with user/tool message)
+        """Get messages up to (but not including) the last assistant turn.
+
+        The rollback point when the final assistant message is incomplete or malformed.
         """
         if not messages:
             return []
-        
+
         # Find the index of the last assistant message
         last_assistant_idx = None
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == "assistant":
                 last_assistant_idx = i
                 break
-        
+
         if last_assistant_idx is None:
             # No assistant message found, return all messages
             return messages.copy()
-        
+
         # Return everything up to (not including) the last assistant message
         return messages[:last_assistant_idx]
 
@@ -2790,17 +2290,10 @@ class AIAgent:
         return convert_to_trajectory_format(self, messages, user_query, completed)
 
     def _save_trajectory(self, messages: List[Dict[str, Any]], user_query: str, completed: bool):
-        """
-        Save conversation trajectory to JSONL file.
-        
-        Args:
-            messages (List[Dict]): Complete message history
-            user_query (str): Original user query
-            completed (bool): Whether the conversation completed successfully
-        """
+        """Save conversation trajectory to JSONL file."""
         if not self.save_trajectories:
             return
-        
+
         trajectory = self._convert_to_trajectory_format(messages, user_query, completed)
         _save_trajectory_to_file(trajectory, self.model, completed)
 
@@ -2809,43 +2302,19 @@ class AIAgent:
         error_context: Optional[Dict[str, Any]],
         status_code: Optional[int],
     ) -> bool:
-        """Detect subscription/entitlement 403s that masquerade as auth failures.
+        """Detect subscription/entitlement 401/403s that masquerade as auth failures.
 
-        Returned True only when the body text matches a known entitlement
-        shape AND the status is 401/403.  Refreshing an OAuth token cannot
-        fix an unsubscribed account, so callers should surface the error
-        instead of looping the credential pool.
-
-        Current matches:
-          * xAI OAuth: "do not have an active Grok subscription" /
-            "out of available resources" / "does not have permission" + "grok"
-
-        Disambiguator for xAI (#29344): the same ``code`` text ("The caller
-        does not have permission to execute the specified operation") is
-        returned for BOTH an unsubscribed account AND a stale OAuth access
-        token.  xAI ships an explicit signal in the ``error`` field that
-        tells the two apart: a ``[WKE=unauthenticated:...]`` suffix (and/or
-        the ``OAuth2 access token could not be validated`` phrasing) means
-        the credentials failed validation — that's recoverable by refreshing
-        the token, NOT by surfacing an entitlement message.  When either
-        signal is present we return False eagerly so the credential-pool
-        refresh path runs, letting long-running TUI sessions recover from
-        stale tokens without an exit/reopen cycle.
-
-        Extend here for new providers as we discover them (Anthropic's
-        Claude Max OAuth entitlement errors look distinct enough today that
-        the existing 1M-context-beta branch handles them; revisit if other
-        subscription tiers start producing the same loop signature).
+        Refreshing a token cannot fix an unsubscribed account, so callers surface the error instead of looping
+        the
+        pool. xAI returns the same permission-denied text for BOTH cases; a ``[WKE=unauthenticated:...]``
+        suffix (or
+        "access token could not be validated") means stale token → return False so the refresh path runs.
         """
         if status_code not in {401, 403, None}:
             return False
         if not isinstance(error_context, dict):
             return False
-        # Build a single lowercase haystack covering every field shape the
-        # body might land in.  ``_extract_api_error_context`` normalises to
-        # ``message``/``reason``, but callers (and the test suite) may also
-        # hand us the raw body with ``code``/``error`` keys; cover both so
-        # the WKE disambiguator below fires regardless of entry point.
+        # Single lowercase haystack over every field shape (message/reason and raw code/error).
         message = str(error_context.get("message") or "").lower()
         reason = str(error_context.get("reason") or "").lower()
         code = str(error_context.get("code") or "").lower()
@@ -2853,13 +2322,8 @@ class AIAgent:
         haystack = f"{message} {reason} {code} {err}"
         if not haystack.strip():
             return False
-        # xAI's authoritative disambiguator for "stale token" vs
-        # "unsubscribed account".  Both conditions share the same
-        # permission-denied ``code`` text; only one carries this suffix.
-        # Bail out before the entitlement keyword checks so a stale OAuth
-        # token routes through the credential-refresh path instead of the
-        # surface-error-as-entitlement path.  See #29344 for the long-
-        # running TUI failure mode this closes.
+        # xAI's disambiguator for stale-token vs unsubscribed: same permission-denied text, only one carries
+        # this suffix. Bail out so a stale OAuth token takes the credential-refresh path (#29344).
         if "[wke=unauthenticated:" in haystack:
             return False
         if "oauth2 access token could not be validated" in haystack:
@@ -2874,36 +2338,11 @@ class AIAgent:
 
     @staticmethod
     def _decorate_xai_entitlement_error(detail: str) -> str:
-        """Append a neutral hint when xAI's OAuth surface returns the
-        permission-denied 403.
+        """Append a neutral hint when xAI's OAuth surface returns the permission-denied 403.
 
-        xAI's ``/v1/responses`` endpoint replies to several distinct failure
-        modes with the SAME body::
-
-            {"code": "The caller does not have permission to execute the
-             specified operation", "error": "You have either run out of
-             available resources or do not have an active Grok subscription.
-             Manage subscriptions at https://grok.com/?_s=usage or subscribe
-             at https://grok.com/supergrok"}
-
-        That body covers several real causes we cannot distinguish without
-        more info from xAI.  The most common (and least obvious) one is
-        that **X Premium+ does NOT include API access** — only standalone
-        SuperGrok subscribers can use Hermes against xai-oauth.  Lots of
-        users see Grok in their X app, assume it works here too, and hit
-        this 403 with no idea why.  Lead the hint with that.
-
-        Other possible causes:
-          * No Grok subscription at all
-          * SuperGrok tier doesn't include the requested model (e.g.
-            grok-4.3 may need a higher tier)
-          * Monthly quota exhausted (the ``?_s=usage`` URL hints at this)
-
-        Surface the raw xAI text verbatim and point at
-        https://grok.com/?_s=usage where the user can see WHICH applies.
-
-        Matched once per detail string — won't double-decorate if the
-        upstream already concatenated the same text.
+        xAI's ``/v1/responses`` uses one body for several causes (no subscription, tier lacks the model, quota
+        exhausted). The least obvious: X Premium+ does NOT include API access — only SuperGrok does. Lead with
+        that, keep the raw text, point at https://grok.com/?_s=usage. Matched once per detail string.
         """
         if not detail:
             return detail
@@ -2962,17 +2401,12 @@ class AIAgent:
     def _summarize_api_error(error: Exception) -> str:
         """Extract a human-readable one-liner from an API error.
 
-        Handles Cloudflare HTML error pages (502, 503, etc.) by pulling the
-        <title> tag instead of dumping raw HTML. Network/DNS failures are
-        translated into an offline hint, including when an SDK wraps the
-        original OS error. Falls back to a truncated str(error) otherwise.
+        Cloudflare HTML pages → ``<title>``; network/DNS failures (even SDK-wrapped) → offline hint; else
+        truncated str(error).
         """
         raw = str(error)
 
-        # Linux, macOS, and Windows use different low-level messages when DNS
-        # cannot resolve the provider while the device is offline. SDKs often
-        # wrap that OSError in a generic "Connection error", so inspect the
-        # exception chain before showing the top-level message to the user.
+        # Offline DNS failures are wrapped in a generic "Connection error" by SDKs — inspect the chain.
         network_resolution_markers = (
             "temporary failure in name resolution",
             "name or service not known",
@@ -3017,10 +2451,7 @@ class AIAgent:
                 parts.append(f"Ray {ray_id}")
             return " — ".join(parts)
 
-        # GeminiAPIError (agent/gemini_native_adapter.py) already composes a
-        # clean one-liner and may have appended actionable guidance (free-tier
-        # 429, legacy Standard-key 401). Prefer its message over re-extracting
-        # the raw response body below, which would strip that guidance.
+        # GeminiAPIError already composes a clean one-liner with guidance; don't re-extract the raw body.
         if type(error).__name__ == "GeminiAPIError":
             return redact_sensitive_text(raw[:1000])
 
@@ -3034,11 +2465,8 @@ class AIAgent:
                 msg = AIAgent._coerce_api_error_detail(msg)
                 return AIAgent._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
 
-        # SDK may leave body empty while httpx still has the payload (#36109).
-        # Redact before returning: the raw provider/proxy error body is
-        # attacker-influenced and may echo Authorization / x-api-key / request
-        # JSON, which would otherwise leak into final_response + logs (this path
-        # widens exposure vs the old empty-body "HTTP 400" string).
+        # SDK may leave body empty while httpx has the payload (#36109). Redact: the body is
+        # attacker-influenced and may echo Authorization / x-api-key / request JSON.
         response = getattr(error, "response", None)
         if response is not None:
             try:
@@ -3077,29 +2505,21 @@ class AIAgent:
         return f"{key[:8]}...{key[-4:]}"
 
     def _clean_error_message(self, error_msg: str) -> str:
-        """
-        Clean up error messages for user display, removing HTML content and truncating.
-        
-        Args:
-            error_msg: Raw error message from API or exception
-            
-        Returns:
-            Clean, user-friendly error message
-        """
+        """Clean up error messages for user display, removing HTML content and truncating."""
         if not error_msg:
             return "Unknown error"
-            
+
         # Remove HTML content (common with CloudFlare and gateway error pages)
         if error_msg.strip().startswith('<!DOCTYPE html') or '<html' in error_msg:
             return "Service temporarily unavailable (HTML error page returned)"
-            
+
         # Remove newlines and excessive whitespace
         cleaned = ' '.join(error_msg.split())
-        
+
         # Truncate if too long
         if len(cleaned) > 150:
             cleaned = cleaned[:150] + "..."
-            
+
         return cleaned
 
     @staticmethod
@@ -3202,9 +2622,8 @@ class AIAgent:
         try:
             if hasattr(value, "model_dump"):
                 try:
-                    # warnings=False: pydantic's serializer UserWarnings on
-                    # generic-union SDK models (Anthropic ParsedMessage etc.)
-                    # would otherwise leak to the terminal mid-response.
+                    # warnings=False: pydantic UserWarnings on generic-union SDK models would leak to the
+                    # terminal.
                     dumped = value.model_dump(mode="json", warnings=False)
                 except TypeError:
                     try:
@@ -3301,13 +2720,8 @@ class AIAgent:
         *,
         finish_reason: Optional[str],
     ) -> Dict[str, Any]:
-        # ``tool_calls`` is the raw list of provider SDK objects (e.g.
-        # OpenAI ``ChatCompletionMessageToolCall``).  We deliberately hand
-        # the raw objects to ``_sanitize_hook_payload`` and rely on
-        # ``_hook_jsonable`` to normalise them via ``model_dump`` /
-        # ``__dict__`` / dataclass introspection — a future refactor of
-        # the sanitiser MUST preserve that capability or hook subscribers
-        # will receive opaque ``str(obj)`` blobs here.
+        # Raw provider SDK tool_call objects are handed to the sanitizer on purpose; `_hook_jsonable` must
+        # keep normalising them (model_dump / __dict__ / dataclass) or subscribers get str() blobs.
         tool_calls = getattr(assistant_message, "tool_calls", None) or []
         return self._sanitize_hook_payload(
             {
@@ -3339,9 +2753,7 @@ class AIAgent:
         retryable: Optional[bool] = None,
         reason: Optional[str] = None,
     ) -> None:
-        # Lazy module import (not from-import) so tests can replace lifecycle
-        # dispatch at this call site. After first call the import is a
-        # ``sys.modules`` dict lookup, so retries don't repay any real cost.
+        # Lazy module import (not from-import) so tests can replace lifecycle dispatch at this call site.
         try:
             from hermes_cli import lifecycle as _lifecycle
 
@@ -3402,14 +2814,8 @@ class AIAgent:
     def _redact_message_content(content):
         """Apply secret redaction to message content (str or list-of-parts).
 
-        Handles both plain-string content and the OpenAI/Anthropic multimodal
-        shape where ``content`` is a list of ``{"type": "text", "text": ...}``
-        / ``{"type": "image_url", ...}`` / ``{"type": "input_text", "content": ...}``
-        parts. Image / binary parts are left untouched; only text fields are
-        passed through ``redact_sensitive_text``.
-
-        Respects ``HERMES_REDACT_SECRETS`` via ``redact_sensitive_text`` —
-        when disabled the helper is effectively a no-op.
+        Only text fields pass through ``redact_sensitive_text``; image/binary parts are untouched.
+        No-op when ``HERMES_REDACT_SECRETS`` disables redaction.
         """
         if content is None:
             return content
@@ -3429,19 +2835,11 @@ class AIAgent:
         return content
 
     def _save_session_log(self, messages: List[Dict[str, Any]] = None):
-        """Optional per-session JSON snapshot writer.
+        """Optional per-session JSON snapshot writer (``sessions.write_json_snapshots``, default False).
 
-        Gated by ``sessions.write_json_snapshots`` (default False).  state.db
-        is the canonical message store; this writer exists only for users
-        whose external tooling consumes ``~/.hermes/sessions/session_{sid}.json``
-        directly.  When the flag is off this is a fast no-op.
-
-        When enabled, rewrites the snapshot after every persistence point with
-        the full message list (assistant content normalized via
-        ``_clean_session_content`` to convert REASONING_SCRATCHPAD to think
-        tags).  The truncation guard ("don't overwrite a larger log with
-        fewer messages") is preserved so resume + branch don't clobber a
-        fuller existing snapshot.
+        state.db is canonical; this exists for external tooling reading ``session_{sid}.json``. Rewrites the
+        full
+        list after every persistence point, never overwriting a larger log with fewer messages.
         """
         if not getattr(self, "_session_json_enabled", False):
             return
@@ -3449,12 +2847,8 @@ class AIAgent:
         if not messages:
             return
 
-        # Re-derive the target path each call so /branch and /compress
-        # session-id changes land in the right file without any re-point
-        # bookkeeping at the call sites.  Sanitize the session ID into a
-        # single traversal-free path segment — session IDs can come from
-        # untrusted input (X-Hermes-Session-Id header) and must not escape
-        # the sessions directory.
+        # Re-derive the path each call so /branch and /compress land in the right file. Session IDs can be
+        # untrusted (X-Hermes-Session-Id) — sanitize to a single traversal-free segment.
         try:
             safe_sid = _safe_session_filename_component(self.session_id)
             log_file = self.logs_dir / f"session_{safe_sid}.json"
@@ -3471,19 +2865,14 @@ class AIAgent:
                 if msg.get("role") == "assistant" and msg.get("content"):
                     msg = dict(msg)
                     msg["content"] = self._clean_session_content(msg["content"])
-                # Defence-in-depth: redact credentials from every message
-                # content before persistence. Catches PATs / API keys / Bearer
-                # tokens that may have leaked into assistant responses, tool
-                # output, or user paste. Respects HERMES_REDACT_SECRETS via
-                # redact_sensitive_text — no-op when disabled. (#19798, #19845)
+                # Defence-in-depth: redact credentials from every message before persistence; respects
+                # HERMES_REDACT_SECRETS via redact_sensitive_text (#19798, #19845).
                 if "content" in msg:
                     msg = dict(msg)
                     msg["content"] = self._redact_message_content(msg.get("content"))
                 cleaned.append(msg)
 
-            # Guard: never overwrite a larger session log with fewer messages.
-            # Protects against data loss when a resumed agent starts with
-            # partial history and would otherwise clobber the full JSON log.
+            # Never overwrite a larger session log with fewer messages (resumed agent with partial history).
             if log_file.exists():
                 try:
                     existing = json.loads(log_file.read_text(encoding="utf-8"))
@@ -3530,67 +2919,21 @@ class AIAgent:
         tool_reason: Optional[str] = None,
         require_generation: Optional[int] = None,
     ) -> bool:
-        """
-        Request the agent to interrupt its current tool-calling loop.
-        
-        Call this from another thread (e.g., input handler, message receiver)
-        to gracefully stop the agent and process a new message.
-        
-        Also signals long-running tool executions (e.g. terminal commands)
-        to terminate early, so the agent can respond immediately.
-        
-        Args:
-            message: Optional new message that triggered the interrupt.
-                     If provided, the agent will include this in its response context.
-            hard_cancel: Mark this as an explicit stop rather than a redirect or
-                         incoming-message interrupt. Compression may honor this
-                         atomic signal even while ordinary interrupts are
-                         masked. With a generation claim in play, the
-                         destructive compression-fence cancellation is
-                         deferred until after the claim survives, so a
-                         declined abort never cancels a legitimate pending
-                         compression.
-            tool_reason: Trusted fixed category safe to expose in tool output.
-                         Arbitrary diagnostic or caller text belongs in message.
-            require_generation: Optional activity-generation claim (#95663).
-                         When set, the interrupt is published only if the
-                         turn's activity generation still equals this value
-                         at the final mutation edge. The claim is RESERVED
-                         under the activity lock — ``_touch_activity``
-                         invalidates the reservation the instant real
-                         progress lands — survives every blocking boundary in
-                         between (including the compression commit fence),
-                         and is CONSUMED in ONE lock critical section
-                         together with the first observable publication
-                         (``_interrupt_requested`` / ``_interrupt_message`` /
-                         ``_tool_interrupt_reason`` and the hard-cancel
-                         event). If the turn resumed in the window, the call
-                         abandons itself without publishing anything (no
-                         flag, no hard-cancel event, no tool signal).
+        """Request the agent to interrupt its current tool-calling loop (call from another thread).
 
-        Returns:
-            True when the interrupt was published, False when a
-            ``require_generation`` claim no longer matched the live activity
-            clock and the call was abandoned without publishing.
-        
-        Example (CLI):
-            # In a separate input thread:
-            if user_typed_something:
-                agent.interrupt(user_input)
-        
-        Example (Messaging):
-            # When new message arrives for active session:
-            if session_has_running_agent:
-                running_agent.interrupt(new_message.text)
+        ``message``: new message to include in the response context. ``hard_cancel``: explicit stop;
+        compression
+        may honor it even while ordinary interrupts are masked. ``tool_reason``: trusted fixed category safe
+        for
+        tool output. ``require_generation``: activity-generation claim — the interrupt is published only if
+        the
+        turn's generation still matches at the final mutation edge (claim reserved under the activity lock,
+        consumed together with the first observable publication); returns False if the turn resumed meanwhile.
         """
         if require_generation is not None:
-            # RESERVE the abort's generation claim under the SAME lock
-            # `_touch_activity` stamps the clock with. Real progress
-            # invalidates the reservation the instant it lands, and the
-            # claim is CONSUMED at the final mutation edge — after every
-            # blocking boundary — in ONE critical section with the first
-            # observable publication. A resumed turn therefore abandons
-            # the abort instead of being hard-cancelled by a stale proof.
+            # RESERVE the abort's generation claim under the SAME lock `_touch_activity` stamps with. Real
+            # progress invalidates it; it is CONSUMED at the final mutation edge, so a resumed turn abandons
+            # the abort.
             with self._liveness_activity_lock():
                 if (
                     getattr(self, "_turn_liveness_activity_generation", 0)
@@ -3602,37 +2945,25 @@ class AIAgent:
         # A hard stop and redirect share one lock so /stop cannot race with an
         # accepted correction and accidentally turn itself into a retry.
         def _wait_for_compression_commit() -> None:
-            # Pre-claim half of hard-cancel admission (#99758 P1): wait out
-            # a commit that ALREADY crossed its boundary, so the interrupt
-            # is published only after the in-flight SessionDB mutation has
-            # finished — but mutate NOTHING. Cancelling a pending commit is
-            # a destructive, irreversible fence mutation (``begin_commit``
-            # refuses a cancelled fence forever), so it must not run while
-            # a generation claim can still be vetoed: an abort that declines
-            # after the fence was cancelled would have killed the recovered
-            # turn's legitimate pending compression. The destructive half
-            # runs in _cancel_pending_compression_commit(), only after the
-            # claim survived the final mutation edge.
+            # Pre-claim half of hard-cancel admission (#99758 P1): wait out a commit that already crossed its
+            # boundary but mutate NOTHING — cancelling a pending fence is irreversible and must wait until the
+            # generation claim survived the final mutation edge (_cancel_pending_compression_commit).
             fence = vars(self).get("_active_compression_commit_fence")
             if fence is None:
                 return
             if not getattr(fence, "commit_in_flight", False):
-                # No commit crossed its boundary — nothing to wait out,
-                # and calling cancel_before_commit here WOULD cancel the
-                # pending commit (the production fence's
-                # cancel_before_commit sets _cancelled whenever no commit
-                # has started). Skip it; the destructive half handles it.
+                # No commit in flight — cancel_before_commit here WOULD cancel the pending commit; leave it to
+                # the
+                # destructive half.
                 return
             cancel_before_commit = getattr(
                 type(fence), "cancel_before_commit", None
             )
             if callable(cancel_before_commit):
                 try:
-                    # A commit is in flight (it holds the fence lock
-                    # through finish_commit), so this call blocks until
-                    # the commit finishes and returns False WITHOUT
-                    # setting _cancelled — the started-commit branch of
-                    # the production fence never cancels.
+                    # A commit holds the fence lock through finish_commit: this blocks until it finishes and
+                    # returns
+                    # False WITHOUT setting _cancelled.
                     cancel_before_commit(fence)
                 except Exception:
                     logger.debug(
@@ -3641,15 +2972,9 @@ class AIAgent:
                     )
 
         def _cancel_pending_compression_commit() -> None:
-            # Destructive half of hard-cancel admission (#99758 P1): runs
-            # only AFTER the generation claim survived the final mutation
-            # edge, so an abort that declines can never leave the active
-            # compression fence cancelled. Waiting for an in-flight commit
-            # already happened in _wait_for_compression_commit(); if a
-            # commit crossed its boundary in between, it can no longer be
-            # fence-cancelled (it owns the fence until finish_commit and
-            # completes on its own), so only a still-pending commit is
-            # cancelled here.
+            # Destructive half of hard-cancel admission (#99758 P1): runs only AFTER the claim survived, so a
+            # declined abort never leaves the fence cancelled. A commit that started meanwhile owns the fence
+            # and completes on its own; only a still-pending commit is cancelled here.
             fence = vars(self).get("_active_compression_commit_fence")
             if fence is None:
                 return
@@ -3660,10 +2985,9 @@ class AIAgent:
             )
             if callable(cancel_before_commit):
                 try:
-                    # Marks the fence cancelled (or waits out a commit
-                    # that started between the wait above and now) without
-                    # setting the hard-stop Event, which was already
-                    # published at the final claim edge.
+                    # Marks the fence cancelled (or waits out a just-started commit) without touching the
+                    # hard-stop
+                    # Event, which was published at the claim edge.
                     cancel_before_commit(fence)
                 except Exception:
                     logger.debug(
@@ -3683,25 +3007,13 @@ class AIAgent:
                     _hard_event.set()
 
         def _consume_claim_and_publish_first_state() -> bool:
-            # Final mutation edge: when a generation claim is in play,
-            # claim consumption and the FIRST observable interrupt
-            # publication are ONE activity-lock critical section — the
-            # same lock `_touch_activity` stamps the clock with. The
-            # generation winner is therefore total: either the claim
-            # survives and the interrupt state commits under the lock
-            # BEFORE any later activity stamp, or the stamp landed first
-            # and the abort declines without publishing anything. (A
-            # consume-then-release-then-publish split would let a turn
-            # that resumed in the consume→publication window be
-            # hard-cancelled by an already-consumed claim.)
+            # Final mutation edge: claim consumption and the FIRST observable interrupt publication are ONE
+            # activity-lock critical section, so either the claim survives and commits before any later
+            # activity stamp, or the stamp landed first and the abort declines without publishing.
             if require_generation is None:
-                # No claim to race the activity clock against: publish
-                # WITHOUT touching the liveness lock. ``AIAgent``
-                # stand-ins used by unrelated suites (e.g. the
-                # start-order gate `_Stub`) do not carry the liveness
-                # seam, and an unconditional
-                # ``_liveness_activity_lock()`` acquisition here
-                # regresses them with AttributeError.
+                # No claim to race: publish WITHOUT the liveness lock. Bare AIAgent stand-ins in other suites
+                # lack
+                # the liveness seam and would AttributeError.
                 _publish_interrupt_state()
                 return True
             with self._liveness_activity_lock():
@@ -3714,9 +3026,8 @@ class AIAgent:
                 _publish_interrupt_state()
             return True
 
-        # Keep tool cancellation attribution separate from _interrupt_message:
-        # ordinary interrupts may carry the user's full next message, which
-        # must not be copied into tool output.
+        # Tool cancellation attribution stays separate from _interrupt_message, which may carry the user's
+        # full next message.
         tool_interrupt_reason = (
             (tool_reason or "explicit stop requested")
             if hard_cancel
@@ -3726,13 +3037,9 @@ class AIAgent:
         _redirect_lock = getattr(self, "_pending_redirect_lock", None)
         if _redirect_lock is not None:
             with _redirect_lock:
-                # The (potentially blocking) in-flight-commit wait runs
-                # BEFORE the atomic claim/publication edge; the redirect
-                # lock is still held across it, exactly as before, so /stop
-                # cannot race with an accepted correction. The destructive
-                # pending-commit cancellation runs AFTER the claim survives
-                # (#99758 P1) so a declined abort can never cancel the
-                # recovered turn's legitimate compression.
+                # The blocking in-flight-commit wait runs BEFORE the atomic claim edge (redirect lock still
+                # held);
+                # the destructive pending-commit cancel runs AFTER the claim survives (#99758 P1).
                 if hard_cancel:
                     _wait_for_compression_commit()
                 if not _consume_claim_and_publish_first_state():
@@ -3763,19 +3070,15 @@ class AIAgent:
                         exc_info=True,
                     )
 
-        # A cron turn performs its API request on the conversation thread to
-        # avoid the nested interrupt-worker deadlock.  Unlike the normal worker
-        # path, its client is registered here so this cross-thread interrupt can
-        # still shut down the active sockets promptly.
+        # Cron turns request on the conversation thread (no nested interrupt-worker deadlock); their client
+        # is registered here so this cross-thread interrupt can still shut the sockets.
         _abort_active_request = getattr(self, "_active_request_abort", None)
         if callable(_abort_active_request):
             try:
                 _abort_active_request("interrupt_abort")
             except Exception:
                 logger.debug("Failed to abort active inline request", exc_info=True)
-        # Signal all tools to abort any in-flight operations immediately.
-        # Scope the interrupt to this agent's execution thread so other
-        # agents running in the same process (gateway) are not affected.
+        # Scope the tool interrupt to this agent's execution thread so other in-process agents are unaffected.
         if self._execution_thread_id is not None:
             _set_interrupt(
                 True,
@@ -3784,20 +3087,11 @@ class AIAgent:
             )
             self._interrupt_thread_signal_pending = False
         else:
-            # The interrupt arrived before run_conversation() finished
-            # binding the agent to its execution thread. Defer the tool-level
-            # interrupt signal until startup completes instead of targeting
-            # the caller thread by mistake.
+            # Interrupt arrived before run_conversation bound the execution thread: defer the tool-level
+            # signal instead of targeting the caller thread.
             self._interrupt_thread_signal_pending = True
-        # Fan out to concurrent-tool worker threads.  Those workers run tools
-        # on their own tids (ThreadPoolExecutor workers), so `is_interrupted()`
-        # inside a tool only sees an interrupt when their specific tid is in
-        # the `_interrupted_threads` set.  Without this propagation, an
-        # already-running concurrent tool (e.g. a terminal command hung on
-        # network I/O) never notices the interrupt and has to run to its own
-        # timeout.  See `_run_tool` for the matching entry/exit bookkeeping.
-        # `getattr` fallback covers test stubs that build AIAgent via
-        # object.__new__ and skip __init__.
+        # Fan out to concurrent-tool worker tids: is_interrupted() inside a tool only sees its own tid, so
+        # without this a hung concurrent tool runs to its own timeout. getattr covers __init__-less stubs.
         _tracker = getattr(self, "_tool_worker_threads", None)
         _tracker_lock = getattr(self, "_tool_worker_threads_lock", None)
         if _tracker is not None and _tracker_lock is not None:
@@ -3833,14 +3127,11 @@ class AIAgent:
         *,
         tool_reason: Optional[str] = None,
     ) -> None:
-        """Request an explicit stop while preserving ``interrupt()`` ABI.
+        """Request an explicit stop while preserving the ``interrupt()`` ABI.
 
-        Frontends can feature-detect this method and fall back to the legacy
-        ``interrupt()`` signature for synthetic or third-party agents.
+        Frontends feature-detect this and fall back to legacy ``interrupt()`` for third-party agents.
         """
-        # Deliberately bypass dynamic dispatch: subclasses written against the
-        # legacy interrupt(message=None) ABI may override interrupt without the
-        # newer keyword-only hard_cancel argument.
+        # Bypass dynamic dispatch: legacy subclasses may override interrupt(message=None) without hard_cancel.
         AIAgent.interrupt(
             self,
             message,
@@ -3851,9 +3142,8 @@ class AIAgent:
     def clear_interrupt(self, *, preserve_redirect: bool = False) -> bool:
         """Clear the interrupt request and per-thread tool signal.
 
-        ``preserve_redirect`` is used only by the conversation loop after it
-        intentionally cancels a model request to rebuild that same logical
-        turn. Public hard-stop paths keep the default and clear everything.
+        ``preserve_redirect`` is only for the conversation loop rebuilding the same logical turn after
+        cancelling a model request; public hard-stop paths clear everything.
         """
         _redirect_lock = getattr(self, "_pending_redirect_lock", None)
         if _redirect_lock is not None:
@@ -3878,13 +3168,8 @@ class AIAgent:
         self._interrupt_thread_signal_pending = False
         if self._execution_thread_id is not None:
             _set_interrupt(False, self._execution_thread_id)
-        # Also clear any concurrent-tool worker thread bits.  Tracked
-        # workers normally clear their own bit on exit, but an explicit
-        # clear here guarantees no stale interrupt can survive a turn
-        # boundary and fire on a subsequent, unrelated tool call that
-        # happens to get scheduled onto the same recycled worker tid.
-        # `getattr` fallback covers test stubs that build AIAgent via
-        # object.__new__ and skip __init__.
+        # Also clear worker-thread bits so no stale interrupt survives a turn boundary onto a recycled tid.
+        # getattr covers __init__-less test stubs.
         _tracker = getattr(self, "_tool_worker_threads", None)
         _tracker_lock = getattr(self, "_tool_worker_threads_lock", None)
         if _tracker is not None and _tracker_lock is not None:
@@ -3895,10 +3180,7 @@ class AIAgent:
                     _set_interrupt(False, _wtid)
                 except Exception:
                     pass
-        # A hard interrupt supersedes any pending /steer — the steer was
-        # meant for the agent's next tool-call iteration, which will no
-        # longer happen. Drop it instead of surprising the user with a
-        # late injection on the post-interrupt turn.
+        # A hard interrupt supersedes any pending /steer — its target iteration will no longer happen.
         _steer_lock = getattr(self, "_pending_steer_lock", None)
         if _steer_lock is not None:
             with _steer_lock:
@@ -3906,31 +3188,17 @@ class AIAgent:
         return True
 
     def steer(self, text: str) -> bool:
-        """
-        Inject a user message into the next tool result without interrupting.
+        """Inject user text into the next tool result without interrupting the current tool.
 
-        Unlike interrupt(), this does NOT stop the current tool call. The
-        text is stashed and the agent loop appends it to the LAST tool
-        result's content once the current tool batch finishes. The model
-        sees the steer as part of the tool output on its next iteration.
-
-        Thread-safe: callable from gateway/CLI/TUI threads. Multiple calls
-        before the drain point concatenate with newlines.
-
-        Args:
-            text: The user text to inject. Empty strings are ignored.
-
-        Returns:
-            True if the steer was accepted, False if the text was empty.
+        The text is appended to the LAST tool result once the batch finishes, so the model sees it on its next
+        iteration. Thread-safe; multiple calls concatenate with newlines. Returns False for empty text.
         """
         if not text or not text.strip():
             return False
         cleaned = text.strip()
         _lock = getattr(self, "_pending_steer_lock", None)
         if _lock is None:
-            # Test stubs that built AIAgent via object.__new__ skip __init__.
-            # Fall back to direct attribute set; no concurrent callers expected
-            # in those stubs.
+            # __init__-less test stubs: fall back to a direct attribute set.
             existing = getattr(self, "_pending_steer", None)
             self._pending_steer = (existing + "\n" + cleaned) if existing else cleaned
             return True
@@ -3944,16 +3212,11 @@ class AIAgent:
     def redirect(self, text: str) -> bool:
         """Redirect the active turn without converting it into a new task.
 
-        During a normal Hermes model request this cancels only that request;
-        the conversation loop retains completed messages/tool results, records
-        the displayed partial reasoning as plain assistant context, appends the
-        correction as a real user message, and retries. During tool execution
-        it degrades to ``steer()`` so the tool can finish at a safe boundary.
-        Codex app-server has a native ``turn/steer`` operation and uses it
-        directly instead of cancelling.
-
-        Returns ``False`` when there is no live turn or the text is empty, so
-        surfaces can fall back to their existing next-turn queue.
+        During a model request this cancels only that request: completed messages/tool results are kept, the
+        displayed partial reasoning becomes assistant context, the correction is appended as a real user
+        message,
+        and the loop retries. During tool execution it degrades to ``steer()``; Codex app-server uses native
+        ``turn/steer``. Returns False when there is no live turn or the text is empty.
         """
         if not text or not text.strip():
             return False
@@ -3978,9 +3241,7 @@ class AIAgent:
                     logger.debug("Codex app-server turn/steer failed", exc_info=True)
                     return False
 
-        # Never kill a tool merely to deliver conversational guidance. The
-        # existing steer drain puts it on the final tool result before the next
-        # model decision, including delegate_task children.
+        # Never kill a tool to deliver guidance; the steer drain puts it on the final tool result.
         if getattr(self, "_executing_tools", False):
             return self.steer(cleaned)
 
@@ -4054,11 +3315,7 @@ class AIAgent:
         return text
 
     def _drain_pending_steer(self) -> Optional[str]:
-        """Return the pending steer text (if any) and clear the slot.
-
-        Safe to call from the agent execution thread after appending tool
-        results. Returns None when no steer is pending.
-        """
+        """Return the pending steer text (if any) and clear the slot; None when nothing is pending."""
         _lock = getattr(self, "_pending_steer_lock", None)
         if _lock is None:
             text = getattr(self, "_pending_steer", None)
@@ -4078,11 +3335,8 @@ class AIAgent:
     ) -> None:
         """Record a ``write_file`` / ``patch`` outcome for the turn-end verifier.
 
-        On failure, store ``{path: {error_preview, tool}}`` entries.  On
-        success, remove any prior failure entries for the same paths (the
-        model recovered within the turn).  Silently no-ops if the per-turn
-        state dict hasn't been initialised yet (e.g. a tool dispatched
-        outside ``run_conversation``).
+        Failures store ``{path: {error_preview, tool}}``; a later success on the same path removes the entry.
+        No-op when the per-turn state dict is not initialised (tool dispatched outside ``run_conversation``).
         """
         if tool_name not in _FILE_MUTATING_TOOLS:
             return
@@ -4110,9 +3364,7 @@ class AIAgent:
         if is_error and not landed:
             preview = _extract_error_preview(result)
             for path in targets:
-                # Keep the FIRST error we saw for a given path unless we
-                # later see success.  A repeated failure with a different
-                # message shouldn't silently overwrite the original.
+                # Keep the FIRST error per path unless a later success replaces it.
                 if path not in state:
                     state[path] = {
                         "tool": tool_name,
@@ -4125,16 +3377,8 @@ class AIAgent:
     def _file_mutation_verifier_enabled(self) -> bool:
         """Check whether the per-turn file-mutation verifier footer is on.
 
-        Config path: ``display.file_mutation_verifier`` (bool, default True).
-        ``HERMES_FILE_MUTATION_VERIFIER`` env var overrides config.  Exposed
-        as a method so tests can patch a single seam without reaching into
-        the private ``_turn_failed_file_mutations`` state dict.
-
-        The config lookup is read once per agent and cached (mirroring
-        ``_credits_notices_enabled``) — the footer gate runs at the end of
-        every turn, and a config flip applying on the next session is fine.
-        The env-var override stays authoritative on every call and is never
-        cached, so tests and operators can still flip it at runtime.
+        ``display.file_mutation_verifier`` (default True), cached per agent; ``HERMES_FILE_MUTATION_VERIFIER``
+        overrides on every call and is never cached. A method so tests can patch one seam.
         """
         try:
             import os as _os
@@ -4162,30 +3406,19 @@ class AIAgent:
             pass
         return True  # safe default: verifier on
 
-    # Bare absolute / home / Windows-drive file paths in a footer line.
-    # Anchors mirror the gateway's ``extract_local_files`` bare-path
-    # detector so that anything the gateway WOULD auto-attach is wrapped
-    # in inline-code backticks here first (the extractor skips paths inside
-    # `code` spans).  Defense-in-depth: even if a future error message
-    # echoes a credential path (config.yaml, .env, auth.json) into the
-    # user-facing footer, it can never be matched as a deliverable bare
-    # path and silently uploaded to a messaging channel (#35584).
+    # Bare absolute / home / Windows-drive paths in a footer line. Mirrors the gateway's
+    # extract_local_files detector so anything it WOULD auto-attach is backticked first (#35584).
     _FOOTER_PATH_RE = re.compile(
         r"(?<![/:\w.`])(?:~/|/|[A-Za-z]:[/\\])(?:[\w.\-]+[/\\])*[\w.\-]+\.[\w]+",
     )
 
     @classmethod
     def _neutralize_footer_paths(cls, text: str) -> str:
-        """Wrap bare file paths in backticks so they aren't auto-delivered.
+        """Wrap bare file paths in backticks so the gateway's ``extract_local_files`` never auto-attaches
+        them.
 
-        The gateway's ``extract_local_files`` scans response text for bare
-        absolute/home paths ending in a deliverable extension and uploads
-        any that exist on disk as native attachments — but it explicitly
-        skips paths inside inline-code (`` `...` ``) spans.  Backticking
-        every path the footer renders defeats that auto-detection while
-        keeping the path fully human-readable.  Paths already wrapped in a
-        backtick (the negative lookbehind excludes a preceding `` ` ``) are
-        left untouched so we never double-wrap.
+        The extractor skips paths inside inline-code spans. Already-backticked paths are left alone (no
+        double-wrap).
         """
         if not text:
             return text
@@ -4195,15 +3428,10 @@ class AIAgent:
     def _format_file_mutation_failure_footer(cls, failed: Dict[str, Dict[str, Any]]) -> str:
         """Render the per-turn failed-mutation dict as a user-facing footer.
 
-        Displays up to 10 paths with their first error preview, then a
-        count of any additional failures.  Returns an empty string when
-        the dict is empty so callers can concatenate unconditionally.
-
-        Every file path that reaches the user-facing text — both the bullet
-        path and any path echoed inside the tool's error preview — is
-        backtick-wrapped via ``_neutralize_footer_paths`` so the gateway's
-        bare-path media extractor can never auto-attach a protected file
-        (e.g. ``~/.hermes/config.yaml``) to a messaging channel (#35584).
+        Up to 10 paths with their first error preview, then an overflow count; empty string when nothing
+        failed.
+        Every path is backtick-wrapped via ``_neutralize_footer_paths`` so protected files cannot be auto-
+        delivered.
         """
         if not failed:
             return ""
@@ -4227,24 +3455,15 @@ class AIAgent:
         remaining = len(failed) - shown
         if remaining > 0:
             lines.append(f"  • … and {remaining} more")
-        # Neutralize any path the preview text echoed (the bullet path is
-        # already backticked above; the lookbehind keeps it from being
-        # double-wrapped).
+        # Neutralize paths the preview echoed; the lookbehind prevents double-wrapping the bullet path.
         return cls._neutralize_footer_paths("\n".join(lines))
 
     def _turn_completion_explainer_enabled(self) -> bool:
         """Check whether the end-of-turn completion explainer footer is on.
 
-        Config path: ``display.turn_completion_explainer`` (bool, default
-        True).  ``HERMES_TURN_COMPLETION_EXPLAINER`` env var overrides
-        config.  Exposed as a method so tests can patch a single seam,
-        mirroring ``_file_mutation_verifier_enabled``.
-
-        The config lookup is read once per agent and cached (mirroring
-        ``_credits_notices_enabled``) — the gate runs at the end of every
-        turn, and a config flip applying on the next session is fine.
-        The env-var override stays authoritative on every call and is never
-        cached, so tests and operators can still flip it at runtime.
+        ``display.turn_completion_explainer`` (default True), cached per agent;
+        ``HERMES_TURN_COMPLETION_EXPLAINER``
+        overrides on every call and is never cached. Mirrors ``_file_mutation_verifier_enabled``.
         """
         try:
             import os as _os
@@ -4278,23 +3497,9 @@ class AIAgent:
     ) -> str:
         """Render a user-facing explanation for an abnormal turn ending.
 
-        Maps the internal ``turn_exit_reason`` to a short, actionable
-        message so a turn that produced no usable assistant reply (empty
-        content after retries, a partial/truncated stream, a still-pending
-        tool result, or an iteration/budget limit) is never silent from
-        the UI's perspective — the symptom users report in #34452.
-
-        ``persistence_cause`` refines the ``session_persistence_failed``
-        wording (see ``classify_persistence_error``): lock contention gets
-        "storage was busy, send it again" instead of the disk-space advice,
-        which was a misdiagnosis for that failure mode. It is optional and
-        ignored for every other reason, so one-argument callers keep the
-        exact behavior they had before.
-
-        Returns an empty string for reasons that are NOT abnormal (e.g.
-        a normal ``text_response(...)`` exit), so callers can concatenate
-        or substitute unconditionally without warning on healthy turns
-        like a terse ``Done.``.
+        Maps ``turn_exit_reason`` to an actionable message so a turn with no usable reply is never silent.
+        ``persistence_cause`` refines ``session_persistence_failed`` wording (lock contention ≠ disk full).
+        Returns "" for non-abnormal reasons so callers can concatenate unconditionally.
         """
         if not turn_exit_reason:
             return ""
@@ -4463,12 +3668,8 @@ class AIAgent:
     def _liveness_activity_lock(self) -> "threading.Lock":
         """Shared lock for the activity clock and its generation counter.
 
-        ``_touch_activity`` stamps the clock under this lock; the turn
-        liveness watchdog (``agent/turn_liveness.py``) samples and commits
-        under the same lock, so a stall observation can never abort a turn
-        that resumed between the sample and the commit (#95663 review).
-        Created lazily so ``AIAgent.__new__``-based test doubles keep
-        working.
+        ``_touch_activity`` stamps under it and the liveness watchdog samples/commits under it, so a stall
+        observation can never abort a turn that resumed in between. Lazy so ``__new__``-built doubles work.
         """
         _lock = getattr(self, "_turn_liveness_activity_lock", None)
         if _lock is None:
@@ -4485,28 +3686,13 @@ class AIAgent:
     ) -> None:
         """Update the last-activity timestamp and description (thread-safe).
 
-        The clock stamp is synchronized on ``_liveness_activity_lock`` and
-        bumps a monotonic generation counter, so concurrent readers (the
-        turn liveness watchdog, #95548) can bind their stall observation to
-        the exact ``(generation, timestamp)`` pair they sampled and
-        revalidate it at the commit point.
-
-        Also bridges to the kanban board's heartbeat fields when this
-        process is a dispatcher-spawned worker (HERMES_KANBAN_TASK set),
-        so the dispatcher watchdog doesn't reclaim an actively-running
-        worker as stale (#31752). Bridge is rate-limited (60s) and
-        best-effort — it never raises into the agent loop.
-
-        Separately, rate-limits a durable SessionDB activity projection
-        (``last_activity_at`` + bounded description/provenance) so
-        CLI/Gateway consumers share one observation source (#72016 / #72039).
-
-        ``provenance`` defaults to ``unknown`` (the ordinary agent activity
-        clock). Named values are for special writers (e.g. compression);
-        ordinary call sites should leave the default.
-
-        ``force_persist`` bypasses the 60s SessionDB rate limit so a
-        terminal stamp (e.g. compression completed) is not dropped.
+        Bumps a monotonic generation under ``_liveness_activity_lock`` so the watchdog can bind a stall
+        observation
+        to the exact ``(generation, timestamp)`` it sampled. Also bridges (rate-limited, best-effort) to the
+        kanban
+        heartbeat when this is a dispatcher-spawned worker, and to the durable SessionDB activity projection.
+        ``provenance`` names special writers (compression); ``force_persist`` bypasses the SessionDB rate
+        limit.
         """
         from agent.session_activity import (
             bound_activity_description,
@@ -4514,11 +3700,8 @@ class AIAgent:
             reset_session_activity_persist_window,
         )
 
-        # Lazy per-instance lock (inline so bare doubles like
-        # types.SimpleNamespace fixtures keep working — they bind
-        # _touch_activity without the class, so they cannot call
-        # self._liveness_activity_lock(); see
-        # tests/run_agent/test_session_activity_persist.py).
+        # Lazy per-instance lock, inline so SimpleNamespace doubles binding _touch_activity without the
+        # class keep working (tests/run_agent/test_session_activity_persist.py).
         _clock_lock = getattr(self, "_turn_liveness_activity_lock", None)
         if _clock_lock is None:
             _clock_lock = threading.Lock()
@@ -4530,11 +3713,8 @@ class AIAgent:
             self._last_activity_ts = time.time()
             self._last_activity_desc = bound_activity_description(desc)
             self._last_activity_provenance = normalize_activity_provenance(provenance)
-            # Real progress invalidates any reserved abort claim. A watchdog
-            # interrupt that is still in flight (e.g. parked inside the
-            # compression commit fence) must abandon itself at the final
-            # mutation edge instead of publishing against a generation the
-            # turn has already left behind.
+            # Real progress invalidates a reserved abort claim; an in-flight watchdog interrupt must abandon
+            # itself at the final mutation edge.
             self._turn_liveness_abort_claim = None
         if os.environ.get("HERMES_KANBAN_TASK"):
             try:
@@ -4547,10 +3727,7 @@ class AIAgent:
                 # steer) so the user can talk to a live task without a restart.
                 inject_new_comments_from_env(self)
             except Exception:
-                # Never let the bridge break the agent loop.  The function
-                # already swallows exceptions internally; this outer guard
-                # covers import-time failures (kanban_tools unavailable,
-                # etc.) on niche deployment surfaces.
+                # Never let the bridge break the loop; this guard covers import-time failures.
                 pass
         if force_persist:
             reset_session_activity_persist_window(self)
@@ -4559,11 +3736,8 @@ class AIAgent:
     def _persist_session_activity_if_due(self) -> None:
         """Best-effort durable activity heartbeat for SessionDB consumers.
 
-        Cadence is pinned by SESSION_ACTIVITY_HEARTBEAT_MIN_INTERVAL_SECONDS
-        (>=30s per session, config-independent — see agent/session_activity.py).
-        The write rides the standard SessionDB ``_execute_write`` patience
-        path via ``touch_session_activity``. Fail-open: a failed heartbeat
-        write must NEVER raise into the agent loop (swallow + debug-log).
+        Cadence pinned by ``SESSION_ACTIVITY_HEARTBEAT_MIN_INTERVAL_SECONDS`` (config-independent). Fail-open:
+        a failed write never raises into the agent loop.
         """
         session_id = getattr(self, "session_id", None)
         session_db = getattr(self, "_session_db", None)
@@ -4592,9 +3766,7 @@ class AIAgent:
                 ),
             )
         except Exception:
-            # Never let durable heartbeat I/O break the agent loop. The
-            # heartbeat is an observation-only projection; the next due
-            # window retries naturally.
+            # Heartbeat is observation-only; never let its I/O break the loop.
             logger.debug(
                 "session activity heartbeat write failed (ignored)",
                 exc_info=True,
@@ -4603,11 +3775,8 @@ class AIAgent:
     def _reset_activity_labels_after_turn(self) -> None:
         """Drop mid-turn activity labels once the turn is no longer running.
 
-        Keeps ``_last_activity_ts`` so idle/watchdog clocks stay continuous
-        across interrupt-recursive turns (#15654) and between turns. Clears
-        description + provenance so idle cached agents / SessionDB listings
-        do not keep advertising the last mid-turn stamp (e.g. compression
-        or tool execution) after the turn ended (#72039).
+        Keeps ``_last_activity_ts`` so idle/watchdog clocks stay continuous across turns; clears description +
+        provenance so idle agents / SessionDB listings stop advertising the last mid-turn stamp.
         """
         from agent.session_activity import ActivityProvenance
 
@@ -4629,8 +3798,7 @@ class AIAgent:
     def _capture_rate_limits(self, http_response: Any) -> None:
         """Parse x-ratelimit-* headers from an HTTP response and cache the state.
 
-        Called after each streaming API call.  The httpx Response object is
-        available on the OpenAI SDK Stream via ``stream.response``.
+        Called after each streaming call; the httpx Response is available as ``stream.response``.
         """
         if http_response is None:
             return
@@ -4652,10 +3820,8 @@ class AIAgent:
     def _capture_anthropic_response_headers(self, http_response: Any) -> None:
         """Capture out-of-band state from Anthropic Messages response headers.
 
-        The Anthropic SDK's aggregated ``Message`` drops HTTP headers. Portal
-        (and other providers) put rate-limit and credits state there — the same
-        families the OpenAI-wire streaming path captures via
-        ``stream.response``. Fail-open: each capture swallows its own errors.
+        The SDK's aggregated ``Message`` drops headers, where Portal puts rate-limit and credits state. Fail-
+        open.
         """
         self._capture_rate_limits(http_response)
         self._capture_credits(http_response)
@@ -4663,10 +3829,9 @@ class AIAgent:
     def _capture_credits(self, http_response: Any) -> None:
         """Parse x-nous-credits-* headers, cache CreditsState, fire threshold notices.
 
-        Fail-open throughout — header issues never break the agent loop. The PARSE is
-        swallowed (any error → treated as a miss → keep last-known). The notice
-        EVALUATION/EMIT is a SEPARATE block that WARNS on failure (R1-M2): a bug in the
-        depletion-notice path must not vanish silently under the parse swallow.
+        The PARSE is swallowed (miss → keep last-known); the notice EVALUATION is a separate block that WARNS
+        on
+        failure so a depletion-notice bug cannot vanish silently.
         """
         # Dev test fixture (HERMES_DEV_CREDITS_FIXTURE): inject a chosen notice state
         # each turn for repeatable testing, bypassing real headers. Throwaway scaffolding.
@@ -4681,9 +3846,7 @@ class AIAgent:
                 self._credits_session_start_micros = _fixture.remaining_micros
             _latch = getattr(self, "_credits_latch", None)
             if isinstance(_latch, dict):
-                # Only seen_below_90 — never seen_grant_unspent (priming it would
-                # fire grant_spent on a fixture's first observation, the exact
-                # every-session nag the gate exists to prevent).
+                # Only seen_below_90 — priming seen_grant_unspent would fire grant_spent on first observation.
                 _latch["seen_below_90"] = True  # let warn90 fire without a real crossing
             _used = _fixture.used_fraction
             logger.info(
@@ -4747,12 +3910,10 @@ class AIAgent:
     def _emit_credits_notices(self) -> None:
         """Run the threshold policy on the current credits state and emit notices.
 
-        Shared by the warm path (_capture_credits) and the L3 cold-start seed, so a
-        session that opens already depleted warns immediately — not only after the first
-        inference header. Runs only when a notice consumer is bound (messaging binds none
-        → state still cached for /usage, no policy). WARNS on failure rather than
-        swallowing (R1-M2): a depletion-path bug must not vanish silently. Emits clears
-        FIRST, then shows (so depleted lands last in a latest-wins slot).
+        Shared by the warm path and the cold-start seed so an already-depleted session warns immediately. Runs
+        only
+        when a notice consumer is bound. WARNS on failure. Emits clears FIRST so depleted lands last (latest-
+        wins slot).
         """
         if getattr(self, "notice_callback", None) is None and getattr(self, "notice_clear_callback", None) is None:
             return
@@ -4766,10 +3927,7 @@ class AIAgent:
             latch = getattr(self, "_credits_latch", None)
             if latch is None:
                 latch = self._credits_latch = new_credits_latch()
-            # Free-model gate: a depleted account on a free model can still
-            # inference, so the depleted error banner is suppressed. Local-data
-            # only (":free" suffix, "stealth/" prefix + pricing-cache peek) —
-            # never a network call.
+            # Free-model gate: a depleted account can still inference on a free model. Local data only.
             model_is_free = is_free_tier_model(
                 getattr(self, "model", "") or "",
                 getattr(self, "base_url", "") or "",
@@ -4783,12 +3941,9 @@ class AIAgent:
             logger.warning("credits notice evaluation/emit failed", exc_info=True)
 
     def _credits_notices_enabled(self) -> bool:
-        """Whether credits notices are enabled (config display.credits_notices).
+        """Whether credits notices are enabled (``display.credits_notices``).
 
-        Read once per agent and cached — the policy runs after every API
-        response, and the setting governs UI noise, not correctness, so a
-        config flip applying on the next session is fine.  Fail-open True
-        (preserve current behaviour) on any config error.
+        Read once per agent and cached (governs UI noise, not correctness); fail-open True.
         """
         cached = getattr(self, "_credits_notices_enabled_cache", None)
         if cached is not None:
@@ -4816,10 +3971,7 @@ class AIAgent:
         return self._credits_session_start_micros - self._credits_state.remaining_micros
 
     def _check_openrouter_cache_status(self, http_response: Any) -> None:
-        """Read X-OpenRouter-Cache-Status from response headers and log it.
-
-        Increments ``_or_cache_hits`` on HIT so callers can report savings.
-        """
+        """Read X-OpenRouter-Cache-Status from response headers and log it; HITs count in ``_or_cache_hits``."""
         if http_response is None:
             return
         headers = getattr(http_response, "headers", None)
@@ -4840,11 +3992,8 @@ class AIAgent:
     def get_activity_summary(self) -> dict:
         """Return a snapshot of the agent's current activity for diagnostics.
 
-        Exposes the shared activity observation contract
-        (``last_activity_at`` / ``last_activity_description`` /
-        ``last_activity_provenance``) plus short aliases
-        (``last_activity_ts`` / ``last_activity_desc`` / …) for existing
-        gateway and delegate readers.
+        Exposes ``last_activity_at`` / ``last_activity_description`` / ``last_activity_provenance`` plus the
+        short aliases existing gateway and delegate readers use.
         """
         from agent.session_activity import (
             ActivityProvenance,
@@ -4870,8 +4019,7 @@ class AIAgent:
     def shutdown_memory_provider(self, messages: list = None) -> None:
         """Shut down the memory provider and context engine at session end.
 
-        Idempotent: gateway cleanup and AIAgent.close() may share this
-        ownership boundary.
+        Idempotent: gateway cleanup and ``AIAgent.close()`` may share this ownership boundary.
         """
         if getattr(self, "_memory_provider_shutdown", False):
             return
@@ -4897,20 +4045,17 @@ class AIAgent:
 
     def commit_memory_session(self, messages: list = None) -> None:
         """Trigger end-of-session extraction without tearing providers down.
-        Called when session_id rotates (e.g. /new, context compression);
-        providers keep their state and continue running under the old
-        session_id — they just flush pending extraction now."""
+
+        Called on session_id rotation (/new, compression); providers keep running, just flushing pending
+        extraction.
+        """
         if self._memory_manager:
             try:
                 self._memory_manager.on_session_end(messages or [])
             except Exception:
                 pass
-        # Notify context engine of session end too — same lifecycle moment as
-        # the memory manager's on_session_end. Without this, engines that
-        # accumulate per-session state (DAGs, summaries) leak that state from
-        # the rotated-out session into whatever comes next under the same
-        # compressor instance. Mirrors the call in shutdown_memory_provider().
-        # See issue #22394.
+        # Notify the context engine of session end (same lifecycle moment as the memory manager) so
+        # per-session engine state does not leak into the next session (#22394).
         if hasattr(self, "context_compressor") and self.context_compressor:
             try:
                 self.context_compressor.on_session_end(
@@ -4928,39 +4073,18 @@ class AIAgent:
         interrupted: bool,
         messages: list | None = None,
     ) -> None:
-        """Mirror a completed turn into external memory providers.
+        """Mirror a completed turn into external memory providers (``sync_all`` + ``queue_prefetch_all``).
 
-        Called at the end of ``run_conversation`` with the cleaned user
-        message (``original_user_message``) and the finalised assistant
-        response.  The external memory backend gets both ``sync_all`` (to
-        persist the exchange) and ``queue_prefetch_all`` (to start
-        warming context for the next turn) in one shot.
-
-        Uses ``original_user_message`` rather than ``user_message``
-        because the latter may carry injected skill content that bloats
-        or breaks provider queries.
-
-        Interrupted turns are skipped entirely (#15218).  A partial
-        assistant output, an aborted tool chain, or a mid-stream reset
-        is not durable conversational truth — mirroring it into an
-        external memory backend pollutes future recall with state the
-        user never saw completed.  The prefetch is gated on the same
-        flag: the user's next message is almost certainly a retry of
-        the same intent, and a prefetch keyed on the interrupted turn
-        would fire against stale context.
-
-        Normal completed turns still sync as before.  The whole body is
-        wrapped in ``try/except Exception`` because external memory
-        providers are strictly best-effort — a misconfigured or offline
-        backend must not block the user from seeing their response.
+        Uses ``original_user_message`` — ``user_message`` may carry injected skill content. Interrupted turns
+        are
+        skipped entirely: partial output is not durable truth, and a prefetch keyed on it would fire against
+        stale context. Strictly best-effort — an offline backend must never block the response.
         """
         if interrupted:
             return
         if not (self._memory_manager and final_response and original_user_message):
             return
-        # Multimodal turns carry content as a list of typed parts; providers
-        # expect plain strings, so flatten to text first (newline-joined for
-        # memory, vs the default space-join used for log/trajectory previews).
+        # Flatten multimodal parts to text (newline-joined for memory).
         user_text = _summarize_user_message_for_log(original_user_message, sep="\n")
         response_text = _summarize_user_message_for_log(final_response, sep="\n")
         if not (user_text and response_text):
@@ -4974,10 +4098,7 @@ class AIAgent:
                 response_text,
                 **sync_kwargs,
             )
-            # Sibling of the build_turn_context() prefetch gate: warming the
-            # next turn's recall with a trivial prompt ("hi", "thanks") keys
-            # provider searches on zero-signal text — skip it. The sync above
-            # still runs so the turn itself is persisted.
+            # Sibling of the build_turn_context() prefetch gate: don't key recall on zero-signal prompts.
             if not is_trivial_prompt(user_text):
                 self._memory_manager.queue_prefetch_all(
                     user_text,
@@ -4989,24 +4110,11 @@ class AIAgent:
     def release_clients(self) -> None:
         """Release LLM client resources WITHOUT tearing down session tool state.
 
-        Used by the gateway when evicting this agent from _agent_cache for
-        memory-management reasons (LRU cap or idle TTL) — the session may
-        resume at any time with a freshly-built AIAgent that reuses the
-        same task_id / session_id, so we must NOT kill:
-          - process_registry entries for task_id (user's bg shells)
-          - terminal sandbox for task_id (cwd, env, shell state)
-          - browser daemon for task_id (open tabs, cookies)
-          - computer-use backend for task_id (native target and browser refs)
-          - memory provider (has its own lifecycle; keeps running)
-
-        We DO close:
-          - OpenAI/httpx client pool (big chunk of held memory + sockets;
-            the rebuilt agent gets a fresh client anyway)
-          - Active child subagents (per-turn artefacts; safe to drop)
-
-        Safe to call multiple times.  Distinct from close() — which is the
-        hard teardown for actual session boundaries (/new, /reset, session
-        expiry).
+        For gateway cache eviction (LRU/idle): the session may resume with a fresh AIAgent on the same
+        task_id, so
+        process_registry entries, terminal sandbox, browser daemon, computer-use backend and memory provider
+        are
+        kept. Closes the OpenAI/httpx pool and active child subagents. Idempotent; distinct from ``close()``.
         """
         # Close active child agents (per-turn; no cross-turn persistence).
         try:
@@ -5025,12 +4133,8 @@ class AIAgent:
         except Exception:
             pass
 
-        # Retire the OpenAI/httpx client to release sockets immediately.
-        # #70773: eviction runs on the gateway's memory-manager thread — a
-        # cross-thread hard close of the shared client can release TLS FDs
-        # under a still-unwinding worker (FD-recycle → SQLite corruption).
-        # Retirement shuts the pooled sockets down (the memory/socket win we
-        # want here) and lets GC release the FDs once no thread holds them.
+        # Retire (don't hard-close) the shared client: eviction runs on the gateway memory-manager thread,
+        # and a cross-thread close can release TLS FDs under a still-unwinding worker (#70773).
         try:
             client = getattr(self, "client", None)
             if client is not None:
@@ -5051,22 +4155,14 @@ class AIAgent:
             pass
 
     def close(self) -> None:
-        """Release all resources held by this agent instance.
+        """Release all resources held by this agent instance (idempotent).
 
-        Cleans up subprocess resources that would otherwise become orphans:
-        - Background processes tracked in ProcessRegistry
-        - Terminal sandbox environments
-        - Browser daemon sessions
-        - Computer-use backend sessions and target/ref state
-        - Active child agents (subagent delegation)
-        - OpenAI/httpx client connections
-
-        Safe to call multiple times (idempotent).  Each cleanup step is
-        independently guarded so a failure in one does not prevent the rest.
+        Cleans up background processes, terminal sandbox, browser daemon, computer-use backend, child agents
+        and
+        client connections. Each step is independently guarded so one failure does not block the rest.
         """
-        # AIAgent.close() is the hard owner boundary. Gateway cleanup may
-        # call shutdown_memory_provider() first; its idempotence prevents
-        # duplicate extraction while direct callers cannot skip provider close.
+        # close() is the hard owner boundary; shutdown_memory_provider() is idempotent so gateway
+        # pre-calls never double-extract.
         try:
             session_messages = getattr(self, "_session_messages", None)
             self.shutdown_memory_provider(
@@ -5096,11 +4192,7 @@ class AIAgent:
         except Exception:
             pass
 
-        # 4. Release the session-owned computer-use backend.  This ends the
-        # exact cua-driver session, drops typed-browser refs/grants, and stops
-        # a private embedded daemon when Hermes YOLO selected unrestricted
-        # mode.  The import is lazy so sessions without computer_use retain
-        # the narrow core footprint.
+        # 4. Release the session-owned computer-use backend (lazy import keeps the core footprint narrow).
         try:
             from tools.computer_use import release_computer_use_session
 
@@ -5141,13 +4233,8 @@ class AIAgent:
         except Exception:
             pass
 
-        # 6c. Close the Codex app-server session. The runtime already drops
-        # it on turn crash / retirement (agent/codex_runtime.py), but hard
-        # teardown had no owner — a /new, /reset, or session expiry left the
-        # app-server child process running until interpreter exit. Clear the
-        # attribute BEFORE close() so a concurrent reader can't grab a
-        # half-closed session, and so a raising close() can't strand a stale
-        # reference behind.
+        # 6c. Close the Codex app-server session; hard teardown had no owner and left the child running.
+        # Clear the attribute BEFORE close() so a concurrent reader can't grab a half-closed session.
         try:
             codex_session = getattr(self, "_codex_session", None)
             if codex_session is not None:
@@ -5156,33 +4243,22 @@ class AIAgent:
         except Exception:
             pass
 
-        # 7. Free conversation history.  Mirrors _release_evicted_agent_soft's
-        # soft-eviction clear — close() is the hard teardown for true session
-        # boundaries (/new, /reset, session expiry), so the message list won't
-        # be reused.  Drops the reference proactively rather than waiting for
-        # the agent object itself to be collected, which matters when a caller
-        # still holds the closed agent (e.g. a draining background task).
+        # 7. Free conversation history proactively (close() is the hard teardown; callers may still hold
+        # the closed agent).
         try:
             self._session_messages = []
         except Exception:
             pass
 
-        # The references above are now gone; on Linux/glibc, return their free
-        # heap pages immediately instead of retaining the process RSS high-water
-        # mark until exit.  This helper is a safe no-op on other allocators.
+        # Return freed heap pages to the OS on glibc; safe no-op elsewhere.
         try:
             from hermes_cli.mem_trim import trim_memory
             trim_memory(force=True, reason="agent close")
         except Exception:
             pass
 
-        # 8. Finalize the owned SQLite session row unless this agent is only a
-        # temporary helper that deliberately handed session ownership forward
-        # (manual compression helpers that rotate to a continuation session_id,
-        # or background-review forks that share the live parent's session_id and
-        # must leave it open). end_session() is first-reason-wins and no-ops on
-        # an already-ended row, so this never clobbers a 'compression' /
-        # 'cron_complete' / 'cli_close' reason set by an earlier terminal path.
+        # 8. Finalize the owned session row unless ownership was handed forward (compression helpers,
+        # review forks sharing the parent's id). end_session() is first-reason-wins and idempotent.
         session_db = getattr(self, "_session_db", None)
         try:
             if getattr(self, "_end_session_on_close", True):
@@ -5192,17 +4268,9 @@ class AIAgent:
         except Exception:
             pass
 
-        # 9. Close the SQLite handle itself, but ONLY when this agent owns it.
-        # end_session() above finalizes the session ROW; it does not release the
-        # connection. For the shared launch handle that is correct — it outlives
-        # every agent — so _owns_session_db defaults False and this is a no-op.
-        # A DEDICATED handle (the gateway's per-profile state.db opens, and the
-        # lazy self-open in _get_session_db_for_recall) has no other owner: left
-        # unclosed it keeps its db/-wal/-shm fds and its background token-writer
-        # thread, and once that writer has started the instance pins ITSELF via
-        # atexit.register(_drain_token_queue_at_exit) — which only close()
-        # unregisters — so it survives for the life of the process.
-        # Cleared first so the documented idempotency of close() holds.
+        # 9. Close the SQLite handle ONLY when this agent owns it. A dedicated handle left open keeps its
+        # fds and background token-writer thread (pinned via atexit) for the life of the process.
+        # Cleared first so close() stays idempotent.
         try:
             if getattr(self, "_owns_session_db", False) and session_db is not None:
                 self._owns_session_db = False
@@ -5214,19 +4282,13 @@ class AIAgent:
             pass
 
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:
-        """
-        Recover todo state from conversation history.
-        
-        The gateway creates a fresh AIAgent per message, so the in-memory
-        TodoStore is empty. We scan the history for the most recent todo
-        tool response and replay it to reconstruct the state.
+        """Recover todo state from conversation history.
 
-        Hydration is restricted to tool results that are paired with an
-        earlier assistant ``todo`` tool call. The gateway/API server accepts
-        caller-supplied ``conversation_history``, so a forged bare
-        ``role: tool`` message carrying a ``todos`` array must not be able to
-        seed the store without a matching canonical tool call
-        (GHSA-5g4g-6jrg-mw3g).
+        The gateway builds a fresh AIAgent per message, so replay the most recent todo tool response. Only
+        results
+        paired with an earlier assistant ``todo`` tool call count: caller-supplied history could otherwise
+        seed
+        the store with a forged bare ``role: tool`` message (GHSA-5g4g-6jrg-mw3g).
         """
         from tools.todo_tool import MAX_TODO_RESULT_CHARS
 
@@ -5264,12 +4326,8 @@ class AIAgent:
                 continue
 
         if last_todo_response is not None:
-            # Restore only when history carries a newer revision than the
-            # store already holds (a live store re-hydrated in place must not
-            # be rolled back by older history). Sessions that predate
-            # revisions default to 1 so they still hydrate. Empty lists
-            # matter: they are an authoritative clear after an earlier
-            # non-empty plan.
+            # Restore only when history carries a newer revision than the store holds; empty lists are an
+            # authoritative clear.
             current_revision = int(
                 self._todo_store.snapshot().get("revision", 0) or 0
             )
@@ -5294,10 +4352,8 @@ class AIAgent:
     ) -> bool:
         """Return True when a tool result belongs to a prior assistant todo call.
 
-        Scans backwards from the tool result to the nearest assistant message
-        and confirms it issued a ``todo`` tool call whose id matches this
-        result's ``tool_call_id``. A ``user``/``system`` boundary (or a missing
-        id) means the result is unpaired and must not hydrate the store.
+        Scans back to the nearest assistant message for a ``todo`` call with this ``tool_call_id``; a
+        ``user``/``system`` boundary or missing id means unpaired → must not hydrate.
         """
         if tool_index < 0 or tool_index >= len(history):
             return False
@@ -5361,8 +4417,7 @@ class AIAgent:
     def _get_tool_call_id_static(tc) -> str:
         """Extract call ID from a tool_call entry (dict or object).
 
-        Forwarder — policy owner is
-        ``agent.message_sanitization.coalesce_tool_call_id`` (audit F4).
+        Policy owner: ``agent.message_sanitization.coalesce_tool_call_id``.
         """
         return _sanitize_coalesce_tool_call_id(tc)
 
@@ -5370,10 +4425,7 @@ class AIAgent:
     def _get_tool_call_name_static(tc) -> str:
         """Extract function name from a tool_call entry (dict or object).
 
-        Gemini's OpenAI-compatibility endpoint requires every `role: tool`
-        message to carry the matching function name. OpenAI/Anthropic/ollama
-        tolerate its absence, so the field is best-effort: callers fall back
-        to "" and the message still works elsewhere.
+        Gemini's OpenAI-compat endpoint requires the name on every ``role: tool`` message; others tolerate "".
         """
         if isinstance(tc, dict):
             fn = tc.get("function")
@@ -5397,20 +4449,11 @@ class AIAgent:
         *,
         drop_codex_reasoning_items: bool = True,
     ) -> bool:
-        """Return True if ``msg`` is an assistant turn whose only payload is reasoning.
+        """Return True if ``msg`` is an assistant turn whose only payload is reasoning (no text, no
+        tool_calls).
 
-        "Thinking-only" means the model emitted reasoning (``reasoning`` or
-        ``reasoning_content``) but no visible text and no tool_calls. When sent
-        back to providers that convert reasoning into thinking blocks (native
-        Anthropic, OpenRouter Anthropic, third-party Anthropic-compatible
-        gateways), the resulting message has only thinking blocks — which
-        Anthropic rejects with HTTP 400 "The final block in an assistant
-        message cannot be `thinking`."
-
-        Symmetric with Claude Code's ``filterOrphanedThinkingOnlyMessages``
-        (src/utils/messages.ts). We drop the whole turn from the API copy
-        rather than fabricating stub text — the message log (UI transcript)
-        keeps the reasoning block; only the wire copy is cleaned.
+        Providers that convert reasoning to thinking blocks reject such a message (400 "final block cannot be
+        thinking"). The whole turn is dropped from the API copy; the transcript keeps the reasoning block.
         """
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             return False
@@ -5443,14 +4486,8 @@ class AIAgent:
                 return False
         elif content is not None and content != "":
             return False
-        # A native compaction checkpoint makes a carrier never thinking-only,
-        # regardless of api_mode or which reasoning field is populated. The
-        # checkpoint is the server-side stand-in for already-pruned history
-        # and exists in exactly one place; the codex_responses adapter also
-        # surfaces commentary text via msg["reasoning"], so the string branch
-        # below would otherwise drop a carrier before the sidecar is ever
-        # inspected. Checked here — above every reasoning branch — so no
-        # carrier shape can fall into a drop path (#82108 review finding).
+        # A native compaction checkpoint makes a carrier never thinking-only, regardless of api_mode or
+        # reasoning field. Checked above every reasoning branch so no carrier shape is dropped (#82108).
         from agent.native_compaction import has_compaction_checkpoint
 
         if has_compaction_checkpoint(msg.get("codex_reasoning_items")):
@@ -5462,10 +4499,8 @@ class AIAgent:
         rd = msg.get("reasoning_details")
         if isinstance(rd, list) and rd:
             return True
-        # Codex Responses stores encrypted reasoning state under a separate
-        # assistant-message key. Treat only real reasoning items as
-        # thinking-only; empty/junk lists should fall through to the generic
-        # empty-turn handling instead of being dropped here.
+        # Codex Responses keeps encrypted reasoning under a separate key; only real items count as
+        # thinking-only, empty/junk lists fall through to generic empty-turn handling.
         codex_items = msg.get("codex_reasoning_items")
         if drop_codex_reasoning_items and isinstance(codex_items, list):
             return any(
@@ -5489,13 +4524,10 @@ class AIAgent:
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
-        """Truncate excess delegate_task calls to max_concurrent_children.
+        """Truncate excess delegate_task tool_calls in one turn to max_concurrent_children, keeping all non-
+        delegate calls.
 
-        The delegate_tool caps the task list inside a single call, but the
-        model can emit multiple separate delegate_task tool_calls in one
-        turn.  This truncates the excess, preserving all non-delegate calls.
-
-        Returns the original list if no truncation was needed.
+        Returns the original list when no truncation was needed.
         """
         from tools.delegate_tool import _get_max_concurrent_children
         max_children = _get_max_concurrent_children()
@@ -5520,13 +4552,10 @@ class AIAgent:
 
     @staticmethod
     def _deduplicate_tool_calls(tool_calls: list) -> list:
-        """Remove duplicate (tool_name, arguments) pairs within a single turn.
+        """Remove duplicate (tool_name, arguments) pairs within a single turn; first occurrence wins.
 
-        Valid JSON arguments are canonicalized so equivalent objects do not
-        evade deduplication merely because their keys or whitespace differ.
-        Malformed arguments retain their raw representation rather than being
-        repaired here. Only the first occurrence of each unique pair is kept.
-        Returns the original list if no duplicates were found.
+        Valid JSON arguments are canonicalized so key order / whitespace cannot evade dedup; malformed
+        arguments keep their raw form. Returns the original list when nothing was removed.
         """
         seen: set = set()
         unique: list = []
@@ -5548,13 +4577,11 @@ class AIAgent:
 
     @staticmethod
     def _uniquify_tool_call_ids(tool_calls: list) -> list:
-        """Ensure every tool call in a single assistant turn has a distinct id.
+        """Ensure every tool call in a single assistant turn has a distinct id (policy owner:
+        ``message_sanitization``).
 
-        Forwarder — policy owner is
-        ``agent.message_sanitization.uniquify_tool_call_ids`` (audit F4).
-        First occurrence keeps its id; later collisions get a deterministic
-        ``<id>_d<n>`` suffix (never uuid4 — prompt-cache prefix stability).
-        Mutates entries in place and returns the same list.
+        Collisions get a deterministic ``<id>_d<n>`` suffix — never uuid4, for prompt-cache prefix stability.
+        In place.
         """
         return _sanitize_uniquify_tool_call_ids(tool_calls)
 
@@ -5570,11 +4597,9 @@ class AIAgent:
 
     @staticmethod
     def _deterministic_call_id(fn_name: str, arguments: str, index: int = 0) -> str:
-        """Generate a deterministic call_id from tool call content.
+        """Generate a deterministic call_id from tool call content when the API omits one.
 
-        Used as a fallback when the API doesn't provide a call_id.
-        Deterministic IDs prevent cache invalidation — random UUIDs would
-        make every API call's prefix unique, breaking OpenAI's prompt cache.
+        Random UUIDs would make every request prefix unique and break the provider prompt cache.
         """
         return _codex_deterministic_call_id(fn_name, arguments, index)
 
@@ -5615,12 +4640,9 @@ class AIAgent:
     def _is_openai_client_closed(client: Any) -> bool:
         """Check if an OpenAI client is closed.
 
-        Handles both property and method forms of is_closed:
-        - httpx.Client.is_closed is a bool property
-        - openai.OpenAI.is_closed is a method returning bool
-
-        Prior bug: getattr(client, "is_closed", False) returned the bound method,
-        which is always truthy, causing unnecessary client recreation on every call.
+        ``is_closed`` is a bool property on httpx.Client but a method on openai.OpenAI; a bare getattr
+        returned
+        the always-truthy bound method and recreated the client on every call.
         """
         from unittest.mock import Mock
 
@@ -5686,24 +4708,12 @@ class AIAgent:
     def _retire_shared_openai_client(self, client: Any, *, reason: str) -> None:
         """Ownership-safe retirement of a replaced shared OpenAI client.
 
-        #70773 / #67142 / #29507: ``client.close()`` releases the pool's raw
-        FDs from the *calling* thread. The shared primary client has no single
-        owning thread — worker threads from stale-killed attempts may still be
-        unwinding their SSL BIOs, and the codex-direct / MoA paths stream on
-        the shared client itself. If we release an FD while another thread's
-        SSL layer still caches the raw integer fd, the kernel can recycle it
-        into an unrelated ``open()`` (e.g. ``kanban.db``) and the unwinding
-        TLS flush then writes an application-data record into that file — the
-        SQLite-header corruption documented in #29507/#70773.
-
-        Only an owner may release FDs, and a replaced shared client has none.
-        So nobody calls ``close()``: we ``shutdown()`` the pooled sockets
-        (FD-safe from any thread; unblocks in-flight readers with EOF/EPIPE)
-        and defer the actual FD release to garbage collection. Refcounting
-        guarantees the underlying sockets are only collected once every
-        thread that borrowed the client has unwound — GC *is* the ownership
-        handshake. In the common case (no borrower) the refcount hits zero on
-        this line and the FDs are released immediately anyway.
+        ``close()`` releases raw FDs from the calling thread; the shared client has no owning thread and other
+        threads may still hold its fd in an SSL BIO. A recycled fd then gets a TLS record written into an
+        unrelated
+        file (the SQLite-header corruption family). So: ``shutdown()`` the sockets (FD-safe from any thread)
+        and
+        let GC release the FDs once every borrower has unwound.
         """
         if client is None:
             return
@@ -5725,18 +4735,12 @@ class AIAgent:
             )
 
     def _drain_transports_after_abandonment(self, *, reason: str) -> int:
-        """FD-safe transport drain for an abandoned (timed-out) worker (#94248).
+        """FD-safe transport drain for an abandoned (timed-out) worker; returns sockets shut down.
 
-        A delegation deadline abandons this agent's daemon worker while it may
-        still be blocked inside an in-flight OpenSSL ``read`` (Codex Responses
-        stream, httpx request). The timeout thread must never hard-close those
-        transports — ``client.close()`` releases raw FDs under a live SSL BIO,
-        the #29507 / #67142 / #70773 native-corruption family and the SIGSEGV
-        shape reported in #94248. This helper only ``shutdown()``s pooled
-        sockets (safe from any thread), settling blocked reads with EOF/EPIPE
-        so the worker can unwind and run the real close from its own thread.
-
-        Returns the number of sockets shut down across all transports.
+        The worker may be blocked in an OpenSSL read; hard-closing from the timeout thread releases FDs under
+        a live
+        BIO (native corruption / SIGSEGV). Only ``shutdown()`` so the read settles with EOF and the worker
+        closes itself.
         """
         drained = 0
         # Shared primary client (codex-direct / MoA stream on it directly).
@@ -5796,10 +4800,8 @@ class AIAgent:
     def _build_primary_client_for_active_provider(self, *, reason: str) -> Any:
         """Build the shared client shape required by the active provider.
 
-        MoA is a virtual provider whose ``client`` is an in-process facade,
-        not an OpenAI SDK client. Generic rebuild paths (credential rotation,
-        timeout application, and dead-connection cleanup) still pass through
-        this helper, so they must preserve that provider/client invariant.
+        MoA is a virtual provider whose ``client`` is an in-process facade, not an SDK client; generic rebuild
+        paths (rotation, timeout, dead-connection cleanup) must preserve that.
         """
         if (getattr(self, "provider", "") or "").strip().lower() == "moa":
             from agent.moa_loop import build_moa_facade
@@ -5827,12 +4829,8 @@ class AIAgent:
                 )
                 return False
             self.client = new_client
-        # #70773: never hard-close the replaced shared client from here — the
-        # caller may not be the thread whose request is still unwinding on the
-        # old pool (credential rotation and dead-connection cleanup run on the
-        # turn thread while stale-killed workers unwind; the codex-direct path
-        # streams on the shared client itself). Retire it instead: sockets are
-        # shut down (FD-safe), FD release deferred to GC.
+        # Never hard-close the replaced shared client here (#70773): the caller may not own the thread
+        # still unwinding on the old pool. Retire: sockets shut down, FD release deferred to GC.
         self._retire_shared_openai_client(old_client, reason=f"replace:{reason}")
         return True
 
@@ -5901,14 +4899,8 @@ class AIAgent:
 
         return copilot_request_headers(is_agent_turn=True, is_vision=is_vision)
 
-    # Close reasons the request workers' own ``finally`` unwind reports for
-    # a request that produced a response — the only closes that both come
-    # from the thread that owns the pool's FDs AND attest a healthy pool.
-    # Only these may keep the wire client for the next call, and poisoning
-    # still wins: a cross-thread abort (#29507) marks the slot so even a
-    # worker-finally close discards it. Every other reason (error cleanups,
-    # stale/interrupt kills, retry cleanups) gets a real close, so a retry
-    # after a request error always builds a fresh pool.
+    # Close reasons reported by a request worker's own finally after a response — the only closes
+    # that come from the FD-owning thread AND attest a healthy pool. Poisoning (#29507) still wins.
     _REQUEST_CLIENT_REUSE_REASONS = frozenset({
         "request_complete",
         "stream_request_complete",
@@ -5932,29 +4924,16 @@ class AIAgent:
             return primary_client
         with self._openai_client_lock():
             request_kwargs = dict(self._client_kwargs)
-        # Per-request OpenAI-wire clients (used by both the non-streaming
-        # chat-completions path and the streaming chat-completions path
-        # in `_interruptible_api_call`) should not run the SDK's built-in
-        # retry loop: the agent's outer loop owns retries with credential
-        # rotation, provider fallback, and backoff that the SDK can't
-        # see. Leaving SDK retries on (default 2) compounds with our outer
-        # retries and lets a single hung provider request stretch to ~3x
-        # the per-call timeout before our stale detector reports it.
-        # Shared/primary clients and Anthropic / Bedrock paths are
-        # unaffected (they don't go through here).
+        # Per-request clients must not run the SDK retry loop: the outer loop owns retries/rotation/
+        # fallback, and SDK retries stretch a hung request ~3x past our stale detector.
         request_kwargs["max_retries"] = 0
         if (
             base_url_host_matches(str(request_kwargs.get("base_url", "")), "githubcopilot.com")
             and self._api_kwargs_have_image_parts(api_kwargs or {})
         ):
             request_kwargs["default_headers"] = self._copilot_headers_for_request(is_vision=True)
-        # Reuse the cached wire client while the effective kwargs are
-        # unchanged: constructing openai.OpenAI + its httpx pool costs
-        # ~19-35ms per LLM call (fresh TCP+TLS handshake), ~5x per turn.
-        # The cache is a single checked-out slot: `in_use` prevents two
-        # concurrent calls from sharing one pool's close/abort lifecycle
-        # (a second concurrent call gets a fresh untracked client with
-        # the old build-per-request behavior).
+        # Reuse the cached wire client while kwargs are unchanged (openai.OpenAI + httpx pool costs
+        # ~19-35ms/call). Single checked-out slot: `in_use` keeps two concurrent calls off one pool.
         stale = None
         with self._openai_client_lock():
             cache = self._request_client_cache_ref()
@@ -5967,35 +4946,28 @@ class AIAgent:
                 ):
                     cache["in_use"] = True
                     return cached
-                # kwargs changed (credential rotation, provider failover),
-                # poisoned by a cross-thread abort (#29507), or externally
-                # closed — never reuse; discard and rebuild below.
+                # kwargs changed, poisoned by a cross-thread abort (#29507), or externally closed — rebuild.
                 stale = cached
                 cache["client"] = None
                 cache["kwargs"] = None
                 cache["poisoned"] = False
         if stale is not None:
-            # Safe to close from this thread: in_use was False, so no
-            # worker thread owns the pool's FDs (#29507 concerns clients
-            # with an in-flight request on another thread).
+            # Safe to close here: in_use was False, so no worker thread owns the pool's FDs.
             self._close_openai_client(stale, reason=f"reuse_evict:{reason}", shared=False)
         client = self._create_openai_client(request_kwargs, reason=reason, shared=False)
         with self._openai_client_lock():
             cache = self._request_client_cache_ref()
             if cache["client"] is None:
                 cache["client"] = client
-                # Snapshot nested dicts (default_headers): rotation sites
-                # assign fresh inner dicts today, but an aliased inner
-                # object would compare equal even after in-place mutation.
+                # Snapshot nested dicts (default_headers) so an aliased inner object can't compare equal after
+                # mutation.
                 cache["kwargs"] = {
                     k: dict(v) if isinstance(v, dict) else v
                     for k, v in request_kwargs.items()
                 }
                 cache["poisoned"] = False
                 cache["in_use"] = True
-            # else: a concurrent call holds the slot — hand this client
-            # out untracked; _close_request_openai_client fully closes
-            # untracked clients, preserving the per-request lifecycle.
+            # else: a concurrent call holds the slot — hand this client out untracked (fully closed later).
         return client
 
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
@@ -6007,9 +4979,8 @@ class AIAgent:
                     # (and its warm httpx pool) for the next sequential call.
                     cache["in_use"] = False
                     return
-                # Failure / kill / abort outcome: drop the slot and fall
-                # through to a real close. This runs on the owning worker
-                # thread, which is where the FD release belongs (#29507).
+                # Failure / kill / abort: drop the slot and do a real close on the owning worker thread
+                # (#29507).
                 cache["client"] = None
                 cache["kwargs"] = None
                 cache["poisoned"] = False
@@ -6030,12 +5001,8 @@ class AIAgent:
         if client is None:
             return
         if in_use:
-            # A worker thread has this client checked out for an in-flight
-            # request (workers can outlive turns — see interruptible_api_call).
-            # client.close() here would release its FDs from a stranger thread,
-            # the #29507 race teardown must not reintroduce. Abort the sockets
-            # instead; the slot is already cleared, so the worker's own finally
-            # sees an untracked client and does the real close on its thread.
+            # A worker has this client checked out; close() here would release FDs from a stranger thread
+            # (#29507). Abort the sockets; the worker's own finally does the real close.
             self._abort_request_openai_client(client, reason=f"{reason}_in_flight")
             return
         self._close_openai_client(client, reason=reason, shared=False)
@@ -6043,32 +5010,21 @@ class AIAgent:
     def _abort_request_openai_client(self, client: Any, *, reason: str) -> None:
         """Cross-thread abort: shut sockets down without releasing FDs.
 
-        Companion to :meth:`_close_request_openai_client` for stranger-thread
-        callers (interrupt-check loop, stale-call detector). Calling
-        ``client.close()`` from a thread that does not own the active httpx
-        connection raced the still-live SSL BIO and corrupted unrelated file
-        descriptors when the kernel recycled the just-freed TCP FD (#29507).
-
-        Here we only ``shutdown(SHUT_RDWR)`` the pool's sockets. That unblocks
-        the owning worker thread's pending ``recv``/``send`` with an EOF or
-        ``EPIPE`` so it can unwind and close ``client`` from its own context
-        — which is where the FD release belongs.
+        For stranger-thread callers (interrupt loop, stale detector). ``close()`` from a non-owning thread
+        raced the
+        live SSL BIO and corrupted unrelated FDs; ``shutdown(SHUT_RDWR)`` unblocks the owner's recv/send so it
+        closes from its own context.
         """
         if client is None:
             return
-        # A pool whose sockets were shut down from a stranger thread must
-        # never be reused: poison the cache slot so the owner-thread close
-        # discards it and the next create builds a fresh client.
+        # A pool whose sockets were shut from a stranger thread must never be reused: poison the slot.
         with self._openai_client_lock():
             cache = self._request_client_cache_ref()
             if cache["client"] is client:
                 cache["poisoned"] = True
         try:
             shutdown_count = self._force_close_tcp_sockets(client)
-            # tcp_force_closed=0 means the stranger-thread abort found no
-            # sockets to shut down — the worker stays blocked in recv and the
-            # provider keeps the slot (#72975). Surface that as WARNING so it
-            # cannot be mistaken for a successful abort in the logs.
+            # tcp_force_closed=0 means the abort found no sockets — the worker stays blocked (#72975). WARN.
             _log = logger.warning if shutdown_count == 0 else logger.info
             _log(
                 "OpenAI client aborted (%s, shared=False, tcp_force_closed=%d, "
@@ -6100,9 +5056,10 @@ class AIAgent:
         return cache
 
     def _request_anthropic_client_key(self) -> tuple:
-        """Cache key covering everything that forces a fresh client: credential
-        rotation, base URL / region changes, timeout changes (model switch),
-        and the 1M-context beta flag."""
+        """Cache key covering everything that forces a fresh client: credential rotation, base URL / region,
+
+        timeout (model switch), and the 1M-context beta flag.
+        """
         if getattr(self, "provider", None) == "bedrock":
             region = getattr(self, "_bedrock_region", "us-east-1") or "us-east-1"
             return ("bedrock", region)
@@ -6117,27 +5074,13 @@ class AIAgent:
     def _create_request_anthropic_client(self, *, reason: str) -> Any:
         """Build (or reuse) a request-local Anthropic client for one in-flight call.
 
-        The shared ``_anthropic_client`` stays the long-lived primary, but the
-        stale/interrupt watchdog runs on the poll thread and must never call
-        ``close()`` on the client whose TLS socket a worker thread is still
-        reading: releasing that FD from a stranger thread lets the kernel
-        recycle it under a still-live SSL BIO, which then writes a TLS record
-        into an unrelated SQLite header (#29507 / #67142). A per-request client
-        lets the stranger thread ``shutdown()`` the socket while the owning
-        worker performs the SDK-level close from its own context — the same
-        ownership contract the OpenAI-wire path already uses.
-
-        Also mirrors the OpenAI-wire path's single-slot cache
-        (``_create_request_openai_client``): building ``anthropic.Anthropic``
-        means a fresh httpx pool and TCP+TLS handshake per call, so the client
-        is kept warm across sequential calls whose cache key (credentials,
-        base URL/region, timeout, 1M-beta flag) hasn't changed. ``in_use``
-        keeps a second concurrent call from sharing one pool's close/abort
-        lifecycle — it gets a fresh untracked client instead.
-
-        Mirrors ``_rebuild_anthropic_client`` construction (direct + Bedrock,
-        1M-beta drop) but returns a fresh/cached client instead of swapping
-        the shared one.
+        The stale/interrupt watchdog must never ``close()`` the client a worker is still reading (fd recycled
+        under
+        a live SSL BIO → TLS record in a SQLite header). A per-request client lets the stranger ``shutdown()``
+        while
+        the owner closes. Single-slot cache keyed as ``_request_anthropic_client_key``; ``in_use`` gives a
+        second
+        concurrent call a fresh untracked client. Mirrors ``_rebuild_anthropic_client`` construction.
         """
         if self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
@@ -6155,9 +5098,7 @@ class AIAgent:
                 ):
                     cache["in_use"] = True
                     return cached
-                # Key changed (credential rotation, base URL/region, timeout,
-                # 1M-beta flip), poisoned by a cross-thread abort, or
-                # externally closed — never reuse; discard and rebuild below.
+                # Key changed, poisoned by a cross-thread abort, or externally closed — rebuild.
                 stale = cached
                 cache["client"] = None
                 cache["key"] = None
@@ -6191,21 +5132,14 @@ class AIAgent:
                 cache["key"] = key
                 cache["poisoned"] = False
                 cache["in_use"] = True
-            # else: a concurrent call holds the slot — hand this client out
-            # untracked; _close_request_anthropic_client fully closes
-            # untracked clients, preserving the per-request lifecycle.
+            # else: a concurrent call holds the slot — hand this client out untracked (fully closed later).
         return client
 
     def _close_request_anthropic_client(self, client: Any, *, reason: str) -> None:
         """Owner-thread close of a request-local Anthropic client.
 
-        On a clean finish (``reason`` in ``_REQUEST_CLIENT_REUSE_REASONS``)
-        the pool is kept warm in the cache slot for the next sequential call,
-        mirroring ``_close_request_openai_client``. Any other outcome
-        (error / kill / abort / stale-slot eviction) force-closes the pool's
-        TCP sockets first (CLOSE-WAIT hygiene, parity with
-        ``_close_openai_client``), then does the graceful SDK close. Safe
-        because the caller owns the connection.
+        Clean finish (``_REQUEST_CLIENT_REUSE_REASONS``) keeps the pool warm in the slot; any other outcome
+        force-closes the TCP sockets (CLOSE-WAIT hygiene) then does the graceful SDK close.
         """
         if client is None:
             return
@@ -6264,26 +5198,19 @@ class AIAgent:
     def _abort_request_anthropic_client(self, client: Any, *, reason: str) -> None:
         """Cross-thread abort for request-local Anthropic clients.
 
-        Stranger threads (the interrupt-check / stale-stream detector loop)
-        must not call the SDK ``close()`` — that races the owning worker's live
-        SSL BIO and can recycle a TLS FD into a SQLite header (#29507 /
-        #67142). Only ``shutdown(SHUT_RDWR)`` the pool's sockets so the worker
-        unblocks and releases the FD from its own thread.
+        Stranger threads only ``shutdown(SHUT_RDWR)`` the sockets — SDK ``close()`` would race the owner's
+        live SSL BIO.
         """
         if client is None:
             return
-        # A pool whose sockets were shut down from a stranger thread must
-        # never be reused: poison the cache slot so the owner-thread close
-        # discards it and the next create builds a fresh client.
+        # A pool whose sockets were shut from a stranger thread must never be reused: poison the slot.
         with self._openai_client_lock():
             cache = self._request_anthropic_client_cache_ref()
             if cache["client"] is client:
                 cache["poisoned"] = True
         try:
             shutdown_count = self._force_close_tcp_sockets(client)
-            # Same visibility contract as the OpenAI abort path (#72975):
-            # zero sockets shut down means the abort did not unblock the
-            # worker — log WARNING, not a success-shaped INFO.
+            # Same contract as the OpenAI abort (#72975): zero sockets shut down is a WARNING, not success.
             _log = logger.warning if shutdown_count == 0 else logger.info
             _log(
                 "Anthropic client aborted (%s, shared=False, tcp_force_closed=%d, "
@@ -6322,18 +5249,9 @@ class AIAgent:
         if self.api_mode != "codex_responses" or self.provider not in {"openai-codex", "xai-oauth"}:
             return False
 
-        # Guard against silent account swap.
-        #
-        # When an agent is using a non-singleton credential — e.g. a manual
-        # pool entry (``hermes auth add xai-oauth``) whose tokens belong to
-        # a different account than the device_code singleton, or an agent
-        # constructed with an explicit ``api_key=`` arg — force-refreshing
-        # the singleton here and adopting its tokens silently re-routes the
-        # rest of the conversation onto the singleton's account.  The
-        # credential pool's reactive recovery (``_recover_with_credential_pool``)
-        # is the right channel for that case; this path is the
-        # singleton-only fallback used when the pool can't recover, and
-        # MUST only fire when the agent really is on singleton tokens.
+        # Guard against silent account swap: a non-singleton credential (manual pool entry, explicit
+        # api_key=) must not be replaced by the device_code singleton's tokens. The pool's reactive
+        # recovery owns that case; this singleton fallback MUST only fire on singleton tokens.
         try:
             if self.provider == "openai-codex":
                 from hermes_cli.auth import resolve_codex_runtime_credentials
@@ -6384,10 +5302,8 @@ class AIAgent:
         if not isinstance(base_url, str) or not base_url.strip():
             return False
 
-        # Defect 2 fix: return False when no NEW token was actually minted.
-        # resolve_codex_runtime_credentials returns the same stale token
-        # when the underlying refresh fails (failure is debug-only).
-        # Comparing the access token (api_key) before/after detects this.
+        # Return False when no NEW token was minted: resolve_codex_runtime_credentials returns the same
+        # stale token when refresh fails.
         new_key = api_key.strip()
         if old_key and new_key == old_key:
             logger.debug(
@@ -6414,9 +5330,8 @@ class AIAgent:
     ) -> bool:
         if self.provider != "nous":
             return False
-        # Portal serves anthropic/* on the native Messages route, so a session
-        # can be holding either client kind when its short-lived invoke JWT
-        # expires. Both need the refresh or the turn dies on a 401.
+        # Portal serves anthropic/* on the native Messages route, so either client kind may hold the
+        # expiring invoke JWT.
         if self.api_mode not in ("chat_completions", "anthropic_messages"):
             return False
 
@@ -6460,28 +5375,13 @@ class AIAgent:
     def _try_refresh_env_client_credentials(self) -> bool:
         """Adopt ~/.hermes/.env credential/base-url edits at the turn boundary.
 
-        A Settings save (desktop ``PUT /api/env``, ``hermes setup``) updates
-        ``.env`` and the *saving* process's os.environ, but a live session
-        worker keeps the base_url/api_key captured at agent init until it
-        restarts — so an open chat silently keeps calling the old endpoint
-        (#67821). Called at the start of each conversation turn, this
-        re-resolves the provider's env-sourced credentials (load_env() is
-        mtime-memoized, so an unchanged file costs one stat()) and rebuilds
-        the client when the user edited them.
-
-        Reacts only to env *edits* (resolved values changed since the last
-        look), never to mere divergence from the agent's current values —
-        credential-pool rotation and failover legitimately move the session
-        off the env credential, and stomping those back every turn would
-        flap. A config.yaml ``model.base_url`` (or a pool entry with a
-        custom endpoint) also wins: edits are only adopted while the
-        session's current base_url is still the registry default or the
-        previously-seen env value.
-
-        Covers api-key registry providers and named custom providers with a
-        ``key_env`` (#67935) — the latter resolve to ``provider="custom"``
-        with no registry entry, so they are matched through the runtime
-        provider's config lookup instead.
+        A Settings save updates ``.env`` but a live worker keeps init-time values, so an open chat kept
+        calling the
+        old endpoint. Reacts only to env *edits* (resolved value changed since last look), never to divergence
+        from
+        the agent's current values — pool rotation/failover and a config ``model.base_url`` legitimately move
+        the
+        session and must not flap. Covers registry providers and named custom providers with ``key_env``.
         """
         if self.api_mode != "chat_completions":
             return False
@@ -6525,12 +5425,8 @@ class AIAgent:
                     api_key, pconfig.inference_base_url, env_url
                 ).rstrip("/")
         elif self.provider == "custom":
-            # Named custom provider (#67935): identity lives in config
-            # (``providers.<name>`` / ``custom_providers``), the credential in
-            # the env var it names via ``key_env``. Re-resolve through the
-            # same config lookup the runtime resolver uses; entries without
-            # ``key_env`` (inline ``api_key``, pool-backed) have no
-            # env-sourced credential to watch.
+            # Named custom provider (#67935): identity in config, credential in the env var named by key_env;
+            # entries without key_env have nothing env-sourced to watch.
             try:
                 from hermes_cli.runtime_provider import _get_named_custom_provider
             except ImportError:
@@ -6546,9 +5442,7 @@ class AIAgent:
             api_key = get_env_prefer_dotenv(key_env).strip()
             if not api_key:
                 return False
-            # Custom providers pin their endpoint in config, not env — the
-            # config base_url is both the resolved and the "default" base, so
-            # only key edits are ever adopted here.
+            # Custom providers pin base_url in config, so only key edits are adopted here.
             default_base = str(custom_provider.get("base_url") or "").strip().rstrip("/")
             base_url = default_base
         else:
@@ -6562,16 +5456,11 @@ class AIAgent:
         current_base = (self.base_url or "").strip().rstrip("/")
 
         if prev is None:
-            # First look — no baseline to diff against. Adopt only the
-            # boot-default case (worker spawned before the user saved an
-            # override); anything else is unattributable on turn one.
+            # First look — adopt only the boot-default case; anything else is unattributable on turn one.
             adopt = current_base == default_base and not (
                 base_url == current_base and api_key == self.api_key
             )
-            # #79156: if the session already holds a pool-rotated key, do
-            # not treat that divergence as a boot-time env adoption. First
-            # look would otherwise stomp the rotated key with the env value
-            # while leaving ``_credential_pool_entry_id`` on the fallback.
+            # #79156: a pool-rotated key is not a boot-time env adoption; don't stomp it.
             if (
                 adopt
                 and api_key != self.api_key
@@ -6580,10 +5469,8 @@ class AIAgent:
             ):
                 adopt = False
         else:
-            # Env unchanged → no-op; any drift from self.* is rotation/
-            # failover or config precedence — leave it alone. An edit is
-            # only adopted while the session still runs on the registry
-            # default or the previously-seen env value.
+            # Env unchanged → no-op; drift from self.* is rotation/failover/config precedence. Adopt only
+            # while the session still runs on the registry default or the previously-seen env value.
             adopt = (
                 resolved != prev
                 and current_base in {default_base, prev[0]}
@@ -6607,24 +5494,20 @@ class AIAgent:
         self.base_url = base_url
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
-        # A base-url change moves the route: TLS material and default
-        # headers derived from the old endpoint must be recomputed, exactly
-        # as on credential-pool rotation.
+        # A base-url change moves the route: recompute TLS material and default headers.
         self._reapply_route_client_config(route_changed=route_changed)
 
         if not self._replace_primary_openai_client(reason="env_credential_refresh"):
-            # Leave the baseline un-advanced so the unchanged edit is
-            # retried next turn, and roll the agent back so its state keeps
-            # matching the still-live old client.
+            # Leave the baseline un-advanced (retry next turn) and roll the agent back to match the live
+            # client.
             self.api_key = prior_api_key
             self.base_url = prior_base_url
             self._client_kwargs.clear()
             self._client_kwargs.update(prior_client_kwargs)
             return False
 
-        # Rebind the pool entry id to the key we just adopted. Leaving a
-        # stale id after a key rewrite makes mark_exhausted_and_rotate
-        # quarantine the wrong credential on the next 429 (#79156).
+        # Rebind the pool entry id to the adopted key, or the next 429 quarantines the wrong credential
+        # (#79156).
         try:
             from agent.agent_runtime_helpers import sync_credential_pool_entry_id
 
@@ -6644,14 +5527,10 @@ class AIAgent:
         return True
 
     def _try_refresh_vertex_client_credentials(self) -> bool:
-        """Re-mint the Vertex OAuth2 access token and rebuild the OpenAI client.
+        """Re-mint the Vertex OAuth2 access token (~1h TTL) and rebuild the OpenAI client.
 
-        Vertex tokens live ~1 hour. On a long-lived agent (gateway session) a
-        cached client's bearer token will expire mid-session, producing a 401.
-        This re-resolves credentials via the adapter (which refreshes the
-        underlying google-auth Credentials object when near expiry), swaps the
-        new token into the client kwargs, and rebuilds the primary OpenAI
-        client. Returns True when a usable token+base_url were obtained.
+        Long-lived gateway sessions 401 mid-session on the expired bearer. Returns True when a usable
+        token+base_url were obtained.
         """
         if self.api_mode != "chat_completions" or self.provider != "vertex":
             return False
@@ -6683,17 +5562,11 @@ class AIAgent:
     def _try_refresh_copilot_client_credentials(self) -> bool:
         """Refresh Copilot credentials and rebuild the shared OpenAI client.
 
-        The raw GitHub OAuth token (`gh auth token`) is usually stable, but the
-        short-TTL *exchanged* IDE token minted from it is what Copilot actually
-        authenticates — and it expires mid-session. A heavy/long turn whose
-        request straddles that expiry gets a clean `401 IDE token expired:
-        unauthorized: token expired`. Simply re-resolving the (unchanged) raw
-        token and rebuilding the client leaves the SAME expired IDE token on the
-        wire, so the retry 401s again and the turn aborts as non-retryable —
-        only a gateway restart helped, because a cold process re-runs the
-        exchange. Fix: force a fresh exchange (evict the cached exchanged JWT,
-        then mint a new one) so the retry carries a valid IDE token. Mirrors the
-        400 stale-credential recovery; the caller enforces the single-shot guard.
+        The raw GitHub token is stable, but the short-TTL *exchanged* IDE token is what authenticates and
+        expires
+        mid-turn (``401 IDE token expired``). Re-resolving the raw token leaves the same expired JWT on the
+        wire, so
+        force a fresh exchange. Caller enforces the single-shot guard.
         """
         if not self._is_copilot_provider():
             return False
@@ -6715,12 +5588,8 @@ class AIAgent:
 
         new_token = new_token.strip()
 
-        # Force a fresh IDE-token exchange: the cached exchanged JWT is the thing
-        # that expired ("401 IDE token expired"), so evict it and re-mint before
-        # rebuilding the client. Fall back to the resolved (raw) token only if the
-        # exchange itself is unavailable (network blip) — a client rebuild on the
-        # raw token still clears stale client state and may recover on enterprise
-        # seats where headers matter.
+        # Force a fresh IDE-token exchange (the cached JWT is what expired); fall back to the raw token
+        # only if the exchange itself is unavailable.
         try:
             evict_cached_exchanged_token(new_token)
             api_token, enterprise_base_url = get_copilot_api_token(new_token)
@@ -6745,19 +5614,11 @@ class AIAgent:
     def _try_recover_stale_copilot_credential(self) -> bool:
         """Force a fresh Copilot token exchange + client rebuild after a 400.
 
-        Copilot surfaces a stale/degraded credential as a
-        ``400 model_not_available_for_integrator`` /
-        ``model_not_supported`` — NOT a clean 401 — so the normal 401 refresh
-        path never fires. The most common trigger is a raw ``ghu_`` OAuth token
-        that got seeded (and cached) when the startup token exchange degraded:
-        the raw token routes the request to the restricted
-        ``copilot-language-server`` integrator whose allowlist omits
-        enterprise-only models (e.g. ``claude-opus-4.8``).
-
-        Recovery = evict the poisoned cache entry, force a fresh exchange to
-        mint the real ~437-char API token, re-apply the Copilot headers, and
-        rebuild the shared client. Single-shot (guarded by the caller) so a
-        genuinely unavailable model can't loop.
+        Copilot surfaces a stale credential as ``400 model_not_available_for_integrator`` /
+        ``model_not_supported``,
+        not a 401 — typically a raw ``ghu_`` token cached when the startup exchange degraded, routing to the
+        restricted integrator allowlist. Evict, re-exchange, re-apply headers, rebuild. Single-shot (caller-
+        guarded).
         """
         if not self._is_copilot_provider():
             return False
@@ -6851,10 +5712,8 @@ class AIAgent:
             return False
 
         self._anthropic_api_key = new_token
-        # Update OAuth flag — token type may have changed (API key ↔ OAuth).
-        # Only treat as OAuth on native Anthropic; third-party endpoints using
-        # the Anthropic protocol must not trip OAuth paths (#1739 & third-party
-        # identity-injection guard).
+        # Update the OAuth flag — only on native Anthropic; third-party Anthropic-protocol endpoints must
+        # not trip OAuth paths (#1739).
         from agent.anthropic_adapter import _is_oauth_token
         self._is_anthropic_oauth = _is_oauth_token(new_token) if self.provider == "anthropic" else False
         return True
@@ -6918,9 +5777,7 @@ class AIAgent:
         if apply_user_headers:
             self._apply_user_default_headers()
 
-        # Per-provider extra HTTP headers (providers.<name>.extra_headers /
-        # custom_providers[].extra_headers) — applied last so the most
-        # specific config level survives credential swaps and rebuilds too.
+        # Per-provider extra_headers applied last so they survive credential swaps and rebuilds.
         # SECURITY: values may carry credentials — never log them.
         if self.api_mode not in ("anthropic_messages", "bedrock_converse"):
             try:
@@ -6935,25 +5792,12 @@ class AIAgent:
                 logger.debug("custom-provider extra_headers skipped", exc_info=True)
 
     def _apply_user_default_headers(self) -> None:
-        """Merge user-configured request headers onto the OpenAI client.
+        """Merge ``model.default_headers`` from config onto the OpenAI client (user values win).
 
-        Reads ``model.default_headers`` from config.yaml and merges it onto
-        ``self._client_kwargs["default_headers"]``, with user values taking
-        precedence over provider- and SDK-supplied defaults.
-
-        This exists for ``custom`` OpenAI-compatible endpoints sitting behind
-        a gateway/WAF that rejects the OpenAI Python SDK's identifying headers
-        (``User-Agent: OpenAI/Python ...``, ``X-Stainless-*``). Setting e.g.
-        ``model.default_headers: {User-Agent: curl/8.7.1}`` lets the request
-        reach such an upstream instead of failing with an opaque 4xx/502 even
-        though the same body works under ``curl``. (#40033)
-
-        Delegates the config read + merge to
-        ``agent.auxiliary_client._apply_user_default_headers`` so the main and
-        auxiliary clients can never drift on precedence or value handling.
-
-        No-op for Anthropic/Bedrock modes, which don't use the OpenAI client,
-        and when no overrides are configured.
+        Lets custom endpoints behind a WAF that rejects the SDK's identifying headers (``User-Agent``,
+        ``X-Stainless-*``) work. Delegates to ``agent.auxiliary_client._apply_user_default_headers`` so main
+        and
+        auxiliary clients cannot drift. No-op for Anthropic/Bedrock modes.
         """
         if self.api_mode in ("anthropic_messages", "bedrock_converse"):
             return
@@ -7001,14 +5845,11 @@ class AIAgent:
         self._replace_primary_openai_client(reason="credential_rotation")
 
     def _reapply_route_client_config(self, *, route_changed: bool) -> None:
-        """Recompute route-derived client kwargs for the current ``self.base_url``.
+        """Recompute route-derived client kwargs (TLS material, default headers) for the current
+        ``self.base_url``.
 
-        TLS material (``ssl_verify``/``ssl_ca_cert``) and default headers are
-        derived from the endpoint, not the credential — any client rebuild
-        that may have moved ``base_url`` must recompute them or the new
-        endpoint inherits configuration computed for the old one. Shared by
-        credential-pool rotation and the per-turn env refresh so the two
-        paths cannot drift.
+        Any rebuild that may have moved ``base_url`` must call this or the new endpoint inherits the old one's
+        config. Shared by pool rotation and the per-turn env refresh so they cannot drift.
         """
         self._client_kwargs.pop("ssl_verify", None)
         self._client_kwargs.pop("ssl_ca_cert", None)
@@ -7055,37 +5896,26 @@ class AIAgent:
         return pool.has_available()
 
     def _anthropic_messages_create(self, api_kwargs: dict, *, client: Any = None):
-        # When a request-local client is supplied it was already credential-
-        # refreshed in ``_create_request_anthropic_client``; only the shared
-        # fallback path refreshes here.
+        # A supplied request-local client was already refreshed in _create_request_anthropic_client.
         if client is None and self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
-        # Defensive: strip Responses-only kwargs that can leak in under an
-        # api_mode-flip race (the Anthropic SDK raises a non-retryable
-        # TypeError on them). See #31673.
+        # Strip Responses-only kwargs that leak in under an api_mode-flip race (#31673).
         from agent.anthropic_adapter import create_anthropic_message
         return create_anthropic_message(
             client or self._anthropic_client,
             api_kwargs,
             log_prefix=getattr(self, "log_prefix", ""),
             prefer_stream=not bool(getattr(self, "_disable_streaming", False)),
-            # Rate-limit + credits state live in response headers, which the
-            # parsed Message drops. No-ops on providers that don't send the
-            # matching header families (x-ratelimit-* / x-nous-credits-*).
+            # Rate-limit + credits state live in response headers, which the parsed Message drops.
             on_response=self._capture_anthropic_response_headers,
         )
 
     def _rebuild_anthropic_client(self) -> None:
         """Rebuild the Anthropic client after an interrupt or stale call.
 
-        Handles both direct Anthropic and Bedrock-hosted Anthropic models
-        correctly — rebuilding with the Bedrock SDK when provider is bedrock,
-        rather than always falling back to build_anthropic_client() which
-        requires a direct Anthropic API key.
-
-        Honors ``self._oauth_1m_beta_disabled`` (set by the reactive recovery
-        path when an OAuth subscription rejects the 1M-context beta) so the
-        rebuilt client carries the reduced beta set.
+        Uses the Bedrock SDK when provider is bedrock (``build_anthropic_client()`` needs a direct key).
+        Honors
+        ``_oauth_1m_beta_disabled`` so the rebuilt client carries the reduced beta set.
         """
         _drop_1m = bool(getattr(self, "_oauth_1m_beta_disabled", False))
         if getattr(self, "provider", None) == "bedrock":
@@ -7110,18 +5940,13 @@ class AIAgent:
 
     def _reset_stream_delivery_tracking(self) -> None:
         """Reset tracking for text delivered during the current model response."""
-        # Flush any benign partial-tag tail held by the think scrubber
-        # first (#17924): an innocent '<' at the end of the stream that
-        # turned out not to be a tag prefix should reach the UI.  Then
-        # flush the context scrubber.  Order matters — the think
-        # scrubber's output feeds into the context scrubber's state.
+        # Flush the think scrubber's benign partial-tag tail first (#17924), then the context scrubber —
+        # order matters, the think output feeds the context scrubber.
         think_scrubber = getattr(self, "_stream_think_scrubber", None)
         if think_scrubber is not None:
             think_tail = think_scrubber.flush()
             if think_tail:
-                # Route the tail through the context scrubber too so a
-                # memory-context span straddling the final boundary is
-                # still caught.
+                # Route the tail through the context scrubber so a span straddling the boundary is caught.
                 ctx_scrubber = getattr(self, "_stream_context_scrubber", None)
                 if ctx_scrubber is not None:
                     think_tail = ctx_scrubber.feed(think_tail)
@@ -7133,9 +5958,7 @@ class AIAgent:
                         except Exception:
                             pass
                     self._record_streamed_assistant_text(think_tail)
-        # Flush any benign partial-tag tail held by the context scrubber so it
-        # reaches the UI before we clear state for the next model call.  If
-        # the scrubber is mid-span, flush() drops the orphaned content.
+        # Flush the context scrubber's benign tail before clearing; mid-span, flush() drops orphaned content.
         scrubber = getattr(self, "_stream_context_scrubber", None)
         if scrubber is not None:
             tail = scrubber.flush()
@@ -7151,10 +5974,8 @@ class AIAgent:
 
     def _record_streamed_assistant_text(self, text: str) -> None:
         """Accumulate visible assistant text emitted through stream callbacks."""
-        # Single-writer guard (#65991): a superseded stream must not pollute the
-        # turn's accumulated text (which also feeds the interim-visible-text
-        # de-dup comparison), even when a caller reaches this directly (the
-        # tool-suppressed content path) rather than through _fire_stream_delta.
+        # Single-writer guard (#65991): a superseded stream must not pollute the accumulated text, even
+        # when reached directly via the tool-suppressed path.
         if self._stream_writer_superseded():
             return
         if isinstance(text, str) and text:
@@ -7177,15 +5998,8 @@ class AIAgent:
         streamed = self._normalize_interim_visible_text(
             self._strip_think_blocks(getattr(self, "_current_streamed_assistant_text", "") or "")
         )
-        # Prefix match (not exact equality): the final response may be the
-        # streamed text plus a trailing delta, or the stream may have been
-        # partial when the verify nudge fired.  In both cases the streamed
-        # content is a prefix of the final — that's enough to mark it
-        # previewed (fails safe to a benign duplicate, never loses text).
-        # The reverse direction (streamed longer than final) is NOT matched:
-        # that could suppress a needed resend in the gateway path where
-        # already_streamed=True calls on_segment_break() instead of
-        # on_commentary() (#65919 review).
+        # Prefix match, not equality: the final may be streamed text plus a trailing delta, or the stream
+        # partial. The reverse (streamed longer) is NOT matched — it could suppress a needed resend (#65919).
         return bool(streamed) and visible_content.startswith(streamed)
 
     def _extract_codex_interim_visible_parts(
@@ -7194,11 +6008,9 @@ class AIAgent:
     ) -> List[str]:
         """Extract visible Codex commentary as one string per message item.
 
-        Codex Responses can keep user-facing mid-turn narration as structured
-        ``phase=commentary`` message items while final answer text remains in
-        assistant ``content``.  Non-streaming gateway surfaces need that
-        commentary through the interim assistant callback before tool calls run.
-        ``phase=analysis`` remains hidden because it is provider scratchpad.
+        Codex keeps mid-turn narration as ``phase=commentary`` items while the final answer stays in
+        ``content``;
+        non-streaming gateways need it via the interim callback. ``phase=analysis`` stays hidden (scratchpad).
         """
         if not getattr(self, "show_commentary", True):
             # display.show_commentary=false — commentary stays on the
@@ -7246,13 +6058,9 @@ class AIAgent:
     def _interim_assistant_visible_text(self, assistant_msg: Dict[str, Any]) -> str:
         """Return the exact assistant text eligible for interim delivery.
 
-        Prefer structured Codex commentary over top-level content. A Codex
-        response can contain both commentary and a partial/final-answer message
-        while tools are still pending; treating top-level content as progress
-        in that shape leaks the answer before the tool call runs.
-
-        Content may be a string or a structured parts list (e.g. after vision
-        turns or context compaction), so flatten it before stripping reasoning.
+        Prefers structured Codex commentary over top-level content — a response can hold commentary AND a
+        partial final answer while tools are pending, and treating content as progress leaks the answer early.
+        Content may be a parts list, so flatten before stripping reasoning.
         """
         visible = self._extract_codex_interim_visible_text(assistant_msg)
         if visible:
@@ -7296,13 +6104,8 @@ class AIAgent:
     ) -> None:
         """Surface a real mid-turn assistant commentary message to the UI layer.
 
-        Does NOT set ``_response_was_previewed`` — that flag means "the final
-        response was already shown to the user," but this helper is called for
-        ordinary tool-call narration, intermediate acknowledgements, and
-        verification candidates alike. Setting it here would cause the CLI to
-        suppress a *different* final summary (e.g. from ``_handle_max_iterations``)
-        when the only streamed text was unrelated mid-turn commentary. (#65919
-        review: response-loss blocker)
+        Does NOT set ``_response_was_previewed`` — that means "the final response was shown"; setting it for
+        narration would make the CLI suppress a different final summary (response-loss blocker).
         """
         if not isinstance(assistant_msg, dict):
             return
@@ -7361,12 +6164,9 @@ class AIAgent:
             logger.debug("interim_assistant_callback error", exc_info=True)
 
     def _ensure_stream_writer_state(self) -> None:
-        """Lazily create the single-writer guard fields (#65991).
+        """Lazily create the single-writer guard fields.
 
-        The fields are normally set in ``agent_init``, but agents constructed
-        via ``AIAgent.__new__`` (test doubles, legacy/partially-initialized
-        instances) skip that path. Claiming/checking the writer must not crash
-        those agents, so initialize the fields on first use.
+        Normally set in ``agent_init``; ``AIAgent.__new__``-built instances skip that path and must not crash.
         """
         if getattr(self, "_stream_writer_lock", None) is None:
             self._stream_writer_lock = threading.Lock()
@@ -7378,16 +6178,14 @@ class AIAgent:
             self._stream_writer_dropped = 0
 
     def _claim_stream_writer(self) -> int:
-        """Claim exclusive ownership of the streaming delta sink for the calling
-        stream attempt and return its monotonic writer token (#65991).
+        """Claim exclusive ownership of the streaming delta sink for this stream attempt; returns its writer
+        token.
 
-        Every streaming attempt (each provider path, each retry) calls this
-        right before it begins consuming its stream. Claiming bumps the shared
-        token, so any earlier attempt still alive on another thread is
-        immediately superseded: its cached token no longer matches and the sink
-        fences its late chunks out. The token is stored per-thread, so a thread
-        that never claimed (a non-streaming caller) is never treated as a
-        writer and can never be fenced.
+        Every attempt (each provider path, each retry) claims right before consuming. Claiming bumps the
+        shared
+        token, so an earlier attempt still alive on another thread is superseded and its late chunks fenced
+        out.
+        Stored per-thread: a thread that never claimed is never a writer and can never be fenced.
         """
         self._ensure_stream_writer_state()
         with self._stream_writer_lock:
@@ -7397,19 +6195,17 @@ class AIAgent:
         return token
 
     def _stream_writer_is_current(self, token: int) -> bool:
-        """True when ``token`` (from a prior _claim_stream_writer) is still the
-        active writer — i.e. no newer stream attempt has claimed the sink since
-        (#65991). Lets a stream loop bail out the instant it is superseded."""
+        """True when ``token`` is still the active writer (no newer attempt claimed since).
+
+        Lets a stream loop bail out the instant it is superseded.
+        """
         return token == getattr(self, "_stream_writer_token", token)
 
     def _stream_writer_superseded(self) -> bool:
-        """True when the calling thread claimed the delta sink but a newer
-        stream attempt has since claimed it — i.e. this thread is a stale
-        writer whose chunks must be dropped (#65991).
+        """True when this thread claimed the sink but a newer attempt has since claimed it (stale writer, drop
+        chunks).
 
-        A thread that never claimed (``token is None``) is not a writer and is
-        never reported as superseded, so non-streaming delta callers are
-        unaffected.
+        A thread that never claimed (``token is None``) is never reported superseded.
         """
         tls = getattr(self, "_stream_writer_tls", None)
         token = getattr(tls, "token", None) if tls is not None else None
@@ -7423,9 +6219,7 @@ class AIAgent:
             self._stream_writer_dropped = int(getattr(self, "_stream_writer_dropped", 0)) + 1
         except Exception:
             self._stream_writer_dropped = 1
-        # Log sparsely (first drop, then powers of two) so a chatty superseded
-        # stream can't flood the log, but a real provider problem is still
-        # visible. A silent discard would hide genuine failures.
+        # Log sparsely (first drop, then powers of two) so a chatty superseded stream can't flood the log.
         _n = self._stream_writer_dropped
         if _n == 1 or (_n & (_n - 1)) == 0:
             logger.warning(
@@ -7474,10 +6268,8 @@ class AIAgent:
         if self._stream_writer_superseded():
             self._note_dropped_stream_writer("_fire_stream_delta")
             return
-        # If a tool iteration set the break flag, prepend a single paragraph
-        # break before the first real text delta.  This prevents the original
-        # problem (text concatenation across tool boundaries) without stacking
-        # blank lines when multiple tool iterations run back-to-back.
+        # Prepend one paragraph break before the first text delta after a tool iteration, without
+        # stacking blank lines across back-to-back tool iterations.
         if getattr(self, "_stream_needs_break", False) and text and text.strip():
             self._stream_needs_break = False
             text = "\n\n" + text
@@ -7485,14 +6277,8 @@ class AIAgent:
         else:
             prepended_break = False
         if isinstance(text, str):
-            # Suppress reasoning/thinking blocks via the stateful
-            # scrubber (#17924).  Earlier versions ran _strip_think_blocks
-            # per-delta here, which destroyed downstream state machines
-            # when a tag was split across deltas (e.g. MiniMax-M2.7
-            # sends '<think>' and its content as separate deltas —
-            # regex case 2 erased the first delta, so the CLI/gateway
-            # state machine never saw the open tag and leaked the
-            # reasoning content as regular response text).
+            # Stateful scrubber (#17924): per-delta regex stripping destroyed downstream state machines when a
+            # tag was split across deltas (MiniMax-M2.7 sends '<think>' separately).
             think_scrubber = getattr(self, "_stream_think_scrubber", None)
             if think_scrubber is not None:
                 text = think_scrubber.feed(text or "")
@@ -7563,12 +6349,10 @@ class AIAgent:
             logger.debug("reasoning on_stream_delta plugin hook enqueue failed", exc_info=True)
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
-        """Notify display layer that the model is generating tool call arguments.
+        """Notify the display layer that the model is generating tool call arguments.
 
-        Fires once per tool name when the streaming response begins producing
-        tool_call / tool_use tokens.  Gives the TUI a chance to show a spinner
-        or status line so the user isn't staring at a frozen screen while a
-        large tool payload (e.g. a 45 KB write_file) is being generated.
+        Fires once per tool name so the TUI can show a spinner while a large payload (e.g. a 45 KB write_file)
+        streams.
         """
         cb = self.tool_gen_callback
         if cb is not None:
@@ -7606,10 +6390,8 @@ class AIAgent:
     def _has_pending_fallback(self) -> bool:
         """Whether a fallback provider is actually available to switch to.
 
-        Used to gate user-facing "trying fallback..." status so we don't
-        announce a fallback that will never be attempted (the user has no
-        fallback chain configured).  Mirrors the early-return guard in
-        ``try_activate_fallback`` (#35314, #17446).
+        Gates the "trying fallback..." status so we never announce a fallback that will not be attempted.
+        Mirrors the early-return guard in ``try_activate_fallback``.
         """
         chain = getattr(self, "_fallback_chain", None) or []
         index = getattr(self, "_fallback_index", 0)
@@ -7638,9 +6420,7 @@ class AIAgent:
                 return True
         return False
 
-    # 20 MB base64 ≈ 15 MB decoded image — generous but prevents OOM from an
-    # oversized data: URL (a 100 MB+ payload creates ~275 MB of memory pressure,
-    # and gateway users sharing the same process can trivially OOM it).
+    # 20 MB base64 ≈ 15 MB decoded — prevents OOM from an oversized data: URL in a shared gateway process.
     _MAX_DATA_URL_BASE64_BYTES = 20 * 1024 * 1024
 
     @staticmethod
@@ -7732,16 +6512,10 @@ class AIAgent:
     def _model_supports_vision(self) -> bool:
         """Return True if the active provider+model reports native vision.
 
-        Used to decide whether to strip image content parts from API-bound
-        messages (for non-vision models) or let the provider adapter handle
-        them natively (for vision-capable models).
-
-        Resolution order (see ``agent.image_routing._supports_vision_override``):
-          1. ``model.supports_vision`` (top-level, single-model shortcut)
-          2. ``providers.<provider>.models.<model>.supports_vision``
-          3. models.dev capability lookup
-        Custom/local models absent from models.dev would otherwise be
-        misclassified as non-vision and have their images stripped.
+        Resolution: ``model.supports_vision`` > ``providers.<p>.models.<m>.supports_vision`` > models.dev
+        lookup
+        (see ``image_routing._supports_vision_override``). Custom/local models absent from models.dev would
+        otherwise be misclassified and have their images stripped.
         """
         try:
             from hermes_cli.config import load_config
@@ -7756,9 +6530,8 @@ class AIAgent:
     def _provider_supports_vision_tool_messages(self) -> bool:
         """Return True if the active provider accepts list-type tool content.
 
-        Some providers (e.g. Xiaomi MiMo) support multimodal user messages
-        but reject list-type tool message content with 400 errors.  This
-        checks the provider profile's ``supports_vision_tool_messages`` field.
+        Some providers (Xiaomi MiMo) accept multimodal user messages but 400 on list-type tool content;
+        reads the provider profile's ``supports_vision_tool_messages``.
         """
         try:
             from providers import get_provider_profile
@@ -7815,11 +6588,7 @@ class AIAgent:
         return "[A multimodal message was converted to text for Anthropic compatibility.]"
 
     def _get_transport(self, api_mode: str = None):
-        """Return the cached transport for the given (or current) api_mode.
-
-        Lazy-initializes on first call per api_mode. Returns None if no
-        transport is registered for the mode.
-        """
+        """Return the cached transport for the given (or current) api_mode (lazy; None if unregistered)."""
         mode = api_mode or self.api_mode
         cache = getattr(self, "_transport_cache", None)
         if cache is None:
@@ -7840,11 +6609,8 @@ class AIAgent:
         ):
             return api_messages
 
-        # The Anthropic adapter (agent/anthropic_adapter.py:_convert_content_part_to_anthropic)
-        # already translates OpenAI-style image_url/input_image parts into
-        # native Anthropic ``{"type": "image", "source": ...}`` blocks. When
-        # the active model supports vision we let the adapter do its job and
-        # skip this legacy text-fallback preprocessor entirely.
+        # The Anthropic adapter already converts image parts to native blocks; skip the legacy text
+        # fallback when the model supports vision.
         if self._model_supports_vision():
             return api_messages
 
@@ -7861,13 +6627,9 @@ class AIAgent:
         return transformed
 
     def _prepare_messages_for_non_vision_model(self, api_messages: list) -> list:
-        """Strip native image parts when the active model lacks vision.
+        """Replace native image parts with cached vision_analyze text when the active model lacks vision.
 
-        Runs on the chat.completions / codex_responses paths. Vision-capable
-        models pass through unchanged (provider and any downstream translator
-        handle the image parts natively). Non-vision models get each image
-        replaced by a cached vision_analyze text description so the turn
-        doesn't fail with "model does not support image input".
+        Vision-capable models pass through unchanged (the provider adapter handles image parts natively).
         """
         if not any(
             isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
@@ -7882,10 +6644,7 @@ class AIAgent:
         for msg in transformed:
             if not isinstance(msg, dict):
                 continue
-            # Reuse the Anthropic text-fallback preprocessor — the behaviour is
-            # identical (walk content parts, replace images with cached
-            # descriptions, merge back into a single text or structured
-            # content). Naming is historical.
+            # Reuse the Anthropic text-fallback preprocessor — identical behaviour; naming is historical.
             msg["content"] = self._preprocess_anthropic_content(
                 msg.get("content"),
                 str(msg.get("role", "user") or "user"),
@@ -7895,11 +6654,8 @@ class AIAgent:
     def _tool_result_content_for_active_model(self, tool_name: str, result: Any) -> Any:
         """Return the tool message content that is safe for the active model.
 
-        Multimodal tool results normally unwrap to OpenAI-style content parts so
-        vision-capable models can inspect screenshots.  Text-only providers must
-        not receive those image parts, because a rejected tool result becomes
-        part of the canonical history and can make the next user turn fail before
-        the agent has a chance to recover.
+        Text-only providers must not receive image parts: a rejected tool result becomes canonical history
+        and can make the next user turn fail before the agent can recover.
         """
         if not _is_multimodal_tool_result(result):
             return result
@@ -7909,10 +6665,8 @@ class AIAgent:
             return content
 
         if self._model_supports_vision():
-            # Vision-capable on paper — but if the provider rejects list-type
-            # tool content (e.g. Xiaomi MiMo's 400 "text is not set"), or if
-            # we've already learned this lesson in-session, short-circuit to
-            # a text summary so we don't burn a round-trip relearning it.
+            # Vision on paper, but the provider rejects list-type tool content (or we already learned that
+            # in-session): short-circuit to a text summary.
             if not self._provider_supports_vision_tool_messages():
                 logger.debug(
                     "Tool %s: provider %s does not accept list-type tool "
@@ -7974,26 +6728,11 @@ class AIAgent:
         *,
         remember_model: bool = True,
     ) -> bool:
-        """Downgrade list-type tool messages to text summaries in-place.
+        """Downgrade list-type tool messages to text summaries in place; returns True if any were downgraded.
 
-        Recovery path for providers that reject list-type tool message content
-        (e.g. Xiaomi MiMo's 400 "text is not set"; see issue #27344).  Walks
-        ``api_messages`` for any ``role: "tool"`` message whose ``content`` is
-        a list containing image parts, replaces the content with the existing
-        text part(s) (or a minimal placeholder if none survive), and by default
-        records the active (provider, model) in
-        ``self._no_list_tool_content_models`` so subsequent
-        ``_tool_result_content_for_active_model`` calls in this session
-        preemptively downgrade screenshots without a round-trip.
-
-        413 payload-size recovery passes ``remember_model=False`` because that
-        error means this request body was too large, not that the provider/model
-        rejects list-type tool content in general.
-
-        Returns True when at least one tool message was downgraded — the
-        caller (the 400 recovery branch in ``agent.conversation_loop``) uses
-        this to decide whether to retry the API call with the modified
-        history or surface the original error.
+        Recovery for providers that 400 on list-type tool content (e.g. MiMo "text is not set"). By default
+        records the (provider, model) in ``_no_list_tool_content_models`` so later results downgrade without a
+        round-trip; 413 recovery passes ``remember_model=False`` (body too large ≠ provider rejects lists).
         """
         if not isinstance(api_messages, list):
             return False
@@ -8035,11 +6774,7 @@ class AIAgent:
                         text_parts.append(text)
 
             if not had_image:
-                # List-type content but no image parts — leave alone (some
-                # providers reject ANY list content, but stripping a
-                # text-only list doesn't reduce ambiguity; let the caller
-                # surface the original error if this turns out to be the
-                # case).
+                # List content without image parts — leave alone; stripping wouldn't reduce ambiguity.
                 continue
 
             if text_parts:
@@ -8055,18 +6790,10 @@ class AIAgent:
 
     def _anthropic_preserve_dots(self) -> bool:
         """True when using an anthropic-compatible endpoint that preserves dots in model names.
-        Alibaba/DashScope keeps dots (e.g. qwen3.5-plus).
-        MiniMax keeps dots (e.g. MiniMax-M2.7).
-        Xiaomi MiMo keeps dots (e.g. mimo-v2.5, mimo-v2.5-pro).
-        OpenCode Go/Zen keeps dots for non-Claude models (e.g. minimax-m2.5-free).
-        ZAI/Zhipu keeps dots (e.g. glm-4.7, glm-5.1).
-        AWS Bedrock uses dotted inference-profile IDs
-        (e.g. ``global.anthropic.claude-opus-4-7``,
-        ``us.anthropic.claude-sonnet-4-5-20250929-v1:0``) and rejects
-        the hyphenated form with
-        ``HTTP 400 The provided model identifier is invalid``.
-        Regression for #11976; mirrors the opencode-go fix for #5211
-        (commit f77be22c), which extended this same allowlist."""
+
+        DashScope, MiniMax, Xiaomi MiMo, OpenCode Go/Zen (non-Claude), ZAI/Zhipu keep dots; AWS Bedrock uses
+        dotted inference-profile IDs and rejects the hyphenated form with HTTP 400.
+        """
         if (getattr(self, "provider", "") or "").lower() in {
             "alibaba", "minimax", "minimax-cn",
             "opencode-go", "opencode-zen",
@@ -8164,9 +6891,8 @@ class AIAgent:
     def _supports_reasoning_extra_body(self) -> bool:
         """Return True when reasoning extra_body is safe to send for this route/model.
 
-        OpenRouter forwards unknown extra_body fields to upstream providers.
-        Some providers/routes reject `reasoning` with 400s, so gate it to
-        known reasoning-capable model families and direct Nous Portal.
+        OpenRouter forwards unknown extra_body upstream and some routes 400 on ``reasoning``; gate to known
+        reasoning-capable families and direct Nous Portal.
         """
         if base_url_host_matches(self._base_url_lower, "nousresearch.com"):
             return True
@@ -8186,10 +6912,8 @@ class AIAgent:
             opts = self._lmstudio_reasoning_options_cached()
             # "off-only" (or absent) means no real reasoning capability.
             return any(opt and opt != "off" for opt in opts)
-        # Ollama Cloud (and any Ollama-compatible server): the native
-        # /api/show capabilities list is authoritative — emit reasoning_effort
-        # only for models that declare the "thinking" capability. deepseek-v4
-        # has it; gemma3 / qwen3-coder don't. Cached per (model, base_url).
+        # Ollama Cloud: /api/show capabilities are authoritative — emit reasoning_effort only for models
+        # declaring "thinking". Cached per (model, base_url).
         if base_url_host_matches(self._base_url_lower, "ollama.com"):
             return self._ollama_supports_thinking_cached()
         if not self._is_openrouter_url():
@@ -8198,16 +6922,9 @@ class AIAgent:
             return False
 
         model = (self.model or "").lower()
-        # Live-catalog metadata first (ported from
-        # PrimeIntellect-ai/prime-agent#1258): OpenRouter's /v1/models entries
-        # advertise reasoning support via supported_parameters + a reasoning
-        # object, which covers every routed vendor without a hand-maintained
-        # prefix list. The static prefix allowlist below repeatedly went
-        # stale one vendor at a time (nvidia/ missing → #75386; same class
-        # as tencent/, xiaomi/ additions before it) — metadata makes new
-        # vendors work without a code change. One catalog fetch per process,
-        # cached; unknown (catalog unreachable / unlisted model) falls back
-        # to the static list.
+        # Live-catalog metadata first (OpenRouter /v1/models supported_parameters) — the static prefix
+        # allowlist repeatedly went stale one vendor at a time (#75386). Unknown falls back to the static
+        # list.
         try:
             from hermes_cli.models import (
                 openrouter_model_reasoning_capabilities,
@@ -8215,9 +6932,7 @@ class AIAgent:
             )
             caps = openrouter_model_reasoning_capabilities(self.model)
             if caps is None:
-                # Cache cold (no picker run this process) — warm it in the
-                # background so subsequent turns get metadata; never block
-                # this turn on HTTP.
+                # Cache cold — warm in the background; never block this turn on HTTP.
                 warm_openrouter_reasoning_caps_async()
         except Exception:
             caps = None
@@ -8237,16 +6952,13 @@ class AIAgent:
         return any(model.startswith(prefix) for prefix in reasoning_model_prefixes)
 
     def _lmstudio_reasoning_options_cached(self) -> list[str]:
-        """Probe LM Studio's published reasoning ``allowed_options`` once per
-        (model, base_url). The list (e.g. ``["off","on"]`` or
-        ``["off","minimal","low"]``) is needed both for the supports-reasoning
-        gate and for clamping the emitted ``reasoning_effort`` so toggle-style
-        models don't 400 on ``high``. Cache is keyed on (model, base_url) so
-        ``/model`` swaps and base-URL changes don't reuse a stale list.
-        Non-empty results are cached permanently (model capabilities don't
-        change). Empty results (transient probe failure OR genuinely
-        non-reasoning model) are cached with a 60-second TTL to avoid an
-        HTTP round-trip on every turn while still retrying reasonably soon.
+        """Probe LM Studio's published reasoning ``allowed_options`` once per (model, base_url).
+
+        Needed for the supports-reasoning gate and to clamp ``reasoning_effort`` so toggle-style models don't
+        400
+        on ``high``. Non-empty results cache permanently; empty ones (transient failure OR non-reasoning
+        model)
+        cache with a 60s TTL to avoid a round-trip per turn while retrying soon.
         """
         import time as _time
 
@@ -8271,13 +6983,12 @@ class AIAgent:
         return opts
 
     def _ollama_supports_thinking_cached(self) -> bool:
-        """Probe Ollama's ``/api/show`` capabilities once per (model, base_url).
+        """Probe Ollama's ``/api/show`` capabilities once per (model, base_url); True only if ``thinking`` is
+        declared.
 
-        Returns True only when the model declares the ``thinking`` capability.
-        Caching mirrors the LM Studio probe: a True/False result is permanent
-        (capabilities don't change), while a probe failure (None) is cached
-        with a 60-second TTL so a transient outage doesn't suppress reasoning
-        for the rest of the session but also doesn't round-trip every turn.
+        True/False cache permanently; a probe failure (None) caches 60s so an outage neither suppresses
+        reasoning
+        for the session nor round-trips every turn.
         """
         import time as _time
 
@@ -8304,9 +7015,8 @@ class AIAgent:
     def _resolve_lmstudio_summary_reasoning_effort(self) -> Optional[str]:
         """Resolve a safe top-level ``reasoning_effort`` for LM Studio.
 
-        The iteration-limit summary path calls ``chat.completions.create()``
-        directly, bypassing the transport. Share the helper so the two paths
-        can't drift on effort resolution and clamping.
+        The iteration-limit summary calls ``chat.completions.create()`` directly, bypassing the transport;
+        share the helper so effort resolution and clamping cannot drift.
         """
         from agent.lmstudio_reasoning import resolve_lmstudio_effort
         return resolve_lmstudio_effort(
@@ -8352,19 +7062,11 @@ class AIAgent:
         return build_assistant_message(self, assistant_message, finish_reason)
 
     def _needs_thinking_reasoning_pad(self) -> bool:
-        """Return True when the active provider enforces reasoning_content echo-back.
+        """Return True when the active provider enforces ``reasoning_content`` echo-back on tool-call replays.
 
-        DeepSeek v4 thinking and Kimi / Moonshot thinking both reject replays
-        of assistant tool-call messages that omit ``reasoning_content`` (refs
-        #15250, #17400). Xiaomi MiMo thinking mode has the same requirement.
-
-        Result cached on the AIAgent instance keyed by (provider, model,
-        base_url); invalidated whenever ``switch_model()`` /
-        ``_try_activate_fallback()`` mutate any of those. This is hot — the
-        agent loop hits ~16 invocations per turn, each of which would
-        otherwise re-run ~5 ``base_url_host_matches`` (and therefore
-        ``urlparse``) calls under it. Caching drops the per-turn cost from
-        ~5us × 16 = ~80us to <1us.
+        DeepSeek thinking, Kimi/Moonshot thinking and Xiaomi MiMo thinking all 400 without it. Cached per
+        (provider, model, base_url) and invalidated by ``switch_model()`` / ``_try_activate_fallback()`` —
+        the loop calls this ~16× per turn and each miss re-runs several ``urlparse`` host matches.
         """
         key = (self.provider, self.model, getattr(self, "_base_url_lower", self.base_url))
         cached = getattr(self, "_thinking_pad_cache", None)
@@ -8380,27 +7082,14 @@ class AIAgent:
         return result
 
     def _reasoning_echo_opt_in(self) -> bool:
-        """Return True when the user has opted in to ``reasoning_content``
-        echo-back for the *current* provider via config.
+        """True when the user opted in to ``reasoning_content`` echo-back for the *current* provider via
+        config.
 
-        This covers custom providers and OpenAI-compatible gateways that
-        proxy thinking-mode models (e.g. a reverse proxy fronting Kimi K3
-        or GLM-5.2) but are not matched by the built-in host-based
-        ``_REASONING_ECHO_RULES`` (DeepSeek / Kimi / MiMo).
-
-        The flag is per-active-provider:
-
-        * **Primary** — read from ``model.reasoning_echo`` in config.yaml
-          at agent init and on ``switch_model()``.
-        * **Fallback** — set by ``try_activate_fallback()`` from the
-          fallback entry's ``reasoning_echo`` field.
-        * **Restore** — ``restore_primary_runtime()`` copies the snapshot
-          saved by ``switch_model()``.
-
-        Unlike a global toggle, this flag travels with the active
-        provider, so falling back to a strict provider (Mistral, Groq,
-        Cerebras) correctly strips ``reasoning_content`` even when the
-        primary had the flag enabled.
+        Covers custom providers / gateways proxying thinking models that the host-based
+        ``_REASONING_ECHO_RULES``
+        miss. Per-active-provider: primary from ``model.reasoning_echo``, fallback from the fallback entry's
+        field,
+        restored by ``restore_primary_runtime()`` — so falling back to a strict provider still strips it.
         """
         return bool(getattr(self, "_reasoning_echo_flag", False))
 
@@ -8416,19 +7105,11 @@ class AIAgent:
             return False
 
     def _needs_kimi_tool_reasoning(self) -> bool:
-        """Return True when the current provider is Kimi / Moonshot thinking mode.
+        """Return True when the current provider is Kimi / Moonshot thinking mode (requires
+        ``reasoning_content`` echo).
 
-        Kimi ``/coding`` and Moonshot thinking mode both require
-        ``reasoning_content`` on every assistant tool-call message; omitting
-        it causes the next replay to fail with HTTP 400.
-
-        Detection is host-driven, not model-name-driven: aggregators like
-        OpenRouter that re-export Kimi/Moonshot models speak their own
-        protocol and reject ``reasoning_content`` echoes. We only enable the
-        kimi-reasoning replay when the request actually targets a
-        kimi/moonshot endpoint or the dedicated kimi-coding provider.
-
-        Rule table owner: ``agent.message_sanitization.reasoning_echo_family``.
+        Host-driven, not model-name-driven: aggregators re-exporting Kimi reject the echo. Rule table:
+        ``message_sanitization.reasoning_echo_family``.
         """
         from agent.message_sanitization import matches_reasoning_echo_family
         return matches_reasoning_echo_family(
@@ -8436,13 +7117,10 @@ class AIAgent:
         )
 
     def _needs_deepseek_tool_reasoning(self) -> bool:
-        """Return True when the current provider is DeepSeek thinking mode.
+        """Return True when the current provider is DeepSeek thinking mode (requires ``reasoning_content``
+        echo).
 
-        DeepSeek V4 thinking mode requires ``reasoning_content`` on every
-        assistant tool-call turn; omitting it causes HTTP 400 when the
-        message is replayed in a subsequent API request (#15250).
-
-        Rule table owner: ``agent.message_sanitization.reasoning_echo_family``.
+        Rule table: ``message_sanitization.reasoning_echo_family``.
         """
         from agent.message_sanitization import matches_reasoning_echo_family
         return matches_reasoning_echo_family(
@@ -8450,13 +7128,10 @@ class AIAgent:
         )
 
     def _needs_mimo_tool_reasoning(self) -> bool:
-        """Return True when the current provider is Xiaomi MiMo thinking mode.
+        """Return True when the current provider is Xiaomi MiMo thinking mode (requires ``reasoning_content``
+        echo).
 
-        MiMo thinking mode requires ``reasoning_content`` on every assistant
-        tool-call message when replaying history; omitting it causes HTTP 400.
-        Refs: https://platform.xiaomimimo.com/docs/zh-CN/usage-guide/passing-back-reasoning_content
-
-        Rule table owner: ``agent.message_sanitization.reasoning_echo_family``.
+        Rule table: ``message_sanitization.reasoning_echo_family``.
         """
         from agent.message_sanitization import matches_reasoning_echo_family
         return matches_reasoning_echo_family(
@@ -8475,26 +7150,12 @@ class AIAgent:
 
     @staticmethod
     def _sanitize_tool_calls_for_strict_api(api_msg: dict, model: "str | None" = None) -> dict:
-        """Strip Codex Responses API fields from tool_calls for strict providers.
+        """Strip Codex Responses fields (call_id, response_item_id, extra_content) from tool_calls for strict
+        providers.
 
-        Providers like Mistral, Fireworks, and other strict OpenAI-compatible APIs
-        validate the Chat Completions schema and reject unknown fields (call_id,
-        response_item_id) with 400 or 422 errors. These fields are preserved in
-        the internal message history — this method only modifies the outgoing
-        API copy.
-
-        ``extra_content`` (Gemini thought_signature) is also stripped — strict
-        providers reject it with "Extra inputs are not permitted" — UNLESS the
-        outgoing ``model`` is itself Gemini-family, in which case it must be
-        replayed (Gemini 3 thinking models 400 without it). Defaults to
-        stripping when no model is supplied.
-
-        Creates new tool_call dicts rather than mutating in-place, so the
-        original messages list retains call_id/response_item_id for Codex
-        Responses API compatibility (e.g. if the session falls back to a
-        Codex provider later).
-
-        Fields stripped: call_id, response_item_id, extra_content (model-gated)
+        Strict Chat Completions APIs (Mistral, Fireworks) 400/422 on unknown fields. ``extra_content`` (Gemini
+        thought_signature) is kept only when the outgoing model is Gemini-family (it 400s without it). Builds
+        new dicts so the internal history retains the Codex fields for a later fallback.
         """
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
@@ -8525,15 +7186,9 @@ class AIAgent:
         )
 
     def _should_sanitize_tool_calls(self) -> bool:
-        """Determine if tool_calls need sanitization for strict APIs.
+        """Determine if tool_calls need sanitization (True for every non-Codex API).
 
-        Codex Responses API uses fields like call_id and response_item_id
-        that are not part of the standard Chat Completions schema. These
-        fields must be stripped when calling any other API to avoid
-        validation errors (400 Bad Request).
-
-        Returns:
-            bool: True if sanitization is needed (non-Codex API), False otherwise.
+        Codex Responses fields (call_id, response_item_id) are not Chat Completions schema and 400 elsewhere.
         """
         return self.api_mode != "codex_responses"
 
@@ -8552,20 +7207,11 @@ class AIAgent:
     ) -> tuple:
         """Forwarder — see ``agent.conversation_compression.compress_context``.
 
-        ``force=True`` is passed by the manual ``/compress`` slash command
-        so users can bypass the summary-failure cooldown after an
-        auto-compress abort.  Auto-compress callers use the default
-        ``force=False``.  ``bypass_cooldown=True`` is passed by the
-        provider-proven overflow recovery path so one real attempt runs while
-        the cooldown is armed (#100661) — without clearing it.
+        ``force=True`` (manual /compress) bypasses the summary-failure cooldown; ``bypass_cooldown=True``
+        (provider-proven overflow recovery) runs one real attempt while the cooldown stays armed.
         """
-        # Per-attempt signal consumed by turn-start preflight (#98424) and the
-        # in-loop pre-API/overflow consumers. A stalled compression must not
-        # be mistaken for a structural no-op and followed by the oversized
-        # provider request it was meant to prevent. The typed helper upgrades
-        # the simple attribute to thread-local state guarded by a per-agent
-        # lock so overlapping automatic/manual entrypoints cannot clobber each
-        # other's outcome (#98741).
+        # Per-attempt timeout signal for turn-start preflight and in-loop consumers (#98424): a stalled
+        # compression must not be mistaken for a structural no-op. Thread-local + per-agent lock (#98741).
         from agent.conversation_compression import (
             CompressionCommitFence,
             compress_context,
@@ -8584,42 +7230,26 @@ class AIAgent:
             set_conversation_context,
         )
         from agent.prompt_cache_scope import declared_conversation_scope_safe
-        # Out-of-turn compaction entry points — ``/compact`` (cli.py), the
-        # gateway ``/compress`` command and its hygiene sweep (both of which
-        # build a throwaway agent), and partial head compression — call this
-        # forwarder directly, outside ``run_conversation``'s ambient scope.
-        # With nothing ambient the summarizer's auxiliary call carries no
-        # conversation tag and no Portal sticky key, so it routes independently
-        # of the conversation it belongs to. Publish the root here as a
-        # fallback; in-turn callers already have it set to the same value, so
-        # this is a no-op for them.
-        #
-        # Note this does NOT keep the compaction turn's own prompt cache warm:
-        # compaction replaces the history with a summary and rebuilds the
-        # system prompt, so that request is a cold write on any endpoint. What
-        # it buys is the turns AFTER compaction reading the cache it wrote.
+        # Out-of-turn compaction (/compact, gateway /compress, partial head compression) runs outside
+        # run_conversation's ambient scope; publish the root as a fallback so the summarizer's call carries
+        # the conversation tag. No-op for in-turn callers.
         token = None
         if get_conversation_context() is None:
             root = self._conversation_root_id()
             if root:
                 token = set_conversation_context(root)
-        # Same fallback for the ROUTING scope: out-of-turn compaction would
-        # otherwise send the summarizer's call with no sticky key at all, or
-        # (worse, on a per-response host) with a key that no longer matches
-        # the conversation it is compacting. Only set when the host declared
-        # one — unset keeps the pre-#96811 conversation-id fallback.
+        # Same fallback for the ROUTING scope, only when the host declared one (pre-#96811 fallback
+        # otherwise).
         affinity_token = None
         if get_affinity_scope() is None:
             declared = declared_conversation_scope_safe(self)
             if declared:
                 affinity_token = set_affinity_scope(declared)
-        # Every AIAgent compression has a fence, including ordinary in-turn and
-        # manual paths. hard_interrupt() uses this exact instance to serialize
-        # cancel admission against begin_commit().
+        # Every compression has a fence; hard_interrupt() uses this exact instance to serialize cancel
+        # admission against begin_commit().
         active_fence = commit_fence or CompressionCommitFence()
-        # A single agent can receive overlapping automatic/manual entrypoints.
-        # Serialize fence publication so a waiter cannot replace the fence of
-        # the attempt currently generating/committing a summary.
+        # Serialize fence publication so overlapping automatic/manual entrypoints cannot replace the
+        # fence of the attempt currently committing.
         fence_registration_lock = vars(self).setdefault(
             "_compression_commit_fence_lock", threading.RLock()
         )
@@ -8658,34 +7288,24 @@ class AIAgent:
                 result = _run(active_fence)
             else:
                 def _snapshot_worker(fence=None):
-                    # #76354 review F3: the pooled worker must NEVER share the
-                    # caller's live transcript. Plugin/legacy context engines are
-                    # allowed to mutate their input list in place; after a host
-                    # timeout the worker stays alive, so a shared list would let
-                    # a late engine rewrite the live conversation (roles,
-                    # ordering, persisted content) behind the caller's back.
-                    # Deep-snapshot here, on the worker thread, so the caller's
-                    # list object is never touched by pooled code. Results are
-                    # published to caller-visible state only via the returned
-                    # value of an ADMITTED commit (the host discards results on
-                    # timeout/cancel); durable SessionDB mutation is already
-                    # gated behind the commit fence inside compress_context.
+                    # #76354 F3: the pooled worker must NEVER share the caller's live transcript — a late
+                    # engine after a
+                    # host timeout could rewrite it. Deep-snapshot on the worker; results publish only via an
+                    # ADMITTED commit.
                     snapshot = copy.deepcopy(messages)
                     result_msgs, result_prompt = _run(
                         fence, target_messages=snapshot
                     )
                     if result_msgs is snapshot:
-                        # No-op/abort path returned the snapshot unchanged: hand
-                        # back the caller's ORIGINAL list so identity-based
-                        # semantics (len/identity no-op detection, flush dedup
-                        # by id()) keep working.
+                        # No-op/abort returned the snapshot unchanged: hand back the ORIGINAL list so
+                        # identity-based
+                        # semantics keep working.
                         return messages, result_prompt
                     return result_msgs, result_prompt
 
-                # Resolve the fallback prompt lazily on timeout only. Eager
-                # rebuild here would raise before compress_context runs whenever
-                # _cached_system_prompt is unset and _build_system_prompt fails
-                # (lock-refresher / noop-exception tests rely on that path).
+                # Resolve the fallback prompt lazily: an eager rebuild would raise before compress_context
+                # runs
+                # when _cached_system_prompt is unset and _build_system_prompt fails.
                 def _fallback_prompt():
                     cached = getattr(self, "_cached_system_prompt", None)
                     if cached:
@@ -8795,10 +7415,8 @@ class AIAgent:
                             )
 
                 def _on_commit_overrun(waited, ceiling):
-                    # Commit-phase ceiling breach: the SessionDB mutation is in
-                    # flight and must complete (abandoning it mid-commit would
-                    # diverge live messages from durable session state), so this
-                    # only surfaces the overrun — it never cancels the commit.
+                    # Commit-phase ceiling breach: the SessionDB mutation must complete, so this only surfaces
+                    # the overrun.
                     emit = getattr(self, "_emit_warning", None)
                     if callable(emit):
                         emit(
@@ -8809,11 +7427,9 @@ class AIAgent:
                         )
 
                 def _publish_new_fence():
-                    # The stall-fallback retry (#78981) needs a fence the aborted
-                    # attempt cannot veto. Publish it on the same serialized slot
-                    # hard_interrupt() reads, so a /stop during the retry admits
-                    # against the attempt that is actually running. The finally
-                    # below restores whatever the caller had either way.
+                    # The stall-fallback retry (#78981) needs a fence the aborted attempt cannot veto; publish
+                    # it on
+                    # the slot hard_interrupt() reads. The finally restores the caller's fence.
                     retry_fence = CompressionCommitFence()
                     with fence_registration_lock:
                         self._active_compression_commit_fence = retry_fence
@@ -8832,19 +7448,8 @@ class AIAgent:
                     telemetry_agent=self,
                     new_fence=_publish_new_fence,
                 )
-            # _DB_PERSISTED_MARKER lives at module level in
-            # agent.context_compressor; conversation_compression only
-            # imports it locally (cannot be imported from there). Imported
-            # UNCONDITIONALLY (no fallback): both modules are already
-            # hard dependencies at this point — agent.context_compressor is
-            # imported at the top of this module (line ~162), and
-            # agent.conversation_compression is imported at the top of this
-            # very method and its compress_context is invoked below. The
-            # only way these imports can fail while the wrapper is
-            # functional is a renamed/removed symbol, and that must fail
-            # LOUDLY: a silent fallback literal ("_db_persisted") would
-            # split the stamping key from the flush's and quietly resurrect
-            # the duplicate-row bug this fix removed.
+            # Imported UNCONDITIONALLY: a silent fallback literal would split the stamping key from the
+            # flush's and resurrect the duplicate-row bug.
             from agent.context_compressor import _DB_PERSISTED_MARKER
             from agent.conversation_compression import (
                 _messages_match_scoped_identity,
@@ -8856,12 +7461,9 @@ class AIAgent:
                     source_messages, list
                 ):
                     return
-                # Compression runs against a deepcopy snapshot on the pooled
-                # worker path, so publish stamps land on the result list first.
-                # Mirror them back onto the live caller lists by scoped
-                # identity after publish succeeds; timestamp-less repeated
-                # content is ambiguous, so we stamp every scoped match instead
-                # of stopping at the first one.
+                # Stamps land on the worker's snapshot first; mirror them onto the live lists by scoped
+                # identity.
+                # Timestamp-less repeated content is ambiguous, so every scoped match is stamped.
                 for source_message in source_messages:
                     if not (
                         isinstance(source_message, dict)
@@ -8900,10 +7502,7 @@ class AIAgent:
             if isinstance(result, tuple) and result:
                 result_messages = result[0]
                 if isinstance(result_messages, list):
-                    # Direct-path callers bypass the snapshot worker, so they
-                    # still need the same post-publish mirror onto the live
-                    # caller list even when the returned list already points at
-                    # the active transcript.
+                    # Direct-path callers bypass the snapshot worker but still need the post-publish mirror.
                     if direct_path or result_messages is not messages:
                         _sync_persisted_markers(messages, result_messages)
                     session_messages = getattr(self, "_session_messages", None)
@@ -8911,28 +7510,18 @@ class AIAgent:
                         isinstance(session_messages, list)
                         and session_messages is not messages
                     ):
-                        # Intentional: durable-parent adoption can leave
-                        # `_session_messages` on the pre-adoption live list
-                        # while `messages` now points at the adopted snapshot,
-                        # so both lists need the post-publish marker sync.
+                        # Durable-parent adoption can leave `_session_messages` on the pre-adoption list; sync
+                        # both.
                         _sync_persisted_markers(session_messages, result_messages)
-            # compress_context ran on a daemon pool worker thread; the session
-            # id rotation updated hermes_logging._session_context (a
-            # threading.local) on the WORKER thread, not this one. Propagate
-            # the current session_id back so subsequent log lines on this
-            # thread carry the rotated id (#34089).
+            # The worker thread rotated hermes_logging's thread-local session id; propagate to this thread
+            # (#34089).
             try:
                 from hermes_logging import set_session_context
                 set_session_context(self.session_id)
             except Exception:
                 pass
-            # #76354 review F5: the worker thread also rebound the session
-            # ContextVar inside its own (copied) context, which the caller
-            # never sees — and get_session_env() prefers an already-bound
-            # ContextVar over os.environ. Rebind in the CALLER's context so
-            # post-compression tools/subprocesses on this thread resolve
-            # HERMES_SESSION_ID to the child id after an out-of-place
-            # rotation (idempotent when no rotation happened).
+            # #76354 F5: rebind the session ContextVar in the CALLER's context so post-compression tools
+            # resolve HERMES_SESSION_ID to the child id (idempotent when no rotation happened).
             try:
                 from gateway.session_context import set_current_session_id
                 if self.session_id:
@@ -8985,12 +7574,8 @@ class AIAgent:
             function_result,
             failed=failed,
         )
-        # Identical-call stall guards (agent.stall_guards): notice-only, no
-        # blocking. Observed on the RAW result (before the loop-warning suffix
-        # below, whose embedded count changes per call and would defeat
-        # result-identity matching). Applied here — at result construction,
-        # before the tool message is built — so it is cache-safe (tool results
-        # are append-only; nothing already sent to the provider is mutated).
+        # Identical-call stall guards: notice-only, observed on the RAW result (before the per-call loop
+        # suffix) and applied at result construction so tool results stay append-only / cache-safe.
         stall_notice = None
         result_stub = None
         if self._stall_guards_enabled():
@@ -9006,13 +7591,8 @@ class AIAgent:
                 result_stub = observation.stub
             except Exception as exc:
                 logger.debug("stall-guard identical-call observation failed: %s", exc)
-        # Result-reference stubbing: a 2nd+ consecutive identical call whose
-        # FRESH result is byte-identical enters context as a short reference
-        # stub instead of the duplicate payload. The tool still executed —
-        # this is not a cache; a changed result flows through whole. Only
-        # plain-string results are stubbed (multimodal content lists pass
-        # through untouched), and the current message keeps its role and
-        # tool_call_id — only the content is replaced.
+        # Result-reference stubbing: a 2nd+ identical call with a byte-identical FRESH result enters
+        # context as a short stub. Not a cache — the tool ran; only plain-string results are stubbed.
         if result_stub and isinstance(function_result, str):
             function_result = result_stub
         if decision.action in {"warn", "halt"}:
@@ -9041,13 +7621,10 @@ class AIAgent:
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls from the assistant message and append results to messages.
 
-        The segment planner splits the batch into maximal contiguous runs of
-        parallel-safe calls (read-only tools, non-overlapping file targets,
-        opted-in MCP tools) separated by sequential barriers (interactive,
-        unsafe, or unrecognized tools). Homogeneous batches keep their
-        original single-path dispatch; mixed batches execute segment by
-        segment in emission order so safe subsets still run concurrently
-        while side-effect ordering is preserved.
+        The segment planner splits the batch into maximal runs of parallel-safe calls (read-only, non-
+        overlapping
+        file targets, opted-in MCP) separated by sequential barriers; mixed batches run segment by segment in
+        emission order so safe subsets stay concurrent while side-effect ordering is preserved.
         """
         tool_calls = assistant_message.tool_calls
 
@@ -9083,26 +7660,14 @@ class AIAgent:
             self._executing_tools = False
 
     def _dispatch_delegate_task(self, function_args: dict) -> str:
-        """Single call site for delegate_task dispatch.
-
-        New DELEGATE_TASK_SCHEMA fields only need to be added here to reach all
-        invocation paths (concurrent, sequential, inline).
-        """
+        """Single call site for delegate_task dispatch; new DELEGATE_TASK_SCHEMA fields are added only here."""
         from tools.delegate_tool import (
             _strip_model_hidden_task_fields,
             delegate_task as _delegate_task,
         )
-        # Delegations from the top-level MODEL always run in the background —
-        # the model does not get to choose. delegate_task returns immediately
-        # with a handle (one per task) and each subagent's result re-enters the
-        # conversation as a new message when it finishes. This applies to BOTH
-        # a single task and a fan-out batch (each task becomes its own
-        # independent background subagent). The one exception:
-        #   - A delegation from an ORCHESTRATOR SUBAGENT (depth > 0) stays
-        #     synchronous: the orchestrator needs its workers' results within
-        #     its own turn to compose a summary, and a subagent doesn't own the
-        #     gateway session the async result would route back to.
-        # The schema-level `background` param is intentionally ignored here.
+        # Top-level MODEL delegations always run in the background (handle returned, results re-enter as
+        # messages). An ORCHESTRATOR SUBAGENT (depth > 0) stays synchronous — it needs results in-turn and
+        # owns no gateway session. The schema-level `background` param is intentionally ignored.
         _is_subagent = getattr(self, "_delegate_depth", 0) > 0
         return _delegate_task(
             goal=function_args.get("goal"),
@@ -9140,12 +7705,9 @@ class AIAgent:
 
     @staticmethod
     def _wrap_verbose(label: str, text: str, indent: str = "     ") -> str:
-        """Word-wrap verbose tool output to fit the terminal width.
+        """Word-wrap verbose tool output to the terminal width, wrapping each existing line separately.
 
-        Splits *text* on existing newlines and wraps each line individually,
-        preserving intentional line breaks (e.g. pretty-printed JSON).
-        Returns a ready-to-print string with *label* on the first line and
-        continuation lines indented.
+        Returns ``label`` on the first line with continuation lines indented.
         """
         import shutil as _shutil
         import textwrap as _tw
@@ -9181,15 +7743,9 @@ class AIAgent:
     def _conversation_root_id(self) -> Optional[str]:
         """Resolve the stable conversation id for Portal usage attribution.
 
-        Returns the session-lineage ROOT id rather than the current segment
-        id, so one user-facing conversation keeps a single ``conversation=``
-        tag across context-compression rotation (`/new` starts a genuinely
-        new lineage). Delegate subagents resolve through their
-        ``_parent_session_id`` so an entire delegation tree tags as the
-        parent conversation.
-
-        Best-effort: falls back to the raw session id when the session DB
-        is unavailable or the lineage walk fails.
+        Returns the session-lineage ROOT so one conversation keeps a single ``conversation=`` tag across
+        compression rotation; delegate subagents resolve through ``_parent_session_id``. Falls back to the raw
+        id.
         """
         sid = getattr(self, "session_id", None)
         if not sid:
@@ -9222,20 +7778,14 @@ class AIAgent:
         moa_config: Optional[dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
-        # A review deliberately shares this agent's session_id for prompt-cache
-        # parity. Fence review startup or interrupt an admitted request, then
-        # await that request's exit before opening any live-turn Relay or task
-        # instrumentation for the same session. Foreground priority is retained
-        # if the review does not acknowledge within the bounded deadline (#84423).
+        # A review shares this session_id for cache parity: fence review startup or interrupt an admitted
+        # request and await its exit before opening live-turn instrumentation (#84423).
         from agent.background_review import cancel_background_review_for_live_turn
 
         cancel_background_review_for_live_turn(self)
 
-        # Turn liveness for the deferred-review idle queue: a queued review
-        # must not dispatch into the settle gap between two quick prompts.
-        # Marked inside the try below so the balancing note_turn_finished in
-        # its finally covers every exit; the actual start-mark happens as the
-        # first statement of the try.
+        # Turn liveness for the deferred-review idle queue; start-mark is the first statement of the try
+        # so the finally's note_turn_finished balances every exit.
         from agent.review_idle_queue import QUEUE as _review_queue
 
         from agent.aux_accounting import (
@@ -9282,10 +7832,8 @@ class AIAgent:
         durable_turn_lease_turn_active = False
         durable_turn_lease_interrupt_message = None
         token = None
-        # Initialized alongside `token`: the turn-lease timeout/interrupt
-        # early returns leave the try block before set_affinity_scope() runs,
-        # and the finally reads this name unconditionally (UnboundLocalError
-        # otherwise — the 4 red cross-process lease tests on PR #97158).
+        # Initialized alongside `token`: early returns leave the try before set_affinity_scope() and the
+        # finally reads this unconditionally (PR #97158).
         affinity_token = None
         acct_token = None
         task_started = False
@@ -9324,23 +7872,17 @@ class AIAgent:
 
         try:
             _review_queue.note_turn_started()
-            # Serialize the full load -> run -> flush region across Hermes
-            # processes. Gateway's asyncio lease closes alias routing inside one
-            # process; this durable lease covers Desktop, CLI resume, gateway,
-            # and background delivery processes sharing state.db (#84234).
+            # Durable cross-process lease over load -> run -> flush (Desktop, CLI resume, gateway, background
+            # delivery sharing state.db, #84234).
             _turn_db = getattr(self, "_session_db", None)
             _durable_session_exists = False
             if _turn_db is not None and session_id:
                 try:
                     _durable_session_exists = _turn_db.get_session(session_id) is not None
                 except Exception:
-                    # A locked / non-WAL read is not proof the row is absent.
-                    # Treating probe failure as "fresh session" skipped the
-                    # lease this block exists to take and ran fail-open on
-                    # the exact contention point (#84234). Acquire (or fail
-                    # closed if acquire itself cannot) rather than start
-                    # load/run/flush unsynchronized. get_session returns
-                    # None — it does not raise — when the row is missing.
+                    # A locked / non-WAL read is not proof the row is absent; treating probe failure as
+                    # "fresh" ran
+                    # fail-open at the exact contention point (#84234). Acquire, or fail closed.
                     logger.warning(
                         "Could not check durable session before turn lease; "
                         "will acquire rather than run without serialization",
@@ -9351,21 +7893,16 @@ class AIAgent:
                 _turn_db is not None
                 and session_id
                 and not getattr(self, "_persist_disabled", False)
-                # A fresh session id is process-unique and has no durable
-                # transcript to race over. More importantly, subagent/new-turn
-                # callers may intentionally supply an in-memory seed before the
-                # row exists; reloading an absent row would erase that seed.
+                # A fresh session id has no durable transcript to race over, and callers may supply an in-
+                # memory
+                # seed before the row exists — reloading would erase it.
                 and _durable_session_exists
-                # Test doubles and third-party DB shims may accept arbitrary
-                # MagicMock attributes without implementing the protocol. Check
-                # the concrete type so only real implementations opt in.
+                # Check the concrete type: MagicMock-style shims accept any attribute without the protocol.
                 and callable(
                     getattr(type(_turn_db), "acquire_session_turn_lease", None)
                 )
             ):
-                # Resumed agents also defer their create check until the turn
-                # prologue. We just proved this row exists, so suppress the
-                # redundant create attempt after acquiring it.
+                # Row proven to exist — suppress the redundant create attempt.
                 self._session_db_created = True
                 _durable_holder = (
                     f"pid={os.getpid()}:turn={relay_turn_id}:platform="
@@ -9420,18 +7957,16 @@ class AIAgent:
                             interrupt_result["interrupt_message"] = (
                                 interrupt_message
                             )
-                        # Conversation-loop finalizer never runs on this
-                        # early return. Clear so a cached agent cannot
-                        # fail-close the next turn as interrupted.
+                        # The finalizer never runs on this early return; clear so a cached agent doesn't fail-
+                        # close the next turn.
                         try:
                             self.clear_interrupt()
                         except Exception:
                             self._interrupt_requested = False
                             self._interrupt_message = None
                         return interrupt_result
-                    # Fail closed like gateway TurnLeaseTimeoutError: do not
-                    # enter load/run/flush, and surface a resend notice instead
-                    # of a bare TimeoutError that looks like a hang.
+                    # Fail closed like gateway TurnLeaseTimeoutError: surface a resend notice, not a bare
+                    # TimeoutError.
                     timeout_msg = (
                         "⏳ Another Hermes process kept this session busy too "
                         "long. Your message was not processed - wait for the "
@@ -9458,10 +7993,8 @@ class AIAgent:
                         "error": f"session_turn_lease_timeout:{session_id}",
                     }
 
-                # Assign only after admission so finally release cannot target a
-                # holder string that never owned the row. Persist paths read
-                # the agent attr so a late flush after reclaim is fenced in
-                # the same SQLite write transaction as the transcript insert.
+                # Assign only after admission so the finally cannot release a holder that never owned the row;
+                # persist paths read the agent attr so a late flush is fenced in the same SQLite transaction.
                 durable_turn_lease = _durable_holder
                 self._active_session_turn_lease_holder = _durable_holder
                 self._active_session_turn_lease_ttl_seconds = _lease_ttl
@@ -9470,12 +8003,9 @@ class AIAgent:
                         "Session is free; loading the latest transcript..."
                     )
 
-                # The holder may have compressed and rotated the session while
-                # this process waited. Resolve and reload only AFTER admission;
-                # a caller-provided in-memory snapshot is necessarily stale.
-                # Skip when acquisition was immediate — no other process held
-                # the lease, so the in-memory history is current and reloading
-                # would only cause an unnecessary prompt cache miss.
+                # The holder may have compressed/rotated the session while we waited: reload only AFTER
+                # admission,
+                # and skip when acquisition was immediate (avoids a needless prompt-cache miss).
                 if _lease_waited:
                     latest_session_id = _turn_db.resolve_resume_session_id(session_id)
                     if latest_session_id:
@@ -9487,28 +8017,18 @@ class AIAgent:
                         include_row_ids=True,
                     )
 
-                # Long model/tool/compression turns outlive a fixed TTL. Refresh
-                # in a daemon thread; holder-qualified UPDATE and DELETE fence a
-                # late refresher/release from a successor lease.
+                # Long turns outlive a fixed TTL: refresh in a daemon thread; holder-qualified UPDATE/DELETE
+                # fence
+                # a late refresher from a successor lease.
                 durable_turn_lease_stop = threading.Event()
                 _lease_refresh_interval = float(
                     getattr(self, "_session_turn_lease_refresh_interval", 60.0)
                 )
 
-                # ── Turn liveness watchdog (#95548) ─────────────────────
-                # The durable lease refresher keeps the lease alive for as
-                # long as the turn runs, so lease renewal is NOT evidence of
-                # progress. A turn that stalls silently (observed #95548: no
-                # tool execution, no API call, no persisted message for 9+
-                # minutes after a slow model response + desktop WS
-                # disconnect) would otherwise renew its lease forever, look
-                # "active", and never be force-aborted.
-                #
-                # The watchdog policy (config resolution, sampling state
-                # machine, thread mechanics) lives in agent/turn_liveness.py;
-                # this block is only the integration seam: resolve the
-                # config.yaml settings, wire the commit/deactivate callbacks
-                # that own turn-lease state, and start the thread.
+                # ── Turn liveness watchdog (#95548) ──
+                # Lease renewal is NOT evidence of progress; a silently stalled turn would renew forever.
+                # Policy
+                # lives in agent/turn_liveness.py; this block only wires config + commit/deactivate callbacks.
                 try:
                     from hermes_cli.config import (
                         load_config_readonly as _liveness_load_config,
@@ -9523,13 +8043,9 @@ class AIAgent:
                 )
 
                 def _interrupt_turn(message: str) -> None:
-                    # Lease-loss interrupts fire UNCONDITIONALLY (no
-                    # require_generation claim): losing the durable lease
-                    # means this process no longer owns the session, so
-                    # the turn must stop regardless of activity-clock
-                    # progress. The generation-claim machinery is the
-                    # liveness watchdog's only — its stalls can be
-                    # spuriously stale, a lost lease cannot.
+                    # Lease-loss interrupts fire UNCONDITIONALLY (no generation claim): a lost lease means
+                    # this
+                    # process no longer owns the session. Only the watchdog's stalls can be spuriously stale.
                     nonlocal durable_turn_lease_interrupt_message
                     with durable_turn_lease_activity_lock:
                         if (
@@ -9550,28 +8066,14 @@ class AIAgent:
                 ) -> bool:
                     """Commit point for the watchdog's stall observation.
 
-                    Revalidates the observed ``(generation, timestamp)`` pair
-                    under the SAME lock ``_touch_activity`` stamps the clock
-                    with, so a turn that resumed while the stall was being
-                    logged/emitted is never hard-cancelled (#95663 review):
-                    it continues and its lease keeps renewing. Returns False
-                    when the observation is stale (watchdog keeps sampling)
-                    or the turn is already winding down.
-
-                    Round-3 (#95663): the revalidated generation is carried
-                    into the interrupt path as a claim
-                    (``require_generation``); ``interrupt`` reserves it,
-                    consumes it and publishes the first interrupt state in
-                    ONE activity-lock critical section (round-6) and
-                    abandons the abort when it went stale.
-
-                    Round-4 (#95663): if ``interrupt`` raises, the abort
-                    declines FAIL-CLOSED — the exceptional path must not
-                    convert the inability to validate/publish the claim
-                    through the normal path into unconditional interrupt
-                    authority. No interrupt state is mutated here; the
-                    watchdog keeps sampling while the turn (which may have
-                    resumed) continues.
+                    Revalidates the observed ``(generation, timestamp)`` under the SAME lock
+                    ``_touch_activity`` uses, so a turn
+                    that resumed while the stall was logged is never hard-cancelled. The revalidated
+                    generation is carried into
+                    ``interrupt`` as ``require_generation``, which consumes it with the first publication in
+                    ONE critical section.
+                    If ``interrupt`` raises, the abort declines FAIL-CLOSED. Returns False when stale or
+                    already winding down.
                     """
                     nonlocal durable_turn_lease_interrupt_message
                     with self._liveness_activity_lock():
@@ -9596,12 +8098,9 @@ class AIAgent:
                             require_generation=current_generation,
                         )
                     except Exception:
-                        # Round-4 (#95663): fail closed. An exceptional
-                        # interrupt path must not turn the inability to
-                        # validate/publish the generation claim into
-                        # unconditional abort authority — declining keeps
-                        # the watchdog sampling while the turn (which may
-                        # have resumed) continues.
+                        # Round-4 (#95663): fail closed — an exceptional path must not turn an unvalidated
+                        # claim into
+                        # unconditional abort authority.
                         logger.debug(
                             "Turn liveness abort interrupt raised; "
                             "declining the abort",
@@ -9609,11 +8108,8 @@ class AIAgent:
                         )
                         published = False
                     if published is False:
-                        # The generation claim went stale between the
-                        # revalidation above and the hammer: real progress
-                        # landed in the window, so the abort abandons itself
-                        # and the watchdog keeps sampling while the turn
-                        # (and its lease) continue.
+                        # Claim went stale between revalidation and the hammer: real progress landed, abandon
+                        # the abort.
                         return False
                     with durable_turn_lease_activity_lock:
                         durable_turn_lease_interrupt_message = message
@@ -9622,10 +8118,9 @@ class AIAgent:
                 def _deactivate_turn_after_liveness_abort() -> None:
                     """Stop lease renewal after a committed liveness abort.
 
-                    A wedge the hard interrupt cannot unwind must not keep
-                    the lease alive forever (the issue's "lease keeps
-                    renewing" masking); TTL expiry then lets stale-turn
-                    cleanup reclaim the row.
+                    A wedge the hard interrupt cannot unwind must not keep the lease alive forever; TTL expiry
+                    lets
+                    stale-turn cleanup reclaim the row.
                     """
                     nonlocal durable_turn_lease_turn_active
                     with durable_turn_lease_activity_lock:
@@ -9644,9 +8139,8 @@ class AIAgent:
                                 durable_turn_lease,
                                 ttl_seconds=_lease_ttl,
                             ):
-                                # finally sets the stop event then releases.
-                                # A late holder-fenced miss after that join
-                                # timeout must not hard-interrupt the next turn.
+                                # finally sets stop then releases; a late holder-fenced miss must not hard-
+                                # interrupt the next turn.
                                 if durable_turn_lease_stop.is_set():
                                     return
                                 logger.error(
@@ -9713,47 +8207,32 @@ class AIAgent:
                     parent_session_id=getattr(self, "_parent_session_id", None) or "",
                 )
                 task_started = True
-            # Publish the conversation id for ambient Nous Portal tagging. Every
-            # LLM call made inside this turn — main loop, compression, vision,
-            # web_extract, session_search, MoA slots, background-review forks
-            # (which copy this Context into their thread) — inherits the
-            # ``conversation=<root>`` tag with zero per-call-site plumbing.
+            # Publish the conversation id for ambient Nous Portal tagging: every LLM call in this turn (loop,
+            # compression, vision, MoA, review forks) inherits `conversation=<root>`.
             token = set_conversation_context(self._conversation_root_id())
-            # Routing/affinity scope for the same turn — the conversation the
-            # HOST declared, when it declared one. Providers fall back to the
-            # attribution id above when it is unset, so this changes nothing
-            # for a host that keeps one session id per conversation (#96811).
+            # Routing/affinity scope the HOST declared; providers fall back to the id above when unset
+            # (#96811).
             affinity_token = set_affinity_scope(
                 declared_conversation_scope_safe(self)
             )
-            # Publish the session accounting handles the same way so auxiliary
-            # calls record their token usage into session_model_usage (task
-            # dimension) — the fix for aux spend being invisible in analytics
-            # (issue #23270).
+            # Publish session accounting handles so auxiliary calls record usage into session_model_usage
+            # (#23270).
             acct_token = set_accounting_context(
                 getattr(self, "_session_db", None),
                 getattr(self, "session_id", None),
             )
             from agent.auxiliary_client import scoped_runtime_main
 
-            # The outer token restores the caller's Context even though turn setup
-            # replaces the value with the live runtime after fallback restoration.
-            # Keep the scope local instead of storing ContextVar tokens on the agent,
-            # which may be observed from another thread.
+            # Keep the ContextVar scope local (tokens on the agent may be observed from another thread).
             with bind_subagent_parent(self), scoped_runtime_main({}):
                 try:
                     if durable_turn_lease_thread is not None:
                         with durable_turn_lease_activity_lock:
                             durable_turn_lease_turn_active = True
-                        # Stamp the activity clock at turn entry (#95663
-                        # review): a real agent keeps ``_last_activity_ts``
-                        # across turns (idle time between turns is normal —
-                        # ``_reset_activity_labels_after_turn`` preserves
-                        # it by design), so without this stamp the liveness
-                        # watchdog would measure idle from the PREVIOUS
-                        # turn and force-abort a just-started turn on its
-                        # first poll whenever the agent had been idle longer
-                        # than the watchdog bound.
+                        # Stamp the activity clock at turn entry (#95663): `_last_activity_ts` persists across
+                        # turns, so
+                        # without this the watchdog would measure idle from the PREVIOUS turn and abort a
+                        # fresh one.
                         self._touch_activity("starting new turn")
                         durable_turn_lease_thread.start()
                         if durable_turn_liveness_thread is not None:
@@ -9773,13 +8252,11 @@ class AIAgent:
                         moa_config=moa_config,
                     )
                 finally:
-                    # The lease remains held through relay/task finalization, but
-                    # those post-loop steps must not receive a late refresh
-                    # interrupt that poisons the next turn on a cached agent.
+                    # Post-loop relay/task finalization must not receive a late refresh interrupt.
                     _stop_durable_turn_lease_refresher()
-                    # Interrupt clear is deferred to after thread join in the
-                    # outer finally: a refresher firing between stop and join
-                    # would otherwise set an interrupt that survives the clear.
+                    # Interrupt clear is deferred until after thread join (outer finally) so a refresher
+                    # firing
+                    # between stop and join cannot leave an interrupt behind.
             terminal = result if isinstance(result, dict) else {}
             if terminal.get("interrupted") is True:
                 relay_outcome = "cancelled"
@@ -9835,9 +8312,7 @@ class AIAgent:
                             and _durable_thread.is_alive()
                         ):
                             _durable_thread.join(timeout=1.0)
-                    # Clear any interrupt the refresher may have fired between
-                    # the inner stop and this join. Must run AFTER join so a
-                    # late interrupt does not survive into the next turn.
+                    # Clear any refresher interrupt fired between stop and join; must run AFTER join.
                     _clear_durable_turn_lease_interrupt()
                     if durable_turn_lease is not None:
                         try:
@@ -9870,24 +8345,16 @@ class AIAgent:
                         reset_conversation_context(token)
                     if affinity_token is not None:
                         reset_affinity_scope(affinity_token)
-                    # Balance the note_turn_started above — every exit path
-                    # lands here, so the idle queue's live-turn count cannot
-                    # leak upward and starve deferred reviews.
+                    # Balance note_turn_started on every exit so the idle queue's live-turn count cannot leak.
                     try:
                         _review_queue.note_turn_finished()
                     except Exception:
                         pass
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
-        """
-        Simple chat interface that returns just the final response.
+        """Simple chat interface that returns just the final response string.
 
-        Args:
-            message (str): User message
-            stream_callback: Optional callback invoked with each text delta during streaming.
-
-        Returns:
-            str: Final assistant response
+        ``stream_callback`` is invoked with each text delta during streaming.
         """
         result = self.run_conversation(message, stream_callback=stream_callback)
         return result["final_response"]
@@ -9924,7 +8391,8 @@ def main(
 
     Args:
         query (str): Natural language query for the agent. Defaults to Python 3.13 example.
-        model (str): Model name to use (OpenRouter format: provider/model). Defaults to anthropic/claude-sonnet-4.6.
+        model (str): Model name to use (OpenRouter format: provider/model). Defaults to anthropic/claude-
+        sonnet-4.6.
         api_key (str): API key for authentication. Uses OPENROUTER_API_KEY env var if not provided.
         base_url (str): Base URL for the model API. Defaults to https://openrouter.ai/api/v1
         max_turns (int): Maximum number of API call iterations. Defaults to 10.
@@ -9933,35 +8401,38 @@ def main(
                               Multiple toolsets can be combined: "web,vision"
         disabled_toolsets (str): Comma-separated list of toolsets to disable (e.g., "terminal")
         list_tools (bool): Just list available tools and exit
-        save_trajectories (bool): Save conversation trajectories to JSONL files (appends to trajectory_samples.jsonl). Defaults to False.
-        save_sample (bool): Save a single trajectory sample to a UUID-named JSONL file for inspection. Defaults to False.
+        save_trajectories (bool): Save conversation trajectories to JSONL files (appends to
+        trajectory_samples.jsonl). Defaults to False.
+        save_sample (bool): Save a single trajectory sample to a UUID-named JSONL file for inspection.
+        Defaults to False.
         verbose (bool): Enable verbose logging for debugging. Defaults to False.
-        log_prefix_chars (int): Number of characters to show in log previews for tool calls/responses. Defaults to 20.
+        log_prefix_chars (int): Number of characters to show in log previews for tool calls/responses.
+        Defaults to 20.
 
     Toolset Examples:
         - "research": Web search, extract, crawl + vision tools
     """
     print("🤖 AI Agent with Tool Calling")
     print("=" * 50)
-    
+
     # Handle tool listing
     if list_tools:
         from model_tools import get_all_tool_names, get_available_toolsets
         from toolsets import get_all_toolsets, get_toolset_info
-        
+
         print("📋 Available Tools & Toolsets:")
         print("-" * 50)
-        
+
         # Show new toolsets system
         print("\n🎯 Predefined Toolsets (New System):")
         print("-" * 40)
         all_toolsets = get_all_toolsets()
-        
+
         # Group by category
         basic_toolsets = []
         composite_toolsets = []
         scenario_toolsets = []
-        
+
         for name, toolset in all_toolsets.items():
             info = get_toolset_info(name)
             if info:
@@ -9972,14 +8443,14 @@ def main(
                     composite_toolsets.append(entry)
                 else:
                     scenario_toolsets.append(entry)
-        
+
         # Print basic toolsets
         print("\n📌 Basic Toolsets:")
         for name, info in basic_toolsets:
             tools_str = ', '.join(info['resolved_tools']) if info['resolved_tools'] else 'none'
             print(f"  • {name:15} - {info['description']}")
             print(f"    Tools: {tools_str}")
-        
+
         # Print composite toolsets
         print("\n📂 Composite Toolsets (built from other toolsets):")
         for name, info in composite_toolsets:
@@ -9987,14 +8458,14 @@ def main(
             print(f"  • {name:15} - {info['description']}")
             print(f"    Includes: {includes_str}")
             print(f"    Total tools: {info['tool_count']}")
-        
+
         # Print scenario-specific toolsets
         print("\n🎭 Scenario-Specific Toolsets:")
         for name, info in scenario_toolsets:
             print(f"  • {name:20} - {info['description']}")
             print(f"    Total tools: {info['tool_count']}")
-        
-        
+
+
         # Show legacy toolset compatibility
         print("\n📦 Legacy Toolsets (for backward compatibility):")
         legacy_toolsets = get_available_toolsets()
@@ -10003,14 +8474,14 @@ def main(
             print(f"  {status} {name}: {info['description']}")
             if not info["available"]:
                 print(f"    Requirements: {', '.join(info['requirements'])}")
-        
+
         # Show individual tools
         all_tools = get_all_tool_names()
         print(f"\n🔧 Individual Tools ({len(all_tools)} available):")
         for tool_name in sorted(all_tools):
             toolset = get_toolset_for_tool(tool_name)
             print(f"  📌 {tool_name} (from {toolset})")
-        
+
         print("\n💡 Usage Examples:")
         print("  # Use predefined toolsets")
         print("  python run_agent.py --enabled_toolsets=research --query='search for Python news'")
@@ -10026,24 +8497,24 @@ def main(
         print("  # Run with trajectory saving enabled")
         print("  python run_agent.py --save_trajectories --query='your question here'")
         return
-    
+
     # Parse toolset selection arguments
     enabled_toolsets_list = None
     disabled_toolsets_list = None
-    
+
     if enabled_toolsets:
         enabled_toolsets_list = [t.strip() for t in enabled_toolsets.split(",")]
         print(f"🎯 Enabled toolsets: {enabled_toolsets_list}")
-    
+
     if disabled_toolsets:
         disabled_toolsets_list = [t.strip() for t in disabled_toolsets.split(",")]
         print(f"🚫 Disabled toolsets: {disabled_toolsets_list}")
-    
+
     if save_trajectories:
         print("💾 Trajectory saving: ENABLED")
         print("   - Successful conversations → trajectory_samples.jsonl")
         print("   - Failed conversations → failed_trajectories.jsonl")
-    
+
     # Initialize agent with provided parameters
     try:
         agent = AIAgent(
@@ -10060,7 +8531,7 @@ def main(
     except RuntimeError as e:
         print(f"❌ Failed to initialize agent: {e}")
         return
-    
+
     # Use provided query or default to Python 3.13 example
     if query is None:
         user_query = (
@@ -10069,37 +8540,37 @@ def main(
         )
     else:
         user_query = query
-    
+
     print(f"\n📝 User Query: {user_query}")
     print("\n" + "=" * 50)
-    
+
     # Run conversation
     result = agent.run_conversation(user_query)
-    
+
     print("\n" + "=" * 50)
     print("📋 CONVERSATION SUMMARY")
     print("=" * 50)
     print(f"✅ Completed: {result['completed']}")
     print(f"📞 API Calls: {result['api_calls']}")
     print(f"💬 Messages: {len(result['messages'])}")
-    
+
     if result['final_response']:
         print("\n🎯 FINAL RESPONSE:")
         print("-" * 30)
         print(result['final_response'])
-    
+
     # Save sample trajectory to UUID-named file if requested
     if save_sample:
         sample_id = str(uuid.uuid4())[:8]
         sample_filename = f"sample_{sample_id}.json"
-        
+
         # Convert messages to trajectory format (same as batch_runner)
         trajectory = agent._convert_to_trajectory_format(
             result['messages'], 
             user_query, 
             result['completed']
         )
-        
+
         entry = {
             "conversations": trajectory,
             "timestamp": datetime.now().isoformat(),
@@ -10107,7 +8578,7 @@ def main(
             "completed": result['completed'],
             "query": user_query
         }
-        
+
         try:
             with open(sample_filename, "w", encoding="utf-8") as f:
                 # Pretty-print JSON with indent for readability
@@ -10115,7 +8586,7 @@ def main(
             print(f"\n💾 Sample trajectory saved to: {sample_filename}")
         except Exception as e:
             print(f"\n⚠️ Failed to save sample: {e}")
-    
+
     print("\n👋 Agent execution completed!")
 
 
