@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
@@ -31,10 +32,6 @@ from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Tool schemas (unchanged from original PR)
-# ---------------------------------------------------------------------------
 
 FACT_STORE_SCHEMA = {
     "name": "fact_store",
@@ -90,15 +87,21 @@ FACT_FEEDBACK_SCHEMA = {
     },
 }
 
+# Auto-extraction patterns (on_session_end): user preferences -> user_pref, decisions -> project.
+_PREF_PATTERNS = [
+    re.compile(r'\bI\s+(?:prefer|like|love|use|want|need)\s+(.+)', re.IGNORECASE),
+    re.compile(r'\bmy\s+(?:favorite|preferred|default)\s+\w+\s+is\s+(.+)', re.IGNORECASE),
+    re.compile(r'\bI\s+(?:always|never|usually)\s+(.+)', re.IGNORECASE),
+]
+_DECISION_PATTERNS = [
+    re.compile(r'\bwe\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+)', re.IGNORECASE),
+    re.compile(r'\bthe\s+project\s+(?:uses|needs|requires)\s+(.+)', re.IGNORECASE),
+]
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 
 def _load_plugin_config() -> dict:
     try:
-        # Canonical loader: behavioral read now honors the managed-scope
-        # overlay + ${VAR} expansion (e.g. an api key template) too.
+        # Canonical loader: honors the managed-scope overlay + ${VAR} expansion.
         from hermes_cli.config import load_config_readonly
         all_config = load_config_readonly()
         return cfg_get(all_config, "plugins", "hermes-memory-store", default={}) or {}
@@ -106,9 +109,9 @@ def _load_plugin_config() -> dict:
         return {}
 
 
-# ---------------------------------------------------------------------------
-# MemoryProvider implementation
-# ---------------------------------------------------------------------------
+def _results(results: list) -> str:
+    return json.dumps({"results": results, "count": len(results)})
+
 
 class HolographicMemoryProvider(MemoryProvider):
     """Holographic memory with structured facts, entity resolution, and HRR retrieval."""
@@ -128,16 +131,14 @@ class HolographicMemoryProvider(MemoryProvider):
 
     def save_config(self, values, hermes_home):
         """Write config to config.yaml under plugins.hermes-memory-store."""
-        from pathlib import Path
         config_path = Path(hermes_home) / "config.yaml"
         try:
             import yaml
-            # Write-back round-trip: raw read is correct (merged defaults
-            # must not be persisted back into the user's file).
+            # Raw read for the write-back round-trip: merged defaults must not
+            # be persisted into the user's file.
             from hermes_cli.config import read_user_config_raw
             existing = read_user_config_raw(config_path)
-            existing.setdefault("plugins", {})
-            existing["plugins"]["hermes-memory-store"] = values
+            existing.setdefault("plugins", {})["hermes-memory-store"] = values
             with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(existing, f, default_flow_style=False)
         except Exception:
@@ -156,24 +157,19 @@ class HolographicMemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         from hermes_constants import get_hermes_home
         _hermes_home = str(get_hermes_home())
-        _default_db = _hermes_home + "/memory_store.db"
-        db_path = self._config.get("db_path", _default_db)
-        # Expand $HERMES_HOME in user-supplied paths so config values like
-        # "$HERMES_HOME/memory_store.db" or "~/.hermes/memory_store.db" both
-        # resolve to the active profile's directory.
+        db_path = self._config.get("db_path", _hermes_home + "/memory_store.db")
+        # Expand $HERMES_HOME so configured paths resolve to the active profile's directory.
         if isinstance(db_path, str):
-            db_path = db_path.replace("$HERMES_HOME", _hermes_home)
-            db_path = db_path.replace("${HERMES_HOME}", _hermes_home)
-        default_trust = float(self._config.get("default_trust", 0.5))
+            db_path = db_path.replace("$HERMES_HOME", _hermes_home).replace("${HERMES_HOME}", _hermes_home)
         hrr_dim = int(self._config.get("hrr_dim", 1024))
-        hrr_weight = float(self._config.get("hrr_weight", 0.3))
-        temporal_decay = int(self._config.get("temporal_decay_half_life", 0))
 
-        self._store = MemoryStore(db_path=db_path, default_trust=default_trust, hrr_dim=hrr_dim)
+        self._store = MemoryStore(
+            db_path=db_path, default_trust=float(self._config.get("default_trust", 0.5)), hrr_dim=hrr_dim,
+        )
         self._retriever = FactRetriever(
             store=self._store,
-            temporal_decay_half_life=temporal_decay,
-            hrr_weight=hrr_weight,
+            temporal_decay_half_life=int(self._config.get("temporal_decay_half_life", 0)),
+            hrr_weight=float(self._config.get("hrr_weight", 0.3)),
             hrr_dim=hrr_dim,
         )
         self._session_id = session_id
@@ -182,9 +178,7 @@ class HolographicMemoryProvider(MemoryProvider):
         if not self._store:
             return ""
         try:
-            total = self._store._conn.execute(
-                "SELECT COUNT(*) FROM facts"
-            ).fetchone()[0]
+            total = self._store._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
         except Exception:
             total = 0
         if total == 0:
@@ -208,39 +202,35 @@ class HolographicMemoryProvider(MemoryProvider):
             results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
             if not results:
                 return ""
-            lines = []
-            for r in results:
-                trust = r.get("trust_score", r.get("trust", 0))
-                lines.append(f"- [{trust:.1f}] {r.get('content', '')}")
+            lines = [f"- [{r.get('trust_score', r.get('trust', 0)):.1f}] {r.get('content', '')}" for r in results]
             return "## Holographic Memory\n" + "\n".join(lines)
         except Exception as e:
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        # Holographic memory stores explicit facts via tools, not auto-sync.
-        # The on_session_end hook handles auto-extraction if configured.
+        # Facts are stored explicitly via tools; on_session_end handles auto-extraction if configured.
         pass
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
-        if tool_name == "fact_store":
-            return self._handle_fact_store(args)
-        elif tool_name == "fact_feedback":
-            return self._handle_fact_feedback(args)
-        return tool_error(f"Unknown tool: {tool_name}")
+        handler = self._TOOL_HANDLERS.get(tool_name)
+        if handler is None:
+            return tool_error(f"Unknown tool: {tool_name}")
+        try:
+            return handler(self, args)
+        except KeyError as exc:
+            return tool_error(f"Missing required argument: {exc}")
+        except Exception as exc:
+            return tool_error(str(exc))
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         # is_truthy_value: the config schema declares auto_extract as a string
-        # enum ("false"/"true"), and a plain truthiness check treats the string
-        # "false" as enabled (#57682).
-        if not is_truthy_value(self._config.get("auto_extract", False)):
-            return
-        if not self._store or not messages:
-            return
-        self._auto_extract_facts(messages)
+        # enum ("false"/"true"); plain truthiness would treat "false" as enabled.
+        if is_truthy_value(self._config.get("auto_extract", False)) and self._store and messages:
+            self._auto_extract_facts(messages)
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         """Mirror built-in memory writes as facts."""
@@ -252,12 +242,9 @@ class HolographicMemoryProvider(MemoryProvider):
                 logger.debug("Holographic memory_write mirror failed: %s", e)
 
     def shutdown(self) -> None:
-        # Release the shared SQLite connection deterministically on the
-        # caller's thread. Dropping the reference alone leaves fd finalization
-        # to GC, which keeps the connection (and its write lock) alive on a
-        # long-running gateway and prolongs the "database is locked" contention
-        # this store's shared-connection refcounting is meant to eliminate.
-        # close() is idempotent and refcount-guarded, so siblings stay safe.
+        # Release the shared SQLite connection on the caller's thread: leaving
+        # it to GC keeps the connection (and its write lock) alive on a
+        # long-running gateway. close() is idempotent and refcount-guarded.
         if self._store is not None:
             try:
                 self._store.close()
@@ -267,196 +254,116 @@ class HolographicMemoryProvider(MemoryProvider):
         self._retriever = None
 
     # -- Tool handlers -------------------------------------------------------
+    # KeyError from args[...] / Exception are turned into tool_error by handle_tool_call.
 
     def _handle_fact_store(self, args: dict) -> str:
-        try:
-            action = args["action"]
-            store = self._store
-            retriever = self._retriever
+        action = args["action"]
+        handler = self._FACT_STORE_ACTIONS.get(action)
+        if handler is None:
+            return tool_error(f"Unknown action: {action}")
+        return handler(self, args)
 
-            if action == "add":
-                fact_id = store.add_fact(
-                    args["content"],
-                    category=args.get("category", "general"),
-                    tags=args.get("tags", ""),
-                )
-                return json.dumps({"fact_id": fact_id, "status": "added"})
+    def _act_add(self, args: dict) -> str:
+        fact_id = self._store.add_fact(args["content"], category=args.get("category", "general"), tags=args.get("tags", ""))
+        return json.dumps({"fact_id": fact_id, "status": "added"})
 
-            elif action == "search":
-                results = retriever.search(
-                    args["query"],
-                    category=args.get("category"),
-                    min_trust=float(args.get("min_trust", self._min_trust)),
-                    limit=int(args.get("limit", 10)),
-                )
-                return json.dumps({"results": results, "count": len(results)})
+    def _act_search(self, args: dict) -> str:
+        return _results(self._retriever.search(
+            args["query"], category=args.get("category"),
+            min_trust=float(args.get("min_trust", self._min_trust)), limit=int(args.get("limit", 10)),
+        ))
 
-            elif action == "probe":
-                results = retriever.probe(
-                    args["entity"],
-                    category=args.get("category"),
-                    limit=int(args.get("limit", 10)),
-                )
-                return json.dumps({"results": results, "count": len(results)})
+    def _act_entity(self, args: dict, method: str) -> str:
+        """Shared body of 'probe' and 'related' (single-entity retriever queries)."""
+        return _results(getattr(self._retriever, method)(
+            args["entity"], category=args.get("category"), limit=int(args.get("limit", 10)),
+        ))
 
-            elif action == "related":
-                results = retriever.related(
-                    args["entity"],
-                    category=args.get("category"),
-                    limit=int(args.get("limit", 10)),
-                )
-                return json.dumps({"results": results, "count": len(results)})
+    def _act_reason(self, args: dict) -> str:
+        entities = args.get("entities", [])
+        if not entities:
+            return tool_error("reason requires 'entities' list")
+        return _results(self._retriever.reason(entities, category=args.get("category"), limit=int(args.get("limit", 10))))
 
-            elif action == "reason":
-                entities = args.get("entities", [])
-                if not entities:
-                    return tool_error("reason requires 'entities' list")
-                results = retriever.reason(
-                    entities,
-                    category=args.get("category"),
-                    limit=int(args.get("limit", 10)),
-                )
-                return json.dumps({"results": results, "count": len(results)})
+    def _act_contradict(self, args: dict) -> str:
+        return _results(self._retriever.contradict(category=args.get("category"), limit=int(args.get("limit", 10))))
 
-            elif action == "contradict":
-                results = retriever.contradict(
-                    category=args.get("category"),
-                    limit=int(args.get("limit", 10)),
-                )
-                return json.dumps({"results": results, "count": len(results)})
+    def _act_update(self, args: dict) -> str:
+        updated = self._store.update_fact(
+            int(args["fact_id"]), content=args.get("content"),
+            trust_delta=float(args["trust_delta"]) if "trust_delta" in args else None,
+            tags=args.get("tags"), category=args.get("category"),
+        )
+        return json.dumps({"updated": updated})
 
-            elif action == "update":
-                updated = store.update_fact(
-                    int(args["fact_id"]),
-                    content=args.get("content"),
-                    trust_delta=float(args["trust_delta"]) if "trust_delta" in args else None,
-                    tags=args.get("tags"),
-                    category=args.get("category"),
-                )
-                return json.dumps({"updated": updated})
+    def _act_remove(self, args: dict) -> str:
+        return json.dumps({"removed": self._store.remove_fact(int(args["fact_id"]))})
 
-            elif action == "remove":
-                removed = store.remove_fact(int(args["fact_id"]))
-                return json.dumps({"removed": removed})
-
-            elif action == "list":
-                facts = store.list_facts(
-                    category=args.get("category"),
-                    min_trust=float(args.get("min_trust", 0.0)),
-                    limit=int(args.get("limit", 10)),
-                )
-                return json.dumps({"facts": facts, "count": len(facts)})
-
-            else:
-                return tool_error(f"Unknown action: {action}")
-
-        except KeyError as exc:
-            return tool_error(f"Missing required argument: {exc}")
-        except Exception as exc:
-            return tool_error(str(exc))
+    def _act_list(self, args: dict) -> str:
+        facts = self._store.list_facts(
+            category=args.get("category"), min_trust=float(args.get("min_trust", 0.0)), limit=int(args.get("limit", 10)),
+        )
+        return json.dumps({"facts": facts, "count": len(facts)})
 
     def _handle_fact_feedback(self, args: dict) -> str:
-        try:
-            fact_id = int(args["fact_id"])
-            helpful = args["action"] == "helpful"
-            result = self._store.record_feedback(fact_id, helpful=helpful)
-            return json.dumps(result)
-        except KeyError as exc:
-            return tool_error(f"Missing required argument: {exc}")
-        except Exception as exc:
-            return tool_error(str(exc))
+        return json.dumps(self._store.record_feedback(int(args["fact_id"]), helpful=args["action"] == "helpful"))
+
+    _FACT_STORE_ACTIONS = {
+        "add": _act_add, "search": _act_search,
+        "probe": lambda self, args: self._act_entity(args, "probe"),
+        "related": lambda self, args: self._act_entity(args, "related"),
+        "reason": _act_reason, "contradict": _act_contradict,
+        "update": _act_update, "remove": _act_remove, "list": _act_list,
+    }
+    _TOOL_HANDLERS = {"fact_store": _handle_fact_store, "fact_feedback": _handle_fact_feedback}
 
     # -- Auto-extraction (on_session_end) ------------------------------------
 
     def _auto_extract_facts(self, messages: list) -> None:
-        # Local import (pattern used in initialize()): the compressor module is
-        # heavier than this plugin and is only needed when auto_extract is on.
+        # Local import: the compressor module is heavier than this plugin and
+        # only needed when auto_extract is on.
         from agent.context_compressor import (
             _MERGED_PRIOR_CONTEXT_HEADER,
             _MERGED_SUMMARY_DELIMITER,
             is_compaction_summary_message,
         )
 
-        def _pre_delimiter_user_segment(msg: dict):
-            """Return the genuine user text preceding a merged-into-tail
-            compaction summary, or None when the whole message is a summary.
-
-            Merge-into-tail messages (agent/context_compressor.py ~3163-3190)
-            wrap real prior tail content BEFORE ``_MERGED_SUMMARY_DELIMITER``,
-            prefixed with ``_MERGED_PRIOR_CONTEXT_HEADER``, then append the
-            generated handoff summary AFTER the delimiter. Dropping the whole
-            row (as ``is_compaction_summary_message`` alone would suggest)
-            discards that genuine pre-delimiter content too (#57690 review).
-            Only the summary suffix must be excluded from harvesting.
-            """
-            content = msg.get("content", "")
-            if not isinstance(content, str) or _MERGED_SUMMARY_DELIMITER not in content:
-                return None
-            pre = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
-            if pre.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
-                pre = pre[len(_MERGED_PRIOR_CONTEXT_HEADER):]
-            pre = pre.strip()
-            return pre or None
-
-        _PREF_PATTERNS = [
-            re.compile(r'\bI\s+(?:prefer|like|love|use|want|need)\s+(.+)', re.IGNORECASE),
-            re.compile(r'\bmy\s+(?:favorite|preferred|default)\s+\w+\s+is\s+(.+)', re.IGNORECASE),
-            re.compile(r'\bI\s+(?:always|never|usually)\s+(.+)', re.IGNORECASE),
-        ]
-        _DECISION_PATTERNS = [
-            re.compile(r'\bwe\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+)', re.IGNORECASE),
-            re.compile(r'\bthe\s+project\s+(?:uses|needs|requires)\s+(.+)', re.IGNORECASE),
-        ]
-
         extracted = 0
         for msg in messages:
             if msg.get("role") != "user":
                 continue
-            # Compaction handoff summaries can be inserted as role="user"
-            # messages; their prose reliably matches the decision patterns, so
-            # without this guard the compactor's own output is stored as a
-            # durable "fact" on every rollover (#57682). A merge-into-tail
-            # summary also carries genuine pre-delimiter user content in the
-            # SAME row; harvest that segment instead of dropping the whole
-            # message (#57690 review).
-            pre_delimiter_segment = _pre_delimiter_user_segment(msg)
-            if pre_delimiter_segment is not None:
-                content = pre_delimiter_segment
+            content = msg.get("content", "")
+            # Compaction handoff summaries arrive as role="user" and reliably
+            # match the decision patterns; skip them so the compactor's own
+            # output is never stored as a durable fact. A merge-into-tail row
+            # holds genuine prior user text BEFORE _MERGED_SUMMARY_DELIMITER
+            # (prefixed with the header) and the summary AFTER it — harvest
+            # only the pre-delimiter segment.
+            if isinstance(content, str) and _MERGED_SUMMARY_DELIMITER in content:
+                pre = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
+                if pre.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
+                    pre = pre[len(_MERGED_PRIOR_CONTEXT_HEADER):]
+                if pre.strip():
+                    content = pre.strip()
+                elif is_compaction_summary_message(msg):
+                    continue
             elif is_compaction_summary_message(msg):
                 continue
-            else:
-                content = msg.get("content", "")
             if not isinstance(content, str) or len(content) < 10:
                 continue
 
-            for pattern in _PREF_PATTERNS:
-                if pattern.search(content):
+            for patterns, category in ((_PREF_PATTERNS, "user_pref"), (_DECISION_PATTERNS, "project")):
+                if any(p.search(content) for p in patterns):
                     try:
-                        self._store.add_fact(content[:400], category="user_pref")
+                        self._store.add_fact(content[:400], category=category)
                         extracted += 1
                     except Exception:
                         pass
-                    break
-
-            for pattern in _DECISION_PATTERNS:
-                if pattern.search(content):
-                    try:
-                        self._store.add_fact(content[:400], category="project")
-                        extracted += 1
-                    except Exception:
-                        pass
-                    break
 
         if extracted:
             logger.info("Auto-extracted %d facts from conversation", extracted)
 
 
-# ---------------------------------------------------------------------------
-# Plugin entry point
-# ---------------------------------------------------------------------------
-
 def register(ctx) -> None:
     """Register the holographic memory provider with the plugin system."""
-    config = _load_plugin_config()
-    provider = HolographicMemoryProvider(config=config)
-    ctx.register_memory_provider(provider)
+    ctx.register_memory_provider(HolographicMemoryProvider(config=_load_plugin_config()))
