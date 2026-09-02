@@ -13,16 +13,9 @@ import sys
 import time
 from typing import Any
 
-from agent.skill_commands import (
-    SKILL_EXCERPT_JOINT,
-    SKILL_SCAFFOLD_SQL_LIKE,
-    describe_skill_invocation,
-)
+from agent.skill_commands import SKILL_EXCERPT_JOINT, SKILL_SCAFFOLD_SQL_LIKE, describe_skill_invocation
 from agent.context_compressor import (
-    LEGACY_SUMMARY_PREFIX,
-    SUMMARY_PREFIX,
-    _MERGED_PRIOR_CONTEXT_HEADER,
-    _MERGED_SUMMARY_DELIMITER,
+    LEGACY_SUMMARY_PREFIX, SUMMARY_PREFIX, _MERGED_PRIOR_CONTEXT_HEADER, _MERGED_SUMMARY_DELIMITER,
     _SUMMARY_END_MARKER,
 )
 
@@ -33,11 +26,7 @@ from agent.context_compressor import (
 # (whole message under budget, else head + tail where the typed instruction
 # lands) so ``_shape_preview`` can recover ``/work — fix the title leak``.
 _PREVIEW_HEAD_CHARS = 63
-
-
 _PREVIEW_SCAFFOLD_WINDOW = 400
-
-
 _PREVIEW_MAX_CHARS = 60
 
 
@@ -50,16 +39,12 @@ def escape_like(text: str) -> str:
 
 
 _PREVIEW_CONTENT_SQL = "REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' ')"
-
-
 _PREVIEW_SCAFFOLDED_SQL = f"m.content LIKE '{SKILL_SCAFFOLD_SQL_LIKE}'"
+_SQL_WHITESPACE = "CHAR(9) || CHAR(10) || CHAR(13) || CHAR(32)"
 
 
 def _sql_literal(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
-
-
-_SQL_WHITESPACE = "CHAR(9) || CHAR(10) || CHAR(13) || CHAR(32)"
 
 
 def _sql_ltrim_whitespace(expression: str) -> str:
@@ -72,28 +57,22 @@ def _sql_trim_whitespace(expression: str) -> str:
 
 def _sql_starts_with(expression: str, prefixes: tuple[str, ...]) -> str:
     trimmed = _sql_ltrim_whitespace(expression)
-    checks = [
-        f"SUBSTR({trimmed}, 1, {len(prefix)}) = {_sql_literal(prefix)}"
-        for prefix in prefixes
-    ]
+    checks = [f"SUBSTR({trimmed}, 1, {len(prefix)}) = {_sql_literal(prefix)}" for prefix in prefixes]
     return "(" + " OR ".join(checks) + ")"
+
+
+def _sql_after_marker(marker: str) -> str:
+    """``m.content`` after the first occurrence of *marker*."""
+    return f"SUBSTR(m.content, INSTR(m.content, {_sql_literal(marker)}) + {len(marker)})"
 
 
 # Current and legacy long-form prefixes share this whole introduction; matching
 # all of it keeps an ordinary message that merely starts with the bracketed
 # label from counting as a compaction carrier.
 _PREVIEW_LONG_FORM_PREFIX = SUMMARY_PREFIX.split("Do NOT answer", 1)[0]
-_PREVIEW_SUMMARY_PREFIXES = (
-    _PREVIEW_LONG_FORM_PREFIX,
-    LEGACY_SUMMARY_PREFIX,
-)
-_PREVIEW_STANDALONE_SUMMARY_SQL = _sql_starts_with(
-    "m.content", _PREVIEW_SUMMARY_PREFIXES
-)
-_PREVIEW_MERGED_AFTER_SQL = (
-    f"SUBSTR(m.content, INSTR(m.content, {_sql_literal(_MERGED_SUMMARY_DELIMITER)})"
-    f" + {len(_MERGED_SUMMARY_DELIMITER)})"
-)
+_PREVIEW_SUMMARY_PREFIXES = (_PREVIEW_LONG_FORM_PREFIX, LEGACY_SUMMARY_PREFIX)
+_PREVIEW_STANDALONE_SUMMARY_SQL = _sql_starts_with("m.content", _PREVIEW_SUMMARY_PREFIXES)
+_PREVIEW_MERGED_AFTER_SQL = _sql_after_marker(_MERGED_SUMMARY_DELIMITER)
 _PREVIEW_MERGED_SUMMARY_SQL = (
     f"(INSTR(m.content, {_sql_literal(_MERGED_SUMMARY_DELIMITER)}) > 0"
     f" AND {_sql_starts_with(_PREVIEW_MERGED_AFTER_SQL, _PREVIEW_SUMMARY_PREFIXES)})"
@@ -101,19 +80,14 @@ _PREVIEW_MERGED_SUMMARY_SQL = (
 _PREVIEW_MERGED_PRIOR_SQL = _sql_trim_whitespace(
     f"SUBSTR(m.content, 1, INSTR(m.content, {_sql_literal(_MERGED_SUMMARY_DELIMITER)}) - 1)"
 )
-_PREVIEW_MERGED_PRIOR_LTRIMMED_SQL = _sql_ltrim_whitespace(
-    _PREVIEW_MERGED_PRIOR_SQL
-)
+_PREVIEW_MERGED_PRIOR_LTRIMMED_SQL = _sql_ltrim_whitespace(_PREVIEW_MERGED_PRIOR_SQL)
 _PREVIEW_MERGED_PRIOR_UNWRAPPED_SQL = (
     f"CASE WHEN SUBSTR({_PREVIEW_MERGED_PRIOR_LTRIMMED_SQL}, 1,"
     f" {len(_MERGED_PRIOR_CONTEXT_HEADER)}) = {_sql_literal(_MERGED_PRIOR_CONTEXT_HEADER)}"
     f" THEN {_sql_ltrim_whitespace(f'SUBSTR({_PREVIEW_MERGED_PRIOR_LTRIMMED_SQL}, {len(_MERGED_PRIOR_CONTEXT_HEADER) + 1})')}"
     f" ELSE {_PREVIEW_MERGED_PRIOR_SQL} END"
 )
-_PREVIEW_FORCE_USER_REMAINDER_SQL = (
-    f"SUBSTR(m.content, INSTR(m.content, {_sql_literal(_SUMMARY_END_MARKER)})"
-    f" + {len(_SUMMARY_END_MARKER)})"
-)
+_PREVIEW_FORCE_USER_REMAINDER_SQL = _sql_after_marker(_SUMMARY_END_MARKER)
 
 # Pure compaction rows are ineligible for previews; force-user-leading and
 # merged carriers are eligible only when authentic content survives.
@@ -125,7 +99,6 @@ _PREVIEW_ELIGIBLE_SQL = (
     f" OR ({_PREVIEW_MERGED_SUMMARY_SQL}"
     f" AND LENGTH({_sql_trim_whitespace(_PREVIEW_MERGED_PRIOR_UNWRAPPED_SQL)}) > 0))"
 )
-
 
 # Shared ``_preview_raw`` SELECT expression for every listing query (scaffolded
 # rows: head + tail spliced around SKILL_EXCERPT_JOINT when over budget).
@@ -167,6 +140,8 @@ _PREVIEW_RAW_SUBQUERY_SQL = (
 )
 
 
+# ── Session lineage predicates ({a} = sessions alias) ───────────────────────
+
 # A /branch child (kept visible, never cascade-deleted): stable marker OR the
 # legacy end_reason heuristic.
 _BRANCH_CHILD_SQL = (
@@ -176,14 +151,11 @@ _BRANCH_CHILD_SQL = (
     "            AND p.end_reason = 'branched'"
     "            AND {a}.started_at >= p.ended_at)"
 )
-
-
 _COMPRESSION_CHILD_SQL = (
     "EXISTS (SELECT 1 FROM sessions p"
     "        WHERE p.id = {a}.parent_session_id"
     "        AND p.end_reason = 'compression')"
 )
-
 
 _RESET_END_REASONS = (
     "session_reset",
@@ -219,10 +191,7 @@ _RECOVERABLE_END_REASONS_SQL = ", ".join(f"'{reason}'" for reason in _RECOVERABL
 # prove liveness (e.g. a compression rotation holding the lease) may clear it.
 # Superset of the recoverable set plus the TUI gateway's automatic reasons.
 _AUTOMATIC_END_REASONS = frozenset(_RECOVERABLE_END_REASONS) | {
-    "tui_shutdown",
-    "ws_disconnect",
-    "idle_timeout",
-    "lru_evict",
+    "tui_shutdown", "ws_disconnect", "idle_timeout", "lru_evict",
 }
 
 
@@ -257,7 +226,6 @@ _RESET_CHILD_SQL = (
     " OR " + _legacy_reset_child_sql("{a}", _RESET_END_REASONS_SQL)
 )
 
-
 # Picker-visible rows: roots + branch/reset children (not subagent runs or
 # compression continuations).
 _LISTABLE_CHILD_SQL = (
@@ -268,51 +236,19 @@ _LISTABLE_CHILD_SQL = (
 
 def _ephemeral_child_sql(alias: str = "s") -> str:
     """Subagent runs, not branch, reset, or compression children."""
-    branch = _BRANCH_CHILD_SQL.format(a=alias)
-    compression = _COMPRESSION_CHILD_SQL.format(a=alias)
-    reset = _RESET_CHILD_SQL.format(a=alias)
     return (
         f"({alias}.parent_session_id IS NOT NULL"
-        f" AND NOT ({branch})"
-        f" AND NOT ({compression})"
-        f" AND NOT ({reset}))"
+        f" AND NOT ({_BRANCH_CHILD_SQL.format(a=alias)})"
+        f" AND NOT ({_COMPRESSION_CHILD_SQL.format(a=alias)})"
+        f" AND NOT ({_RESET_CHILD_SQL.format(a=alias)}))"
     )
 
 
-def _sql_session_last_active(alias: str = "s") -> str:
-    """Session recency: freshest of ``last_activity_at`` and the latest message
-    timestamp, else ``started_at``.  Heartbeats are rate-limited (~60s) so
-    ``last_activity_at`` can lag a newer message; never prefer it alone.
-    """
-    msg_max = (
-        f"(SELECT MAX(_act_m.timestamp) FROM messages _act_m "
-        f"WHERE _act_m.session_id = {alias}.id)"
-    )
-    return (
-        f"COALESCE("
-        f"(SELECT MAX(_act_v.v) FROM ("
-        f"SELECT {alias}.last_activity_at AS v "
-        f"UNION ALL "
-        f"SELECT {msg_max}"
-        f") _act_v), "
-        f"{alias}.started_at)"
-    )
-
-
-def _sql_session_last_active_by_id(session_id_expr: str) -> str:
-    """Same freshest-of expression keyed by a session-id SQL expression."""
-    msg_max = (
-        f"(SELECT MAX(_act_m.timestamp) FROM messages _act_m "
-        f"WHERE _act_m.session_id = {session_id_expr})"
-    )
-    activity = (
-        f"(SELECT last_activity_at FROM sessions _act_s "
-        f"WHERE _act_s.id = {session_id_expr})"
-    )
-    started = (
-        f"(SELECT started_at FROM sessions _act_s "
-        f"WHERE _act_s.id = {session_id_expr})"
-    )
+def _sql_freshest_of(activity: str, session_id_expr: str, started: str) -> str:
+    """Freshest of *activity* and the latest message timestamp for
+    *session_id_expr*, else *started*.  Heartbeats are rate-limited (~60s) so
+    ``last_activity_at`` can lag a newer message; never prefer it alone."""
+    msg_max = f"(SELECT MAX(_act_m.timestamp) FROM messages _act_m WHERE _act_m.session_id = {session_id_expr})"
     return (
         f"COALESCE("
         f"(SELECT MAX(_act_v.v) FROM ("
@@ -321,6 +257,20 @@ def _sql_session_last_active_by_id(session_id_expr: str) -> str:
         f"SELECT {msg_max}"
         f") _act_v), "
         f"{started})"
+    )
+
+
+def _sql_session_last_active(alias: str = "s") -> str:
+    """Session recency expression for a ``sessions {alias}`` row."""
+    return _sql_freshest_of(f"{alias}.last_activity_at", f"{alias}.id", f"{alias}.started_at")
+
+
+def _sql_session_last_active_by_id(session_id_expr: str) -> str:
+    """Same freshest-of expression keyed by a session-id SQL expression."""
+    return _sql_freshest_of(
+        f"(SELECT last_activity_at FROM sessions _act_s WHERE _act_s.id = {session_id_expr})",
+        session_id_expr,
+        f"(SELECT started_at FROM sessions _act_s WHERE _act_s.id = {session_id_expr})",
     )
 
 
@@ -885,9 +835,7 @@ def is_advisory_lock_contention(exc: BaseException) -> bool:
     cannot succeed and polling only stalls the caller."""
     if isinstance(exc, BlockingIOError):
         return True
-    if not isinstance(exc, OSError):
-        return False
-    return exc.errno in _LOCK_CONTENTION_ERRNOS
+    return isinstance(exc, OSError) and exc.errno in _LOCK_CONTENTION_ERRNOS
 
 
 def _proc_start_ticks(pid: int):
@@ -923,11 +871,7 @@ def _write_lock_holder_record(handle) -> None:
     """Record this process as holder (best effort), written under the flock so
     timed-out contenders can tell an orphaned-fd holder from a live wedged one."""
     try:
-        record = {
-            "pid": os.getpid(),
-            "start_ticks": _proc_start_ticks(os.getpid()),
-            "acquired_at": time.time(),
-        }
+        record = {"pid": os.getpid(), "start_ticks": _proc_start_ticks(os.getpid()), "acquired_at": time.time()}
         handle.seek(0)
         handle.truncate()
         handle.write(json.dumps(record, sort_keys=True).encode("utf-8"))
@@ -964,8 +908,7 @@ def _lock_holder_provably_dead(record) -> bool:
     except ProcessLookupError:
         return True
     except OSError:
-        # PermissionError et al.: the PID exists (or is unknowable) — closed.
-        return False
+        return False  # PermissionError et al.: PID exists (or unknowable) — closed
     recorded_ticks = record.get("start_ticks")
     if recorded_ticks is None:
         return False
@@ -974,6 +917,15 @@ def _lock_holder_provably_dead(record) -> bool:
         return False
     # Same PID, different start time: recycled by an unrelated process.
     return current_ticks != recorded_ticks
+
+
+def _reopen_lock(lock_path, handle):
+    """Close *handle* and reopen *lock_path*; returns the new handle or None."""
+    try:
+        handle.close()
+        return open(lock_path, "a+b")
+    except OSError:
+        return None
 
 
 def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, description):
@@ -1008,10 +960,7 @@ def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, descript
                     "Could not acquire %s %s (%s) — deferring rather than "
                     "waiting out the %.0fs holder timeout on a "
                     "non-contention error.",
-                    description,
-                    lock_path,
-                    exc,
-                    timeout_seconds,
+                    description, lock_path, exc, timeout_seconds,
                 )
                 return None, handle
             if time.monotonic() < deadline:
@@ -1027,21 +976,14 @@ def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, descript
                 "holder pid %s is dead — a forked child inherited the lock "
                 "fd); breaking the stale lock and retaking it on a fresh "
                 "file.",
-                description,
-                lock_path,
-                (record or {}).get("pid"),
+                description, lock_path, (record or {}).get("pid"),
             )
             try:
                 os.unlink(lock_path)
                 handle.close()
                 handle = open(lock_path, "a+b")
             except OSError as exc:
-                logger.warning(
-                    "Could not break stale %s %s (%s) — deferring.",
-                    description,
-                    lock_path,
-                    exc,
-                )
+                logger.warning("Could not break stale %s %s (%s) — deferring.", description, lock_path, exc)
                 return False, handle
             broke_lock = True
             deadline = time.monotonic() + _LOCK_BREAK_REACQUIRE_SECONDS
@@ -1051,20 +993,16 @@ def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, descript
         try:
             fd_stat = os.fstat(handle.fileno())
             path_stat = os.stat(lock_path)
-            same_file = (
-                fd_stat.st_dev == path_stat.st_dev
-                and fd_stat.st_ino == path_stat.st_ino
-            )
+            same_file = fd_stat.st_dev == path_stat.st_dev and fd_stat.st_ino == path_stat.st_ino
         except OSError:
             same_file = False
         if same_file:
             _write_lock_holder_record(handle)
             return True, handle
-        try:
-            handle.close()
-            handle = open(lock_path, "a+b")
-        except OSError:
+        reopened = _reopen_lock(lock_path, handle)
+        if reopened is None:
             return False, handle
+        handle = reopened
         if time.monotonic() >= deadline:
             return False, handle
 
@@ -1084,6 +1022,30 @@ def _describe_lock_holder(record) -> str:
     return f"pid {pid}{age}"
 
 
+def _acquire_msvcrt_lock(lock_path, handle, timeout):
+    """Windows counterpart of ``_acquire_db_flock`` (no orphan break); same
+    True / False / None contract."""
+    import msvcrt
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except (BlockingIOError, OSError) as exc:
+            if not is_advisory_lock_contention(exc):
+                logger.warning(
+                    "Could not acquire FTS rebuild lock %s (%s) — "
+                    "deferring on a non-contention error.",
+                    lock_path, exc,
+                )
+                return None
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(_FTS_REBUILD_LOCK_POLL_SECONDS)
+
+
 @contextlib.contextmanager
 def fts_rebuild_admission(db_path, *, timeout_seconds=None):
     """Serialize full structural FTS rebuilds on *db_path* across processes.
@@ -1099,11 +1061,7 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
     if db_path is None:
         yield True
         return
-    timeout = (
-        _FTS_REBUILD_LOCK_TIMEOUT_SECONDS
-        if timeout_seconds is None
-        else max(float(timeout_seconds), 0.0)
-    )
+    timeout = _FTS_REBUILD_LOCK_TIMEOUT_SECONDS if timeout_seconds is None else max(float(timeout_seconds), 0.0)
     lock_path = f"{db_path}.fts_rebuild.lock"
     try:
         handle = open(lock_path, "a+b")
@@ -1125,38 +1083,13 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
     acquired = False
     try:
         if _IS_WINDOWS:
-            deadline = time.monotonic() + timeout
-            while True:
-                try:
-                    import msvcrt
-
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                    acquired = True
-                    break
-                except (BlockingIOError, OSError) as exc:
-                    if not is_advisory_lock_contention(exc):
-                        logger.warning(
-                            "Could not acquire FTS rebuild lock %s (%s) — "
-                            "deferring on a non-contention error.",
-                            lock_path, exc,
-                        )
-                        acquired = None
-                        break
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(_FTS_REBUILD_LOCK_POLL_SECONDS)
+            acquired = _acquire_msvcrt_lock(lock_path, handle, timeout)
         else:
             acquired, handle = _acquire_db_flock(
-                lock_path,
-                handle,
-                timeout,
-                _FTS_REBUILD_LOCK_POLL_SECONDS,
-                "FTS rebuild lock",
+                lock_path, handle, timeout, _FTS_REBUILD_LOCK_POLL_SECONDS, "FTS rebuild lock",
             )
         if acquired is None:
-            # Already logged with the real errno; "held by another process"
-            # would be a lie.
+            # Already logged with the real errno; "held by another process" would be a lie.
             acquired = False
         elif not acquired:
             record = None if _IS_WINDOWS else _read_lock_holder_record(handle)
@@ -1166,8 +1099,7 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
                     "FTS rebuild lock %s is busy — deferring this retry "
                     "(the stale-FTS breadcrumb keeps it retryable). "
                     "Recorded holder: %s.",
-                    lock_path,
-                    _describe_lock_holder(record),
+                    lock_path, _describe_lock_holder(record),
                 )
             else:
                 logger.warning(
@@ -1175,8 +1107,7 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
                     "%.0fs — deferring this rebuild to avoid racing the holder "
                     "(the stale-FTS breadcrumb keeps it retryable). "
                     "Recorded holder: %s.",
-                    lock_path, timeout,
-                    _describe_lock_holder(record),
+                    lock_path, timeout, _describe_lock_holder(record),
                 )
         yield acquired
     finally:
