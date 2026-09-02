@@ -1390,6 +1390,111 @@ def direct_api_call(agent, api_kwargs: dict):
             )
 
 
+class _RequestClientRegistry:
+    """Per-request client / stream-handle registry shared by the request worker
+    and the stranger threads (interrupt-check loop, stale detector) that may
+    need to abort it.
+
+    ``kind`` is ``"openai"`` (default), ``"anthropic_messages"`` or ``"stream"``
+    and routes :meth:`close_once` to the matching abort/close helpers (#67142).
+    ``kind="stream"`` registers a per-request *stream handle* instead of a
+    client — used under the MoA facade, whose singleton client has no
+    per-request sockets to abort, so interrupts must close the stream object
+    itself (#57354).
+
+    Thread-ownership rule (#29507): the owning worker thread pops + fully
+    closes on its way out. A *stranger* thread only aborts the sockets so the
+    worker's blocked ``recv``/``send`` unwinds with EPIPE/EOF — never
+    ``client.close()`` — avoiding the FD-recycling race where the kernel
+    reassigned a just-closed TLS socket FD to ``kanban.db`` and the still-live
+    SSL BIO wrote a TLS record into the SQLite header. The abort happens under
+    the holder lock: once released, the worker's finally may pop + cache the
+    client for reuse and the NEXT call check it out, so a late abort would
+    poison an innocent in-flight request's sockets. A registered stream handle
+    is safe to close from any thread (closing IS the abort), so the ownership
+    carve-out only applies to real per-request clients.
+    """
+
+    def __init__(self, agent):
+        self.agent = agent
+        self.client = None
+        self.kind = "openai"
+        self.owner_tid = None
+        self.diag = None  # per-attempt stream diagnostics (streaming path)
+        self.lock = threading.Lock()
+
+    def set_client(self, client, *, kind: str = "openai"):
+        with self.lock:
+            self.client = client
+            self.kind = kind
+            self.owner_tid = threading.get_ident()
+        return client
+
+    @staticmethod
+    def _stream_close_callable(stream):
+        close = getattr(stream, "close", None)
+        if callable(close):
+            return close
+        response = getattr(stream, "response", None)
+        close = getattr(response, "close", None)
+        if callable(close):
+            return close
+        return None
+
+    def set_stream_handle(self, stream):
+        if self._stream_close_callable(stream) is None:
+            return stream
+        with self.lock:
+            self.client = stream
+            self.kind = "stream"
+            self.owner_tid = threading.get_ident()
+        return stream
+
+    def _close_stream_handle(self, stream, reason: str) -> None:
+        close = self._stream_close_callable(stream)
+        if close is None:
+            return
+        try:
+            close()
+            logger.info("Streaming response handle closed (%s)", reason)
+        except Exception as exc:
+            logger.debug(
+                "Streaming response handle close failed (%s): %s",
+                reason,
+                exc,
+            )
+
+    def close_once(self, reason: str) -> None:
+        with self.lock:
+            request_client = self.client
+            request_kind = self.kind
+            owner_tid = self.owner_tid
+            stranger_thread = (
+                request_kind != "stream"
+                and request_client is not None
+                and owner_tid is not None
+                and owner_tid != threading.get_ident()
+            )
+            if stranger_thread:
+                if request_kind == "anthropic_messages":
+                    self.agent._abort_request_anthropic_client(
+                        request_client, reason=reason
+                    )
+                else:
+                    self.agent._abort_request_openai_client(request_client, reason=reason)
+                return
+            self.client = None
+            self.owner_tid = None
+        if request_client is None:
+            return
+        if request_kind == "stream":
+            self._close_stream_handle(request_client, reason)
+        elif request_kind == "anthropic_messages":
+            self.agent._close_request_anthropic_client(request_client, reason=reason)
+        else:
+            self.agent._close_request_openai_client(request_client, reason=reason)
+
+
 def interruptible_api_call(agent, api_kwargs: dict):
     """
     Run the API call in a background thread so the main conversation loop
@@ -1418,12 +1523,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
     # unattended session here has the same infinite stale-retry class.
     _check_stale_giveup(agent)
 
-    request_client_holder = {"client": None, "owner_tid": None}
-    # Transport kind of the registered request client ("openai" or
-    # "anthropic_messages") so _close_request_client_once routes to the right
-    # abort/close helpers (#67142).
-    request_client_kind = {"value": "openai"}
-    request_client_lock = threading.Lock()
+    _clients = _RequestClientRegistry(agent)
     # Request-local cancellation flag. Distinct from agent._interrupt_requested
     # because that flag is cleared at run_conversation() turn boundaries, but
     # this daemon worker thread can outlive the turn (the gateway caches
@@ -1463,66 +1563,10 @@ def interruptible_api_call(agent, api_kwargs: dict):
         ):
             agent._active_codex_stream_request_token = None
 
-    def _set_request_client(client, *, kind: str = "openai"):
-        with request_client_lock:
-            request_client_holder["client"] = client
-            request_client_kind["value"] = kind
-            # #29507: stamp the owning thread so a stranger-thread interrupt
-            # only shuts the connection down rather than racing the worker
-            # for FD ownership during ``client.close()``.
-            request_client_holder["owner_tid"] = threading.get_ident()
-        return client
-
-    def _close_request_client_once(reason: str) -> None:
-        # #29507: dispatch on the calling thread.
-        #
-        # When ``_call`` (the worker) reaches its ``finally`` it owns the
-        # close and we pop + fully close as before. When a *stranger* thread
-        # (the interrupt-check loop, the stale-call detector) drives the
-        # close, only shut the sockets down so the worker's blocked
-        # ``recv``/``send`` unwinds with an ``EPIPE`` / EOF — and let the
-        # worker close ``client`` from its own thread on its way out. That
-        # avoids the FD-recycling race where the kernel reassigned a
-        # just-closed TLS socket FD to ``kanban.db``, and the still-live SSL
-        # BIO on the worker thread then wrote a 24-byte TLS application-data
-        # record into the SQLite header (#29507).
-        with request_client_lock:
-            request_client = request_client_holder.get("client")
-            owner_tid = request_client_holder.get("owner_tid")
-            stranger_thread = (
-                request_client is not None
-                and owner_tid is not None
-                and owner_tid != threading.get_ident()
-            )
-            if stranger_thread:
-                # Abort while still holding the holder lock: the instant it
-                # is released, the worker's finally may pop + cache the client
-                # for reuse and the NEXT call check it out — an abort landing
-                # after that would poison the slot and shut down an innocent
-                # in-flight request's sockets. The abort itself never blocks
-                # (socket shutdown + slot poison), so holding the lock across
-                # it only delays the racing pop, never the data path.
-                if request_client_kind.get("value", "openai") == "anthropic_messages":
-                    agent._abort_request_anthropic_client(
-                        request_client, reason=reason
-                    )
-                else:
-                    agent._abort_request_openai_client(request_client, reason=reason)
-                return
-            # Owning thread (or no recorded owner) → pop and fully close.
-            request_client_holder["client"] = None
-            request_client_holder["owner_tid"] = None
-        if request_client is None:
-            return
-        if request_client_kind.get("value", "openai") == "anthropic_messages":
-            agent._close_request_anthropic_client(request_client, reason=reason)
-        else:
-            agent._close_request_openai_client(request_client, reason=reason)
-
     def _call():
         try:
             _install_codex_request_token()
-            # _set_request_client registers each per-request client with the
+            # _clients.set_client registers each per-request client with the
             # stranger-thread abort machinery above; the shared dispatch helper
             # builds it via this callback (openai- or anthropic-kind) so the
             # interrupt / stale-call detectors can force-close the worker's
@@ -1530,7 +1574,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
             result["response"] = _dispatch_nonstreaming_api_request(
                 agent,
                 api_kwargs,
-                make_client=lambda reason, kind="openai": _set_request_client(
+                make_client=lambda reason, kind="openai": _clients.set_client(
                     agent._create_request_anthropic_client(reason=reason)
                     if kind == "anthropic_messages"
                     else agent._create_request_openai_client(
@@ -1568,7 +1612,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 return
             result["error"] = e
         finally:
-            # Retire first: _close_request_client_once can raise (every other
+            # Retire first: _clients.close_once can raise (every other
             # call site wraps it in try/except), and a leaked token would let a
             # later worker mistake itself for the owning attempt.
             _retire_codex_request_token()
@@ -1576,7 +1620,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
             # error, or the cancel-swallow return above (which leaves both
             # result slots None) — really closes so the next attempt builds
             # a fresh pool (see _REQUEST_CLIENT_REUSE_REASONS).
-            _close_request_client_once(
+            _clients.close_once(
                 "request_complete"
                 if result["response"] is not None
                 else "request_error_cleanup"
@@ -1781,7 +1825,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     f"Reconnecting."
                 )
             try:
-                _close_request_client_once("codex_ttfb_kill")
+                _clients.close_once("codex_ttfb_kill")
             except Exception:
                 pass
             _retire_codex_request_token()
@@ -1832,7 +1876,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 f"Reconnecting."
             )
             try:
-                _close_request_client_once("codex_stream_idle_kill")
+                _clients.close_once("codex_stream_idle_kill")
             except Exception:
                 pass
             _retire_codex_request_token()
@@ -1864,7 +1908,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 # #67142: routes by client kind — anthropic now aborts the
                 # request-local client's sockets from this poll (stranger)
                 # thread instead of closing the shared _anthropic_client.
-                _close_request_client_once("stale_call_kill")
+                _clients.close_once("stale_call_kill")
             except Exception:
                 pass
             _retire_codex_request_token()
@@ -1912,7 +1956,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
             # rather than closing the shared _anthropic_client, which could
             # release a TLS FD mid-SSL-BIO and corrupt an unrelated SQLite DB.
             try:
-                _close_request_client_once("interrupt_abort")
+                _clients.close_once("interrupt_abort")
             except Exception:
                 pass
             _retire_codex_request_token()
@@ -3947,16 +3991,7 @@ class _StreamingCall:
         self.worker = None  # request thread; None in inline mode
         self.result = {"response": None, "error": None, "partial_tool_names": []}
 
-        self.request_client_holder = {"client": None, "diag": None, "owner_tid": None}
-        # Transport kind of the registered request client — see the non-streaming
-        # variant. Routes _close_request_client_once to anthropic vs openai abort/
-        # close helpers (#67142). ``kind="stream"`` registers a per-request
-        # *stream handle* instead of a client — used under the MoA facade, whose
-        # singleton client has no per-request sockets to abort
-        # (_abort_request_openai_client is a no-op on it), so interrupts must
-        # close the stream object itself (#57354).
-        self.request_client_kind = {"value": "openai"}
-        self.request_client_lock = threading.Lock()
+        self.clients = _RequestClientRegistry(agent)
         # Request-local cancellation flag — see interruptible_api_call for the full
         # rationale. The streaming retry loop is where the 7-minute cascading-
         # interrupt hang originated: a force-close raised RemoteProtocolError, the
@@ -3989,95 +4024,6 @@ class _StreamingCall:
             "discarded_bytes": 0,
         }
         self.managed_stream_holder = {"stream": None}
-
-    def _set_request_client(self, client, *, kind: str = "openai"):
-        with self.request_client_lock:
-            self.request_client_holder["client"] = client
-            self.request_client_kind["value"] = kind
-            # See #29507 explanation in the non-streaming variant above.
-            self.request_client_holder["owner_tid"] = threading.get_ident()
-        return client
-
-    def _stream_close_callable(self, stream):
-        close = getattr(stream, "close", None)
-        if callable(close):
-            return close
-        response = getattr(stream, "response", None)
-        close = getattr(response, "close", None)
-        if callable(close):
-            return close
-        return None
-
-    def _set_request_stream_handle(self, stream):
-        # Register the per-request *stream* under kind="stream" so an
-        # interrupt closes the stream handle itself. Under the MoA facade the
-        # registered "client" is the shared facade singleton whose
-        # per-request abort helpers are no-ops, leaving the underlying HTTP
-        # stream open until the provider drained it (#57354).
-        if self._stream_close_callable(stream) is None:
-            return stream
-        with self.request_client_lock:
-            self.request_client_holder["client"] = stream
-            self.request_client_kind["value"] = "stream"
-            self.request_client_holder["owner_tid"] = threading.get_ident()
-        return stream
-
-    def _close_request_stream_handle(self, stream, reason: str) -> None:
-        close = self._stream_close_callable(stream)
-        if close is None:
-            return
-        try:
-            close()
-            logger.info("Streaming response handle closed (%s)", reason)
-        except Exception as exc:
-            logger.debug(
-                "Streaming response handle close failed (%s): %s",
-                reason,
-                exc,
-            )
-
-    def _close_request_client_once(self, reason: str) -> None:
-        # See #29507 explanation in the non-streaming variant above. A
-        # stranger thread (the interrupt-check / stale-stream detector loop)
-        # only aborts sockets — never pops, never calls ``client.close()`` —
-        # so the worker thread retains ownership of the FD release.
-        with self.request_client_lock:
-            request_client = self.request_client_holder.get("client")
-            request_kind = self.request_client_kind.get("value", "openai")
-            owner_tid = self.request_client_holder.get("owner_tid")
-            # A registered stream handle (kind="stream", MoA facade path) is
-            # safe to close from any thread — closing IS the abort — so the
-            # stranger-thread ownership carve-out only applies to real
-            # per-request clients (#57354).
-            stranger_thread = (
-                request_kind != "stream"
-                and request_client is not None
-                and owner_tid is not None
-                and owner_tid != threading.get_ident()
-            )
-            if stranger_thread:
-                # Abort under the holder lock — see the non-streaming variant
-                # for why the holder read and the abort must be atomic (a late
-                # abort would otherwise hit the NEXT request's checkout).
-                if self.request_client_kind.get("value", "openai") == "anthropic_messages":
-                    self.agent._abort_request_anthropic_client(
-                        request_client, reason=reason
-                    )
-                else:
-                    self.agent._abort_request_openai_client(request_client, reason=reason)
-                return
-            self.request_client_holder["client"] = None
-            self.request_client_holder["owner_tid"] = None
-        if request_client is None:
-            return
-        # Stranger threads returned under the lock above, so only the owner
-        # (or an any-thread-safe stream handle) reaches the close dispatch.
-        if request_kind == "stream":
-            self._close_request_stream_handle(request_client, reason)
-        elif request_kind == "anthropic_messages":
-            self.agent._close_request_anthropic_client(request_client, reason=reason)
-        else:
-            self.agent._close_request_openai_client(request_client, reason=reason)
 
     def _set_managed_stream(self, stream: Any) -> Any:
         self.managed_stream_holder["stream"] = stream
@@ -4224,7 +4170,7 @@ class _StreamingCall:
         reasoning_parts: list = []
         usage_obj = None
         _diag = self.agent._stream_diag_init()
-        self.request_client_holder["diag"] = _diag
+        self.clients.diag = _diag
         _writer_token = {"value": None}
         attempt_request_client = {"value": None}
         attempt_stream_response = {"value": None}
@@ -4243,7 +4189,7 @@ class _StreamingCall:
             # Native Gemini rejects OpenAI's usage-streaming extension.
             if not is_native_gemini_base_url(self.agent.base_url):
                 stream_kwargs["stream_options"] = {"include_usage": True}
-            request_client = self._set_request_client(
+            request_client = self.clients.set_client(
                 self.agent._create_request_openai_client(
                     reason="chat_completion_stream_request",
                     api_kwargs=stream_kwargs,
@@ -4365,7 +4311,7 @@ class _StreamingCall:
         if self.agent.provider == "moa":
             # Hermes interrupts the managed stream; Relay retains sole
             # ownership of closing the underlying provider stream.
-            self._set_request_stream_handle(stream)
+            self.clients.set_stream_handle(stream)
         pending_text_parts: list[str] = []
 
         def _flush_pending_stream_text():
@@ -4871,7 +4817,7 @@ class _StreamingCall:
 
         self.last_chunk_time["t"] = time.time()
         _diag = self.agent._stream_diag_init()
-        self.request_client_holder["diag"] = _diag
+        self.clients.diag = _diag
         _writer_token = {"value": None}
         _stream_context = {"manager": None, "stream": None}
         base_final_message = None
@@ -5088,7 +5034,7 @@ class _StreamingCall:
                         # #67142: per-request client (credential refresh happens
                         # inside _create_request_anthropic_client) registered so
                         # the watchdog aborts its socket, not the shared client.
-                        request_client = self._set_request_client(
+                        request_client = self.clients.set_client(
                             self.agent._create_request_anthropic_client(
                                 reason="anthropic_stream_request"
                             ),
@@ -5223,12 +5169,12 @@ class _StreamingCall:
                             attempt=_stream_attempt + 2,
                             max_attempts=_max_stream_retries + 1,
                             mid_tool_call=True,
-                            diag=self.request_client_holder.get("diag"),
+                            diag=self.clients.diag,
                         )
                         self._cancel_current_stream_attempt("stream_mid_tool_retry_cleanup")
-                        self._close_request_client_once("stream_mid_tool_retry_cleanup")
+                        self.clients.close_once("stream_mid_tool_retry_cleanup")
                         # #67142: anthropic streams on a request-local client,
-                        # already worker-owned-closed by _close_request_client_once
+                        # already worker-owned-closed by clients.close_once
                         # above; the next attempt builds a fresh one. The shared
                         # _anthropic_client is never closed from inside a request.
                         # #70773: same FD-recycle corruption vector for OpenAI.
@@ -5281,11 +5227,11 @@ class _StreamingCall:
                                 attempt=_stream_attempt + 2,
                                 max_attempts=_max_stream_retries + 1,
                                 mid_tool_call=False,
-                                diag=self.request_client_holder.get("diag"),
+                                diag=self.clients.diag,
                             )
                             # Close the stale request client before retry
                             self._cancel_current_stream_attempt("stream_retry_cleanup")
-                            self._close_request_client_once("stream_retry_cleanup")
+                            self.clients.close_once("stream_retry_cleanup")
                             # Also rebuild the primary client to purge any dead
                             # connections from the pool. #67142: anthropic uses a
                             # request-local client (already worker-owned-closed
@@ -5308,7 +5254,7 @@ class _StreamingCall:
                             attempt=_max_stream_retries + 1,
                             max_attempts=_max_stream_retries + 1,
                             mid_tool_call=False,
-                            diag=self.request_client_holder.get("diag"),
+                            diag=self.clients.diag,
                         )
                         if _is_stream_parse_err:
                             _exhausted_msg = (
@@ -5398,7 +5344,7 @@ class _StreamingCall:
             # Reuse reason only on a clean stream; any other outcome (error,
             # cancel-swallow) really closes so the next attempt builds a
             # fresh pool (see _REQUEST_CLIENT_REUSE_REASONS).
-            self._close_request_client_once(
+            self.clients.close_once(
                 "stream_request_complete"
                 if self.result["response"] is not None
                 else "stream_error_cleanup"
@@ -5522,7 +5468,7 @@ class _StreamingCall:
                 )
                 try:
                     self._cancel_current_stream_attempt("stale_stream_kill")
-                    self._close_request_client_once("stale_stream_kill")
+                    self.clients.close_once("stale_stream_kill")
                 except Exception:
                     pass
                 # Circuit breaker (#58962): count the stale kill.  See the
@@ -5533,7 +5479,7 @@ class _StreamingCall:
                 if self.agent.api_mode == "anthropic_messages":
                     # #67142: the stale stream ran on a request-local anthropic
                     # client, already socket-aborted above via
-                    # _close_request_client_once (which unblocks the worker and
+                    # clients.close_once (which unblocks the worker and
                     # preserves the #28161 no-hang guarantee). The shared
                     # _anthropic_client is NOT the in-flight transport, so we must
                     # not close it from this poll (stranger) thread — that was the
@@ -5545,7 +5491,7 @@ class _StreamingCall:
                     # closed from this watchdog/poll thread — worker threads
                     # from previous stale-killed attempts may still be
                     # unwinding their SSL BIOs.  The request-local client is
-                    # already closed above via _close_request_client_once.
+                    # already closed above via clients.close_once.
                     # The shared client will be replaced lazily by
                     # _ensure_primary_openai_client on the next request.
                     pass
@@ -5583,7 +5529,7 @@ class _StreamingCall:
                     # #67142: kind-aware — anthropic aborts the request-local
                     # client's socket from this poll thread; the shared
                     # _anthropic_client is never closed here.
-                    self._close_request_client_once("stream_interrupt_abort")
+                    self.clients.close_once("stream_interrupt_abort")
                 except Exception:
                     pass
                 # Wait for the worker to unwind Relay-managed stream scopes
@@ -5822,7 +5768,7 @@ class _StreamingCall:
         # per-attempt stream diagnostic dict already records ``first_chunk_at``
         # on the first received chunk; propagate the latest value onto the agent
         # so the loop can read it without threading the diag through returns.
-        _diag_last = self.request_client_holder.get("diag")
+        _diag_last = self.clients.diag
         if isinstance(_diag_last, dict) and _diag_last.get("first_chunk_at"):
             self.agent._last_api_first_chunk_at = float(_diag_last["first_chunk_at"])
         return self.result["response"]
