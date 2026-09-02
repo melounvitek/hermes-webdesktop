@@ -146,7 +146,9 @@ def _digest(value: Any, *, field: str) -> str:
     return value
 
 
-def _exact_fields(value: Mapping[str, Any], *, required: set[str], optional: set[str] = frozenset(), label: str) -> None:
+def _exact_fields(
+    value: Mapping[str, Any], *, required: set[str], optional: set[str] = frozenset(), label: str
+) -> None:
     exact_fields(
         value, label=label, required=required, optional=optional, error=HostedRoomPeerError,
         missing_fmt="{label} missing fields: {fields}", unknown_fmt="{label} unknown fields: {fields}",
@@ -237,9 +239,11 @@ class GatewayRoomCatalog:
             endpoint_url, endpoint_reason, transport_security = _parse_endpoint(value["endpoint"])
         catalog = cls(
             installation_id=installation_id, protocol_versions=versions, link_modes=links,
-            persistent_process=value["persistent_process"], text=value["text"], attachments=value["attachments"],
-            execution_policy=policy, catalog_digest=_digest(value["catalog_digest"], field="catalog_digest"),
-            endpoint_url=endpoint_url, endpoint_reason=endpoint_reason, transport_security=transport_security,
+            persistent_process=value["persistent_process"], text=value["text"],
+            attachments=value["attachments"], execution_policy=policy,
+            catalog_digest=_digest(value["catalog_digest"], field="catalog_digest"),
+            endpoint_url=endpoint_url, endpoint_reason=endpoint_reason,
+            transport_security=transport_security,
         )
         unsigned = catalog.as_mapping()
         del unsigned["catalog_digest"]
@@ -263,7 +267,9 @@ class GatewayRoomCatalog:
     def endpoint_mapping(self) -> dict[str, Any]:
         """Return the normalized self-advertised endpoint capability."""
         if self.endpoint_url is not None:
-            return {"available": True, "url": self.endpoint_url, "transport_security": self.transport_security}
+            return {
+                "available": True, "url": self.endpoint_url, "transport_security": self.transport_security,
+            }
         return {"available": False, "reason": self.endpoint_reason or "not_configured"}
 
 
@@ -277,7 +283,9 @@ def catalog_mapping(
     # A Desktop-managed gateway exits with the app: the caller's flag is only an
     # upper bound, so call sites that still pass ``True`` stay honest.
     persistent_process = bool(persistent_process and os.getenv("HERMES_DESKTOP") != "1")
-    profile = str(target_profile or "").strip() or (os.getenv("HERMES_PROFILE") or "default").strip() or "default"
+    profile = (
+        str(target_profile or "").strip() or (os.getenv("HERMES_PROFILE") or "default").strip() or "default"
+    )
     checked_policy = RoomExecutionPolicy.from_mapping(
         execution_policy or execution_policy_mapping(target_profile=profile)
     )
@@ -288,13 +296,13 @@ def catalog_mapping(
         raise HostedRoomPeerError("remote room execution requires manual or smart approvals")
     value = {
         "installation_id": _identifier(installation_id, field="installation_id"),
-        "protocol_versions": sorted({_positive_int(item, field="protocol_version") for item in protocol_versions}),
+        "protocol_versions": sorted(
+            {_positive_int(item, field="protocol_version") for item in protocol_versions}
+        ),
         # Direct HTTPS/loopback is the only RoomLink transport implemented by
         # this backend slice. Do not advertise pull/relay placeholders.
         "link_modes": [mode for mode in dict.fromkeys(link_modes) if mode == "direct"],
-        "persistent_process": persistent_process,
-        "text": bool(text),
-        "attachments": bool(attachments),
+        "persistent_process": persistent_process, "text": bool(text), "attachments": bool(attachments),
         "execution_policy": checked_policy.as_mapping(),
         "endpoint": dict(local_room_link_endpoint() if endpoint is None else endpoint),
     }
@@ -458,9 +466,9 @@ _GRANT_SCOPE = (
     "grant_id", "room_id", "home_install_id", "authority_gateway_id", "authority_epoch",
     "member_id", "target_install_id", "target_profile",
 )
-_GRANT_FIELDS = {
+_GRANT_FIELDS = frozenset({
     "version", *_GRANT_SCOPE, "execution_policy_digest", "permissions", "issued_at", "expires_at",
-}
+})
 _GRANT_REFRESH_FIELDS = _GRANT_FIELDS | {"status_expires_at"}
 _GRANT_PERMISSIONS = {"approve", "dispatch", "status", "stop"}
 MAX_DISPATCH_GRANT_TTL_SECONDS = 24 * 60 * 60
@@ -531,7 +539,9 @@ def verify_room_grant(
     return payload
 
 
-def decode_room_grant(secret: bytes, token: str, *, permission: str, now: float | None = None) -> dict[str, Any]:
+def decode_room_grant(
+    secret: bytes, token: str, *, permission: str, now: float | None = None
+) -> dict[str, Any]:
     """Verify grant signature, lifetime and operation without a dispatch."""
     if not isinstance(token, str) or len(token.encode("utf-8")) > MAX_TOKEN_BYTES:
         raise HostedRoomGrantError("room grant is invalid")
@@ -545,9 +555,7 @@ def decode_room_grant(secret: bytes, token: str, *, permission: str, now: float 
         payload = json.loads(encoded.decode("ascii"))
     except Exception as exc:
         raise HostedRoomGrantError("room grant payload is invalid") from exc
-    if not isinstance(payload, dict) or frozenset(payload) not in {
-        frozenset(_GRANT_FIELDS), frozenset(_GRANT_REFRESH_FIELDS),
-    }:
+    if not isinstance(payload, dict) or frozenset(payload) not in {_GRANT_FIELDS, _GRANT_REFRESH_FIELDS}:
         raise HostedRoomGrantError("room grant fields are invalid")
     checked_now = time.time() if now is None else float(now)
     if not math.isfinite(checked_now):
@@ -558,10 +566,8 @@ def decode_room_grant(secret: bytes, token: str, *, permission: str, now: float 
         status_expires_at = float(payload.get("status_expires_at", expires_at))
     except (TypeError, ValueError) as exc:
         raise HostedRoomGrantError("room grant lifetime is invalid") from exc
-    if not (
-        all(map(math.isfinite, (issued_at, expires_at, status_expires_at)))
-        and issued_at < expires_at <= status_expires_at
-    ):
+    finite = all(map(math.isfinite, (issued_at, expires_at, status_expires_at)))
+    if not (finite and issued_at < expires_at <= status_expires_at):
         raise HostedRoomGrantError("room grant lifetime is invalid")
     operation_expires_at = status_expires_at if permission in {"approve", "status", "stop"} else expires_at
     if checked_now < issued_at - 30 or checked_now >= operation_expires_at:
@@ -572,7 +578,9 @@ def decode_room_grant(secret: bytes, token: str, *, permission: str, now: float 
     return payload
 
 
-def room_grant_needs_dispatch_refresh(token: str, *, now: float | None = None, leeway_seconds: float = 5 * 60) -> bool:
+def room_grant_needs_dispatch_refresh(
+    token: str, *, now: float | None = None, leeway_seconds: float = 5 * 60
+) -> bool:
     """Read only grant timing to schedule target-validated refresh.
 
     This deliberately does not establish trust; the target validates the
