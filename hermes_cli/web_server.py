@@ -1927,55 +1927,16 @@ app.include_router(_dashboard_auth_router)
 mount_spa(app)
 
 
-def start_server(
-    host: str = "127.0.0.1",
-    port: int = 9119,
-    open_browser: bool = True,
-    allow_public: bool = False,
-    initial_profile: str = "",
-    headless: bool = False,
-    ssh_session_token: Optional[str] = None,
-    ssh_owner_nonce: Optional[str] = None,
-    start_mcp_discovery_after_bind: bool = False,
-):
-    """Start the web UI server.
+def _configure_auth_gate(
+    host: str,
+    allow_public: bool,
+    ssh_session_token: Optional[str],
+    ssh_owner_nonce: Optional[str],
+) -> None:
+    """Resolve the trusted public hosts + auth-gate flag onto ``app.state``.
 
-    ``initial_profile`` (when set) is appended to the auto-opened browser
-    URL as ``?profile=<name>`` so the SPA's profile switcher preselects it
-    — used when a profile alias (``<profile> dashboard``) routes to the
-    machine dashboard.
-
-    ``headless`` is the ``serve`` path: the JSON-RPC/WS backend with no UI
-    build and no SPA mount (mount_spa() honours ``HERMES_SERVE_HEADLESS``), so
-    the banner announces the bind rather than a browser URL.
-
-    ``ssh_session_token`` and ``ssh_owner_nonce`` are process-local Desktop SSH
-    bootstrap state. Neither is persisted or exported to child processes.
-
-    ``start_mcp_discovery_after_bind`` (Desktop ``serve``) defers the
-    background MCP discovery thread until the ready sentinel has been written,
-    so its SDK import cannot hold the GIL against the pre-bind import path.
-    """
-    _apply_ssh_session_token(ssh_session_token or "")
-    _apply_ssh_owner_nonce(ssh_owner_nonce)
-
-    # Raise RLIMIT_NOFILE for dashboard-mode starts that don't route through
-    # the `serve` path in main.py (which applies the same floor). Canonical
-    # policy lives in resource_limits; #81547's motivating leak (iterdir fds)
-    # is fixed above, this covers legitimate high fd demand.
-    from hermes_cli.resource_limits import apply_nofile_soft_limit
-
-    apply_nofile_soft_limit()
-
-    import uvicorn
-
-    try:
-        from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive
-
-        start_nous_auth_keepalive()
-    except Exception as exc:
-        _log.debug("Nous auth keepalive did not start: %s", exc)
-
+    Fails closed (``SystemExit`` with an actionable message) when the gate
+    engages but no dashboard auth provider is registered."""
     # A configured browser-facing URL is also the exact Host/Origin trust
     # declaration for reverse-proxy deployments. Resolve it once at startup so
     # request middleware never reloads config. Any non-loopback public hostname
@@ -2131,9 +2092,11 @@ def start_server(
             ", ".join(p.name for p in list_providers()),
         )
 
-    # Record the bound host so host_header_middleware can validate incoming
-    # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
-    app.state.bound_host = host
+
+def _build_uvicorn_server(host: str, port: int):
+    """Build the uvicorn ``Config`` + ``Server`` for this bind (reads
+    ``app.state.auth_required``; see the comments for each knob)."""
+    import uvicorn
 
     # ── Start uvicorn with direct Server API ─────────────────────────
     # We use uvicorn.Server directly (not uvicorn.run) so we can split
@@ -2207,6 +2170,295 @@ def start_server(
         ws_max_size=_DESKTOP_ATTACHMENT_WS_MAX_BYTES,
     )
     server = uvicorn.Server(config)
+    return config, server
+
+
+def _on_server_started(
+    server,
+    *,
+    host: str,
+    port: int,
+    headless: bool,
+    open_browser: bool,
+    initial_profile: str,
+    start_mcp_discovery_after_bind: bool,
+) -> None:
+    """Post-bind arming, run on the serving loop right after ``server.startup()``:
+    reap prior corpses, watchdog, process identity, READY announcement,
+    browser open, deferred MCP discovery, loop-noise filter, loop heartbeat."""
+    # Parent-death watchdog. The desktop spawns us and is supposed to
+    # SIGTERM us on quit, but a crash / SIGKILL / update handoff that
+    # exits before reaping leaves us orphaned (ppid→1) yet still
+    # serving — leaking the whole backend + its MCP child subtree
+    # (each MCP watchdog is parented to THIS process, so os._exit here
+    # cascades their teardown). Same pattern as
+    # Clear corpses left by a previous unclean Desktop exit before we
+    # stack another backend + MCP tree (EMFILE / missing tabs).
+    # Parent-death watchdog only protects *this* process going forward.
+    if os.getenv("HERMES_DESKTOP") == "1":
+        try:
+            from hermes_cli.dashboard_procs import (
+                _reap_orphaned_desktop_local_serves,
+            )
+
+            _reap_orphaned_desktop_local_serves()
+        except Exception as exc:
+            _log.debug("orphan desktop-local serve reap skipped: %s", exc)
+
+    # Same sweep for stdio MCP helper children (#61514): ledger-
+    # identified helpers whose recorded spawner is provably dead are
+    # corpses from a prior unclean exit — reap them before this
+    # backend stacks a fresh MCP tree on top. Positive identity only
+    # (spawn ledger + spawner_is_dead); a helper whose spawner is
+    # alive or unprovable is never touched.
+    try:
+        from hermes_cli.process_identity import reap_orphaned_mcp_helpers
+
+        reap_orphaned_mcp_helpers()
+    except Exception as exc:
+        _log.debug("orphan MCP helper reap skipped: %s", exc)
+
+    # tui_gateway/slash_worker.py::_start_parent_death_watchdog. No-op
+    # for standalone `hermes serve` (no HERMES_PARENT_PID env).
+    _start_parent_death_watchdog()
+
+    actual_port = _read_bound_port(server, fallback=port)
+    app.state.bound_port = actual_port
+
+    # Positive process identity: record (pid, create_time, purpose,
+    # spawner) in the machine spawn ledger and — on Windows — attach
+    # to a kill-on-close job so this backend's whole child tree dies
+    # with it. Both best-effort; failures degrade to legacy behavior.
+    # Registered AFTER the bind so the entry carries the ACTUAL port
+    # (ephemeral binds included) — the structured host/port/profile
+    # is what lets `hermes update` relaunch a manually-started serve
+    # on its real endpoint instead of dropping it (#63206).
+    try:
+        from hermes_cli.process_identity import (
+            attach_self_to_kill_on_close_job,
+            register_self,
+        )
+
+        register_self(
+            "serve" if headless else "dashboard",
+            detail={
+                "host": host,
+                "port": actual_port,
+                "profile": initial_profile or "",
+            },
+        )
+        attach_self_to_kill_on_close_job()
+    except Exception as exc:
+        _log.debug("process-identity registration skipped: %s", exc)
+
+    _write_dashboard_ready_file(actual_port)
+    # Port-discovery sentinel parsed by the desktop spawn. `serve` is a
+    # plain backend, not a dashboard, so it announces a neutral token;
+    # `dashboard` keeps the legacy one. The desktop matches either.
+    ready_token = "HERMES_BACKEND_READY" if headless else "HERMES_DASHBOARD_READY"
+    # tui_gateway.server (imported above for the flush-on-SIGTERM
+    # handlers, #94724) redirects sys.stdout→sys.stderr at import time
+    # to keep stray prints off the JSON-RPC protocol stream. fd 1 is
+    # still the real stdout — and the Desktop spawn watches
+    # child.stdout for this sentinel — so write to the fd, not to the
+    # (redirected) sys.stdout, or the desktop times out after 90s
+    # against a perfectly healthy backend (#96282).
+    _write_machine_sentinel_line(f"{ready_token} port={actual_port}")
+    if headless:
+        # No SPA, and the JSON-RPC/WS endpoints are auth-gated — don't
+        # advertise a paste-and-connect URL, just announce the bind.
+        # flush: on a piped stdout (Desktop spawn) this line is
+        # block-buffered and can surface MINUTES after the flushed
+        # READY sentinel above, which reads as a slow boot in
+        # support bundles when the backend was actually up.
+        print(f"  Hermes backend listening on {host}:{actual_port}", flush=True)
+    else:
+        print(f"  Hermes Web UI → http://{host}:{actual_port}")
+    _maybe_open_browser(host, actual_port, open_browser, initial_profile)
+
+    if start_mcp_discovery_after_bind:
+        # Deferred from cmd_dashboard for Desktop `serve` (see there).
+        # Not started at the bind itself either: the ~350ms `mcp` SDK
+        # import holds the GIL, and at bind time the renderer is doing
+        # its WebSocket handshake + first hydration reads against this
+        # loop (measured: starting it here gave back most of the
+        # READY gain as a slower connect). One second later the shell
+        # is painted and idle. An agent build inside that second fires
+        # the deferred start itself (wait_for_mcp_discovery), so its
+        # bounded join and the late-binding refresh are unchanged.
+        try:
+            from hermes_cli.mcp_startup import defer_background_mcp_discovery
+
+            defer_background_mcp_discovery(
+                logger=_log,
+                thread_name="dashboard-mcp-discovery",
+                delay=_DESKTOP_MCP_DISCOVERY_DELAY_S,
+            )
+        except Exception:
+            _log.debug("Deferred MCP discovery arm failed", exc_info=True)
+
+    # Collapse the peer-hangup teardown flood (#50005). When the Desktop
+    # forcibly closes its WebSocket mid-write, asyncio logs a full
+    # traceback per pending connection-lost callback — 50+ identical
+    # WinError 10054 (ConnectionResetError) lines per disconnect on
+    # Windows. This filter downgrades exactly that class to one debug
+    # line and passes every other loop error through unchanged.
+    try:
+        from tui_gateway.loop_noise import install_loop_noise_filter
+
+        install_loop_noise_filter(asyncio.get_running_loop())
+    except Exception as exc:  # pragma: no cover - best-effort
+        _log.debug("loop noise filter install skipped: %s", exc)
+
+    # ── Loop heartbeat watchdog (CF-1) ───────────────────────────
+    # Confirm the GIL-pressure hypothesis in production. Re-arm a 2s
+    # tick and measure the drift between when it *should* fire and
+    # when it actually does: a healthy loop drifts ~0, but a turn that
+    # holds the GIL blocks the loop and the next tick fires late by the
+    # stall duration. We log that so a stalled-loop WS drop is
+    # diagnosable from the gateway log. Uses loop.time() (monotonic)
+    # for drift, and call_later (not a task) so it dies with the loop —
+    # nothing to cancel on shutdown.
+    _hb_interval = 2.0
+    _hb_stall_threshold = 5.0
+    _hb_loop = asyncio.get_running_loop()
+
+    def _loop_heartbeat(expected: float) -> None:
+        now = _hb_loop.time()
+        drift = now - expected
+        if drift > _hb_stall_threshold:
+            _log.warning(
+                "event loop stalled %.1fs (GIL pressure suspected)",
+                drift,
+            )
+        _hb_loop.call_later(
+            _hb_interval, _loop_heartbeat, now + _hb_interval
+        )
+
+    _hb_loop.call_later(
+        _hb_interval, _loop_heartbeat, _hb_loop.time() + _hb_interval
+    )
+
+
+def _run_serve(serve, config, host: str, port: int) -> None:
+    """Drive ``serve()`` on the loop uvicorn expects; translate the two known
+    exits (Ctrl+C -> clean return, probe-to-bind port race -> sentinel + exit code)."""
+    # On POSIX, keep the long-standing ``asyncio.run(_serve())`` runner —
+    # Python's default loop there is already a SelectorEventLoop (or uvloop when
+    # uvicorn[standard] installs it), which is exactly what uvicorn serves on.
+    # Uvicorn's ``capture_signals()`` restores the original SIGINT handler and
+    # re-raises the captured signal after a graceful shutdown, which otherwise
+    # leaks a noisy KeyboardInterrupt traceback for the normal foreground
+    # dashboard Ctrl+C path. Treat that one signal as a clean user-requested
+    # shutdown; other serve-time errors still propagate.
+    #
+    # On Windows it is broken: ``asyncio.run`` defaults to a ProactorEventLoop,
+    # but uvicorn's socket-serving stack assumes a SelectorEventLoop on win32
+    # (``uvicorn/loops/asyncio.py`` forces it, and ``uvicorn.Server.run`` threads
+    # ``config.get_loop_factory()`` into its runner for exactly this reason).
+    # Driving uvicorn on the proactor loop makes ``server.startup()`` bind a
+    # socket that never accepts — the dashboard / desktop backend prints
+    # "Skipping web UI build" and then hangs forever with the port LISTENING but
+    # no TCP handshake completing (#50641). So *only on Windows* we mirror
+    # uvicorn's own machinery and run on the loop factory it picks.
+    runner = asyncio.run
+    runner_kwargs: dict = {}
+    if sys.platform == "win32":
+        # Windows-only path. Resolve the runner + loop factory FIRST (and fall back
+        # to a hand-installed Windows selector policy only when uvicorn predates the
+        # loop-factory API, < 0.36). The actual serve call is then OUTSIDE this
+        # import try/except so genuine serve-time errors (port in use) propagate
+        # normally instead of being swallowed and double-run.
+        try:
+            from uvicorn._compat import asyncio_run as runner
+
+            runner_kwargs = {"loop_factory": config.get_loop_factory()}
+        except Exception:
+            runner = asyncio.run
+            runner_kwargs = {}
+            try:
+                asyncio.set_event_loop_policy(
+                    asyncio.WindowsSelectorEventLoopPolicy()  # type: ignore[attr-defined]
+                )
+            except Exception:
+                pass
+
+    # Clean Ctrl+C contract on both platforms: ``capture_signals()`` re-raises
+    # the captured signal after the graceful shutdown has already completed.
+    # For console Ctrl+C the re-raised SIGINT lands as ``KeyboardInterrupt`` —
+    # a clean user-requested exit. (Re-raised SIGTERM/SIGBREAK keep their
+    # default terminate disposition and never reach this except.)
+    try:
+        runner(serve(), **runner_kwargs)
+    except KeyboardInterrupt:
+        return
+    except SystemExit as exc:
+        # Probe-to-bind race (#93608): another process grabbed the port
+        # between our preflight probe and uvicorn's real bind. uvicorn's
+        # bind_socket() exits 1 — re-check the bind and translate a
+        # confirmed conflict into the sentinel + distinct exit code.
+        if exc.code == 1 and _port_bind_conflict(host, port):
+            _report_port_in_use(host, port)
+            raise SystemExit(PORT_IN_USE_EXIT_CODE) from None
+        raise
+
+
+def start_server(
+    host: str = "127.0.0.1",
+    port: int = 9119,
+    open_browser: bool = True,
+    allow_public: bool = False,
+    initial_profile: str = "",
+    headless: bool = False,
+    ssh_session_token: Optional[str] = None,
+    ssh_owner_nonce: Optional[str] = None,
+    start_mcp_discovery_after_bind: bool = False,
+):
+    """Start the web UI server.
+
+    ``initial_profile`` (when set) is appended to the auto-opened browser
+    URL as ``?profile=<name>`` so the SPA's profile switcher preselects it
+    — used when a profile alias (``<profile> dashboard``) routes to the
+    machine dashboard.
+
+    ``headless`` is the ``serve`` path: the JSON-RPC/WS backend with no UI
+    build and no SPA mount (mount_spa() honours ``HERMES_SERVE_HEADLESS``), so
+    the banner announces the bind rather than a browser URL.
+
+    ``ssh_session_token`` and ``ssh_owner_nonce`` are process-local Desktop SSH
+    bootstrap state. Neither is persisted or exported to child processes.
+
+    ``start_mcp_discovery_after_bind`` (Desktop ``serve``) defers the
+    background MCP discovery thread until the ready sentinel has been written,
+    so its SDK import cannot hold the GIL against the pre-bind import path.
+    """
+    _apply_ssh_session_token(ssh_session_token or "")
+    _apply_ssh_owner_nonce(ssh_owner_nonce)
+
+    # Raise RLIMIT_NOFILE for dashboard-mode starts that don't route through
+    # the `serve` path in main.py (which applies the same floor). Canonical
+    # policy lives in resource_limits; #81547's motivating leak (iterdir fds)
+    # is fixed above, this covers legitimate high fd demand.
+    from hermes_cli.resource_limits import apply_nofile_soft_limit
+
+    apply_nofile_soft_limit()
+
+    import uvicorn  # noqa: F401 — fail fast (before any side effects) when the dashboard extra is missing
+
+    try:
+        from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive
+
+        start_nous_auth_keepalive()
+    except Exception as exc:
+        _log.debug("Nous auth keepalive did not start: %s", exc)
+
+    _configure_auth_gate(host, allow_public, ssh_session_token, ssh_owner_nonce)
+
+    # Record the bound host so host_header_middleware can validate incoming
+    # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
+    app.state.bound_host = host
+
+    config, server = _build_uvicorn_server(host, port)
 
     # Flush-on-kill guard (#94724 item 2): install chaining SIGTERM/SIGINT
     # handlers that first persist in-memory session transcripts to state.db
@@ -2242,232 +2494,18 @@ def start_server(
             if server.should_exit:
                 return
 
-            # Parent-death watchdog. The desktop spawns us and is supposed to
-            # SIGTERM us on quit, but a crash / SIGKILL / update handoff that
-            # exits before reaping leaves us orphaned (ppid→1) yet still
-            # serving — leaking the whole backend + its MCP child subtree
-            # (each MCP watchdog is parented to THIS process, so os._exit here
-            # cascades their teardown). Same pattern as
-            # Clear corpses left by a previous unclean Desktop exit before we
-            # stack another backend + MCP tree (EMFILE / missing tabs).
-            # Parent-death watchdog only protects *this* process going forward.
-            if os.getenv("HERMES_DESKTOP") == "1":
-                try:
-                    from hermes_cli.dashboard_procs import (
-                        _reap_orphaned_desktop_local_serves,
-                    )
-
-                    _reap_orphaned_desktop_local_serves()
-                except Exception as exc:
-                    _log.debug("orphan desktop-local serve reap skipped: %s", exc)
-
-            # Same sweep for stdio MCP helper children (#61514): ledger-
-            # identified helpers whose recorded spawner is provably dead are
-            # corpses from a prior unclean exit — reap them before this
-            # backend stacks a fresh MCP tree on top. Positive identity only
-            # (spawn ledger + spawner_is_dead); a helper whose spawner is
-            # alive or unprovable is never touched.
-            try:
-                from hermes_cli.process_identity import reap_orphaned_mcp_helpers
-
-                reap_orphaned_mcp_helpers()
-            except Exception as exc:
-                _log.debug("orphan MCP helper reap skipped: %s", exc)
-
-            # tui_gateway/slash_worker.py::_start_parent_death_watchdog. No-op
-            # for standalone `hermes serve` (no HERMES_PARENT_PID env).
-            _start_parent_death_watchdog()
-
-            actual_port = _read_bound_port(server, fallback=port)
-            app.state.bound_port = actual_port
-
-            # Positive process identity: record (pid, create_time, purpose,
-            # spawner) in the machine spawn ledger and — on Windows — attach
-            # to a kill-on-close job so this backend's whole child tree dies
-            # with it. Both best-effort; failures degrade to legacy behavior.
-            # Registered AFTER the bind so the entry carries the ACTUAL port
-            # (ephemeral binds included) — the structured host/port/profile
-            # is what lets `hermes update` relaunch a manually-started serve
-            # on its real endpoint instead of dropping it (#63206).
-            try:
-                from hermes_cli.process_identity import (
-                    attach_self_to_kill_on_close_job,
-                    register_self,
-                )
-
-                register_self(
-                    "serve" if headless else "dashboard",
-                    detail={
-                        "host": host,
-                        "port": actual_port,
-                        "profile": initial_profile or "",
-                    },
-                )
-                attach_self_to_kill_on_close_job()
-            except Exception as exc:
-                _log.debug("process-identity registration skipped: %s", exc)
-
-            _write_dashboard_ready_file(actual_port)
-            # Port-discovery sentinel parsed by the desktop spawn. `serve` is a
-            # plain backend, not a dashboard, so it announces a neutral token;
-            # `dashboard` keeps the legacy one. The desktop matches either.
-            ready_token = "HERMES_BACKEND_READY" if headless else "HERMES_DASHBOARD_READY"
-            # tui_gateway.server (imported above for the flush-on-SIGTERM
-            # handlers, #94724) redirects sys.stdout→sys.stderr at import time
-            # to keep stray prints off the JSON-RPC protocol stream. fd 1 is
-            # still the real stdout — and the Desktop spawn watches
-            # child.stdout for this sentinel — so write to the fd, not to the
-            # (redirected) sys.stdout, or the desktop times out after 90s
-            # against a perfectly healthy backend (#96282).
-            _write_machine_sentinel_line(f"{ready_token} port={actual_port}")
-            if headless:
-                # No SPA, and the JSON-RPC/WS endpoints are auth-gated — don't
-                # advertise a paste-and-connect URL, just announce the bind.
-                # flush: on a piped stdout (Desktop spawn) this line is
-                # block-buffered and can surface MINUTES after the flushed
-                # READY sentinel above, which reads as a slow boot in
-                # support bundles when the backend was actually up.
-                print(f"  Hermes backend listening on {host}:{actual_port}", flush=True)
-            else:
-                print(f"  Hermes Web UI → http://{host}:{actual_port}")
-            _maybe_open_browser(host, actual_port, open_browser, initial_profile)
-
-            if start_mcp_discovery_after_bind:
-                # Deferred from cmd_dashboard for Desktop `serve` (see there).
-                # Not started at the bind itself either: the ~350ms `mcp` SDK
-                # import holds the GIL, and at bind time the renderer is doing
-                # its WebSocket handshake + first hydration reads against this
-                # loop (measured: starting it here gave back most of the
-                # READY gain as a slower connect). One second later the shell
-                # is painted and idle. An agent build inside that second fires
-                # the deferred start itself (wait_for_mcp_discovery), so its
-                # bounded join and the late-binding refresh are unchanged.
-                try:
-                    from hermes_cli.mcp_startup import defer_background_mcp_discovery
-
-                    defer_background_mcp_discovery(
-                        logger=_log,
-                        thread_name="dashboard-mcp-discovery",
-                        delay=_DESKTOP_MCP_DISCOVERY_DELAY_S,
-                    )
-                except Exception:
-                    _log.debug("Deferred MCP discovery arm failed", exc_info=True)
-
-            # Collapse the peer-hangup teardown flood (#50005). When the Desktop
-            # forcibly closes its WebSocket mid-write, asyncio logs a full
-            # traceback per pending connection-lost callback — 50+ identical
-            # WinError 10054 (ConnectionResetError) lines per disconnect on
-            # Windows. This filter downgrades exactly that class to one debug
-            # line and passes every other loop error through unchanged.
-            try:
-                from tui_gateway.loop_noise import install_loop_noise_filter
-
-                install_loop_noise_filter(asyncio.get_running_loop())
-            except Exception as exc:  # pragma: no cover - best-effort
-                _log.debug("loop noise filter install skipped: %s", exc)
-
-            # ── Loop heartbeat watchdog (CF-1) ───────────────────────────
-            # Confirm the GIL-pressure hypothesis in production. Re-arm a 2s
-            # tick and measure the drift between when it *should* fire and
-            # when it actually does: a healthy loop drifts ~0, but a turn that
-            # holds the GIL blocks the loop and the next tick fires late by the
-            # stall duration. We log that so a stalled-loop WS drop is
-            # diagnosable from the gateway log. Uses loop.time() (monotonic)
-            # for drift, and call_later (not a task) so it dies with the loop —
-            # nothing to cancel on shutdown.
-            _hb_interval = 2.0
-            _hb_stall_threshold = 5.0
-            _hb_loop = asyncio.get_running_loop()
-
-            def _loop_heartbeat(expected: float) -> None:
-                now = _hb_loop.time()
-                drift = now - expected
-                if drift > _hb_stall_threshold:
-                    _log.warning(
-                        "event loop stalled %.1fs (GIL pressure suspected)",
-                        drift,
-                    )
-                _hb_loop.call_later(
-                    _hb_interval, _loop_heartbeat, now + _hb_interval
-                )
-
-            _hb_loop.call_later(
-                _hb_interval, _loop_heartbeat, _hb_loop.time() + _hb_interval
+            _on_server_started(
+                server,
+                host=host,
+                port=port,
+                headless=headless,
+                open_browser=open_browser,
+                initial_profile=initial_profile,
+                start_mcp_discovery_after_bind=start_mcp_discovery_after_bind,
             )
 
             await server.main_loop()
             if server.started:
                 await server.shutdown()
 
-    # On POSIX, keep the long-standing ``asyncio.run(_serve())`` runner —
-    # Python's default loop there is already a SelectorEventLoop (or uvloop when
-    # uvicorn[standard] installs it), which is exactly what uvicorn serves on.
-    # Uvicorn's ``capture_signals()`` restores the original SIGINT handler and
-    # re-raises the captured signal after a graceful shutdown, which otherwise
-    # leaks a noisy KeyboardInterrupt traceback for the normal foreground
-    # dashboard Ctrl+C path. Treat that one signal as a clean user-requested
-    # shutdown; other serve-time errors still propagate.
-    #
-    # On Windows it is broken: ``asyncio.run`` defaults to a ProactorEventLoop,
-    # but uvicorn's socket-serving stack assumes a SelectorEventLoop on win32
-    # (``uvicorn/loops/asyncio.py`` forces it, and ``uvicorn.Server.run`` threads
-    # ``config.get_loop_factory()`` into its runner for exactly this reason).
-    # Driving uvicorn on the proactor loop makes ``server.startup()`` bind a
-    # socket that never accepts — the dashboard / desktop backend prints
-    # "Skipping web UI build" and then hangs forever with the port LISTENING but
-    # no TCP handshake completing (#50641). So *only on Windows* we mirror
-    # uvicorn's own machinery and run on the loop factory it picks.
-    if sys.platform != "win32":
-        try:
-            asyncio.run(_serve())
-        except KeyboardInterrupt:
-            return
-        except SystemExit as exc:
-            # Probe-to-bind race (#93608): another process grabbed the port
-            # between our preflight probe and uvicorn's real bind. uvicorn's
-            # bind_socket() exits 1 — re-check the bind and translate a
-            # confirmed conflict into the sentinel + distinct exit code.
-            if exc.code == 1 and _port_bind_conflict(host, port):
-                _report_port_in_use(host, port)
-                raise SystemExit(PORT_IN_USE_EXIT_CODE) from None
-            raise
-        return
-
-    # Windows-only path. Resolve the runner + loop factory FIRST (and fall back
-    # to a hand-installed Windows selector policy only when uvicorn predates the
-    # loop-factory API, < 0.36). The actual serve call is then OUTSIDE this
-    # import try/except so genuine serve-time errors (port in use) propagate
-    # normally instead of being swallowed and double-run.
-    try:
-        from uvicorn._compat import asyncio_run as _runner
-
-        _loop_factory = config.get_loop_factory()
-    except Exception:
-        _runner = None
-        _loop_factory = None
-        try:
-            asyncio.set_event_loop_policy(
-                asyncio.WindowsSelectorEventLoopPolicy()  # type: ignore[attr-defined]
-            )
-        except Exception:
-            pass
-
-    # Same clean Ctrl+C contract as the POSIX branch above: ``capture_signals()``
-    # re-raises the captured signal after the graceful shutdown has already
-    # completed. For console Ctrl+C the re-raised SIGINT lands as
-    # ``KeyboardInterrupt`` — a clean user-requested exit here too. (Re-raised
-    # SIGTERM/SIGBREAK keep their default terminate disposition and never reach
-    # this except.)
-    try:
-        if _runner is not None:
-            _runner(_serve(), loop_factory=_loop_factory)
-        else:
-            asyncio.run(_serve())
-    except KeyboardInterrupt:
-        return
-    except SystemExit as exc:
-        # Same probe-to-bind race translation as the POSIX branch (#93608).
-        if exc.code == 1 and _port_bind_conflict(host, port):
-            _report_port_in_use(host, port)
-            raise SystemExit(PORT_IN_USE_EXIT_CODE) from None
-        raise
+    _run_serve(_serve, config, host, port)
