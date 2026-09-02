@@ -4640,8 +4640,9 @@ def _run_pre_update_backup(args) -> Optional[str]:
                         f"{k}={v}" for k, v in sorted(_sibling_snaps.items())
                     ),
                 )
-                global _LAST_SIBLING_SNAPSHOTS
-                _LAST_SIBLING_SNAPSHOTS = _sibling_snaps
+                import hermes_cli.update_cmd as _u
+
+                _u._LAST_SIBLING_SNAPSHOTS = _sibling_snaps
         except Exception as _sib_exc:
             logging.getLogger(__name__).debug(
                 "Sibling profile snapshots failed: %s", _sib_exc
@@ -6727,14 +6728,6 @@ def _gateway_recovery_partition(
     except Exception as exc:
         logger.debug("Could not prepare fresh gateway restart profiles: %s", exc)
     return candidates, skipped
-
-
-def _gateway_restart_recovery_profiles(
-    plan, *, skip_profiles: set[str] | None = None
-) -> list[str]:
-    """Supervised gateway profiles a fresh process may restart (kept: re-exported by ``hermes_cli.main``)."""
-    candidates, _ = _gateway_recovery_partition(plan, skip_profiles=skip_profiles)
-    return sorted(candidates)
 
 
 def _warn_gateway_restart_phase_aborted(exc: BaseException, pids) -> None:
