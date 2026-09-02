@@ -38,7 +38,11 @@ from agent.turn_overflow import recover_from_overflow
 from agent.turn_empty_response import recover_empty_response
 from agent.turn_stop_gates import apply_stop_gates
 from agent.turn_tool_validation import validate_tool_calls
-from agent.turn_truncation import continue_codex_incomplete, recover_from_truncation
+from agent.turn_truncation import (
+    continue_codex_incomplete,
+    handle_content_policy_refusal,
+    recover_from_truncation,
+)
 from agent.turn_preflight import compress_after_tool_results, run_preflight_compression
 from agent.turn_recovery import (
     route_classified_error,
@@ -2872,90 +2876,31 @@ def run_conversation(
                 # Refusal finish reasons (``content_filter``, ``guardrail_intervened``)
                 # are deterministic: one fallback try, else return the refusal.
                 if finish_reason == "content_filter":
-                    _refusal_transport = agent._get_transport()
-                    if agent.api_mode == "anthropic_messages":
-                        _refusal_result = _refusal_transport.normalize_response(
-                            response, strip_tool_prefix=agent._is_anthropic_oauth
-                        )
-                    else:
-                        _refusal_result = _refusal_transport.normalize_response(response)
-                    _refusal_text = (getattr(_refusal_result, "content", None) or "").strip()
-                    # Some refusals carry the explanation only in the reasoning
-                    # channel; fall back to it so the user sees *something*.
-                    if not _refusal_text:
-                        _refusal_text = (agent._extract_reasoning(_refusal_result) or "").strip()
-
-                    agent._invoke_api_request_error_hook(
-                        task_id=effective_task_id,
+                    _rv = handle_content_policy_refusal(
+                        agent,
+                        response,
+                        _retry,
+                        thinking_spinner=thinking_spinner,
+                        messages=messages,
+                        api_messages=api_messages,
+                        api_kwargs=api_kwargs,
+                        active_system_prompt=active_system_prompt,
+                        conversation_history=conversation_history,
+                        api_call_count=api_call_count,
+                        effective_task_id=effective_task_id,
                         turn_id=turn_id,
                         api_request_id=api_request_id,
-                        api_call_count=api_call_count,
                         api_start_time=api_start_time,
-                        api_kwargs=api_kwargs,
-                        error_type="ContentPolicyBlocked",
-                        error_message=_refusal_text or "model declined to respond (content_filter)",
-                        status_code=None,
                         retry_count=retry_count,
                         max_retries=max_retries,
-                        retryable=False,
-                        reason=FailoverReason.content_policy_blocked.value,
                     )
-
-                    if thinking_spinner:
-                        thinking_spinner.stop("")
-                        thinking_spinner = None
-                    if agent.thinking_callback:
-                        agent.thinking_callback("")
-
-                    # Deterministic for the unchanged prompt — never retry. Try a
-                    # configured fallback once; otherwise surface the refusal.
-                    if agent._has_pending_fallback():
-                        agent._buffer_status(
-                            "⚠️ Model declined to respond (safety refusal) — trying fallback..."
-                        )
-                    if agent._try_activate_fallback():
-                        active_system_prompt = _arm_fallback_restart(
-                            agent, api_messages, active_system_prompt, _retry)
-                        retry_count = 0
-                        compression_attempts = 0
-                        break
-
-                    agent._flush_status_buffer()
-                    _refusal_log = (
-                        _refusal_text[:500] + "..."
-                        if len(_refusal_text) > 500
-                        else _refusal_text
-                    )
-                    logger.warning(
-                        "%sModel declined to respond (finish_reason=content_filter). "
-                        "model=%s provider=%s refusal=%s",
-                        agent.log_prefix, agent.model, agent.provider,
-                        _refusal_log or "(no text)",
-                    )
-                    agent._emit_status(
-                        "⚠️ The model declined to respond to this request (safety refusal)."
-                    )
-
-                    _refusal_detail = (
-                        f"Model's explanation: {_refusal_text}"
-                        if _refusal_text
-                        else "The model returned no explanation."
-                    )
-                    _refusal_response = (
-                        "⚠️  The model declined to respond to this request "
-                        "(safety refusal — not a Hermes/gateway failure).\n\n"
-                        f"{_refusal_detail}\n\n"
-                        f"{_CONTENT_POLICY_RECOVERY_HINT}"
-                    )
-
-                    agent._cleanup_task_resources(effective_task_id)
-                    agent._persist_session(messages, conversation_history)
-                    return _content_policy_blocked_result(
-                        messages,
-                        api_call_count,
-                        final_response=_refusal_response,
-                        error_detail=_refusal_text or "model declined (content_filter)",
-                    )
+                    thinking_spinner = None
+                    active_system_prompt = _rv.active_system_prompt
+                    if _rv.action == "return":
+                        return _rv.result
+                    retry_count = 0
+                    compression_attempts = 0
+                    break
 
                 if finish_reason == "length":
                     _tv = recover_from_truncation(

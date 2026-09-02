@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from agent.error_classifier import FailoverReason
 from agent.message_metadata import append_message
 from agent.message_sanitization import close_interrupted_tool_sequence
 from agent.repetition_guard import is_repetition_dominated
@@ -618,3 +619,130 @@ def continue_codex_incomplete(
         "partial": True,
         "error": "Codex response remained incomplete after 3 continuation attempts",
     }
+
+
+@dataclass
+class RefusalVerdict:
+    """Outcome of ``handle_content_policy_refusal``: ``"break"`` (fallback activated —
+    restart armed on ``_retry``; caller resets retry/compression counters) or
+    ``"return"`` (the typed content-policy result in ``result``). ``active_system_prompt``
+    is the possibly re-synced system prompt."""
+
+    action: str
+    result: Optional[Dict[str, Any]]
+    active_system_prompt: Any
+
+
+def handle_content_policy_refusal(
+    agent: Any,
+    response: Any,
+    _retry: TurnRetryState,
+    *,
+    thinking_spinner: Any,
+    messages: List[Dict[str, Any]],
+    api_messages: Any,
+    api_kwargs: Any,
+    active_system_prompt: Any,
+    conversation_history: Any,
+    api_call_count: int,
+    effective_task_id: Any,
+    turn_id: Any,
+    api_request_id: Any,
+    api_start_time: float,
+    retry_count: int,
+    max_retries: int,
+) -> RefusalVerdict:
+    """HTTP-200 refusal (``finish_reason`` ``content_filter`` / ``guardrail_intervened``).
+    Deterministic for the unchanged prompt — never retried: one configured-fallback try,
+    else surface the refusal (explanation may live only in the reasoning channel). The
+    caller stops its spinner reference; this stops the spinner object."""
+    from agent.conversation_loop import (
+        _CONTENT_POLICY_RECOVERY_HINT,
+        _arm_fallback_restart,
+        _content_policy_blocked_result,
+    )
+
+    def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> RefusalVerdict:
+        return RefusalVerdict(action=action, result=result, active_system_prompt=active_system_prompt)
+
+    _refusal_transport = agent._get_transport()
+    if agent.api_mode == "anthropic_messages":
+        _refusal_result = _refusal_transport.normalize_response(
+            response, strip_tool_prefix=agent._is_anthropic_oauth
+        )
+    else:
+        _refusal_result = _refusal_transport.normalize_response(response)
+    _refusal_text = (getattr(_refusal_result, "content", None) or "").strip()
+    # Some refusals carry the explanation only in the reasoning
+    # channel; fall back to it so the user sees *something*.
+    if not _refusal_text:
+        _refusal_text = (agent._extract_reasoning(_refusal_result) or "").strip()
+
+    agent._invoke_api_request_error_hook(
+        task_id=effective_task_id,
+        turn_id=turn_id,
+        api_request_id=api_request_id,
+        api_call_count=api_call_count,
+        api_start_time=api_start_time,
+        api_kwargs=api_kwargs,
+        error_type="ContentPolicyBlocked",
+        error_message=_refusal_text or "model declined to respond (content_filter)",
+        status_code=None,
+        retry_count=retry_count,
+        max_retries=max_retries,
+        retryable=False,
+        reason=FailoverReason.content_policy_blocked.value,
+    )
+
+    if thinking_spinner:
+        thinking_spinner.stop("")
+    if agent.thinking_callback:
+        agent.thinking_callback("")
+
+    # Deterministic for the unchanged prompt — never retry. Try a
+    # configured fallback once; otherwise surface the refusal.
+    if agent._has_pending_fallback():
+        agent._buffer_status(
+            "⚠️ Model declined to respond (safety refusal) — trying fallback..."
+        )
+    if agent._try_activate_fallback():
+        active_system_prompt = _arm_fallback_restart(
+            agent, api_messages, active_system_prompt, _retry)
+        return _verdict("break")
+
+    agent._flush_status_buffer()
+    _refusal_log = (
+        _refusal_text[:500] + "..."
+        if len(_refusal_text) > 500
+        else _refusal_text
+    )
+    logger.warning(
+        "%sModel declined to respond (finish_reason=content_filter). "
+        "model=%s provider=%s refusal=%s",
+        agent.log_prefix, agent.model, agent.provider,
+        _refusal_log or "(no text)",
+    )
+    agent._emit_status(
+        "⚠️ The model declined to respond to this request (safety refusal)."
+    )
+
+    _refusal_detail = (
+        f"Model's explanation: {_refusal_text}"
+        if _refusal_text
+        else "The model returned no explanation."
+    )
+    _refusal_response = (
+        "⚠️  The model declined to respond to this request "
+        "(safety refusal — not a Hermes/gateway failure).\n\n"
+        f"{_refusal_detail}\n\n"
+        f"{_CONTENT_POLICY_RECOVERY_HINT}"
+    )
+
+    agent._cleanup_task_resources(effective_task_id)
+    agent._persist_session(messages, conversation_history)
+    return _verdict("return", _content_policy_blocked_result(
+        messages,
+        api_call_count,
+        final_response=_refusal_response,
+        error_detail=_refusal_text or "model declined (content_filter)",
+    ))
