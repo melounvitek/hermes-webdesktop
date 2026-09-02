@@ -39,9 +39,8 @@ def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
 
         answer = request_elicitation_consent(
             (
-                f"MCP tool '{tool_name}' on UNTRUSTED server "
-                f"'{server_name}' wants to run. This tool is write-capable "
-                f"(no readOnlyHint=true annotation) and may modify external "
+                f"MCP tool '{tool_name}' on UNTRUSTED server '{server_name}' wants to run. This "
+                f"tool is write-capable (no readOnlyHint=true annotation) and may modify external "
                 f"state."
             ),
             (
@@ -56,9 +55,8 @@ def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
             server_name, tool_name, exc, exc_info=True,
         )
         return tool_error(
-            f"MCP tool '{tool_name}' on untrusted server '{server_name}' "
-            f"was blocked: the approval system was unavailable "
-            f"(fail-closed)."
+            f"MCP tool '{tool_name}' on untrusted server '{server_name}' was blocked: the approval "
+            f"system was unavailable (fail-closed)."
         )
 
     if answer == "accept":
@@ -69,9 +67,8 @@ def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
         tool_name, server_name,
     )
     return tool_error(
-        f"The user did not approve running write-capable MCP tool "
-        f"'{tool_name}' on untrusted server '{server_name}'. The command "
-        f"was NOT run. Do not retry without explicit user direction."
+        f"The user did not approve running write-capable MCP tool '{tool_name}' on untrusted server "
+        f"'{server_name}'. The command was NOT run. Do not retry without explicit user direction."
     )
 
 
@@ -90,10 +87,8 @@ def _check_circuit_breaker(server_name: str) -> Optional[str]:
         return None
     remaining = max(1, int(_core._CIRCUIT_BREAKER_COOLDOWN_SEC - age))
     return tool_error(
-        f"MCP server '{server_name}' is unreachable after "
-        f"{failures} consecutive "
-        f"failures. Auto-retry available in ~{remaining}s. "
-        f"Do NOT retry this tool yet — use alternative "
+        f"MCP server '{server_name}' is unreachable after {failures} consecutive failures. "
+        f"Auto-retry available in ~{remaining}s. Do NOT retry this tool yet — use alternative "
         f"approaches or ask the user to check the MCP server."
     )
 
@@ -120,9 +115,8 @@ def _acquire_call_server(server_name: str, tool_timeout: float):
     _core._bump_server_error(server_name)
     if _core._signal_reconnect(server):
         return None, tool_error(
-            f"MCP server '{server_name}' transport is down; "
-            f"reconnect requested. Do NOT retry this tool "
-            f"immediately — give it a few seconds to come back."
+            f"MCP server '{server_name}' transport is down; reconnect requested. Do NOT retry this "
+            f"tool immediately — give it a few seconds to come back."
         )
     return None, not_connected
 
@@ -229,10 +223,9 @@ def _handle_auth_error_and_retry(
     # No recovery, or retry failed: structured needs_reauth error + breaker strike.
     _core._bump_server_error(server_name)
     return tool_error(
-        f"MCP server '{server_name}' requires re-authentication. "
-        f"Run `hermes mcp login {server_name}` (or delete the tokens "
-        f"file under ~/.hermes/mcp-tokens/ and restart). Do NOT retry "
-        f"this tool — ask the user to re-authenticate.",
+        f"MCP server '{server_name}' requires re-authentication. Run `hermes mcp login "
+        f"{server_name}` (or delete the tokens file under ~/.hermes/mcp-tokens/ and restart). Do "
+        f"NOT retry this tool — ask the user to re-authenticate.",
         needs_reauth=True,
         server=server_name,
     )
@@ -325,10 +318,9 @@ def _handle_stdio_child_exited_and_retry(
     if not reconnected:
         _core._bump_server_error(server_name)
         return tool_error(
-            f"MCP server '{server_name}' stdio subprocess had exited (this is "
-            f"not a timeout — the call never reached the server). A respawn was "
-            f"requested but no fresh session came back within "
-            f"{_core._STDIO_RESPAWN_WAIT_SEC:.0f}s. Wait a few seconds before retrying; "
+            f"MCP server '{server_name}' stdio subprocess had exited (this is not a timeout — the "
+            f"call never reached the server). A respawn was requested but no fresh session came "
+            f"back within {_core._STDIO_RESPAWN_WAIT_SEC:.0f}s. Wait a few seconds before retrying; "
             f"if it keeps failing the server is not starting and needs the user."
         )
 
@@ -343,10 +335,9 @@ def _handle_stdio_child_exited_and_retry(
             server_name, op_description, retry_exc,
         )
         message = (
-            f"MCP server '{server_name}' respawned its stdio subprocess "
-            f"and it exited again immediately. The server is not "
-            f"starting cleanly — do NOT retry this tool; ask the user to "
-            f"check the server's command and its stderr log."
+            f"MCP server '{server_name}' respawned its stdio subprocess and it exited again "
+            f"immediately. The server is not starting cleanly — do NOT retry this tool; ask the "
+            f"user to check the server's command and its stderr log."
         )
     except Exception as retry_exc:
         logger.warning(
@@ -354,9 +345,8 @@ def _handle_stdio_child_exited_and_retry(
             server_name, op_description, retry_exc,
         )
         message = _sanitize_error(
-            f"MCP call failed after respawning the stdio subprocess for "
-            f"'{server_name}': {type(retry_exc).__name__}: "
-            f"{_exc_str(retry_exc)}"
+            f"MCP call failed after respawning the stdio subprocess for '{server_name}': "
+            f"{type(retry_exc).__name__}: {_exc_str(retry_exc)}"
         )
     _core._bump_server_error(server_name)
     return tool_error(message)

@@ -253,9 +253,8 @@ class MCPServerHealthMixin:
                         raise
                     self._ping_unsupported = True
                     logger.info(
-                        "MCP server '%s': does not implement the optional "
-                        "'ping' utility (-32601); using 'list_tools' for "
-                        "keepalive on this connection.",
+                        "MCP server '%s': does not implement the optional 'ping' utility (-32601); "
+                        "using 'list_tools' for keepalive on this connection.",
                         self.name,
                     )
                 elif isinstance(exc, (TimeoutError, asyncio.TimeoutError)) and self._advertises_tools():
@@ -269,9 +268,8 @@ class MCPServerHealthMixin:
                     # Transport alive; latch so later keepalives skip the 30s wait.
                     self._ping_unsupported = True
                     logger.info(
-                        "MCP server '%s': ping timed out but list_tools "
-                        "succeeded — server silently drops ping; using "
-                        "'list_tools' for keepalive on this connection.",
+                        "MCP server '%s': ping timed out but list_tools succeeded — server "
+                        "silently drops ping; using 'list_tools' for keepalive on this connection.",
                         self.name,
                     )
                     return
@@ -310,8 +308,7 @@ class MCPServerHealthMixin:
         :meth:`ensure_healthy` and recycles the transport if the probe fails."""
         if self._suspect_reason is None and reason:
             logger.warning(
-                "MCP server '%s': connection marked suspect (%s); next call "
-                "will health-check it",
+                "MCP server '%s': connection marked suspect (%s); next call will health-check it",
                 self.name, reason,
             )
         self._suspect_reason = reason or None
@@ -336,9 +333,8 @@ class MCPServerHealthMixin:
         except Exception as exc:
             root = _unwrap_exception_group(exc)
             logger.warning(
-                "MCP server '%s': suspect connection (%s) failed health "
-                "check (%s: %s) — requesting reconnect (state: suspect → "
-                "degraded)",
+                "MCP server '%s': suspect connection (%s) failed health check (%s: %s) — "
+                "requesting reconnect (state: suspect → degraded)",
                 self.name, reason, type(root).__name__, root,
             )
             self._suspect_reason = None
@@ -348,8 +344,7 @@ class MCPServerHealthMixin:
             self._reconnect_event.set()
             return False
         logger.info(
-            "MCP server '%s': suspect connection passed health check "
-            "(%s) — clearing suspicion",
+            "MCP server '%s': suspect connection passed health check (%s) — clearing suspicion",
             self.name, reason,
         )
         self._suspect_reason = None

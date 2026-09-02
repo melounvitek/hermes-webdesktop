@@ -260,8 +260,7 @@ class MCPServerTransportMixin:
         if not _core._ensure_mcp_sdk():
             raise ImportError(
                 f"MCP server '{self.name}' requires the 'mcp' Python SDK, but "
-                "it is not installed. Run `hermes setup` to install MCP support, "
-                "then retry."
+                "it is not installed. Run `hermes setup` to install MCP support, then retry."
             )
         command, args, safe_env = self._resolve_stdio_config(config)
         await _osv_malware_preflight(self.name, command, args)
@@ -394,12 +393,10 @@ class MCPServerTransportMixin:
         if not ct_base or ct_base in self._MCP_CONTENT_TYPES:
             return
         raise NonMcpEndpointError(
-            f"MCP server '{self.name}' at {url} returned Content-Type "
-            f"'{ct_base}', not an MCP response (expected one of: "
-            f"{', '.join(self._MCP_CONTENT_TYPES)}). The URL most likely "
-            "points at a web page rather than an MCP endpoint — check it "
-            "resolves to a Streamable HTTP / SSE endpoint "
-            "(e.g. https://host/mcp, not https://host/)."
+            f"MCP server '{self.name}' at {url} returned Content-Type '{ct_base}', not an MCP "
+            f"response (expected one of: {', '.join(self._MCP_CONTENT_TYPES)}). The URL most likely "
+            "points at a web page rather than an MCP endpoint — check it resolves to a Streamable "
+            "HTTP / SSE endpoint (e.g. https://host/mcp, not https://host/)."
         )
 
     def _reconnect_or_reraise_group(self, eg: BaseExceptionGroup) -> str:
