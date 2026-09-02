@@ -192,7 +192,7 @@ class TestModelStateIncludesNamedProviders:
         )
         acp_agent = HermesACPAgent(session_manager=manager)
 
-        with patch("hermes_cli.models.curated_models_for_provider", return_value=[]), patch(
+        with patch(
             "acp_adapter.server._named_custom_provider_catalogs",
             return_value=[("custom:ollama", "Ollama", [])],
         ):
@@ -215,9 +215,6 @@ class TestModelStateIncludesNamedProviders:
         acp_agent = HermesACPAgent(session_manager=manager)
 
         with patch(
-            "hermes_cli.models.curated_models_for_provider",
-            return_value=[("gpt-5.4", "recommended")],
-        ), patch(
             "acp_adapter.server._named_custom_provider_catalogs",
             return_value=[
                 (

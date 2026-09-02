@@ -8,7 +8,7 @@ from unittest.mock import patch, MagicMock
 from hermes_cli.nous_account import NousPortalAccountInfo
 from hermes_cli.models import (
     OPENROUTER_MODELS, fetch_openrouter_models, model_ids, detect_provider_for_model,
-    is_nous_free_tier, partition_nous_models_by_tier,
+    partition_nous_models_by_tier,
     check_nous_free_tier, _FREE_TIER_CACHE_TTL,
     union_with_portal_free_recommendations,
     union_with_portal_paid_recommendations,
@@ -161,23 +161,6 @@ class TestDetectProviderForModel:
         assert detect_provider_for_model("gpt-5.4", "custom:foo") is None
 
 
-
-
-class TestIsNousFreeTier:
-    """Tests for is_nous_free_tier — account tier detection."""
-
-    def test_paid_service_access_allowed_true_is_not_free(self):
-        assert is_nous_free_tier({"paid_service_access": {"allowed": True}}) is False
-
-
-    def test_empty_subscription_not_free(self):
-        """Empty subscription dict defaults to not-free (don't block users)."""
-        assert is_nous_free_tier({"subscription": {}}) is False
-
-
-    def test_empty_response_not_free(self):
-        """Completely empty response defaults to not-free."""
-        assert is_nous_free_tier({}) is False
 
 
 class TestPartitionNousModelsByTier:

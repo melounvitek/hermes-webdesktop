@@ -1,6 +1,6 @@
 """Tests for the state.db integrity guard used by the update flow (#68474).
 
-Exercises ``verify_sqlite_integrity`` and ``copy_db_and_verify`` against REAL
+Exercises ``verify_sqlite_integrity`` against REAL
 SQLite files (valid, zeroed, truncated) — the exact corruption signature from
 issue #68474 (file kept at original size, 100% null bytes, header gone).
 """
@@ -9,7 +9,7 @@ import sqlite3
 
 import pytest
 
-from hermes_cli.backup import copy_db_and_verify, verify_sqlite_integrity
+from hermes_cli.backup import verify_sqlite_integrity
 
 
 @pytest.fixture()
