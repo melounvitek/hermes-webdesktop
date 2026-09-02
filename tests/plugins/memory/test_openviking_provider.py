@@ -1,10 +1,7 @@
 import json
 import os
 import socket
-import stat
 import threading
-import time
-import zipfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -14,7 +11,6 @@ import plugins.memory.openviking as openviking_module
 from hermes_cli import __version__ as _HERMES_VERSION
 from plugins.memory.openviking import (
     OpenVikingMemoryProvider,
-    _DEFERRED_COMMIT_TIMEOUT,
     _VikingClient,
 )
 
@@ -61,18 +57,6 @@ def _allow_setup_validation(monkeypatch, *, root_access: bool = False):
         openviking_module,
         "_validate_openviking_reachability",
         lambda endpoint: (True, ""),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        openviking_module,
-        "_validate_openviking_auth",
-        lambda values: (True, ""),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        openviking_module,
-        "_validate_openviking_root_access",
-        lambda values: (root_access, "" if root_access else "Requires role: root"),
         raising=False,
     )
     monkeypatch.setattr(
@@ -1111,7 +1095,6 @@ def test_sync_turn_captures_session_id_before_worker_runs():
     """Worker must use the session id snapshotted at sync_turn() call time, not
     re-read self._session_id later — otherwise a delayed worker can write the
     previous turn's messages into the rotated-in NEW session."""
-    import threading
 
     provider = OpenVikingMemoryProvider()
     provider._client = MagicMock()
@@ -1247,7 +1230,6 @@ def test_concurrent_providers_claim_unlocked_pending_owner_once(
     owner_run_id,
 ):
     """Only one provider may recover a missing or legacy owner lock."""
-    import threading
 
     pytest.importorskip("fcntl")
     _clear_openviking_env(monkeypatch)
@@ -1314,7 +1296,6 @@ def test_concurrent_providers_claim_unlocked_pending_owner_once(
 
 
 def test_shutdown_waits_for_memory_write_worker(monkeypatch):
-    import threading
 
     provider = OpenVikingMemoryProvider()
     provider._client = MagicMock()
@@ -1362,7 +1343,6 @@ def test_shutdown_waits_for_memory_write_worker(monkeypatch):
 
 
 def test_memory_write_uses_one_connection_for_identity_uri_and_post(monkeypatch):
-    import threading
 
     provider = OpenVikingMemoryProvider()
     provider._agent = "alice-agent"
