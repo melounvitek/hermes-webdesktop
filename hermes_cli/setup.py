@@ -22,7 +22,7 @@ import copy
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Callable
 
 from hermes_cli.curses_ui import MenuNavigationEvent, MenuNavigationStart
 from hermes_cli.nous_subscription import get_nous_subscription_features
@@ -34,41 +34,6 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 _DOCS_BASE = "https://hermes-agent.nousresearch.com/docs"
-
-
-def _model_config_dict(config: Dict[str, Any]) -> Dict[str, Any]:
-    current_model = config.get("model")
-    if isinstance(current_model, dict):
-        return dict(current_model)
-    if isinstance(current_model, str) and current_model.strip():
-        return {"default": current_model.strip()}
-    return {}
-
-
-def _get_credential_pool_strategies(config: Dict[str, Any]) -> Dict[str, str]:
-    strategies = config.get("credential_pool_strategies")
-    return dict(strategies) if isinstance(strategies, dict) else {}
-
-
-def _set_credential_pool_strategy(config: Dict[str, Any], provider: str, strategy: str) -> None:
-    if not provider:
-        return
-    strategies = _get_credential_pool_strategies(config)
-    strategies[provider] = strategy
-    config["credential_pool_strategies"] = strategies
-
-
-def _supports_same_provider_pool_setup(provider: str) -> bool:
-    if not provider or provider == "custom":
-        return False
-    if provider == "openrouter":
-        return True
-    from hermes_cli.auth import PROVIDER_REGISTRY
-
-    pconfig = PROVIDER_REGISTRY.get(provider)
-    if not pconfig:
-        return False
-    return pconfig.auth_type in {"api_key", "oauth_device_code"}
 
 
 # Default model lists per provider — used as fallback when the live
@@ -120,23 +85,6 @@ _DEFAULT_PROVIDER_MODELS = {
         "deepseek-ai/DeepSeek-V3.2", "moonshotai/Kimi-K2.5",
     ],
 }
-
-
-def _current_reasoning_effort(config: Dict[str, Any]) -> str:
-    agent_cfg = config.get("agent")
-    if isinstance(agent_cfg, dict):
-        return str(agent_cfg.get("reasoning_effort") or "").strip().lower()
-    return ""
-
-
-def _set_reasoning_effort(config: Dict[str, Any], effort: str) -> None:
-    agent_cfg = config.get("agent")
-    if not isinstance(agent_cfg, dict):
-        agent_cfg = {}
-        config["agent"] = agent_cfg
-    agent_cfg["reasoning_effort"] = effort
-
-
 
 
 # Import config helpers
@@ -205,10 +153,7 @@ def print_noninteractive_setup_guidance(reason: str | None = None) -> None:
 
 def prompt(question: str, default: str = None, password: bool = False) -> str:
     """Prompt for input with optional default."""
-    if default:
-        display = f"{question} [{default}]: "
-    else:
-        display = f"{question}: "
+    display = f"{question} [{default}]: " if default else f"{question}: "
 
     try:
         if password:
@@ -471,6 +416,49 @@ def _prompt_api_key(var: dict):
         print_warning("  Skipped (configure later with 'hermes setup')")
 
 
+def _module_installed(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except Exception:
+        return False
+
+
+# provider -> (label, env vars: any one set means available; empty = always).
+# Local engines are (label, module, hint) and must be importable.
+_TTS_SUMMARY_ROWS = {
+    "elevenlabs": ("ElevenLabs", ("ELEVENLABS_API_KEY",)),
+    "openai": ("OpenAI", ("VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY")),
+    "minimax": ("MiniMax", ("MINIMAX_API_KEY",)),
+    "mistral": ("Mistral Voxtral", ("MISTRAL_API_KEY",)),
+    "gemini": ("Google Gemini", ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
+    "neutts": ("NeuTTS", "neutts", "run 'hermes setup tts'"),
+    "kittentts": ("KittenTTS", "kittentts", "run 'hermes setup tts'"),
+}
+_TTS_SUMMARY_DEFAULT = ("Edge TTS", ())
+_STT_SUMMARY_ROWS = {
+    "openai": ("OpenAI", ("VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY")),
+    "groq": ("Groq Whisper", ("GROQ_API_KEY",)),
+    "elevenlabs": ("ElevenLabs Scribe", ("ELEVENLABS_API_KEY",)),
+    "xai": ("xAI", ()),
+    "deepinfra": ("DeepInfra", ("DEEPINFRA_API_KEY",)),
+}
+_STT_SUMMARY_DEFAULT = ("Local Whisper", "faster_whisper", "run 'hermes tools' → Speech-to-Text")
+
+
+def _voice_provider_status(kind: str, provider: str, rows: dict, default: tuple) -> tuple:
+    """Summary row for a TTS/STT provider. A keyed provider whose key is missing
+    falls through to the default row, matching the runtime fallback."""
+    row = rows.get(provider, default)
+    if isinstance(row[1], tuple) and row[1] and not any(get_env_value(v) for v in row[1]):
+        row = default
+    if isinstance(row[1], tuple):
+        return (f"{kind} ({row[0]})", True, None)
+    label, module, hint = row
+    if _module_installed(module):
+        return (f"{kind} ({label}{' local' if kind == 'Text-to-Speech' else ''})", True, None)
+    return (f"{kind} ({label} — not installed)", False, hint)
+
+
 def _print_setup_summary(config: dict, hermes_home):
     """Print the setup completion summary."""
     # Provider readiness — the one thing setup absolutely must produce.
@@ -608,71 +596,18 @@ def _print_setup_summary(config: dict, hermes_home):
         if _video_backend:
             tool_status.append((f"Video Generation ({_video_backend})", True, None))
 
-    # TTS — show configured provider
+    # TTS / STT — configured provider, gated on its key (or local install)
     tts_provider = cfg_get(config, "tts", "provider", default="edge")
     if subscription_features.tts.managed_by_nous:
         tool_status.append(("Text-to-Speech (OpenAI via Nous subscription)", True, None))
-    elif tts_provider == "elevenlabs" and get_env_value("ELEVENLABS_API_KEY"):
-        tool_status.append(("Text-to-Speech (ElevenLabs)", True, None))
-    elif tts_provider == "openai" and (
-        get_env_value("VOICE_TOOLS_OPENAI_KEY") or get_env_value("OPENAI_API_KEY")
-    ):
-        tool_status.append(("Text-to-Speech (OpenAI)", True, None))
-    elif tts_provider == "minimax" and get_env_value("MINIMAX_API_KEY"):
-        tool_status.append(("Text-to-Speech (MiniMax)", True, None))
-    elif tts_provider == "mistral" and get_env_value("MISTRAL_API_KEY"):
-        tool_status.append(("Text-to-Speech (Mistral Voxtral)", True, None))
-    elif tts_provider == "gemini" and (get_env_value("GEMINI_API_KEY") or get_env_value("GOOGLE_API_KEY")):
-        tool_status.append(("Text-to-Speech (Google Gemini)", True, None))
-    elif tts_provider == "neutts":
-        try:
-            neutts_ok = importlib.util.find_spec("neutts") is not None
-        except Exception:
-            neutts_ok = False
-        if neutts_ok:
-            tool_status.append(("Text-to-Speech (NeuTTS local)", True, None))
-        else:
-            tool_status.append(("Text-to-Speech (NeuTTS — not installed)", False, "run 'hermes setup tts'"))
-    elif tts_provider == "kittentts":
-        try:
-            kittentts_ok = importlib.util.find_spec("kittentts") is not None
-        except Exception:
-            kittentts_ok = False
-        if kittentts_ok:
-            tool_status.append(("Text-to-Speech (KittenTTS local)", True, None))
-        else:
-            tool_status.append(("Text-to-Speech (KittenTTS — not installed)", False, "run 'hermes setup tts'"))
     else:
-        tool_status.append(("Text-to-Speech (Edge TTS)", True, None))
-
-    # STT — show configured provider
+        tool_status.append(_voice_provider_status("Text-to-Speech", tts_provider, _TTS_SUMMARY_ROWS, _TTS_SUMMARY_DEFAULT))
     stt_provider = cfg_get(config, "stt", "provider", default="local") or "local"
     _stt_feature = subscription_features.features.get("stt")
     if _stt_feature is not None and _stt_feature.managed_by_nous:
         tool_status.append(("Speech-to-Text (OpenAI via Nous subscription)", True, None))
-    elif stt_provider == "openai" and (
-        get_env_value("VOICE_TOOLS_OPENAI_KEY") or get_env_value("OPENAI_API_KEY")
-    ):
-        tool_status.append(("Speech-to-Text (OpenAI)", True, None))
-    elif stt_provider == "groq" and get_env_value("GROQ_API_KEY"):
-        tool_status.append(("Speech-to-Text (Groq Whisper)", True, None))
-    elif stt_provider == "elevenlabs" and get_env_value("ELEVENLABS_API_KEY"):
-        tool_status.append(("Speech-to-Text (ElevenLabs Scribe)", True, None))
-    elif stt_provider == "xai":
-        tool_status.append(("Speech-to-Text (xAI)", True, None))
-    elif stt_provider == "deepinfra" and get_env_value("DEEPINFRA_API_KEY"):
-        tool_status.append(("Speech-to-Text (DeepInfra)", True, None))
     else:
-        try:
-            fw_ok = importlib.util.find_spec("faster_whisper") is not None
-        except Exception:
-            fw_ok = False
-        if fw_ok:
-            tool_status.append(("Speech-to-Text (Local Whisper)", True, None))
-        else:
-            tool_status.append(
-                ("Speech-to-Text (Local Whisper — not installed)", False, "run 'hermes tools' → Speech-to-Text")
-            )
+        tool_status.append(_voice_provider_status("Speech-to-Text", stt_provider, _STT_SUMMARY_ROWS, _STT_SUMMARY_DEFAULT))
 
     if subscription_features.modal.managed_by_nous:
         tool_status.append(("Modal Execution (Nous subscription)", True, None))
@@ -740,48 +675,37 @@ def _print_setup_summary(config: dict, hermes_home):
 
     # Done banner
     print()
-    print(
-        color(
-            "┌─────────────────────────────────────────────────────────┐", Colors.GREEN
-        )
-    )
-    print(
-        color(
-            "│              ✓ Setup Complete!                          │", Colors.GREEN
-        )
-    )
-    print(
-        color(
-            "└─────────────────────────────────────────────────────────┘", Colors.GREEN
-        )
-    )
+    for line in (
+        "┌─────────────────────────────────────────────────────────┐",
+        "│              ✓ Setup Complete!                          │",
+        "└─────────────────────────────────────────────────────────┘",
+    ):
+        print(color(line, Colors.GREEN))
     print()
 
-    # Show file locations prominently
     from hermes_constants import display_hermes_home as _dhh
     print(color(f"📁 All your files are in {_dhh()}/:", Colors.CYAN, Colors.BOLD))
     print()
     print(f"   {color('Settings:', Colors.YELLOW)}  {get_config_path()}")
     print(f"   {color('API Keys:', Colors.YELLOW)}  {get_env_path()}")
-    print(
-        f"   {color('Data:', Colors.YELLOW)}      {hermes_home}/cron/, sessions/, logs/"
-    )
+    print(f"   {color('Data:', Colors.YELLOW)}      {hermes_home}/cron/, sessions/, logs/")
     print()
 
     print(color("─" * 60, Colors.DIM))
     print()
     print(color("📝 To edit your configuration:", Colors.CYAN, Colors.BOLD))
     print()
-    print(f"   {color('hermes setup', Colors.GREEN)}          Re-run the full wizard")
-    print(f"   {color('hermes setup model', Colors.GREEN)}    Change model/provider")
-    print(f"   {color('hermes setup terminal', Colors.GREEN)} Change terminal backend")
-    print(f"   {color('hermes setup gateway', Colors.GREEN)}  Configure messaging")
-    print(f"   {color('hermes setup tools', Colors.GREEN)}    Configure tool providers")
+    for cmd, desc in (
+        ("hermes setup", "          Re-run the full wizard"),
+        ("hermes setup model", "    Change model/provider"),
+        ("hermes setup terminal", " Change terminal backend"),
+        ("hermes setup gateway", "  Configure messaging"),
+        ("hermes setup tools", "    Configure tool providers"),
+    ):
+        print(f"   {color(cmd, Colors.GREEN)}{desc}")
     print()
     print(f"   {color('hermes config', Colors.GREEN)}         View current settings")
-    print(
-        f"   {color('hermes config edit', Colors.GREEN)}    Open config in your editor"
-    )
+    print(f"   {color('hermes config edit', Colors.GREEN)}    Open config in your editor")
     print(f"   {color('hermes config set <key> <value>', Colors.GREEN)}")
     print("                          Set a specific value")
     print()
@@ -798,48 +722,6 @@ def _print_setup_summary(config: dict, hermes_home):
     print(f"   {color('hermes gateway', Colors.GREEN)}      Start messaging gateway")
     print(f"   {color('hermes doctor', Colors.GREEN)}       Check for issues")
     print()
-
-
-def _prompt_container_resources(config: dict):
-    """Prompt for container resource settings (Docker, Singularity, Modal, Daytona)."""
-    terminal = config.setdefault("terminal", {})
-
-    print()
-    print_info("Container Resource Settings:")
-
-    # Persistence
-    current_persist = terminal.get("container_persistent", True)
-    persist_label = "yes" if current_persist else "no"
-    print_info("  Persistent filesystem keeps files between sessions.")
-    print_info("  Set to 'no' for ephemeral sandboxes that reset each time.")
-    persist_str = prompt(
-        "  Persist filesystem across sessions? (yes/no)", persist_label
-    )
-    terminal["container_persistent"] = persist_str.lower() in {"yes", "true", "y", "1"}
-
-    # CPU
-    current_cpu = terminal.get("container_cpu", 1)
-    cpu_str = prompt("  CPU cores", str(current_cpu))
-    try:
-        terminal["container_cpu"] = float(cpu_str)
-    except ValueError:
-        pass
-
-    # Memory
-    current_mem = terminal.get("container_memory", 5120)
-    mem_str = prompt("  Memory in MB (5120 = 5GB)", str(current_mem))
-    try:
-        terminal["container_memory"] = int(mem_str)
-    except ValueError:
-        pass
-
-    # Disk
-    current_disk = terminal.get("container_disk", 51200)
-    disk_str = prompt("  Disk in MB (51200 = 50GB)", str(current_disk))
-    try:
-        terminal["container_disk"] = int(disk_str)
-    except ValueError:
-        pass
 
 
 def _prompt_vercel_sandbox_settings(config: dict):
@@ -1010,6 +892,26 @@ def _check_espeak_ng() -> bool:
     return shutil.which("espeak-ng") is not None or shutil.which("espeak") is not None
 
 
+def _pip_install_tts_package(name: str, pip_args: list, manual_cmd: str) -> bool:
+    """Install a local TTS engine through the canonical uv → pip → ensurepip
+    ladder so pip-less venvs (Ubuntu 25.10 ``python -m venv``, ``uv venv``) work."""
+    from hermes_cli.tools_config import _pip_install
+
+    try:
+        result = _pip_install(pip_args, timeout=300)
+    except Exception as e:
+        print_error(f"Failed to install {name}: {e}")
+        print_info(f"Try manually: {manual_cmd}")
+        return False
+    if result.returncode == 0:
+        print_success(f"{name} installed successfully")
+        return True
+    err = (result.stderr or "").strip()
+    print_error(f"Failed to install {name}: {err[:300] if err else 'install failed'}")
+    print_info(f"Try manually: {manual_cmd}")
+    return False
+
+
 def _install_neutts_deps() -> bool:
     """Install NeuTTS dependencies with user approval. Returns True on success."""
     import subprocess
@@ -1048,23 +950,7 @@ def _install_neutts_deps() -> bool:
     print_info("This will also download the TTS model (~300MB) on first use.")
     print()
 
-    # Route through the canonical uv → pip → ensurepip ladder so pip-less
-    # venvs (Ubuntu 25.10 `python -m venv`, `uv venv`) work out of the box.
-    from hermes_cli.tools_config import _pip_install
-
-    try:
-        result = _pip_install(["-U", "neutts[all]", "--quiet"], timeout=300)
-    except Exception as e:
-        print_error(f"Failed to install neutts: {e}")
-        print_info("Try manually: uv pip install -U 'neutts[all]'")
-        return False
-    if result.returncode == 0:
-        print_success("neutts installed successfully")
-        return True
-    err = (result.stderr or "").strip()
-    print_error(f"Failed to install neutts: {err[:300] if err else 'install failed'}")
-    print_info("Try manually: uv pip install -U 'neutts[all]'")
-    return False
+    return _pip_install_tts_package("neutts", ["-U", "neutts[all]", "--quiet"], "uv pip install -U 'neutts[all]'")
 
 
 def _install_kittentts_deps() -> bool:
@@ -1078,21 +964,9 @@ def _install_kittentts_deps() -> bool:
     print_info("Installing kittentts Python package (~25-80MB model downloaded on first use)...")
     print()
 
-    from hermes_cli.tools_config import _pip_install
-
-    try:
-        result = _pip_install(["-U", wheel_url, "soundfile", "--quiet"], timeout=300)
-    except Exception as e:
-        print_error(f"Failed to install kittentts: {e}")
-        print_info(f"Try manually: uv pip install -U '{wheel_url}' soundfile")
-        return False
-    if result.returncode == 0:
-        print_success("kittentts installed successfully")
-        return True
-    err = (result.stderr or "").strip()
-    print_error(f"Failed to install kittentts: {err[:300] if err else 'install failed'}")
-    print_info(f"Try manually: uv pip install -U '{wheel_url}' soundfile")
-    return False
+    return _pip_install_tts_package(
+        "kittentts", ["-U", wheel_url, "soundfile", "--quiet"], f"uv pip install -U '{wheel_url}' soundfile",
+    )
 
 
 def _xai_oauth_logged_in_for_setup() -> bool:
@@ -1152,59 +1026,168 @@ def _run_xai_oauth_login_from_setup() -> bool:
         return False
 
 
-def _setup_tts_provider(config: dict):
-    """Interactive TTS provider selection with install flow for NeuTTS."""
-    tts_config = config.get("tts", {})
-    current_provider = tts_config.get("provider", "edge")
-    subscription_features = get_nous_subscription_features(config)
+_TTS_PROVIDER_LABELS = {
+    "edge": "Edge TTS",
+    "elevenlabs": "ElevenLabs",
+    "openai": "OpenAI TTS",
+    "xai": "xAI TTS",
+    "minimax": "MiniMax TTS",
+    "mistral": "Mistral Voxtral TTS",
+    "gemini": "Google Gemini TTS",
+    "neutts": "NeuTTS",
+    "kittentts": "KittenTTS",
+}
+_TTS_PROVIDER_CHOICES = [
+    ("edge", "Edge TTS (free, cloud-based, no setup needed)"),
+    ("elevenlabs", "ElevenLabs (premium quality, needs API key)"),
+    ("openai", "OpenAI TTS (good quality, needs API key)"),
+    ("xai", "xAI TTS (Grok voices — OAuth login or API key)"),
+    ("minimax", "MiniMax TTS (high quality with voice cloning, needs API key)"),
+    ("mistral", "Mistral Voxtral TTS (multilingual, native Opus, needs API key)"),
+    ("gemini", "Google Gemini TTS (30 prebuilt voices, prompt-controllable, needs API key)"),
+    ("neutts", "NeuTTS (local on-device, free, ~300MB model download)"),
+    ("kittentts", "KittenTTS (local on-device, free, lightweight ~25-80MB ONNX)"),
+]
+# provider -> (env vars that satisfy it, env var to save, prompt, success line, pre-prompt hint)
+_TTS_API_KEY_PROVIDERS = {
+    "elevenlabs": (("ELEVENLABS_API_KEY",), "ELEVENLABS_API_KEY", "ElevenLabs API key", "ElevenLabs API key saved", ""),
+    "openai": (
+        ("VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY"), "VOICE_TOOLS_OPENAI_KEY",
+        "OpenAI API key for TTS", "OpenAI TTS API key saved", "",
+    ),
+    "minimax": (("MINIMAX_API_KEY",), "MINIMAX_API_KEY", "MiniMax API key for TTS", "MiniMax TTS API key saved", ""),
+    "mistral": (("MISTRAL_API_KEY",), "MISTRAL_API_KEY", "Mistral API key for TTS", "Mistral TTS API key saved", ""),
+    "gemini": (
+        ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "GEMINI_API_KEY", "Gemini API key for TTS", "Gemini TTS API key saved",
+        "Get a free API key at https://aistudio.google.com/app/apikey",
+    ),
+}
+# provider -> (module, display name, requirement lines, install question, installer)
+_TTS_LOCAL_PROVIDERS = {
+    "neutts": (
+        "neutts", "NeuTTS",
+        ("NeuTTS requires:", "  • Python package: neutts (~50MB install + ~300MB model on first use)",
+         "  • System package: espeak-ng (phonemizer)"),
+        "Install NeuTTS dependencies now?", _install_neutts_deps,
+    ),
+    "kittentts": (
+        "kittentts", "KittenTTS",
+        ("KittenTTS is lightweight (~25-80MB, CPU-only, no API key required).",
+         "Voices: Jasper, Bella, Luna, Bruno, Rosie, Hugo, Kiki, Leo"),
+        "Install KittenTTS now?", _install_kittentts_deps,
+    ),
+}
 
-    provider_labels = {
-        "edge": "Edge TTS",
-        "elevenlabs": "ElevenLabs",
-        "openai": "OpenAI TTS",
-        "xai": "xAI TTS",
-        "minimax": "MiniMax TTS",
-        "mistral": "Mistral Voxtral TTS",
-        "gemini": "Google Gemini TTS",
-        "neutts": "NeuTTS",
-        "kittentts": "KittenTTS",
-    }
-    current_label = provider_labels.get(current_provider, current_provider)
+
+def _tts_api_key_step(selected: str) -> str:
+    """Ensure the key for an API-key TTS provider exists; fall back to edge otherwise."""
+    env_vars, save_var, prompt_label, saved_msg, hint = _TTS_API_KEY_PROVIDERS[selected]
+    if any(get_env_value(v) for v in env_vars):
+        return selected
+    print()
+    if hint:
+        print_info(hint)
+    api_key = prompt(prompt_label, password=True)
+    if api_key:
+        save_env_value(save_var, api_key)
+        print_success(saved_msg)
+        return selected
+    print_warning("No API key provided. Falling back to Edge TTS.")
+    return "edge"
+
+
+def _tts_local_install_step(selected: str) -> str:
+    """Offer to install a local TTS engine; fall back to edge if declined/failed."""
+    module, name, lines, question, installer = _TTS_LOCAL_PROVIDERS[selected]
+    if _module_installed(module):
+        print_success(f"{name} is already installed")
+        return selected
+    print()
+    for line in lines:
+        print_info(line)
+    print()
+    if not prompt_yes_no(question, True):
+        print_info(f"Skipping install. Set tts.provider to '{selected}' after installing manually.")
+        return "edge"
+    if not installer():
+        print_warning(f"{name} installation incomplete. Falling back to Edge TTS.")
+        return "edge"
+    return selected
+
+
+def _tts_xai_step(config: dict) -> str:
+    """xAI TTS auth. Order: existing OAuth tokens (free for SuperGrok) > existing
+    XAI_API_KEY > offer both paths — xAI TTS works with OAuth bearer tokens too."""
+    selected = "xai"
+    if _xai_oauth_logged_in_for_setup():
+        print_success("xAI TTS will use your xAI Grok OAuth (SuperGrok / Premium+) credentials")
+    elif get_env_value("XAI_API_KEY"):
+        print_success("xAI TTS will use your existing XAI_API_KEY")
+    else:
+        print()
+        choice_idx = prompt_choice(
+            "How do you want xAI TTS to authenticate?",
+            choices=[
+                "Sign in with xAI Grok OAuth (SuperGrok / Premium+) — browser login",
+                "Paste an xAI API key (console.x.ai)",
+                "Skip → fallback to Edge TTS",
+            ],
+            default=0,
+        )
+        if choice_idx == 0:
+            if _run_xai_oauth_login_from_setup():
+                print_success("Logged in — xAI TTS will use these OAuth credentials")
+            else:
+                print_warning("xAI Grok OAuth login did not complete. Falling back to Edge TTS.")
+                selected = "edge"
+        elif choice_idx == 1:
+            api_key = prompt("xAI API key for TTS", password=True)
+            if api_key:
+                save_env_value("XAI_API_KEY", api_key)
+                print_success("xAI TTS API key saved")
+            else:
+                from hermes_constants import display_hermes_home as _dhh
+                print_warning(
+                    "No xAI API key provided for TTS. Configure XAI_API_KEY "
+                    f"via hermes setup model or {_dhh()}/.env to use xAI TTS. "
+                    "Falling back to Edge TTS."
+                )
+                selected = "edge"
+        else:
+            print_warning("xAI TTS skipped. Falling back to Edge TTS.")
+            selected = "edge"
+
+    if selected == "xai":
+        print()
+        voice_id = prompt("xAI voice_id (Enter for 'eve', or paste a custom voice ID)")
+        if voice_id and voice_id.strip():
+            config.setdefault("tts", {}).setdefault("xai", {})["voice_id"] = voice_id.strip()
+            print_success(f"xAI voice_id set to: {voice_id.strip()}")
+    return selected
+
+
+def _setup_tts_provider(config: dict):
+    """Interactive TTS provider selection with install flow for local engines."""
+    current_provider = config.get("tts", {}).get("provider", "edge")
+    current_label = _TTS_PROVIDER_LABELS.get(current_provider, current_provider)
 
     print()
     print_header("Text-to-Speech Provider (optional)")
     print_info(f"Current: {current_label}")
     print()
 
-    choices = []
-    providers = []
-    if managed_nous_tools_enabled() and subscription_features.nous_auth_present:
-        choices.append("Nous Subscription (managed OpenAI TTS, billed to your subscription)")
-        providers.append("nous-openai")
-    choices.extend(
-        [
-            "Edge TTS (free, cloud-based, no setup needed)",
-            "ElevenLabs (premium quality, needs API key)",
-            "OpenAI TTS (good quality, needs API key)",
-            "xAI TTS (Grok voices — OAuth login or API key)",
-            "MiniMax TTS (high quality with voice cloning, needs API key)",
-            "Mistral Voxtral TTS (multilingual, native Opus, needs API key)",
-            "Google Gemini TTS (30 prebuilt voices, prompt-controllable, needs API key)",
-            "NeuTTS (local on-device, free, ~300MB model download)",
-            "KittenTTS (local on-device, free, lightweight ~25-80MB ONNX)",
-        ]
-    )
-    providers.extend(["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts"])
-    choices.append(f"Keep current ({current_label})")
+    options = list(_TTS_PROVIDER_CHOICES)
+    if managed_nous_tools_enabled() and get_nous_subscription_features(config).nous_auth_present:
+        options.insert(0, ("nous-openai", "Nous Subscription (managed OpenAI TTS, billed to your subscription)"))
+    choices = [label for _, label in options] + [f"Keep current ({current_label})"]
     keep_current_idx = len(choices) - 1
     idx = prompt_choice("Select TTS provider:", choices, keep_current_idx)
-
     if idx == keep_current_idx:
         return
 
-    selected = providers[idx]
+    selected = options[idx][0]
     selected_via_nous = selected == "nous-openai"
-    if selected == "nous-openai":
+    if selected_via_nous:
         selected = "openai"
         print_info("OpenAI TTS will use the managed Nous gateway and bill to your subscription.")
         if get_env_value("VOICE_TOOLS_OPENAI_KEY") or get_env_value("OPENAI_API_KEY"):
@@ -1212,180 +1195,16 @@ def _setup_tts_provider(config: dict):
                 "Direct OpenAI credentials are still configured and may take precedence until removed from ~/.hermes/.env."
             )
 
-    if selected == "neutts":
-        # Check if already installed
-        try:
-            already_installed = importlib.util.find_spec("neutts") is not None
-        except Exception:
-            already_installed = False
-
-        if already_installed:
-            print_success("NeuTTS is already installed")
-        else:
-            print()
-            print_info("NeuTTS requires:")
-            print_info("  • Python package: neutts (~50MB install + ~300MB model on first use)")
-            print_info("  • System package: espeak-ng (phonemizer)")
-            print()
-            if prompt_yes_no("Install NeuTTS dependencies now?", True):
-                if not _install_neutts_deps():
-                    print_warning("NeuTTS installation incomplete. Falling back to Edge TTS.")
-                    selected = "edge"
-            else:
-                print_info("Skipping install. Set tts.provider to 'neutts' after installing manually.")
-                selected = "edge"
-
-    elif selected == "elevenlabs":
-        existing = get_env_value("ELEVENLABS_API_KEY")
-        if not existing:
-            print()
-            api_key = prompt("ElevenLabs API key", password=True)
-            if api_key:
-                save_env_value("ELEVENLABS_API_KEY", api_key)
-                print_success("ElevenLabs API key saved")
-            else:
-                print_warning("No API key provided. Falling back to Edge TTS.")
-                selected = "edge"
-
-    elif selected == "openai" and not selected_via_nous:
-        existing = get_env_value("VOICE_TOOLS_OPENAI_KEY") or get_env_value("OPENAI_API_KEY")
-        if not existing:
-            print()
-            api_key = prompt("OpenAI API key for TTS", password=True)
-            if api_key:
-                save_env_value("VOICE_TOOLS_OPENAI_KEY", api_key)
-                print_success("OpenAI TTS API key saved")
-            else:
-                print_warning("No API key provided. Falling back to Edge TTS.")
-                selected = "edge"
-
+    if selected in _TTS_LOCAL_PROVIDERS:
+        selected = _tts_local_install_step(selected)
+    elif selected in _TTS_API_KEY_PROVIDERS and not selected_via_nous:
+        selected = _tts_api_key_step(selected)
     elif selected == "xai":
-        # Resolution order: existing OAuth tokens (free for SuperGrok subscribers
-        # via the Hermes auth store) > existing XAI_API_KEY > prompt the user.
-        # When neither is configured, offer both options instead of forcing the
-        # API-key path — xAI TTS works fine with OAuth bearer tokens too.
-        oauth_logged_in = _xai_oauth_logged_in_for_setup()
-        existing_api_key = get_env_value("XAI_API_KEY")
+        selected = _tts_xai_step(config)
 
-        if oauth_logged_in:
-            print_success(
-                "xAI TTS will use your xAI Grok OAuth (SuperGrok / Premium+) "
-                "credentials"
-            )
-        elif existing_api_key:
-            print_success("xAI TTS will use your existing XAI_API_KEY")
-        else:
-            print()
-            choice_idx = prompt_choice(
-                "How do you want xAI TTS to authenticate?",
-                choices=[
-                    "Sign in with xAI Grok OAuth (SuperGrok / Premium+) — browser login",
-                    "Paste an xAI API key (console.x.ai)",
-                    "Skip → fallback to Edge TTS",
-                ],
-                default=0,
-            )
-            if choice_idx == 0:
-                if _run_xai_oauth_login_from_setup():
-                    print_success(
-                        "Logged in — xAI TTS will use these OAuth credentials"
-                    )
-                else:
-                    print_warning(
-                        "xAI Grok OAuth login did not complete. "
-                        "Falling back to Edge TTS."
-                    )
-                    selected = "edge"
-            elif choice_idx == 1:
-                api_key = prompt("xAI API key for TTS", password=True)
-                if api_key:
-                    save_env_value("XAI_API_KEY", api_key)
-                    print_success("xAI TTS API key saved")
-                else:
-                    from hermes_constants import display_hermes_home as _dhh
-                    print_warning(
-                        "No xAI API key provided for TTS. Configure XAI_API_KEY "
-                        f"via hermes setup model or {_dhh()}/.env to use xAI TTS. "
-                        "Falling back to Edge TTS."
-                    )
-                    selected = "edge"
-            else:
-                print_warning("xAI TTS skipped. Falling back to Edge TTS.")
-                selected = "edge"
-
-        if selected == "xai":
-            print()
-            voice_id = prompt("xAI voice_id (Enter for 'eve', or paste a custom voice ID)")
-            if voice_id and voice_id.strip():
-                config.setdefault("tts", {}).setdefault("xai", {})["voice_id"] = voice_id.strip()
-                print_success(f"xAI voice_id set to: {voice_id.strip()}")
-
-
-    elif selected == "minimax":
-        existing = get_env_value("MINIMAX_API_KEY")
-        if not existing:
-            print()
-            api_key = prompt("MiniMax API key for TTS", password=True)
-            if api_key:
-                save_env_value("MINIMAX_API_KEY", api_key)
-                print_success("MiniMax TTS API key saved")
-            else:
-                print_warning("No API key provided. Falling back to Edge TTS.")
-                selected = "edge"
-
-    elif selected == "mistral":
-        existing = get_env_value("MISTRAL_API_KEY")
-        if not existing:
-            print()
-            api_key = prompt("Mistral API key for TTS", password=True)
-            if api_key:
-                save_env_value("MISTRAL_API_KEY", api_key)
-                print_success("Mistral TTS API key saved")
-            else:
-                print_warning("No API key provided. Falling back to Edge TTS.")
-                selected = "edge"
-
-    elif selected == "gemini":
-        existing = get_env_value("GEMINI_API_KEY") or get_env_value("GOOGLE_API_KEY")
-        if not existing:
-            print()
-            print_info("Get a free API key at https://aistudio.google.com/app/apikey")
-            api_key = prompt("Gemini API key for TTS", password=True)
-            if api_key:
-                save_env_value("GEMINI_API_KEY", api_key)
-                print_success("Gemini TTS API key saved")
-            else:
-                print_warning("No API key provided. Falling back to Edge TTS.")
-                selected = "edge"
-
-    elif selected == "kittentts":
-        # Check if already installed
-        try:
-            already_installed = importlib.util.find_spec("kittentts") is not None
-        except Exception:
-            already_installed = False
-
-        if already_installed:
-            print_success("KittenTTS is already installed")
-        else:
-            print()
-            print_info("KittenTTS is lightweight (~25-80MB, CPU-only, no API key required).")
-            print_info("Voices: Jasper, Bella, Luna, Bruno, Rosie, Hugo, Kiki, Leo")
-            print()
-            if prompt_yes_no("Install KittenTTS now?", True):
-                if not _install_kittentts_deps():
-                    print_warning("KittenTTS installation incomplete. Falling back to Edge TTS.")
-                    selected = "edge"
-            else:
-                print_info("Skipping install. Set tts.provider to 'kittentts' after installing manually.")
-                selected = "edge"
-
-    # Save the selection
-    if "tts" not in config:
-        config["tts"] = {}
-    config["tts"]["provider"] = selected
+    config.setdefault("tts", {})["provider"] = selected
     save_config(config)
-    print_success(f"TTS provider set to: {provider_labels.get(selected, selected)}")
+    print_success(f"TTS provider set to: {_TTS_PROVIDER_LABELS.get(selected, selected)}")
 
 
 def setup_tts(config: dict):
@@ -1398,6 +1217,245 @@ def setup_tts(config: dict):
 # =============================================================================
 
 
+def _prompt_secret_env(label: str, env_var: str, *, confirm_msg: str = "") -> None:
+    """Prompt for a secret and persist it to .env when non-empty."""
+    value = prompt(label, password=True)
+    if value:
+        save_env_value(env_var, value)
+        if confirm_msg:
+            print_success(confirm_msg)
+
+
+def _ensure_sdk(package: str, manual_hint: str, *, show_stderr: bool = False) -> None:
+    """Import *package*; if missing, install it via the venv pip helper."""
+    try:
+        __import__(package)
+    except ImportError:
+        print_info(f"Installing {package} SDK...")
+        from hermes_cli.tools_config import _pip_install
+
+        result = _pip_install([package])
+        if result.returncode == 0:
+            print_success(f"{package} SDK installed")
+        else:
+            print_warning(f"Install failed — run manually: {manual_hint}")
+            if show_stderr and result.stderr:
+                print_info(f"  Error: {result.stderr.strip().splitlines()[-1]}")
+
+
+def _setup_backend_local(config: dict) -> None:
+    print_success("Terminal backend: Local")
+    print_info("Commands run directly on this machine.")
+    # Gateway working directory defaults to home; sudo stays off. Both are
+    # configurable later via `hermes setup terminal` / config.yaml.
+    config["terminal"].setdefault("cwd", str(Path.home()))
+
+
+def _setup_backend_docker(config: dict) -> None:
+    print_success("Terminal backend: Docker")
+    docker_bin = shutil.which("docker")
+    if not docker_bin:
+        print_warning("Docker not found in PATH!")
+        print_info("Install Docker: https://docs.docker.com/get-docker/")
+    else:
+        print_info(f"Docker found: {docker_bin}")
+
+    # Image and resource limits use defaults; tune via `hermes setup terminal`.
+    config["terminal"].setdefault("docker_image", "nikolaik/python-nodejs:python3.11-nodejs20")
+    print()
+    print_info("Docker sandboxes can be protected with the egress credential firewall.")
+    print_info(
+        "It routes sandbox traffic through iron-proxy so containers receive "
+        "proxy tokens instead of real API keys."
+    )
+    print_info("   Docker only for now; Modal, SSH, Daytona, and Singularity are not wired yet.")
+    if prompt_yes_no("  Enable egress firewall for Docker sandboxes?", False):
+        proxy_cfg = config.setdefault("proxy", {})
+        proxy_cfg["enabled"] = True
+        proxy_cfg.setdefault("enforce_on_docker", True)
+        print_success("Egress firewall enabled in config")
+        print_info("Run `hermes egress setup` then `hermes egress start` to mint tokens and launch the proxy.")
+    else:
+        print_info("Skipping egress firewall. You can enable it later with `hermes egress setup`.")
+
+
+def _setup_backend_singularity(config: dict) -> None:
+    print_success("Terminal backend: Singularity/Apptainer")
+    sing_bin = shutil.which("apptainer") or shutil.which("singularity")
+    if not sing_bin:
+        print_warning("Singularity/Apptainer not found in PATH!")
+        print_info("Install: https://apptainer.org/docs/admin/main/installation.html")
+    else:
+        print_info(f"Found: {sing_bin}")
+    # Image and resource limits use defaults; tune via `hermes setup terminal`.
+    config["terminal"].setdefault("singularity_image", "docker://nikolaik/python-nodejs:python3.11-nodejs20")
+
+
+def _setup_backend_modal(config: dict) -> None:
+    print_success("Terminal backend: Modal")
+    print_info("Serverless cloud sandboxes. Each session gets its own container.")
+    from tools.managed_tool_gateway import is_managed_tool_gateway_ready
+    from tools.tool_backend_helpers import normalize_modal_mode
+
+    managed_modal_available = bool(
+        managed_nous_tools_enabled()
+        and get_nous_subscription_features(config).nous_auth_present
+        and is_managed_tool_gateway_ready("modal")
+    )
+    modal_mode = normalize_modal_mode(cfg_get(config, "terminal", "modal_mode"))
+    use_managed_modal = False
+    if managed_modal_available:
+        if modal_mode == "managed":
+            default_modal_idx = 0
+        elif modal_mode == "direct":
+            default_modal_idx = 1
+        else:
+            default_modal_idx = 1 if get_env_value("MODAL_TOKEN_ID") else 0
+        modal_mode_idx = prompt_choice(
+            "Select how Modal execution should be billed:",
+            ["Use my Nous subscription", "Use my own Modal account"],
+            default_modal_idx,
+        )
+        use_managed_modal = modal_mode_idx == 0
+
+    if use_managed_modal:
+        config["terminal"]["modal_mode"] = "managed"
+        print_info("Modal execution will use the managed Nous gateway and bill to your subscription.")
+        if get_env_value("MODAL_TOKEN_ID") or get_env_value("MODAL_TOKEN_SECRET"):
+            print_info("Direct Modal credentials are still configured, but this backend is pinned to managed mode.")
+        return
+
+    config["terminal"]["modal_mode"] = "direct"
+    print_info("Requires a Modal account: https://modal.com")
+    _ensure_sdk("modal", "uv pip install modal")
+    print()
+    print_info("Modal authentication:")
+    print_info("  Get your token at: https://modal.com/settings")
+    if get_env_value("MODAL_TOKEN_ID"):
+        print_info("  Modal token: already configured")
+        if not prompt_yes_no("  Update Modal credentials?", False):
+            return
+    _prompt_secret_env("    Modal Token ID", "MODAL_TOKEN_ID")
+    _prompt_secret_env("    Modal Token Secret", "MODAL_TOKEN_SECRET")
+
+
+def _setup_backend_daytona(config: dict) -> None:
+    print_success("Terminal backend: Daytona")
+    print_info("Persistent cloud development environments.")
+    print_info("Each session gets a dedicated sandbox with filesystem persistence.")
+    print_info("Sign up at: https://daytona.io")
+    _ensure_sdk("daytona", "uv pip install daytona", show_stderr=True)
+    print()
+    if get_env_value("DAYTONA_API_KEY"):
+        print_info("  Daytona API key: already configured")
+        if prompt_yes_no("  Update API key?", False):
+            _prompt_secret_env("    Daytona API key", "DAYTONA_API_KEY", confirm_msg="    Updated")
+    else:
+        _prompt_secret_env("    Daytona API key", "DAYTONA_API_KEY", confirm_msg="    Configured")
+    # Image and resource limits use defaults; tune via `hermes setup terminal`.
+    config["terminal"].setdefault("daytona_image", "nikolaik/python-nodejs:python3.11-nodejs20")
+
+
+def _setup_backend_vercel(config: dict) -> None:
+    print_success("Terminal backend: Vercel Sandbox")
+    print_info("Cloud microVM sandboxes with snapshot-backed filesystem persistence.")
+    print_info("Requires the optional SDK: pip install 'hermes-agent[vercel]'")
+    try:
+        __import__("vercel")
+    except ImportError:
+        print_info("Installing vercel SDK...")
+        import subprocess
+
+        # Managed uv first: $HERMES_HOME/bin is never on PATH, so a bare which()
+        # misses the uv Hermes installed; bootstrapping one mid-wizard is fine,
+        # and a `uv venv` venv may not even have pip.
+        from hermes_cli.managed_uv import ensure_uv
+
+        uv_bin = ensure_uv()
+        cmd = (
+            [uv_bin, "pip", "install", "--python", sys.executable, "vercel"]
+            if uv_bin
+            else [sys.executable, "-m", "pip", "install", "vercel"]
+        )
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            print_success("vercel SDK installed")
+        else:
+            print_warning("Install failed — run manually: pip install 'hermes-agent[vercel]'")
+            if result.stderr:
+                print_info(f"  Error: {result.stderr.strip().splitlines()[-1]}")
+    _prompt_vercel_sandbox_settings(config)
+
+
+def _setup_backend_ssh(config: dict) -> None:
+    print_success("Terminal backend: SSH")
+    print_info("Run commands on a remote machine via SSH.")
+
+    host = prompt("  SSH host (hostname or IP)", get_env_value("TERMINAL_SSH_HOST") or "")
+    if host:
+        save_env_value("TERMINAL_SSH_HOST", host)
+    user = prompt("  SSH user", (get_env_value("TERMINAL_SSH_USER") or "") or os.getenv("USER", ""))
+    if user:
+        save_env_value("TERMINAL_SSH_USER", user)
+    port = prompt("  SSH port", get_env_value("TERMINAL_SSH_PORT") or "22")
+    if port and port != "22":
+        save_env_value("TERMINAL_SSH_PORT", port)
+    default_key = str(Path.home() / ".ssh" / "id_rsa")
+    ssh_key = prompt("  SSH private key path", (get_env_value("TERMINAL_SSH_KEY") or "") or default_key)
+    if ssh_key:
+        save_env_value("TERMINAL_SSH_KEY", ssh_key)
+
+    if host and prompt_yes_no("  Test SSH connection?", True):
+        print_info("  Testing connection...")
+        import subprocess
+
+        ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+        if ssh_key:
+            ssh_cmd.extend(["-i", ssh_key])
+        if port and port != "22":
+            ssh_cmd.extend(["-p", port])
+        ssh_cmd.append(f"{user}@{host}" if user else host)
+        ssh_cmd.append("echo ok")
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+        if result.returncode == 0:
+            print_success("  SSH connection successful!")
+        else:
+            print_warning(f"  SSH connection failed: {result.stderr.strip()}")
+            print_info("  Check your SSH key and host settings.")
+
+
+def _setup_backend_plugin(config: dict, backend: str) -> None:
+    try:
+        from agent.terminal_env_registry import get_provider
+
+        provider = get_provider(backend)
+        print_success(f"Terminal backend: {provider.display_name}")
+        for line in provider.setup_instructions():
+            print_info(line)
+        provider.post_setup()
+    except Exception as exc:
+        print_warning(f"Backend plugin setup hook failed: {exc}")
+
+
+_BUILTIN_TERMINAL_BACKENDS = [
+    ("local", "Local - run directly on this machine (default)"),
+    ("docker", "Docker - isolated container with configurable resources"),
+    ("modal", "Modal - serverless cloud sandbox"),
+    ("ssh", "SSH - run on a remote machine"),
+    ("daytona", "Daytona - persistent cloud development environment"),
+    ("vercel_sandbox", "Vercel Sandbox - cloud microVM with snapshot filesystem persistence"),
+]
+_TERMINAL_BACKEND_SETUP = {
+    "local": _setup_backend_local,
+    "docker": _setup_backend_docker,
+    "singularity": _setup_backend_singularity,
+    "modal": _setup_backend_modal,
+    "daytona": _setup_backend_daytona,
+    "vercel_sandbox": _setup_backend_vercel,
+    "ssh": _setup_backend_ssh,
+}
+
+
 def setup_terminal_backend(config: dict):
     """Configure the terminal execution backend."""
     import platform as _platform
@@ -1408,30 +1466,12 @@ def setup_terminal_backend(config: dict):
     print()
 
     current_backend = cfg_get(config, "terminal", "backend", default="local")
-    is_linux = _platform.system() == "Linux"
+    backends = list(_BUILTIN_TERMINAL_BACKENDS)
+    if _platform.system() == "Linux":
+        backends.append(("singularity", "Singularity/Apptainer - HPC-friendly container"))
 
-    # Build backend choices with descriptions
-    terminal_choices = [
-        "Local - run directly on this machine (default)",
-        "Docker - isolated container with configurable resources",
-        "Modal - serverless cloud sandbox",
-        "SSH - run on a remote machine",
-        "Daytona - persistent cloud development environment",
-        "Vercel Sandbox - cloud microVM with snapshot filesystem persistence",
-    ]
-    idx_to_backend = {0: "local", 1: "docker", 2: "modal", 3: "ssh", 4: "daytona", 5: "vercel_sandbox"}
-    backend_to_idx = {"local": 0, "docker": 1, "modal": 2, "ssh": 3, "daytona": 4, "vercel_sandbox": 5}
-
-    next_idx = 6
-    if is_linux:
-        terminal_choices.append("Singularity/Apptainer - HPC-friendly container")
-        idx_to_backend[next_idx] = "singularity"
-        backend_to_idx["singularity"] = next_idx
-        next_idx += 1
-
-    # Plugin-registered terminal backends (standalone plugin repos installed
-    # under ~/.hermes/plugins/). Fail-soft: a broken plugin must not take the
-    # setup wizard down.
+    # Plugin-registered terminal backends (standalone plugin repos under
+    # ~/.hermes/plugins/). Fail-soft: a broken plugin must not take the wizard down.
     plugin_backend_names = []
     try:
         from hermes_cli.plugins import discover_plugins
@@ -1439,319 +1479,31 @@ def setup_terminal_backend(config: dict):
         discover_plugins()  # idempotent — plugin state may not be loaded yet
         from agent.terminal_env_registry import list_providers
 
-        for _provider in list_providers():
-            _pname = _provider.name.strip().lower()
-            terminal_choices.append(f"{_provider.display_name} - {_provider.description}")
-            idx_to_backend[next_idx] = _pname
-            backend_to_idx[_pname] = next_idx
-            plugin_backend_names.append(_pname)
-            next_idx += 1
+        for provider in list_providers():
+            pname = provider.name.strip().lower()
+            backends.append((pname, f"{provider.display_name} - {provider.description}"))
+            plugin_backend_names.append(pname)
     except Exception:
         pass
 
-    # Add keep current option
-    keep_current_idx = next_idx
-    terminal_choices.append(f"Keep current ({current_backend})")
-    idx_to_backend[keep_current_idx] = current_backend
-
-    terminal_idx = prompt_choice(
-        "Select terminal backend:", terminal_choices, keep_current_idx
-    )
-
-    selected_backend = idx_to_backend.get(terminal_idx)
-
+    keep_current_idx = len(backends)
+    terminal_choices = [label for _, label in backends] + [f"Keep current ({current_backend})"]
+    terminal_idx = prompt_choice("Select terminal backend:", terminal_choices, keep_current_idx)
     if terminal_idx == keep_current_idx:
         print_info(f"Keeping current backend: {current_backend}")
         return
+    selected_backend = backends[terminal_idx][0] if 0 <= terminal_idx < len(backends) else None
 
     config.setdefault("terminal", {})["backend"] = selected_backend
-
-    if selected_backend == "local":
-        print_success("Terminal backend: Local")
-        print_info("Commands run directly on this machine.")
-        # Gateway working directory defaults to home; sudo stays off. Both are
-        # configurable later via `hermes setup terminal` / config.yaml.
-        config["terminal"].setdefault("cwd", str(Path.home()))
-
-    elif selected_backend == "docker":
-        print_success("Terminal backend: Docker")
-
-        # Check if Docker is available
-        docker_bin = shutil.which("docker")
-        if not docker_bin:
-            print_warning("Docker not found in PATH!")
-            print_info("Install Docker: https://docs.docker.com/get-docker/")
-        else:
-            print_info(f"Docker found: {docker_bin}")
-
-        # Image and resource limits use defaults; tune via `hermes setup terminal`.
-        config["terminal"].setdefault(
-            "docker_image", "nikolaik/python-nodejs:python3.11-nodejs20"
-        )
-        print()
-        print_info("Docker sandboxes can be protected with the egress credential firewall.")
-        print_info(
-            "It routes sandbox traffic through iron-proxy so containers receive "
-            "proxy tokens instead of real API keys."
-        )
-        print_info(
-            "   Docker only for now; Modal, SSH, Daytona, and Singularity are not wired yet."
-        )
-        if prompt_yes_no("  Enable egress firewall for Docker sandboxes?", False):
-            proxy_cfg = config.setdefault("proxy", {})
-            proxy_cfg["enabled"] = True
-            proxy_cfg.setdefault("enforce_on_docker", True)
-            print_success("Egress firewall enabled in config")
-            print_info(
-                "Run `hermes egress setup` then `hermes egress start` to mint "
-                "tokens and launch the proxy."
-            )
-        else:
-            print_info(
-                "Skipping egress firewall. You can enable it later with `hermes egress setup`."
-            )
-
-    elif selected_backend == "singularity":
-        print_success("Terminal backend: Singularity/Apptainer")
-
-        # Check if singularity/apptainer is available
-        sing_bin = shutil.which("apptainer") or shutil.which("singularity")
-        if not sing_bin:
-            print_warning("Singularity/Apptainer not found in PATH!")
-            print_info(
-                "Install: https://apptainer.org/docs/admin/main/installation.html"
-            )
-        else:
-            print_info(f"Found: {sing_bin}")
-
-        # Image and resource limits use defaults; tune via `hermes setup terminal`.
-        config["terminal"].setdefault(
-            "singularity_image",
-            "docker://nikolaik/python-nodejs:python3.11-nodejs20",
-        )
-
-    elif selected_backend == "modal":
-        print_success("Terminal backend: Modal")
-        print_info("Serverless cloud sandboxes. Each session gets its own container.")
-        from tools.managed_tool_gateway import is_managed_tool_gateway_ready
-        from tools.tool_backend_helpers import normalize_modal_mode
-
-        managed_modal_available = bool(
-            managed_nous_tools_enabled()
-            and
-            get_nous_subscription_features(config).nous_auth_present
-            and is_managed_tool_gateway_ready("modal")
-        )
-        modal_mode = normalize_modal_mode(cfg_get(config, "terminal", "modal_mode"))
-        use_managed_modal = False
-        if managed_modal_available:
-            modal_choices = [
-                "Use my Nous subscription",
-                "Use my own Modal account",
-            ]
-            if modal_mode == "managed":
-                default_modal_idx = 0
-            elif modal_mode == "direct":
-                default_modal_idx = 1
-            else:
-                default_modal_idx = 1 if get_env_value("MODAL_TOKEN_ID") else 0
-            modal_mode_idx = prompt_choice(
-                "Select how Modal execution should be billed:",
-                modal_choices,
-                default_modal_idx,
-            )
-            use_managed_modal = modal_mode_idx == 0
-
-        if use_managed_modal:
-            config["terminal"]["modal_mode"] = "managed"
-            print_info("Modal execution will use the managed Nous gateway and bill to your subscription.")
-            if get_env_value("MODAL_TOKEN_ID") or get_env_value("MODAL_TOKEN_SECRET"):
-                print_info(
-                    "Direct Modal credentials are still configured, but this backend is pinned to managed mode."
-                )
-        else:
-            config["terminal"]["modal_mode"] = "direct"
-            print_info("Requires a Modal account: https://modal.com")
-
-            # Check if modal SDK is installed
-            try:
-                __import__("modal")
-            except ImportError:
-                print_info("Installing modal SDK...")
-                from hermes_cli.tools_config import _pip_install
-
-                result = _pip_install(["modal"])
-                if result.returncode == 0:
-                    print_success("modal SDK installed")
-                else:
-                    print_warning("Install failed — run manually: uv pip install modal")
-
-            # Modal token
-            print()
-            print_info("Modal authentication:")
-            print_info("  Get your token at: https://modal.com/settings")
-            existing_token = get_env_value("MODAL_TOKEN_ID")
-            if existing_token:
-                print_info("  Modal token: already configured")
-                if prompt_yes_no("  Update Modal credentials?", False):
-                    token_id = prompt("    Modal Token ID", password=True)
-                    token_secret = prompt("    Modal Token Secret", password=True)
-                    if token_id:
-                        save_env_value("MODAL_TOKEN_ID", token_id)
-                    if token_secret:
-                        save_env_value("MODAL_TOKEN_SECRET", token_secret)
-            else:
-                token_id = prompt("    Modal Token ID", password=True)
-                token_secret = prompt("    Modal Token Secret", password=True)
-                if token_id:
-                    save_env_value("MODAL_TOKEN_ID", token_id)
-                if token_secret:
-                    save_env_value("MODAL_TOKEN_SECRET", token_secret)
-
-    elif selected_backend == "daytona":
-        print_success("Terminal backend: Daytona")
-        print_info("Persistent cloud development environments.")
-        print_info("Each session gets a dedicated sandbox with filesystem persistence.")
-        print_info("Sign up at: https://daytona.io")
-
-        # Check if daytona SDK is installed
-        try:
-            __import__("daytona")
-        except ImportError:
-            print_info("Installing daytona SDK...")
-            from hermes_cli.tools_config import _pip_install
-
-            result = _pip_install(["daytona"])
-            if result.returncode == 0:
-                print_success("daytona SDK installed")
-            else:
-                print_warning("Install failed — run manually: uv pip install daytona")
-                if result.stderr:
-                    print_info(f"  Error: {result.stderr.strip().splitlines()[-1]}")
-
-        # Daytona API key
-        print()
-        existing_key = get_env_value("DAYTONA_API_KEY")
-        if existing_key:
-            print_info("  Daytona API key: already configured")
-            if prompt_yes_no("  Update API key?", False):
-                api_key = prompt("    Daytona API key", password=True)
-                if api_key:
-                    save_env_value("DAYTONA_API_KEY", api_key)
-                    print_success("    Updated")
-        else:
-            api_key = prompt("    Daytona API key", password=True)
-            if api_key:
-                save_env_value("DAYTONA_API_KEY", api_key)
-                print_success("    Configured")
-
-        # Image and resource limits use defaults; tune via `hermes setup terminal`.
-        config["terminal"].setdefault(
-            "daytona_image", "nikolaik/python-nodejs:python3.11-nodejs20"
-        )
-
-    elif selected_backend == "vercel_sandbox":
-        print_success("Terminal backend: Vercel Sandbox")
-        print_info("Cloud microVM sandboxes with snapshot-backed filesystem persistence.")
-        print_info("Requires the optional SDK: pip install 'hermes-agent[vercel]'")
-
-        try:
-            __import__("vercel")
-        except ImportError:
-            print_info("Installing vercel SDK...")
-            import subprocess
-
-            # Managed uv first: $HERMES_HOME/bin is never on PATH, so a bare
-            # which() misses the uv Hermes installed. Bootstrapping one is
-            # welcome here — this is the interactive setup wizard, already
-            # mid-install, and the alternative tier is a pip that a `uv venv`
-            # venv may not even have.
-            from hermes_cli.managed_uv import ensure_uv
-
-            uv_bin = ensure_uv()
-            if uv_bin:
-                result = subprocess.run(
-                    [uv_bin, "pip", "install", "--python", sys.executable, "vercel"],
-                    capture_output=True,
-                    text=True,
-                )
-            else:
-                result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "vercel"],
-                    capture_output=True,
-                    text=True,
-                )
-            if result.returncode == 0:
-                print_success("vercel SDK installed")
-            else:
-                print_warning("Install failed — run manually: pip install 'hermes-agent[vercel]'")
-                if result.stderr:
-                    print_info(f"  Error: {result.stderr.strip().splitlines()[-1]}")
-
-        _prompt_vercel_sandbox_settings(config)
-
+    # Plugin names shadow only the ssh built-in (dispatch order of the original chain).
+    handler = _TERMINAL_BACKEND_SETUP.get(selected_backend)
+    if handler is not None and (selected_backend != "ssh" or selected_backend not in plugin_backend_names):
+        handler(config)
     elif selected_backend in plugin_backend_names:
-        try:
-            from agent.terminal_env_registry import get_provider
+        _setup_backend_plugin(config, selected_backend)
 
-            _provider = get_provider(selected_backend)
-            print_success(f"Terminal backend: {_provider.display_name}")
-            for _line in _provider.setup_instructions():
-                print_info(_line)
-            _provider.post_setup()
-        except Exception as exc:
-            print_warning(f"Backend plugin setup hook failed: {exc}")
-
-    elif selected_backend == "ssh":
-        print_success("Terminal backend: SSH")
-        print_info("Run commands on a remote machine via SSH.")
-
-        # SSH host
-        current_host = get_env_value("TERMINAL_SSH_HOST") or ""
-        host = prompt("  SSH host (hostname or IP)", current_host)
-        if host:
-            save_env_value("TERMINAL_SSH_HOST", host)
-
-        # SSH user
-        current_user = get_env_value("TERMINAL_SSH_USER") or ""
-        user = prompt("  SSH user", current_user or os.getenv("USER", ""))
-        if user:
-            save_env_value("TERMINAL_SSH_USER", user)
-
-        # SSH port
-        current_port = get_env_value("TERMINAL_SSH_PORT") or "22"
-        port = prompt("  SSH port", current_port)
-        if port and port != "22":
-            save_env_value("TERMINAL_SSH_PORT", port)
-
-        # SSH key
-        current_key = get_env_value("TERMINAL_SSH_KEY") or ""
-        default_key = str(Path.home() / ".ssh" / "id_rsa")
-        ssh_key = prompt("  SSH private key path", current_key or default_key)
-        if ssh_key:
-            save_env_value("TERMINAL_SSH_KEY", ssh_key)
-
-        # Test connection
-        if host and prompt_yes_no("  Test SSH connection?", True):
-            print_info("  Testing connection...")
-            import subprocess
-
-            ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
-            if ssh_key:
-                ssh_cmd.extend(["-i", ssh_key])
-            if port and port != "22":
-                ssh_cmd.extend(["-p", port])
-            ssh_cmd.append(f"{user}@{host}" if user else host)
-            ssh_cmd.append("echo ok")
-            result = subprocess.run(ssh_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
-            if result.returncode == 0:
-                print_success("  SSH connection successful!")
-            else:
-                print_warning(f"  SSH connection failed: {result.stderr.strip()}")
-                print_info("  Check your SSH key and host settings.")
-
-    # Sync terminal backend to .env so terminal_tool picks it up directly.
-    # config.yaml is the source of truth, but terminal_tool reads TERMINAL_ENV.
+    # config.yaml is the source of truth, but terminal_tool reads TERMINAL_ENV
+    # from .env — keep them in sync.
     save_env_value("TERMINAL_ENV", selected_backend)
     if selected_backend == "modal":
         save_env_value("TERMINAL_MODAL_MODE", config["terminal"].get("modal_mode", "auto"))
@@ -1793,6 +1545,16 @@ def _apply_default_agent_settings(config: dict):
     print_info("  Compression threshold: 0.50")
     print_info("  Session reset: never (use /reset or compression)")
     print_info("  Run `hermes setup agent` later to customize.")
+
+
+def _prompt_int_setting(section: dict, key: str, label: str, current, accept) -> None:
+    """Prompt for an int; store it under *key* only when it parses and *accept* holds."""
+    try:
+        value = int(prompt(label, str(current)))
+        if accept(value):
+            section[key] = value
+    except ValueError:
+        pass
 
 
 def setup_agent_settings(config: dict):
@@ -1907,63 +1669,26 @@ def setup_agent_settings(config: dict):
     current_hour = current_policy.get("at_hour", 4)
 
     default_reset = {"both": 0, "idle": 1, "daily": 2, "none": 3}.get(current_mode, 3)
-
     reset_idx = prompt_choice("Session reset mode:", reset_choices, default_reset)
 
-    config.setdefault("session_reset", {})
-
-    if reset_idx == 0:  # Both
-        config["session_reset"]["mode"] = "both"
-        idle_str = prompt("  Inactivity timeout (minutes)", str(current_idle))
-        try:
-            idle_val = int(idle_str)
-            if idle_val > 0:
-                config["session_reset"]["idle_minutes"] = idle_val
-        except ValueError:
-            pass
-        hour_str = prompt("  Daily reset hour (0-23, local time)", str(current_hour))
-        try:
-            hour_val = int(hour_str)
-            if 0 <= hour_val <= 23:
-                config["session_reset"]["at_hour"] = hour_val
-        except ValueError:
-            pass
-        print_success(
-            f"Sessions reset after {config['session_reset'].get('idle_minutes', 1440)} min idle or daily at {config['session_reset'].get('at_hour', 4)}:00"
-        )
-    elif reset_idx == 1:  # Idle only
-        config["session_reset"]["mode"] = "idle"
-        idle_str = prompt("  Inactivity timeout (minutes)", str(current_idle))
-        try:
-            idle_val = int(idle_str)
-            if idle_val > 0:
-                config["session_reset"]["idle_minutes"] = idle_val
-        except ValueError:
-            pass
-        print_success(
-            f"Sessions reset after {config['session_reset'].get('idle_minutes', 1440)} min of inactivity"
-        )
-    elif reset_idx == 2:  # Daily only
-        config["session_reset"]["mode"] = "daily"
-        hour_str = prompt("  Daily reset hour (0-23, local time)", str(current_hour))
-        try:
-            hour_val = int(hour_str)
-            if 0 <= hour_val <= 23:
-                config["session_reset"]["at_hour"] = hour_val
-        except ValueError:
-            pass
-        print_success(
-            f"Sessions reset daily at {config['session_reset'].get('at_hour', 4)}:00"
-        )
-    elif reset_idx == 3:  # None
-        config["session_reset"]["mode"] = "none"
-        print_info(
-            "Sessions will never auto-reset. Context is managed only by compression."
-        )
-        print_warning(
-            "Long conversations will grow in cost. Use /reset manually when needed."
-        )
-    # else: keep current (idx == 4)
+    reset_cfg = config.setdefault("session_reset", {})
+    mode = {0: "both", 1: "idle", 2: "daily", 3: "none"}.get(reset_idx)  # 4 = keep current
+    if mode is not None:
+        reset_cfg["mode"] = mode
+    if mode in ("both", "idle"):
+        _prompt_int_setting(reset_cfg, "idle_minutes", "  Inactivity timeout (minutes)", current_idle, lambda v: v > 0)
+    if mode in ("both", "daily"):
+        _prompt_int_setting(reset_cfg, "at_hour", "  Daily reset hour (0-23, local time)", current_hour, lambda v: 0 <= v <= 23)
+    idle_now, hour_now = reset_cfg.get("idle_minutes", 1440), reset_cfg.get("at_hour", 4)
+    if mode == "both":
+        print_success(f"Sessions reset after {idle_now} min idle or daily at {hour_now}:00")
+    elif mode == "idle":
+        print_success(f"Sessions reset after {idle_now} min of inactivity")
+    elif mode == "daily":
+        print_success(f"Sessions reset daily at {hour_now}:00")
+    elif mode == "none":
+        print_info("Sessions will never auto-reset. Context is managed only by compression.")
+        print_warning("Long conversations will grow in cost. Use /reset manually when needed.")
 
     save_config(config)
 
@@ -2001,12 +1726,6 @@ def _profile_name_from_hermes_home(hermes_home) -> str | None:
     if hermes_home.parent.name == "profiles":
         return hermes_home.name
     return None
-
-
-def _setup_telegram_auto() -> str | None:
-    """Attempt automatic Telegram bot creation and return only the token."""
-    result = _setup_telegram_auto_result()
-    return result.token if result else None
 
 
 def _prompt_telegram_bot_token() -> str | None:
@@ -2261,6 +1980,16 @@ def _setup_webhooks():
     print_info("   Open config in your editor:  hermes config edit")
 
 
+# (platform label, credential env var, home-channel env vars — any one satisfies)
+_HOME_CHANNEL_CHECKS = (
+    ("Telegram", "TELEGRAM_BOT_TOKEN", ("TELEGRAM_HOME_CHANNEL",)),
+    ("Discord", "DISCORD_BOT_TOKEN", ("DISCORD_HOME_CHANNEL",)),
+    ("Slack", "SLACK_BOT_TOKEN", ("SLACK_HOME_CHANNEL",)),
+    ("BlueBubbles", "BLUEBUBBLES_SERVER_URL", ("BLUEBUBBLES_HOME_CHANNEL",)),
+    ("QQBot", "QQ_APP_ID", ("QQBOT_HOME_CHANNEL", "QQ_HOME_CHANNEL")),
+)
+
+
 def setup_gateway(config: dict):
     """Configure messaging platform integrations."""
     from hermes_cli.gateway import _all_platforms, _platform_status, _configure_platform
@@ -2309,24 +2038,11 @@ def setup_gateway(config: dict):
         print_info("━" * 50)
         print_success("Messaging platforms configured!")
 
-        # Check if any home channels are missing
-        missing_home = []
-        if get_env_value("TELEGRAM_BOT_TOKEN") and not get_env_value(
-            "TELEGRAM_HOME_CHANNEL"
-        ):
-            missing_home.append("Telegram")
-        if get_env_value("DISCORD_BOT_TOKEN") and not get_env_value(
-            "DISCORD_HOME_CHANNEL"
-        ):
-            missing_home.append("Discord")
-        if get_env_value("SLACK_BOT_TOKEN") and not get_env_value("SLACK_HOME_CHANNEL"):
-            missing_home.append("Slack")
-        if get_env_value("BLUEBUBBLES_SERVER_URL") and not get_env_value("BLUEBUBBLES_HOME_CHANNEL"):
-            missing_home.append("BlueBubbles")
-        if get_env_value("QQ_APP_ID") and not (
-            get_env_value("QQBOT_HOME_CHANNEL") or get_env_value("QQ_HOME_CHANNEL")
-        ):
-            missing_home.append("QQBot")
+        # Platforms with a token but no home channel
+        missing_home = [
+            plat for plat, token_var, home_vars in _HOME_CHANNEL_CHECKS
+            if get_env_value(token_var) and not any(get_env_value(v) for v in home_vars)
+        ]
 
         if missing_home:
             print()
@@ -2554,9 +2270,8 @@ def _model_section_has_credentials(config: dict) -> bool:
     model_cfg = config.get("model") if isinstance(config, dict) else None
     if isinstance(model_cfg, dict):
         provider_id = (model_cfg.get("provider") or "").strip().lower()
-        if provider_id in PROVIDER_REGISTRY:
-            if _has_key(PROVIDER_REGISTRY[provider_id]):
-                return True
+        if provider_id in PROVIDER_REGISTRY and _has_key(PROVIDER_REGISTRY[provider_id]):
+            return True
         if provider_id == "openrouter":
             for env_var in ("OPENROUTER_API_KEY", "OPENAI_API_KEY"):
                 if get_env_value(env_var):
