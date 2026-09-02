@@ -24,6 +24,7 @@ from hermes_cli.kanban_output import (
     _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
     _task_to_dict,
 )
+from hermes_cli.kanban_boards import _dispatch_boards
 from hermes_cli.kanban_parser import build_parser  # noqa: F401  (re-exported: hermes_cli.main, run_slash)
 
 
@@ -49,14 +50,13 @@ def _parse_metadata_flag(raw: Optional[str]) -> tuple[Optional[dict], int]:
     return metadata, 0
 
 
-def _run_state_kwargs(args: argparse.Namespace) -> Optional[dict[str, str]]:
+def _run_state_kwargs(args: argparse.Namespace, cmd: str) -> tuple[Optional[dict[str, str]], int]:
+    """``--state-type``/``--state-name`` must be given together: ``(kwargs, 0)`` or ``(None, 2)``."""
     st = getattr(args, "state_type", None)
     sn = getattr(args, "state_name", None)
     if (st is None) != (sn is None):
-        return None
-    if st is None:
-        return {}
-    return {"state_type": st, "state_name": sn}
+        return None, _err(f"kanban {cmd}: pass both --state-type and --state-name, or omit both", 2)
+    return ({} if st is None else {"state_type": st, "state_name": sn}), 0
 
 
 def _parse_workspace_flag(value: str) -> tuple[str, Optional[str]]:
@@ -131,13 +131,8 @@ def _check_dispatcher_presence(
         return (True, "")
     pid = liveness.pid
 
-    # Even if the gateway is up, dispatch_in_gateway may be off.
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
-        dispatch_on = bool(cfg.get("kanban", {}).get("dispatch_in_gateway", True))
-    except Exception:
-        dispatch_on = True  # can't tell — assume default
+    # Even if the gateway is up, dispatch_in_gateway may be off (can't tell -> assume default).
+    dispatch_on = bool(_kanban_config().get("dispatch_in_gateway", True))
 
     if pid and dispatch_on:
         return (True, f"gateway pid={pid}, dispatch enabled")
@@ -239,6 +234,16 @@ def kanban_command(args: argparse.Namespace) -> int:
 # Handlers
 # ---------------------------------------------------------------------------
 
+def _kanban_config() -> dict:
+    """``config.yaml`` ``kanban:`` section, or ``{}`` when config can't be loaded."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        return (cfg.get("kanban", {}) if isinstance(cfg, dict) else {}) or {}
+    except Exception:
+        return {}
+
+
 def _profile_author() -> str:
     """Best-effort author name for an interactive CLI call."""
     for env in ("HERMES_PROFILE_NAME", "HERMES_PROFILE"):
@@ -283,234 +288,29 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Boards management (hermes kanban boards …)
-# ---------------------------------------------------------------------------
-
-def _dispatch_boards(args: argparse.Namespace) -> int:
-    """``hermes kanban boards <action>`` — filesystem-only (board dirs, the
-    ``current`` pointer, ``board.json``), so it works before ``kanban init``."""
-    sub = getattr(args, "boards_action", None) or "list"
-    handler = _BOARD_HANDLERS.get(sub)
-    if handler is None:
-        return _err(f"kanban boards: unknown action {sub!r}", 2)
-    return handler(args)
 
 
-def _board_task_counts(slug: str) -> dict[str, int]:
-    """Return ``{status: count}`` for a board. Safe to call on an empty DB."""
-    try:
-        path = kb.kanban_db_path(board=slug)
-        if not path.exists():
-            return {}
-        with kb.connect_closing(board=slug) as conn:
-            rows = conn.execute(
-                "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
-            ).fetchall()
-        return {r["status"]: int(r["n"]) for r in rows}
-    except Exception:
-        return {}
+def _joined_words(words) -> Optional[str]:
+    """Free-text positional ``nargs="*"`` words -> stripped string, or None when absent."""
+    return " ".join(words).strip() if words else None
 
 
-def _board_slug_arg(args: argparse.Namespace, cmd: str, *, must_exist: bool) -> tuple[Optional[str], int]:
-    """Normalize ``args.slug`` for a ``boards`` subcommand; ``(slug, 0)`` or ``(None, rc)``."""
-    try:
-        normed = kb._normalize_board_slug(args.slug)
-    except ValueError as exc:
-        return None, _err(f"kanban boards {cmd}: {exc}", 2)
-    if must_exist:
-        if not normed or not kb.board_exists(normed):
-            return None, _err(f"kanban boards {cmd}: board {args.slug!r} does not exist")
-    elif not normed:
-        return None, _err(f"kanban boards {cmd}: slug is required", 2)
-    return normed, 0
+def _stripped_or_none(value: Optional[str]) -> Optional[str]:
+    """``None`` stays ``None``; otherwise strip, and treat the empty string as ``None``."""
+    return None if value is None else (value.strip() or None)
 
 
-def _cmd_boards_list(args: argparse.Namespace) -> int:
-    boards = kb.list_boards(include_archived=bool(getattr(args, "all", False)))
-    current = kb.get_current_board()
-    for b in boards:
-        b["is_current"] = (b["slug"] == current)
-        b["counts"] = _board_task_counts(b["slug"])
-        b["total"] = sum(b["counts"].values())
-    if _json_out(args, boards):
-        return 0
-    if not boards:
-        print("(no boards — create one with `hermes kanban boards create <slug>`)")
-        return 0
-    print(f"{'':2s}  {'SLUG':24s}  {'NAME':28s}  COUNTS")
-    for b in boards:
-        marker = "●" if b["is_current"] else " "
-        name = b.get("name") or ""
-        if b.get("archived"):
-            name += " [archived]"
-        print(f"{marker:2s}  {b['slug']:24s}  {name:28s}  {_fmt_counts(b['counts'] or {}, '(empty)')}")
-    print()
-    print(f"Current board: {current}")
-    if len(boards) > 1:
-        print("Switch boards with `hermes kanban boards switch <slug>`.")
-    return 0
+def _bulk_ids(args: argparse.Namespace) -> list[str]:
+    """Positional ``task_id`` plus ``--ids`` extras (bulk verbs)."""
+    return [args.task_id] + list(getattr(args, "ids", None) or [])
 
 
-def _cmd_boards_create(args: argparse.Namespace) -> int:
-    normed, rc = _board_slug_arg(args, "create", must_exist=False)
-    if rc:
-        return rc
-    already = kb.board_exists(normed) and normed != kb.DEFAULT_BOARD
-    meta = kb.create_board(
-        normed,
-        name=args.name,
-        description=args.description,
-        icon=args.icon,
-        color=args.color,
-        default_workdir=args.default_workdir,
-    )
-    verb = "already exists" if already else "created"
-    print(f"Board {meta['slug']!r} {verb}.")
-    print(f"  Display name: {meta.get('name', '')}")
-    print(f"  DB path:      {meta['db_path']}")
-    if getattr(args, "switch", False):
-        kb.set_current_board(meta["slug"])
-        print(f"  Switched to {meta['slug']!r}.")
-    else:
-        print(f"  Use `hermes kanban boards switch {meta['slug']}` to make it current.")
-    return 0
-
-
-def _cmd_boards_rm(args: argparse.Namespace) -> int:
-    # `boards delete <slug>` (alias) never sets args.delete because --delete
-    # belongs to the 'rm' subparser only; treat the alias as `rm --delete`.
-    force_delete = getattr(args, "delete", False) or getattr(args, "boards_action", "") == "delete"
-    try:
-        res = kb.remove_board(args.slug, archive=not force_delete)
-    except ValueError as exc:
-        return _err(f"kanban boards rm: {exc}")
-    if res["action"] == "archived":
-        print(f"Board {res['slug']!r} archived → {res['new_path']}")
-        print("Recover by moving the directory back to "
-              "<root>/kanban/boards/<slug>/.")
-    else:
-        print(f"Board {res['slug']!r} deleted.")
-    return 0
-
-
-def _cmd_boards_switch(args: argparse.Namespace) -> int:
-    normed, rc = _board_slug_arg(args, "switch", must_exist=False)
-    if rc:
-        return rc
-    if not kb.board_exists(normed):
-        return _err(
-            f"kanban boards switch: board {normed!r} does not exist. "
-            f"Create it with `hermes kanban boards create {normed}`."
-        )
-    kb.set_current_board(normed)
-    print(f"Active board is now {normed!r}.")
-    return 0
-
-
-def _cmd_boards_show(args: argparse.Namespace) -> int:
-    current = kb.get_current_board()
-    meta = kb.read_board_metadata(current)
-    counts = _board_task_counts(current)
-    print(f"Current board: {current}")
-    print(f"  Display name: {meta.get('name', '')}")
-    if meta.get("description"):
-        print(f"  Description:  {meta['description']}")
-    print(f"  DB path:      {meta['db_path']}")
-    print(f"  Tasks:        {sum(counts.values())} total"
-          + (f" ({_fmt_counts(counts)})" if counts else ""))
-    return 0
-
-
-def _cmd_boards_rename(args: argparse.Namespace) -> int:
-    normed, rc = _board_slug_arg(args, "rename", must_exist=True)
-    if rc:
-        return rc
-    meta = kb.write_board_metadata(normed, name=args.name)
-    print(f"Board {normed!r} renamed to {meta['name']!r}.")
-    return 0
-
-
-def _cmd_boards_set_default_workdir(args: argparse.Namespace) -> int:
-    normed, rc = _board_slug_arg(args, "set-default-workdir", must_exist=True)
-    if rc:
-        return rc
-    meta = kb.write_board_metadata(normed, default_workdir=args.path)
-    new_val = meta.get("default_workdir")
-    if new_val:
-        print(f"Board {normed!r} default workdir set to {new_val!r}.")
-    else:
-        print(f"Board {normed!r} default workdir cleared.")
-    return 0
-
-
-def _cmd_boards_export(args: argparse.Namespace) -> int:
-    from hermes_cli import kanban_transfer
-    from hermes_cli.sizefmt import format_bytes
-
-    slug = args.slug or kb.get_current_board()
-    output = args.output or f"{slug}.tar.gz"
-    try:
-        res = kanban_transfer.export_board(
-            slug,
-            output,
-            include_attachments=not args.no_attachments,
-            include_logs=args.include_logs,
-        )
-    except (OSError, ValueError) as exc:
-        return _err(f"kanban boards export: {exc}")
-
-    if _json_out(args, res):
-        return 0
-    counts = res["counts"]
-    print(f"Exported board {res['board']!r} → {res['archive']}")
-    print(f"  Size:        {format_bytes(res['size'])}")
-    print(f"  Tasks:       {counts['tasks']}")
-    print(f"  Comments:    {counts['task_comments']}")
-    print(f"  Attachments: {counts['attachment_files']}")
-    print("Import it with `hermes kanban boards import <archive>`.")
-    return 0
-
-
-def _cmd_boards_import(args: argparse.Namespace) -> int:
-    from hermes_cli import kanban_transfer
-
-    try:
-        res = kanban_transfer.import_board(
-            args.archive, args.as_slug, activate=args.switch
-        )
-    except (OSError, ValueError) as exc:
-        return _err(f"kanban boards import: {exc}")
-
-    if _json_out(args, res):
-        return 0
-    print(f"Imported board {res['board']!r} ({res['name']}).")
-    if res["renamed"]:
-        print(f"  Renamed from {res['requested_board']!r} — that slug was taken.")
-    print(f"  Path:  {res['path']}")
-    print(f"  Tasks: {res['counts']['tasks']}")
-    for warning in res["warnings"]:
-        print(f"  Note:  {warning}")
-    if res["activated"]:
-        print(f"  Active board is now {res['board']!r}.")
-    else:
-        print(f"  Switch to it with `hermes kanban boards switch {res['board']}`.")
-    return 0
-
-
-_BOARD_HANDLERS = {
-    "list": _cmd_boards_list, "ls": _cmd_boards_list,
-    "create": _cmd_boards_create, "new": _cmd_boards_create,
-    "rm": _cmd_boards_rm, "remove": _cmd_boards_rm, "delete": _cmd_boards_rm,
-    "switch": _cmd_boards_switch, "use": _cmd_boards_switch,
-    "show": _cmd_boards_show, "current": _cmd_boards_show,
-    "rename": _cmd_boards_rename,
-    "set-default-workdir": _cmd_boards_set_default_workdir,
-    "export": _cmd_boards_export,
-    "import": _cmd_boards_import,
-}
-
-
-# ---------------------------------------------------------------------------
+def _require_ids(args: argparse.Namespace) -> tuple[list[str], int]:
+    """``args.task_ids`` -> ``(ids, 0)`` or ``([], 1)`` after printing the standard error."""
+    ids = list(args.task_ids or [])
+    if not ids:
+        return ids, _err("at least one task_id is required")
+    return ids, 0
 
 
 def _parse_duration(val) -> Optional[int]:
@@ -746,9 +546,9 @@ def _print_diagnostics(diags, indent: str, *, with_kind: bool) -> None:
 
 
 def _cmd_show(args: argparse.Namespace) -> int:
-    rsk = _run_state_kwargs(args)
-    if rsk is None:
-        return _err("kanban show: pass both --state-type and --state-name, or omit both", 2)
+    rsk, rc = _run_state_kwargs(args, "show")
+    if rc:
+        return rc
     graph = None
     with kb.connect_closing() as conn:
         task = kb.get_task(conn, args.task_id)
@@ -796,12 +596,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     if task.max_retries is not None:
         print(f"  max-retries: {task.max_retries} (task)")
     else:
-        try:
-            from hermes_cli.config import load_config
-            cfg = load_config()
-            cfg_val = (cfg.get("kanban", {}) or {}).get("failure_limit")
-        except Exception:
-            cfg_val = None
+        cfg_val = _kanban_config().get("failure_limit")
         if cfg_val is not None and int(cfg_val) != kb.DEFAULT_FAILURE_LIMIT:
             print(f"  max-retries: {int(cfg_val)} (config kanban.failure_limit)")
         else:
@@ -1190,11 +985,25 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
     return (verdict, None if verdict == "done" else reason)
 
 
+def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: str,
+                     continue_hint: str) -> Optional[str]:
+    """Goal-mode judge gate shared by ``complete`` / ``request-review``
+    (mirrors tools/kanban_tools.py); applied to every terminal handoff so
+    request-review can't bypass it. Returns the error line, or None to allow."""
+    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence)
+    if verdict == "blocked":
+        return (f"kanban: goal {handoff} of {tid} rejected: judge ruled "
+                f"the goal unachievable — {rejection}. {blocked_hint}")
+    if rejection is not None:
+        return f"kanban: goal {handoff} of {tid} rejected by judge: {rejection}. {continue_hint}"
+    return None
+
+
 def _cmd_complete(args: argparse.Namespace) -> int:
     """Mark one or more tasks done. Supports a single id or a list."""
-    ids = list(args.task_ids or [])
-    if not ids:
-        return _err("at least one task_id is required")
+    ids, rc = _require_ids(args)
+    if rc:
+        return rc
     summary = getattr(args, "summary", None)
     raw_meta = getattr(args, "metadata", None)
     # Structured handoff fields are per-run; copying them across N runs is
@@ -1212,25 +1021,14 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     fail_msg: dict[str, str] = {}
     with kb.connect_closing() as conn:
         def op(tid):
-            # Goal-mode judge gate (mirrors tools/kanban_tools.py); applied to
-            # every terminal handoff so request-review can't bypass it.
-            gate_verdict, rejection = _goal_mode_handoff_rejection(
-                kb.get_task(conn, tid),
-                (summary or args.result or "").strip(),
+            gate_err = _goal_gate_error(
+                conn, tid, (summary or args.result or "").strip(), "completion",
+                "Re-scope with kanban edit, or record the block with kanban block "
+                "instead of completing.",
+                "Provide evidence matching the task's acceptance criteria.",
             )
-            if gate_verdict == "blocked":
-                fail_msg[tid] = (
-                    f"kanban: goal completion of {tid} rejected: judge ruled "
-                    f"the goal unachievable — {rejection}. Re-scope with "
-                    f"kanban edit, or record the block with kanban block "
-                    f"instead of completing."
-                )
-                return False
-            if rejection is not None:
-                fail_msg[tid] = (
-                    f"kanban: goal completion of {tid} rejected by judge: {rejection}. "
-                    f"Provide evidence matching the task's acceptance criteria."
-                )
+            if gate_err:
+                fail_msg[tid] = gate_err
                 return False
             fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
             return kb.complete_task(
@@ -1262,10 +1060,10 @@ def _cmd_edit(args: argparse.Namespace) -> int:
 
 
 def _cmd_block(args: argparse.Namespace) -> int:
-    reason = " ".join(args.reason).strip() if args.reason else None
+    reason = _joined_words(args.reason)
     kind = getattr(args, "kind", None)
     author = _profile_author()
-    ids = [args.task_id] + list(getattr(args, "ids", None) or [])
+    ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
     with kb.connect_closing() as conn:
         def op(tid):
@@ -1292,9 +1090,9 @@ def _cmd_block(args: argparse.Namespace) -> int:
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
-    reason = " ".join(args.reason).strip() if args.reason else None
+    reason = _joined_words(args.reason)
     author = _profile_author()
-    ids = [args.task_id] + list(getattr(args, "ids", None) or [])
+    ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
     with kb.connect_closing() as conn:
         def op(tid):
@@ -1310,12 +1108,10 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
-    ids = list(args.task_ids or [])
-    if not ids:
-        return _err("at least one task_id is required")
-    reason = getattr(args, "reason", None)
-    if reason is not None:
-        reason = reason.strip() or None
+    ids, rc = _require_ids(args)
+    if rc:
+        return rc
+    reason = _stripped_or_none(getattr(args, "reason", None))
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
     with kb.connect_closing() as conn:
@@ -1332,29 +1128,19 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
     tid = args.task_id
-    summary = getattr(args, "summary", None)
-    if summary is not None:
-        summary = summary.strip() or None
+    summary = _stripped_or_none(getattr(args, "summary", None))
     metadata, rc = _parse_metadata_flag(getattr(args, "metadata", None))
     if rc:
         return rc
     reviewer = getattr(args, "reviewer", None)
     with kb.connect_closing() as conn:
-        gate_verdict, rejection = _goal_mode_handoff_rejection(
-            kb.get_task(conn, tid),
-            summary or "",
+        gate_err = _goal_gate_error(
+            conn, tid, summary or "", "review handoff",
+            "Record the block with kanban block instead of requesting review.",
+            "Provide acceptance evidence matching the task.",
         )
-        if gate_verdict == "blocked":
-            return _err(
-                f"kanban: goal review handoff of {tid} rejected: judge ruled "
-                f"the goal unachievable — {rejection}. Record the block with "
-                f"kanban block instead of requesting review."
-            )
-        if rejection is not None:
-            return _err(
-                f"kanban: goal review handoff of {tid} rejected by judge: "
-                f"{rejection}. Provide acceptance evidence matching the task."
-            )
+        if gate_err:
+            return _err(gate_err)
         ok, reason = kb.request_review(
             conn,
             tid,
@@ -1396,9 +1182,9 @@ def _cmd_request_changes(args: argparse.Namespace) -> int:
 
 
 def _cmd_reopen_review(args: argparse.Namespace) -> int:
-    ids = list(args.task_ids or [])
-    if not ids:
-        return _err("at least one task_id is required")
+    ids, rc = _require_ids(args)
+    if rc:
+        return rc
     reason = getattr(args, "reason", None)
     if reason is not None:
         reason = str(kb.redact_review_value(reason.strip())).strip() or None
@@ -1419,10 +1205,10 @@ def _cmd_reopen_review(args: argparse.Namespace) -> int:
 
 
 def _cmd_promote(args: argparse.Namespace) -> int:
-    reason = " ".join(args.reason).strip() if args.reason else None
+    reason = _joined_words(args.reason)
     author = _profile_author()
     # Dedupe while preserving order; positional task_id always first.
-    ids = list(dict.fromkeys([args.task_id, *(getattr(args, "ids", None) or [])]))
+    ids = list(dict.fromkeys(_bulk_ids(args)))
 
     results: list[dict[str, object]] = []
     with kb.connect_closing() as conn:
@@ -1850,9 +1636,9 @@ def _cmd_log(args: argparse.Namespace) -> int:
 
 def _cmd_runs(args: argparse.Namespace) -> int:
     """Show attempt history for a task."""
-    rsk = _run_state_kwargs(args)
-    if rsk is None:
-        return _err("kanban runs: pass both --state-type and --state-name, or omit both", 2)
+    rsk, rc = _run_state_kwargs(args, "runs")
+    if rc:
+        return rc
     with kb.connect_closing() as conn:
         runs = kb.list_runs(conn, args.task_id, **rsk)
     if _json_out(args, [_obj_dict(r, _RUNS_RUN_FIELDS) for r in runs]):
