@@ -1,52 +1,29 @@
 """Coding-context awareness — base Hermes, every interactive surface.
 
-When the user runs Hermes inside a code workspace (CLI, TUI, desktop app, or an
-editor over ACP), Hermes shifts into a **coding posture**. This module is the
-single place that decides whether we're in that posture and what it implies,
-so the rest of the codebase never re-derives "are we coding?" on its own.
+When Hermes runs inside a code workspace (CLI, TUI, desktop, ACP editor) it
+shifts into a **coding posture**. This module is the single place that decides
+whether we're in that posture and what it implies, so nothing else re-derives
+"are we coding?". The posture is a frozen :class:`RuntimeMode` selected from a
+small :class:`ContextProfile` registry (``coding`` / ``general``); a profile is
+*data* (toolset, operating brief, skill-index hints) that every domain reads:
 
-Architecture — one seam, many consumers
-----------------------------------------
-The posture is modelled as a frozen :class:`RuntimeMode` selected from a small
-:class:`ContextProfile` registry (today: ``coding`` and ``general``). A profile
-is *data* — it declares the toolset to collapse to, the operating brief to
-inject, and hints for other domains (model routing, memory, subagents). Every
-domain reads the same resolved object instead of probing git/config itself:
+  * System prompt — ``RuntimeMode.system_prompt_parts()`` → operating brief +
+    live git/workspace snapshot (``agent/system_prompt.py``).
+  * Toolset — ``RuntimeMode.toolset_selection()`` → ``coding`` toolset + enabled
+    MCP servers, ONLY under the opt-in ``focus`` mode. The default posture is
+    prompt-only and never strips a toolset the user explicitly enabled.
+  * Delegation — subagents inherit the toolset and prompt builder, so the
+    posture propagates for free.
 
-  * **System prompt** — ``RuntimeMode.system_blocks()`` → the operating brief +
-    a live git/workspace snapshot (``agent/system_prompt.py``).
-  * **Toolset** — ``RuntimeMode.toolset_selection()`` → the ``coding`` toolset
-    plus the user's enabled MCP servers (``cli.py`` / ``tui_gateway``). Only
-    under the opt-in ``focus`` mode: the default posture is prompt-only and
-    never touches the user's configured toolsets (toolsets like messaging /
-    smart-home / music are off-by-default anyway, and someone who explicitly
-    enabled image-gen or Spotify shouldn't lose it for being in a git repo).
-  * **Delegation** — subagents inherit the parent's toolset and run through the
-    same prompt builder, so the coding posture propagates to children for free.
-  * **Model / memory / compression** — declared on the profile
-    (``model_hint``, ``memory_policy``) as the extension seam; consumers read
-    ``mode.profile`` rather than re-deciding.
+Cache safety: the mode is resolved once and immutable; the workspace snapshot
+is built once at prompt-build time and never re-probed per turn (the brief
+tells the model to re-check with ``git``). A ``/coding`` flip takes effect next
+session.
 
-Cache safety
-------------
-The mode is resolved **once** and is immutable. The workspace snapshot is built
-once at prompt-build time and baked into the *stable* system-prompt tier — never
-re-probed per turn (that would shatter the prompt cache). Branch and dirty state
-drift mid-session, so the brief tells the model to re-check with ``git`` before
-acting on the snapshot. A ``/coding`` flip therefore only takes effect next
-session (deferred), the same contract as ``/skills install`` vs ``--now``.
-
-Activation (config ``agent.coding_context``):
-
-  * ``auto`` (default) — posture (brief + snapshot) on an interactive coding
-    surface sitting in a code workspace (git repo or recognised project root).
-    Prompt-only; toolsets and the skill index untouched.
-  * ``focus`` — like ``auto``, but additionally collapses the toolset to the
-    ``coding`` set + enabled MCP servers and demotes non-coding skill
-    categories to names-only in the prompt's skill index (no skill is ever
-    hidden). Explicit opt-in for a lean schema.
-  * ``on`` — force the posture anywhere (incl. non-workspaces). Prompt-only.
-  * ``off`` — disable entirely.
+Activation (config ``agent.coding_context``): ``auto`` (default) — posture on an
+interactive surface in a code workspace, prompt-only; ``focus`` — also collapse
+the toolset and demote non-coding skill categories to names-only (never
+hidden); ``on`` — force the posture anywhere; ``off`` — disable.
 """
 
 from __future__ import annotations
@@ -67,8 +44,7 @@ logger = logging.getLogger("hermes.coding_context")
 CODING_TOOLSET = "coding"
 
 # Surfaces where a coding posture makes sense under ``auto``. Messaging
-# platforms (telegram, discord, slack, …) are intentionally absent — a chat bot
-# in a group is not pair-programming.
+# platforms are intentionally absent — a chat bot in a group is not pairing.
 INTERACTIVE_CODING_PLATFORMS = {"cli", "tui", "acp", "desktop", ""}
 
 # Project-root signals that mark a directory as a code workspace even when it
@@ -85,10 +61,8 @@ _PROJECT_MARKERS = (
 # Agent-instruction files surfaced separately from manifests in the snapshot.
 _CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", ".cursorrules")
 
-# Source-file extensions that make a git repo a *code* workspace even with no
-# manifest. Without this, `git init` on a notes/writing/research folder (a huge
-# non-coding use case) would flip the whole session into the coding posture just
-# for having a `.git`. A manifest still wins on its own (see `_PROJECT_MARKERS`).
+# Source extensions that make a manifest-less git repo a *code* workspace, so
+# `git init` on a notes/writing folder does not flip the session into coding.
 _CODE_EXTENSIONS = frozenset({
     ".py", ".pyi", ".ipynb", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
     ".go", ".rs", ".java", ".kt", ".kts", ".scala", ".rb", ".php", ".c", ".h",
@@ -97,24 +71,16 @@ _CODE_EXTENSIONS = frozenset({
     ".hs", ".clj", ".erl", ".pl",
 })
 
-# Dirs never worth scanning for the code check (deps/build/vcs/venv noise).
 _CODE_SCAN_SKIP_DIRS = frozenset({
     ".git", "node_modules", "venv", ".venv", "__pycache__", "dist", "build",
     "target", ".next", ".turbo", "vendor",
 })
-
 # Bounded sweep: a code workspace reveals itself in the first handful of entries.
 _CODE_SCAN_MAX_ENTRIES = 500
 
 
 def _has_code_files(root: Path) -> bool:
-    """Cheap, bounded check for source files in a repo's top two levels.
-
-    Lets a git repo of loose scripts (no manifest) still read as a code
-    workspace while a bare notes/writing repo does not. Scans the root and its
-    immediate subdirectories only, capped at ``_CODE_SCAN_MAX_ENTRIES`` stats —
-    a handful of readdirs at session start, not a full walk.
-    """
+    """Bounded check for source files in the root and its immediate subdirs."""
     seen = 0
     stack = [(root, True)]
     while stack:
@@ -138,6 +104,7 @@ def _has_code_files(root: Path) -> bool:
             continue
     return False
 
+
 # Lockfile → package manager, checked in priority order.
 _PY_LOCKFILES = (("uv.lock", "uv"), ("poetry.lock", "poetry"), ("Pipfile.lock", "pipenv"))
 _JS_LOCKFILES = (
@@ -153,21 +120,13 @@ _MAX_FACT_FILE_BYTES = 256 * 1024
 _GIT_TIMEOUT = 2.5
 
 
-# Per-model edit-format steering. Matching the edit tool format to how a model
-# was trained reduces mistakes and wasted reasoning (OpenAI/Codex handle
-# patch-style diffs best; Anthropic models — and most open-weight coding
-# models, whose RL scaffolds use str_replace-style editors — do best with
-# string-replacement). Our `patch` tool exposes both: mode="patch" (V4A
-# multi-file) and mode="replace" (find-and-swap). We nudge each family toward
-# its native format. Unknown families get nothing (the brief's neutral wording
-# stands). Substrings match the model id; aligned with TOOL_USE_ENFORCEMENT_MODELS.
-#
-# GPT/Codex get V4A for ALL edits, single-file included: in codex-rs,
-# apply_patch (V4A — apply_patch.lark) is the ONLY file editor, no
-# str_replace-style tool exists, and the shipped model prompts say to use
-# apply_patch even "for single file edits" — so a replace-mode nudge would
-# steer those models toward a format their first-party harness never taught
-# them.
+# Per-model edit-format steering: nudge each family toward the `patch` mode it
+# was trained on (unknown families get nothing). GPT/Codex get V4A for ALL
+# edits incl. single-file — codex-rs ships apply_patch as its ONLY editor and
+# its prompts say to use it even for single files, so a replace-mode nudge
+# would steer them toward a format their first-party harness never taught.
+# Anthropic and most open-weight coding models were RL'd on str_replace-style
+# editors. Substrings match the model id; aligned with TOOL_USE_ENFORCEMENT_MODELS.
 _EDIT_FORMAT_GUIDANCE: dict[str, tuple[tuple[str, ...], str]] = {
     "patch": (
         ("gpt", "codex"),
@@ -188,12 +147,7 @@ _EDIT_FORMAT_GUIDANCE: dict[str, tuple[tuple[str, ...], str]] = {
 
 
 def _model_family(model: Optional[str]) -> Optional[str]:
-    """Classify a model id into an edit-format family key, or ``None``.
-
-    Used to steer the coding posture toward the edit tool format a model was
-    trained on. Family-agnostic by design: an unrecognised model gets ``None``
-    and the operating brief's neutral edit wording applies.
-    """
+    """Edit-format family key for a model id, or ``None`` (neutral wording applies)."""
     if not model:
         return None
     lowered = model.lower()
@@ -206,14 +160,11 @@ def _model_family(model: Optional[str]) -> Optional[str]:
 def _edit_format_line(model: Optional[str]) -> str:
     """The edit-format guidance line for this model's family (``""`` if none)."""
     family = _model_family(model)
-    if family is None:
-        return ""
-    return _EDIT_FORMAT_GUIDANCE[family][1]
+    return "" if family is None else _EDIT_FORMAT_GUIDANCE[family][1]
 
 
-# Operating brief for the coding posture. Tool names referenced here (read_file,
-# search_files, patch, write_file, terminal, todo) are in the coding toolset and
-# in _HERMES_CORE_TOOLS, so they're present on every surface this fires on.
+# Operating brief for the coding posture. Tool names referenced here are in the
+# coding toolset and in _HERMES_CORE_TOOLS, so they exist on every surface this fires on.
 CODING_AGENT_GUIDANCE = (
     "You are a coding agent pairing with the user inside their codebase. "
     "Operate like a careful senior engineer.\n"
@@ -264,6 +215,12 @@ CODING_AGENT_GUIDANCE = (
     "answer, not a preamble."
 )
 
+_TODO_SENTENCE = (
+    "- Track multi-step work with `todo_list`. Reference code as "
+    "`path:line` instead of pasting whole files."
+)
+_NO_TODO_SENTENCE = "- Reference code as `path:line` instead of pasting whole files."
+
 
 # ── Context profiles (declarative posture definitions) ──────────────────────
 
@@ -272,35 +229,22 @@ CODING_AGENT_GUIDANCE = (
 class ContextProfile:
     """A named operating posture. Pure data — consumers read these fields.
 
-    ``toolset``      — collapse to this toolset (+ enabled MCP) when no explicit
-                       selection is pinned; ``None`` keeps the platform default.
-    ``guidance``     — operating brief injected into the stable system prompt;
-                       ``""`` injects nothing.
-    ``model_hint``   — routing preference key for smart model routing
-                       (extension seam; not yet consumed by the router).
-    ``memory_policy``— memory namespace/weighting hint (extension seam).
-    ``compact_skill_categories`` — skill categories DEMOTED to names-only in
-                       the system-prompt skill index under the opt-in ``focus``
-                       mode. Never hidden: every skill name stays visible
-                       (so memory-anchored recall keeps working) — only the
-                       descriptions are dropped to cut index noise. Deny-list
-                       semantics so unknown/custom categories keep full
-                       entries.
+    ``toolset``: collapse to this toolset (+ enabled MCP) under ``focus``;
+    ``None`` keeps the platform default. ``guidance``: operating brief for the
+    stable system prompt. ``model_hint``: routing preference (extension seam).
+    ``compact_skill_categories``: categories DEMOTED to names-only in the skill
+    index under ``focus`` — deny-list, never hidden, so recall keeps working.
     """
 
     name: str
     toolset: Optional[str] = None
     guidance: str = ""
     model_hint: Optional[str] = None
-    memory_policy: str = "default"
     compact_skill_categories: tuple[str, ...] = ()
 
 
-# Skill categories that are clearly not part of a coding workflow. Demoted to
-# names-only in the prompt's skill index under the opt-in ``focus`` mode only
-# (deny-list — anything not listed here, incl. custom user categories, keeps
-# full entries). Coding-adjacent categories (devops, github, mcp,
-# data-science, diagramming, research, security, …) are intentionally absent.
+# Clearly non-coding skill categories (deny-list: custom categories keep full
+# entries). Coding-adjacent ones (devops, github, mcp, research, …) are absent.
 _NON_CODING_SKILL_CATEGORIES = (
     "apple", "communication", "cooking", "creative", "email", "finance",
     "gaming", "gifs", "health", "media", "music", "note-taking",
@@ -315,7 +259,6 @@ CODING_PROFILE = ContextProfile(
     toolset=CODING_TOOLSET,
     guidance=CODING_AGENT_GUIDANCE,
     model_hint="coding",
-    memory_policy="project",
     compact_skill_categories=_NON_CODING_SKILL_CATEGORIES,
 )
 
@@ -332,45 +275,38 @@ def get_profile(name: str) -> ContextProfile:
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
+_MODE_ALIASES = {
+    **dict.fromkeys(("focus", "strict", "lean"), "focus"),
+    **dict.fromkeys(("on", "true", "yes", "1", "always"), "on"),
+    **dict.fromkeys(("off", "false", "no", "0", "never"), "off"),
+}
 
-def _coding_mode(config: Optional[dict[str, Any]]) -> str:
-    """Return the normalized ``agent.coding_context`` mode (auto/focus/on/off)."""
+
+def _agent_config_value(config: Optional[dict[str, Any]], key: str, default: Any, *, readonly: bool) -> Any:
+    """``config["agent"][key]``, loading config when none was passed."""
     if config is None:
         try:
-            from hermes_cli.config import load_config_readonly
+            from hermes_cli.config import load_config, load_config_readonly
 
-            config = load_config_readonly()
+            config = load_config_readonly() if readonly else load_config()
         except Exception:
             config = {}
-    raw = ((config or {}).get("agent", {}) or {}).get("coding_context", "auto")
-    mode = str(raw).strip().lower()
-    if mode in {"focus", "strict", "lean"}:
-        return "focus"
-    if mode in {"on", "true", "yes", "1", "always"}:
-        return "on"
-    if mode in {"off", "false", "no", "0", "never"}:
-        return "off"
-    return "auto"
+    return ((config or {}).get("agent", {}) or {}).get(key, default)
+
+
+def _coding_mode(config: Optional[dict[str, Any]]) -> str:
+    """Normalized ``agent.coding_context`` mode (auto/focus/on/off)."""
+    raw = _agent_config_value(config, "coding_context", "auto", readonly=True)
+    return _MODE_ALIASES.get(str(raw).strip().lower(), "auto")
 
 
 def _coding_instructions(config: Optional[dict[str, Any]]) -> str:
-    """Standing operator instructions for the coding posture (config).
+    """Standing operator instructions (``agent.coding_instructions``: str or list).
 
-    ``agent.coding_instructions`` — a string or list of strings appended to the
-    coding brief as an extra stable system block, so a user can pin project-wide
-    coding-workflow rules (e.g. "for UI work don't run tsc/lint until I approve;
-    clean the diff before committing") without editing the shipped brief.
-    Cache-safe: resolved once per session into the stable system-prompt tier,
-    like the rest of the posture.
+    Appended to the brief as an extra stable block so a user can pin
+    project-wide workflow rules without editing the shipped brief.
     """
-    if config is None:
-        try:
-            from hermes_cli.config import load_config
-
-            config = load_config()
-        except Exception:
-            config = {}
-    raw = ((config or {}).get("agent", {}) or {}).get("coding_instructions", "")
+    raw = _agent_config_value(config, "coding_instructions", "", readonly=False)
     if isinstance(raw, (list, tuple)):
         return "\n".join(str(item).strip() for item in raw if str(item).strip())
     return str(raw or "").strip()
@@ -403,19 +339,14 @@ def _home() -> Optional[Path]:
 
 
 def _marker_root(cwd: Path) -> Optional[Path]:
-    """Nearest ancestor that looks like a project root, or ``None``.
+    """Nearest ancestor (≤6 levels) that looks like a project root, or ``None``.
 
-    Walks up at most a few levels so a manifest in the workspace root counts
-    even when the user is in a subdirectory. ``$HOME`` itself is skipped — a
-    Makefile or AGENTS.md sitting in the home directory is global user config,
-    not a project-root signal.
+    ``$HOME`` and the shared temp root are skipped: a Makefile/AGENTS.md in the
+    home dir is global user config, and a stray manifest in /tmp must not flip
+    every session whose cwd lives under it into the coding posture.
     """
     current = cwd.resolve()
     home = _home()
-    # Shared world-writable temp roots are never project roots: a stray
-    # manifest in /tmp (left by any process) must not flip every session
-    # whose cwd lives under the temp dir into the coding posture. Same
-    # reasoning as the $HOME skip below.
     try:
         temp_root = Path(tempfile.gettempdir()).resolve()
     except Exception:
@@ -435,17 +366,10 @@ def _detect_profile_name(mode: str, platform: str, cwd_str: str) -> str:
     """Resolve which profile applies.
 
     ``auto``/``focus``: coding when the surface is interactive AND the cwd is a
-    code workspace (a git repo or a recognised project root). ``on``: always
-    coding. ``off``: always general.
-
-    A git repo rooted at ``$HOME`` (the dotfiles pattern) is NOT a workspace
-    signal — without the guard, every session anywhere under a dotfiles-managed
-    home directory would silently flip to the coding posture.
-
-    Detection is intentionally not memoized: it's a handful of ``stat`` calls,
-    and callers resolve the mode once per session anyway. Caching here would
-    risk a stale posture if a long-lived process (gateway/TUI) serves sessions
-    from different working directories.
+    code workspace (project root, or a git repo that actually holds code).
+    ``on``: always coding. ``off``: always general. A git repo rooted at
+    ``$HOME`` (dotfiles) is NOT a workspace signal. Deliberately not memoized:
+    a long-lived gateway/TUI process serves sessions from different cwds.
     """
     if mode == "off":
         return GENERAL_PROFILE.name
@@ -454,16 +378,10 @@ def _detect_profile_name(mode: str, platform: str, cwd_str: str) -> str:
     if platform and platform.strip().lower() not in INTERACTIVE_CODING_PLATFORMS:
         return GENERAL_PROFILE.name
     cwd = Path(cwd_str)
-    # A recognized project root (manifest / AGENTS.md / .cursorrules) is a code
-    # workspace on its own — cheap stat checks, no scan.
     if _marker_root(cwd) is not None:
         return CODING_PROFILE.name
     git_root = _git_root(cwd)
-    if git_root is not None and git_root == _home():
-        git_root = None  # dotfiles repo at $HOME — not a code workspace
-    # A bare git repo only counts when it actually holds code, so `git init` on a
-    # notes/writing/research folder stays in the general posture.
-    if git_root is not None and _has_code_files(git_root):
+    if git_root is not None and git_root != _home() and _has_code_files(git_root):
         return CODING_PROFILE.name
     return GENERAL_PROFILE.name
 
@@ -475,23 +393,18 @@ def _detect_profile_name(mode: str, platform: str, cwd_str: str) -> str:
 class RuntimeMode:
     """The resolved operating posture for a session. Immutable by construction.
 
-    Built once via :func:`resolve_runtime_mode` and consumed by every domain
-    that cares about the coding/general distinction. Never mutate or re-resolve
-    mid-session — that would break the prompt cache.
+    Built once via :func:`resolve_runtime_mode`; never re-resolved mid-session
+    (that would break the prompt cache).
     """
 
     profile: ContextProfile
     surface: str
     cwd: Path
-    # The normalized ``agent.coding_context`` mode this posture was resolved
-    # under (auto/focus/on/off). Toolset collapse is gated on ``focus``.
+    # Normalized ``agent.coding_context`` mode; toolset collapse is gated on ``focus``.
     config_mode: str = "auto"
-    # The model id this session runs (e.g. "anthropic/claude-opus-4.8"). Used
-    # only to steer edit-format guidance toward the model's family — see
-    # ``_edit_format_line``. Fixed for the session, so cache-safe.
+    # Model id, used only to steer edit-format guidance (fixed per session).
     model: Optional[str] = None
-    # Standing operator instructions (``agent.coding_instructions``), appended
-    # as an extra stable system block. Empty unless the user configures it.
+    # ``agent.coding_instructions``, appended as an extra stable block.
     instructions: str = ""
 
     @property
@@ -505,94 +418,58 @@ class RuntimeMode:
     def toolset_selection(self, config: Optional[dict[str, Any]] = None) -> Optional[list[str]]:
         """Toolset list for this posture, or ``None`` to keep the platform default.
 
-        Non-``None`` only under the opt-in ``focus`` mode. The default posture
-        is prompt-only: most strippable toolsets are off-by-default anyway, and
-        a user who explicitly enabled one (image-gen for frontend/game assets,
-        messaging for build notifications, …) keeps it while coding.
-
-        Callers apply this only when the user hasn't pinned an explicit
-        selection (``--toolsets``, ``HERMES_TUI_TOOLSETS``, …); they never
-        override a pin. Returns the profile's toolset plus enabled MCP servers.
+        Non-``None`` only under ``focus``. Callers apply it only when the user
+        hasn't pinned an explicit selection (``--toolsets``, ``HERMES_TUI_TOOLSETS``).
         """
-        if self.config_mode != "focus":
-            return None
-        if self.profile.toolset is None:
+        if self.config_mode != "focus" or self.profile.toolset is None:
             return None
         return [self.profile.toolset, *_enabled_mcp_servers(config)]
 
     def system_prompt_parts(
         self, valid_tool_names=None
     ) -> tuple[list[str], list[str], list[str]]:
-        """Return prefix, workspace, and trailing posture blocks separately.
+        """Return (prefix, workspace, trailing) posture blocks.
 
-        The operating brief carries a model-family edit-format nudge appended
-        to it (one cached string, not a separate block) so the model is steered
-        toward the `patch` mode it handles best — see ``_edit_format_line``.
-
-        ``valid_tool_names`` (when provided) tailors the brief to the session's
-        toolset: the ``todo`` tracking sentence is dropped when the todo tool
-        isn't loaded (e.g. Blank Slate), so the brief never references a tool
-        the model can't call. The toolset is fixed at session construction,
-        so the rendered brief is deterministic per session — cache-safe.
-
-        The three lists preserve the historical flat prompt order: the brief,
-        the live workspace snapshot, then configured operator instructions.
-        Prompt assembly can therefore put a cache boundary before the snapshot
-        without changing the persisted system-prompt bytes.
+        The brief carries the model-family edit-format nudge appended to it
+        (one cached string). ``valid_tool_names`` drops the ``todo_list``
+        sentence when that tool isn't loaded (e.g. Blank Slate). The three
+        lists preserve the historical flat order — brief, workspace snapshot,
+        operator instructions — so prompt assembly can put a cache boundary
+        before the snapshot without changing the persisted bytes.
         """
         if not self.is_coding:
             return [], [], []
         prefix: list[str] = []
-        workspace_parts: list[str] = []
-        trailing: list[str] = []
         if self.profile.guidance:
             brief = self.profile.guidance
             if valid_tool_names is not None and "todo_list" not in valid_tool_names:
-                brief = brief.replace(
-                    "- Track multi-step work with `todo_list`. Reference code as "
-                    "`path:line` instead of pasting whole files.",
-                    "- Reference code as `path:line` instead of pasting "
-                    "whole files.",
-                )
+                brief = brief.replace(_TODO_SENTENCE, _NO_TODO_SENTENCE)
             edit_line = _edit_format_line(self.model)
             if edit_line:
                 brief = f"{brief}\n{edit_line}"
             prefix.append(brief)
         workspace = build_coding_workspace_block(self.cwd)
-        if workspace:
-            workspace_parts.append(workspace)
-        # Operator instructions ride their own block so the brief (block 0) stays
-        # byte-stable and cache-keyed independently of user config.
-        if self.instructions:
-            trailing.append(f"Operator instructions (from config):\n{self.instructions}")
+        workspace_parts = [workspace] if workspace else []
+        # Operator instructions ride their own block so the brief stays
+        # byte-stable independently of user config.
+        trailing = (
+            [f"Operator instructions (from config):\n{self.instructions}"]
+            if self.instructions else []
+        )
         return prefix, workspace_parts, trailing
 
     def system_blocks(self) -> list[str]:
-        """Return posture blocks in their historical display order.
-
-        ``system_prompt_parts`` is the cache-aware API. This compatibility
-        helper retains the public flat list for callers outside prompt assembly.
-        """
+        """Posture blocks as one flat list in historical order (compat helper)."""
         prefix, workspace, trailing = self.system_prompt_parts()
         return [*prefix, *workspace, *trailing]
 
     def compact_skill_categories(self) -> frozenset[str]:
-        """Skill categories to demote to names-only in the prompt's skill index.
+        """Skill categories to demote to names-only in the skill index.
 
-        Gated on the opt-in ``focus`` mode, like the toolset collapse: the
-        default posture leaves the skill index untouched. Users who didn't ask
-        for a lean prompt keep full entries for every category — index changes
-        under ``auto`` proved too surprising in practice, even names-only ones
-        (a demoted description is information the model no longer weighs when
-        deciding what to load).
-
-        Demoted — never hidden — even under ``focus``. An earlier revision
-        fully pruned these categories from the index, which caused silent
-        capability loss in a real workflow: agent-created skills are the
-        model's accumulated project memory (server-ops runbooks, learned
-        pitfalls, …), and models do not reliably reach for ``skills_list`` to
-        rediscover what the index stopped showing them. Names-only keeps every
-        skill loadable on recall while still cutting the description noise.
+        Gated on ``focus`` like the toolset collapse — index changes under
+        ``auto`` proved too surprising. Demoted, never hidden: fully pruning
+        them caused silent capability loss (agent-created skills are the
+        model's project memory and models don't reliably re-run ``skills_list``).
         """
         if not self.is_coding or self.config_mode != "focus":
             return frozenset()
@@ -606,14 +483,10 @@ def resolve_runtime_mode(
     config: Optional[dict[str, Any]] = None,
     model: Optional[str] = None,
 ) -> RuntimeMode:
-    """Resolve the operating posture once. Cheap — a handful of ``stat`` calls.
+    """Resolve the operating posture once (a handful of ``stat`` calls).
 
-    This is the single entry point every domain should call. The returned
-    object is immutable and safe to cache for the session. Detection itself is
-    intentionally *not* memoized (see ``_detect_profile_name``) so a long-lived
-    process can't pin a stale posture; callers resolve once per session and
-    hold the result. ``model`` is recorded only to steer edit-format guidance;
-    it never affects detection.
+    The single entry point every domain should call; the result is immutable
+    and safe to hold for the session. ``model`` only steers edit-format guidance.
     """
     resolved_cwd = _resolve_cwd(cwd)
     mode = _coding_mode(config)
@@ -649,30 +522,10 @@ def coding_selection(
     cwd: Optional[str | Path] = None,
     config: Optional[dict[str, Any]] = None,
 ) -> Optional[list[str]]:
-    """Toolset selection for the coding posture.
-
-    ``None`` unless the user opted into ``focus`` mode AND the posture is
-    active — the default coding posture never overrides configured toolsets.
-    """
+    """Toolset selection for the coding posture (``None`` unless ``focus`` and active)."""
     return resolve_runtime_mode(
         platform=platform, cwd=cwd, config=config
     ).toolset_selection(config)
-
-
-def coding_system_blocks(
-    *,
-    platform: Optional[str] = None,
-    cwd: Optional[str | Path] = None,
-    config: Optional[dict[str, Any]] = None,
-    model: Optional[str] = None,
-) -> list[str]:
-    """Stable system-prompt blocks for the current posture (empty when general).
-
-    ``model`` steers the brief's edit-format nudge toward the model's family.
-    """
-    return resolve_runtime_mode(
-        platform=platform, cwd=cwd, config=config, model=model
-    ).system_blocks()
 
 
 def coding_system_prompt_parts(
@@ -695,25 +548,14 @@ def coding_compact_skill_categories(
     cwd: Optional[str | Path] = None,
     config: Optional[dict[str, Any]] = None,
 ) -> frozenset[str]:
-    """Skill categories the active posture demotes to names-only in the index.
-
-    Empty outside the coding posture and outside the opt-in ``focus`` mode —
-    the default posture never touches the skill index. Under ``focus``,
-    demoted — never hidden: every skill name stays in the index and remains
-    loadable via ``skill_view`` / ``skills_list``; only descriptions are
-    dropped.
-    """
+    """Skill categories the active posture demotes to names-only (empty outside ``focus``)."""
     return resolve_runtime_mode(
         platform=platform, cwd=cwd, config=config
     ).compact_skill_categories()
 
 
 def _enabled_mcp_servers(config: Optional[dict[str, Any]]) -> list[str]:
-    """Names of MCP servers the user has enabled — kept in the coding posture.
-
-    MCP servers (figma, browser, tophat, …) are explicitly configured and part
-    of the coding workflow, not noise to strip.
-    """
+    """Names of MCP servers the user has enabled — kept in the coding posture."""
     try:
         from hermes_cli.config import read_raw_config
         from hermes_cli.tools_config import _parse_enabled_flag
@@ -735,10 +577,9 @@ def _enabled_mcp_servers(config: Optional[dict[str, Any]]) -> list[str]:
 def _git(cwd: Path, *args: str) -> str:
     """``git -C <cwd> <args>`` → stripped stdout, or ``""`` on any failure.
 
-    Uses the shared :func:`bounded_git_probe` so the post-kill cleanup is bounded
-    on Windows — a plain ``subprocess.run(timeout=...)`` here deadlocked the agent
-    turn inside ``build_coding_workspace_block`` when a killed git left a suspended
-    descendant holding the pipe handles (issue #66037).
+    :func:`bounded_git_probe` bounds the post-kill cleanup on Windows — a plain
+    ``subprocess.run(timeout=...)`` deadlocked when a killed git left a
+    suspended descendant holding the pipe handles.
     """
     return bounded_git_probe(["git", "-C", str(cwd), *args], timeout=_GIT_TIMEOUT)
 
@@ -780,12 +621,7 @@ def _read_small(path: Path) -> str:
 
 @dataclass(frozen=True)
 class ProjectFacts:
-    """Structured project facts — the model's verify loop, detected once.
-
-    The same data that feeds the workspace snapshot, exposed structurally so
-    non-prompt consumers (e.g. the desktop verify UI) read it instead of
-    re-detecting and drifting from the prompt.
-    """
+    """Structured project facts — exposed so non-prompt consumers (desktop verify UI) don't re-detect."""
 
     manifests: list[str]
     package_managers: list[str]
@@ -796,9 +632,8 @@ class ProjectFacts:
 def detect_project_facts(root: Path) -> ProjectFacts:
     """Detect manifests, package manager(s), verify commands, and context files.
 
-    Cheap: stat calls plus reads of a couple of small files. The single source
-    of truth for both the prompt snapshot (:func:`_project_facts`) and the
-    gateway's ``project.facts`` — so the UI never re-sniffs verify commands.
+    Single source of truth for the prompt snapshot and the gateway's
+    ``project.facts``. Cheap: stat calls plus a couple of small file reads.
     """
     manifests = [m for m in _PROJECT_MARKERS if m not in _CONTEXT_FILES and (root / m).is_file()]
     package_managers = list(
@@ -833,16 +668,9 @@ def detect_project_facts(root: Path) -> ProjectFacts:
 
 
 def _project_facts(root: Path) -> list[str]:
-    """Render :func:`detect_project_facts` as workspace-snapshot lines.
-
-    Hands the model its *verify loop* up front — which manifest, which package
-    manager, and the exact test/lint/build commands — instead of making it
-    rediscover them every session. Built once at prompt-build time; the string
-    output must stay byte-stable to preserve the prompt cache.
-    """
+    """Render :func:`detect_project_facts` as workspace-snapshot lines (byte-stable)."""
     f = detect_project_facts(root)
     facts: list[str] = []
-
     if f.manifests:
         line = f"- Project: {', '.join(f.manifests[:6])}"
         if f.package_managers:
@@ -852,22 +680,25 @@ def _project_facts(root: Path) -> list[str]:
         facts.append(f"- Verify: {'; '.join(f.verify_commands)}")
     if f.context_files:
         facts.append(f"- Context files: {', '.join(f.context_files)}")
-
     return facts
+
+
+def _workspace_roots(cwd: Optional[str | Path]) -> tuple[Optional[Path], Optional[Path]]:
+    """(git_root, workspace_root) for *cwd*; workspace root is git root else marker root."""
+    resolved = _resolve_cwd(cwd)
+    git_root = _git_root(resolved)
+    return git_root, git_root or _marker_root(resolved)
 
 
 def project_facts_for(cwd: Optional[str | Path] = None) -> Optional[dict[str, Any]]:
     """Structured project facts for ``cwd`` — ``None`` outside a workspace.
 
-    Same detection the system-prompt snapshot uses (git root, else marker root),
-    exposed for non-prompt consumers (the desktop verify UI) so they never
-    re-derive "are we coding?" or duplicate the verify-command sniffing.
+    Same detection the system-prompt snapshot uses, exposed for non-prompt
+    consumers (the desktop verify UI).
     """
-    resolved = _resolve_cwd(cwd)
-    root = _git_root(resolved) or _marker_root(resolved)
+    _, root = _workspace_roots(cwd)
     if root is None:
         return None
-
     f = detect_project_facts(root)
     return {
         "root": str(root),
@@ -881,13 +712,10 @@ def project_facts_for(cwd: Optional[str | Path] = None) -> Optional[dict[str, An
 def build_coding_workspace_block(cwd: Optional[str | Path] = None) -> str:
     """Workspace snapshot for the system prompt (empty outside a workspace).
 
-    Git state (branch/status/commits) when the cwd is in a repo, plus detected
-    project facts (manifest, package manager, verify commands, context files)
-    — so marker-only (non-git) projects still get a snapshot.
+    Git state when the cwd is in a repo, plus detected project facts — so
+    marker-only (non-git) projects still get a snapshot.
     """
-    resolved = _resolve_cwd(cwd)
-    git_root = _git_root(resolved)
-    root = git_root or _marker_root(resolved)
+    git_root, root = _workspace_roots(cwd)
     if root is None:
         return ""
 
@@ -908,11 +736,9 @@ def build_coding_workspace_block(cwd: Optional[str | Path] = None) -> str:
         elif head == "(detached)":
             lines.append("- Branch: (detached HEAD)")
 
-        # Linked worktree: the per-worktree git dir differs from the shared common dir.
-        # We surface the fact that it's a worktree (so the model knows branches/stashes
-        # are shared state) but deliberately do NOT expose the primary tree path —
-        # giving the model a second absolute path causes it to sometimes run commands
-        # in the wrong directory.
+        # Linked worktree: say so (branches/stashes are shared state) but do
+        # NOT expose the primary tree path — a second absolute path makes the
+        # model run commands in the wrong directory.
         git_dir, common_dir = _git(root, "rev-parse", "--git-dir"), _git(root, "rev-parse", "--git-common-dir")
         if git_dir and common_dir and Path(git_dir).resolve() != Path(common_dir).resolve():
             lines.append("- Worktree: linked (git state shared with primary tree)")
