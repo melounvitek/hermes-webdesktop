@@ -175,8 +175,7 @@ class SessionTitlesMixin:
         row = self._read_one(
             "SELECT s.*, COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
             "FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
-            "WHERE s.title = ?",
-            (title,),
+            "WHERE s.title = ?", (title,),
         )
         return self._session_row_dict(row) if row else None
 

@@ -245,8 +245,7 @@ class SessionUsageMixin:
                 # Writer stuck mid-apply: leave deltas unapplied rather than race it.
                 logger.warning(
                     "async token accounting: writer did not stop within %.0fs; "
-                    "%d queued delta(s) not persisted",
-                    join_timeout, len(self._token_queue),
+                    "%d queued delta(s) not persisted", join_timeout, len(self._token_queue),
                 )
                 return
         # Writer gone: apply leftovers synchronously under the same busy protocol. Wait
@@ -366,8 +365,7 @@ class SessionUsageMixin:
         """
         row = conn.execute(
             "SELECT model, billing_provider, billing_base_url, billing_mode "
-            "FROM sessions WHERE id = ?",
-            (session_id,),
+            "FROM sessions WHERE id = ?", (session_id,),
         ).fetchone()
         sess = dict(row) if (row is not None and not task) else {}
         eff_model = model or sess.get("model") or "unknown"

@@ -236,11 +236,9 @@ class SessionCompressionMixin:
                     _ceiling_clause = " AND id <= ?"
                     _params.append(int(watermark_ceiling))
                 tail_ids, tail_tool_calls = self._tail_rows_after_watermark(
-                    conn,
-                    "SELECT id, tool_calls FROM messages "
+                    conn, "SELECT id, tool_calls FROM messages "
                     "WHERE session_id = ? AND active = 1 AND id > ?"
-                    f"{_ceiling_clause} ORDER BY id",
-                    _params,
+                    f"{_ceiling_clause} ORDER BY id", _params,
                 )
                 if tail_ids:
                     self._clone_message_rows(conn, tail_ids, session_id=child_session_id)
@@ -252,8 +250,7 @@ class SessionCompressionMixin:
             )
             updated = conn.execute(
                 "UPDATE sessions SET ended_at = ?, end_reason = 'compression' "
-                "WHERE id = ? AND ended_at IS NULL",
-                (time.time(), parent_session_id),
+                "WHERE id = ? AND ended_at IS NULL", (time.time(), parent_session_id),
             )
             if updated.rowcount != 1:
                 raise RuntimeError(f"Compression parent changed during publication: {parent_session_id}")
@@ -322,8 +319,7 @@ class SessionCompressionMixin:
         def _do(conn):
             cursor = conn.execute(
                 "UPDATE sessions SET compression_failure_cooldown_until = ?, "
-                "compression_failure_error = ? WHERE id = ?",
-                (deadline, error, session_id),
+                "compression_failure_error = ? WHERE id = ?", (deadline, error, session_id),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError(f"compression cooldown rollback session missing: {session_id}")
@@ -348,8 +344,7 @@ class SessionCompressionMixin:
         self._write_sql_logged(
             "clear_compression_failure_cooldown", session_id,
             "UPDATE sessions SET compression_failure_cooldown_until = NULL, "
-            "compression_failure_error = NULL WHERE id = ?",
-            (session_id,),
+            "compression_failure_error = NULL WHERE id = ?", (session_id,),
         )
 
     def _read_session_number(self, column: str, session_id: str, cast: type, zero: Any) -> Any:
@@ -484,8 +479,7 @@ class SessionCompressionMixin:
         def _row(sid: str):
             row = conn.execute(
                 "SELECT id, parent_session_id, source, model_config, end_reason "
-                "FROM sessions WHERE id = ?",
-                (sid,),
+                "FROM sessions WHERE id = ?", (sid,),
             ).fetchone()
             return dict(row) if row else None
 
@@ -590,8 +584,7 @@ class SessionCompressionMixin:
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             cursor = conn.execute(
                 "UPDATE session_turn_leases SET expires_at = ? "
-                "WHERE conversation_id = ? AND holder = ?",
-                (expires_at, conversation_id, holder),
+                "WHERE conversation_id = ? AND holder = ?", (expires_at, conversation_id, holder),
             )
             return cursor.rowcount > 0
 
