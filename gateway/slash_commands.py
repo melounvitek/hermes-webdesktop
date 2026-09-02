@@ -111,6 +111,137 @@ def _model_switch_skew_guard() -> Optional[str]:
     )
 
 
+def _manual_compression_reply_lines(summary: dict, compressor, focus_topic) -> list[str]:
+    """Lines for the manual /compress confirmation, surfacing summariser/aux-model failures.
+
+    ``_last_compress_aborted`` = no usable summary, messages unchanged (force=True bypasses any
+    cooldown). Provider exception text is force-redacted at this UI boundary even when global
+    redaction is off. A configured aux model that failed and was recovered via main is an info
+    note so the user can fix their config.
+    """
+    lines = [f"🗜️ {summary['headline']}"]
+    if focus_topic:
+        lines.append(t("gateway.compress.focus_line", topic=focus_topic))
+    lines.append(summary["token_line"])
+    if summary["note"]:
+        lines.append(summary["note"])
+    summary_err = getattr(compressor, "_last_summary_error", None)
+    if summary_err:
+        from agent.redact import redact_sensitive_text
+        summary_err = redact_sensitive_text(summary_err, force=True)
+    aux_fail_model = getattr(compressor, "_last_aux_model_failure_model", None)
+    if getattr(compressor, "_last_compress_aborted", False):
+        lines.append(t("gateway.compress.aborted", error=(summary_err or "unknown error")))
+    elif aux_fail_model:
+        lines.append(
+            t(
+                "gateway.compress.aux_failed",
+                model=aux_fail_model,
+                error=(getattr(compressor, "_last_aux_model_failure_error", None) or "unknown error"),
+            )
+        )
+    return lines
+
+
+async def _persist_model_switch_to_config(result, config_path) -> None:
+    """Write-through a resolved /model switch to ``config_path`` (model.default/provider/base_url).
+
+    Write-back round-trip: raw read is correct (merged defaults must not be persisted back to the
+    user's file). A scalar/None ``model:`` is coerced into a dict first — otherwise
+    ``cfg.setdefault("model", {})`` returns the existing scalar and the next assignment raises
+    ``TypeError``. Named providers re-resolve base_url/api_mode fresh, so leftovers are cleared
+    unconditionally; custom providers have no registry entry to re-derive from, so they need an
+    explicit set-or-clear (a lone ``if base_url:`` leaves stale values).
+    """
+    from hermes_cli.config import read_user_config_raw, save_config
+
+    cfg = read_user_config_raw(config_path)
+    raw_model = cfg.get("model")
+    if isinstance(raw_model, dict):
+        model_cfg = raw_model
+    elif isinstance(raw_model, str) and raw_model.strip():
+        model_cfg = cfg["model"] = {"default": raw_model.strip()}
+    else:
+        model_cfg = cfg["model"] = {}
+    try:
+        from hermes_cli.route_identity import should_clear_context_pin_async
+
+        if await should_clear_context_pin_async(
+            model_cfg.get("default") or model_cfg.get("model"),
+            result.new_model,
+            model_cfg.get("base_url"),
+            result.base_url,
+            model_cfg.get("provider"),
+            result.target_provider,
+        ):
+            model_cfg.pop("context_length", None)
+    except Exception:
+        model_cfg.pop("context_length", None)
+    model_cfg["default"] = result.new_model
+    model_cfg["provider"] = result.target_provider
+    is_custom_target = str(result.target_provider or "").strip().lower() == "custom"
+    if result.base_url:
+        model_cfg["base_url"] = result.base_url
+    elif is_custom_target:
+        model_cfg.pop("base_url", None)
+    if is_custom_target:
+        if result.api_mode:
+            model_cfg["api_mode"] = result.api_mode
+        else:
+            model_cfg.pop("api_mode", None)
+    else:
+        clear_model_endpoint_credentials(model_cfg, clear_base_url=True)
+    save_config(cfg)
+
+
+def _read_model_command_config(config_path):
+    """Current (model, provider, base_url, user_providers, custom_providers, excluded) for /model.
+
+    Fail-open: any config read error yields the defaults (``provider="openrouter"``).
+    """
+    from gateway.run import _load_gateway_config
+
+    current_model, current_provider, current_base_url = "", "openrouter", ""
+    user_provs = custom_provs = None
+    excluded_provs: list = []
+    try:
+        cfg = _load_gateway_config(config_path=config_path)
+        if cfg:
+            model_cfg = cfg.get("model", {})
+            if isinstance(model_cfg, dict):
+                current_model = model_cfg.get("default", "")
+                current_provider = model_cfg.get("provider", current_provider)
+                current_base_url = model_cfg.get("base_url", "")
+            user_provs = cfg.get("providers")
+            try:
+                from hermes_cli.config import get_compatible_custom_providers
+                custom_provs = get_compatible_custom_providers(cfg)
+            except Exception:
+                custom_provs = cfg.get("custom_providers")
+            _excl = cfg.get("model_catalog", {}).get("excluded_providers")
+            if isinstance(_excl, list):
+                excluded_provs = _excl
+    except Exception:
+        pass
+    return current_model, current_provider, current_base_url, user_provs, custom_provs, excluded_provs
+
+
+def _model_provider_listing_lines(providers) -> list[str]:
+    """Text-list body for ``/model`` with no args on platforms without a picker."""
+    lines: list[str] = []
+    for p in providers:
+        tag = t("gateway.model.current_tag") if p["is_current"] else ""
+        lines.append(f"**{p['name']}** `--provider {p['slug']}`{tag}:")
+        if p["models"]:
+            model_strs = ", ".join(f"`{m}`" for m in p["models"])
+            extra = t("gateway.model.more_models_suffix", count=p["total_models"] - len(p["models"])) if p["total_models"] > len(p["models"]) else ""
+            lines.append(f"  {model_strs}{extra}")
+        elif p.get("api_url"):
+            lines.append(f"  `{p['api_url']}`")
+        lines.append("")
+    return lines
+
+
 def _home_thread_from_source(source) -> Optional[str]:
     """The thread id /sethome should persist on the home target, or None.
 
@@ -1817,54 +1948,7 @@ class GatewaySlashCommandsMixin:
         # Persist to config (default) unless --session opted out
         if persist_global:
             try:
-                # Write-back round-trip: raw read is correct (merged
-                # defaults must not be persisted back to the user's file).
-                from hermes_cli.config import read_user_config_raw, save_config
-                cfg = read_user_config_raw(config_path)
-                # Coerce scalar/None ``model:`` into a dict before mutation — otherwise
-                # ``cfg.setdefault("model", {})`` returns the existing scalar and the next
-                # assignment raises ``TypeError: 'str' object does not support item assignment``.
-                raw_model = cfg.get("model")
-                if isinstance(raw_model, dict):
-                    model_cfg = raw_model
-                elif isinstance(raw_model, str) and raw_model.strip():
-                    model_cfg = {"default": raw_model.strip()}
-                    cfg["model"] = model_cfg
-                else:
-                    model_cfg = {}
-                    cfg["model"] = model_cfg
-                try:
-                    from hermes_cli.route_identity import should_clear_context_pin_async
-
-                    if await should_clear_context_pin_async(
-                        model_cfg.get("default") or model_cfg.get("model"),
-                        result.new_model,
-                        model_cfg.get("base_url"),
-                        result.base_url,
-                        model_cfg.get("provider"),
-                        result.target_provider,
-                    ):
-                        model_cfg.pop("context_length", None)
-                except Exception:
-                    model_cfg.pop("context_length", None)
-                model_cfg["default"] = result.new_model
-                model_cfg["provider"] = result.target_provider
-                # Named providers re-resolve base_url/api_mode fresh, so leftovers are cleared
-                # unconditionally; custom providers have no registry entry to re-derive from, so
-                # they need an explicit set-or-clear (a lone ``if base_url:`` leaves stale values).
-                _is_custom_target = str(result.target_provider or "").strip().lower() == "custom"
-                if result.base_url:
-                    model_cfg["base_url"] = result.base_url
-                elif _is_custom_target:
-                    model_cfg.pop("base_url", None)
-                if _is_custom_target:
-                    if result.api_mode:
-                        model_cfg["api_mode"] = result.api_mode
-                    else:
-                        model_cfg.pop("api_mode", None)
-                else:
-                    clear_model_endpoint_credentials(model_cfg, clear_base_url=True)
-                save_config(cfg)
+                await _persist_model_switch_to_config(result, config_path)
             except Exception as e:
                 logger.warning("Failed to persist model switch: %s", e)
 
@@ -1972,33 +2056,11 @@ class GatewaySlashCommandsMixin:
                 pass
 
         # Read current model/provider from config
-        current_model = ""
-        current_provider = "openrouter"
-        current_base_url = ""
-        current_api_key = ""
-        user_provs = None
-        custom_provs = None
-        excluded_provs = []
         config_path = (_command_profile_home or _hermes_home) / "config.yaml"
-        try:
-            cfg = _load_gateway_config(config_path=config_path)
-            if cfg:
-                model_cfg = cfg.get("model", {})
-                if isinstance(model_cfg, dict):
-                    current_model = model_cfg.get("default", "")
-                    current_provider = model_cfg.get("provider", current_provider)
-                    current_base_url = model_cfg.get("base_url", "")
-                user_provs = cfg.get("providers")
-                try:
-                    from hermes_cli.config import get_compatible_custom_providers
-                    custom_provs = get_compatible_custom_providers(cfg)
-                except Exception:
-                    custom_provs = cfg.get("custom_providers")
-                _excl = cfg.get("model_catalog", {}).get("excluded_providers")
-                if isinstance(_excl, list):
-                    excluded_provs = _excl
-        except Exception:
-            pass
+        current_model, current_provider, current_base_url, user_provs, custom_provs, excluded_provs = (
+            _read_model_command_config(config_path)
+        )
+        current_api_key = ""
 
         # Check for session override. Normalize the source the same way a normal message turn does
         # (Telegram DM topic recovery) before deriving the override key, so the override is stored
@@ -2014,6 +2076,47 @@ class GatewaySlashCommandsMixin:
             current_provider = override.get("provider", current_provider)
             current_base_url = override.get("base_url", current_base_url)
             current_api_key = override.get("api_key", current_api_key)
+
+        async def perform_switch(model_id: str, provider_slug, *, src=source):
+            return await self._perform_model_switch(
+                _switch_model,
+                raw_input=model_id,
+                explicit_provider=provider_slug,
+                session_key=session_key,
+                source=src,
+                current_model=current_model,
+                current_provider=current_provider,
+                current_base_url=current_base_url,
+                current_api_key=current_api_key,
+                persist_global=persist_global,
+                user_provs=user_provs,
+                custom_provs=custom_provs,
+            )
+
+        async def commit_switch(result, *, picker: bool = False, src=source) -> str:
+            """Apply the resolved switch (agent, session, config) and build the reply."""
+            return await self._commit_model_switch(
+                result,
+                session_key=session_key,
+                source=src,
+                current_model=current_model,
+                current_base_url=current_base_url,
+                current_api_key=current_api_key,
+                custom_provs=custom_provs,
+                persist_global=persist_global,
+                config_path=config_path,
+                one_turn=False if picker else one_turn,
+                restore_snapshot=None if picker else restore_snapshot,
+                picker=picker,
+            )
+
+        async def switch_and_commit(model_id: str, provider_slug, *, picker: bool) -> str:
+            # The picker callback binds the raw event source (pre-normalization), as it always has.
+            src = event.source if picker else source
+            result, error = await perform_switch(model_id, provider_slug, src=src)
+            if error is not None:
+                return error
+            return await commit_switch(result, picker=picker, src=src)
 
         # No args: show interactive picker (Telegram/Discord) or text list
         if not model_input and not explicit_provider:
@@ -2044,59 +2147,23 @@ class GatewaySlashCommandsMixin:
                     providers = []
 
                 if providers:
-                    # Build a callback closure for when the user picks a model.
-                    # Captures self + locals needed for the switch logic.
-                    _self = self
-                    _session_key = session_key
-                    _cur_model = current_model
-                    _cur_provider = current_provider
-                    _cur_base_url = current_base_url
-                    _cur_api_key = current_api_key
-                    _picker_profile_home = _command_profile_home
-
+                    # Callback for when the user picks a model; captures the switch locals.
                     async def _on_model_selected_scoped(
                         _chat_id: str, model_id: str, provider_slug: str
                     ) -> str:
                         """Perform the model switch and return confirmation text."""
-                        result, error = await _self._perform_model_switch(
-                            _switch_model,
-                            raw_input=model_id,
-                            explicit_provider=provider_slug,
-                            session_key=_session_key,
-                            source=event.source,
-                            current_model=_cur_model,
-                            current_provider=_cur_provider,
-                            current_base_url=_cur_base_url,
-                            current_api_key=_cur_api_key,
-                            persist_global=persist_global,
-                            user_provs=user_provs,
-                            custom_provs=custom_provs,
-                        )
-                        if error is not None:
-                            return error
-                        return await _self._commit_model_switch(
-                            result,
-                            session_key=_session_key,
-                            source=event.source,
-                            current_model=_cur_model,
-                            current_base_url=_cur_base_url,
-                            current_api_key=_cur_api_key,
-                            custom_provs=custom_provs,
-                            persist_global=persist_global,
-                            config_path=config_path,
-                            picker=True,
-                        )
+                        return await switch_and_commit(model_id, provider_slug, picker=True)
 
                     async def _on_model_selected(
                         _chat_id: str, model_id: str, provider_slug: str
                     ) -> str:
-                        if _picker_profile_home is None:
+                        if _command_profile_home is None:
                             return await _on_model_selected_scoped(
                                 _chat_id, model_id, provider_slug
                             )
                         from gateway.run import _profile_runtime_scope
 
-                        with _profile_runtime_scope(_picker_profile_home):
+                        with _profile_runtime_scope(_command_profile_home):
                             return await _on_model_selected_scoped(
                                 _chat_id, model_id, provider_slug
                             )
@@ -2115,9 +2182,7 @@ class GatewaySlashCommandsMixin:
                         return None  # Picker sent — adapter handles the response
 
             # Fallback: text list (for platforms without picker or if picker failed)
-            provider_label = get_label(current_provider)
-            lines = [t("gateway.model.current_label", model=current_model or "unknown", provider=provider_label), ""]
-
+            lines = [t("gateway.model.current_label", model=current_model or "unknown", provider=get_label(current_provider)), ""]
             try:
                 # Offload blocking provider-listing off the event loop so the
                 # gateway doesn't freeze on a stale-cache HTTP fetch. See #41289.
@@ -2131,57 +2196,18 @@ class GatewaySlashCommandsMixin:
                     max_models=5,
                     excluded_providers=excluded_provs,
                 )
-                for p in providers:
-                    tag = t("gateway.model.current_tag") if p["is_current"] else ""
-                    lines.append(f"**{p['name']}** `--provider {p['slug']}`{tag}:")
-                    if p["models"]:
-                        model_strs = ", ".join(f"`{m}`" for m in p["models"])
-                        extra = t("gateway.model.more_models_suffix", count=p["total_models"] - len(p["models"])) if p["total_models"] > len(p["models"]) else ""
-                        lines.append(f"  {model_strs}{extra}")
-                    elif p.get("api_url"):
-                        lines.append(f"  `{p['api_url']}`")
-                    lines.append("")
+                lines.extend(_model_provider_listing_lines(providers))
             except Exception:
                 pass
-
             lines.append(t("gateway.model.usage_switch_model"))
             lines.append(t("gateway.model.usage_switch_provider"))
             lines.append(t("gateway.model.usage_persist"))
             return "\n".join(lines)
 
         # Perform the switch
-        result, error = await self._perform_model_switch(
-            _switch_model,
-            raw_input=model_input,
-            explicit_provider=explicit_provider,
-            session_key=session_key,
-            source=source,
-            current_model=current_model,
-            current_provider=current_provider,
-            current_base_url=current_base_url,
-            current_api_key=current_api_key,
-            persist_global=persist_global,
-            user_provs=user_provs,
-            custom_provs=custom_provs,
-        )
+        result, error = await perform_switch(model_input, explicit_provider)
         if error is not None:
             return error
-
-        async def _finish_switch() -> str:
-            """Apply the resolved switch (agent, session, config) and build the reply."""
-            return await self._commit_model_switch(
-                result,
-                session_key=session_key,
-                source=source,
-                current_model=current_model,
-                current_base_url=current_base_url,
-                current_api_key=current_api_key,
-                custom_provs=custom_provs,
-                persist_global=persist_global,
-                config_path=config_path,
-                one_turn=one_turn,
-                restore_snapshot=restore_snapshot,
-            )
 
         # Selection-guard confirmation for the typed /model <name> path (pickers confirm via their own
         # UI). Runs the unified registry (cost + data-policy guards); pricing lookups may hit
@@ -2210,7 +2236,7 @@ class GatewaySlashCommandsMixin:
                 # "once" and "always" both proceed — there is no persistent
                 # opt-out for selection guards (each guarded switch should be
                 # an explicit decision).
-                return await _finish_switch()
+                return await commit_switch(result)
 
             _p = self._typed_command_prefix_for(event.source.platform)
             return await self._request_slash_confirm(
@@ -2225,7 +2251,7 @@ class GatewaySlashCommandsMixin:
                 handler=_on_cost_confirm,
             )
 
-        return await _finish_switch()
+        return await commit_switch(result)
 
     async def _handle_codex_runtime_command(self, event: MessageEvent) -> str:
         """Handle /codex-runtime command in the gateway.
@@ -4002,9 +4028,8 @@ class GatewaySlashCommandsMixin:
 
         _agg_note = ""
         if _aggressive:
-            # LLM-free hard truncation is not supported on this surface —
-            # it would need its own transcript-persistence branch outside
-            # the guarded _compress_context rotation machinery (#44794).
+            # LLM-free hard truncation is not supported on this surface — it would need its own
+            # transcript-persistence branch outside the guarded _compress_context rotation machinery.
             _agg_note = t("gateway.compress.aggressive_unsupported")
             if not _preview:
                 return _agg_note
@@ -4017,9 +4042,8 @@ class GatewaySlashCommandsMixin:
                 for m in history
                 if m.get("role") in {"user", "assistant"} and m.get("content")
             ]
-            approx_tokens = estimate_request_tokens_rough(_pv_msgs)
             report = summarize_compress_preview(
-                _pv_msgs, partial, keep_last, focus_topic, approx_tokens
+                _pv_msgs, partial, keep_last, focus_topic, estimate_request_tokens_rough(_pv_msgs)
             )
             lines = [f"🗜️ {line}" for line in report["lines"]]
             if _aggressive:
@@ -4027,18 +4051,13 @@ class GatewaySlashCommandsMixin:
             return "\n".join(lines)
 
         try:
-            from run_agent import AIAgent
             from agent.manual_compression_feedback import summarize_manual_compression
             from agent.model_metadata import estimate_request_tokens_rough
+            from gateway.run import _platform_config_key
 
             session_key = self._session_key_for_source(source)
             # Preserve the platform + stable gateway session identity of a normal turn so external
             # context engines bind this agent to the original conversation, not a default "cli" host.
-            from gateway.run import (
-                _GATEWAY_HYGIENE_PLATFORM,
-                _platform_config_key,
-                _seed_hygiene_system_prompt,
-            )
             platform_key = (
                 _platform_config_key(source.platform) if source.platform else None
             )
@@ -4082,58 +4101,10 @@ class GatewaySlashCommandsMixin:
                 runtime_kwargs["platform"] = platform_key
             runtime_kwargs["gateway_session_key"] = session_key
 
-            # The manual compression helper runs outside the live session's fully initialized
-            # prompt environment and _compress_context may persist its cached system prompt —
-            # restore the exact live-session prompt so provider blocks are retained.
-            session_row = None
-            get_session = getattr(self._session_db, "get_session", None)
-            if callable(get_session):
-                try:
-                    session_row = await get_session(session_entry.session_id)
-                except Exception as exc:
-                    logger.warning(
-                        "Manual compression could not restore the system prompt "
-                        "for session %s: %s. Preserving an empty prompt so the "
-                        "live turn rebuilds it with its configured providers.",
-                        session_entry.session_id,
-                        exc,
-                        exc_info=True,
-                    )
-
-            # This agent performs a lossy rewrite. When compression.checkpoint_required is on, the
-            # memory provider must be loaded so _compress_context() can write the pre-compression
-            # checkpoint; otherwise keep the historical fast path (no provider init).
-            from hermes_cli.config import load_config as _load_cfg
-            from utils import is_truthy_value as _is_truthy
-
-            _checkpoint_required = _is_truthy(
-                ((_load_cfg() or {}).get("compression") or {}).get(
-                    "checkpoint_required"
-                ),
-                default=False,
+            tmp_agent = await self._build_manual_compression_agent(
+                session_entry.session_id, model, runtime_kwargs
             )
-            tmp_agent = AIAgent(
-                **runtime_kwargs,
-                model=model,
-                max_iterations=4,
-                quiet_mode=True,
-                skip_memory=not _checkpoint_required,
-                enabled_toolsets=["memory"],
-                session_id=session_entry.session_id,
-                session_db=getattr(self._session_db, "_db", self._session_db),
-            )
-            _seed_hygiene_system_prompt(tmp_agent, session_row)
-            # Keep the real source platform during construction so external context engines bind
-            # correctly. If compression has to rebuild the prompt, stamp that provider-less fallback
-            # as stale for the next real gateway turn.
-            tmp_agent.platform = _GATEWAY_HYGIENE_PLATFORM
             try:
-                tmp_agent._print_fn = lambda *a, **kw: None
-                # Prevent close() from ending the newly rotated session —
-                # the gateway session entry now points at the new id and
-                # must remain open for the next user turn.
-                tmp_agent._end_session_on_close = False
-
                 # Estimate with system prompt + tool schemas included so the figure reflects real
                 # request pressure, not a transcript-only underestimate. Must be computed after
                 # tmp_agent is built so _cached_system_prompt/tools are populated.
@@ -4174,49 +4145,7 @@ class GatewaySlashCommandsMixin:
                 if partial and tail:
                     compressed = rejoin_compressed_head_and_tail(compressed, tail)
 
-                # _compress_context either rotated (new continuation id — write compressed messages
-                # into the NEW session so the original stays searchable) or compacted in place
-                # (compression.in_place: same id, transcript replaced).
-                new_session_id = tmp_agent.session_id
-                rotated = new_session_id != session_entry.session_id
-                _in_place = bool(getattr(tmp_agent, "_last_compaction_in_place", False))
-
-                # Persist the compressed transcript BEFORE repointing the live session: repoint first
-                # + failed DB write would leave the entry on an empty session while reporting success.
-                # Write first, treat failure as fatal so old history stays reachable.
-                # Only rewrite when rotation produced a NEW id: in-place compaction already archived +
-                # inserted rows and rewrite_transcript() (active_only=False) would DELETE the archived
-                # turns; an unchanged id without in-place means rotation FAILED and a rewrite would
-                # leave only the summary.
-                if rotated:
-                    if not await self.async_session_store.rewrite_transcript(
-                        new_session_id, compressed
-                    ):
-                        raise RuntimeError(
-                            f"failed to persist compressed transcript for "
-                            f"session {new_session_id}"
-                        )
-                    session_entry.session_id = new_session_id
-                    await self.async_session_store._save()
-                    await asyncio.to_thread(
-                        self._sync_telegram_topic_binding,
-                        source, session_entry, reason="compress-command",
-                    )
-                elif _in_place:
-                    # archive_and_compact() already persisted the compacted
-                    # transcript inside _compress_context — nothing to do.
-                    pass
-                else:
-                    logger.warning(
-                        "Manual /compress: session rotation did not occur "
-                        "(session_id unchanged) and in-place mode is off — "
-                        "preserving original transcript instead of overwriting "
-                        "it (#44794)."
-                    )
-                # Reset stored token count — transcript changed, old value is stale
-                await self.async_session_store.update_session(
-                    session_entry.session_key, last_prompt_tokens=0
-                )
+                await self._persist_manual_compression(tmp_agent, session_entry, source, compressed)
                 finalize_context_engine_compression_notification(
                     tmp_agent,
                     committed=True,
@@ -4231,20 +4160,6 @@ class GatewaySlashCommandsMixin:
                     new_tokens,
                     compression_state=compressor,
                 )
-                # Surface summary-generation failure on the manual path (_last_compress_aborted =
-                # no usable summary, messages unchanged). force=True above bypasses any cooldown.
-                _summary_aborted = bool(getattr(compressor, "_last_compress_aborted", False))
-                _summary_err = getattr(compressor, "_last_summary_error", None)
-                # Force-redact provider exception text at this UI boundary
-                # even when global redaction is disabled.
-                if _summary_err:
-                    from agent.redact import redact_sensitive_text
-                    _summary_err = redact_sensitive_text(_summary_err, force=True)
-                # Separately: did the user's CONFIGURED aux model fail
-                # and we recovered via main?  Surface that as an info
-                # note so they can fix their config.
-                _aux_fail_model = getattr(compressor, "_last_aux_model_failure_model", None)
-                _aux_fail_err = getattr(compressor, "_last_aux_model_failure_error", None)
             finally:
                 finalize_context_engine_compression_notification(
                     tmp_agent,
@@ -4258,31 +4173,98 @@ class GatewaySlashCommandsMixin:
                 await self._cleanup_agent_resources_off_loop(
                     tmp_agent, context="manual compression"
                 )
-            lines = [f"🗜️ {summary['headline']}"]
-            if focus_topic:
-                lines.append(t("gateway.compress.focus_line", topic=focus_topic))
-            lines.append(summary["token_line"])
-            if summary["note"]:
-                lines.append(summary["note"])
-            if _summary_aborted:
-                lines.append(
-                    t(
-                        "gateway.compress.aborted",
-                        error=(_summary_err or "unknown error"),
-                    )
-                )
-            elif _aux_fail_model:
-                lines.append(
-                    t(
-                        "gateway.compress.aux_failed",
-                        model=_aux_fail_model,
-                        error=(_aux_fail_err or "unknown error"),
-                    )
-                )
-            return "\n".join(lines)
+            return "\n".join(_manual_compression_reply_lines(summary, compressor, focus_topic))
         except Exception as e:
             logger.warning("Manual compress failed: %s", e)
             return t("gateway.compress.failed", error=e)
+
+    async def _build_manual_compression_agent(self, session_id: str, model, runtime_kwargs: dict):
+        """Build the throwaway AIAgent that performs a manual /compress rewrite of *session_id*."""
+        from run_agent import AIAgent
+        from gateway.run import _GATEWAY_HYGIENE_PLATFORM, _seed_hygiene_system_prompt
+
+        # The manual compression helper runs outside the live session's fully initialized prompt
+        # environment and _compress_context may persist its cached system prompt — restore the
+        # exact live-session prompt so provider blocks are retained.
+        session_row = None
+        get_session = getattr(self._session_db, "get_session", None)
+        if callable(get_session):
+            try:
+                session_row = await get_session(session_id)
+            except Exception as exc:
+                logger.warning(
+                    "Manual compression could not restore the system prompt "
+                    "for session %s: %s. Preserving an empty prompt so the "
+                    "live turn rebuilds it with its configured providers.",
+                    session_id,
+                    exc,
+                    exc_info=True,
+                )
+
+        # This agent performs a lossy rewrite. When compression.checkpoint_required is on, the
+        # memory provider must be loaded so _compress_context() can write the pre-compression
+        # checkpoint; otherwise keep the historical fast path (no provider init).
+        from hermes_cli.config import load_config as _load_cfg
+        from utils import is_truthy_value as _is_truthy
+
+        _checkpoint_required = _is_truthy(
+            ((_load_cfg() or {}).get("compression") or {}).get("checkpoint_required"),
+            default=False,
+        )
+        tmp_agent = AIAgent(
+            **runtime_kwargs,
+            model=model,
+            max_iterations=4,
+            quiet_mode=True,
+            skip_memory=not _checkpoint_required,
+            enabled_toolsets=["memory"],
+            session_id=session_id,
+            session_db=getattr(self._session_db, "_db", self._session_db),
+        )
+        _seed_hygiene_system_prompt(tmp_agent, session_row)
+        # Keep the real source platform during construction so external context engines bind
+        # correctly. If compression has to rebuild the prompt, stamp that provider-less fallback
+        # as stale for the next real gateway turn.
+        tmp_agent.platform = _GATEWAY_HYGIENE_PLATFORM
+        tmp_agent._print_fn = lambda *a, **kw: None
+        # Prevent close() from ending the newly rotated session — the gateway session entry now
+        # points at the new id and must remain open for the next user turn.
+        tmp_agent._end_session_on_close = False
+        return tmp_agent
+
+    async def _persist_manual_compression(self, tmp_agent, session_entry, source, compressed) -> None:
+        """Commit a manual /compress result to the session store.
+
+        _compress_context either rotated (new continuation id — write compressed messages into the
+        NEW session so the original stays searchable) or compacted in place (compression.in_place:
+        same id, transcript replaced). Persist BEFORE repointing the live session: repoint first +
+        failed DB write would leave the entry on an empty session while reporting success; a failed
+        write is fatal so old history stays reachable. Only rewrite when rotation produced a NEW id:
+        in-place compaction already archived + inserted rows and rewrite_transcript()
+        (active_only=False) would DELETE the archived turns; an unchanged id without in-place means
+        rotation FAILED and a rewrite would leave only the summary.
+        """
+        new_session_id = tmp_agent.session_id
+        if new_session_id != session_entry.session_id:
+            if not await self.async_session_store.rewrite_transcript(new_session_id, compressed):
+                raise RuntimeError(
+                    f"failed to persist compressed transcript for session {new_session_id}"
+                )
+            session_entry.session_id = new_session_id
+            await self.async_session_store._save()
+            await asyncio.to_thread(
+                self._sync_telegram_topic_binding,
+                source, session_entry, reason="compress-command",
+            )
+        elif not getattr(tmp_agent, "_last_compaction_in_place", False):
+            logger.warning(
+                "Manual /compress: session rotation did not occur "
+                "(session_id unchanged) and in-place mode is off — "
+                "preserving original transcript instead of overwriting "
+                "it (#44794)."
+            )
+        # Reset stored token count — transcript changed, old value is stale
+        await self.async_session_store.update_session(session_entry.session_key, last_prompt_tokens=0)
 
     async def _handle_topic_command(self, event: MessageEvent, args: str = "") -> str:
         """Handle /topic for Telegram DM user-managed topic sessions."""
