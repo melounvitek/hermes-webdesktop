@@ -110,11 +110,8 @@ def browser_dialog(
 
 def _browser_dialog_check() -> bool:
     """Gate: same as ``browser_cdp`` so the two tools appear/disappear together."""
-    try:
-        from tools.browser_cdp_tool import _browser_cdp_check  # type: ignore[import-not-found]
-    except Exception as exc:  # pragma: no cover — defensive
-        logger.debug("browser_dialog check: browser_cdp_tool import failed: %s", exc)
-        return False
+    from tools.browser_cdp_tool import _browser_cdp_check
+
     return _browser_cdp_check()
 
 

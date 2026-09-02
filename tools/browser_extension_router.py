@@ -183,11 +183,8 @@ def routed_browser_handler(
 
     try:
         env_session, env_principal, env_transport = _bound_identity()
-        session_id = session_id or env_session
-        principal_id = principal_id or env_principal
-        transport_family = transport_family or env_transport
     except Exception:
-        pass
+        env_session = env_principal = env_transport = None
 
     return route_browser_tool(
         action,
@@ -195,9 +192,9 @@ def routed_browser_handler(
         fallback=fallback,
         broker=get_browser_control_broker(),
         enabled=True,
-        session_id=session_id,
+        session_id=session_id or env_session,
         task_id=task_id,
-        principal_id=principal_id,
-        transport_family=transport_family,
+        principal_id=principal_id or env_principal,
+        transport_family=transport_family or env_transport,
         tool_call_id=tool_call_id,
     )

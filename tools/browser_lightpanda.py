@@ -174,6 +174,19 @@ def _tree_kill(pid: int, expected_start) -> None:
     ProcessRegistry._terminate_host_pid(pid, expected_start=expected_start)
 
 
+def _kill_server(server: LightpandaServer) -> None:
+    """Tree-kill a live server, falling back to plain terminate on any failure."""
+    try:
+        _tree_kill(server.proc.pid, server.start_time)
+    except Exception as e:
+        logger.debug("lightpanda tree-kill failed for %s: %s", server.session_name, e)
+        _terminate(server.proc)
+    try:
+        server.proc.wait(timeout=5)
+    except Exception:
+        _terminate(server.proc)
+
+
 def _write_record(server: LightpandaServer) -> None:
     record = {
         "pid": server.proc.pid,
@@ -287,21 +300,11 @@ def stop_lightpanda(session_name: str) -> None:
     """Stop the server for ``session_name`` (tree-kill) and drop its record."""
     with _servers_lock:
         server = _servers.pop(session_name, None)
-    if server is None:
-        _unlink_record(session_name)
-        return
-    if server.is_alive():
-        try:
-            _tree_kill(server.proc.pid, server.start_time)
-        except Exception as e:
-            logger.debug("lightpanda tree-kill failed for %s: %s", session_name, e)
-            _terminate(server.proc)
-        try:
-            server.proc.wait(timeout=5)
-        except Exception:
-            _terminate(server.proc)
+    if server is not None and server.is_alive():
+        _kill_server(server)
     _unlink_record(session_name)
-    logger.debug("Stopped lightpanda serve for session %s", session_name)
+    if server is not None:
+        logger.debug("Stopped lightpanda serve for session %s", session_name)
 
 
 def stop_all_lightpanda() -> None:

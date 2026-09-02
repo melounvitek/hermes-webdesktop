@@ -78,27 +78,23 @@ def _redact_cdp_output(
         return tuple(_redact_cdp_output(item) for item in value)
     if isinstance(value, dict):
         base64_flagged = value.get("base64Encoded") is True
+
+        def leaf(paths: tuple, key: str) -> bool:
+            return any(len(p) == 1 and p[0] == key for p in paths)
+
+        def descend(paths: tuple, key: str) -> tuple:
+            return tuple(p[1:] for p in paths if len(p) > 1 and p[0] == key)
+
         redacted: Dict[str, Any] = {}
         for key, item in value.items():
-            terminal_always = any(
-                len(p) == 1 and p[0] == key for p in always_paths
-            )
-            terminal_flagged = any(
-                len(p) == 1 and p[0] == key for p in flagged_paths
-            )
-            if isinstance(item, str) and (
-                terminal_always or (terminal_flagged and base64_flagged)
-            ):
+            opaque = leaf(always_paths, key) or (leaf(flagged_paths, key) and base64_flagged)
+            if isinstance(item, str) and opaque:
                 redacted[key] = item
             else:
                 redacted[key] = _redact_cdp_output(
                     item,
-                    always_paths=tuple(
-                        p[1:] for p in always_paths if len(p) > 1 and p[0] == key
-                    ),
-                    flagged_paths=tuple(
-                        p[1:] for p in flagged_paths if len(p) > 1 and p[0] == key
-                    ),
+                    always_paths=descend(always_paths, key),
+                    flagged_paths=descend(flagged_paths, key),
                 )
         return redacted
     return value
@@ -142,14 +138,29 @@ def _resolve_cdp_endpoint() -> str:
         return ""
 
 
-def _private_page_guard_error(blocked_url: str, method: str) -> str:
-    return tool_error(
-        "Blocked: page URL targets a private or internal address "
-        f"({blocked_url}). Raw CDP method {method!r} could expose private "
-        "page content or state.",
-        method=method,
-        cdp_docs=CDP_DOCS_URL,
-    )
+def _blocked(message: str, method: str) -> str:
+    return tool_error(message, method=method, cdp_docs=CDP_DOCS_URL)
+
+
+def _navigate_private_target(bt: Any, params: Dict[str, Any]) -> Optional[str]:
+    """Blocked URL literal for ``Page.navigate`` params, else ``None``."""
+    target_url = str(params.get("url") or "").strip()
+    if target_url and (bt._is_always_blocked_url(target_url) or not bt._is_safe_url(target_url)):
+        return target_url
+    return None
+
+
+# method → (probe(bt, params) -> blocked literal | None, error template)
+_METHOD_PARAM_GUARDS = {
+    "Page.navigate": (
+        _navigate_private_target,
+        "Blocked: CDP Page.navigate target is a private or internal address ({}).",
+    ),
+    "Runtime.evaluate": (
+        lambda bt, params: bt._expression_targets_private_url(str(params.get("expression") or "")),
+        "Blocked: CDP Runtime.evaluate expression targets a private or internal address ({}).",
+    ),
+}
 
 
 def _browser_cdp_private_guard(
@@ -169,34 +180,22 @@ def _browser_cdp_private_guard(
         if not bt._eval_ssrf_guard_active(task_id):  # type: ignore[attr-defined]
             return None
 
-        if method == "Page.navigate":
-            target_url = str((params or {}).get("url") or "").strip()
-            if target_url and (
-                bt._is_always_blocked_url(target_url)  # type: ignore[attr-defined]
-                or not bt._is_safe_url(target_url)  # type: ignore[attr-defined]
-            ):
-                return tool_error(
-                    "Blocked: CDP Page.navigate target is a private or "
-                    f"internal address ({target_url}).",
-                    method=method,
-                    cdp_docs=CDP_DOCS_URL,
-                )
-
-        if method == "Runtime.evaluate":
-            expression = str((params or {}).get("expression") or "")
-            blocked_literal = bt._expression_targets_private_url(expression)  # type: ignore[attr-defined]
-            if blocked_literal:
-                return tool_error(
-                    "Blocked: CDP Runtime.evaluate expression targets a "
-                    f"private or internal address ({blocked_literal}).",
-                    method=method,
-                    cdp_docs=CDP_DOCS_URL,
-                )
+        guard = _METHOD_PARAM_GUARDS.get(method)
+        if guard is not None:
+            probe, template = guard
+            literal = probe(bt, params or {})
+            if literal:
+                return _blocked(template.format(literal), method)
 
         if method not in _CDP_PRIVATE_PAGE_ALLOWED_METHODS:
             blocked_url = bt._current_page_private_url(task_id)  # type: ignore[attr-defined]
             if blocked_url:
-                return _private_page_guard_error(blocked_url, method)
+                return _blocked(
+                    "Blocked: page URL targets a private or internal address "
+                    f"({blocked_url}). Raw CDP method {method!r} could expose private "
+                    "page content or state.",
+                    method,
+                )
     except Exception as exc:  # noqa: BLE001
         # Guard probes are best-effort; never break local/custom CDP workflows.
         logger.debug("browser_cdp: private-page guard probe failed: %s", exc)
@@ -293,15 +292,12 @@ def _browser_cdp_via_supervisor(
         )
 
     snap = supervisor.snapshot()
-    top = snap.frame_tree.get("top")
-    frame_info: Optional[Dict[str, Any]] = None
-    if top and top.get("frame_id") == frame_id:
-        frame_info = top
-    else:
-        for child in snap.frame_tree.get("children", []) or []:
-            if child.get("frame_id") == frame_id:
-                frame_info = child
-                break
+    tree = snap.frame_tree
+    frame_info: Optional[Dict[str, Any]] = next(
+        (f for f in [tree.get("top"), *(tree.get("children") or [])]
+         if f and f.get("frame_id") == frame_id),
+        None,
+    )
     if frame_info is None:
         # frame_tree is capped at 30 entries — check the raw frames dict too.
         with supervisor._state_lock:  # type: ignore[attr-defined]
@@ -334,17 +330,12 @@ def _browser_cdp_via_supervisor(
             "/browser connect."
         )
 
-    async def _do_cdp():
-        return await supervisor._cdp(  # type: ignore[attr-defined]
-            method,
-            params or {},
-            session_id=child_sid,
-            timeout=timeout,
-        )
-
     try:
         from agent.async_utils import safe_schedule_threadsafe
-        fut = safe_schedule_threadsafe(_do_cdp(), loop)
+        fut = safe_schedule_threadsafe(
+            supervisor._cdp(method, params or {}, session_id=child_sid, timeout=timeout),  # type: ignore[attr-defined]
+            loop,
+        )
         if fut is None:
             return tool_error(
                 "CDP call via supervisor failed: loop unavailable",

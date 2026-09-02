@@ -1,10 +1,8 @@
 """Hermes-managed Camofox state helpers.
 
-Provides profile-scoped identity and state directory paths for Camofox
-persistent browser profiles.  When managed persistence is enabled, Hermes
-sends a deterministic userId derived from the active profile so that
-Camofox can map it to the same persistent browser profile directory
-across restarts.
+With managed persistence enabled, Hermes sends a deterministic userId derived
+from the active profile so Camofox maps it to the same persistent browser
+profile directory across restarts.
 """
 
 from __future__ import annotations
@@ -27,21 +25,13 @@ def get_camofox_state_dir() -> Path:
 def get_camofox_identity(task_id: Optional[str] = None) -> Dict[str, str]:
     """Return the stable Hermes-managed Camofox identity for this profile.
 
-    The user identity is profile-scoped (same Hermes profile = same userId).
-    The session key is scoped to the logical browser task so newly created
-    tabs within the same profile reuse the same identity contract.
+    The user identity is profile-scoped (same Hermes profile = same userId); the
+    session key is scoped to the logical browser task so new tabs within the
+    same profile reuse the same identity contract.
     """
     scope_root = str(get_camofox_state_dir())
-    logical_scope = task_id or "default"
-    user_digest = uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"camofox-user:{scope_root}",
-    ).hex[:10]
+    user_digest = uuid.uuid5(uuid.NAMESPACE_URL, f"camofox-user:{scope_root}").hex[:10]
     session_digest = uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"camofox-session:{scope_root}:{logical_scope}",
+        uuid.NAMESPACE_URL, f"camofox-session:{scope_root}:{task_id or 'default'}"
     ).hex[:16]
-    return {
-        "user_id": f"hermes_{user_digest}",
-        "session_key": f"task_{session_digest}",
-    }
+    return {"user_id": f"hermes_{user_digest}", "session_key": f"task_{session_digest}"}
