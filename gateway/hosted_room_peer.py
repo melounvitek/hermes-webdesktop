@@ -23,10 +23,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping
 
-from gateway.hosted_room_execution_policy import (
-    RoomExecutionPolicy,
-    execution_policy_mapping,
-)
+from gateway.hosted_room_execution_policy import RoomExecutionPolicy, execution_policy_mapping
+from gateway.hosted_rooms_common import exact_fields, identifier, positive_int
 
 
 # v2 adds authority/member lineage to scoped grants and is deliberately not
@@ -53,10 +51,20 @@ class HostedRoomGrantError(HostedRoomPeerError):
 _ROOM_GRANT_SECRET_FILE = ".room-link-grant-secret"
 
 
+def _fsync_dir(directory: Path) -> None:
+    try:
+        parent_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except OSError:
+        pass
+
+
 @lru_cache(maxsize=32)
 def _gateway_room_grant_secret_for_home(home_value: str) -> bytes:
     """Load one restart-scoped grant secret for an exact installation root."""
-
     home = Path(home_value)
     home.mkdir(parents=True, exist_ok=True)
     path = home / _ROOM_GRANT_SECRET_FILE
@@ -65,18 +73,17 @@ def _gateway_room_grant_secret_for_home(home_value: str) -> bytes:
         data = path.read_bytes()
         if len(data) != 32:
             raise HostedRoomGrantError("gateway RoomLink secret is invalid")
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if mode & 0o077:
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
             path.chmod(0o600)
         return data
 
     try:
         material = _read()
     except FileNotFoundError:
+        # Atomic create: O_EXCL temp file, hard-link into place (loser re-reads
+        # the winner's secret), fsync the directory, always drop the temp name.
         material = os.urandom(32)
-        temporary = home / (
-            f".{_ROOM_GRANT_SECRET_FILE}.{os.getpid()}.{os.urandom(8).hex()}"
-        )
+        temporary = home / f".{_ROOM_GRANT_SECRET_FILE}.{os.getpid()}.{os.urandom(8).hex()}"
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(fd, "wb", closefd=True) as stream:
@@ -88,21 +95,10 @@ def _gateway_room_grant_secret_for_home(home_value: str) -> bytes:
             except FileExistsError:
                 material = _read()
             else:
-                try:
-                    parent_fd = os.open(home, os.O_RDONLY)
-                    try:
-                        os.fsync(parent_fd)
-                    finally:
-                        os.close(parent_fd)
-                except OSError:
-                    pass
+                _fsync_dir(home)
         finally:
             temporary.unlink(missing_ok=True)
-    return hmac.new(
-        material,
-        b"hermes-hosted-room-installation-grant-v1",
-        hashlib.sha256,
-    ).digest()
+    return hmac.new(material, b"hermes-hosted-room-installation-grant-v1", hashlib.sha256).digest()
 
 
 def gateway_room_grant_secret(root: Path | str | None = None) -> bytes:
@@ -113,15 +109,13 @@ def gateway_room_grant_secret(root: Path | str | None = None) -> bytes:
     installation root, is not exposed by configuration or capability RPCs, and
     is shared only by the gateway processes that serve this installation.
     """
-
     if root is None:
         from hermes_constants import get_hermes_home
 
         # Profile routing uses a context-local HERMES_HOME override. The process
         # environment retains the installation root and is the authority here.
         root = os.environ.get("HERMES_HOME") or get_hermes_home()
-    home = Path(root).expanduser().resolve()
-    return _gateway_room_grant_secret_for_home(str(home))
+    return _gateway_room_grant_secret_for_home(str(Path(root).expanduser().resolve()))
 
 
 def derive_room_grant_secret(api_key: str) -> bytes:
@@ -132,26 +126,18 @@ def derive_room_grant_secret(api_key: str) -> bytes:
     """
     if not isinstance(api_key, str) or len(api_key) < 8:
         raise HostedRoomGrantError("room grants require a strong gateway API key")
-    return hmac.new(
-        api_key.encode("utf-8"),
-        b"hermes-hosted-room-grant-v1",
-        hashlib.sha256,
-    ).digest()
+    return hmac.new(api_key.encode("utf-8"), b"hermes-hosted-room-grant-v1", hashlib.sha256).digest()
 
 
 def _identifier(value: Any, *, field: str) -> str:
-    if not isinstance(value, str):
-        raise HostedRoomPeerError(f"{field} must be a string")
-    normalized = value.strip()
-    if not _IDENTIFIER_RE.fullmatch(normalized):
-        raise HostedRoomPeerError(f"{field} is invalid")
-    return normalized
+    return identifier(
+        value, label=field, error=HostedRoomPeerError, max_chars=256, pattern=_IDENTIFIER_RE,
+        invalid=f"{field} is invalid",
+    )
 
 
 def _positive_int(value: Any, *, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise HostedRoomPeerError(f"{field} must be a positive integer")
-    return value
+    return positive_int(value, error=HostedRoomPeerError, message=f"{field} must be a positive integer")
 
 
 def _digest(value: Any, *, field: str) -> str:
@@ -160,34 +146,15 @@ def _digest(value: Any, *, field: str) -> str:
     return value
 
 
-def _exact_fields(
-    value: Mapping[str, Any],
-    *,
-    required: set[str],
-    optional: set[str] | None = None,
-    label: str,
-) -> None:
-    optional = optional or set()
-    fields = set(value)
-    missing = required - fields
-    unknown = fields - required - optional
-    if missing:
-        raise HostedRoomPeerError(
-            f"{label} missing fields: {', '.join(sorted(missing))}"
-        )
-    if unknown:
-        raise HostedRoomPeerError(
-            f"{label} unknown fields: {', '.join(sorted(unknown))}"
-        )
+def _exact_fields(value: Mapping[str, Any], *, required: set[str], optional: set[str] = frozenset(), label: str) -> None:
+    exact_fields(
+        value, label=label, required=required, optional=optional, error=HostedRoomPeerError,
+        missing_fmt="{label} missing fields: {fields}", unknown_fmt="{label} unknown fields: {fields}",
+    )
 
 
 def _canonical_json(value: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("ascii")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
 def _b64encode(value: bytes) -> str:
@@ -195,11 +162,45 @@ def _b64encode(value: bytes) -> str:
 
 
 def _b64decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
     try:
-        return base64.urlsafe_b64decode(value + padding)
+        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
     except Exception as exc:
         raise HostedRoomGrantError("room grant encoding is invalid") from exc
+
+
+def _split_token(token: str) -> tuple[str, str]:
+    encoded_token, separator, signature_token = token.partition(".")
+    if not separator:
+        raise HostedRoomGrantError("room grant is invalid")
+    return encoded_token, signature_token
+
+
+def _parse_link_modes(links_raw: Any) -> tuple[LinkMode, ...]:
+    if not isinstance(links_raw, list) or not links_raw:
+        raise HostedRoomPeerError("link_modes must be a non-empty list")
+    if any(item not in _LINK_MODES for item in links_raw):
+        raise HostedRoomPeerError("link_modes contains an unsupported mode")
+    return tuple(dict.fromkeys(links_raw))
+
+
+def _parse_endpoint(endpoint: Any) -> tuple[str | None, str | None, TransportSecurity | None]:
+    """Return ``(url, reason, transport_security)`` for an advertised endpoint capability."""
+    if not isinstance(endpoint, Mapping) or not isinstance(endpoint.get("available"), bool):
+        raise HostedRoomPeerError("endpoint capability is invalid")
+    if not endpoint["available"]:
+        _exact_fields(endpoint, required={"available", "reason"}, label="endpoint capability")
+        return None, _identifier(endpoint["reason"], field="endpoint.reason"), None
+    _exact_fields(endpoint, required={"available", "url", "transport_security"}, label="endpoint capability")
+    url, transport_security = validate_room_link_url(endpoint["url"])
+    if endpoint["transport_security"] != transport_security:
+        raise HostedRoomPeerError("endpoint transport_security does not match its URL")
+    return url, None, transport_security
+
+
+_CATALOG_FIELDS = {
+    "installation_id", "protocol_versions", "link_modes", "persistent_process", "text",
+    "attachments", "execution_policy", "catalog_digest",
+}
 
 
 @dataclass(frozen=True)
@@ -220,85 +221,25 @@ class GatewayRoomCatalog:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "GatewayRoomCatalog":
-        _exact_fields(
-            value,
-            required={
-                "installation_id",
-                "protocol_versions",
-                "link_modes",
-                "persistent_process",
-                "text",
-                "attachments",
-                "execution_policy",
-                "catalog_digest",
-            },
-            optional={"endpoint"},
-            label="capability catalog",
-        )
+        _exact_fields(value, required=_CATALOG_FIELDS, optional={"endpoint"}, label="capability catalog")
         installation_id = _identifier(value["installation_id"], field="installation_id")
         versions_raw = value["protocol_versions"]
         if not isinstance(versions_raw, list) or not versions_raw:
             raise HostedRoomPeerError("protocol_versions must be a non-empty list")
-        versions = tuple(
-            sorted({
-                _positive_int(item, field="protocol_version") for item in versions_raw
-            })
-        )
-        links_raw = value["link_modes"]
-        if not isinstance(links_raw, list) or not links_raw:
-            raise HostedRoomPeerError("link_modes must be a non-empty list")
-        links: list[LinkMode] = []
-        for item in links_raw:
-            if item not in _LINK_MODES:
-                raise HostedRoomPeerError("link_modes contains an unsupported mode")
-            if item not in links:
-                links.append(item)
+        versions = tuple(sorted({_positive_int(item, field="protocol_version") for item in versions_raw}))
+        links = _parse_link_modes(value["link_modes"])
         for field in ("persistent_process", "text", "attachments"):
             if not isinstance(value[field], bool):
                 raise HostedRoomPeerError(f"{field} must be a boolean")
         policy = RoomExecutionPolicy.from_mapping(value["execution_policy"])
-
         endpoint_url = endpoint_reason = transport_security = None
         if "endpoint" in value:
-            endpoint = value["endpoint"]
-            if not isinstance(endpoint, Mapping) or not isinstance(
-                endpoint.get("available"), bool
-            ):
-                raise HostedRoomPeerError("endpoint capability is invalid")
-            if endpoint["available"]:
-                _exact_fields(
-                    endpoint,
-                    required={"available", "url", "transport_security"},
-                    label="endpoint capability",
-                )
-                endpoint_url, transport_security = validate_room_link_url(
-                    endpoint["url"]
-                )
-                if endpoint["transport_security"] != transport_security:
-                    raise HostedRoomPeerError(
-                        "endpoint transport_security does not match its URL"
-                    )
-            else:
-                _exact_fields(
-                    endpoint,
-                    required={"available", "reason"},
-                    label="endpoint capability",
-                )
-                endpoint_reason = _identifier(
-                    endpoint["reason"], field="endpoint.reason"
-                )
+            endpoint_url, endpoint_reason, transport_security = _parse_endpoint(value["endpoint"])
         catalog = cls(
-            installation_id=installation_id,
-            protocol_versions=versions,
-            link_modes=tuple(links),
-            persistent_process=value["persistent_process"],
-            text=value["text"],
-            attachments=value["attachments"],
-            execution_policy=policy,
-            catalog_digest=_digest(value["catalog_digest"], field="catalog_digest"),
-            endpoint_url=endpoint_url,
-            endpoint_reason=endpoint_reason,
-            transport_security=transport_security,
+            installation_id=installation_id, protocol_versions=versions, link_modes=links,
+            persistent_process=value["persistent_process"], text=value["text"], attachments=value["attachments"],
+            execution_policy=policy, catalog_digest=_digest(value["catalog_digest"], field="catalog_digest"),
+            endpoint_url=endpoint_url, endpoint_reason=endpoint_reason, transport_security=transport_security,
         )
         unsigned = catalog.as_mapping()
         del unsigned["catalog_digest"]
@@ -310,14 +251,10 @@ class GatewayRoomCatalog:
     def as_mapping(self) -> dict[str, Any]:
         """Canonical catalog mapping; ``endpoint`` appears only when advertised."""
         value = {
-            "installation_id": self.installation_id,
-            "protocol_versions": list(self.protocol_versions),
-            "link_modes": list(self.link_modes),
-            "persistent_process": self.persistent_process,
-            "text": self.text,
-            "attachments": self.attachments,
-            "execution_policy": self.execution_policy.as_mapping(),
-            "catalog_digest": self.catalog_digest,
+            "installation_id": self.installation_id, "protocol_versions": list(self.protocol_versions),
+            "link_modes": list(self.link_modes), "persistent_process": self.persistent_process,
+            "text": self.text, "attachments": self.attachments,
+            "execution_policy": self.execution_policy.as_mapping(), "catalog_digest": self.catalog_digest,
         }
         if self.endpoint_url is not None or self.endpoint_reason is not None:
             value["endpoint"] = self.endpoint_mapping()
@@ -326,55 +263,32 @@ class GatewayRoomCatalog:
     def endpoint_mapping(self) -> dict[str, Any]:
         """Return the normalized self-advertised endpoint capability."""
         if self.endpoint_url is not None:
-            return {
-                "available": True,
-                "url": self.endpoint_url,
-                "transport_security": self.transport_security,
-            }
-        return {
-            "available": False,
-            "reason": self.endpoint_reason or "not_configured",
-        }
+            return {"available": True, "url": self.endpoint_url, "transport_security": self.transport_security}
+        return {"available": False, "reason": self.endpoint_reason or "not_configured"}
 
 
 def catalog_mapping(
-    *,
-    installation_id: str,
-    protocol_versions: Iterable[int] = (PROTOCOL_VERSION,),
-    link_modes: Iterable[LinkMode] = ("direct", "pull"),
-    persistent_process: bool,
-    text: bool = True,
-    attachments: bool = False,
-    endpoint: Mapping[str, Any] | None = None,
-    target_profile: str | None = None,
+    *, installation_id: str, protocol_versions: Iterable[int] = (PROTOCOL_VERSION,),
+    link_modes: Iterable[LinkMode] = ("direct", "pull"), persistent_process: bool, text: bool = True,
+    attachments: bool = False, endpoint: Mapping[str, Any] | None = None, target_profile: str | None = None,
     execution_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a canonical catalog mapping with its digest."""
     # A Desktop-managed gateway exits with the app: the caller's flag is only an
     # upper bound, so call sites that still pass ``True`` stay honest.
     persistent_process = bool(persistent_process and os.getenv("HERMES_DESKTOP") != "1")
+    profile = str(target_profile or "").strip() or (os.getenv("HERMES_PROFILE") or "default").strip() or "default"
     checked_policy = RoomExecutionPolicy.from_mapping(
-        execution_policy
-        or execution_policy_mapping(
-            target_profile=(
-                str(target_profile or "").strip()
-                or (os.getenv("HERMES_PROFILE") or "default").strip()
-                or "default"
-            )
-        )
+        execution_policy or execution_policy_mapping(target_profile=profile)
     )
     # A RoomLink run is initiated by another installation. Process-wide YOLO
     # mode bypasses the scoped approval ContextVar, so rewriting the advertised
     # policy cannot make it safe: refuse until manual or smart approvals are on.
     if checked_policy.approval_mode == "off":
-        raise HostedRoomPeerError(
-            "remote room execution requires manual or smart approvals"
-        )
+        raise HostedRoomPeerError("remote room execution requires manual or smart approvals")
     value = {
         "installation_id": _identifier(installation_id, field="installation_id"),
-        "protocol_versions": sorted({
-            _positive_int(item, field="protocol_version") for item in protocol_versions
-        }),
+        "protocol_versions": sorted({_positive_int(item, field="protocol_version") for item in protocol_versions}),
         # Direct HTTPS/loopback is the only RoomLink transport implemented by
         # this backend slice. Do not advertise pull/relay placeholders.
         "link_modes": [mode for mode in dict.fromkeys(link_modes) if mode == "direct"],
@@ -382,34 +296,22 @@ def catalog_mapping(
         "text": bool(text),
         "attachments": bool(attachments),
         "execution_policy": checked_policy.as_mapping(),
+        "endpoint": dict(local_room_link_endpoint() if endpoint is None else endpoint),
     }
-    value["endpoint"] = dict(
-        local_room_link_endpoint() if endpoint is None else endpoint
-    )
     value["catalog_digest"] = hashlib.sha256(_canonical_json(value)).hexdigest()
     GatewayRoomCatalog.from_mapping(value)
     return value
 
 
 def local_catalog_mapping(
-    *,
-    installation_id: str,
-    protocol_versions: Iterable[int] = (PROTOCOL_VERSION,),
-    link_modes: Iterable[LinkMode] = ("direct", "pull"),
-    text: bool = True,
-    attachments: bool = False,
-    target_profile: str | None = None,
-    execution_policy: Mapping[str, Any] | None = None,
+    *, installation_id: str, protocol_versions: Iterable[int] = (PROTOCOL_VERSION,),
+    link_modes: Iterable[LinkMode] = ("direct", "pull"), text: bool = True, attachments: bool = False,
+    target_profile: str | None = None, execution_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the one truthful catalog advertised by this local process."""
     return catalog_mapping(
-        installation_id=installation_id,
-        protocol_versions=protocol_versions,
-        link_modes=link_modes,
-        persistent_process=True,
-        text=text,
-        attachments=attachments,
-        target_profile=target_profile,
+        installation_id=installation_id, protocol_versions=protocol_versions, link_modes=link_modes,
+        persistent_process=True, text=text, attachments=attachments, target_profile=target_profile,
         execution_policy=execution_policy,
     )
 
@@ -423,22 +325,14 @@ def local_room_link_endpoint(value: Any | None = None) -> dict[str, Any]:
         url, transport_security = validate_room_link_url(configured)
     except HostedRoomPeerError:
         return {"available": False, "reason": "invalid_configuration"}
-    return {
-        "available": True,
-        "url": url,
-        "transport_security": transport_security,
-    }
+    return {"available": True, "url": url, "transport_security": transport_security}
 
 
 @lru_cache(maxsize=16)
 def _room_link_url_from_config(home: str) -> str | None:
     """Read the restart-scoped user setting without polling config on probes."""
     from gateway.config import load_gateway_config
-    from hermes_constants import (
-        get_hermes_home,
-        reset_hermes_home_override,
-        set_hermes_home_override,
-    )
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
 
     if str(get_hermes_home()) == home:
         value = load_gateway_config().room_link_url
@@ -462,14 +356,11 @@ def _configured_room_link_url() -> str | None:
     configured = _room_link_url_from_config(str(home))
     if configured:
         return configured
-
     # RoomLink is a gateway reachability property, not a Bot personality
     # setting: named profiles may override it but otherwise inherit the process
     # gateway's root endpoint, so adding a Bot needs no repeated network config.
     root = get_default_hermes_root()
-    if root != home:
-        return _room_link_url_from_config(str(root))
-    return None
+    return _room_link_url_from_config(str(root)) if root != home else None
 
 
 def validate_room_link_url(value: Any) -> tuple[str, TransportSecurity]:
@@ -508,23 +399,13 @@ def validate_room_link_url(value: Any) -> tuple[str, TransportSecurity]:
 
 # Validator per dispatch field, in validation order. ``prompt`` and
 # ``prompt_digest`` are checked together against each other in from_mapping.
-_DISPATCH_FIELDS: dict[str, Callable[..., Any]] = {
-    "protocol_version": _positive_int,
-    "room_id": _identifier,
-    "home_install_id": _identifier,
-    "authority_gateway_id": _identifier,
-    "authority_epoch": _positive_int,
-    "member_id": _identifier,
-    "target_install_id": _identifier,
-    "target_profile": _identifier,
-    "task_id": _identifier,
-    "execution_generation": _positive_int,
-    "source_event_seq": _positive_int,
-    "cancellation_scope_id": _identifier,
-    "capability_digest": _digest,
-    "execution_policy_digest": _digest,
-    "trace_id": _identifier,
-}
+_DISPATCH_FIELDS: dict[str, Callable[..., Any]] = dict(
+    protocol_version=_positive_int, room_id=_identifier, home_install_id=_identifier,
+    authority_gateway_id=_identifier, authority_epoch=_positive_int, member_id=_identifier,
+    target_install_id=_identifier, target_profile=_identifier, task_id=_identifier,
+    execution_generation=_positive_int, source_event_seq=_positive_int, cancellation_scope_id=_identifier,
+    capability_digest=_digest, execution_policy_digest=_digest, trace_id=_identifier,
+)
 
 
 @dataclass(frozen=True)
@@ -555,11 +436,7 @@ class HostedMemberDispatch:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "HostedMemberDispatch":
-        _exact_fields(
-            value,
-            required=set(_DISPATCH_FIELDS) | {"prompt", "prompt_digest"},
-            label="dispatch",
-        )
+        _exact_fields(value, required=set(_DISPATCH_FIELDS) | {"prompt", "prompt_digest"}, label="dispatch")
         prompt = value["prompt"]
         if not isinstance(prompt, str) or not prompt.strip():
             raise HostedRoomPeerError("prompt must be a non-empty string")
@@ -570,51 +447,32 @@ class HostedMemberDispatch:
         if not hmac.compare_digest(expected_prompt_digest, prompt_digest):
             raise HostedRoomPeerError("prompt_digest does not match prompt")
         return cls(
-            prompt=prompt,
-            prompt_digest=prompt_digest,
-            **{
-                name: check(value[name], field=name)
-                for name, check in _DISPATCH_FIELDS.items()
-            },
+            prompt=prompt, prompt_digest=prompt_digest,
+            **{name: check(value[name], field=name) for name, check in _DISPATCH_FIELDS.items()},
         )
 
 
+# Grant scope fields, in issue-time validation order; each is validated with
+# the same checker as the matching dispatch field (``grant_id`` is an identifier).
+_GRANT_SCOPE = (
+    "grant_id", "room_id", "home_install_id", "authority_gateway_id", "authority_epoch",
+    "member_id", "target_install_id", "target_profile",
+)
 _GRANT_FIELDS = {
-    "version",
-    "grant_id",
-    "room_id",
-    "home_install_id",
-    "authority_gateway_id",
-    "authority_epoch",
-    "member_id",
-    "target_install_id",
-    "target_profile",
-    "execution_policy_digest",
-    "permissions",
-    "issued_at",
-    "expires_at",
+    "version", *_GRANT_SCOPE, "execution_policy_digest", "permissions", "issued_at", "expires_at",
 }
 _GRANT_REFRESH_FIELDS = _GRANT_FIELDS | {"status_expires_at"}
+_GRANT_PERMISSIONS = {"approve", "dispatch", "status", "stop"}
 MAX_DISPATCH_GRANT_TTL_SECONDS = 24 * 60 * 60
 MAX_STATUS_GRANT_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
 def issue_room_grant(
-    secret: bytes,
-    *,
-    grant_id: str,
-    room_id: str,
-    home_install_id: str,
-    authority_gateway_id: str,
-    authority_epoch: int,
-    member_id: str,
-    target_install_id: str,
-    target_profile: str,
+    secret: bytes, *, grant_id: str, room_id: str, home_install_id: str, authority_gateway_id: str,
+    authority_epoch: int, member_id: str, target_install_id: str, target_profile: str,
     execution_policy_digest: str | None = None,
     permissions: Iterable[str] = ("approve", "dispatch", "status", "stop"),
-    issued_at: float | None = None,
-    ttl_seconds: float = 3600,
-    status_ttl_seconds: float | None = None,
+    issued_at: float | None = None, ttl_seconds: float = 3600, status_ttl_seconds: float | None = None,
     status_expires_at: float | None = None,
 ) -> str:
     """Issue a target-verifiable bearer grant scoped to one room member."""
@@ -627,44 +485,28 @@ def issue_room_grant(
         else float(status_expires_at)
     )
     if (
-        not math.isfinite(now)
-        or ttl_seconds <= 0
-        or ttl_seconds > MAX_DISPATCH_GRANT_TTL_SECONDS
-        or not math.isfinite(bounded_status_expiry)
-        or bounded_status_expiry < now + float(ttl_seconds)
+        not math.isfinite(now) or ttl_seconds <= 0 or ttl_seconds > MAX_DISPATCH_GRANT_TTL_SECONDS
+        or not math.isfinite(bounded_status_expiry) or bounded_status_expiry < now + float(ttl_seconds)
         or bounded_status_expiry > now + MAX_STATUS_GRANT_TTL_SECONDS
     ):
         raise HostedRoomGrantError("room grant lifetime is invalid")
     allowed = tuple(sorted(set(permissions)))
-    if not allowed or not set(allowed) <= {
-        "approve",
-        "dispatch",
-        "status",
-        "stop",
-    }:
+    if not allowed or not set(allowed) <= _GRANT_PERMISSIONS:
         raise HostedRoomGrantError("room grant permissions are invalid")
+    scope = {
+        "grant_id": grant_id, "room_id": room_id, "home_install_id": home_install_id,
+        "authority_gateway_id": authority_gateway_id, "authority_epoch": authority_epoch,
+        "member_id": member_id, "target_install_id": target_install_id, "target_profile": target_profile,
+    }
     payload = {
         "version": PROTOCOL_VERSION,
-        "grant_id": _identifier(grant_id, field="grant_id"),
-        "room_id": _identifier(room_id, field="room_id"),
-        "home_install_id": _identifier(home_install_id, field="home_install_id"),
-        "authority_gateway_id": _identifier(
-            authority_gateway_id, field="authority_gateway_id"
-        ),
-        "authority_epoch": _positive_int(
-            authority_epoch, field="authority_epoch"
-        ),
-        "member_id": _identifier(member_id, field="member_id"),
-        "target_install_id": _identifier(target_install_id, field="target_install_id"),
-        "target_profile": _identifier(target_profile, field="target_profile"),
+        **{name: _DISPATCH_FIELDS.get(name, _identifier)(scope[name], field=name) for name in _GRANT_SCOPE},
         "execution_policy_digest": _digest(
             execution_policy_digest
             or execution_policy_mapping(target_profile=target_profile)["policy_digest"],
             field="execution_policy_digest",
         ),
-        "permissions": list(allowed),
-        "issued_at": now,
-        "expires_at": now + float(ttl_seconds),
+        "permissions": list(allowed), "issued_at": now, "expires_at": now + float(ttl_seconds),
         "status_expires_at": bounded_status_expiry,
     }
     encoded = _canonical_json(payload)
@@ -676,50 +518,24 @@ def issue_room_grant(
 
 
 def verify_room_grant(
-    secret: bytes,
-    token: str,
-    dispatch: HostedMemberDispatch,
-    *,
-    permission: str = "dispatch",
+    secret: bytes, token: str, dispatch: HostedMemberDispatch, *, permission: str = "dispatch",
     now: float | None = None,
 ) -> dict[str, Any]:
     """Verify one room grant against exact recipient dispatch coordinates."""
-    payload = decode_room_grant(
-        secret,
-        token,
-        permission=permission,
-        now=now,
-    )
+    payload = decode_room_grant(secret, token, permission=permission, now=now)
     if payload["version"] != dispatch.protocol_version:
         raise HostedRoomGrantError("room grant protocol does not match dispatch")
-    expected = {
-        "room_id": dispatch.room_id,
-        "home_install_id": dispatch.home_install_id,
-        "authority_gateway_id": dispatch.authority_gateway_id,
-        "authority_epoch": dispatch.authority_epoch,
-        "member_id": dispatch.member_id,
-        "target_install_id": dispatch.target_install_id,
-        "target_profile": dispatch.target_profile,
-        "execution_policy_digest": dispatch.execution_policy_digest,
-    }
-    if any(payload.get(field) != value for field, value in expected.items()):
+    scope = (*_GRANT_SCOPE[1:], "execution_policy_digest")
+    if any(payload.get(field) != getattr(dispatch, field) for field in scope):
         raise HostedRoomGrantError("room grant scope does not match dispatch")
     return payload
 
 
-def decode_room_grant(
-    secret: bytes,
-    token: str,
-    *,
-    permission: str,
-    now: float | None = None,
-) -> dict[str, Any]:
+def decode_room_grant(secret: bytes, token: str, *, permission: str, now: float | None = None) -> dict[str, Any]:
     """Verify grant signature, lifetime and operation without a dispatch."""
     if not isinstance(token, str) or len(token.encode("utf-8")) > MAX_TOKEN_BYTES:
         raise HostedRoomGrantError("room grant is invalid")
-    encoded_token, separator, signature_token = token.partition(".")
-    if not separator:
-        raise HostedRoomGrantError("room grant is invalid")
+    encoded_token, signature_token = _split_token(token)
     encoded = _b64decode(encoded_token)
     supplied_signature = _b64decode(signature_token)
     expected_signature = hmac.new(secret, encoded, hashlib.sha256).digest()
@@ -730,8 +546,7 @@ def decode_room_grant(
     except Exception as exc:
         raise HostedRoomGrantError("room grant payload is invalid") from exc
     if not isinstance(payload, dict) or frozenset(payload) not in {
-        frozenset(_GRANT_FIELDS),
-        frozenset(_GRANT_REFRESH_FIELDS),
+        frozenset(_GRANT_FIELDS), frozenset(_GRANT_REFRESH_FIELDS),
     }:
         raise HostedRoomGrantError("room grant fields are invalid")
     checked_now = time.time() if now is None else float(now)
@@ -744,17 +559,11 @@ def decode_room_grant(
     except (TypeError, ValueError) as exc:
         raise HostedRoomGrantError("room grant lifetime is invalid") from exc
     if not (
-        math.isfinite(issued_at)
-        and math.isfinite(expires_at)
-        and math.isfinite(status_expires_at)
+        all(map(math.isfinite, (issued_at, expires_at, status_expires_at)))
         and issued_at < expires_at <= status_expires_at
     ):
         raise HostedRoomGrantError("room grant lifetime is invalid")
-    operation_expires_at = (
-        status_expires_at
-        if permission in {"approve", "status", "stop"}
-        else expires_at
-    )
+    operation_expires_at = status_expires_at if permission in {"approve", "status", "stop"} else expires_at
     if checked_now < issued_at - 30 or checked_now >= operation_expires_at:
         raise HostedRoomGrantError("room grant is expired or not active")
     permissions = payload.get("permissions")
@@ -763,22 +572,14 @@ def decode_room_grant(
     return payload
 
 
-def room_grant_needs_dispatch_refresh(
-    token: str,
-    *,
-    now: float | None = None,
-    leeway_seconds: float = 5 * 60,
-) -> bool:
+def room_grant_needs_dispatch_refresh(token: str, *, now: float | None = None, leeway_seconds: float = 5 * 60) -> bool:
     """Read only grant timing to schedule target-validated refresh.
 
     This deliberately does not establish trust; the target validates the
     signature and immutable scope before issuing a replacement.
     """
     try:
-        encoded_token, separator, _signature = token.partition(".")
-        if not separator:
-            return True
-        payload = json.loads(_b64decode(encoded_token).decode("ascii"))
+        payload = json.loads(_b64decode(_split_token(token)[0]).decode("ascii"))
         expires_at = float(payload["expires_at"])
         checked_now = time.time() if now is None else float(now)
         return checked_now + max(0.0, float(leeway_seconds)) >= expires_at
