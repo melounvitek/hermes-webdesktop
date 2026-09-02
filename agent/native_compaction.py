@@ -222,9 +222,8 @@ def _extract_item_text(item: Any) -> Optional[str]:
                 if isinstance(part_text, str) and part_text.strip():
                     parts.append(part_text.strip())
                 part_meta = part.get("metadata")
-                if isinstance(part_meta, dict) and isinstance(part_meta.get("text"), str):
-                    if part_meta["text"].strip():
-                        parts.append(part_meta["text"].strip())
+                if isinstance(part_meta, dict) and isinstance(part_meta.get("text"), str) and part_meta["text"].strip():
+                    parts.append(part_meta["text"].strip())
         text = " ".join(parts)
         return text if text.strip() else None
 
@@ -325,15 +324,17 @@ def prune_pre_checkpoint_items(
     summary_remaining = max(0, int(retained_summary_token_budget))
     seen_summary_texts: set = set()
 
-    def _try_retain_summary(text: Optional[str]) -> Optional[Dict[str, Any]]:
-        """Budget/dedup check for a summary; return its cost or None."""
+    def _retain_summary(text: Optional[str], retained_item: Dict[str, Any]) -> None:
+        """Retain a summary whole when it fits the budget and is not a duplicate."""
+        nonlocal summary_remaining
         if not text or summary_remaining <= 0 or text in seen_summary_texts:
-            return None
+            return
         cost = _approx_tokens(text)
         if cost > summary_remaining:
-            return None  # never slice a summary's structural framing
+            return  # never slice a summary's structural framing
         seen_summary_texts.add(text)
-        return {"cost": cost}
+        retained_reversed.append(retained_item)
+        summary_remaining -= cost
 
     for item, source in zip(reversed(pre), reversed(pre_sources)):
         if not isinstance(item, dict):
@@ -343,15 +344,11 @@ def prune_pre_checkpoint_items(
         # when the source itself is a provenance-tagged summary carrier.
         if enable_summary_retention and isinstance(source, dict) and _is_summary_item(source):
             text = flatten_message_text(source.get("content"))
-            text = text if text.strip() else None
-            result = _try_retain_summary(text)
-            if result:
-                _src_role = source.get("role")
-                retained_reversed.append({
-                    "role": _src_role if _src_role in ("user", "assistant") else "assistant",
-                    "content": text,
-                })
-                summary_remaining -= result["cost"]
+            _src_role = source.get("role")
+            _retain_summary(text if text.strip() else None, {
+                "role": _src_role if _src_role in ("user", "assistant") else "assistant",
+                "content": text,
+            })
             continue
 
         # Typed non-message items never carry role=user or a summary flag.
@@ -372,10 +369,7 @@ def prune_pre_checkpoint_items(
             text = ""
 
         if is_summary:
-            result = _try_retain_summary(text)
-            if result:
-                retained_reversed.append(item)
-                summary_remaining -= result["cost"]
+            _retain_summary(text, item)
         elif is_user:
             if user_remaining <= 0:
                 continue
@@ -394,12 +388,8 @@ def prune_pre_checkpoint_items(
 
     logger.debug(
         "Pruned pre-checkpoint items: %d input -> %d retained (user_rem=%d, summary_rem=%d)",
-        len(items),
-        len(result),
-        user_remaining,
-        summary_remaining,
+        len(items), len(result), user_remaining, summary_remaining,
     )
-
     return result
 
 

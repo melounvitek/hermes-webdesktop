@@ -29,15 +29,15 @@ _CATEGORY_COLORS = {
 
 
 def _chars_to_tokens(text: str) -> int:
-    if not text:
-        return 0
-    return (len(text) + 3) // 4
+    return (len(text) + 3) // 4 if text else 0
 
 
 def _json_tokens(value: Any) -> int:
-    if not value:
-        return 0
-    return _chars_to_tokens(json.dumps(value, ensure_ascii=False))
+    return _chars_to_tokens(json.dumps(value, ensure_ascii=False)) if value else 0
+
+
+def _bytes_to_tokens(size: Optional[int]) -> Optional[int]:
+    return None if size is None else (int(size) + 3) // 4
 
 
 def _tool_name(tool: dict) -> str:
@@ -45,6 +45,12 @@ def _tool_name(tool: dict) -> str:
     if isinstance(fn, dict):
         return str(fn.get("name") or "")
     return str(tool.get("name") or "")
+
+
+def _skills_block(stable: str) -> str:
+    """The live ``<available_skills>`` block inside the stable tier, or ''."""
+    m = _SKILLS_BLOCK_RE.search(stable)
+    return m.group(0) if m else ""
 
 
 def _split_tools(tools: Sequence[dict]) -> Tuple[List[dict], List[dict], List[dict]]:
@@ -63,8 +69,7 @@ def _split_tools(tools: Sequence[dict]) -> Tuple[List[dict], List[dict], List[di
 
 
 def _memory_blocks(agent: Any) -> Tuple[str, str]:
-    memory_block = ""
-    user_block = ""
+    memory_block = user_block = ""
     store = getattr(agent, "_memory_store", None)
     if store is None:
         return memory_block, user_block
@@ -98,9 +103,7 @@ def compute_session_context_breakdown(
     stable = parts.get("stable", "") or ""
     context = parts.get("context", "") or ""
     volatile = parts.get("volatile", "") or ""
-
-    skills_match = _SKILLS_BLOCK_RE.search(stable)
-    skills_index = skills_match.group(0) if skills_match else ""
+    skills_index = _skills_block(stable)
 
     memory_block, user_block = _memory_blocks(agent)
     memory_text = "\n\n".join(part for part in (memory_block, user_block) if part).strip()
@@ -109,11 +112,7 @@ def compute_session_context_breakdown(
     system_tail = _strip_blocks(volatile, memory_block, user_block)
     system_prompt_text = "\n\n".join(part for part in (system_core, system_tail) if part).strip()
 
-    tools = list(getattr(agent, "tools", None) or [])
-    builtin_tools, mcp_tools, subagent_tools = _split_tools(tools)
-
-    conversation_tokens = estimate_messages_tokens_rough(messages or [])
-
+    builtin_tools, mcp_tools, subagent_tools = _split_tools(list(getattr(agent, "tools", None) or []))
     categories = [
         ("system_prompt", "System prompt", _chars_to_tokens(system_prompt_text)),
         ("tool_definitions", "Tool definitions", _json_tokens(builtin_tools)),
@@ -122,43 +121,33 @@ def compute_session_context_breakdown(
         ("mcp", "MCP", _json_tokens(mcp_tools)),
         ("subagent_definitions", "Subagent definitions", _json_tokens(subagent_tools)),
         ("memory", "Memory", _chars_to_tokens(memory_text)),
-        ("conversation", "Conversation", conversation_tokens),
+        ("conversation", "Conversation", estimate_messages_tokens_rough(messages or [])),
     ]
-
     estimated_total = sum(tokens for _, _, tokens in categories)
 
     comp = getattr(agent, "context_compressor", None)
     context_max = int(getattr(comp, "context_length", 0) or 0) if comp else 0
-    # Prefer the usage-anchored figure: provider-exact prompt+completion of
-    # the last response plus a delta estimate of anything appended since —
-    # fresher than the raw last_prompt_tokens (which lags messages appended
-    # after the response) and far more accurate than the heuristic total.
+    # Usage-anchored figure (provider-exact tokens of a response + delta of what
+    # was appended since) beats last_prompt_tokens (lags) and the heuristic.
+    # Prefer the turn-base anchor: on reasoning models later same-turn
+    # responses inflate prompt_tokens with replayed thinking that evaporates at
+    # the turn boundary, so anchoring on the LAST response makes the meter
+    # sawtooth.  Fall back to last-response anchor, then measured/estimated.
     from agent.model_metadata import anchored_context_tokens
 
-    # Prefer the turn-base anchor (first response of the current turn): on
-    # reasoning models, later same-turn responses inflate prompt_tokens with
-    # replayed thinking that evaporates at the turn boundary, so anchoring on
-    # the LAST response makes the meter sawtooth. Fall back to the last-
-    # response anchor, then to measured/estimated figures.
     anchored_used = anchored_context_tokens(
         messages or [],
         getattr(agent, "_turn_base_usage_anchor", None),
         charge_stale_thinking=False,
     )
     if anchored_used is None:
-        anchored_used = anchored_context_tokens(
-            messages or [], getattr(agent, "_usage_anchor", None)
-        )
+        anchored_used = anchored_context_tokens(messages or [], getattr(agent, "_usage_anchor", None))
     measured_used = int(getattr(comp, "last_prompt_tokens", 0) or 0) if comp else 0
     if anchored_used is not None:
         context_used = anchored_used
     else:
         context_used = measured_used if measured_used > 0 else estimated_total
-    context_percent = (
-        max(0, min(100, round(context_used / context_max * 100)))
-        if context_max
-        else 0
-    )
+    context_percent = max(0, min(100, round(context_used / context_max * 100))) if context_max else 0
 
     return {
         "categories": [
@@ -180,10 +169,8 @@ def compute_session_context_breakdown(
 
 
 # ── /context rendering (CLI + gateway) ──────────────────────────────────────
-#
-# Pure text renderers over the payload above. The CLI shows a glyph block-grid
-# plus a category table; the gateway uses the same table without the grid
-# (proportional monospace is not guaranteed on messaging platforms).
+# Pure text renderers over the payload above.  The gateway skips the glyph grid
+# (monospace is not guaranteed on messaging platforms).
 
 _CATEGORY_GLYPHS = {
     "system_prompt": "■",
@@ -198,66 +185,43 @@ _CATEGORY_GLYPHS = {
 _FREE_GLYPH = "·"
 _GRID_COLUMNS = 20
 _GRID_ROWS = 5  # 100 cells → 1 cell per percent of the context window
-
-# Human-readable tables cap the expanded listings; nothing is dropped from
-# the underlying data.
-_DETAILS_TABLE_LIMIT = 15
-
-
-def _bytes_to_tokens(size: Optional[int]) -> Optional[int]:
-    if size is None:
-        return None
-    return (int(size) + 3) // 4
+_DETAILS_TABLE_LIMIT = 15  # display cap only; the underlying data keeps everything
 
 
 def compute_context_details(agent: Any) -> Dict[str, Any]:
-    """Expanded per-skill / per-toolset cost listing for ``/context all``.
-
-    Reuses the ``hermes prompt-size`` attribution mechanism (PR #66656):
-    per-skill index-line bytes parsed from the live ``<available_skills>``
-    block, and per-toolset schema bytes attributed via the tool registry's
-    canonical tool→toolset map. Byte figures are converted to the same
-    chars/4 token heuristic the categories above use.
-    """
+    """Expanded per-skill / per-toolset cost listing for ``/context all``,
+    reusing the ``hermes prompt-size`` attribution (index-line bytes from the
+    live skills block; schema bytes via the registry's tool→toolset map)."""
     from hermes_cli.prompt_size import (
         _compute_skills_breakdown,
         _compute_toolsets_breakdown,
     )
     from agent.system_prompt import build_system_prompt_parts
 
-    parts = build_system_prompt_parts(agent)
-    stable = parts.get("stable", "") or ""
-    skills_match = _SKILLS_BLOCK_RE.search(stable)
-    skills_block = skills_match.group(0) if skills_match else ""
-
-    skills: List[Dict[str, Any]] = []
-    if skills_block:
-        for entry in _compute_skills_breakdown(skills_block):
-            skills.append({
-                "name": entry.get("name", ""),
-                "index_tokens": _bytes_to_tokens(entry.get("index_line_bytes")) or 0,
-                "skill_md_tokens": _bytes_to_tokens(entry.get("skill_md_bytes")),
-            })
-
-    toolsets: List[Dict[str, Any]] = []
+    skills_block = _skills_block(build_system_prompt_parts(agent).get("stable", "") or "")
+    skills = [
+        {
+            "name": entry.get("name", ""),
+            "index_tokens": _bytes_to_tokens(entry.get("index_line_bytes")) or 0,
+            "skill_md_tokens": _bytes_to_tokens(entry.get("skill_md_bytes")),
+        }
+        for entry in (_compute_skills_breakdown(skills_block) if skills_block else [])
+    ]
     tools = list(getattr(agent, "tools", None) or [])
-    if tools:
-        for group in _compute_toolsets_breakdown(tools):
-            toolsets.append({
-                "toolset": group.get("toolset", ""),
-                "tool_count": int(group.get("tool_count", 0) or 0),
-                "schema_tokens": _bytes_to_tokens(group.get("json_bytes")) or 0,
-            })
-
+    toolsets = [
+        {
+            "toolset": group.get("toolset", ""),
+            "tool_count": int(group.get("tool_count", 0) or 0),
+            "schema_tokens": _bytes_to_tokens(group.get("json_bytes")) or 0,
+        }
+        for group in (_compute_toolsets_breakdown(tools) if tools else [])
+    ]
     return {"skills": skills, "toolsets": toolsets}
 
 
 def render_context_grid(payload: Dict[str, Any]) -> List[str]:
-    """Render the payload as a Claude Code-style glyph block grid.
-
-    100 cells (5×20), each one percent of the model context window. Categories
-    fill in declaration order; the remainder renders as free space.
-    """
+    """Glyph block grid: 100 cells, one per percent of the context window;
+    categories fill in declaration order, the remainder is free space."""
     context_max = int(payload.get("context_max") or 0)
     categories = payload.get("categories") or []
     total_cells = _GRID_COLUMNS * _GRID_ROWS
@@ -307,6 +271,12 @@ def render_context_category_lines(payload: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def _append_overflow(lines: List[str], count: int) -> None:
+    remaining = count - _DETAILS_TABLE_LIMIT
+    if remaining > 0:
+        lines.append(f"  … and {remaining} more")
+
+
 def render_context_details_lines(details: Dict[str, Any]) -> List[str]:
     """Render the expanded ``/context all`` per-skill / per-toolset tables."""
     lines: List[str] = []
@@ -319,9 +289,7 @@ def render_context_details_lines(details: Dict[str, Any]) -> List[str]:
                 f"  {group['toolset']:<24} {group['tool_count']:>3} tools"
                 f" {group['schema_tokens']:>8,} tokens"
             )
-        remaining = len(toolsets) - _DETAILS_TABLE_LIMIT
-        if remaining > 0:
-            lines.append(f"  … and {remaining} more")
+        _append_overflow(lines, len(toolsets))
 
     skills = details.get("skills") or []
     if skills:
@@ -338,9 +306,7 @@ def render_context_details_lines(details: Dict[str, Any]) -> List[str]:
                 f"  {name:<28} index {entry['index_tokens']:>6,}"
                 f"  SKILL.md {md_str} tokens"
             )
-        remaining = len(skills) - _DETAILS_TABLE_LIMIT
-        if remaining > 0:
-            lines.append(f"  … and {remaining} more")
+        _append_overflow(lines, len(skills))
 
     return lines
 
@@ -351,12 +317,8 @@ def render_context_breakdown_lines(
     details: Optional[Dict[str, Any]] = None,
     grid: bool = True,
 ) -> List[str]:
-    """Render the full /context view as plain-text lines.
-
-    ``grid=True`` (CLI) prepends the glyph block grid; the gateway passes
-    ``grid=False`` and keeps its own gauge. ``details`` (from
-    :func:`compute_context_details`) appends the expanded listings.
-    """
+    """Full /context view.  ``grid`` prepends the glyph grid (CLI; the gateway
+    keeps its own gauge); ``details`` appends the expanded listings."""
     lines: List[str] = []
     if grid:
         lines.extend(render_context_grid(payload))
@@ -368,9 +330,7 @@ def render_context_breakdown_lines(
     if context_max > 0:
         pct = int(payload.get("context_percent") or 0)
         lines.append("")
-        lines.append(
-            f"Context window: {context_used:,} / {context_max:,} tokens ({pct}%)"
-        )
+        lines.append(f"Context window: {context_used:,} / {context_max:,} tokens ({pct}%)")
 
     if details is not None:
         detail_lines = render_context_details_lines(details)

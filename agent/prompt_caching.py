@@ -114,6 +114,8 @@ def _can_carry_marker(
     if content is None or content == "":
         return False
     if isinstance(content, list):
+        # Mirrors _apply_cache_marker (marks only the LAST part): a list whose
+        # last element isn't a dict cannot receive a marker.
         return bool(content) and isinstance(content[-1], dict)
     return isinstance(content, str)
 
@@ -188,6 +190,9 @@ def effective_cache_ttl(
     if ttl != "1h":
         return ttl or "5m"
     if (provider or "").lower() in MEASURED_1H_PROVIDERS:
+        # Checked BEFORE the generic Qwen clamp (which would swallow every Qwen
+        # model on this route); the per-model denial stays nested so an
+        # opencode-go observation cannot reclamp the same model on another route.
         return "5m" if _flat_model(model) in NO_1H_TIER_MODELS else "1h"
     if is_qwen_model(model) or (provider or "").lower() in ALIBABA_FAMILY_PROVIDERS:
         return "5m"

@@ -1,16 +1,12 @@
-"""Transcript repair and in-place row reconciliation helpers for SessionDB and run_agent.
-
-Extracted from hermes_state.py and run_agent.py to keep the godfiles narrow and bounded
-under the 2K invariant (#95514 / PR #95886). Provides focused helpers to:
-1. Resolve active assistant rows and watermark compaction clones in SQLite during batch appends.
-2. In-place update blank assistant rows or adopt concurrent non-blank winner content without overwrite.
-3. Synchronize in-memory message dicts with canonical committed content and row IDs after commit.
+"""Transcript repair for SessionDB batch appends: reconcile in-memory assistant
+rows with committed SQLite rows (blank-row in-place update, concurrent-winner
+adoption, watermark-compaction clone lookup) and sync markers after commit.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 from agent.context_compressor import _DB_PERSISTED_MARKER
 
@@ -24,12 +20,9 @@ def is_content_blank(content: Any) -> bool:
     if isinstance(content, list):
         if not content:
             return True
-        texts = [
-            p.get("text", "")
-            for p in content
-            if isinstance(p, dict) and p.get("type") == "text"
-        ]
-        return not "".join(texts).strip()
+        return not "".join(
+            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+        ).strip()
     return False
 
 

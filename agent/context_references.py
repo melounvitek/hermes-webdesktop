@@ -294,6 +294,19 @@ async def preprocess_context_references_async(
     )
 
 
+def _git_log_args(ref: ContextReference) -> list[str]:
+    count = max(1, min(int(ref.target or "1"), 10))
+    return ["log", f"-{count}", "-p"]
+
+
+# Git-backed reference kinds -> f(ref) -> git argv (the label is "git " + argv).
+_GIT_REFERENCE_ARGS: dict[str, Callable[[ContextReference], list[str]]] = {
+    "diff": lambda ref: ["diff"],
+    "staged": lambda ref: ["diff", "--staged"],
+    "git": _git_log_args,
+}
+
+
 async def _expand_reference(
     ref: ContextReference,
     cwd: Path,
@@ -307,13 +320,9 @@ async def _expand_reference(
             return _expand_file_reference(ref, cwd, allowed_root=allowed_root)
         if ref.kind == "folder":
             return _expand_folder_reference(ref, cwd, allowed_root=allowed_root)
-        if ref.kind == "diff":
-            return _expand_git_reference(ref, cwd, ["diff"], "git diff")
-        if ref.kind == "staged":
-            return _expand_git_reference(ref, cwd, ["diff", "--staged"], "git diff --staged")
-        if ref.kind == "git":
-            count = max(1, min(int(ref.target or "1"), 10))
-            return _expand_git_reference(ref, cwd, ["log", f"-{count}", "-p"], f"git log -{count} -p")
+        if ref.kind in _GIT_REFERENCE_ARGS:
+            git_args = _GIT_REFERENCE_ARGS[ref.kind](ref)
+            return _expand_git_reference(ref, cwd, git_args, "git " + " ".join(git_args))
         if ref.kind == "url":
             content = await _fetch_url_content(ref.target, url_fetcher=url_fetcher)
             if not content:

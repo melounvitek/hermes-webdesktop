@@ -55,9 +55,12 @@ def find_stable_prefix(content: str) -> Optional[str]:
     with _lock:
         best: Optional[str] = None
         for prefix in _prefixes:
-            if content.startswith(prefix) and content[len(prefix):].strip():
-                if best is None or len(prefix) > len(best):
-                    best = prefix
+            if (
+                content.startswith(prefix)
+                and content[len(prefix):].strip()
+                and (best is None or len(prefix) > len(best))
+            ):
+                best = prefix
         if best is not None:
             _prefixes.move_to_end(best)  # after the scan: never mutate mid-iteration
         return best

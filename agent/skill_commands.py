@@ -383,11 +383,12 @@ def _render_skill_block(
     loaded: tuple[dict[str, Any], Path | None, str],
     activation_note: str,
     task_id: str | None,
+    **message_kwargs: str,
 ) -> str:
     """Bump usage and build the message block for one loaded skill."""
     loaded_skill, skill_dir, skill_name = loaded
     _bump_use(skill_name, task_id)
-    return _build_skill_message(loaded_skill, skill_dir, activation_note, session_id=task_id)
+    return _build_skill_message(loaded_skill, skill_dir, activation_note, session_id=task_id, **message_kwargs)
 
 
 def _scaffold_header(
@@ -627,20 +628,13 @@ def build_skill_invocation_message(
     if not loaded:
         return None
 
-    loaded_skill, skill_dir, skill_name = loaded
-    _bump_use(skill_name, task_id)
-
-    activation_note = (
-        f'[IMPORTANT: The user has invoked the "{skill_name}" skill, indicating they want '
-        "you to follow its instructions. The full skill content is loaded below.]"
-    )
-    return _build_skill_message(
-        loaded_skill,
-        skill_dir,
-        activation_note,
+    return _render_skill_block(
+        loaded,
+        f'[IMPORTANT: The user has invoked the "{loaded[2]}" skill, indicating they want '
+        "you to follow its instructions. The full skill content is loaded below.]",
+        task_id,
         user_instruction=user_instruction,
         runtime_note=runtime_note,
-        session_id=task_id,
     )
 
 

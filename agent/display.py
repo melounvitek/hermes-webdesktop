@@ -395,6 +395,121 @@ def _delegate_action_preview(args: dict) -> str | None:
     return None
 
 
+def _preview_browser_exec(args: dict, max_len: int) -> str | None:
+    label = _browser_exec_step_label(args)
+    if label is not None:
+        return _truncate_preview(label, max_len)
+    return _truncate_preview(_oneline(str(args.get("code", "") or "")), max_len) or None
+
+
+def _preview_delegate_task(args: dict, max_len: int) -> str | None:
+    action_preview = _delegate_action_preview(args)
+    if action_preview is not None:
+        return _truncate_preview(action_preview, max_len)
+    tasks = args.get("tasks")
+    if tasks and isinstance(tasks, list):
+        task_count, goals = _delegate_task_goal_parts(tasks, per_goal_len=40)
+        preview = f"{task_count} tasks: " + " | ".join(goals) if goals else f"{len(tasks)} parallel tasks"
+        return _truncate_preview(preview, max_len)
+    goal = args.get("goal", "")
+    if goal is None:
+        return None
+    return _truncate_preview(_oneline(str(goal)), max_len) or None
+
+
+def _preview_process_manage(args: dict, _max_len: int) -> str | None:
+    action = args.get("action", "")
+    sid = args.get("session_id", "")
+    data = args.get("data", "")
+    timeout_val = args.get("timeout")
+    parts = [str(action) if action else ""]
+    if sid:
+        parts.append(str(sid)[:16])
+    if data:
+        parts.append(f'"{_oneline(str(data)[:20])}"')
+    if timeout_val and action == "wait":
+        parts.append(f"{timeout_val}s")
+    parts = [p for p in parts if p]
+    return " ".join(parts) if parts else None
+
+
+def _preview_todo_list(args: dict, _max_len: int) -> str:
+    todos_arg = args.get("todos")
+    if todos_arg is None:
+        return "reading task list"
+    if args.get("merge", False):
+        return f"updating {len(todos_arg)} task(s)"
+    return f"planning {len(todos_arg)} task(s)"
+
+
+def _preview_shell(key: str):
+    def _build(args: dict, max_len: int) -> str | None:
+        command = args.get(key)
+        if command is None:
+            return None
+        return _truncate_preview(summarize_shell_command(str(command)), max_len) or None
+    return _build
+
+
+def _preview_read_file(args: dict, max_len: int) -> str | None:
+    path = args.get("path") or args.get("file") or args.get("filepath")
+    if path is None:
+        return None
+    label = Path(str(path).replace("\\", "/")).name or str(path)
+    return _truncate_preview(f"{label} {_read_file_line_label(args)}".strip(), max_len) or None
+
+
+def _preview_session_search(args: dict, _max_len: int) -> str:
+    query = _oneline(args.get("query", ""))
+    return f"recall: \"{query[:25]}{'...' if len(query) > 25 else ''}\""
+
+
+def _preview_memory(args: dict, _max_len: int) -> str:
+    action = args.get("action", "")
+    target = args.get("target", "")
+    if action == "add":
+        content = _oneline(args.get("content", ""))
+        return f"+{target}: \"{content[:25]}{'...' if len(content) > 25 else ''}\""
+    if action in ("replace", "remove"):
+        old = _oneline(args.get("old_text") or "") or "<missing old_text>"
+        return f"{'~' if action == 'replace' else '-'}{target}: \"{old[:20]}\""
+    return action
+
+
+def _preview_send_message(args: dict, _max_len: int) -> str:
+    target = args.get("target", "?")
+    msg = _oneline(args.get("message", ""))
+    if len(msg) > 20:
+        msg = msg[:17] + "..."
+    return f"to {target}: \"{msg}\""
+
+
+def _preview_skill_view(args: dict, max_len: int) -> str | None:
+    name = _oneline(str(args.get("name") or ""))
+    file_path = args.get("file_path")
+    if file_path:
+        file_path = _oneline(str(file_path))
+        return _truncate_preview(f"{name} → {file_path}" if name else file_path, max_len) or None
+    return _truncate_preview(name, max_len) or None
+
+
+# Tool-specific preview builders: f(args, max_len) -> preview. Tools not listed
+# fall through to the primary-argument lookup in build_tool_preview.
+_PREVIEW_BUILDERS = {
+    "browser_exec": _preview_browser_exec,
+    "delegate_task": _preview_delegate_task,
+    "process_manage": _preview_process_manage,
+    "todo_list": _preview_todo_list,
+    "terminal": _preview_shell("command"),
+    "execute_code": _preview_shell("code"),
+    "read_file": _preview_read_file,
+    "session_search": _preview_session_search,
+    "memory": _preview_memory,
+    "send_message": _preview_send_message,
+    "skill_view": _preview_skill_view,
+}
+
+
 def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
     """Build a short preview of a tool call's primary argument for display.
 
@@ -406,94 +521,9 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
         return None
     args = redact_tool_args_for_display(tool_name, args) or args
 
-    def _done(preview: str) -> str | None:
-        return _truncate_preview(preview, max_len) if preview else None
-
-    if tool_name == "browser_exec":
-        label = _browser_exec_step_label(args)
-        if label is not None:
-            return _truncate_preview(label, max_len)
-        return _done(_oneline(str(args.get("code", "") or "")))
-
-    if tool_name == "delegate_task":
-        action_preview = _delegate_action_preview(args)
-        if action_preview is not None:
-            return _truncate_preview(action_preview, max_len)
-        tasks = args.get("tasks")
-        if tasks and isinstance(tasks, list):
-            task_count, goals = _delegate_task_goal_parts(tasks, per_goal_len=40)
-            preview = f"{task_count} tasks: " + " | ".join(goals) if goals else f"{len(tasks)} parallel tasks"
-            return _truncate_preview(preview, max_len)
-        goal = args.get("goal", "")
-        if goal is None:
-            return None
-        return _done(_oneline(str(goal)))
-
-    if tool_name == "process_manage":
-        action = args.get("action", "")
-        sid = args.get("session_id", "")
-        data = args.get("data", "")
-        timeout_val = args.get("timeout")
-        parts = [str(action) if action else ""]
-        if sid:
-            parts.append(str(sid)[:16])
-        if data:
-            parts.append(f'"{_oneline(str(data)[:20])}"')
-        if timeout_val and action == "wait":
-            parts.append(f"{timeout_val}s")
-        parts = [p for p in parts if p]
-        return " ".join(parts) if parts else None
-
-    if tool_name == "todo_list":
-        todos_arg = args.get("todos")
-        if todos_arg is None:
-            return "reading task list"
-        if args.get("merge", False):
-            return f"updating {len(todos_arg)} task(s)"
-        return f"planning {len(todos_arg)} task(s)"
-
-    if tool_name in {"terminal", "execute_code"}:
-        command = args.get("code" if tool_name == "execute_code" else "command")
-        if command is None:
-            return None
-        return _done(summarize_shell_command(str(command)))
-
-    if tool_name == "read_file":
-        path = args.get("path") or args.get("file") or args.get("filepath")
-        if path is None:
-            return None
-        label = Path(str(path).replace("\\", "/")).name or str(path)
-        return _done(f"{label} {_read_file_line_label(args)}".strip())
-
-    if tool_name == "session_search":
-        query = _oneline(args.get("query", ""))
-        return f"recall: \"{query[:25]}{'...' if len(query) > 25 else ''}\""
-
-    if tool_name == "memory":
-        action = args.get("action", "")
-        target = args.get("target", "")
-        if action == "add":
-            content = _oneline(args.get("content", ""))
-            return f"+{target}: \"{content[:25]}{'...' if len(content) > 25 else ''}\""
-        if action in ("replace", "remove"):
-            old = _oneline(args.get("old_text") or "") or "<missing old_text>"
-            return f"{'~' if action == 'replace' else '-'}{target}: \"{old[:20]}\""
-        return action
-
-    if tool_name == "send_message":
-        target = args.get("target", "?")
-        msg = _oneline(args.get("message", ""))
-        if len(msg) > 20:
-            msg = msg[:17] + "..."
-        return f"to {target}: \"{msg}\""
-
-    if tool_name == "skill_view":
-        name = _oneline(str(args.get("name") or ""))
-        file_path = args.get("file_path")
-        if file_path:
-            file_path = _oneline(str(file_path))
-            return _done(f"{name} → {file_path}" if name else file_path)
-        return _done(name)
+    builder = _PREVIEW_BUILDERS.get(tool_name)
+    if builder is not None:
+        return builder(args, max_len)
 
     key = _PRIMARY_ARGS.get(tool_name) or next((k for k in _FALLBACK_PREVIEW_KEYS if k in args), None)
     if not key or key not in args:
