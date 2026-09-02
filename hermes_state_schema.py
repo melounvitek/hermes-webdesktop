@@ -688,6 +688,17 @@ class SessionSchemaMixin:
         # row: (cid, name, type, notnull, dflt_value, pk)
         return [r[1] for r in sorted((r for r in rows if r[5]), key=lambda r: r[5])]
 
+    @staticmethod
+    def _rebuild_table(cursor: sqlite3.Cursor, table: str, legacy_name: str, ddl: str, copy_sql: str, indexes=()) -> None:
+        """RENAME *table* to *legacy_name*, CREATE it fresh from *ddl*, copy rows
+        back with *copy_sql*, DROP the legacy copy, recreate *indexes*."""
+        cursor.execute(f"ALTER TABLE {table} RENAME TO {legacy_name}")
+        cursor.execute(ddl)
+        cursor.execute(copy_sql)
+        cursor.execute(f"DROP TABLE {legacy_name}")
+        for sql in indexes:
+            cursor.execute(sql)
+
     def _heal_gateway_routing_pk(self, cursor: sqlite3.Cursor) -> None:
         """Rebuild ``gateway_routing`` when its PRIMARY KEY predates scoping.
         Early builds used ``session_key TEXT PRIMARY KEY``; the reconciler ADDs
@@ -695,7 +706,7 @@ class SessionSchemaMixin:
         lands and every routing write fails (ON CONFLICT mismatch / UNIQUE
         violation across scopes) with per-save warning spam. Rebuild once,
         preserving rows; on a cross-scope session_key collision the newest
-        row wins."""
+        row wins (INSERT OR REPLACE in updated_at order)."""
         pk_cols = self._live_pk_columns(cursor, "gateway_routing")
         if pk_cols is None or pk_cols == ["scope", "session_key"]:
             return
@@ -704,27 +715,24 @@ class SessionSchemaMixin:
             "composite (scope, session_key) key",
             pk_cols,
         )
-        cursor.execute("ALTER TABLE gateway_routing RENAME TO gateway_routing_legacy_pk")
-        cursor.execute(
+        self._rebuild_table(
+            cursor, "gateway_routing", "gateway_routing_legacy_pk",
             """CREATE TABLE gateway_routing (
     scope TEXT NOT NULL DEFAULT '',
     session_key TEXT NOT NULL,
     entry_json TEXT NOT NULL,
     updated_at REAL NOT NULL,
     PRIMARY KEY (scope, session_key)
-)"""
-        )
-        # INSERT OR REPLACE in updated_at order: newest row per key wins.
-        cursor.execute(
+)""",
             "INSERT OR REPLACE INTO gateway_routing "
             "(scope, session_key, entry_json, updated_at) "
             "SELECT COALESCE(scope, ''), session_key, entry_json, updated_at "
-            "FROM gateway_routing_legacy_pk ORDER BY updated_at ASC"
+            "FROM gateway_routing_legacy_pk ORDER BY updated_at ASC",
         )
-        cursor.execute("DROP TABLE gateway_routing_legacy_pk")
 
     def _heal_session_model_usage_pk(self, cursor: sqlite3.Cursor) -> None:
         """Rebuild ``session_model_usage`` when its PRIMARY KEY lacks ``task``.
+
         Installs already at v22+ when ``task`` landed carry the 5-column PK;
         the reconciler ADDs ``task`` as a bare nullable but SQLite cannot
         ALTER a PK, and the version-gated v22 rebuild is unreachable there.
@@ -736,7 +744,9 @@ class SessionSchemaMixin:
         violations, so an orphaned usage row (partial prune while accounting
         was broken) would abort the whole rebuild. PRAGMA foreign_keys is a
         no-op inside a transaction — fine here, _init_schema runs on an
-        isolation_level=None connection with no transaction open."""
+        isolation_level=None connection with no transaction open. OR IGNORE:
+        COALESCE(task, '') on legacy NULL rows can collide with a genuine
+        ''-task row — keep the first rather than fail."""
         pk_cols = self._live_pk_columns(cursor, "session_model_usage")
         if pk_cols is None or "task" in pk_cols:
             return
@@ -747,11 +757,8 @@ class SessionSchemaMixin:
         )
         cursor.execute("PRAGMA foreign_keys=OFF")
         try:
-            cursor.execute("ALTER TABLE session_model_usage RENAME TO session_model_usage_legacy_pk")
-            cursor.execute(_SESSION_MODEL_USAGE_HEAL_DDL)
-            # OR IGNORE: COALESCE(task, '') on legacy NULL rows can collide
-            # with a genuine ''-task row — keep the first rather than fail.
-            cursor.execute(
+            self._rebuild_table(
+                cursor, "session_model_usage", "session_model_usage_legacy_pk", _SESSION_MODEL_USAGE_HEAL_DDL,
                 """INSERT OR IGNORE INTO session_model_usage (
                        session_id, model, billing_provider, billing_base_url,
                        billing_mode, task, api_call_count, input_tokens,
@@ -768,11 +775,9 @@ class SessionSchemaMixin:
                           output_tokens, cache_read_tokens, cache_write_tokens,
                           reasoning_tokens, estimated_cost_usd, actual_cost_usd,
                           cost_status, cost_source, first_seen, last_seen
-                   FROM session_model_usage_legacy_pk"""
+                   FROM session_model_usage_legacy_pk""",
+                _SESSION_MODEL_USAGE_INDEX_SQL,
             )
-            cursor.execute("DROP TABLE session_model_usage_legacy_pk")
-            for sql in _SESSION_MODEL_USAGE_INDEX_SQL:
-                cursor.execute(sql)
         except sqlite3.OperationalError as exc:
             logger.debug("session_model_usage PK heal skipped: %s", exc)
         finally:
@@ -976,9 +981,8 @@ class SessionSchemaMixin:
             ).fetchone()[0]
             if legacy_pk:
                 return
-            cursor.execute("ALTER TABLE session_model_usage RENAME TO session_model_usage_v21")
-            cursor.execute(_SESSION_MODEL_USAGE_V22_DDL)
-            cursor.execute(
+            self._rebuild_table(
+                cursor, "session_model_usage", "session_model_usage_v21", _SESSION_MODEL_USAGE_V22_DDL,
                 """INSERT INTO session_model_usage (
                                    session_id, model, billing_provider, billing_base_url,
                                    billing_mode, task, api_call_count, input_tokens,
@@ -991,11 +995,9 @@ class SessionSchemaMixin:
                                       output_tokens, cache_read_tokens, cache_write_tokens,
                                       reasoning_tokens, estimated_cost_usd, actual_cost_usd,
                                       cost_status, cost_source, first_seen, last_seen
-                               FROM session_model_usage_v21"""
+                               FROM session_model_usage_v21""",
+                _SESSION_MODEL_USAGE_INDEX_SQL,
             )
-            cursor.execute("DROP TABLE session_model_usage_v21")
-            for sql in _SESSION_MODEL_USAGE_INDEX_SQL:
-                cursor.execute(sql)
         except sqlite3.OperationalError as exc:
             logger.debug("v22 session_model_usage rebuild skipped: %s", exc)
 
