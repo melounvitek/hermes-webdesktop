@@ -46,7 +46,7 @@ from hermes_cli.dashboard_auth.ws_tickets import (
     INTERNAL_USER_ID as _INTERNAL_USER_ID,
 )
 
-from .method_ctx import HandlerRegistry
+from .method_ctx import HandlerRegistry, bind_module
 
 logger = logging.getLogger(__name__)
 
@@ -319,5 +319,10 @@ def _(rid, params: dict, transport, _identity, _session_id, broker, scope, _sess
 
 
 def register(server) -> None:
-    """Bind this module's handlers onto ``server``'s globals and registry."""
-    _registry.install(server)
+    """Publish this module's helpers/constants onto ``server`` and install handlers.
+
+    ``rebind`` re-targets closure cells that hold this module's functions, so
+    the helpers (and the constants they read) must exist in server.py's
+    namespace too — ``bind_module`` publishes them.
+    """
+    bind_module(globals(), server, skip=("_",))
