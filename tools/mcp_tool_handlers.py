@@ -169,10 +169,7 @@ def _retry_once(server_name: str, retry_call, op_description: str, what: str):
     try:
         result = retry_call()
     except Exception as retry_exc:
-        logger.warning(
-            "MCP %s/%s retry after %s failed: %s",
-            server_name, op_description, what, retry_exc,
-        )
+        logger.warning("MCP %s/%s retry after %s failed: %s", server_name, op_description, what, retry_exc)
         return None
     if _result_is_error(result):
         return None
@@ -394,9 +391,7 @@ def _invoke_with_recovery(server_name: str, call_once: Callable[[], str], op: st
             if recovered is not None:
                 return recovered
         on_final_failure(exc)
-        return tool_error(_sanitize_error(
-            f"MCP call failed: {type(exc).__name__}: {_exc_str(exc)}"
-        ))
+        return tool_error(_sanitize_error(f"MCP call failed: {type(exc).__name__}: {_exc_str(exc)}"))
 
 
 # ------------------------------------------------------------- the RPC itself
@@ -466,10 +461,7 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
     rpc_task = asyncio.ensure_future(_call_coro)
     watch_task = asyncio.ensure_future(_watch_children())
     try:
-        done, _pending = await asyncio.wait(
-            {rpc_task, watch_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        done, _pending = await asyncio.wait({rpc_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
         if watch_task in done and not rpc_task.done():
             rpc_task.cancel()
             raise _StdioChildExited(f"MCP stdio subprocess for '{server_name}' exited mid-call")

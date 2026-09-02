@@ -92,10 +92,7 @@ def _unwrap_exception_group(exc: BaseException) -> BaseException:
             while isinstance(leaf, BaseExceptionGroup) and leaf.exceptions:
                 leaf = leaf.exceptions[0]
             raise leaf
-        exc = next(
-            (sub for sub in exc.exceptions if not _contains_only_cancellation(sub)),
-            exc.exceptions[0],
-        )
+        exc = next((sub for sub in exc.exceptions if not _contains_only_cancellation(sub)), exc.exceptions[0])
     return exc
 
 
@@ -174,9 +171,7 @@ def _resolve_client_cert(server_name: str, config: dict):
 
     def _expand(path: Any, label: str) -> str:
         if not isinstance(path, str) or not path.strip():
-            raise ValueError(
-                f"{prefix}{label} must be a non-empty string path (got {type(path).__name__})"
-            )
+            raise ValueError(f"{prefix}{label} must be a non-empty string path (got {type(path).__name__})")
         expanded = os.path.expanduser(path.strip())
         if not os.path.isfile(expanded):
             raise FileNotFoundError(f"{prefix}{label} not found at {expanded!r}")
@@ -189,9 +184,7 @@ def _resolve_client_cert(server_name: str, config: dict):
                 f"client_cert + client_key, not both"
             )
         if len(raw_cert) not in (2, 3):
-            raise ValueError(
-                f"{prefix}client_cert list form must have 2 or 3 elements (got {len(raw_cert)})"
-            )
+            raise ValueError(f"{prefix}client_cert list form must have 2 or 3 elements (got {len(raw_cert)})")
         pair = (_expand(raw_cert[0], "client_cert[0]"), _expand(raw_cert[1], "client_cert[1]"))
         if len(raw_cert) == 2:
             return pair
@@ -293,10 +286,7 @@ def _make_redirect_header_stripper(
 
 def _exc_causes(exc: BaseException) -> List[BaseException]:
     """``__cause__`` then ``__context__`` of *exc*, when they are exceptions."""
-    return [
-        nested for nested in (exc.__cause__, exc.__context__)
-        if isinstance(nested, BaseException)
-    ]
+    return [nested for nested in (exc.__cause__, exc.__context__) if isinstance(nested, BaseException)]
 
 
 def _format_connect_error(exc: BaseException) -> str:

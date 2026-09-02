@@ -126,10 +126,7 @@ class MCPServerHealthMixin:
                 origin = f"{self.name}/{logger_name}" if logger_name else self.name
                 logger.log(level, "MCP server log [%s]: %s", origin, data)
             except Exception:
-                logger.debug(
-                    "Failed to handle MCP log notification from '%s'",
-                    self.name, exc_info=True,
-                )
+                logger.debug("Failed to handle MCP log notification from '%s'", self.name, exc_info=True)
         return _on_log
 
     def _make_message_handler(self):
@@ -196,9 +193,7 @@ class MCPServerHealthMixin:
 
             # 1. Fetch the current tool list (follow nextCursor).
             async with self._rpc_lock:
-                new_mcp_tools = await _core._paginate_full_list(
-                    self.session.list_tools, "tools", self.name
-                )
+                new_mcp_tools = await _core._paginate_full_list(self.session.list_tools, "tools", self.name)
 
             # 2. Remove only stale names first — no nuke-and-repave: live agent
             # turns may hold tool-call IDs pointing at existing handlers, and

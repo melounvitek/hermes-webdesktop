@@ -181,10 +181,7 @@ class MCPServerTransportMixin:
         self._session_proven = False
         reason = await self._wait_for_lifecycle_event()
         if label and reason == "reconnect":
-            logger.info(
-                "MCP server '%s': reconnect requested — tearing down %s session",
-                self.name, label,
-            )
+            logger.info("MCP server '%s': reconnect requested — tearing down %s session", self.name, label)
         return reason
 
     async def _serve_transport(self, transport_cm, label: str, connect_timeout: float) -> str:
@@ -230,10 +227,7 @@ class MCPServerTransportMixin:
 
                 register_child(_pid, "mcp-helper")
             except Exception:
-                logger.debug(
-                    "spawn-ledger register_child failed for MCP helper pid %s",
-                    _pid, exc_info=True,
-                )
+                logger.debug("spawn-ledger register_child failed for MCP helper pid %s", _pid, exc_info=True)
 
     def _release_spawned_children(self, new_pids: Set[int]) -> None:
         """Drop the ledger entries; any child (or its pgroup) still alive means SDK
@@ -323,9 +317,7 @@ class MCPServerTransportMixin:
                     # never answers ``initialize`` would otherwise hang here forever,
                     # the ``finally`` below would never run, and the child + pipes
                     # would leak on every retry until EMFILE.
-                    connect_timeout = float(
-                        config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT)
-                    )
+                    connect_timeout = float(config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT))
                     return await self._serve_session(session, connect_timeout, mark_lifecycle=True)
         finally:
             # Runs on clean exit, exceptions AND cancellation.
@@ -553,11 +545,7 @@ class MCPServerTransportMixin:
                 "enforce the portable redirect-header boundary "
                 "(strict_redirect_headers). Upgrade the mcp package."
             )
-        http_kwargs: dict = {
-            "headers": headers,
-            "timeout": float(connect_timeout),
-            "verify": ssl_verify,
-        }
+        http_kwargs: dict = {"headers": headers, "timeout": float(connect_timeout), "verify": ssl_verify}
         if oauth_auth is not None:
             http_kwargs["auth"] = oauth_auth
         return _core.streamablehttp_client(url, **http_kwargs)
