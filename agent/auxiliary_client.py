@@ -2688,81 +2688,64 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                 continue
 
             raw_base_url = _pool_runtime_base_url(entry, pconfig.inference_base_url) or pconfig.inference_base_url
-            base_url = _to_openai_base_url(raw_base_url)
-            model = _get_aux_model_for_provider(provider_id) or None
-            if model is None:
-                continue  # skip provider if we don't know a valid aux model
-            logger.debug("Auxiliary text client: %s (%s) via pool", pconfig.name, model)
-            if provider_id == "gemini":
-                from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
+            via = " via pool"
+        else:
+            creds = resolve_api_key_provider_credentials(provider_id)
+            api_key = str(creds.get("api_key", "")).strip()
+            if not api_key:
+                continue
+            raw_base_url = str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
+            via = ""
 
-                if is_native_gemini_base_url(base_url):
-                    return GeminiNativeClient(api_key=api_key, base_url=base_url), model
-            extra = {}
-            if base_url_host_matches(base_url, "api.kimi.com"):
-                extra["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
-            elif base_url_host_matches(base_url, "githubcopilot.com"):
-                from hermes_cli.models import copilot_default_headers
-
-                extra["default_headers"] = copilot_default_headers()
-            elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
-                extra["default_headers"] = build_nvidia_nim_headers(base_url)
-            else:
-                try:
-                    from providers import get_provider_profile as _gpf_aux
-                    _ph_aux = _gpf_aux(provider_id)
-                    if _ph_aux and _ph_aux.default_headers:
-                        extra["default_headers"] = dict(_ph_aux.default_headers)
-                except Exception:
-                    pass
-            _merged_aux = _apply_user_default_headers(extra.get("default_headers"))
-            if _merged_aux:
-                extra["default_headers"] = _merged_aux
-            _client = _create_openai_client(api_key=api_key, base_url=base_url, **extra)
-            _client = _maybe_wrap_anthropic(_client, model, api_key, raw_base_url)
-            return _client, model
-
-        creds = resolve_api_key_provider_credentials(provider_id)
-        api_key = str(creds.get("api_key", "")).strip()
-        if not api_key:
-            continue
-
-        raw_base_url = str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
-        base_url = _to_openai_base_url(raw_base_url)
         model = _get_aux_model_for_provider(provider_id) or None
         if model is None:
             continue  # skip provider if we don't know a valid aux model
-        logger.debug("Auxiliary text client: %s (%s)", pconfig.name, model)
-        if provider_id == "gemini":
-            from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
-
-            if is_native_gemini_base_url(base_url):
-                return GeminiNativeClient(api_key=api_key, base_url=base_url), model
-        extra = {}
-        if base_url_host_matches(base_url, "api.kimi.com"):
-            extra["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
-        elif base_url_host_matches(base_url, "githubcopilot.com"):
-            from hermes_cli.models import copilot_default_headers
-
-            extra["default_headers"] = copilot_default_headers()
-        elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
-            extra["default_headers"] = build_nvidia_nim_headers(base_url)
-        else:
-            try:
-                from providers import get_provider_profile as _gpf_aux2
-                _ph_aux2 = _gpf_aux2(provider_id)
-                if _ph_aux2 and _ph_aux2.default_headers:
-                    extra["default_headers"] = dict(_ph_aux2.default_headers)
-            except Exception:
-                pass
-        _merged_aux2 = _apply_user_default_headers(extra.get("default_headers"))
-        if _merged_aux2:
-            extra["default_headers"] = _merged_aux2
-        _client = _create_openai_client(api_key=api_key, base_url=base_url, **extra)
-        _client = _maybe_wrap_anthropic(_client, model, api_key, raw_base_url)
-        return _client, model
+        logger.debug("Auxiliary text client: %s (%s)%s", pconfig.name, model, via)
+        return _build_api_key_chain_client(provider_id, api_key, raw_base_url, model)
 
     return None, None
+
+
+def _profile_default_headers(provider: str) -> Optional[dict]:
+    """Client-level attribution headers from the provider profile (e.g. GMI User-Agent), or None."""
+    try:
+        from providers import get_provider_profile
+        profile = get_provider_profile(provider)
+        if profile and profile.default_headers:
+            return dict(profile.default_headers)
+    except Exception:
+        pass
+    return None
+
+
+def _build_api_key_chain_client(
+    provider_id: str, api_key: str, raw_base_url: str, model: str,
+) -> Tuple[Any, str]:
+    """Build the auto-chain client for one API-key provider (native Gemini, else OpenAI-wire + Anthropic rewrap)."""
+    base_url = _to_openai_base_url(raw_base_url)
+    if provider_id == "gemini":
+        from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
+
+        if is_native_gemini_base_url(base_url):
+            return GeminiNativeClient(api_key=api_key, base_url=base_url), model
+    if base_url_host_matches(base_url, "api.kimi.com"):
+        headers = {"User-Agent": "claude-code/0.1.0"}
+    elif base_url_host_matches(base_url, "githubcopilot.com"):
+        from hermes_cli.models import copilot_default_headers
+
+        headers = copilot_default_headers()
+    elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
+        headers = build_nvidia_nim_headers(base_url)
+    else:
+        headers = _profile_default_headers(provider_id)
+    extra = {}
+    if headers:
+        extra["default_headers"] = headers
+    merged = _apply_user_default_headers(extra.get("default_headers"))
+    if merged:
+        extra["default_headers"] = merged
+    client = _create_openai_client(api_key=api_key, base_url=base_url, **extra)
+    return _maybe_wrap_anthropic(client, model, api_key, raw_base_url), model
 
 
 # ── Provider resolution helpers ─────────────────────────────────────────────
@@ -5715,17 +5698,15 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
 
         async_kwargs["default_headers"] = hermes_xai_default_headers()
     else:
-        # Fall back to profile.default_headers (e.g. attribution User-Agent); provider inferred from hostname.
+        # profile.default_headers (e.g. attribution User-Agent); provider inferred from hostname.
         try:
             from agent.model_metadata import _infer_provider_from_url
-            from providers import get_provider_profile as _gpf_async
             _inferred = _infer_provider_from_url(sync_base_url)
-            if _inferred:
-                _ph_async = _gpf_async(_inferred)
-                if _ph_async and _ph_async.default_headers:
-                    async_kwargs["default_headers"] = dict(_ph_async.default_headers)
         except Exception:
-            pass
+            _inferred = None
+        _ph_async = _profile_default_headers(_inferred) if _inferred else None
+        if _ph_async:
+            async_kwargs["default_headers"] = _ph_async
     _merged_async = _apply_user_default_headers(async_kwargs.get("default_headers"))
     if _merged_async:
         async_kwargs["default_headers"] = _merged_async
@@ -6012,14 +5993,9 @@ def resolve_provider_client(
             elif base_url_host_matches(custom_base, "integrate.api.nvidia.com"):
                 extra["default_headers"] = build_nvidia_nim_headers(custom_base)
             else:
-                # Fall back to profile.default_headers (client-level attribution headers).
-                try:
-                    from providers import get_provider_profile as _gpf_custom
-                    _ph_custom = _gpf_custom(provider)
-                    if _ph_custom and _ph_custom.default_headers:
-                        extra["default_headers"] = dict(_ph_custom.default_headers)
-                except Exception:
-                    pass
+                _ph_custom = _profile_default_headers(provider)
+                if _ph_custom:
+                    extra["default_headers"] = _ph_custom
             _merged_custom = _apply_user_default_headers(extra.get("default_headers"))
             if _merged_custom:
                 extra["default_headers"] = _merged_custom
@@ -6311,15 +6287,7 @@ def resolve_provider_client(
 
             headers.update(hermes_xai_default_headers())
         else:
-            # Fall back to profile.default_headers for client-level attribution headers
-            # (e.g. GMI User-Agent, Vercel AI Gateway Referer/Title).
-            try:
-                from providers import get_provider_profile as _gpf_main
-                _ph_main = _gpf_main(provider)
-                if _ph_main and _ph_main.default_headers:
-                    headers.update(_ph_main.default_headers)
-            except Exception:
-                pass
+            headers.update(_profile_default_headers(provider) or {})
         _merged_main = _apply_user_default_headers(headers)
         if _merged_main:
             headers = _merged_main
