@@ -105,7 +105,14 @@ def _module_registers_tools(module_path: Path) -> bool:
     except SyntaxError:
         return False
 
-    return any(_is_registry_register_call(stmt) for stmt in tree.body)
+    # Module-level ``for`` loops count too: table-driven modules register
+    # several tools from one loop, which still runs at import time.
+    for stmt in tree.body:
+        if _is_registry_register_call(stmt):
+            return True
+        if isinstance(stmt, ast.For) and any(_is_registry_register_call(s) for s in stmt.body):
+            return True
+    return False
 
 
 def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:

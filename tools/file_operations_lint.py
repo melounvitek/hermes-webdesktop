@@ -11,7 +11,7 @@ import os
 import tomllib
 from typing import Callable, Dict, Optional
 
-from tools.file_operations_types import LintResult
+from tools.file_operations_common import LintResult
 
 # Shell linters by extension, run via _exec() for languages whose check needs an
 # external toolchain. ``.tsx`` is deliberately absent: it has never had a shell
