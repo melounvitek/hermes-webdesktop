@@ -177,7 +177,6 @@ def cache_media_bytes(
         cache_document_from_bytes,
         cache_image_from_bytes,
     )
-
     primary = _normalize_mime(mime)
     kind = kind_hint
     if kind is None:
@@ -187,14 +186,12 @@ def cache_media_bytes(
             kind = "audio"
         else:
             kind = "document"
-
     if kind == "image":
         ext = ext_for_mime(primary, overrides=ext_overrides, fallback=".jpg") or ".jpg"
         return cache_image_from_bytes(data, ext)
     if kind == "audio":
         ext = ext_for_mime(primary, overrides=ext_overrides, fallback=".ogg") or ".ogg"
         return cache_audio_from_bytes(data, ext)
-
     filename = filename_hint
     if not filename:
         ext = ext_for_mime(primary, overrides=ext_overrides, fallback=".bin")
