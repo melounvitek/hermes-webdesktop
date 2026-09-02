@@ -83,14 +83,13 @@ def get_cached_entry(server_name: str, fingerprint: str) -> Optional[dict]:
         return None
     ttl_ms = entry.get("ttl_ms")
     written_at = entry.get("written_at")
-    if isinstance(ttl_ms, (int, float)) and isinstance(written_at, (int, float)):
-        if (time.time() - written_at) * 1000.0 >= float(ttl_ms):
-            return None
+    if (
+        isinstance(ttl_ms, (int, float))
+        and isinstance(written_at, (int, float))
+        and (time.time() - written_at) * 1000.0 >= float(ttl_ms)
+    ):
+        return None
     return entry
-
-
-def has_cached_entry(server_name: str, fingerprint: str) -> bool:
-    return get_cached_entry(server_name, fingerprint) is not None
 
 
 def write_cache_entry(
@@ -130,14 +129,6 @@ def write_cache_entry(
             return
         data[server_name] = entry
         _save_all(data)
-
-
-def clear_cache_entry(server_name: str) -> None:
-    with _cache_lock:
-        data = _load_all()
-        if server_name in data:
-            del data[server_name]
-            _save_all(data)
 
 
 def tools_from_cache_entry(entry: dict) -> List[dict]:

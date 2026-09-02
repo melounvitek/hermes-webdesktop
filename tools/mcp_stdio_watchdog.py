@@ -1,38 +1,19 @@
 #!/usr/bin/env python3
 """Parent-death watchdog supervisor for stdio MCP subprocesses.
 
-Problem this fixes (#TBD): a stdio MCP server (e.g. ``npx -y mcp-remote
-<url>``) is spawned as a direct child of the Hermes process. Hermes's own
-teardown path (``MCPServerTask.shutdown()`` / ``_kill_orphaned_mcp_children``
-at final exit) reaps it cleanly on a *graceful* exit. But if the spawning
-Hermes process dies hard — ``kill -9``, an OS-level crash, a force-quit of
-the TUI/desktop app — that teardown code never runs, and the child (plus any
-of its own descendants, e.g. mcp-remote's spawned ``node`` process) is
-orphaned. macOS has no direct equivalent of Linux's
-``prctl(PR_SET_PDEATHSIG)`` to make the kernel auto-kill a child when its
-parent dies, so nothing reaps these until the next Hermes startup's opt-in
-``_kill_orphaned_mcp_children()`` sweep — which only runs if something calls
-it. Repeated ungraceful session restarts can pile up N orphaned processes,
-all racing to hold the same upstream SSE session, producing errors like
-"Invalid request parameters" / "Received request before initialization was
-complete" on the *legitimate* new connection.
+If Hermes dies hard (kill -9, crash, force-quit), its graceful teardown never
+runs and the stdio child plus its descendants are orphaned; macOS has no
+``PR_SET_PDEATHSIG`` equivalent. Piled-up orphans then race the legitimate new
+connection for the same upstream session. So the MCP command is spawned via
+this supervisor, which:
+  1. runs the real command as its own child in a new process group (so the
+     whole tree can be killpg'd);
+  2. passes stdin/stdout/stderr straight through — the MCP stdio protocol
+     talks over those pipes, so this must be a no-op relay, not a proxy;
+  3. polls ``getppid()`` against the recorded parent PID and, when the parent
+     is gone, SIGTERMs the child's group, waits, then SIGKILLs.
 
-Fix: don't spawn the MCP server command directly. Spawn this supervisor
-instead, which:
-  1. execs the real command as its own child (own process group via
-     ``start_new_session``, so it doesn't inherit the supervisor's
-     controlling terminal weirdly and so we can killpg it cleanly);
-  2. transparently passes stdin/stdout/stderr through — the MCP stdio
-     protocol talks directly over those pipes, so the supervisor must be a
-     no-op relay, not a bytes-in-the-middle proxy;
-  3. runs a background thread that polls the direct POSIX parent identity:
-     compare current ``getppid()`` against the parent PID recorded when the
-     wrapper was created;
-  4. the instant the original parent is gone, terminates the real child's
-     process group (SIGTERM, grace period, then SIGKILL) and exits.
-
-This is intentionally a thin, standard-library-only script so it starts fast
-and can't itself become a resource leak.
+Standard-library only so it starts fast and cannot itself leak.
 
 Usage (see ``tools/mcp_tool.py::_run_stdio``)::
 
@@ -60,13 +41,9 @@ def _is_orphaned(original_ppid: int, getppid=os.getppid) -> bool:
 
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:
-    """Best-effort SIGTERM-then-SIGKILL of the child's process group.
-
-    This module only ever runs on POSIX (the wrap site in tools/mcp_tool.py
-    gates on ``os.name == "posix"``), but guard the POSIX-only primitives
-    anyway so an accidental Windows import/execute degrades to a plain
-    child kill instead of AttributeError.
-    """
+    """Best-effort SIGTERM-then-SIGKILL of the child's process group. Only runs
+    on POSIX in practice, but guards the POSIX-only primitives so an accidental
+    Windows run degrades to a plain child kill instead of AttributeError."""
     killpg = getattr(os, "killpg", None)
     if killpg is None:  # windows-footgun: ok — non-POSIX fallback
         try:
@@ -115,9 +92,8 @@ def main(argv: list[str] | None = None) -> int:
         print("mcp_stdio_watchdog: no command given after '--'", file=sys.stderr)
         return 2
 
-    # New process group so we can killpg() the whole tree the real command
-    # may spawn (e.g. mcp-remote's own child `node` process), without
-    # touching our own group or the (already-gone) original parent's.
+    # New process group so we can killpg() the whole tree the real command may
+    # spawn, without touching our own group or the original parent's.
     proc = subprocess.Popen(
         real_argv,
         stdin=sys.stdin,
@@ -126,12 +102,10 @@ def main(argv: list[str] | None = None) -> int:
         start_new_session=True,
     )
 
-    # Because the real server lives in its OWN process group (above), the
-    # parent's graceful-shutdown killpg of *our* group no longer reaches it.
-    # Forward SIGTERM/SIGINT to the child's group so graceful teardown
-    # (`_kill_orphaned_mcp_children`, shutdown sweeps) still kills a wedged
-    # server that ignores stdin EOF — otherwise the watchdog wrap would
-    # invert the bug it fixes.
+    # The server lives in its OWN group, so the parent's shutdown killpg of
+    # *our* group no longer reaches it. Forward SIGTERM/SIGINT to the child's
+    # group so graceful teardown still kills a wedged server that ignores stdin
+    # EOF — otherwise the wrap would invert the bug it fixes.
     def _forward_shutdown(signum, frame):  # noqa: ARG001
         _terminate_process_group(proc)
         sys.exit(128 + signum)
