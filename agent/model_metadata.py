@@ -2925,6 +2925,161 @@ def _resolve_nous_context_length(
     return None, ""
 
 
+def _validate_cached_context_length(
+    model: str, base_url: str, cached: int, is_bedrock_context: bool, *, api_key: str = "",
+) -> Optional[int]:
+    """Step 1 of get_model_context_length: accept, repair, or drop a persisted entry.
+
+    Returns the value to use, or None to fall through to live resolution
+    (the stale entry is invalidated first where noted). Order matters: a
+    value must be rejected as bogus before any provider-specific handling.
+    """
+    # 0/negative is always a bug (corrupt cache, failed probe, manual edit);
+    # `0 is not None` would short-circuit the chain and hand the compressor a
+    # zero window, breaking every status-bar and /usage display downstream.
+    if cached <= 0:
+        logger.warning(
+            "Dropping non-positive cache entry %s@%s -> %s; re-resolving",
+            model, base_url, cached,
+        )
+        _invalidate_cached_context_length(model, base_url)
+        return None
+    # Families stale third-party metadata underreports as 32K (Kimi, MiniMax).
+    if cached <= 32768 and _model_name_suggests_stale_32k_underreport(model):
+        logger.info(
+            "Dropping stale cached context entry %s@%s -> %s (known 32K underreport); "
+            "re-resolving via hardcoded defaults",
+            model, base_url, f"{cached:,}",
+        )
+        _invalidate_cached_context_length(model, base_url)
+        return None
+    # Pre-catalog leftovers: a shorter catch-all (or the 256K fallback) was
+    # persisted before the specific entry existed (see _PRE_CATALOG_STALE_KEYS).
+    if _stale_pre_catalog_cache_entry(model, cached):
+        logger.info(
+            "Dropping stale pre-catalog cache entry %s@%s -> %s; "
+            "re-resolving via hardcoded defaults",
+            model, base_url, f"{cached:,}",
+        )
+        _invalidate_cached_context_length(model, base_url)
+        return None
+    # Nous Portal: /v1/models is authoritative. Bypass (don't drop) the cache so
+    # step 5b reconciles pre-fix OR-seeded entries without touching the on-disk
+    # file when the portal is unreachable; the 300s in-memory endpoint cache
+    # makes the per-call cost ~0 within a process.
+    if _infer_provider_from_url(base_url) == "nous":
+        logger.debug(
+            "Bypassing persistent cache for %s@%s (Nous portal authoritative)",
+            model, base_url,
+        )
+        return None
+    # Bedrock: the static table is a FLOOR, not an override — probe-derived
+    # entries may legitimately exceed it (real window read from Bedrock's
+    # length-validation error), so only under-reporting entries are dropped.
+    if is_bedrock_context:
+        try:
+            from agent.bedrock_adapter import get_bedrock_context_length
+            bedrock_ctx = get_bedrock_context_length(model)
+            if cached < bedrock_ctx:
+                logger.info(
+                    "Dropping stale Bedrock cache entry %s@%s -> %s; "
+                    "using static Bedrock table value %s",
+                    model,
+                    base_url,
+                    f"{cached:,}",
+                    f"{bedrock_ctx:,}",
+                )
+                _invalidate_cached_context_length(model, base_url)
+                return bedrock_ctx
+        except ImportError:
+            pass
+        return cached
+    if is_local_endpoint(base_url):
+        return _reconcile_local_cached_context_length(model, base_url, cached, api_key=api_key)
+    return cached
+
+
+def _resolve_bedrock_context_length(model: str, base_url: str) -> Optional[int]:
+    """Step 1b: Bedrock static table + one cached live probe; None when boto3 is absent.
+
+    Bedrock exposes no context window via metadata APIs, so
+    get_bedrock_context_length() probes the live endpoint (one fast
+    pre-inference length rejection). The result is cached per model — keyed by
+    base_url, else a synthetic bedrock:// key so display/offline paths share it.
+    """
+    try:
+        from agent.bedrock_adapter import (
+            get_bedrock_context_length,
+            resolve_bedrock_region,
+        )
+    except ImportError:
+        return None  # boto3 not installed — fall through to generic resolution
+    cache_key_url = base_url or "bedrock://"
+    cached = get_cached_context_length(model, cache_key_url)
+    if cached is not None:
+        return cached
+    # Region from the base_url host first, then the standard AWS chain. An
+    # empty region disables probing (table only).
+    region = ""
+    if base_url:
+        _m = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url)
+        if _m:
+            region = _m.group(1)
+    if not region:
+        try:
+            region = resolve_bedrock_region()
+        except Exception:
+            region = ""
+    ctx = get_bedrock_context_length(model, region=region, probe=bool(region))
+    # Only persist probe-derived values (region present); a pure table fallback
+    # must not poison the cache against a later successful probe.
+    if ctx and region:
+        save_context_length(model, cache_key_url, ctx)
+    return ctx
+
+
+def _resolve_custom_endpoint_context_length(model: str, base_url: str, api_key: str, provider: str) -> int:
+    """Steps 2-3 for a truly custom endpoint: /models, local probes, Ollama /api/show, catalog, default."""
+    context_length = _resolve_endpoint_context_length(model, base_url, api_key=api_key)
+    if context_length is not None:
+        return context_length
+    # Local endpoints: the Modelfile-aware probe first. _query_local_context_length
+    # prefers num_ctx, while _query_ollama_api_show returns the GGUF training max
+    # first, which can be larger and would create a false-safe compression window.
+    if is_local_endpoint(base_url):
+        local_ctx = _probe_local_context_length(model, base_url, api_key, provider)
+        if local_ctx:
+            return local_ctx
+    # 2b. Ollama native /api/show (GGUF-first for non-local). Non-Ollama servers 404/405 quickly.
+    ctx = _query_ollama_api_show(model, base_url, api_key=api_key)
+    if ctx is not None:
+        if not _skip_persistent_context_cache(base_url, provider):
+            save_context_length(model, base_url, ctx)
+        return ctx
+    # 3. Probe-down fallback after endpoint-specific detection failed
+    logger.info(
+        "Could not detect context length for model %r at %s — "
+        "defaulting to %s tokens (probe-down). Set model.context_length "
+        "in config.yaml to override.",
+        model, base_url, f"{DEFAULT_FALLBACK_CONTEXT:,}",
+    )
+    # 3b. Hardcoded catalog as a last resort: a proxied Anthropic gateway fails
+    # the probes above but its model name still matches DEFAULT_CONTEXT_LENGTHS
+    # (e.g. "claude-opus-4-8" -> 1M); without this the early return would
+    # silently cap context at 256K.
+    hit = _longest_key_match(DEFAULT_CONTEXT_LENGTHS, model.lower())
+    if hit:
+        logger.info(
+            "Using hardcoded context length %s for model %r "
+            "(custom endpoint, catalog match on %r)",
+            f"{hit[1]:,}", model, hit[0],
+        )
+        return hit[1]
+    # Same silent-256K bug class as the step-9 fallback — warn here too.
+    _warn_context_length_fallback(model, base_url)
+    return DEFAULT_FALLBACK_CONTEXT
+
+
 def get_model_context_length(
     model: str,
     base_url: str = "",
@@ -2963,12 +3118,10 @@ def get_model_context_length(
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
         return config_context_length
 
-    # 0a. MoA virtual provider — ``model`` is a preset name, not a real model,
-    # and ``base_url`` is the local virtual endpoint, so every probe below would
-    # miss and fall through to the 256K default. The aggregator is the acting
-    # model, so resolve the context window from the aggregator slot's real
-    # provider+model instead. References are advisory-only and never bound the
-    # acting context, so they're ignored here.
+    # 0a. MoA virtual provider: ``model`` is a preset name and ``base_url`` the
+    # local virtual endpoint, so every probe would miss. The aggregator is the
+    # acting model — resolve its real provider+model (references are advisory
+    # and never bound the acting context). Falls through on failure.
     if (provider or "").strip().lower() == "moa":
         try:
             from hermes_cli.config import (
@@ -2997,15 +3150,11 @@ def get_model_context_length(
                 )
         except Exception:
             logger.debug("MoA aggregator context-length resolution failed", exc_info=True)
-        # Fall through to the generic default if aggregator resolution failed.
 
-    # 0b. model_overrides config — EXPLICIT per-provider+model context_window
-    # override only (fill-gap _default entries are applied later, inside
-    # lookup_models_dev_context at step 5f, once the catalog has actually
-    # missed — so a _default can never preempt custom_providers or live
-    # probes). This is the supported self-unblock path for models with
-    # wrong context in models.dev (#84482) and for custom/local models
-    # (#8731). Config-read only; never blocks on the network.
+    # 0b. model_overrides: EXPLICIT per-provider+model context_window only.
+    # Fill-gap _default entries apply later inside lookup_models_dev_context
+    # (step 5f) once the catalog has missed, so a _default can never preempt
+    # custom_providers or live probes. Config-read only; never touches the network.
     if provider and model:
         try:
             from agent.models_dev import _override_context_window
@@ -3015,10 +3164,8 @@ def get_model_context_length(
         except Exception:
             pass  # fall through to other resolution paths
 
-    # 0c. custom_providers per-model override — check before any probe.
-    # This closes the gap where /model switch and display paths used to fall
-    # back to 128K despite the user having a per-model context_length set.
-    # See #15779.
+    # 0c. custom_providers per-model override — before any probe, so /model
+    # switch and display paths honour a per-model context_length.
     if custom_providers and base_url and model:
         try:
             from hermes_cli.config import get_custom_provider_context_length
@@ -3032,10 +3179,9 @@ def get_model_context_length(
         except Exception:
             pass  # fall through to probing
 
-    # Malformed user-provided URLs (for example an unmatched IPv6 bracket)
-    # make urllib.parse raise. Context resolution should treat those as an
-    # unknown endpoint rather than crashing before the inference layer can
-    # report the configuration error itself.
+    # Malformed URLs (e.g. unmatched IPv6 bracket) make urllib.parse raise;
+    # treat them as an unknown endpoint so the inference layer reports the
+    # configuration error itself.
     if base_url:
         try:
             parsed_base_url = urlparse(_normalize_base_url(base_url))
@@ -3043,12 +3189,8 @@ def get_model_context_length(
         except ValueError:
             base_url = ""
 
-    # An empty/blank model id can't be meaningfully resolved: every probe
-    # below would either miss or — worse — fuzzy-match an arbitrary catalog
-    # entry (the endpoint matcher's `model in key` check is vacuously true
-    # for ""), returning whatever context length that random entry has and
-    # persisting it under a junk "@<base_url>" cache key. Fall back to the
-    # default immediately instead.
+    # A blank model id would fuzzy-match an arbitrary catalog entry (`"" in key`
+    # is vacuously true) and persist it under a junk "@<base_url>" cache key.
     if not str(model or "").strip():
         logger.info(
             "No model id provided for context length resolution — defaulting to %s tokens.",
@@ -3056,14 +3198,13 @@ def get_model_context_length(
         )
         return DEFAULT_FALLBACK_CONTEXT
 
-    # Normalise provider-prefixed model names (e.g. "local:model-name" →
-    # "model-name") so cache lookups and server queries use the bare ID that
-    # local servers actually know about.  Ollama "model:tag" colons are preserved.
+    # Bare id for cache lookups and server queries ("local:x" -> "x"; Ollama
+    # "model:tag" colons preserved).
     model = _strip_provider_prefix(model)
 
-    # Endpoint-scoped provider metadata. Keep this ahead of the persistent
-    # cache so a value learned for a multiplexed provider's other endpoint
-    # cannot override the endpoint where the model was actually validated.
+    # Endpoint-scoped metadata goes AHEAD of the persistent cache so a value
+    # learned on a multiplexed provider's other endpoint cannot override the
+    # endpoint where the model was actually validated.
     endpoint_context = _endpoint_scoped_context_length(model, base_url)
     if endpoint_context is not None:
         return endpoint_context
@@ -3074,138 +3215,24 @@ def get_model_context_length(
         and base_url_host_matches(base_url, "amazonaws.com")
     )
 
-    # 1. Check persistent cache (model+provider)
-    # LM Studio is excluded — its loaded context length is transient (the
-    # user can reload the model with a different context_length at any time
-    # via /api/v1/models/load), so a stale cached value would mask reloads.
-    # Codex OAuth is excluded because the authenticated /models catalogue is
-    # account-specific and a fallback must never suppress later revalidation.
+    # 1. Persistent cache (LM Studio / Codex OAuth excluded — see
+    # _skip_persistent_context_cache).
     if base_url and not _skip_persistent_context_cache(base_url, provider):
         cached = get_cached_context_length(model, base_url)
         if cached is not None:
-            # Reject non-positive cached values — a 0 or negative value
-            # is always a bug (corrupted cache, probe failure, or manual
-            # edit).  Without this guard, `0 is not None` short-circuits
-            # the resolution chain and the compressor gets context_length=0,
-            # breaking every status-bar and /usage display downstream.
-            if cached <= 0:
-                logger.warning(
-                    "Dropping non-positive cache entry %s@%s -> %s; re-resolving",
-                    model, base_url, cached,
-                )
-                _invalidate_cached_context_length(model, base_url)
-            # Invalidate stale 32k cache entries for model families known to
-            # be underreported by stale third-party metadata (Kimi, MiniMax).
-            elif cached <= 32768 and _model_name_suggests_stale_32k_underreport(model):
-                logger.info(
-                    "Dropping stale cached context entry %s@%s -> %s (known 32K underreport); "
-                    "re-resolving via hardcoded defaults",
-                    model, base_url, f"{cached:,}",
-                )
-                _invalidate_cached_context_length(model, base_url)
-            # Invalidate pre-catalog leftovers: models whose catalog entry was
-            # added after a shorter catch-all (or the 256K fallback) had
-            # already persisted a smaller value — MiniMax-M3, Grok-4.3/-4.6/
-            # -4-fast/-4.20, qwen3.6-plus, ... (see _PRE_CATALOG_STALE_KEYS).
-            # Drop the stale entry and fall through to the hardcoded default.
-            elif _stale_pre_catalog_cache_entry(model, cached):
-                logger.info(
-                    "Dropping stale pre-catalog cache entry %s@%s -> %s; "
-                    "re-resolving via hardcoded defaults",
-                    model, base_url, f"{cached:,}",
-                )
-                _invalidate_cached_context_length(model, base_url)
-            # Nous Portal: the portal /v1/models endpoint is authoritative.
-            # Bypass the persistent cache so step 5b can always reconcile
-            # against it — this corrects pre-fix entries seeded from the
-            # OR catalog (the same OR underreport class that the Kimi/Qwen
-            # DEFAULT_CONTEXT_LENGTHS overrides exist to mitigate) without
-            # touching the on-disk file when the portal is unreachable.
-            # The in-memory 300s endpoint metadata cache makes the per-call
-            # cost amortise to ~0 within a process.
-            elif _infer_provider_from_url(base_url) == "nous":
-                logger.debug(
-                    "Bypassing persistent cache for %s@%s (Nous portal authoritative)",
-                    model, base_url,
-                )
-                # Fall through; step 5b reconciles and overwrites if portal responds.
-            # Invalidate stale Bedrock entries seeded before the Claude 4.6+
-            # long-context table was corrected to 1M. The static table is a
-            # FLOOR, not an override: probe-derived cache entries (step 1b)
-            # may legitimately exceed the table (real window read from
-            # Bedrock's length-validation error), so only under-reporting
-            # entries are dropped — never a cached value above the table.
-            elif is_bedrock_context:
-                try:
-                    from agent.bedrock_adapter import get_bedrock_context_length
-                    bedrock_ctx = get_bedrock_context_length(model)
-                    if cached < bedrock_ctx:
-                        logger.info(
-                            "Dropping stale Bedrock cache entry %s@%s -> %s; "
-                            "using static Bedrock table value %s",
-                            model,
-                            base_url,
-                            f"{cached:,}",
-                            f"{bedrock_ctx:,}",
-                        )
-                        _invalidate_cached_context_length(model, base_url)
-                        return bedrock_ctx
-                except ImportError:
-                    pass
-                return cached
-            else:
-                if is_local_endpoint(base_url):
-                    return _reconcile_local_cached_context_length(
-                        model, base_url, cached, api_key=api_key,
-                    )
-                return cached
-
-    # 1b. AWS Bedrock — use static context length table.
-    # Bedrock's ListFoundationModels API doesn't expose context window sizes,
-    # so we maintain a curated table in bedrock_adapter.py that reflects
-    # Bedrock-hosted model limits (e.g. older Claude 4 at 200K; Claude
-    # Opus/Sonnet 4.6+ at 1M).  This must run BEFORE the custom-endpoint probe at
-    # step 2 — bedrock-runtime.<region>.amazonaws.com is not in
-    # _URL_TO_PROVIDER, so it would otherwise be treated as a custom endpoint,
-    # fail the /models probe (Bedrock doesn't expose that shape), and fall
-    # back to the 128K default before reaching the original step 4b branch.
-    if is_bedrock_context:
-        try:
-            from agent.bedrock_adapter import (
-                get_bedrock_context_length,
-                resolve_bedrock_region,
+            validated = _validate_cached_context_length(
+                model, base_url, cached, is_bedrock_context, api_key=api_key,
             )
-        except ImportError:
-            pass  # boto3 not installed — fall through to generic resolution
-        else:
-            # Bedrock does not expose the context window via any metadata API,
-            # so get_bedrock_context_length() probes the live endpoint (one
-            # fast, pre-inference length rejection) to read the real window.
-            # Cache the probe result per model so we pay that cost once, not
-            # every turn — keyed by base_url when present, else a synthetic
-            # bedrock:// key so display/offline paths share the entry.
-            cache_key_url = base_url or "bedrock://"
-            cached = get_cached_context_length(model, cache_key_url)
-            if cached is not None:
-                return cached
-            # Resolve region from the base_url host first, then the standard
-            # AWS region chain.  An empty region disables probing (table only).
-            region = ""
-            if base_url:
-                _m = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url)
-                if _m:
-                    region = _m.group(1)
-            if not region:
-                try:
-                    region = resolve_bedrock_region()
-                except Exception:
-                    region = ""
-            ctx = get_bedrock_context_length(model, region=region, probe=bool(region))
-            if ctx and region:
-                # Only persist probe-derived values (region present); a pure
-                # table fallback shouldn't poison the cache against a later
-                # successful probe.
-                save_context_length(model, cache_key_url, ctx)
+            if validated is not None:
+                return validated
+
+    # 1b. AWS Bedrock static table + probe. Must run BEFORE the custom-endpoint
+    # step: bedrock-runtime.<region>.amazonaws.com is not in _URL_TO_PROVIDER,
+    # so it would be treated as a custom endpoint, fail the /models probe and
+    # fall back to the default.
+    if is_bedrock_context:
+        ctx = _resolve_bedrock_context_length(model, base_url)
+        if ctx is not None:
             return ctx
 
     if provider == "novita" or (base_url and base_url_host_matches(base_url, "api.novita.ai")):
@@ -3215,60 +3242,11 @@ def get_model_context_length(
                 save_context_length(model, base_url, ctx)
             return ctx
 
-    # 2. Active endpoint metadata for truly custom/unknown endpoints.
-    # Known providers (Copilot, OpenAI, Anthropic, etc.) skip this — their
-    # /models endpoint may report a provider-imposed limit (e.g. Copilot
-    # returns 128k) instead of the model's full context (400k).  models.dev
-    # has the correct per-provider values and is checked at step 5+.
+    # 2. Live /models for truly custom endpoints. Known providers skip this:
+    # their /models may report a provider-imposed limit (Copilot: 128k) rather
+    # than the model's window (400k); models.dev is consulted at step 5+.
     if _is_custom_endpoint(base_url) and not _is_known_provider_base_url(base_url):
-        context_length = _resolve_endpoint_context_length(model, base_url, api_key=api_key)
-        if context_length is not None:
-            return context_length
-        if not _is_known_provider_base_url(base_url):
-            # For local endpoints, run the probe that respects configured
-            # Modelfile context values first.  _query_local_context_length
-            # prefers num_ctx from Modelfile, while _query_ollama_api_show
-            # returns the GGUF training max first which can be larger and
-            # would create a false-safe window for compression (#63122).
-            # Non-local endpoints preserve the existing GGUF-first behavior.
-            if is_local_endpoint(base_url):
-                local_ctx = _probe_local_context_length(model, base_url, api_key, provider)
-                if local_ctx:
-                    return local_ctx
-            # 2b. Ollama native /api/show — non-local endpoints preserve
-            # the existing generic /api/show GGUF-first behavior.
-            # Non-Ollama servers return 404/405 quickly.
-            ctx = _query_ollama_api_show(model, base_url, api_key=api_key)
-            if ctx is not None:
-                if not _skip_persistent_context_cache(base_url, provider):
-                    save_context_length(model, base_url, ctx)
-                return ctx
-            # 3. Probe-down fallback after endpoint-specific detection failed
-            logger.info(
-                "Could not detect context length for model %r at %s — "
-                "defaulting to %s tokens (probe-down). Set model.context_length "
-                "in config.yaml to override.",
-                model, base_url, f"{DEFAULT_FALLBACK_CONTEXT:,}",
-            )
-            # 3b. Before falling back to the hard 256K default, consult the
-            # hardcoded catalog as a last resort.  A proxied/custom Anthropic
-            # gateway (e.g. corporate proxy) fails the Ollama/local probes
-            # above, but the model name may still match an entry in
-            # DEFAULT_CONTEXT_LENGTHS (e.g. "claude-opus-4-8" → 1M).
-            # Without this, the early return here short-circuits the catalog
-            # lookup at step 8 and silently caps context at 256K.
-            hit = _longest_key_match(DEFAULT_CONTEXT_LENGTHS, model.lower())
-            if hit:
-                logger.info(
-                    "Using hardcoded context length %s for model %r "
-                    "(custom endpoint, catalog match on %r)",
-                    f"{hit[1]:,}", model, hit[0],
-                )
-                return hit[1]
-            # Same silent-256K bug class as the step-9 fallback below —
-            # warn here too so custom/local endpoints aren't left invisible.
-            _warn_context_length_fallback(model, base_url)
-            return DEFAULT_FALLBACK_CONTEXT
+        return _resolve_custom_endpoint_context_length(model, base_url, api_key, provider)
 
     # 4. Anthropic /v1/models API (only for regular API keys, not OAuth)
     if provider == "anthropic" or (
@@ -3278,13 +3256,9 @@ def get_model_context_length(
         if ctx:
             return ctx
 
-    # 4b. (Bedrock handled earlier at step 1b — before custom-endpoint probe.)
-
-    # 5. Provider-aware lookups (before generic OpenRouter cache)
-    # These are provider-specific and take priority over the generic OR cache,
-    # since the same model can have different context limits per provider
-    # (e.g. claude-opus-4.6 is 1M on Anthropic but 128K on GitHub Copilot).
-    # If provider is generic (openrouter/custom/empty), try to infer from URL.
+    # 5. Provider-aware lookups — before the generic OR cache, since the same
+    # model has different limits per provider (claude-opus-4.6: 1M on
+    # Anthropic, 128K on Copilot). Generic providers are inferred from the URL.
     effective_provider = provider
     if not effective_provider or effective_provider in {"openrouter", "custom"}:
         if base_url:
@@ -3292,10 +3266,8 @@ def get_model_context_length(
             if inferred:
                 effective_provider = inferred
 
-    # 5a. Copilot live /models API — max_prompt_tokens from the user's account.
-    # This catches account-specific models (e.g. claude-opus-4.6-1m) that
-    # don't exist in models.dev. For models that ARE in models.dev, this
-    # returns the provider-enforced limit which is what users can actually use.
+    # 5a. Copilot live /models — account-specific models (claude-opus-4.6-1m)
+    # absent from models.dev, and the provider-enforced limit for the rest.
     if effective_provider in {"copilot", "copilot-acp", "github-copilot"}:
         try:
             from hermes_cli.models import get_copilot_model_context
@@ -3310,26 +3282,20 @@ def get_model_context_length(
             model, base_url=base_url or "", api_key=api_key or ""
         )
         if ctx:
-            # Persist ONLY portal-derived values.  Caching an OR-fallback
-            # value here would freeze in a wrong number on the first portal
-            # blip / auth glitch and step-1 would short-circuit it forever.
-            # OR's catalog is community-maintained and is precisely why the
-            # Kimi/Qwen DEFAULT_CONTEXT_LENGTHS overrides exist — we don't
-            # want it leaking into the persistent cache for Nous URLs.
+            # Persist ONLY portal-derived values: an OR-fallback value cached
+            # on a portal blip would be frozen in by step 1 forever.
             if base_url and source == "portal":
                 save_context_length(model, base_url, ctx)
             return ctx
     if effective_provider == "openai-codex":
-        # Codex OAuth enforces lower context limits than the direct OpenAI
-        # API for the same slug (e.g. gpt-5.5 is 1.05M on the API but 272K
-        # on Codex). Authoritative source is Codex's own /models endpoint.
+        # Codex OAuth enforces lower limits than the direct API for the same
+        # slug (gpt-5.5: 1.05M vs 272K); its own /models is authoritative.
         codex_ctx, codex_source = _resolve_codex_oauth_context_length_with_source(
             model, access_token=api_key or "",
         )
         if codex_ctx:
-            # Only a successful authenticated catalogue response is safe to
-            # persist. The static fallback is deliberately runtime-only so a
-            # transient OAuth/network failure cannot poison future probes.
+            # Only a fresh authenticated catalogue response may be persisted;
+            # the static fallback must not poison future probes.
             if base_url and codex_source == "live":
                 save_context_length(model, base_url, codex_ctx)
             return codex_ctx
@@ -3339,17 +3305,10 @@ def get_model_context_length(
         ctx = _resolve_endpoint_context_length(model, base_url, api_key=api_key)
         if ctx is not None:
             return ctx
-    # 5e. Ollama native /api/show probe — runs for providers whose base_url
-    # is NOT a known non-Ollama provider.  Ollama-compatible servers expose
-    # this endpoint regardless of hostname (local Ollama, Ollama Cloud,
-    # custom Ollama hosting).  The OpenAI-compat /v1/models endpoint
-    # correctly omits context_length per the OpenAI schema, but /api/show
-    # returns the authoritative GGUF model_info.context_length.
-    # Known hosted providers (OpenRouter, Anthropic, OpenAI, …) are skipped:
-    # they are definitively not Ollama, the POST always 404s, and the result
-    # is never cached for them — so every fresh process used to pay a
-    # ~300ms blocking HTTP round-trip on the first-turn critical path
-    # (measured against openrouter.ai; worse on slow DNS).
+    # 5e. Ollama native /api/show for any base_url that is not a known
+    # non-Ollama provider (OpenAI-compat /v1/models omits context_length; the
+    # GGUF model_info is authoritative). Known hosted providers are skipped:
+    # the POST always 404s and cost ~300ms on the first-turn critical path.
     if base_url:
         _inferred_for_probe = _infer_provider_from_url(base_url)
         _skip_ollama_probe = (
@@ -3362,16 +3321,10 @@ def get_model_context_length(
                 if not _skip_persistent_context_cache(base_url, provider):
                     save_context_length(model, base_url, ctx)
                 return ctx
-    # 5f. OpenRouter live /models metadata — authoritative for OpenRouter-routed
-    # models. OpenRouter's catalog carries per-model context_length (e.g.
-    # anthropic/claude-fable-5 -> 1M) and refreshes as new slugs ship, so it
-    # must win over both models.dev (step 5g) and the hardcoded family catch-all
-    # (step 8). Before this branch, an OpenRouter selection set
-    # effective_provider="openrouter", which (a) made the models.dev lookup miss
-    # brand-new slugs and (b) skipped the step-6 OR fallback (gated on `not
-    # effective_provider`), so a fresh slug like claude-fable-5 fell through to
-    # the generic "claude": 200K entry and under-reported a 1M window. Mirrors
-    # the dedicated Nous/Copilot/GMI branches above.
+    # 5f. OpenRouter live /models — authoritative for OR-routed models and
+    # refreshed as new slugs ship, so it must win over models.dev (5g) and the
+    # family catch-all (8): otherwise a brand-new slug (claude-fable-5, 1M)
+    # falls through to the generic "claude": 200K entry.
     if effective_provider == "openrouter":
         metadata = fetch_model_metadata()
         entry = metadata.get(model)
@@ -3401,10 +3354,8 @@ def get_model_context_length(
                     ctx = catalog
             return ctx
 
-    # 6. OpenRouter live API metadata — provider-unaware fallback.
-    # Only consulted when the provider is unknown (no effective_provider),
-    # because OpenRouter data is community-maintained and can be incorrect
-    # for models that belong to known providers with curated defaults.
+    # 6. OpenRouter metadata, provider-unaware fallback — only when the
+    # provider is unknown (OR data is community-maintained).
     if not effective_provider:
         metadata = fetch_model_metadata()
         if model in metadata:
@@ -3428,17 +3379,14 @@ def get_model_context_length(
         if local_ctx:
             return local_ctx
 
-    # 8. Hardcoded defaults (fuzzy match — longest key first for specificity)
-    # Only check `default_model in model` (is the key a substring of the input).
-    # The reverse (`model in default_model`) causes shorter names like
-    # "claude-sonnet-4" to incorrectly match "claude-sonnet-4-6" and return 1M.
+    # 8. Hardcoded defaults: `key in model` only — the reverse would let
+    # "claude-sonnet-4" match "claude-sonnet-4-6" and return 1M.
     hit = _longest_key_match(DEFAULT_CONTEXT_LENGTHS, model.lower())
     if hit:
         return hit[1]
 
-    # 9. Default fallback — warn (deduped per model+endpoint) so
-    #    small-context models don't silently get 256K. See
-    #    _warn_context_length_fallback for rationale.
+    # 9. Default fallback — warn (deduped per model+endpoint) so small-context
+    # models don't silently get 256K.
     _warn_context_length_fallback(model, base_url)
     return DEFAULT_FALLBACK_CONTEXT
 
