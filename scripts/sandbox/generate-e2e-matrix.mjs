@@ -317,6 +317,10 @@ export function renderMarkdownResults(jobs, tagAnnotations = [], artifactById = 
   // outcome always beats a skip, and a bad outcome beats a good one.
   const RANK = ['skip', 'TODO', 'pre-desktop', '&#x2705;', 'running', 'cancelled', '&#x274C;'];
   const SKIPS = ['skip', 'TODO', 'pre-desktop'];
+  // Rendered success/failure cells carry artifact links after the glyph;
+  // rank by the leading token or every such cell would rank as unknown (-1)
+  // and lose to any skip already in the map.
+  const rankOf = (cell) => RANK.findIndex((t) => cell === t || cell.startsWith(`${t} `));
   /** @type {Map<string, Map<string, string>>} */
   const rows = new Map();
   /** @type {string[]} */
@@ -355,7 +359,7 @@ export function renderMarkdownResults(jobs, tagAnnotations = [], artifactById = 
   })();
     const byTag = /** @type {Map<string, string>} */ (rows.get(combo));
     const prev = byTag.get(tag);
-    if (prev === undefined || RANK.indexOf(cell) > RANK.indexOf(prev)) {
+    if (prev === undefined || rankOf(cell) > rankOf(prev)) {
       byTag.set(tag, cell);
     }
   }

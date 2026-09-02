@@ -65,7 +65,7 @@ A grey leg is normal. There are two causes:
 
 The result chart on the run summary shows each leg as passed, failed, or skipped.
 
-## Triggers
+## Triggers and cost
 
 The matrix does not run on pull requests. One leg installs real toolchains and takes more than 10 minutes. The triggers are:
 
@@ -76,6 +76,10 @@ The matrix does not run on pull requests. One leg installs real toolchains and t
 ```
 gh workflow run install-e2e.yml --ref <branch> -f route=both -f tag-count=2
 ```
+
+Cost per run, so nobody is surprised: the full board at the default 2 sampled tags is up to ~76 legs. A typical green leg finishes in 7-15 minutes; every leg is capped at 60. Route slices for cheaper reads: `update` (linux only, ~8 legs), `windows-desktop` (~18/tag), `macos-desktop` (~15/tag). `tag-count` is validated to 1-10; above ~14 tags the expansion would exceed GitHub's 256-job matrix limit.
+
+Running the drivers locally: don't, except in a disposable VM. The windows driver kills every process named Hermes during teardown and the macos driver operates on `/Applications/Hermes.app`; on a machine with a real Hermes install they will interfere with it.
 
 ## Artifacts
 
