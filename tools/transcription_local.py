@@ -1,8 +1,13 @@
-"""Local STT backends: faster-whisper loading (CUDA->CPU fallback, Apple Silicon pinning), anti-hallucination transcribe kwargs and segment gating, plus the local whisper CLI (local_command) provider. The cached-model singleton and its idle-unload watcher stay in transcription_tools (they own the module state).
+"""Local STT backends.
 
-Split out of ``tools/transcription_tools.py``; every moved name is re-imported there,
-so ``tools.transcription_tools.<name>`` keeps resolving (and monkeypatching) as before.
-Origin helpers are imported lazily inside functions so patches on the origin intercept.
+faster-whisper loading (CUDA->CPU fallback, Apple Silicon pinning), the
+anti-hallucination transcribe kwargs and segment gate, and the local whisper CLI
+(``local_command``) provider. The cached-model singleton and its idle-unload
+watcher stay in ``transcription_tools`` (they own the module state).
+
+Split out of ``tools/transcription_tools.py``; moved names are re-imported
+there so ``tools.transcription_tools.<name>`` keeps resolving and patches on the
+origin still intercept (origin helpers are imported lazily inside functions).
 """
 
 from __future__ import annotations
@@ -16,17 +21,11 @@ import tempfile
 import importlib.util as _ilu
 from pathlib import Path
 from typing import Any, Dict, Optional
+
 from tools.transcription_audio import _run_quiet
 from tools.transcription_common import (
-    DEFAULT_LOCAL_MODEL,
-    DEFAULT_LOCAL_STT_LANGUAGE,
-    GROQ_MODELS,
-    LOCAL_STT_COMMAND_ENV,
-    OPENAI_MODELS,
-    _config_number,
-    _error_result,
-    _log_prompt_unsupported,
-    _ok_result,
+    DEFAULT_LOCAL_MODEL, DEFAULT_LOCAL_STT_LANGUAGE, GROQ_MODELS, LOCAL_STT_COMMAND_ENV,
+    OPENAI_MODELS, _config_number, _error_result, _log_prompt_unsupported, _ok_result,
     _process_error_detail,
 )
 

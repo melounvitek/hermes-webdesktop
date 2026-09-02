@@ -6,6 +6,11 @@ openai (also serves the managed ``nous`` selection), mistral, xai, elevenlabs,
 deepinfra; plus user-declared command providers and plugin providers.
 
     result = transcribe_audio("/path/to/audio.ogg")   # {"success", "transcript", "error"?, "provider"?}
+
+This module owns provider resolution, the dispatcher, and the cached local
+model + idle-unload state. Backends live in sibling modules
+(``transcription_{common,audio,local,cloud,command}``) and are re-imported
+here so ``tools.transcription_tools.<name>`` stays the patch/import surface.
 """
 
 import logging
@@ -226,13 +231,21 @@ def _resolve_explicit_openai() -> str:
         return "none"
 
 
-def _resolve_explicit_local() -> str:
+def _detect_local_backend() -> Optional[str]:
+    """faster-whisper > local whisper CLI > lazy-installed faster-whisper; None when nothing local works."""
     if _HAS_FASTER_WHISPER:
         return "local"
     if _has_local_command():
         return "local_command"
     if _try_lazy_install_stt():
         return "local"
+    return None
+
+
+def _resolve_explicit_local() -> str:
+    backend = _detect_local_backend()
+    if backend:
+        return backend
     logger.warning(
         "STT provider 'local' configured but unavailable "
         "(install faster-whisper or set HERMES_LOCAL_STT_COMMAND)"
@@ -351,12 +364,9 @@ def _get_provider(stt_config: dict) -> str:
     if explicit:
         return _resolve_explicit_provider(provider)
 
-    if _HAS_FASTER_WHISPER:
-        return "local"
-    if _has_local_command():
-        return "local_command"
-    if _try_lazy_install_stt():
-        return "local"
+    backend = _detect_local_backend()
+    if backend:
+        return backend
     for name, (_probe, available, _warning, message) in _CLOUD_PROVIDER_SPECS.items():
         if available():
             logger.info(message)
@@ -454,6 +464,17 @@ def _get_or_load_local_model(model_name: str, local_cfg: Dict[str, Any]):
     return model
 
 
+def _replace_cached_model_on_cpu(model_name: str):
+    """Load *model_name* on CPU/int8 and make it the cached singleton."""
+    global _local_model, _local_model_name
+    from faster_whisper import WhisperModel
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
+    with _local_model_lock:
+        _local_model = model
+        _local_model_name = model_name
+    return model
+
+
 def _transcribe_local(
     file_path: str,
     model_name: str,
@@ -462,8 +483,6 @@ def _transcribe_local(
     prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transcribe using faster-whisper (local, free)."""
-    global _local_model, _local_model_name
-
     if not _HAS_FASTER_WHISPER and not _try_lazy_install_stt():
         return _error_result("faster-whisper not installed")
 
@@ -486,7 +505,6 @@ def _transcribe_local(
 
         try:
             segments, info = model.transcribe(file_path, **transcribe_kwargs)
-            transcript = _join_confident_segments(segments, local_cfg)
         except Exception as exc:
             # CUDA libs sometimes only fail at dlopen-on-first-use, AFTER the
             # model loaded. Evict the poisoned cached model, reload on CPU and
@@ -498,13 +516,9 @@ def _transcribe_local(
                 "evicting cached model and retrying on CPU (int8).",
                 exc,
             )
-            from faster_whisper import WhisperModel
-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
-            with _local_model_lock:
-                _local_model = model
-                _local_model_name = model_name
+            model = _replace_cached_model_on_cpu(model_name)
             segments, info = model.transcribe(file_path, **transcribe_kwargs)
-            transcript = _join_confident_segments(segments, local_cfg)
+        transcript = _join_confident_segments(segments, local_cfg)
 
         logger.info(
             "Transcribed %s via local whisper (%s, lang=%s, %.1fs audio)",

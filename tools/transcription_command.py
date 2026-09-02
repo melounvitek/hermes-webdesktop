@@ -1,8 +1,12 @@
-"""User-declared STT command providers (stt.providers.<name>: type: command) and plugin-registered TranscriptionProvider dispatch, plus the pre_transcription hook that threads prompt/language/model overrides into every backend.
+"""User-declared and plugin STT providers.
 
-Split out of ``tools/transcription_tools.py``; every moved name is re-imported there,
-so ``tools.transcription_tools.<name>`` keeps resolving (and monkeypatching) as before.
-Origin helpers are imported lazily inside functions so patches on the origin intercept.
+``stt.providers.<name>: type: command`` registry, plugin-registered
+``TranscriptionProvider`` dispatch, and the ``pre_transcription`` hook that
+threads prompt/language/model overrides into every backend.
+
+Split out of ``tools/transcription_tools.py``; moved names are re-imported
+there so ``tools.transcription_tools.<name>`` keeps resolving and patches on the
+origin still intercept (origin helpers are imported lazily inside functions).
 """
 
 from __future__ import annotations
@@ -12,17 +16,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
+
 from tools.tts_command_provider import (
     command_env_passthrough as _command_stt_env_passthrough,
     render_command_template as _render_command_stt_template,
     run_command_provider as _run_command_stt,
 )
 from tools.transcription_common import (
-    BUILTIN_STT_PROVIDERS,
-    _error_result,
-    _get_stt_section,
-    _log_prompt_unsupported,
-    _ok_result,
+    BUILTIN_STT_PROVIDERS, _error_result, _get_stt_section, _log_prompt_unsupported, _ok_result,
 )
 
 # Log-record parity with the origin module.

@@ -1,8 +1,12 @@
-"""Audio preprocessing for STT: binary discovery, ffmpeg transcode/convert, source validation, silk decode, and the best-effort cloud pre-upload silence trim.
+"""Audio preprocessing for STT.
 
-Split out of ``tools/transcription_tools.py``; every moved name is re-imported there,
-so ``tools.transcription_tools.<name>`` keeps resolving (and monkeypatching) as before.
-Origin helpers are imported lazily inside functions so patches on the origin intercept.
+Binary discovery, the shared ffmpeg m4a encode (transcode + silence trim),
+source/format validation, WeChat .silk decoding, CAF conversion and the
+best-effort cloud pre-upload silence trim.
+
+Split out of ``tools/transcription_tools.py``; moved names are re-imported
+there so ``tools.transcription_tools.<name>`` keeps resolving and patches on the
+origin still intercept (origin helpers are imported lazily inside functions).
 """
 
 from __future__ import annotations
@@ -14,17 +18,12 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
+
 from hermes_cli._subprocess_compat import windows_hide_flags
 from utils import is_truthy_value
 from tools.transcription_common import (
-    COMMON_LOCAL_BIN_DIRS,
-    LOCAL_NATIVE_AUDIO_FORMATS,
-    MAX_FILE_SIZE,
-    SUPPORTED_FORMATS,
-    _config_number,
-    _error_result,
-    _lazy_ensure_quietly,
-    _process_error_detail,
+    COMMON_LOCAL_BIN_DIRS, LOCAL_NATIVE_AUDIO_FORMATS, MAX_FILE_SIZE, SUPPORTED_FORMATS,
+    _config_number, _error_result, _lazy_ensure_quietly, _process_error_detail,
 )
 
 # Log-record parity with the origin module.

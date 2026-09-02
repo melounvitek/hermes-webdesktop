@@ -1,8 +1,12 @@
-"""Cloud STT providers: the OpenAI-SDK-shaped backends (groq, openai, deepinfra), Mistral Voxtral, and the REST multipart backends (xAI, ElevenLabs), plus OpenAI audio credential resolution (config > keyless local server > env > managed Nous gateway).
+"""Cloud STT providers.
 
-Split out of ``tools/transcription_tools.py``; every moved name is re-imported there,
-so ``tools.transcription_tools.<name>`` keeps resolving (and monkeypatching) as before.
-Origin helpers are imported lazily inside functions so patches on the origin intercept.
+OpenAI-SDK-shaped backends (groq, openai, deepinfra), Mistral Voxtral, the REST
+multipart backends (xAI, ElevenLabs), and OpenAI audio credential resolution
+(config > keyless local server > env > managed Nous gateway).
+
+Split out of ``tools/transcription_tools.py``; moved names are re-imported
+there so ``tools.transcription_tools.<name>`` keeps resolving and patches on the
+origin still intercept (origin helpers are imported lazily inside functions).
 """
 
 from __future__ import annotations
@@ -13,22 +17,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urljoin
+
 from utils import is_truthy_value
 from tools.transcription_audio import _transcode_audio_for_stt
 from tools.transcription_common import (
-    DEFAULT_GROQ_STT_MODEL,
-    DEFAULT_STT_MODEL,
-    ELEVENLABS_STT_BASE_URL,
-    GROQ_BASE_URL,
-    GROQ_MODELS,
-    OPENAI_BASE_URL,
-    OPENAI_MODELS,
-    XAI_STT_BASE_URL,
-    _error_result,
-    _get_stt_section,
-    _lazy_ensure_quietly,
-    _log_prompt_unsupported,
-    _ok_result,
+    DEFAULT_GROQ_STT_MODEL, DEFAULT_STT_MODEL, ELEVENLABS_STT_BASE_URL, GROQ_BASE_URL, GROQ_MODELS,
+    OPENAI_BASE_URL, OPENAI_MODELS, XAI_STT_BASE_URL, _error_result, _get_stt_section,
+    _lazy_ensure_quietly, _log_prompt_unsupported, _ok_result,
 )
 
 # Log-record parity with the origin module.
