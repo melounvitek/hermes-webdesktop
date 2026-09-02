@@ -3217,12 +3217,6 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     else:
         agent._safe_print(warning)
 
-    summary_request = (
-        "You've reached the maximum number of tool-calling iterations allowed. "
-        "Please provide a final response summarizing what you've found and accomplished so far, "
-        "without calling any more tools."
-    )
-
     summary_api_request_id = f"iteration-summary:{uuid.uuid4()}"
     summary_call_outcome = "failed"
 
@@ -3368,12 +3362,30 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             summary_extra_body["tags"] = _portal_tags()
 
         if agent.api_mode == "codex_responses":
-            codex_kwargs = agent._build_api_kwargs(api_messages)
-            codex_kwargs.pop("tools", None)
-            summary_response = agent._run_codex_stream(codex_kwargs)
-            _ct_sum = agent._get_transport()
-            _cnr_sum = _ct_sum.normalize_response(summary_response)
-            final_response = (_cnr_sum.content or "").strip()
+            def _attempt(retry_count: int) -> str:
+                codex_kwargs = agent._build_api_kwargs(api_messages)
+                codex_kwargs.pop("tools", None)
+                response = agent._run_codex_stream(codex_kwargs)
+                return (agent._get_transport().normalize_response(response).content or "").strip()
+        elif agent.api_mode == "anthropic_messages":
+            def _attempt(retry_count: int) -> str:
+                transport = agent._get_transport()
+                ant_kw = transport.build_kwargs(
+                    model=agent.model,
+                    messages=api_messages,
+                    tools=None,
+                    max_tokens=agent.max_tokens,
+                    reasoning_config=agent.reasoning_config,
+                    is_oauth=agent._is_anthropic_oauth,
+                    preserve_dots=agent._anthropic_preserve_dots(),
+                    base_url=getattr(agent, "_anthropic_base_url", None),
+                )
+                ant_kw = _merge_nous_portal_messages_extra_body(agent, ant_kw)
+                response = _managed_summary_call(
+                    ant_kw, agent._anthropic_messages_create, retry_count=retry_count,
+                )
+                result = transport.normalize_response(response, strip_tool_prefix=agent._is_anthropic_oauth)
+                return (result.content or "").strip()
         else:
             summary_kwargs = {
                 "model": agent.model,
@@ -3437,39 +3449,23 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             if summary_extra_body:
                 summary_kwargs["extra_body"] = summary_extra_body
 
-            if agent.api_mode == "anthropic_messages":
-                _tsum = agent._get_transport()
-                _ant_kw = _tsum.build_kwargs(
-                    model=agent.model,
-                    messages=api_messages,
-                    tools=None,
-                    max_tokens=agent.max_tokens,
-                    reasoning_config=agent.reasoning_config,
-                    is_oauth=agent._is_anthropic_oauth,
-                    preserve_dots=agent._anthropic_preserve_dots(),
-                    base_url=getattr(agent, "_anthropic_base_url", None),
-                )
-                _ant_kw = _merge_nous_portal_messages_extra_body(agent, _ant_kw)
-                summary_response = _managed_summary_call(
-                    _ant_kw,
-                    agent._anthropic_messages_create,
-                    retry_count=0,
-                )
-                _summary_result = _tsum.normalize_response(summary_response, strip_tool_prefix=agent._is_anthropic_oauth)
-                final_response = (_summary_result.content or "").strip()
-            else:
+            def _attempt(retry_count: int) -> str:
                 summary_client = agent._ensure_primary_openai_client(
-                    reason="iteration_limit_summary"
+                    reason="iteration_limit_summary_retry" if retry_count else "iteration_limit_summary"
                 )
-                summary_response = _managed_summary_call(
+                response = _managed_summary_call(
                     summary_kwargs,
                     lambda request: summary_client.chat.completions.create(**request),
-                    retry_count=0,
+                    retry_count=retry_count,
                 )
-                _summary_result = agent._get_transport().normalize_response(summary_response)
-                final_response = (_summary_result.content or "").strip()
+                return (agent._get_transport().normalize_response(response).content or "").strip()
 
-        if final_response:
+        # One retry on an empty summary; a summary that is empty once its
+        # <think> block is stripped is NOT retried (matches prior behavior).
+        for retry_count in (0, 1):
+            final_response = _attempt(retry_count)
+            if not final_response:
+                continue
             if "<think>" in final_response:
                 final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
             if final_response:
@@ -3480,73 +3476,9 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 )
             else:
                 final_response = "I reached the iteration limit and couldn't generate a summary."
+            break
         else:
-            # Retry summary generation
-            if agent.api_mode == "codex_responses":
-                codex_kwargs = agent._build_api_kwargs(api_messages)
-                codex_kwargs.pop("tools", None)
-                retry_response = agent._run_codex_stream(codex_kwargs)
-                _ct_retry = agent._get_transport()
-                _cnr_retry = _ct_retry.normalize_response(retry_response)
-                final_response = (_cnr_retry.content or "").strip()
-            elif agent.api_mode == "anthropic_messages":
-                _tretry = agent._get_transport()
-                _ant_kw2 = _tretry.build_kwargs(
-                    model=agent.model,
-                    messages=api_messages,
-                    tools=None,
-                    is_oauth=agent._is_anthropic_oauth,
-                    max_tokens=agent.max_tokens,
-                    reasoning_config=agent.reasoning_config,
-                    preserve_dots=agent._anthropic_preserve_dots(),
-                    base_url=getattr(agent, "_anthropic_base_url", None),
-                )
-                _ant_kw2 = _merge_nous_portal_messages_extra_body(agent, _ant_kw2)
-                retry_response = _managed_summary_call(
-                    _ant_kw2,
-                    agent._anthropic_messages_create,
-                    retry_count=1,
-                )
-                _retry_result = _tretry.normalize_response(retry_response, strip_tool_prefix=agent._is_anthropic_oauth)
-                final_response = (_retry_result.content or "").strip()
-            else:
-                summary_kwargs = {
-                    "model": agent.model,
-                    "messages": api_messages,
-                }
-                if _summary_temperature is not None:
-                    summary_kwargs["temperature"] = _summary_temperature
-                if agent.max_tokens is not None:
-                    summary_kwargs.update(agent._max_tokens_param(agent.max_tokens))
-                if _lm_reasoning_effort is not None:
-                    summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
-                if summary_extra_body:
-                    summary_kwargs["extra_body"] = summary_extra_body
-
-                summary_client = agent._ensure_primary_openai_client(
-                    reason="iteration_limit_summary_retry"
-                )
-                summary_response = _managed_summary_call(
-                    summary_kwargs,
-                    lambda request: summary_client.chat.completions.create(**request),
-                    retry_count=1,
-                )
-                _retry_result = agent._get_transport().normalize_response(summary_response)
-                final_response = (_retry_result.content or "").strip()
-
-            if final_response:
-                if "<think>" in final_response:
-                    final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
-                if final_response:
-                    summary_call_outcome = "success"
-                    append_message(
-                        messages,
-                        {"role": "assistant", "content": final_response},
-                    )
-                else:
-                    final_response = "I reached the iteration limit and couldn't generate a summary."
-            else:
-                final_response = "I reached the iteration limit and couldn't generate a summary."
+            final_response = "I reached the iteration limit and couldn't generate a summary."
 
     except Exception as e:
         logger.warning("Failed to get summary response: %s", e)
