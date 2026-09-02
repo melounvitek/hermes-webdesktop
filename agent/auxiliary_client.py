@@ -2701,6 +2701,32 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
     return None, None
 
 
+def _endpoint_default_headers(
+    base_url: str, provider: str, *, is_vision: bool = False, xai: bool = False,
+) -> Optional[dict]:
+    """Provider-specific client headers by endpoint host, merged with user ``model.default_headers``.
+
+    Kimi Code needs the claude-code User-Agent; Copilot needs its request headers
+    (``is_vision`` adds Copilot-Vision-Request); NVIDIA NIM and (optionally) xAI have
+    their own fingerprints; anything else falls back to the provider profile.
+    """
+    if base_url_host_matches(base_url, "api.kimi.com"):
+        headers: dict = {"User-Agent": "claude-code/0.1.0"}
+    elif base_url_host_matches(base_url, "githubcopilot.com"):
+        from hermes_cli.copilot_auth import copilot_request_headers
+
+        headers = dict(copilot_request_headers(is_agent_turn=True, is_vision=is_vision))
+    elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
+        headers = dict(build_nvidia_nim_headers(base_url))
+    elif xai and base_url_host_matches(base_url, "x.ai"):
+        from tools.xai_http import hermes_xai_default_headers
+
+        headers = dict(hermes_xai_default_headers())
+    else:
+        headers = _profile_default_headers(provider) or {}
+    return _apply_user_default_headers(headers or None) or None
+
+
 def _profile_default_headers(provider: str) -> Optional[dict]:
     """Client-level attribution headers from the provider profile (e.g. GMI User-Agent), or None."""
     try:
@@ -5857,22 +5883,9 @@ def resolve_provider_client(
             _clean_base, _dq = _extract_url_query_params(custom_base)
             if _dq:
                 extra["default_query"] = _dq
-            if base_url_host_matches(custom_base, "api.kimi.com"):
-                extra["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
-            elif base_url_host_matches(custom_base, "githubcopilot.com"):
-                from hermes_cli.copilot_auth import copilot_request_headers
-                extra["default_headers"] = copilot_request_headers(
-                    is_agent_turn=True, is_vision=is_vision
-                )
-            elif base_url_host_matches(custom_base, "integrate.api.nvidia.com"):
-                extra["default_headers"] = build_nvidia_nim_headers(custom_base)
-            else:
-                _ph_custom = _profile_default_headers(provider)
-                if _ph_custom:
-                    extra["default_headers"] = _ph_custom
-            _merged_custom = _apply_user_default_headers(extra.get("default_headers"))
-            if _merged_custom:
-                extra["default_headers"] = _merged_custom
+            _custom_headers = _endpoint_default_headers(custom_base, provider, is_vision=is_vision)
+            if _custom_headers:
+                extra["default_headers"] = _custom_headers
             client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **extra)
             client = _wrap_if_needed(client, final_model, wrap_base or custom_base, custom_key)
             return _route(client, final_model)
@@ -6123,27 +6136,7 @@ def resolve_provider_client(
                 logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
                 return _route(client, final_model)
 
-        # Provider-specific headers
-        headers = {}
-        if base_url_host_matches(base_url, "api.kimi.com"):
-            headers["User-Agent"] = "claude-code/0.1.0"
-        elif base_url_host_matches(base_url, "githubcopilot.com"):
-            from hermes_cli.copilot_auth import copilot_request_headers
-
-            headers.update(copilot_request_headers(
-                is_agent_turn=True, is_vision=is_vision
-            ))
-        elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
-            headers.update(build_nvidia_nim_headers(base_url))
-        elif base_url_host_matches(base_url, "x.ai"):
-            from tools.xai_http import hermes_xai_default_headers
-
-            headers.update(hermes_xai_default_headers())
-        else:
-            headers.update(_profile_default_headers(provider) or {})
-        _merged_main = _apply_user_default_headers(headers)
-        if _merged_main:
-            headers = _merged_main
+        headers = _endpoint_default_headers(base_url, provider, is_vision=is_vision, xai=True)
         client = _create_openai_client(api_key=api_key, base_url=base_url,
                         **({"default_headers": headers} if headers else {}))
 
@@ -6519,9 +6512,7 @@ def resolve_vision_provider_client(
             api_mode=resolved_api_mode,
             main_runtime=runtime,
         )
-        if client is None:
-            return provider_for_base_override, None, None
-        return provider_for_base_override, client, final_model
+        return provider_for_base_override, client, (final_model if client is not None else None)
 
     if requested == "auto":
         # Auto-detect order: 1. main provider + model (per-provider vision
@@ -6654,13 +6645,6 @@ def resolve_vision_provider_client(
             if client is not None:
                 return _finalize(requested, client, final_model)
         # Fallback: try without explicit base_url (old behavior)
-        client, final_model = _get_cached_client(requested, resolved_model, async_mode,
-                                                 api_mode=resolved_api_mode,
-                                                 main_runtime=runtime,
-                                                 is_vision=True)
-        if client is None:
-            return requested, None, None
-        return requested, client, final_model
 
     client, final_model = _get_cached_client(requested, resolved_model, async_mode,
                                              api_mode=resolved_api_mode,
@@ -9203,29 +9187,33 @@ def _call_llm_impl(
             api_mode=resolved_api_mode,
         )
 
+    def _primary(**validate_kw: Any) -> Any:
+        return _validate_llm_response(
+            _relay_sync_completion(
+                client,
+                kwargs,
+                provider=request_provider,
+                api_mode=resolved_api_mode,
+                create=lambda request: _create_with_progress(
+                    client,
+                    request,
+                    task,
+                    force_stream=_provider_requires_stream(
+                        request_provider, _base_info or resolved_base_url,
+                    ),
+                ),
+            ),
+            task,
+            **validate_kw,
+        )
+
     try:
         # Bounded same-provider retry (exponential backoff, count from
         # auxiliary.transient_retries) for transient transport blips before the
         # except-chain escalates to fallback — a dropped connection shouldn't
         # abandon a healthy provider (matters for pinned MoA advisors).
         try:
-            return _validate_llm_response(
-                _relay_sync_completion(
-                    client,
-                    kwargs,
-                    provider=request_provider,
-                    api_mode=resolved_api_mode,
-                    create=lambda request: _create_with_progress(
-                        client,
-                        request,
-                        task,
-                        force_stream=_provider_requires_stream(
-                            request_provider, _base_info or resolved_base_url,
-                        ),
-                    ),
-                ),
-                task,
-                provider=request_provider, base_url=_base_info)
+            return _primary(provider=request_provider, base_url=_base_info)
         except Exception as transient_err:
             if not _is_transient_transport_error(transient_err):
                 raise
@@ -9250,23 +9238,7 @@ def _call_llm_impl(
                 )
                 time.sleep(_backoff)
                 try:
-                    return _validate_llm_response(
-                        _relay_sync_completion(
-                            client,
-                            kwargs,
-                            provider=request_provider,
-                            api_mode=resolved_api_mode,
-                            create=lambda request: _create_with_progress(
-                                client,
-                                request,
-                                task,
-                                force_stream=_provider_requires_stream(
-                                    request_provider,
-                                    _base_info or resolved_base_url,
-                                ),
-                            ),
-                        ),
-                        task)
+                    return _primary()
                 except Exception as retry_transient:
                     if not _is_transient_transport_error(retry_transient):
                         raise
@@ -9544,7 +9516,7 @@ async def _async_call_llm_impl(
                 return await _acreate_with_stream(client, _kwargs, task)
             return await client.chat.completions.create(**_kwargs)
 
-        try:
+        async def _primary(**validate_kw: Any) -> Any:
             return _validate_llm_response(
                 await _relay_async_completion(
                     client,
@@ -9554,7 +9526,11 @@ async def _async_call_llm_impl(
                     create=_acreate,
                 ),
                 task,
-                provider=request_provider, base_url=_client_base)
+                **validate_kw,
+            )
+
+        try:
+            return await _primary(provider=request_provider, base_url=_client_base)
         except Exception as transient_err:
             if not _is_transient_transport_error(transient_err):
                 raise
@@ -9572,15 +9548,7 @@ async def _async_call_llm_impl(
                 "once on the same provider before fallback: %s",
                 task or "call", transient_err,
             )
-            return _validate_llm_response(
-                await _relay_async_completion(
-                    client,
-                    kwargs,
-                    provider=request_provider,
-                    api_mode=resolved_api_mode,
-                    create=_acreate,
-                ),
-                task)
+            return await _primary()
     except Exception as first_err:
         async def _perform(step: _LadderStep) -> Any:
             if step.kind == "call":
