@@ -413,15 +413,11 @@ if _try_ultrafast_version():
     raise SystemExit(0)
 
 import argparse
-import hashlib
 import json
 import re
 import shlex
 import shutil
-import stat
 import subprocess
-import tempfile
-import time as _time_mod
 from pathlib import Path
 from typing import Optional
 
@@ -841,7 +837,7 @@ if _FORCE_IPV4_EARLY:
 
 import logging
 import threading
-import time as _time
+import time as _time  # noqa: F401  (tests patch hermes_cli.main._time.sleep)
 from datetime import datetime
 
 from hermes_cli import __version__, __release_date__
@@ -875,6 +871,8 @@ from hermes_cli.model_setup_flows import (
 logger = logging.getLogger(__name__)
 from hermes_cli.main_provider_setup import (  # noqa: E402,F401  (re-exported; tests patch hermes_cli.main.<name>)
     _AUX_TASKS,
+    _build_provider_picker_rows,
+    _named_custom_provider_map,
     _DEFAULT_QWEN_PORTAL_MODELS,
     _DELEGATION_TASK_DESC,
     _DELEGATION_TASK_KEY,
@@ -2465,7 +2463,6 @@ def select_provider_and_model(args=None):
     )
     from hermes_cli.providers import (
         custom_provider_aliases,
-        custom_provider_slug,
         resolve_provider_full,
     )
 
@@ -2486,129 +2483,6 @@ def select_provider_and_model(args=None):
         config_provider or os.getenv("HERMES_INFERENCE_PROVIDER") or "auto"
     )
     compatible_custom_providers = get_compatible_custom_providers(config)
-    def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
-        from hermes_cli.config import read_raw_config
-
-        # Build lookups of raw (un-expanded) templates keyed by a
-        # stable identity. We intentionally bypass
-        # ``get_compatible_custom_providers(read_raw_config())`` here because
-        # its ``_normalize_custom_provider_entry`` step calls ``urlparse()``
-        # on ``base_url`` and drops any entry whose ``base_url`` is itself an
-        # env-ref template (e.g. ``${NEURALWATT_API_BASE}``). Dropping those
-        # entries is exactly how env-ref preservation fails for the user
-        # config that motivated this fix.
-        raw_api_key_refs: dict[tuple, str] = {}
-        raw_base_url_refs: dict[tuple, str] = {}
-        raw_cfg = read_raw_config()
-
-        def _record_raw(
-            name: str,
-            provider_key: str,
-            model: str,
-            api_key: str,
-            base_url: str,
-        ) -> None:
-            template = str(api_key or "").strip()
-            base_template = str(base_url or "").strip()
-            name = str(name or "").strip()
-            provider_key = str(provider_key or "").strip()
-            model = str(model or "").strip()
-            # Index by every plausible identity the loaded (expanded) config
-            # might present: (name), (name, model), (provider_key), and
-            # (provider_key, model). Case-insensitive on name/provider_key so
-            # the loaded entry matches regardless of display casing.
-            identities = []
-            if name:
-                identities.extend(((name.lower(),), (name.lower(), model)))
-            if provider_key:
-                identities.extend(
-                    ((provider_key.lower(),), (provider_key.lower(), model))
-                )
-            if "${" in template:
-                for identity in identities:
-                    raw_api_key_refs.setdefault(identity, template)
-            if "${" in base_template:
-                for identity in identities:
-                    raw_base_url_refs.setdefault(identity, base_template)
-
-        raw_list = raw_cfg.get("custom_providers")
-        if isinstance(raw_list, list):
-            for raw_entry in raw_list:
-                if not isinstance(raw_entry, dict):
-                    continue
-                _record_raw(
-                    raw_entry.get("name", ""),
-                    "",
-                    raw_entry.get("model", "") or raw_entry.get("default_model", ""),
-                    raw_entry.get("api_key", ""),
-                    raw_entry.get("base_url", "")
-                    or raw_entry.get("url", "")
-                    or raw_entry.get("api", ""),
-                )
-        raw_providers = raw_cfg.get("providers")
-        if isinstance(raw_providers, dict):
-            for raw_key, raw_entry in raw_providers.items():
-                if not isinstance(raw_entry, dict):
-                    continue
-                _record_raw(
-                    raw_entry.get("name", "") or raw_key,
-                    raw_key,
-                    raw_entry.get("model", "") or raw_entry.get("default_model", ""),
-                    raw_entry.get("api_key", ""),
-                    raw_entry.get("base_url", "")
-                    or raw_entry.get("url", "")
-                    or raw_entry.get("api", ""),
-                )
-
-        def _lookup_ref(
-            refs: dict[tuple, str],
-            name: str,
-            provider_key: str,
-            model: str,
-        ) -> str:
-            name_lc = str(name or "").strip().lower()
-            pkey_lc = str(provider_key or "").strip().lower()
-            model = str(model or "").strip()
-            for identity in (
-                (pkey_lc, model),
-                (pkey_lc,),
-                (name_lc, model),
-                (name_lc,),
-            ):
-                if identity[0] and identity in refs:
-                    return refs[identity]
-            return ""
-
-        custom_provider_map = {}
-        for entry in get_compatible_custom_providers(cfg):
-            if not isinstance(entry, dict):
-                continue
-            name = (entry.get("name") or "").strip()
-            base_url = (entry.get("base_url") or "").strip()
-            if not name or not base_url:
-                continue
-            provider_key = (entry.get("provider_key") or "").strip()
-            key = custom_provider_slug(name, provider_key)
-            custom_provider_map[key] = {
-                "name": name,
-                "base_url": base_url,
-                "api_key": entry.get("api_key", ""),
-                "key_env": entry.get("key_env") or entry.get("api_key_env", ""),
-                "model": entry.get("model", ""),
-                "models": entry.get("models", {}),
-                "models_discovered": entry.get("models_discovered", False),
-                "extra_headers": entry.get("extra_headers", {}),
-                "discover_models": entry.get("discover_models", True),
-                "api_mode": entry.get("api_mode", ""),
-                "provider_key": provider_key,
-                "api_key_ref": _lookup_ref(
-                    raw_api_key_refs, name, provider_key, entry.get("model", "")
-                ),
-                "base_url_ref": _lookup_ref(
-                    raw_base_url_refs, name, provider_key, entry.get("model", "")
-                ),
-            }
-        return custom_provider_map
 
     def _norm_base_url(url: str) -> str:
         return str(url or "").strip().rstrip("/").lower()
@@ -2672,13 +2546,7 @@ def select_provider_and_model(args=None):
     if active == "openrouter" and get_env_value("OPENAI_BASE_URL"):
         active = "custom"
 
-    from hermes_cli.models import (
-        CANONICAL_PROVIDERS,
-        _PROVIDER_LABELS,
-        _PROVIDER_ALIASES,
-        group_providers,
-        provider_group_for_slug,
-    )
+    from hermes_cli.models import _PROVIDER_LABELS
 
     provider_labels = dict(_PROVIDER_LABELS)  # derive from canonical list
     if active and active in _custom_provider_map:
@@ -2691,89 +2559,11 @@ def select_provider_and_model(args=None):
     print(f"  Active provider:  {active_label}")
     print()
 
-    # Step 1: Provider selection.
-    #
-    # Canonical providers are folded into top-level groups (display only — see
-    # PROVIDER_GROUPS in hermes_cli/models.py). A multi-member group shows one
-    # row ("Kimi / Moonshot ▸"); picking it opens a member sub-picker that
-    # resolves back to a concrete slug, so the dispatch chain below is
-    # unchanged. Custom providers and the trailing actions stay flat.
-    canonical_descs = {p.slug: p.tui_desc for p in CANONICAL_PROVIDERS}
-    # Honor ``model_catalog.excluded_providers`` so the CLI ``hermes model``
-    # picker hides the same providers the gateway/TUI pickers do. A canonical
-    # provider is hidden if its slug OR any of its aliases appears in the
-    # exclusion list (case-insensitive), matching list_authenticated_providers'
-    # matching against hermes_id / alias / canonical slug.
-    _cli_excluded = {
-        str(p).strip().lower()
-        for p in (config.get("model_catalog", {}) or {}).get("excluded_providers") or []
-        if p
-    }
-    if _cli_excluded:
-        _alias_to_canon = _PROVIDER_ALIASES
-        _names_for: dict[str, set[str]] = {}
-        for _p in CANONICAL_PROVIDERS:
-            _names_for[_p.slug] = {_p.slug.lower()}
-        for _alias, _canon in _alias_to_canon.items():
-            _names_for.setdefault(_canon, {_canon.lower()}).add(_alias.lower())
-        _visible_slugs = [
-            p.slug for p in CANONICAL_PROVIDERS
-            if not _names_for.get(p.slug, {p.slug.lower()}) & _cli_excluded
-        ]
-    else:
-        _visible_slugs = [p.slug for p in CANONICAL_PROVIDERS]
-    grouped_rows = group_providers(_visible_slugs)
-
-    # The group/slug that should be pre-selected: the active provider's group
-    # if it's grouped, otherwise the active slug itself.
-    active_group = provider_group_for_slug(active) if active else ""
-
-    # ordered entries: (key, label, members)
-    #   members == [] → leaf row, key is a provider slug / action
-    #   members != [] → group row, key is "group:<gid>"
-    ordered: list[tuple[str, str, list[str]]] = []
-    default_idx = 0
-    for row in grouped_rows:
-        if row["kind"] == "group":
-            gid = row["group_id"]
-            group_desc = row.get("description", "")
-            label = f"{row['label']} ▸ ({group_desc})" if group_desc else f"{row['label']} ▸"
-            key = f"group:{gid}"
-            is_active = bool(active_group) and gid == active_group
-            members = row["members"]
-        else:
-            slug = row["slug"]
-            label = canonical_descs.get(slug, provider_labels.get(slug, slug))
-            key = slug
-            is_active = bool(active) and slug == active
-            members = []
-        if is_active:
-            ordered.append((key, f"{label}  ← currently active", members))
-            default_idx = len(ordered) - 1
-        else:
-            ordered.append((key, label, members))
-
-    for key, provider_info in _custom_provider_map.items():
-        name = provider_info["name"]
-        base_url = provider_info["base_url"]
-        short_url = base_url.replace("https://", "").replace("http://", "").rstrip("/")
-        saved_model = provider_info.get("model", "")
-        model_hint = f" — {saved_model}" if saved_model else ""
-        label = f"{name} ({short_url}){model_hint}"
-        if active and key == active:
-            ordered.append((key, f"{label}  ← currently active", []))
-            default_idx = len(ordered) - 1
-        else:
-            ordered.append((key, label, []))
-
-    ordered.append(("custom", "Custom endpoint (enter URL manually)", []))
-    _has_saved_custom_list = isinstance(config.get("custom_providers"), list) and bool(
-        config.get("custom_providers")
+    # Step 1: Provider selection (group rows drill into a member sub-picker
+    # that resolves back to a concrete slug, so the dispatch below is unchanged).
+    ordered, default_idx = _build_provider_picker_rows(
+        config, active, provider_labels, _custom_provider_map
     )
-    if _has_saved_custom_list:
-        ordered.append(("remove-custom", "Remove a saved custom provider", []))
-    ordered.append(("aux-config", "Configure auxiliary models...", []))
-    ordered.append(("cancel", "Leave unchanged", []))
 
     provider_idx = _prompt_provider_choice(
         [label for _, label, _ in ordered],
@@ -4666,92 +4456,21 @@ def _is_electron_packaged_web_dist(path: str) -> bool:
     return "app.asar" in path.replace("\\", "/")
 
 
-def cmd_dashboard(args):
-    """Start the web UI server, or (with --stop/--status) manage running ones."""
-    _token_file = getattr(args, "ssh_session_token_file", None)
-    if _token_file and (
-        getattr(args, "status", False) or getattr(args, "stop", False)
-    ):
-        raise SystemExit("--ssh-session-token-file cannot be used with --status or --stop")
+def _route_named_profile_dashboard(
+    args, _headless_backend: bool, _ssh_owner_nonce: str, _token_file: str
+) -> None:
+    """Named-profile launches route to the single MACHINE dashboard.
 
-    # --status: report running dashboards and exit, no deps needed.
-    if getattr(args, "status", False):
-        count = _report_dashboard_status()
-        sys.exit(0 if count == 0 else 0)  # status is informational, always 0
-
-    # --stop: kill any running dashboards and exit, no deps needed.
-    if getattr(args, "stop", False):
-        pids = _find_stale_dashboard_pids()
-        if not pids:
-            print("No hermes dashboard processes running.")
-            sys.exit(0)
-        # Reuse the same SIGTERM-grace-SIGKILL path used after `hermes update`.
-        _self()._kill_stale_dashboard_processes(reason="requested via --stop")
-        # _kill_stale_dashboard_processes prints outcomes itself.  Exit 0 if
-        # we killed at least one, 1 if they were all unkillable.
-        remaining = _find_stale_dashboard_pids()
-        sys.exit(1 if remaining else 0)
-
-    # `serve` is the headless backend: no UI build, no SPA mount, neutral
-    # ready sentinel. Resolved once and threaded through the re-exec, the
-    # build gate, and start_server.
-    _headless_backend = getattr(args, "headless_backend", False)
-    # `hermes serve` is headless/non-interactive: fail closed on a corrupt
-    # config.yaml instead of silently starting on defaults where provider
-    # auto-detection can adopt unnamed .env credentials (issue #81952).
-    # Same policy + escape hatch as _guard_noninteractive_user_config.
-    if _headless_backend:
-        from hermes_cli.config import (
-            InvalidUserConfigError,
-            require_parseable_user_config,
-        )
-
-        try:
-            require_parseable_user_config(
-                ignore_user_config=bool(getattr(args, "ignore_user_config", False))
-            )
-        except InvalidUserConfigError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            raise SystemExit(2) from exc
-    _ssh_owner_nonce = getattr(args, "ssh_owner_nonce", None)
-    if _ssh_owner_nonce and not re.fullmatch(r"[0-9a-f]{16}", _ssh_owner_nonce):
-        raise SystemExit("--ssh-owner-nonce must be 16 lowercase hex characters")
-    _ssh_session_token = None
-    if _token_file and not _headless_backend:
-        raise SystemExit("--ssh-session-token-file is only valid with hermes serve")
-
-    # ── Sanitize Desktop-inherited env that hijacks a standalone launch ─
-    # Desktop Electron spawns its backend with HERMES_DESKTOP=1 plus
-    # HERMES_WEB_DIST=<packaged app.asar[/unpacked]/dist> (and often
-    # HERMES_SERVE_HEADLESS=1 on the serve path). A shell that inherits
-    # those vars then runs `hermes dashboard` would otherwise:
-    #   - serve the desktop renderer → "Desktop IPC bridge is unavailable"
-    #     (issue #52945), or
-    #   - disable the SPA via inherited HERMES_SERVE_HEADLESS.
-    # Only strip Electron-packaged WEB_DIST contamination — caller-managed
-    # HERMES_WEB_DIST overrides (dev / custom builds) must still work.
-    # The desktop-spawned backend itself (HERMES_DESKTOP=1) keeps its dist.
-    # Intentionally headless `serve` re-sets HERMES_SERVE_HEADLESS below.
-    if os.environ.get("HERMES_DESKTOP") != "1":
-        _inherited_web_dist = os.environ.get("HERMES_WEB_DIST", "")
-        if _is_electron_packaged_web_dist(_inherited_web_dist):
-            os.environ.pop("HERMES_WEB_DIST", None)
-    if not _headless_backend:
-        os.environ.pop("HERMES_SERVE_HEADLESS", None)
-
-    # ── Unified profile launch routing ────────────────────────────────
-    # The dashboard is a MACHINE management surface: it can read/write any
-    # profile via the per-request ?profile= scoping. Running one dashboard
-    # per profile just fragments that (port collisions, N processes, and a
-    # "which dashboard am I on?" guessing game). So when a NAMED profile
-    # launches the dashboard (`worker dashboard` → HERMES_HOME points into
-    # profiles/), default to the machine dashboard:
-    #   - already running → open the browser at ?profile=<name> and exit
-    #   - not running     → re-exec as the machine dashboard (pinned to the
-    #     default profile so _apply_profile_override can't re-route through
-    #     the sticky active_profile file) with the launching profile
-    #     preselected in the UI's switcher.
-    # `--isolated` opts out and preserves the old per-profile behavior.
+    The dashboard manages every profile via per-request ``?profile=`` scoping,
+    so one server per profile only fragments it (port collisions, N
+    processes). When a named profile launches: if the machine dashboard is
+    already listening, open the browser at ``?profile=<name>`` and exit;
+    otherwise re-exec as the machine dashboard pinned to ``-p default`` (so
+    ``_apply_profile_override`` can't re-route through the sticky
+    active_profile file) with this profile preselected. ``--isolated`` opts
+    out; Desktop pool backends (HERMES_DESKTOP=1) stay per-profile. Returns
+    normally when no routing applies.
+    """
     try:
         from hermes_cli.profiles import get_active_profile_name
         _launch_profile = get_active_profile_name()
@@ -4834,6 +4553,149 @@ def cmd_dashboard(args):
         else:
             os.execvpe(sys.executable, reexec_argv, env)
 
+
+def _resolve_dashboard_web_dist(args, _headless_backend: bool) -> None:
+    """Build or validate the web UI dist before the server imports.
+
+    ``serve`` sets HERMES_SERVE_HEADLESS so mount_spa() stays off even if a
+    stray dist exists. Otherwise build unless HERMES_WEB_DIST or --skip-build
+    says a dist is pre-built — in which case verify index.html exists (an
+    unverified promise means the server starts and serves 404s, #23817).
+    --skip-build on the default dist location gets ONE recovery build
+    (#59288); a caller-managed HERMES_WEB_DIST cannot be populated and is
+    written back expanded because web_server reads it raw at import.
+    """
+    if _headless_backend:
+        # Don't build the SPA, and tell mount_spa() (read at web_server import
+        # below) to disable it even if a stray dist exists. Set it first.
+        os.environ["HERMES_SERVE_HEADLESS"] = "1"
+    elif "HERMES_WEB_DIST" not in os.environ and not getattr(args, "skip_build", False):
+        if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
+            sys.exit(1)
+    elif getattr(args, "skip_build", False):
+        # --build-mode skip trusts the caller to have pre-built the web UI.
+        # Verify the dist actually exists; otherwise the server will start
+        # and serve 404s with no obvious cause (issue #23817).
+        _dist_root = (
+            Path(os.environ["HERMES_WEB_DIST"])
+            if "HERMES_WEB_DIST" in os.environ
+            else PROJECT_ROOT / "hermes_cli" / "web_dist"
+        )
+        if not (_dist_root / "index.html").exists():
+            # The caller promised a pre-built dist but there isn't one.
+            # Instead of hard-failing (issue #59288 — desktop launches with
+            # --build-mode skip after a wipe of web_dist), warn and attempt
+            # ONE recovery build through the normal build path. Only the
+            # default dist location is recoverable: a custom HERMES_WEB_DIST
+            # points at a caller-managed directory the build cannot populate.
+            _recoverable = "HERMES_WEB_DIST" not in os.environ
+            if _recoverable:
+                print(f"⚠ --skip-build was passed but no web dist found at: {_dist_root}")
+                print("  Attempting one recovery build of the web UI...")
+                _build_web_ui(PROJECT_ROOT / "web", fatal=True)
+            if not (_dist_root / "index.html").exists():
+                print(f"✗ --skip-build was passed but no web dist found at: {_dist_root}")
+                if _recoverable:
+                    print("  The recovery build did not produce a usable dist.")
+                print("  Pre-build first:  npm install --workspace web && npm run build -w web")
+                print("  Or drop --skip-build to build automatically.")
+                sys.exit(1)
+            print("  ✓ Recovery build produced a web dist")
+        print(f"→ Skipping web UI build (--skip-build); using dist at {_dist_root}")
+    else:
+        # HERMES_WEB_DIST is set without --skip-build: the build is skipped
+        # (the env var points at a caller-managed dist), so validate it the
+        # same way the --skip-build branch does — otherwise the server starts
+        # and serves 404s with no obvious cause (same failure mode as #23817,
+        # via the env-var path).
+        _dist_root = Path(os.environ["HERMES_WEB_DIST"]).expanduser()
+        if not (_dist_root / "index.html").exists():
+            print(f"✗ HERMES_WEB_DIST is set but no web dist found at: {_dist_root}")
+            print("  Pre-build first:  npm install --workspace web && npm run build -w web")
+            print("  Or unset HERMES_WEB_DIST to build and use the default web UI dist.")
+            sys.exit(1)
+        # Write the expanded path back: web_server reads HERMES_WEB_DIST raw
+        # at import (no expanduser), so a validated "~/dist" would otherwise
+        # pass here and still 404 there.
+        os.environ["HERMES_WEB_DIST"] = str(_dist_root)
+        print(f"→ Using web dist from HERMES_WEB_DIST: {_dist_root}")
+
+
+def cmd_dashboard(args):
+    """Start the web UI server, or (with --stop/--status) manage running ones."""
+    _token_file = getattr(args, "ssh_session_token_file", None)
+    if _token_file and (
+        getattr(args, "status", False) or getattr(args, "stop", False)
+    ):
+        raise SystemExit("--ssh-session-token-file cannot be used with --status or --stop")
+
+    # --status: report running dashboards and exit, no deps needed.
+    if getattr(args, "status", False):
+        count = _report_dashboard_status()
+        sys.exit(0 if count == 0 else 0)  # status is informational, always 0
+
+    # --stop: kill any running dashboards and exit, no deps needed.
+    if getattr(args, "stop", False):
+        pids = _find_stale_dashboard_pids()
+        if not pids:
+            print("No hermes dashboard processes running.")
+            sys.exit(0)
+        # Reuse the same SIGTERM-grace-SIGKILL path used after `hermes update`.
+        _self()._kill_stale_dashboard_processes(reason="requested via --stop")
+        # _kill_stale_dashboard_processes prints outcomes itself.  Exit 0 if
+        # we killed at least one, 1 if they were all unkillable.
+        remaining = _find_stale_dashboard_pids()
+        sys.exit(1 if remaining else 0)
+
+    # `serve` is the headless backend: no UI build, no SPA mount, neutral
+    # ready sentinel. Resolved once and threaded through the re-exec, the
+    # build gate, and start_server.
+    _headless_backend = getattr(args, "headless_backend", False)
+    # `hermes serve` is headless/non-interactive: fail closed on a corrupt
+    # config.yaml instead of silently starting on defaults where provider
+    # auto-detection can adopt unnamed .env credentials (issue #81952).
+    # Same policy + escape hatch as _guard_noninteractive_user_config.
+    if _headless_backend:
+        from hermes_cli.config import (
+            InvalidUserConfigError,
+            require_parseable_user_config,
+        )
+
+        try:
+            require_parseable_user_config(
+                ignore_user_config=bool(getattr(args, "ignore_user_config", False))
+            )
+        except InvalidUserConfigError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+    _ssh_owner_nonce = getattr(args, "ssh_owner_nonce", None)
+    if _ssh_owner_nonce and not re.fullmatch(r"[0-9a-f]{16}", _ssh_owner_nonce):
+        raise SystemExit("--ssh-owner-nonce must be 16 lowercase hex characters")
+    _ssh_session_token = None
+    if _token_file and not _headless_backend:
+        raise SystemExit("--ssh-session-token-file is only valid with hermes serve")
+
+    # ── Sanitize Desktop-inherited env that hijacks a standalone launch ─
+    # Desktop Electron spawns its backend with HERMES_DESKTOP=1 plus
+    # HERMES_WEB_DIST=<packaged app.asar[/unpacked]/dist> (and often
+    # HERMES_SERVE_HEADLESS=1 on the serve path). A shell that inherits
+    # those vars then runs `hermes dashboard` would otherwise:
+    #   - serve the desktop renderer → "Desktop IPC bridge is unavailable"
+    #     (issue #52945), or
+    #   - disable the SPA via inherited HERMES_SERVE_HEADLESS.
+    # Only strip Electron-packaged WEB_DIST contamination — caller-managed
+    # HERMES_WEB_DIST overrides (dev / custom builds) must still work.
+    # The desktop-spawned backend itself (HERMES_DESKTOP=1) keeps its dist.
+    # Intentionally headless `serve` re-sets HERMES_SERVE_HEADLESS below.
+    if os.environ.get("HERMES_DESKTOP") != "1":
+        _inherited_web_dist = os.environ.get("HERMES_WEB_DIST", "")
+        if _is_electron_packaged_web_dist(_inherited_web_dist):
+            os.environ.pop("HERMES_WEB_DIST", None)
+    if not _headless_backend:
+        os.environ.pop("HERMES_SERVE_HEADLESS", None)
+
+    _route_named_profile_dashboard(args, _headless_backend, _ssh_owner_nonce, _token_file)
+
     # Apply the final process/profile policy after dashboard routing, but before
     # importing the web server or opening dashboard state. Applying it before a
     # named-profile re-exec could leak that profile's higher limit into the
@@ -4891,61 +4753,7 @@ def cmd_dashboard(args):
         logger.debug("terminal config → env bridge failed for dashboard/serve",
                      exc_info=True)
 
-    if _headless_backend:
-        # Don't build the SPA, and tell mount_spa() (read at web_server import
-        # below) to disable it even if a stray dist exists. Set it first.
-        os.environ["HERMES_SERVE_HEADLESS"] = "1"
-    elif "HERMES_WEB_DIST" not in os.environ and not getattr(args, "skip_build", False):
-        if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
-            sys.exit(1)
-    elif getattr(args, "skip_build", False):
-        # --build-mode skip trusts the caller to have pre-built the web UI.
-        # Verify the dist actually exists; otherwise the server will start
-        # and serve 404s with no obvious cause (issue #23817).
-        _dist_root = (
-            Path(os.environ["HERMES_WEB_DIST"])
-            if "HERMES_WEB_DIST" in os.environ
-            else PROJECT_ROOT / "hermes_cli" / "web_dist"
-        )
-        if not (_dist_root / "index.html").exists():
-            # The caller promised a pre-built dist but there isn't one.
-            # Instead of hard-failing (issue #59288 — desktop launches with
-            # --build-mode skip after a wipe of web_dist), warn and attempt
-            # ONE recovery build through the normal build path. Only the
-            # default dist location is recoverable: a custom HERMES_WEB_DIST
-            # points at a caller-managed directory the build cannot populate.
-            _recoverable = "HERMES_WEB_DIST" not in os.environ
-            if _recoverable:
-                print(f"⚠ --skip-build was passed but no web dist found at: {_dist_root}")
-                print("  Attempting one recovery build of the web UI...")
-                _build_web_ui(PROJECT_ROOT / "web", fatal=True)
-            if not (_dist_root / "index.html").exists():
-                print(f"✗ --skip-build was passed but no web dist found at: {_dist_root}")
-                if _recoverable:
-                    print("  The recovery build did not produce a usable dist.")
-                print("  Pre-build first:  npm install --workspace web && npm run build -w web")
-                print("  Or drop --skip-build to build automatically.")
-                sys.exit(1)
-            print("  ✓ Recovery build produced a web dist")
-        print(f"→ Skipping web UI build (--skip-build); using dist at {_dist_root}")
-    else:
-        # HERMES_WEB_DIST is set without --skip-build: the build is skipped
-        # (the env var points at a caller-managed dist), so validate it the
-        # same way the --skip-build branch does — otherwise the server starts
-        # and serves 404s with no obvious cause (same failure mode as #23817,
-        # via the env-var path).
-        _dist_root = Path(os.environ["HERMES_WEB_DIST"]).expanduser()
-        if not (_dist_root / "index.html").exists():
-            print(f"✗ HERMES_WEB_DIST is set but no web dist found at: {_dist_root}")
-            print("  Pre-build first:  npm install --workspace web && npm run build -w web")
-            print("  Or unset HERMES_WEB_DIST to build and use the default web UI dist.")
-            sys.exit(1)
-        # Write the expanded path back: web_server reads HERMES_WEB_DIST raw
-        # at import (no expanduser), so a validated "~/dist" would otherwise
-        # pass here and still 404 there.
-        os.environ["HERMES_WEB_DIST"] = str(_dist_root)
-        print(f"→ Using web dist from HERMES_WEB_DIST: {_dist_root}")
-
+    _resolve_dashboard_web_dist(args, _headless_backend)
     # Discover and load plugins so any DashboardAuthProvider plugin
     # (e.g. plugins/dashboard_auth/nous) registers BEFORE start_server's
     # fail-closed gate check runs. The top-level argparse setup skips

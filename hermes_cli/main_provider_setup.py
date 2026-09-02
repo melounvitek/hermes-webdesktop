@@ -1098,3 +1098,232 @@ def _run_anthropic_oauth_flow(save_env_value):
             return True
         print("  Cancelled — install Claude Code and try again.")
         return False
+
+
+def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
+    """Saved custom providers keyed by slug, with raw ``${ENV}`` refs preserved."""
+    from hermes_cli.config import get_compatible_custom_providers, read_raw_config
+    from hermes_cli.providers import custom_provider_slug
+
+    # Build lookups of raw (un-expanded) templates keyed by a
+    # stable identity. We intentionally bypass
+    # ``get_compatible_custom_providers(read_raw_config())`` here because
+    # its ``_normalize_custom_provider_entry`` step calls ``urlparse()``
+    # on ``base_url`` and drops any entry whose ``base_url`` is itself an
+    # env-ref template (e.g. ``${NEURALWATT_API_BASE}``). Dropping those
+    # entries is exactly how env-ref preservation fails for the user
+    # config that motivated this fix.
+    raw_api_key_refs: dict[tuple, str] = {}
+    raw_base_url_refs: dict[tuple, str] = {}
+    raw_cfg = read_raw_config()
+
+    def _record_raw(
+        name: str,
+        provider_key: str,
+        model: str,
+        api_key: str,
+        base_url: str,
+    ) -> None:
+        template = str(api_key or "").strip()
+        base_template = str(base_url or "").strip()
+        name = str(name or "").strip()
+        provider_key = str(provider_key or "").strip()
+        model = str(model or "").strip()
+        # Index by every plausible identity the loaded (expanded) config
+        # might present: (name), (name, model), (provider_key), and
+        # (provider_key, model). Case-insensitive on name/provider_key so
+        # the loaded entry matches regardless of display casing.
+        identities = []
+        if name:
+            identities.extend(((name.lower(),), (name.lower(), model)))
+        if provider_key:
+            identities.extend(
+                ((provider_key.lower(),), (provider_key.lower(), model))
+            )
+        if "${" in template:
+            for identity in identities:
+                raw_api_key_refs.setdefault(identity, template)
+        if "${" in base_template:
+            for identity in identities:
+                raw_base_url_refs.setdefault(identity, base_template)
+
+    raw_list = raw_cfg.get("custom_providers")
+    if isinstance(raw_list, list):
+        for raw_entry in raw_list:
+            if not isinstance(raw_entry, dict):
+                continue
+            _record_raw(
+                raw_entry.get("name", ""),
+                "",
+                raw_entry.get("model", "") or raw_entry.get("default_model", ""),
+                raw_entry.get("api_key", ""),
+                raw_entry.get("base_url", "")
+                or raw_entry.get("url", "")
+                or raw_entry.get("api", ""),
+            )
+    raw_providers = raw_cfg.get("providers")
+    if isinstance(raw_providers, dict):
+        for raw_key, raw_entry in raw_providers.items():
+            if not isinstance(raw_entry, dict):
+                continue
+            _record_raw(
+                raw_entry.get("name", "") or raw_key,
+                raw_key,
+                raw_entry.get("model", "") or raw_entry.get("default_model", ""),
+                raw_entry.get("api_key", ""),
+                raw_entry.get("base_url", "")
+                or raw_entry.get("url", "")
+                or raw_entry.get("api", ""),
+            )
+
+    def _lookup_ref(
+        refs: dict[tuple, str],
+        name: str,
+        provider_key: str,
+        model: str,
+    ) -> str:
+        name_lc = str(name or "").strip().lower()
+        pkey_lc = str(provider_key or "").strip().lower()
+        model = str(model or "").strip()
+        for identity in (
+            (pkey_lc, model),
+            (pkey_lc,),
+            (name_lc, model),
+            (name_lc,),
+        ):
+            if identity[0] and identity in refs:
+                return refs[identity]
+        return ""
+
+    custom_provider_map = {}
+    for entry in get_compatible_custom_providers(cfg):
+        if not isinstance(entry, dict):
+            continue
+        name = (entry.get("name") or "").strip()
+        base_url = (entry.get("base_url") or "").strip()
+        if not name or not base_url:
+            continue
+        provider_key = (entry.get("provider_key") or "").strip()
+        key = custom_provider_slug(name, provider_key)
+        custom_provider_map[key] = {
+            "name": name,
+            "base_url": base_url,
+            "api_key": entry.get("api_key", ""),
+            "key_env": entry.get("key_env") or entry.get("api_key_env", ""),
+            "model": entry.get("model", ""),
+            "models": entry.get("models", {}),
+            "models_discovered": entry.get("models_discovered", False),
+            "extra_headers": entry.get("extra_headers", {}),
+            "discover_models": entry.get("discover_models", True),
+            "api_mode": entry.get("api_mode", ""),
+            "provider_key": provider_key,
+            "api_key_ref": _lookup_ref(
+                raw_api_key_refs, name, provider_key, entry.get("model", "")
+            ),
+            "base_url_ref": _lookup_ref(
+                raw_base_url_refs, name, provider_key, entry.get("model", "")
+            ),
+        }
+    return custom_provider_map
+
+
+def _build_provider_picker_rows(
+    config: dict,
+    active: str,
+    provider_labels: dict[str, str],
+    custom_provider_map: dict[str, dict[str, str]],
+) -> tuple[list[tuple[str, str, list[str]]], int]:
+    """Rows for the ``hermes model`` provider picker plus the pre-selected index.
+
+    Canonical providers are folded into display groups (see PROVIDER_GROUPS in
+    hermes_cli/models.py): a multi-member group is one row whose ``members``
+    list drives a sub-picker; leaf rows have ``members == []``. Saved custom
+    providers and the trailing actions stay flat. Honors
+    ``model_catalog.excluded_providers`` (slug or alias, case-insensitive) so
+    the CLI hides the same providers the gateway/TUI pickers do.
+    """
+    from hermes_cli.models import (
+        CANONICAL_PROVIDERS,
+        _PROVIDER_ALIASES,
+        group_providers,
+        provider_group_for_slug,
+    )
+
+    _custom_provider_map = custom_provider_map
+    canonical_descs = {p.slug: p.tui_desc for p in CANONICAL_PROVIDERS}
+    # Honor ``model_catalog.excluded_providers`` so the CLI ``hermes model``
+    # picker hides the same providers the gateway/TUI pickers do. A canonical
+    # provider is hidden if its slug OR any of its aliases appears in the
+    # exclusion list (case-insensitive), matching list_authenticated_providers'
+    # matching against hermes_id / alias / canonical slug.
+    _cli_excluded = {
+        str(p).strip().lower()
+        for p in (config.get("model_catalog", {}) or {}).get("excluded_providers") or []
+        if p
+    }
+    if _cli_excluded:
+        _alias_to_canon = _PROVIDER_ALIASES
+        _names_for: dict[str, set[str]] = {}
+        for _p in CANONICAL_PROVIDERS:
+            _names_for[_p.slug] = {_p.slug.lower()}
+        for _alias, _canon in _alias_to_canon.items():
+            _names_for.setdefault(_canon, {_canon.lower()}).add(_alias.lower())
+        _visible_slugs = [
+            p.slug for p in CANONICAL_PROVIDERS
+            if not _names_for.get(p.slug, {p.slug.lower()}) & _cli_excluded
+        ]
+    else:
+        _visible_slugs = [p.slug for p in CANONICAL_PROVIDERS]
+    grouped_rows = group_providers(_visible_slugs)
+
+    # The group/slug that should be pre-selected: the active provider's group
+    # if it's grouped, otherwise the active slug itself.
+    active_group = provider_group_for_slug(active) if active else ""
+
+    # ordered entries: (key, label, members)
+    #   members == [] → leaf row, key is a provider slug / action
+    #   members != [] → group row, key is "group:<gid>"
+    ordered: list[tuple[str, str, list[str]]] = []
+    default_idx = 0
+    for row in grouped_rows:
+        if row["kind"] == "group":
+            gid = row["group_id"]
+            group_desc = row.get("description", "")
+            label = f"{row['label']} ▸ ({group_desc})" if group_desc else f"{row['label']} ▸"
+            key = f"group:{gid}"
+            is_active = bool(active_group) and gid == active_group
+            members = row["members"]
+        else:
+            slug = row["slug"]
+            label = canonical_descs.get(slug, provider_labels.get(slug, slug))
+            key = slug
+            is_active = bool(active) and slug == active
+            members = []
+        if is_active:
+            ordered.append((key, f"{label}  ← currently active", members))
+            default_idx = len(ordered) - 1
+        else:
+            ordered.append((key, label, members))
+
+    for key, provider_info in _custom_provider_map.items():
+        name = provider_info["name"]
+        base_url = provider_info["base_url"]
+        short_url = base_url.replace("https://", "").replace("http://", "").rstrip("/")
+        saved_model = provider_info.get("model", "")
+        model_hint = f" — {saved_model}" if saved_model else ""
+        label = f"{name} ({short_url}){model_hint}"
+        if active and key == active:
+            ordered.append((key, f"{label}  ← currently active", []))
+            default_idx = len(ordered) - 1
+        else:
+            ordered.append((key, label, []))
+
+    ordered.append(("custom", "Custom endpoint (enter URL manually)", []))
+    _has_saved_custom_list = isinstance(config.get("custom_providers"), list) and bool(
+        config.get("custom_providers")
+    )
+    if _has_saved_custom_list:
+        ordered.append(("remove-custom", "Remove a saved custom provider", []))
+    ordered.append(("aux-config", "Configure auxiliary models...", []))
+    ordered.append(("cancel", "Leave unchanged", []))
+    return ordered, default_idx
