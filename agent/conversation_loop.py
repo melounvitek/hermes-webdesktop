@@ -23,12 +23,10 @@ from agent.fast_mode import begin_turn as begin_fast_mode_turn
 from agent.message_metadata import append_message
 from agent.turn_context import (
     PreflightCompressionTimedOut,
-    _compression_warrants_another_preflight_pass,
     build_turn_context,
     reanchor_current_turn_user_idx,
 )
 from agent.turn_retry_state import TurnRetryState
-from agent.turn_preflight import run_preflight_compression
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.message_sanitization import (
     _repair_tool_call_arguments,
@@ -63,6 +61,8 @@ from agent.turn_recovery import (  # noqa: F401 — resolved lazily by agent.tur
 # Bind before the turn starts so a source-tree swap cannot load a skewed
 # finalizer at turn end.
 from agent.turn_finalizer import finalize_turn
+from agent.turn_iteration_prep import prepare_iteration
+from agent.turn_preflight_gate import run_preflight_gate
 from agent.turn_request_assembly import assemble_api_request
 from agent.turn_api_request import build_api_request
 from agent.turn_api_call import perform_api_call
@@ -1781,144 +1781,13 @@ def run_conversation(
                 agent._safe_print(f"\n⚠️  Iteration budget exhausted ({agent.iteration_budget.used}/{agent.iteration_budget.max_total} iterations used)")
             break
 
-        # Fire step_callback for gateway hooks (agent:step event)
-        if agent.step_callback is not None:
-            try:
-                prev_tools = []
-                for _idx, _m in enumerate(reversed(messages)):
-                    if _m.get("role") == "assistant" and _m.get("tool_calls"):
-                        _fwd_start = len(messages) - _idx
-                        _results_by_id = {}
-                        for _tm in messages[_fwd_start:]:
-                            if _tm.get("role") != "tool":
-                                break
-                            _tcid = _tm.get("tool_call_id")
-                            if _tcid:
-                                _results_by_id[_tcid] = _tm.get("content", "")
-                        prev_tools = [
-                            {
-                                "name": tc["function"]["name"],
-                                "result": _results_by_id.get(tc.get("id")),
-                                "arguments": tc["function"].get("arguments"),
-                            }
-                            for tc in _m["tool_calls"]
-                            if isinstance(tc, dict)
-                        ]
-                        break
-                agent.step_callback(api_call_count, prev_tools)
-            except Exception as _step_err:
-                logger.debug("step_callback error (iteration %s): %s", api_call_count, _step_err)
-
-        # Track tool-calling iterations for skill nudge.
-        # Counter resets whenever skill_manage is actually used.
-        if (agent._skill_nudge_interval > 0
-                and "skill_manage" in agent.valid_tool_names):
-            agent._iters_since_skill += 1
-        
-        # ── Pre-API-call /steer drain ──────────────────────────────────
-        # Drain a /steer sent during the last API call into the newest tool message so
-        # it lands THIS iteration. Never put in a user message (breaks alternation).
-        _pre_api_steer = agent._drain_pending_steer()
-        if _pre_api_steer:
-            _injected = False
-            for _si in range(len(messages) - 1, -1, -1):
-                _sm = messages[_si]
-                if isinstance(_sm, dict) and _sm.get("role") == "tool":
-                    from agent.prompt_builder import format_steer_marker
-                    marker = format_steer_marker(_pre_api_steer)
-                    existing = _sm.get("content", "")
-                    if isinstance(existing, str):
-                        _sm["content"] = existing + marker
-                    else:
-                        # Multimodal content blocks — append text block
-                        try:
-                            blocks = list(existing) if existing else []
-                            blocks.append({"type": "text", "text": marker})
-                            _sm["content"] = blocks
-                        except Exception:
-                            pass
-                    _injected = True
-                    logger.debug(
-                        "Pre-API-call steer drain: injected into tool msg at index %d",
-                        _si,
-                    )
-                    break
-            if not _injected:
-                # No tool message to inject into — put it back so
-                # the post-tool-execution drain picks it up later.
-                _lock = getattr(agent, "_pending_steer_lock", None)
-                if _lock is not None:
-                    with _lock:
-                        if agent._pending_steer:
-                            agent._pending_steer = agent._pending_steer + "\n" + _pre_api_steer
-                        else:
-                            agent._pending_steer = _pre_api_steer
-                else:
-                    existing = getattr(agent, "_pending_steer", None)
-                    agent._pending_steer = (existing + "\n" + _pre_api_steer) if existing else _pre_api_steer
-
-        # ── Wall-clock run-budget wrap-up notice ───────────────────────
-        # One-shot at 80% of agent.run_budget_seconds: ask the model to wrap up via the
-        # same cache-safe channel as /steer (newest tool result); off with no budget.
-        if getattr(agent, "run_budget_seconds", None):
-            _maybe_inject_run_budget_wrapup(agent, messages)
-
-        # Reasoning lives in content via <think> tags for trajectory storage, but some
-        # providers (Moonshot) also need a 'reasoning_content' field; handle both here.
-        request_logger = getattr(agent, "logger", None) or logging.getLogger(__name__)
-        # Per-agent validation cursor skips re-parsing tool_call args already validated.
-        # Identity-keyed; a rewritten list breaks the prefix match and forces a re-scan.
-        _sanitize_cursor = getattr(agent, "_sanitize_args_cursor", None)
-        if _sanitize_cursor is None:
-            _sanitize_cursor = {}
-            try:
-                agent._sanitize_args_cursor = _sanitize_cursor
-            except Exception:
-                pass
-        repaired_tool_calls = agent._sanitize_tool_call_arguments(
-            messages,
-            logger=request_logger,
-            session_id=agent.session_id,
-            cursor=_sanitize_cursor,
+        _ip = prepare_iteration(
+            agent,
+            messages=messages,
+            api_call_count=api_call_count,
         )
-        if repaired_tool_calls > 0:
-            request_logger.info(
-                "Sanitized %s corrupted tool_call arguments before request (session=%s)",
-                repaired_tool_calls,
-                agent.session_id or "-",
-            )
-
-        # Drop legacy hidden assistant placeholders carrying the raw interrupt scaffold
-        # before repair: replayed, the model echoes/self-replicates (#81841).
-        messages = [
-            msg for msg in messages
-            if not (
-                msg.get("display_kind") == "hidden"
-                and msg.get("role") == "assistant"
-                and (
-                    (
-                        isinstance(msg.get("content"), str)
-                        and msg["content"].strip() == _INTERRUPT_SCAFFOLD_MARKER
-                    )
-                    or (
-                        isinstance(msg.get("api_content"), str)
-                        and msg["api_content"].strip() == _INTERRUPT_SCAFFOLD_MARKER
-                    )
-                )
-            )
-        ]
-
-        # Repair malformed role alternation (tool→user / user→user tails): providers
-        # return empty content on them and the empty-retry loop spins. The _with_cursor
-        # variant also recomputes the SessionDB flush cursor after compaction (#44837).
-        from agent.agent_runtime_helpers import repair_message_sequence_with_cursor
-        repaired_seq = repair_message_sequence_with_cursor(agent, messages)
-        if repaired_seq > 0:
-            request_logger.info(
-                "Repaired %s message-alternation violations before request (session=%s)",
-                repaired_seq,
-                agent.session_id or "-",
-            )
+        messages = _ip.messages
+        request_logger = _ip.request_logger
 
         _rr = assemble_api_request(
             agent,
@@ -1940,77 +1809,10 @@ def run_conversation(
         request_pressure_tokens = _rr.request_pressure_tokens
         total_chars = _rr.total_chars
 
-        _runtime_context_error = _ollama_context_limit_error(
-            agent, request_pressure_tokens
-        )
-        if _runtime_context_error:
-            final_response = _runtime_context_error
-            failed = True
-            _turn_exit_reason = "ollama_runtime_context_too_small"
-            append_message(messages, {"role": "assistant", "content": final_response})
-            agent._emit_status("❌ Ollama runtime context is too small for Hermes tool use")
-            api_call_count -= 1
-            agent._api_call_count = api_call_count
-            try:
-                agent.iteration_budget.refund()
-            except Exception:
-                pass
-            break
-
-        # Pre-API pressure check: tool results grow a turn and last_prompt_tokens lags
-        # them. Mirror the turn-prologue guard chain: defer on noisy estimate, skip in
-        # failure cooldown, then should_compress() (#11529).
-        _compressor = agent.context_compressor
-        _preflight_threshold = int(
-            getattr(_compressor, "threshold_tokens", 0) or 0
-        )
-        _provider_overflow_preflight = (
-            _provider_overflow_recovery_pending
-            and (
-                _preflight_threshold <= 0
-                or request_pressure_tokens >= _preflight_threshold
-            )
-        )
-        if (
-            _provider_overflow_recovery_pending
-            and not _provider_overflow_preflight
-        ):
-            # The outer-loop rebuild includes system prompt, request-only injections and
-            # tool schemas; only that full request with output runway may be sent.
-            _provider_overflow_recovery_pending = False
-        # Compare fully assembled requests, not raw ``messages`` (which omit
-        # api_content, plugin injections, prefills, MoA context, ephemeral system text).
-        _previous_preflight_pressure = _last_preflight_pressure
-        _last_preflight_pressure = None
-        if (
-            _previous_preflight_pressure is not None
-            and request_pressure_tokens >= _preflight_threshold
-            and not _compression_warrants_another_preflight_pass(
-                _previous_preflight_pressure,
-                request_pressure_tokens,
-                _preflight_threshold,
-            )
-        ):
-            # Stop proactive retries this turn without consuming the shared overflow-
-            # recovery budget; the provider's error handler may still compact.
-            _preflight_compression_blocked = True
-            logger.warning(
-                "Pre-API compression made insufficient progress: ~%s -> "
-                "~%s request tokens; skipping additional preflight passes",
-                f"{_previous_preflight_pressure:,}",
-                f"{request_pressure_tokens:,}",
-            )
-        _defer_preflight = getattr(
-            _compressor, "should_defer_preflight_to_real_usage", lambda _t: False
-        )
-        _pf = run_preflight_compression(
+        _pg = run_preflight_gate(
             agent,
-            compressor=_compressor,
             request_pressure_tokens=request_pressure_tokens,
-            provider_overflow_preflight=_provider_overflow_preflight,
-            preflight_compression_blocked=_preflight_compression_blocked,
-            defer_preflight=_defer_preflight,
-            moa_prepared_request=_moa_prepared_request,
+            _moa_prepared_request=_moa_prepared_request,
             pending_moa_prepared_request=pending_moa_prepared_request,
             messages=messages,
             system_message=system_message,
@@ -2023,26 +1825,30 @@ def run_conversation(
             effective_task_id=effective_task_id,
             final_response=final_response,
             failed=failed,
-            compression_timeout_exhausted=_compression_timeout_exhausted,
-            turn_exit_reason=_turn_exit_reason,
+            _turn_exit_reason=_turn_exit_reason,
+            _compression_timeout_exhausted=_compression_timeout_exhausted,
+            _preflight_compression_blocked=_preflight_compression_blocked,
+            _provider_overflow_recovery_pending=_provider_overflow_recovery_pending,
+            _last_preflight_pressure=_last_preflight_pressure,
         )
-        messages = _pf.messages
-        active_system_prompt = _pf.active_system_prompt
-        conversation_history = _pf.conversation_history
-        api_call_count = _pf.api_call_count
-        compression_attempts = _pf.compression_attempts
-        pending_moa_prepared_request = _pf.pending_moa_prepared_request
-        final_response = _pf.final_response
-        failed = _pf.failed
-        _compression_timeout_exhausted = _pf.compression_timeout_exhausted
-        _turn_exit_reason = _pf.turn_exit_reason
-        if _pf.last_preflight_pressure is not None:
-            _last_preflight_pressure = _pf.last_preflight_pressure
-        if _pf.action == "return":
-            return _pf.result
-        if _pf.action == "break":
+        pending_moa_prepared_request = _pg.pending_moa_prepared_request
+        messages = _pg.messages
+        active_system_prompt = _pg.active_system_prompt
+        conversation_history = _pg.conversation_history
+        api_call_count = _pg.api_call_count
+        compression_attempts = _pg.compression_attempts
+        final_response = _pg.final_response
+        failed = _pg.failed
+        _turn_exit_reason = _pg._turn_exit_reason
+        _compression_timeout_exhausted = _pg._compression_timeout_exhausted
+        _preflight_compression_blocked = _pg._preflight_compression_blocked
+        _provider_overflow_recovery_pending = _pg._provider_overflow_recovery_pending
+        _last_preflight_pressure = _pg._last_preflight_pressure
+        if _pg.action == "return":
+            return _pg.result
+        if _pg.action == "break":
             break
-        if _pf.action == "continue":
+        if _pg.action == "continue":
             continue
 
         # Thinking spinner for quiet mode (animated during API call)
