@@ -1,24 +1,14 @@
 """Shared late-binding dependency seam for extracted dashboard routers.
 
-Why this exists
----------------
-``hermes_cli/web_server.py`` owns all dashboard runtime state: the ephemeral
-``_SESSION_TOKEN``, the ``DASHBOARD_HEALTH`` singleton, config helpers, and a
-large set of private helper functions the route handlers call.  Extracted
-``APIRouter`` modules under ``hermes_cli/web_routers/`` need those helpers, but
-
-* importing ``web_server`` at module import time from a router module would be
-  a circular import (``web_server`` imports the router modules to mount them),
-  and
-* re-homing the helpers/state here would break the many tests (and any third
-  party code) that ``monkeypatch.setattr(web_server, "_helper", ...)``.
+``hermes_cli/web_server.py`` owns all dashboard runtime state and most helper
+functions the route handlers call.  Extracted ``APIRouter`` modules under
+``hermes_cli/web_routers/`` cannot import it at module import time (web_server
+imports them to mount them — a cycle) and must not copy its state (tests
+``monkeypatch.setattr(web_server, "_helper", ...)`` and expect that to win).
 
 Design: **late binding, state stays in web_server.**  ``late(name)`` returns a
-thin proxy that resolves ``hermes_cli.web_server.<name>`` *at call time*.  This
-is cycle-safe (the import happens inside the call, long after both modules are
-initialised) and keeps ``web_server``'s runtime behaviour byte-identical:
-monkeypatching an attribute on ``web_server`` is still authoritative because
-every call re-reads the attribute from the live module.
+proxy that resolves ``hermes_cli.web_server.<name>`` *at call time*, so
+monkeypatched replacements and module state are never frozen at import time.
 """
 
 from __future__ import annotations
@@ -36,12 +26,7 @@ def _server():
 
 
 def late(name: str):
-    """Late-binding proxy for a callable defined on ``web_server``.
-
-    The returned wrapper looks up ``web_server.<name>`` on every call, so
-    async/sync nature, monkeypatched replacements, and module state are all
-    resolved at call time — never frozen at import time.
-    """
+    """Late-binding proxy for a callable defined on ``web_server``."""
 
     def _proxy(*args: Any, **kwargs: Any):
         return getattr(_server(), name)(*args, **kwargs)
@@ -51,25 +36,15 @@ def late(name: str):
     return _proxy
 
 
-def late_attr(name: str) -> Any:
-    """Read ``web_server.<name>`` right now (for non-callable state reads)."""
-    return getattr(_server(), name)
-
-
 class LateState:
     """Live proxy for module-level state owned by ``web_server``.
 
-    Extracted routers can't ``from web_server import _mcp_oauth_flows`` —
-    that would freeze the object at import time (breaking tests that mutate
-    or replace it on ``web_server``) and be a circular import besides.  Some
-    of the state is also defined *after* the router's ``include_router``
-    point in web_server's body, so even a late module-import wouldn't see it
-    yet.  This proxy forwards every operation the extracted handlers actually
-    perform — attribute access, item get/set/del, iteration, membership,
-    ``len``/truthiness, ``with``-blocks (locks), and rich comparisons
-    (numeric limits) — to ``web_server.<name>`` resolved at operation time,
-    so mutating or monkeypatching the attribute on ``web_server`` stays
-    authoritative.
+    Forwards every operation the extracted handlers perform — attribute access,
+    item get/set/del, iteration, membership, ``len``/truthiness, ``with``-blocks
+    (locks), rich comparisons (numeric limits) — to ``web_server.<name>``
+    resolved at operation time.  Some of that state is defined *after* the
+    router's ``include_router`` point, so even a late module import would not
+    see it; this proxy does.
     """
 
     __slots__ = ("_name",)
@@ -133,21 +108,3 @@ class LateState:
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<LateState {object.__getattribute__(self, '_name')} -> {self._target()!r}>"
-
-
-# --- Named accessors for the shared server state (call-time reads) ---------
-
-
-def get_session_token() -> str:
-    """Current dashboard session token (``web_server._SESSION_TOKEN``)."""
-    return _server()._SESSION_TOKEN
-
-
-def get_dashboard_health():
-    """The ``DASHBOARD_HEALTH`` singleton owned by web_server."""
-    return _server().DASHBOARD_HEALTH
-
-
-def has_valid_session_token(request) -> bool:
-    """Late-bound alias for ``web_server._has_valid_session_token``."""
-    return _server()._has_valid_session_token(request)

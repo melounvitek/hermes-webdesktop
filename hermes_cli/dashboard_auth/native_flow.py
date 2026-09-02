@@ -1,70 +1,32 @@
 """Gateway-brokered RFC 8252 (OAuth 2.0 for Native Apps) authorization store.
 
-The desktop app is a *native* OAuth client that wants to sign in to a gated
-gateway **without an embedded webview and without relying on browser session
-cookies**. It cannot be a direct OAuth client of the upstream IDP (Nous
-Portal): the Portal ``client_id`` is per-gateway-instance
-(``agent:{instance_id}``) and the Portal validates that the ``redirect_uri``
-ends in ``/auth/callback`` on the gateway's own public origin — a desktop
-loopback ``127.0.0.1`` redirect is rejected. So the **gateway brokers** the
-flow: it is the authorization server *to the desktop*, and an OAuth client *to
-the Portal*. This is still a textbook RFC 8252 deployment — system browser,
-loopback redirect, PKCE, tokens returned to the app (never cookies).
+The desktop cannot be a direct OAuth client of the upstream IDP (the Portal
+``client_id`` is per gateway instance and only accepts the gateway's own
+``/auth/callback`` redirect), so the gateway brokers: it is the authorization
+server *to the desktop* and an OAuth client *to the Portal* — still textbook
+RFC 8252: system browser, loopback redirect, PKCE, tokens returned to the app
+and never as cookies.
 
-Wire shape (all gateway-side state lives in this module):
+  1. Desktop generates its own PKCE pair (cv_d, cc_d) + ``state``, opens a
+     loopback listener, and opens the system browser at
+     ``/auth/native/authorize`` with cc_d, state and its loopback redirect_uri.
+  2. The gateway stashes a *pending authorization* (:func:`register_pending`)
+     keyed by an opaque ``broker_state`` and runs the EXISTING upstream flow;
+     broker_state rides inside the gateway's own PKCE cookie, so no desktop
+     secret reaches the Portal.
+  3. On the upstream callback (or a successful password login) the gateway
+     mints a one-time gateway code bound to cc_d (:func:`complete_pending`) and
+     302s the browser to ``redirect_uri?code=<gw_code>&state=<state>``.
+  4. The desktop POSTs ``/auth/native/token`` with gw_code + cv_d; the gateway
+     checks ``S256(cv_d) == cc_d`` (:func:`redeem_code`), consumes the code and
+     returns the upstream tokens in the JSON body.
+  5. The desktop keeps them in the OS keychain and uses ``Authorization: Bearer``.
 
-  1. Desktop generates its OWN PKCE pair ``(cv_d, cc_d)`` and a ``state``, opens
-     a loopback listener on ``127.0.0.1:<port>``, and opens the system browser
-     to the gateway's ``GET /auth/native/authorize?...`` carrying ``cc_d``,
-     ``state``, and its loopback ``redirect_uri``.
-  2. The gateway ``authorize`` route stashes a **pending authorization**
-     (``register_pending``) keyed by an opaque ``broker_state`` and runs the
-     EXISTING upstream PKCE flow (``provider.start_login`` → Portal
-     ``/oauth/authorize`` → gateway ``/auth/callback``). The desktop's
-     ``cc_d`` / ``state`` / loopback ``redirect_uri`` ride through the upstream
-     round trip inside the gateway's own PKCE cookie, so no desktop secret is
-     ever exposed to the Portal.
-  3. On the upstream callback the gateway holds a verified :class:`Session`. It
-     **mints a one-time gateway authorization code** (``complete_pending``)
-     bound to the desktop's ``cc_d``, and 302s the browser to the desktop's
-     ``redirect_uri?code=<gw_code>&state=<state>``.
-  4. The desktop's loopback listener catches ``gw_code``, then POSTs
-     ``/auth/native/token`` with ``gw_code`` + its ``cv_d``. The gateway
-     verifies ``SHA256(cv_d) == cc_d`` (``redeem_code``), consumes the code
-     (single use), and returns the upstream ``access_token`` /
-     ``refresh_token`` / ``expires_at`` **in the JSON body**.
-  5. The desktop stores those in the OS keychain and authenticates REST with
-     ``Authorization: Bearer <access_token>`` (via the existing ``token_auth``
-     seam) and mints ws-tickets the same way — no cookies anywhere.
-
-Password providers ride the same broker with step 2 swapped: there is no
-upstream IDP, so ``/auth/native/authorize`` sends the system browser to the
-interactive ``/login`` form (broker_state in the PKCE cookie) and a successful
-``/auth/password-login`` plays the role of the upstream callback — it calls
-:func:`complete_pending` and bounces the browser to the loopback redirect.
-Steps 4–5 are identical. The point of brokering a password login at all is
-that the system browser can autofill from the OS password manager (macOS
-Passwords, etc.), which no embedded desktop webview can.
-
-Security properties this module guarantees:
-
-  * **PKCE binding (RFC 7636).** A gateway code is redeemable only by the client
-    that presented the matching ``code_challenge``. An attacker who intercepts
-    the loopback ``gw_code`` (e.g. a hostile process racing the redirect) cannot
-    exchange it without ``cv_d``, which never leaves the desktop.
-  * **Single use.** ``redeem_code`` pops the entry; a replay finds nothing.
-  * **Short TTLs.** A pending authorization lives ``_PENDING_TTL`` seconds (the
-    interactive login window); a minted code lives ``_CODE_TTL`` seconds (the
-    loopback round trip is sub-second). Expired entries are refused and GC'd.
-  * **Opaque, high-entropy handles.** ``broker_state`` and ``gw_code`` are
-    256-bit ``secrets.token_urlsafe`` values; comparison is constant-time.
-  * **No secret logging.** The module stores tokens transiently in memory only
-    between callback and redemption; nothing here writes them to disk (the
-    audit log strips token fields).
-
-In-memory and process-local: the dashboard is a single process, so no
-distributed coordination is needed (mirrors ``ws_tickets``). A functional API
-(not a class) keeps ``time.time`` patchable in tests.
+Security properties: PKCE binding (an intercepted gw_code is useless without
+cv_d), single use (redemption pops the entry), short TTLs, 256-bit opaque
+handles compared in constant time, no secret logging. In-memory and
+process-local (single dashboard process); functional API keeps ``time.time``
+patchable in tests.
 """
 
 from __future__ import annotations
@@ -80,24 +42,15 @@ from typing import Dict, Optional
 
 from hermes_cli.dashboard_auth.base import Session
 
-# TTL for a pending authorization (step 2→3): the whole interactive login,
-# including the user typing Portal credentials / approving in the browser.
-_PENDING_TTL_SECONDS = 600  # 10 minutes — mirrors the PKCE cookie lifetime.
-
-# TTL for a minted gateway code (step 3→4): only the loopback redirect + the
-# desktop's immediate token POST, which is sub-second in practice.
-_CODE_TTL_SECONDS = 120  # 2 minutes — generous for a slow local hop.
-
-# Cap the number of concurrent pending/issued entries so a misbehaving or
-# malicious client cannot grow the store unbounded. Well above any legitimate
-# concurrent-login count for a single desktop user.
+# Pending authorization: the whole interactive login (mirrors the PKCE cookie).
+_PENDING_TTL_SECONDS = 600
+# Minted code: only the loopback redirect + immediate token POST.
+_CODE_TTL_SECONDS = 120
+# Global cap so a misbehaving client cannot grow the store unbounded.
 _MAX_ENTRIES = 256
-
-# Per-IP cap on concurrent PENDING authorizations. /auth/native/authorize is a
-# public (pre-auth) route, so without this a single unauthenticated spammer
-# could fill the global store (600s TTL each) and lock out legitimate native
-# logins for the pending window. A real desktop runs at most a couple of
-# concurrent sign-ins from one address; 8 is generous.
+# Per-IP cap on PENDING entries: /auth/native/authorize is a public pre-auth
+# route, so one spammer must not fill the global store (600 s each) and lock
+# out legitimate native logins.
 _MAX_PENDING_PER_IP = 8
 
 _lock = threading.Lock()
@@ -105,11 +58,7 @@ _lock = threading.Lock()
 
 @dataclass
 class _Pending:
-    """An in-flight native authorization awaiting the upstream callback.
-
-    Created when the desktop hits ``/auth/native/authorize`` and consumed when
-    the upstream ``/auth/callback`` completes and mints the gateway code.
-    """
+    """In-flight native authorization awaiting the upstream callback."""
 
     code_challenge: str  # the DESKTOP's S256 challenge (cc_d), base64url no-pad
     redirect_uri: str  # the desktop's loopback redirect (127.0.0.1:<port>/...)
@@ -127,10 +76,8 @@ class _IssuedCode:
     expires_at: int
 
 
-# broker_state -> _Pending
-_pending: Dict[str, _Pending] = {}
-# gw_code -> _IssuedCode
-_issued: Dict[str, _IssuedCode] = {}
+_pending: Dict[str, _Pending] = {}  # broker_state -> _Pending
+_issued: Dict[str, _IssuedCode] = {}  # gw_code -> _IssuedCode
 
 
 class NativeFlowError(Exception):
@@ -157,16 +104,17 @@ def _s256(verifier: str) -> str:
 
 def _gc_locked(now: int) -> None:
     """Drop expired pending + issued entries. Caller holds ``_lock``."""
-    expired_p = [k for k, v in _pending.items() if v.expires_at < now]
-    for k in expired_p:
-        _pending.pop(k, None)
-    expired_c = [k for k, v in _issued.items() if v.expires_at < now]
-    for k in expired_c:
-        _issued.pop(k, None)
+    for store in (_pending, _issued):
+        for k in [k for k, v in store.items() if v.expires_at < now]:
+            store.pop(k, None)
 
 
 def _capacity_ok_locked() -> bool:
     return (len(_pending) + len(_issued)) < _MAX_ENTRIES
+
+
+def _now(now: Optional[int]) -> int:
+    return int(time.time()) if now is None else now
 
 
 def register_pending(
@@ -179,23 +127,11 @@ def register_pending(
 ) -> str:
     """Stash a pending native authorization; return an opaque ``broker_state``.
 
-    Called by ``/auth/native/authorize``. ``code_challenge`` is the DESKTOP's
-    S256 challenge (``cc_d``) — we never see the verifier until redemption.
-    ``redirect_uri`` is the desktop's loopback callback and ``client_state`` is
-    the desktop's own CSRF ``state`` (echoed verbatim on the final redirect).
-    ``client_ip`` is the requester's address, used only for the per-IP pending
-    cap below.
-
-    The returned ``broker_state`` is what the gateway threads through its OWN
-    upstream PKCE round trip (inside the ``hermes_session_pkce`` cookie), so the
-    callback can find this entry again via :func:`complete_pending`.
-
-    Raises ``NativeFlowError`` if the store is at capacity or the caller's IP
-    already holds ``_MAX_PENDING_PER_IP`` live pending entries (fail closed —
-    this is a public pre-auth route, so one spammer must not be able to fill
-    the global store and deny sign-in to everyone else).
+    ``code_challenge`` is the DESKTOP's cc_d (the verifier is never seen until
+    redemption). Raises ``NativeFlowError`` (fail closed) when the store is at
+    capacity or ``client_ip`` already holds ``_MAX_PENDING_PER_IP`` entries.
     """
-    now = int(time.time()) if now is None else now
+    now = _now(now)
     broker_state = secrets.token_urlsafe(32)
     with _lock:
         _gc_locked(now)
@@ -219,13 +155,9 @@ def register_pending(
 
 
 def get_pending(broker_state: str, *, now: Optional[int] = None) -> _Pending:
-    """Return the pending authorization for ``broker_state`` without consuming it.
-
-    Read-only peek used by the callback to learn the desktop's ``redirect_uri``
-    and ``client_state`` for the final 302. Raises :class:`PendingNotFound` if
-    unknown or expired (the entry is GC'd on expiry).
-    """
-    now = int(time.time()) if now is None else now
+    """Peek (without consuming) the pending authorization; raises
+    :class:`PendingNotFound` if unknown or expired."""
+    now = _now(now)
     with _lock:
         _gc_locked(now)
         entry = _pending.get(broker_state)
@@ -240,16 +172,12 @@ def complete_pending(
     session: Session,
     now: Optional[int] = None,
 ) -> str:
-    """Consume a pending authorization and mint a one-time gateway code.
-
-    Called by ``/auth/callback`` once the upstream :class:`Session` is verified.
-    Pops the pending entry (single use), binds a fresh ``gw_code`` to the
-    desktop's ``code_challenge`` + the verified ``session``, and returns the
-    ``gw_code`` for the loopback redirect.
+    """Consume a pending authorization (single use) and mint a one-time gateway
+    code bound to the desktop's challenge + the verified ``session``.
 
     Raises :class:`PendingNotFound` if the broker_state is unknown/expired.
     """
-    now = int(time.time()) if now is None else now
+    now = _now(now)
     with _lock:
         _gc_locked(now)
         pending = _pending.pop(broker_state, None)
@@ -274,27 +202,19 @@ def redeem_code(
 ) -> Session:
     """Verify PKCE + consume a gateway code; return the bound :class:`Session`.
 
-    Called by ``/auth/native/token``. Enforces:
-      * the code exists and is unexpired (else :class:`CodeInvalid`);
-      * ``S256(code_verifier) == code_challenge`` in constant time (RFC 7636);
-      * single use — the entry is popped BEFORE the PKCE check so a wrong
-        verifier cannot be retried against the same code.
-
-    On any failure the code is already consumed (no oracle, no replay).
+    The entry is popped BEFORE the PKCE check so a wrong verifier cannot be
+    retried against the same code: on any failure the code is already consumed
+    (no oracle, no replay). Raises :class:`CodeInvalid`.
     """
-    now = int(time.time()) if now is None else now
+    now = _now(now)
     with _lock:
         _gc_locked(now)
         issued = _issued.pop(code, None)
-    # Pop happened under the lock; every return path below has already
-    # consumed the code, so a replay (valid or not) finds nothing.
     if issued is None:
         raise CodeInvalid("unknown, expired, or already-redeemed code")
     if issued.expires_at < now:
         raise CodeInvalid("code expired")
-    expected = issued.code_challenge
-    actual = _s256(code_verifier)
-    if not hmac.compare_digest(expected, actual):
+    if not hmac.compare_digest(issued.code_challenge, _s256(code_verifier)):
         raise CodeInvalid("PKCE verification failed")
     return issued.session
 

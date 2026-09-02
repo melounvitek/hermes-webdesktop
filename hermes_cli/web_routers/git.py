@@ -1,16 +1,11 @@
-"""Git dashboard routes (extracted verbatim from web_server.py).
-
-Handler bodies are byte-identical to their previous in-web_server form; the
-helpers they call (``_git_op``, ``_git_path``) still live in web_server and are
-reached via the late-binding seam in :mod:`hermes_cli.web_deps`, so
-``monkeypatch.setattr(web_server, ...)`` keeps working.
-"""
+"""Git dashboard routes — thin executor-offloaded wrappers over ``web_git``
+(``_git_op`` / ``_git_path`` live in web_server, reached via the late seam)."""
 
 from typing import Optional
 
 from fastapi import APIRouter
 
-from hermes_cli import web_git as _web_git  # noqa: F401 — used by handlers
+from hermes_cli import web_git as _web_git
 from hermes_cli.web_deps import late
 from hermes_cli.web_models import (
     GitPathBody,
@@ -24,8 +19,6 @@ from hermes_cli.web_models import (
 
 router = APIRouter()
 
-# Late-bound web_server helpers (resolved at call time; cycle-safe,
-# monkeypatch-transparent).
 _git_op = late("_git_op")
 _git_path = late("_git_path")
 
@@ -35,13 +28,10 @@ async def git_status_route(path: str):
     return await _git_op(_web_git.repo_status, _git_path(path))
 
 
-# ─── gh CLI auth probe ───────────────────────────────────────────────────────
-# Cached `gh auth status` result. Consumed by the desktop composer's GitHub
-# suggestion pill: GitHub deliberately has NO MCP catalog entry (its hosted
-# MCP requires a per-host OAuth app — generic DCR 404s — and the bundled
-# github/* skills via gh CLI are the more capable integration), so the pill
-# offers the `/github-auth` skill instead, and only to users who aren't
-# already authenticated. The probe is read-only and never prompts.
+# Cached `gh auth status` for the desktop composer's GitHub suggestion pill.
+# GitHub deliberately has NO MCP catalog entry (hosted MCP needs a per-host
+# OAuth app; the gh-CLI skills are the better integration), so the pill offers
+# the `/github-auth` skill — only to users who aren't already authenticated.
 
 _GH_AUTH_TTL_S = 300.0
 _gh_auth_cache: Optional[tuple] = None  # (monotonic_ts, payload)
@@ -49,12 +39,8 @@ _gh_auth_cache: Optional[tuple] = None  # (monotonic_ts, payload)
 
 @router.get("/api/git/gh-auth")
 async def gh_auth_status_route(refresh: bool = False):
-    """Report whether the `gh` CLI is present and authenticated.
-
-    Returns ``{"available": bool, "authenticated": bool}``. Cached for five
-    minutes (`refresh=true` bypasses — the pill uses it after a completed
-    login so the suggestion withdraws immediately).
-    """
+    """``{"available", "authenticated"}`` for the `gh` CLI; cached 5 min
+    (``refresh=true`` bypasses so the pill withdraws right after a login)."""
     global _gh_auth_cache
     import asyncio
     import time
