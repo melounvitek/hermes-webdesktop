@@ -120,7 +120,7 @@ def fetch_manifest(*, timeout: float = _DEFAULT_TIMEOUT, force: bool = False) ->
     """
     global _cache
 
-    if not force and _cache is not None and time.monotonic() - _cache[0] < _MANIFEST_TTL:
+    if not force and _cache_is_warm():
         return _cache[1]
 
     try:
@@ -144,14 +144,8 @@ def fetch_manifest(*, timeout: float = _DEFAULT_TIMEOUT, force: bool = False) ->
     if not isinstance(pets, list):
         raise ManifestError("petdex manifest had no 'pets' array")
 
-    entries: list[ManifestEntry] = []
-    for raw in pets:
-        if not isinstance(raw, dict):
-            continue
-        entry = ManifestEntry.from_dict(raw)
-        if entry.slug and entry.spritesheet_url:
-            entries.append(entry)
-
+    parsed = (ManifestEntry.from_dict(raw) for raw in pets if isinstance(raw, dict))
+    entries = [entry for entry in parsed if entry.slug and entry.spritesheet_url]
     _cache = (time.monotonic(), entries)
     return entries
 

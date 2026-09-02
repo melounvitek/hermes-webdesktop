@@ -64,18 +64,13 @@ def derive_pet_state(
     7. ``busy``           → ``RUN``     (turn in flight, unspecified work)
     8. otherwise          → ``IDLE``
     """
-    if error:
-        return PetState.FAILED
-    if celebrate:
-        return PetState.JUMP
-    if just_completed:
-        return PetState.WAVE
-    if awaiting_input:
-        return PetState.WAITING
-    if tool_running:
-        return PetState.RUN
-    if reasoning:
-        return PetState.REVIEW
-    if busy:
-        return PetState.RUN
-    return PetState.IDLE
+    ranked = (
+        (error, PetState.FAILED),
+        (celebrate, PetState.JUMP),
+        (just_completed, PetState.WAVE),
+        (awaiting_input, PetState.WAITING),
+        (tool_running, PetState.RUN),
+        (reasoning, PetState.REVIEW),
+        (busy, PetState.RUN),
+    )
+    return next((state for flag, state in ranked if flag), PetState.IDLE)
