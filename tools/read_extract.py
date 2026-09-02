@@ -81,7 +81,8 @@ def _anydoc() -> Optional[Any]:
     """Lazily import the optional anydoc converter; None when unavailable.
 
     A failed load is retried after :data:`ANYDOC_RETRY_SECONDS` rather than
-    disabling extraction for the rest of a long-lived process.
+    disabling extraction for the rest of the process, so one transient failure
+    (network blip, pip race) does not stick in long-lived workers.
     """
     global _anydoc_module, _anydoc_failed_at
     if _anydoc_module is not _ANYDOC_UNSET:
@@ -186,8 +187,9 @@ def _hosted_ocr_config() -> tuple:
     Maintainer decision: the ONLY route is a direct ``FIRECRAWL_API_KEY``
     (anydoc defaults api_url to https://api.firecrawl.dev); the Nous managed
     gateway is NOT used — its Parse proxy live-probed broken while scrape/search
-    worked. ``file_tools.hosted_ocr: false`` disables even with a key;
-    true/unset → enabled iff the key is present. Env probe only, no network.
+    worked (revisit when it grows Parse support). ``file_tools.hosted_ocr:
+    false`` disables even with a key; true/unset → enabled iff the key is
+    present. Env probe only, no network at schema-build time.
     """
     api_key = os.environ.get("FIRECRAWL_API_KEY") or None
     enabled = api_key is not None
@@ -234,28 +236,14 @@ def _needs_ocr_warning(path: str, pages, hosted_error: str = "") -> str:
     return msg + "]\n"
 
 
-def _convert_anydoc(path: str, size: int, convert: Callable[[Any], str], pdf_note: Callable[[], str]) -> str:
-    """Shared anydoc pipeline: availability + size gate, convert, normalize, PDF note.
+def _finalize_anydoc_text(text: Any, path: str, pdf_note: Callable[[], str]) -> str:
+    """Normalize converter output and, for PDFs, PREPEND the coverage note.
 
-    ``convert(mod)`` runs the converter; its exceptions become ExtractionError
-    (anydoc raises one ConvertError subclass per failure mode — Unsupported,
-    Malformed, Encrypted, ResourceLimit, MissingPart — all meaning "no meaningful
-    text", so read_file falls back to normal path/binary handling). The PDF
-    coverage note is PREPENDED: read_file paginates the extraction, so a footer
-    on a long document would sit on a page the model may never fetch. It covers
+    Prepended because read_file paginates the extraction: a footer on a long
+    document would sit on a page the model may never fetch. The note covers
     PARTIAL gaps (text layer plus some scanned pages) that convert without
     raising NeedsOcrError.
     """
-    mod = _anydoc()
-    if mod is None:
-        raise ExtractionError(_anydoc_missing_error(path))
-    _check_size(size, MAX_ANYDOC_BYTES)
-    try:
-        text = convert(mod)
-    except ExtractionError:
-        raise
-    except Exception as exc:
-        raise ExtractionError(f"{type(exc).__name__}: {exc}") from exc
     if not isinstance(text, str) or not text.strip():
         raise ExtractionError("Document contains no extractable text")
     text = text.rstrip("\n") + "\n"
@@ -267,7 +255,7 @@ def _convert_anydoc(path: str, size: int, convert: Callable[[Any], str], pdf_not
 
 
 def _ocr_scanned_pdf(mod: Any, path: str, exc: BaseException) -> str:
-    """Typed scanned-pages signal (anydoc >= 0.2): try hosted OCR, else teach recovery."""
+    """Typed scanned-pages signal (anydoc >= 0.2): try hosted OCR when a Firecrawl route exists, else teach recovery."""
     pages = list(getattr(exc, "pages", []) or [])
     enabled, api_key, api_url = _hosted_ocr_config()
     hosted_error = ""
@@ -281,43 +269,48 @@ def _ocr_scanned_pdf(mod: Any, path: str, exc: BaseException) -> str:
             return mod.to_markdown(path, **kwargs).rstrip("\n") + "\n"
         except Exception as hosted_exc:  # noqa: BLE001
             hosted_error = f"{type(hosted_exc).__name__}: {hosted_exc}"
-    # Whole doc is scans — nothing to extract, so the warning IS the result.
+    # No route / disabled / hosted failed: whole doc is scans — nothing to
+    # extract, so the warning IS the result.
     return _needs_ocr_warning(path, pages, hosted_error)
 
 
-class _ScannedPdfResult(ExtractionError):
-    """Internal: carries the hosted-OCR/NEEDS-OCR text out of the converter callback."""
+def _require_anydoc(path: str) -> Any:
+    mod = _anydoc()
+    if mod is None:
+        raise ExtractionError(_anydoc_missing_error(path))
+    return mod
 
 
 def _extract_anydoc(path: str) -> str:
-    def convert(mod: Any) -> str:
-        try:
-            return mod.to_markdown(path)
-        except OSError as exc:
-            raise ExtractionError(str(exc)) from exc
-        except Exception as exc:
-            needs_ocr = getattr(mod, "NeedsOcrError", None)
-            if needs_ocr is not None and isinstance(exc, needs_ocr):
-                raise _ScannedPdfResult(_ocr_scanned_pdf(mod, path, exc)) from exc
-            raise
-
-    if _anydoc() is None:
-        raise ExtractionError(_anydoc_missing_error(path))
+    mod = _require_anydoc(path)
     try:
         size = os.path.getsize(path)
     except OSError as exc:
         raise ExtractionError(str(exc)) from exc
+    _check_size(size, MAX_ANYDOC_BYTES)
     try:
-        return _convert_anydoc(path, size, convert, lambda: _pdf_coverage_note(path))
-    except _ScannedPdfResult as result:
-        return str(result)
+        text = mod.to_markdown(path)
+    except OSError as exc:
+        raise ExtractionError(str(exc)) from exc
+    except Exception as exc:
+        needs_ocr = getattr(mod, "NeedsOcrError", None)
+        if needs_ocr is not None and isinstance(exc, needs_ocr):
+            return _ocr_scanned_pdf(mod, path, exc)
+        # anydoc raises one ConvertError subclass per failure mode (Unsupported,
+        # Malformed, Encrypted, ResourceLimit, MissingPart); all mean "no
+        # meaningful text", so read_file falls back to path/binary handling.
+        raise ExtractionError(f"{type(exc).__name__}: {exc}") from exc
+    return _finalize_anydoc_text(text, path, lambda: _pdf_coverage_note(path))
 
 
 def _extract_anydoc_bytes(data: bytes, path: str) -> str:
-    return _convert_anydoc(
-        path, len(data), lambda mod: mod.to_markdown_bytes(data),
-        lambda: _pdf_coverage_note_from_bytes(data, path),
-    )
+    mod = _require_anydoc(path)
+    _check_size(len(data), MAX_ANYDOC_BYTES)
+    try:
+        text = mod.to_markdown_bytes(data)
+    except Exception as exc:
+        raise ExtractionError(f"{type(exc).__name__}: {exc}") from exc
+    return _finalize_anydoc_text(text, path, lambda: _pdf_coverage_note_from_bytes(data, path))
 
 
 # ── Scanned-PDF coverage detection ──────────────────────────────────

@@ -5,12 +5,14 @@ for environments whose DNS resolves public names to private/benchmark ranges.
 Even then, cloud metadata hostnames/IPs are **always** blocked.
 
 Limitations:
-  - DNS rebinding (TOCTOU): Hermes-owned direct httpx paths should use
-    ``create_ssrf_safe_client()`` / ``create_ssrf_safe_async_client()`` so the
-    policy is re-applied at TCP connect and the socket dials the validated IP
-    while preserving Host/SNI semantics.
+  - DNS rebinding (TOCTOU): an attacker DNS server with TTL=0 can answer a public
+    IP for the check and a private one for the connect. Hermes-owned direct httpx
+    paths should use ``create_ssrf_safe_client()`` / ``create_ssrf_safe_async_client()``
+    so the policy is re-applied at TCP connect and the socket dials the validated
+    IP while preserving Host/SNI semantics.
   - Redirect bypass is mitigated by httpx response hooks re-validating each
-    redirect target (see ``redirect_target_from_response``).
+    redirect target (see ``redirect_target_from_response``). Web tools go through
+    third-party SDKs (Firecrawl/Tavily) whose redirect handling is server-side.
 """
 
 import ipaddress
@@ -233,18 +235,24 @@ def _normalize_hostname(host: Optional[str]) -> str:
     return (host or "").strip().lower().rstrip(".")
 
 
-def _is_ip_literal(hostname: str) -> bool:
+def _parse_ip(hostname: str) -> Optional[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Return the IP object for a literal-IP hostname, else None."""
     try:
-        ipaddress.ip_address(hostname)
+        return ipaddress.ip_address(hostname)
     except ValueError:
-        return False
-    return True
+        return None
 
 
-def _sockaddr_ip(sockaddr: Any) -> str:
-    """Return the IP string from a getaddrinfo sockaddr, minus any IPv6 scope ID."""
-    ip_str = sockaddr[0]
-    return ip_str.split("%")[0] if "%" in ip_str else ip_str
+def _iter_resolved_ips(addr_info: Any):
+    """Yield ``(raw, ip_str, ip)`` per getaddrinfo answer.
+
+    ``ip_str`` has any IPv6 scope ID (``%eth0``) stripped; ``ip`` is None when the
+    answer is still unparseable — each caller decides skip / fail-closed / raise.
+    """
+    for _family, _, _, _, sockaddr in addr_info:
+        raw = sockaddr[0]
+        ip_str = raw.split("%")[0] if "%" in raw else raw
+        yield raw, ip_str, _parse_ip(ip_str)
 
 
 def _is_always_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -276,53 +284,35 @@ def is_always_blocked_url(url: str) -> bool:
             return False
 
         if hostname in _BLOCKED_HOSTNAMES:
-            logger.warning(
-                "Blocked request to internal hostname (always-blocked floor): %s",
-                hostname,
-            )
+            logger.warning("Blocked request to internal hostname (always-blocked floor): %s", hostname)
             return True
 
-        try:
-            ip = ipaddress.ip_address(hostname)
-        except ValueError:
-            ip = None
-
+        ip = _parse_ip(hostname)
         if ip is not None:
             if _is_always_blocked_ip(ip):
-                logger.warning(
-                    "Blocked request to cloud metadata address "
-                    "(always-blocked floor): %s",
-                    hostname,
-                )
+                logger.warning("Blocked request to cloud metadata address (always-blocked floor): %s", hostname)
                 return True
             return False
 
         try:
-            addr_info = socket.getaddrinfo(
-                hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM
-            )
+            addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
         except socket.gaierror:
-            return False
+            return False  # DNS failure is not part of the floor; caller's path handles it
 
-        for _family, _, _, _, sockaddr in addr_info:
-            ip_str = _sockaddr_ip(sockaddr)
-            try:
-                resolved = ipaddress.ip_address(ip_str)
-            except ValueError:
-                logger.warning("Unparseable IP address %r for hostname %s — skipping address", sockaddr[0], hostname)
+        for raw, ip_str, resolved in _iter_resolved_ips(addr_info):
+            if resolved is None:
+                logger.warning("Unparseable IP address %r for hostname %s — skipping address", raw, hostname)
                 continue
             if _is_always_blocked_ip(resolved):
                 logger.warning(
-                    "Blocked request to cloud metadata address "
-                    "(always-blocked floor): %s -> %s",
-                    hostname,
-                    ip_str,
+                    "Blocked request to cloud metadata address (always-blocked floor): %s -> %s", hostname, ip_str
                 )
                 return True
 
         return False
 
     except Exception as exc:
+        # Parse/unexpected errors are not "always blocked"; caller decides fail-open/closed.
         logger.debug("is_always_blocked_url error for %s: %s", url, exc)
         return False
 
@@ -330,6 +320,21 @@ def is_always_blocked_url(url: str) -> bool:
 def _allows_private_ip_resolution(hostname: str, scheme: str) -> bool:
     """Return True when a trusted HTTPS hostname may bypass IP-class blocking."""
     return scheme == "https" and hostname in _TRUSTED_PRIVATE_IP_HOSTS
+
+
+def _resolved_ip_block_reason(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address, allow_private: bool
+) -> Optional[str]:
+    """Why a resolved answer must be rejected, or None if it may be dialed.
+
+    The metadata floor is checked first and ignores ``allow_private``; ordinary
+    private/internal classes are only blocked when ``allow_private`` is False.
+    """
+    if _is_always_blocked_ip(ip):
+        return "cloud metadata address"
+    if not allow_private and _is_blocked_ip(ip):
+        return "private/internal address"
+    return None
 
 
 def is_safe_url(url: str) -> bool:
@@ -356,6 +361,7 @@ def is_safe_url(url: str) -> bool:
 
         allow_all_private = _global_allow_private_urls()
         allow_private_ip = _allows_private_ip_resolution(hostname, scheme)
+        allow_private = allow_all_private or allow_private_ip
 
         try:
             addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
@@ -364,48 +370,29 @@ def is_safe_url(url: str) -> bool:
             # configured, delegate resolution to it (metadata hostnames were already
             # rejected above). Literal IPs need no DNS, so a failure on one is not a
             # proxy symptom — keep them fail-closed.
-            if not _is_ip_literal(hostname) and _proxy_is_configured():
+            if _parse_ip(hostname) is None and _proxy_is_configured():
                 logger.debug(
-                    "DNS resolution failed for %s — proxy configured, "
-                    "allowing through for proxy-side resolution",
+                    "DNS resolution failed for %s — proxy configured, allowing through for proxy-side resolution",
                     hostname,
                 )
                 return True
             logger.warning("Blocked request — DNS resolution failed for: %s", hostname)
             return False
 
-        for family, _, _, _, sockaddr in addr_info:
-            ip_str = _sockaddr_ip(sockaddr)
-            try:
-                ip = ipaddress.ip_address(ip_str)
-            except ValueError:
-                logger.warning("Blocked request — unparseable IP address %r for hostname %s", sockaddr[0], hostname)
+        for raw, ip_str, ip in _iter_resolved_ips(addr_info):
+            if ip is None:
+                logger.warning("Blocked request — unparseable IP address %r for hostname %s", raw, hostname)
                 return False
 
-            if _is_always_blocked_ip(ip):
-                logger.warning(
-                    "Blocked request to cloud metadata address: %s -> %s",
-                    hostname, ip_str,
-                )
-                return False
-
-            if not allow_all_private and not allow_private_ip and _is_blocked_ip(ip):
-                logger.warning(
-                    "Blocked request to private/internal address: %s -> %s",
-                    hostname, ip_str,
-                )
+            reason = _resolved_ip_block_reason(ip, allow_private)
+            if reason is not None:
+                logger.warning("Blocked request to %s: %s -> %s", reason, hostname, ip_str)
                 return False
 
         if allow_all_private:
-            logger.debug(
-                "Allowing private/internal resolution (security.allow_private_urls=true): %s",
-                hostname,
-            )
+            logger.debug("Allowing private/internal resolution (security.allow_private_urls=true): %s", hostname)
         elif allow_private_ip:
-            logger.debug(
-                "Allowing trusted hostname despite private/internal resolution: %s",
-                hostname,
-            )
+            logger.debug("Allowing trusted hostname despite private/internal resolution: %s", hostname)
 
         return True
 
@@ -441,37 +428,25 @@ def _resolved_http_connect_ips(host: str, port: int, scheme: str) -> list[str]:
     if hostname in _BLOCKED_HOSTNAMES:
         raise SSRFConnectionBlocked(f"Blocked request to internal hostname: {hostname}")
 
-    allow_all_private = _global_allow_private_urls()
-    allow_private_ip = _allows_private_ip_resolution(hostname, scheme)
+    allow_private = _global_allow_private_urls() or _allows_private_ip_resolution(hostname, scheme)
 
     try:
-        addr_info = socket.getaddrinfo(
-            hostname, port, socket.AF_UNSPEC, socket.SOCK_STREAM
-        )
+        addr_info = socket.getaddrinfo(hostname, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
     except socket.gaierror as exc:
-        raise SSRFConnectionBlocked(
-            f"Blocked request - DNS resolution failed for: {hostname}"
-        ) from exc
+        raise SSRFConnectionBlocked(f"Blocked request - DNS resolution failed for: {hostname}") from exc
 
     safe_ips: list[str] = []
     seen: set[str] = set()
-    for _family, _, _, _, sockaddr in addr_info:
-        ip_str = _sockaddr_ip(sockaddr)
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError as exc:
+    for raw, ip_str, ip in _iter_resolved_ips(addr_info):
+        if ip is None:
             raise SSRFConnectionBlocked(
-                f"Blocked request - unparseable IP address {sockaddr[0]!r} for hostname {hostname}"
-            ) from exc
+                f"Blocked request - unparseable IP address {raw!r} for hostname {hostname}"
+            ) from ValueError(f"{ip_str!r} does not appear to be an IPv4 or IPv6 address")
 
-        if _is_always_blocked_ip(ip):
+        reason = _resolved_ip_block_reason(ip, allow_private)
+        if reason is not None:
             raise SSRFConnectionBlocked(
-                f"Blocked request to cloud metadata address during connect: {hostname} -> {ip_str}"
-            )
-
-        if not allow_all_private and not allow_private_ip and _is_blocked_ip(ip):
-            raise SSRFConnectionBlocked(
-                f"Blocked request to private/internal address during connect: {hostname} -> {ip_str}"
+                f"Blocked request to {reason} during connect: {hostname} -> {ip_str}"
             )
 
         if ip_str not in seen and len(safe_ips) < _MAX_SSRF_CONNECT_IPS:
@@ -480,20 +455,36 @@ def _resolved_http_connect_ips(host: str, port: int, scheme: str) -> list[str]:
 
     if not safe_ips:
         raise SSRFConnectionBlocked(f"Blocked request - DNS returned no results for: {hostname}")
-    return safe_ips
+    return safe_ips  # capped at _MAX_SSRF_CONNECT_IPS, but EVERY answer above was validated
 
 
-class _SSRFGuardedAsyncNetworkBackend:
+class _SSRFGuardedBackendBase:
     """httpcore backend that re-resolves + validates at connect time and dials a vetted IP.
 
-    Host/SNI stay on the original hostname; Unix sockets are refused outright.
+    Host/SNI stay on the original hostname (the transport still sees ``host``);
+    Unix sockets are refused outright. Candidate IPs are tried in order and the
+    last connect error is re-raised so callers see the real network failure.
     """
 
+    def __init__(self, backend: Any, schemes_by_origin_var: Any):
+        self._backend = backend
+        self._schemes_by_origin_var = schemes_by_origin_var
+
+    def _connect_scheme(self, host: str, port: int) -> str:
+        return _safe_connect_scheme(host, port, self._schemes_by_origin_var.get({}))
+
+    @staticmethod
+    def _no_usable_ips(host: str, last_exc: Exception | None) -> Exception:
+        if last_exc is not None:
+            return last_exc
+        return SSRFConnectionBlocked(f"Blocked request - DNS returned no usable IPs for: {host}")
+
+
+class _SSRFGuardedAsyncNetworkBackend(_SSRFGuardedBackendBase):
     def __init__(self, schemes_by_origin_var: Any):
         from httpcore._backends.auto import AutoBackend
 
-        self._backend = AutoBackend()
-        self._schemes_by_origin_var = schemes_by_origin_var
+        super().__init__(AutoBackend(), schemes_by_origin_var)
 
     async def connect_tcp(
         self,
@@ -505,7 +496,7 @@ class _SSRFGuardedAsyncNetworkBackend:
     ) -> Any:
         import httpcore
 
-        scheme = _safe_connect_scheme(host, port, self._schemes_by_origin_var.get({}))
+        scheme = self._connect_scheme(host, port)
         ips = await asyncio.to_thread(_resolved_http_connect_ips, host, port, scheme)
 
         last_exc: Exception | None = None
@@ -516,10 +507,7 @@ class _SSRFGuardedAsyncNetworkBackend:
                 )
             except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
                 last_exc = exc
-                continue
-        if last_exc is not None:
-            raise last_exc
-        raise SSRFConnectionBlocked(f"Blocked request - DNS returned no usable IPs for: {host}")
+        raise self._no_usable_ips(host, last_exc)
 
     async def connect_unix_socket(self, path: str, timeout: float | None = None, socket_options: Any = None) -> Any:
         raise SSRFConnectionBlocked("Blocked Unix socket connection in SSRF-safe transport")
@@ -528,17 +516,11 @@ class _SSRFGuardedAsyncNetworkBackend:
         await self._backend.sleep(seconds)
 
 
-class _SSRFGuardedNetworkBackend:
-    """httpcore backend that re-resolves + validates at connect time and dials a vetted IP.
-
-    Host/SNI stay on the original hostname; Unix sockets are refused outright.
-    """
-
+class _SSRFGuardedNetworkBackend(_SSRFGuardedBackendBase):
     def __init__(self, schemes_by_origin_var: Any):
         from httpcore._backends.sync import SyncBackend
 
-        self._backend = SyncBackend()
-        self._schemes_by_origin_var = schemes_by_origin_var
+        super().__init__(SyncBackend(), schemes_by_origin_var)
 
     def connect_tcp(
         self,
@@ -550,8 +532,7 @@ class _SSRFGuardedNetworkBackend:
     ) -> Any:
         import httpcore
 
-        scheme = _safe_connect_scheme(host, port, self._schemes_by_origin_var.get({}))
-        ips = _resolved_http_connect_ips(host, port, scheme)
+        ips = _resolved_http_connect_ips(host, port, self._connect_scheme(host, port))
 
         last_exc: Exception | None = None
         for ip in ips:
@@ -561,10 +542,7 @@ class _SSRFGuardedNetworkBackend:
                 )
             except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
                 last_exc = exc
-                continue
-        if last_exc is not None:
-            raise last_exc
-        raise SSRFConnectionBlocked(f"Blocked request - DNS returned no usable IPs for: {host}")
+        raise self._no_usable_ips(host, last_exc)
 
     def connect_unix_socket(self, path: str, timeout: float | None = None, socket_options: Any = None) -> Any:
         raise SSRFConnectionBlocked("Blocked Unix socket connection in SSRF-safe transport")
@@ -623,6 +601,7 @@ def _install_ssrf_guard_on_transport(transport: Any, schemes_by_origin_var: Any,
 
 
 def _install_ssrf_guard_on_client(client: Any, *, is_async: bool = False) -> None:
+    """Guard ``client._transport`` only; ``_mounts`` (env/explicit proxies) stay untouched."""
     import contextvars
 
     var_name = "hermes_ssrf_async_origin_schemes" if is_async else "hermes_ssrf_origin_schemes"

@@ -26,7 +26,9 @@ def has_xai_credentials() -> bool:
     must not do network I/O. Checks, fast-to-slow: ``XAI_API_KEY``; a non-empty
     ``providers.xai-oauth.tokens.access_token`` in ``auth.json``; any
     ``credential_pool.xai-oauth`` entry with an ``access_token`` (pool-only
-    multi-account grants never write the providers singleton). Never raises.
+    multi-account grants never write the providers singleton). Returns False on
+    any exception so a corrupted auth store can't block other availability
+    scans; truthful refresh/expiry handling happens in the caller's request.
     """
     try:
         from agent.secret_scope import get_secret
@@ -225,7 +227,12 @@ def _xai_base_url_override() -> str:
 
 
 def _resolve_explicit_xai_base_url(default: str = DEFAULT_XAI_BASE_URL) -> str:
-    """Base URL for the explicit-API-key path, origin-pinned so a tampered env override can't exfiltrate the bearer."""
+    """Base URL for the explicit-API-key path.
+
+    Origin-pinned via ``_xai_validate_inference_base_url`` so a tampered env
+    override can't exfiltrate the bearer; on rejection falls back to ``default``
+    rather than raising.
+    """
     override = _xai_base_url_override()
     try:
         import hermes_cli.auth as auth_mod
@@ -247,8 +254,10 @@ def resolve_xai_http_credentials(
     ``get_env_value`` so ``~/.hermes/.env`` keys count). ``prefer_api_key=True``
     inverts that for API-metered endpoints where the subscription OAuth bearer
     authorizes but misbehaves (x_search answers without citations, TTS 403s).
-    ``force_refresh=True`` forces an OAuth refresh; pass the rejected bearer as
-    ``api_key_hint`` so a multi-account pool refreshes the issuing entry.
+    Both branches honor ``HERMES_XAI_BASE_URL``/``XAI_BASE_URL`` behind the same
+    origin-pinning validation. ``force_refresh=True`` forces an OAuth refresh;
+    pass the rejected bearer as ``api_key_hint`` so a multi-account pool
+    refreshes the issuing entry, not whichever its strategy selects first.
     """
     if prefer_api_key:
         explicit_key = str(_resolve_explicit_xai_api_key() or "").strip()

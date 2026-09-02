@@ -13,8 +13,6 @@ Debug: ``WEB_TOOLS_DEBUG=true`` writes ``logs/web_tools_debug_<UUID>.json``.
 import json
 import logging
 import os
-import re
-import asyncio
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 
@@ -61,7 +59,7 @@ from tools.tool_backend_helpers import (  # noqa: F401
     nous_tool_gateway_unavailable_message,
     prefers_gateway,
 )
-from tools.url_safety import async_is_safe_url, normalize_url_for_request, sensitive_query_param_name
+from tools.url_safety import async_is_safe_url
 from tools.web_tools_rescue import (  # noqa: F401 — re-exported (tests patch tools.web_tools.<name>)
     _keyless_rescue_enabled,
     _policy_blocked_result,
@@ -69,22 +67,34 @@ from tools.web_tools_rescue import (  # noqa: F401 — re-exported (tests patch 
     _rescue_extract,
     _rescue_search,
 )
+from tools.web_tools_truncate import (  # noqa: F401 — re-exported (tests + web_result_cache import via tools.web_tools)
+    DEFAULT_EXTRACT_CHAR_LIMIT,
+    MAX_STORED_TEXT_CHARS,
+    _clamp_char_limit,
+    _effective_char_limit,
+    _get_extract_char_limit,
+    _store_full_text,
+    _trim_results,
+    _truncate_results,
+    _truncate_with_footer,
+    convert_base64_images_to_links,
+)
+from tools.web_tools_extract import (  # noqa: F401 — re-exported
+    _EXTRACT_BACKENDS_HINT,
+    _NO_RESULT_ERROR,
+    _disabled_plugin_error,
+    _extract_error_json,
+    _extract_safe_urls,
+    _no_provider_error,
+    _resolve_extract_provider,
+    _result_entry,
+    _strict_selection_error,
+    _validate_extract_urls,
+    _web_extract_url,
+)
 import sys
 
 logger = logging.getLogger(__name__)
-
-
-def _web_extract_url(value: Any) -> Optional[str]:
-    """URL from a model-supplied extract item (str, or dict with ``url``/``href``); None if unusable.
-
-    Never stringify arbitrary objects into fetch targets.
-    """
-    if isinstance(value, dict):
-        value = value.get("url") or value.get("href")
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    return value or None
 
 
 # ─── Backend Selection ────────────────────────────────────────────────────────
@@ -115,7 +125,7 @@ def _load_web_config() -> dict:
     try:
         from hermes_cli.config import load_config
         return load_config().get("web") or {}
-    except (ImportError, Exception):
+    except Exception:
         return {}
 
 
@@ -148,7 +158,10 @@ def _registered_web_provider(backend: str):
 
 
 def _probe(provider, method: str, context: str = "") -> Optional[bool]:
-    """``bool(provider.<method>())``, or ``None`` if it raised (logged; a broken provider is unavailable)."""
+    """``bool(provider.<method>())``, or ``None`` if it raised (logged; a broken provider is unavailable).
+
+    ``context`` is appended to the debug log line (e.g. " during readiness check").
+    """
     try:
         return bool(getattr(provider, method)())
     except Exception as exc:  # noqa: BLE001 — a broken provider is "unavailable"
@@ -197,7 +210,8 @@ def _get_backend() -> str:
     from tools.tool_backend_helpers import selection_exists
 
     if selection_exists("web"):
-        # Selection exists (use_gateway / per-capability keys) but no shared name.
+        # Selection exists (use_gateway / per-capability keys) but no shared
+        # name: keep the firecrawl default rather than credential-laddering.
         return "firecrawl"
 
     # Never-configured install. Explicit user credentials beat the managed-
@@ -311,14 +325,15 @@ def _is_backend_available(backend: str) -> bool:
         if registered is not None:
             return registered
     probe = _BUILTIN_AVAILABILITY.get(backend)
-    return bool(probe()) if probe else False
+    return probe() if probe else False
 
 
 def _web_requires_env() -> list[str]:
     """Tool-registry metadata env vars for the web backends.
 
     Gateway vars are always listed: gating them on ``managed_nous_tools_enabled()``
-    cost a synchronous portal HTTP refresh at every CLI startup.
+    cost a synchronous portal HTTP refresh at every CLI startup. Contract: set var
+    -> tool sees it; not-logged-in users simply lack the vars, so extras are harmless.
     """
     return [
         "EXA_API_KEY",
@@ -334,149 +349,8 @@ def _web_requires_env() -> list[str]:
     ]
 
 
-# ─── Truncate-and-store pipeline ──────────────────────────────────────────────
-
-# Per-page char budget sent to the model (override: web.extract_char_limit).
-# Larger pages are head+tail truncated and the full text stored on disk.
-DEFAULT_EXTRACT_CHAR_LIMIT = 15000
-
-# Ceiling on the full-text file written to cache/web so a multi-MB page can't
-# write unbounded bytes on every extract; the model only ever sees char_limit.
-MAX_STORED_TEXT_CHARS = 2_000_000
-
-_CHAR_LIMIT_FLOOR, _CHAR_LIMIT_CEILING = 2000, 500_000
-
+# Truncate-and-store pipeline lives in tools/web_tools_truncate.py (re-imported above).
 _debug = DebugSession("web_tools", env_var="WEB_TOOLS_DEBUG")
-
-
-def _clamp_char_limit(value: Any) -> int:
-    """Clamp to [2k, 500k]; raises TypeError/ValueError for non-numeric input.
-
-    Floor: below 2k the truncation footer dominates. Ceiling: a config typo
-    must not blow up context.
-    """
-    return max(_CHAR_LIMIT_FLOOR, min(int(value), _CHAR_LIMIT_CEILING))
-
-
-def _get_extract_char_limit() -> int:
-    """``web.extract_char_limit`` clamped to a sane range, else the default."""
-    try:
-        configured = _load_web_config().get("extract_char_limit")
-        if configured is not None:
-            return _clamp_char_limit(configured)
-    except (TypeError, ValueError):
-        pass
-    return DEFAULT_EXTRACT_CHAR_LIMIT
-
-
-def convert_base64_images_to_links(text: str) -> str:
-    """Replace inline base64 image blobs (token bombs) with ``[IMAGE: alt]`` placeholders.
-
-    Handles markdown images (alt text kept), parenthesised blobs, and bare
-    ``data:image/...;base64,`` payloads. Real http(s) markdown image links are
-    left untouched so the agent can ``web_extract`` / ``vision_analyze`` them.
-    """
-    def _md_repl(m: "re.Match[str]") -> str:
-        alt = (m.group("alt") or "").strip()
-        return f"[IMAGE: {alt}]" if alt else "[IMAGE]"
-
-    md_b64 = re.compile(
-        r"!\[(?P<alt>[^\]]*)\]\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)"
-    )
-    out = md_b64.sub(_md_repl, text)
-    out = re.sub(r"\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)", "[IMAGE]", out)
-    out = re.sub(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+", "[IMAGE]", out)
-    return out
-
-
-def _store_full_text(url: str, content: str) -> Optional[str]:
-    """Write the full page to cache/web (mounted read-only into remote backends); absolute path or None.
-
-    Best-effort: on failure the truncated content is still returned to the model.
-    """
-    try:
-        import hashlib
-        from hermes_constants import get_hermes_dir
-        from tools.web_result_cache import _host_slug
-
-        cache_dir = get_hermes_dir("cache/web", "web_cache")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
-        path = cache_dir / f"{_host_slug(url)}-{digest}.md"
-        if len(content) > MAX_STORED_TEXT_CHARS:
-            content = (
-                content[:MAX_STORED_TEXT_CHARS]
-                + f"\n\n[... stored copy truncated at {MAX_STORED_TEXT_CHARS:,} chars "
-                f"of {len(content):,}; re-extract a more specific URL for the rest ...]"
-            )
-        from tools.spill_safety import write_text_exclusive
-
-        # Deterministic name in a well-known dir: refuse symlinks (lstat-unlink +
-        # exclusive create); same-URL re-extraction legitimately overwrites. Not
-        # private: cache/web is bind-mounted into remote backends' container UID.
-        write_text_exclusive(path, content, private=False, overwrite=True)
-        return str(path)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Failed to store full web_extract text for %s: %s", url, exc)
-        return None
-
-
-def _truncate_with_footer(
-    content: str,
-    url: str,
-    char_limit: int,
-) -> tuple[str, bool]:
-    """Return (model_text, was_truncated).
-
-    Pages over ``char_limit`` become a ~75% head / ~25% tail window cut on line
-    boundaries, plus a footer saying how much is shown, where the full text is
-    stored, and the read_file call that pages the omitted middle. Deterministic.
-    """
-    if len(content) <= char_limit:
-        return content, False
-
-    head_budget = int(char_limit * 0.75)
-    tail_budget = char_limit - head_budget
-
-    head = content[:head_budget]
-    tail = content[-tail_budget:]
-    # Snap both cuts to line boundaries (head back, tail forward) so we never slice mid-line.
-    nl = head.rfind("\n")
-    if nl > head_budget * 0.5:
-        head = head[:nl]
-    nl = tail.find("\n")
-    if 0 <= nl < tail_budget * 0.5:
-        tail = tail[nl + 1:]
-
-    total = len(content)
-    stored_path = _store_full_text(url, content)
-
-    footer_lines = [
-        "",
-        "─" * 8 + " [TRUNCATED] " + "─" * 8,
-        f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) "
-        f"of {total:,} total clean characters.",
-    ]
-    if stored_path:
-        # read_file is 1-indexed; +2 lands on the first line after the shown head.
-        middle_start_line = head.count("\n") + 2
-        footer_lines.append(f"Full text saved to: {stored_path}")
-        footer_lines.append(
-            f'To read the omitted middle: read_file path="{stored_path}" '
-            f"offset={middle_start_line} limit=200  (the file is the complete page; "
-            f"raise/lower offset to page through it)."
-        )
-    else:
-        footer_lines.append(
-            "Full text could not be stored; re-run web_extract on a more "
-            "specific URL or use browser_navigate for the complete page."
-        )
-    footer_lines.append("─" * 29)
-
-    model_text = head + "\n\n[... middle omitted — see footer ...]\n\n" + tail
-    model_text += "\n" + "\n".join(footer_lines)
-    return model_text, True
 
 
 # ─── Dispatch ─────────────────────────────────────────────────────────────────
@@ -496,41 +370,6 @@ def _ensure_web_plugins_loaded() -> None:
     except Exception as exc:  # noqa: BLE001
         # Warning, not debug: a broken plugin import is otherwise invisible.
         logger.warning("Web plugin discovery failed (non-fatal): %s", exc)
-
-
-def _disabled_plugin_error(capability: str, disabled_key: str) -> str:
-    """Error text when the configured backend's bundled plugin is disabled in config."""
-    vendor = disabled_key.split("/", 1)[-1]
-    return (
-        f"web.{capability}_backend is set to '{vendor}', but its "
-        f"plugin ('{disabled_key}') is disabled in config. "
-        f"Re-enable it with `hermes plugins enable {disabled_key}` "
-        "(or remove it from plugins.disabled)."
-    )
-
-
-def _strict_selection_error(capability: str, backend: str) -> str:
-    """Error for a stored-but-unregistered backend: name the disabled plugin, else the bad selection.
-
-    Strict selection never silently switches to whatever the availability walk finds.
-    """
-    from agent.web_search_registry import _disabled_web_plugin_for
-    from tools.tool_backend_helpers import selection_error
-
-    disabled_key = _disabled_web_plugin_for(capability=capability)
-    if disabled_key:
-        return _disabled_plugin_error(capability, disabled_key)
-    return selection_error(
-        "web", f"'{backend}'", f"no registered web {capability} provider has that name"
-    )
-
-
-def _no_provider_error(capability: str, fallback: str) -> str:
-    """Error when no provider resolved: point at a disabled bundled plugin if that is the real cause."""
-    from agent.web_search_registry import _disabled_web_plugin_for
-
-    disabled_key = _disabled_web_plugin_for(capability=capability)
-    return _disabled_plugin_error(capability, disabled_key) if disabled_key else fallback
 
 
 def _finish_debug(call_name: str, debug_call_data: dict) -> None:
@@ -651,188 +490,6 @@ def _memoized_search(provider, query: str, limit: int) -> dict:
     return slice_search_response(response_data, limit)
 
 
-def _result_entry(url: str, error: Optional[str]) -> Dict[str, Any]:
-    return {"url": url, "title": "", "content": "", "error": error}
-
-
-_NO_RESULT_ERROR = "Extract backend returned no result for this URL"
-_EXTRACT_BACKENDS_HINT = "firecrawl, tavily, keenable, exa, or parallel."
-
-
-def _extract_error_json(error: str) -> str:
-    return json.dumps({"success": False, "error": error}, ensure_ascii=False)
-
-
-def _validate_extract_urls(urls: List[Any]):
-    """Normalize model-supplied items and block URLs carrying secrets.
-
-    Returns ``(normalized_urls, normalized_indices, invalid_urls, blocked_json)``;
-    ``blocked_json`` is a whole-call refusal (exfiltration prevention) or None.
-    Percent-encoded secrets are caught by checking the unquoted forms too.
-    """
-    from agent.redact import _PREFIX_RE
-    from urllib.parse import unquote
-
-    normalized_urls: List[str] = []
-    normalized_indices: List[int] = []
-    invalid_urls: Dict[int, Dict[str, Any]] = {}
-    for index, item in enumerate(urls):
-        _url = _web_extract_url(item)
-        if _url is None:
-            invalid_urls[index] = _result_entry(
-                "",
-                f"Invalid URL item at index {index}: expected a URL string "
-                "or an object with a string 'url' or 'href' field",
-            )
-            continue
-        normalized_url = normalize_url_for_request(_url)
-        if any(
-            _PREFIX_RE.search(candidate)
-            for candidate in (_url, unquote(_url), normalized_url, unquote(normalized_url))
-        ):
-            return None, None, None, json.dumps({
-                "success": False,
-                "error": "Blocked: URL contains what appears to be an API key or token. "
-                         "Secrets must not be sent in URLs.",
-            })
-        sensitive_query_key = sensitive_query_param_name(normalized_url)
-        if sensitive_query_key:
-            return None, None, None, json.dumps({
-                "success": False,
-                "error": (
-                    "Blocked: URL contains a credential-like query parameter "
-                    f"({sensitive_query_key}). Web extract backends are third-party "
-                    "readers; remove the sensitive query parameter or use a local "
-                    "browser session when this access is explicitly required."
-                ),
-            })
-        normalized_urls.append(normalized_url)
-        normalized_indices.append(index)
-    return normalized_urls, normalized_indices, invalid_urls, None
-
-
-def _resolve_extract_provider(backend: str):
-    """Resolve the extract provider for *backend*; returns ``(provider, error_json)``.
-
-    A registered search-only backend is a typed error (never a silent switch).
-    An unregistered name with a stored web selection is a strict-selection
-    error; with no selection, fall through to the availability walk.
-    """
-    from agent.web_search_registry import (
-        get_active_extract_provider,
-        get_provider as _wsp_get_provider,
-    )
-
-    provider = _wsp_get_provider(backend) if backend else None
-    if provider is not None and provider.supports_extract():
-        return provider, None
-    if provider is not None:
-        return None, _extract_error_json(
-            f"{provider.display_name} is a search-only "
-            "backend and cannot extract URL content. "
-            "Set web.extract_backend to " + _EXTRACT_BACKENDS_HINT
-        )
-    from tools.tool_backend_helpers import selection_exists
-
-    if backend and selection_exists("web"):
-        return None, _extract_error_json(_strict_selection_error("extract", backend))
-    provider = get_active_extract_provider()
-    if provider is None:
-        return None, _extract_error_json(_no_provider_error(
-            "extract",
-            "No web extract provider configured. Set web.extract_backend to "
-            + _EXTRACT_BACKENDS_HINT,
-        ))
-    return provider, None
-
-
-async def _dispatch_extract(provider, fetch_urls: List[str], format: Optional[str]) -> List[dict]:
-    """Call ``provider.extract`` (async or sync-in-thread), with one-shot keyless rescue.
-
-    Rescue fires on a raised exception or when the WHOLE batch failed (backend
-    outage, not per-page problems). Rescued batches are never cached.
-    """
-    import inspect
-    from tools.web_result_cache import extract_cache_put
-
-    try:
-        if inspect.iscoroutinefunction(provider.extract):
-            results = await provider.extract(fetch_urls, format=format)
-        else:
-            results = await asyncio.to_thread(provider.extract, fetch_urls, format=format)
-    except Exception as exc:  # noqa: BLE001 — candidate for rescue
-        if not _rescue_eligible(provider):
-            raise
-        failed = [_result_entry(u, str(exc)) for u in fetch_urls]
-        return await asyncio.to_thread(_rescue_extract, provider.name, fetch_urls, failed)
-    if results and all(r.get("error") for r in results) and _rescue_eligible(provider):
-        return await asyncio.to_thread(_rescue_extract, provider.name, fetch_urls, results)
-
-    # Cache each successful fetch's full clean text (best-effort; oversized skipped).
-    for fetched_pos, fetched in enumerate(results):
-        if fetched_pos >= len(fetch_urls):
-            break
-        if fetched.get("error"):
-            continue
-        _content = fetched.get("raw_content", "") or fetched.get("content", "")
-        if _content:
-            extract_cache_put(
-                fetch_urls[fetched_pos],
-                _content,
-                title=fetched.get("title", ""),
-                format=format,
-                provider=provider.name,
-            )
-    return results
-
-
-async def _extract_safe_urls(provider, safe_urls: List[str], format: Optional[str]) -> List[dict]:
-    """Serve cache hits, fetch the rest, and merge back in ``safe_urls`` order.
-
-    The disk cache (tools/web_result_cache.py) sits AFTER the secret-URL gate,
-    SSRF gate, and provider resolution, and is gated per-URL on the website
-    policy — a hit skips only the vendor call, never a control. Policy-blocked
-    URLs are cache misses so dispatch handles them exactly as without a cache.
-    """
-    from tools.web_result_cache import extract_cache_get
-    from tools.website_policy import check_website_access as _check_site
-
-    cached_results: Dict[int, Dict[str, Any]] = {}
-    fetch_urls: List[str] = []
-    fetch_positions: List[int] = []
-    for position, url in enumerate(safe_urls):
-        hit = None
-        try:
-            _policy_block = _check_site(url)
-        except Exception:  # noqa: BLE001 — policy errors fail open like dispatch
-            _policy_block = None
-        if _policy_block is None:
-            hit = extract_cache_get(url, format=format, provider=provider.name)
-        if hit is not None:
-            cached_results[position] = hit
-        else:
-            fetch_urls.append(url)
-            fetch_positions.append(position)
-
-    if not fetch_urls:
-        return [cached_results[i] for i in range(len(safe_urls))]
-
-    logger.info("Web extract via %s: %d URL(s)", provider.name, len(fetch_urls))
-    results = await _dispatch_extract(provider, fetch_urls, format)
-    if not cached_results:
-        return results
-    merged: List[Dict[str, Any]] = [None] * len(safe_urls)  # type: ignore[list-item]
-    for position, hit in cached_results.items():
-        merged[position] = hit
-    for fetched_pos, position in enumerate(fetch_positions):
-        merged[position] = (
-            results[fetched_pos]
-            if fetched_pos < len(results)
-            else _result_entry(safe_urls[position], _NO_RESULT_ERROR)
-        )
-    return merged
-
-
 async def web_extract_tool(
     urls: List[Any],
     format: str = None,
@@ -910,46 +567,9 @@ async def web_extract_tool(
         debug_call_data["pages_extracted"] = pages_extracted
         debug_call_data["original_response_size"] = len(json.dumps(response))
 
-        effective_char_limit = char_limit if char_limit is not None else _get_extract_char_limit()
-        try:
-            effective_char_limit = _clamp_char_limit(effective_char_limit)
-        except (TypeError, ValueError):
-            effective_char_limit = DEFAULT_EXTRACT_CHAR_LIMIT
-
         debug_call_data["processing_applied"].append("truncate_and_store")
-        for result in response.get("results", []):
-            if result.get("error"):
-                continue
-            url = result.get("url", "")
-            raw_content = result.get("raw_content", "") or result.get("content", "")
-            if not raw_content:
-                continue
-            clean = convert_base64_images_to_links(raw_content)
-            model_text, truncated = _truncate_with_footer(clean, url, effective_char_limit)
-            result["content"] = model_text
-            if truncated:
-                debug_call_data["pages_truncated"] += 1
-                debug_call_data["truncation_metrics"].append({
-                    "url": url,
-                    "original_size": len(clean),
-                    "sent_size": len(model_text),
-                })
-                logger.info("%s (truncated %d -> %d chars)", url, len(clean), len(model_text))
-            else:
-                logger.info("%s (%d chars, whole)", url, len(clean))
-
-        # Trim each entry to url/title/content/error (+ blocked_by_policy when present).
-        trimmed_results = [
-            {
-                "url": r.get("url", ""),
-                "title": r.get("title", ""),
-                "content": r.get("content", ""),
-                "error": r.get("error"),
-                **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
-            }
-            for r in response.get("results", [])
-        ]
-        trimmed_response = {"results": trimmed_results}
+        _truncate_results(response.get("results", []), _effective_char_limit(char_limit), debug_call_data)
+        trimmed_response = {"results": _trim_results(response.get("results", []))}
 
         if trimmed_response.get("results") == []:
             result_json = tool_error("Content was inaccessible or not found")
@@ -983,16 +603,12 @@ def _provider_is_ready(provider) -> bool:
     """
     if provider is None:
         return False
-    for probe in ("is_available", "is_keyless_available"):
-        try:
-            if getattr(provider, probe)():
-                return True
-        except Exception as exc:  # noqa: BLE001 — broken provider == not ready
-            logger.debug(
-                "web provider %r.%s() raised during readiness check: %s",
-                getattr(provider, "name", provider), probe, exc,
-            )
+    for method in ("is_available", "is_keyless_available"):
+        ready = _probe(provider, method, " during readiness check")
+        if ready is None:  # broken provider == not ready; don't try the next probe
             return False
+        if ready:
+            return True
     return False
 
 

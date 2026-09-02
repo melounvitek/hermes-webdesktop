@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from hermes_constants import get_hermes_home
+from tools.url_safety import _normalize_hostname as _normalize_host
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ _DEFAULT_WEBSITE_BLOCKLIST = {
     "shared_files": [],
 }
 
+# Without this cache a 50-URL extract would mean 51 YAML parses of config.yaml.
 _CACHE_TTL_SECONDS = 30.0
 _cache_lock = threading.Lock()
 _cached_policy: Optional[Dict[str, Any]] = None
@@ -39,10 +41,6 @@ def _get_default_config_path() -> Path:
 
 class WebsitePolicyError(Exception):
     """Raised when a website policy file is malformed."""
-
-
-def _normalize_host(host: str) -> str:
-    return (host or "").strip().lower().rstrip(".")
 
 
 def _normalize_rule(rule: Any) -> Optional[str]:
@@ -79,6 +77,7 @@ def _iter_blocklist_file_rules(path: Path) -> List[str]:
 
 
 def _require_mapping(value: Any, label: str) -> Dict[str, Any]:
+    """``None`` (empty YAML section) counts as an empty mapping; other non-dicts are errors."""
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -118,6 +117,7 @@ def _load_policy_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def _require_type(policy: Dict[str, Any], key: str, kind: type, default: Any) -> Any:
+    """Typed policy field; ``None``/empty list values are coerced to ``[]`` for lists only."""
     value = policy.get(key, default)
     if kind is list:
         value = value or []
@@ -176,7 +176,7 @@ def load_website_blocklist(config_path: Optional[Path] = None) -> Dict[str, Any]
 
     result = {"enabled": enabled, "rules": rules}
 
-    if config_path == default_path:
+    if config_path == default_path:  # explicit paths are tests — never cache them
         with _cache_lock:
             _cached_policy = result
             _cached_policy_path = resolved_path
