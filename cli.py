@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 import logging
 import copy
 import os
+import functools
 import shutil
 import sys
 import json
@@ -5191,6 +5192,38 @@ def _should_seed_interactive(query, image, quiet: bool, oneshot: bool) -> bool:
         return bool(sys.stdin.isatty() and sys.stdout.isatty())
     except Exception:
         return False
+
+
+def _panel_box_width(title: str, content_lines: list[str], min_width: int = 46, max_width: int = 76) -> int:
+    """Stable TUI panel width wide enough for the title and content (incl. borders)."""
+    term_cols = shutil.get_terminal_size((100, 20)).columns
+    longest = max([len(title)] + [len(line) for line in content_lines] + [min_width - 4])
+    inner = min(max(longest + 4, min_width - 2), max_width - 2, max(24, term_cols - 6))
+    return inner + 2  # account for the single leading/trailing spaces inside borders
+
+
+def _wrap_panel_text(text: str, width: int, subsequent_indent: str = "", *, keep_ws: bool = False) -> list[str]:
+    """Wrap panel text; ``keep_ws`` preserves whitespace (command/detail previews)."""
+    if keep_ws:
+        kw = dict(replace_whitespace=False, drop_whitespace=False)
+    else:
+        kw = dict(break_long_words=False, break_on_hyphens=False)
+    wrapped = textwrap.wrap(text, width=max(8, width), subsequent_indent=subsequent_indent, **kw)
+    return wrapped or [""]
+
+
+_wrap_panel_text_keep_ws = functools.partial(_wrap_panel_text, keep_ws=True)
+
+
+def _append_panel_line(lines, border_style: str, content_style: str, text: str, box_width: int) -> None:
+    inner_width = max(0, box_width - 2)
+    lines.append((border_style, "│ "))
+    lines.append((content_style, text.ljust(inner_width)))
+    lines.append((border_style, " │\n"))
+
+
+def _append_blank_panel_line(lines, border_style: str, box_width: int) -> None:
+    lines.append((border_style, "│" + (" " * box_width) + "│\n"))
 
 
 class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
@@ -11121,8 +11154,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
     def _prompt_text_input(self, prompt_text: str) -> str | None:
         """Prompt for free-text input safely inside or outside prompt_toolkit.
 
-        ``run_in_terminal``
-        returns a coroutine that must be awaited by the prompt_toolkit event loop,
+        ``run_in_terminal`` returns a coroutine that must be awaited by the prompt_toolkit event loop,
         which only exists on the main thread.  Slash commands are dispatched from
         the ``process_loop`` daemon thread (see issue #23185), so calling
         ``run_in_terminal`` from there orphans the coroutine — ``_ask`` never runs,
@@ -11351,30 +11383,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         choices = state.get("choices") or []
         selected = state.get("selected", 0)
 
-        def _panel_box_width(title_text: str, content_lines: list[str], min_width: int = 56, max_width: int = 86) -> int:
-            term_cols = shutil.get_terminal_size((100, 20)).columns
-            longest = max([len(title_text)] + [len(line) for line in content_lines] + [min_width - 4])
-            inner = min(max(longest + 4, min_width - 2), max_width - 2, max(24, term_cols - 6))
-            return inner + 2
-
-        def _wrap_panel_text(text: str, width: int, subsequent_indent: str = "") -> list[str]:
-            wrapped = textwrap.wrap(
-                text,
-                width=max(8, width),
-                replace_whitespace=False,
-                drop_whitespace=False,
-                subsequent_indent=subsequent_indent,
-            )
-            return wrapped or [""]
-
-        def _append_panel_line(lines, border_style: str, content_style: str, text: str, box_width: int) -> None:
-            inner_width = max(0, box_width - 2)
-            lines.append((border_style, "│ "))
-            lines.append((content_style, text.ljust(inner_width)))
-            lines.append((border_style, " │\n"))
-
-        def _append_blank_panel_line(lines, border_style: str, box_width: int) -> None:
-            lines.append((border_style, "│" + (" " * box_width) + "│\n"))
+        _wrap_panel_text = _wrap_panel_text_keep_ws
 
         preview_lines = []
         for line in detail.splitlines():
@@ -11384,7 +11393,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             preview_lines.extend(_wrap_panel_text(f"{marker} [{idx + 1}] {label} — {desc}", 72, subsequent_indent="    "))
         preview_lines.append("Type 1/2/3 or use ↑/↓ then Enter. ESC/Ctrl+C cancels.")
 
-        box_width = _panel_box_width(title, preview_lines)
+        box_width = _panel_box_width(title, preview_lines, min_width=56, max_width=86)
         inner_text_width = max(8, box_width - 2)
         detail_wrapped = []
         for line in detail.splitlines():
@@ -16574,30 +16583,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         if not state:
             return []
 
-        def _panel_box_width(title_text: str, content_lines: list[str], min_width: int = 46, max_width: int = 76) -> int:
-            term_cols = shutil.get_terminal_size((100, 20)).columns
-            longest = max([len(title_text)] + [len(line) for line in content_lines] + [min_width - 4])
-            inner = min(max(longest + 4, min_width - 2), max_width - 2, max(24, term_cols - 6))
-            return inner + 2
-
-        def _wrap_panel_text(text: str, width: int, subsequent_indent: str = "") -> list[str]:
-            wrapped = textwrap.wrap(
-                text,
-                width=max(8, width),
-                replace_whitespace=False,
-                drop_whitespace=False,
-                subsequent_indent=subsequent_indent,
-            )
-            return wrapped or [""]
-
-        def _append_panel_line(lines, border_style: str, content_style: str, text: str, box_width: int) -> None:
-            inner_width = max(0, box_width - 2)
-            lines.append((border_style, "│ "))
-            lines.append((content_style, text.ljust(inner_width)))
-            lines.append((border_style, " │\n"))
-
-        def _append_blank_panel_line(lines, border_style: str, box_width: int) -> None:
-            lines.append((border_style, "│" + (" " * box_width) + "│\n"))
+        _wrap_panel_text = _wrap_panel_text_keep_ws
 
         command = state["command"]
         description = state["description"]
@@ -19998,32 +19984,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         )
 
         # --- Clarify tool: dynamic display widget for questions + choices ---
-
-        def _panel_box_width(title: str, content_lines: list[str], min_width: int = 46, max_width: int = 76) -> int:
-            """Choose a stable panel width wide enough for the title and content."""
-            term_cols = shutil.get_terminal_size((100, 20)).columns
-            longest = max([len(title)] + [len(line) for line in content_lines] + [min_width - 4])
-            inner = min(max(longest + 4, min_width - 2), max_width - 2, max(24, term_cols - 6))
-            return inner + 2  # account for the single leading/trailing spaces inside borders
-
-        def _wrap_panel_text(text: str, width: int, subsequent_indent: str = "") -> list[str]:
-            wrapped = textwrap.wrap(
-                text,
-                width=max(8, width),
-                break_long_words=False,
-                break_on_hyphens=False,
-                subsequent_indent=subsequent_indent,
-            )
-            return wrapped or [""]
-
-        def _append_panel_line(lines, border_style: str, content_style: str, text: str, box_width: int) -> None:
-            inner_width = max(0, box_width - 2)
-            lines.append((border_style, "│ "))
-            lines.append((content_style, text.ljust(inner_width)))
-            lines.append((border_style, " │\n"))
-
-        def _append_blank_panel_line(lines, border_style: str, box_width: int) -> None:
-            lines.append((border_style, "│" + (" " * box_width) + "│\n"))
 
         def _get_clarify_batch_display(state):
             """Build styled text for the batch (multi-question) clarify panel.
