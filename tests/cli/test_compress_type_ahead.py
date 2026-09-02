@@ -133,7 +133,7 @@ def test_handle_enter_never_gates_on_command_running():
 
     target = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "handle_enter":
+        if isinstance(node, ast.FunctionDef) and node.name == "_tui_handle_enter":
             target = node
             break
     assert target is not None, "handle_enter closure not found in cli.py"
