@@ -1528,6 +1528,166 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
         return f"[{tool_name}] ({_len:,} chars result)"
 
 
+def _sum_terminal(name, args, content, content_len, line_count):
+    cmd = _str_arg(args, "command")
+    if len(cmd) > 80:
+        cmd = cmd[:77] + "..."
+    exit_match = re.search(r'"exit_code"\s*:\s*(-?\d+)', content)
+    exit_code = exit_match.group(1) if exit_match else "?"
+    return f"[terminal] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
+
+
+def _sum_read_file(name, args, content, content_len, line_count):
+    return f"[read_file] read {args.get('path', '?')} from line {args.get('offset', 1)} ({content_len:,} chars)"
+
+
+def _sum_write_file(name, args, content, content_len, line_count):
+    written_lines = _str_arg(args, "content").count("\n") + 1 if args.get("content") else "?"
+    return f"[write_file] wrote to {args.get('path', '?')} ({written_lines} lines)"
+
+
+def _sum_search_files(name, args, content, content_len, line_count):
+    match_count = re.search(r'"total_count"\s*:\s*(\d+)', content)
+    count = match_count.group(1) if match_count else "?"
+    return (
+        f"[search_files] {args.get('target', 'content')} search for "
+        f"'{args.get('pattern', '?')}' in {args.get('path', '.')} -> {count} matches"
+    )
+
+
+def _sum_patch(name, args, content, content_len, line_count):
+    return f"[patch] {args.get('mode', 'replace')} in {args.get('path', '?')} ({content_len:,} chars result)"
+
+
+def _sum_browser(name, args, content, content_len, line_count):
+    url = args.get("url", "")
+    ref = args.get("ref", "")
+    detail = f" {url}" if url else (f" ref={ref}" if ref else "")
+    return f"[{name}]{detail} ({content_len:,} chars)"
+
+
+def _sum_web_search(name, args, content, content_len, line_count):
+    return f"[web_search] query='{args.get('query', '?')}' ({content_len:,} chars result)"
+
+
+def _sum_web_extract(name, args, content, content_len, line_count):
+    urls = args.get("urls", [])
+    first = urls[0] if isinstance(urls, list) and urls else "?"
+    # web_search result dicts get forwarded to web_extract; unwrap to the URL so ``+=`` never
+    # hits ``dict + str``.
+    if isinstance(first, dict):
+        first = first.get("url") or first.get("href") or "?"
+    elif not isinstance(first, str):
+        first = "?"
+    url_desc = first
+    if isinstance(urls, list) and len(urls) > 1:
+        url_desc += f" (+{len(urls) - 1} more)"
+    return f"[web_extract] {url_desc} ({content_len:,} chars)"
+
+
+def _sum_delegate_task(name, args, content, content_len, line_count):
+    goal = _str_arg(args, "goal")
+    if len(goal) > 60:
+        goal = goal[:57] + "..."
+    return f"[delegate_task] '{goal}' ({content_len:,} chars result)"
+
+
+def _sum_execute_code(name, args, content, content_len, line_count):
+    code_str = _str_arg(args, "code")
+    code_preview = code_str[:60].replace("\n", " ")
+    if len(code_str) > 60:
+        code_preview += "..."
+    return f"[execute_code] `{code_preview}` ({line_count} lines output)"
+
+
+def _sum_skill_view(name, args, content, content_len, line_count):
+    skill = args.get("name", "?")
+    if content_len > _SKILL_VIEW_PRUNE_MIN_CHARS:
+        # Ghost-skill defense: canonical marker says instructions are gone and how to reload.
+        return f"[skill_view] name={skill} ({content_len:,} chars) " + _skill_pruned_marker(str(skill))
+    return f"[skill_view] name={skill} ({content_len:,} chars)"
+
+
+def _sum_named(name, args, content, content_len, line_count):
+    return f"[{name}] name={args.get('name', '?')} ({content_len:,} chars)"
+
+
+def _sum_vision_analyze(name, args, content, content_len, line_count):
+    return f"[vision_analyze] '{_str_arg(args, 'question')[:50]}' ({content_len:,} chars)"
+
+
+def _sum_memory(name, args, content, content_len, line_count):
+    return f"[memory] {args.get('action', '?')} on {args.get('target', '?')}"
+
+
+def _sum_clarify(name, args, content, content_len, line_count):
+    response_prefix = "[clarify] user responded: "
+    # Strictly below _PRUNE_MIN_CHARS so the summary survives later prune passes via the
+    # min_prune_chars guard and skips the >=200-char dedup.
+    max_summary_chars = _PRUNE_MIN_CHARS - 1
+    truncation_marker = "...[truncated]"
+    try:
+        result = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        result = {}
+    response = result.get("user_response") if isinstance(result, dict) else None
+    is_answer_shaped = (
+        isinstance(response, str) and bool(response)
+    ) or (
+        isinstance(response, list)
+        and bool(response)
+        and all(isinstance(item, str) and item for item in response)
+    )
+    # Timeout / no-user sentinel prose must not be quoted as a user answer.
+    if is_answer_shaped and not _is_clarify_non_response_sentinel(response):
+        # Escape lone UTF-16 surrogates so the message stays UTF-8/SQLite safe.
+        serialized_response = (
+            json.dumps(response, ensure_ascii=False)
+            .encode("utf-8", errors="backslashreplace")
+            .decode("utf-8")
+        )
+        summary = response_prefix + serialized_response
+        if len(summary) > max_summary_chars:
+            summary = summary[: max_summary_chars - len(truncation_marker)].rstrip() + truncation_marker
+        return summary
+    return "[clarify] asked user a question"
+
+
+def _sum_process_manage(name, args, content, content_len, line_count):
+    return f"[process] {args.get('action', '?')} session={args.get('session_id', '?')}"
+
+
+# tool_name -> (name, args, content, content_len, line_count) -> one-line summary.
+_TOOL_RESULT_SUMMARIZERS = {
+    "terminal": _sum_terminal,
+    "read_file": _sum_read_file,
+    "write_file": _sum_write_file,
+    "search_files": _sum_search_files,
+    "patch": _sum_patch,
+    **{
+        _b: _sum_browser
+        for _b in ("browser_navigate", "browser_click", "browser_snapshot",
+                   "browser_type", "browser_scroll", "browser_vision")
+    },
+    "web_search": _sum_web_search,
+    "web_extract": _sum_web_extract,
+    "delegate_task": _sum_delegate_task,
+    "execute_code": _sum_execute_code,
+    "skill_view": _sum_skill_view,
+    "skills_list": _sum_named,
+    "skill_manage": _sum_named,
+    "vision_analyze": _sum_vision_analyze,
+    "memory": _sum_memory,
+    "todo_list": lambda *a: "[todo] updated task list",
+    "clarify": _sum_clarify,
+    "text_to_speech": lambda name, args, content, content_len, line_count: (
+        f"[text_to_speech] generated audio ({content_len:,} chars)"
+    ),
+    "cronjob_manage": lambda name, args, *_: f"[cronjob] {args.get('action', '?')}",
+    "process_manage": _sum_process_manage,
+}
+
+
 def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_content: str) -> str:
     """Build the summary line (unguarded; see ``_summarize_tool_result``)."""
     try:
@@ -1541,156 +1701,12 @@ def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_conten
     content_len = len(content)
     line_count = content.count("\n") + 1 if content.strip() else 0
 
-    if tool_name == "terminal":
-        cmd = _str_arg(args, "command")
-        if len(cmd) > 80:
-            cmd = cmd[:77] + "..."
-        exit_match = re.search(r'"exit_code"\s*:\s*(-?\d+)', content)
-        exit_code = exit_match.group(1) if exit_match else "?"
-        return f"[terminal] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
-
-    if tool_name == "read_file":
-        path = args.get("path", "?")
-        offset = args.get("offset", 1)
-        return f"[read_file] read {path} from line {offset} ({content_len:,} chars)"
-
-    if tool_name == "write_file":
-        path = args.get("path", "?")
-        written_lines = _str_arg(args, "content").count("\n") + 1 if args.get("content") else "?"
-        return f"[write_file] wrote to {path} ({written_lines} lines)"
-
-    if tool_name == "search_files":
-        pattern = args.get("pattern", "?")
-        path = args.get("path", ".")
-        target = args.get("target", "content")
-        match_count = re.search(r'"total_count"\s*:\s*(\d+)', content)
-        count = match_count.group(1) if match_count else "?"
-        return f"[search_files] {target} search for '{pattern}' in {path} -> {count} matches"
-
-    if tool_name == "patch":
-        path = args.get("path", "?")
-        mode = args.get("mode", "replace")
-        return f"[patch] {mode} in {path} ({content_len:,} chars result)"
-
-    if tool_name in {"browser_navigate", "browser_click", "browser_snapshot",
-                     "browser_type", "browser_scroll", "browser_vision"}:
-        url = args.get("url", "")
-        ref = args.get("ref", "")
-        detail = f" {url}" if url else (f" ref={ref}" if ref else "")
-        return f"[{tool_name}]{detail} ({content_len:,} chars)"
-
-    if tool_name == "web_search":
-        query = args.get("query", "?")
-        return f"[web_search] query='{query}' ({content_len:,} chars result)"
-
-    if tool_name == "web_extract":
-        urls = args.get("urls", [])
-        first = urls[0] if isinstance(urls, list) and urls else "?"
-        # web_search result dicts get forwarded to web_extract; unwrap to the URL
-        # so ``+=`` below never hits ``dict + str``.
-        if isinstance(first, dict):
-            first = first.get("url") or first.get("href") or "?"
-        elif not isinstance(first, str):
-            first = "?"
-        url_desc = first
-        if isinstance(urls, list) and len(urls) > 1:
-            url_desc += f" (+{len(urls) - 1} more)"
-        return f"[web_extract] {url_desc} ({content_len:,} chars)"
-
-    if tool_name == "delegate_task":
-        goal = _str_arg(args, "goal")
-        if len(goal) > 60:
-            goal = goal[:57] + "..."
-        return f"[delegate_task] '{goal}' ({content_len:,} chars result)"
-
-    if tool_name == "execute_code":
-        code_str = _str_arg(args, "code")
-        code_preview = code_str[:60].replace("\n", " ")
-        if len(code_str) > 60:
-            code_preview += "..."
-        return f"[execute_code] `{code_preview}` ({line_count} lines output)"
-
-    if tool_name == "skill_view":
-        name = args.get("name", "?")
-        if content_len > _SKILL_VIEW_PRUNE_MIN_CHARS:
-            # Ghost-skill defense: canonical marker says instructions are gone and how to reload.
-            return (
-                f"[skill_view] name={name} ({content_len:,} chars) "
-                + _skill_pruned_marker(str(name))
-            )
-        return f"[skill_view] name={name} ({content_len:,} chars)"
-
-    if tool_name in {"skills_list", "skill_manage"}:
-        name = args.get("name", "?")
-        return f"[{tool_name}] name={name} ({content_len:,} chars)"
-
-    if tool_name == "vision_analyze":
-        question = _str_arg(args, "question")[:50]
-        return f"[vision_analyze] '{question}' ({content_len:,} chars)"
-
-    if tool_name == "memory":
-        action = args.get("action", "?")
-        target = args.get("target", "?")
-        return f"[memory] {action} on {target}"
-
-    if tool_name == "todo_list":
-        return "[todo] updated task list"
-
-    if tool_name == "clarify":
-        response_prefix = "[clarify] user responded: "
-        # Strictly below _PRUNE_MIN_CHARS so the summary survives later prune
-        # passes via the min_prune_chars guard and skips the >=200-char dedup.
-        max_summary_chars = _PRUNE_MIN_CHARS - 1
-        truncation_marker = "...[truncated]"
-
-        try:
-            result = json.loads(content)
-        except (json.JSONDecodeError, TypeError):
-            result = {}
-        response = result.get("user_response") if isinstance(result, dict) else None
-        is_answer_shaped = (
-            isinstance(response, str) and bool(response)
-        ) or (
-            isinstance(response, list)
-            and bool(response)
-            and all(isinstance(item, str) and item for item in response)
-        )
-        # Timeout / no-user sentinel prose must not be quoted as a user answer.
-        resolved = is_answer_shaped and not _is_clarify_non_response_sentinel(
-            response
-        )
-        if resolved:
-            # Escape lone UTF-16 surrogates so the message stays UTF-8/SQLite safe.
-            serialized_response = (
-                json.dumps(response, ensure_ascii=False)
-                .encode("utf-8", errors="backslashreplace")
-                .decode("utf-8")
-            )
-            summary = response_prefix + serialized_response
-            if len(summary) > max_summary_chars:
-                summary = (
-                    summary[: max_summary_chars - len(truncation_marker)].rstrip()
-                    + truncation_marker
-                )
-            return summary
-        return "[clarify] asked user a question"
-
-    if tool_name == "text_to_speech":
-        return f"[text_to_speech] generated audio ({content_len:,} chars)"
-
-    if tool_name == "cronjob_manage":
-        action = args.get("action", "?")
-        return f"[cronjob] {action}"
-
-    if tool_name == "process_manage":
-        action = args.get("action", "?")
-        sid = args.get("session_id", "?")
-        return f"[process] {action} session={sid}"
-
+    summarizer = _TOOL_RESULT_SUMMARIZERS.get(tool_name)
+    if summarizer is not None:
+        return summarizer(tool_name, args, content, content_len, line_count)
     first_arg = ""
     for k, v in list(args.items())[:2]:
-        sv = str(v)[:40]
-        first_arg += f" {k}={sv}"
+        first_arg += f" {k}={str(v)[:40]}"
     return f"[{tool_name}]{first_arg} ({content_len:,} chars result)"
 
 
