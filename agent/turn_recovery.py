@@ -38,6 +38,7 @@ from agent.message_sanitization import (
     _strip_non_ascii,
 )
 from agent.turn_retry_state import TurnRetryState
+from utils import base_url_host_matches
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -649,3 +650,416 @@ def recover_after_classification(
             agent.log_prefix,
         )
     return False, recovered_with_pool
+
+
+def nonretryable_client_error_result(
+    agent: Any,
+    api_error: Exception,
+    classified: Any,
+    *,
+    status_code: Optional[int],
+    api_kwargs: Any,
+    api_messages: Any,
+    messages: List[Dict[str, Any]],
+    conversation_history: Any,
+    api_call_count: int,
+    approx_tokens: int,
+    provider: Any,
+    base_url: Any,
+    model: Any,
+) -> Dict[str, Any]:
+    """Terminal path for a non-retryable 4xx once fallback is exhausted: dump the
+    request for debugging, flush the buffered retry trace, print actionable auth /
+    billing / content-policy / TLS guidance, persist the session (skipped for likely
+    context-overflow 400s so the failure does not grow the session, #1630) and build
+    the failed-turn result dict."""
+    # Result/guidance helpers stay in the loop module (tests import + patch them
+    # there); lazy import avoids a load-time cycle.
+    from agent.conversation_loop import (
+        _CONTENT_POLICY_RECOVERY_HINT,
+        _billing_failure_result,
+        _content_policy_blocked_result,
+        _print_billing_or_entitlement_guidance,
+        _print_nous_entitlement_guidance,
+    )
+
+    if api_kwargs is not None:
+        agent._dump_api_request_debug(
+            api_kwargs, reason="non_retryable_client_error", error=api_error,
+        )
+    # Terminal — flush buffered context so the user sees
+    # what was tried before the abort.
+    agent._flush_status_buffer()
+    # Summarize once: Cloudflare/proxy HTML pages and raw provider
+    # bodies must be collapsed here or they leak verbatim via the
+    # ``error`` field.
+    _nonretryable_summary = agent._summarize_api_error(api_error)
+    if classified.reason == FailoverReason.content_policy_blocked:
+        agent._emit_status(
+            f"❌ Provider safety filter blocked this request: "
+            f"{_nonretryable_summary}"
+        )
+    elif classified.reason == FailoverReason.ssl_cert_verification:
+        agent._emit_status(
+            f"❌ TLS certificate verification failed: "
+            f"{_nonretryable_summary}"
+        )
+    else:
+        agent._emit_status(
+            f"❌ Non-retryable error (HTTP {status_code}): "
+            f"{_nonretryable_summary}"
+        )
+    agent._vprint(f"{agent.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.", force=True)
+    agent._vprint(f"{agent.log_prefix}   🔌 Provider: {provider}  Model: {model}", force=True)
+    agent._vprint(f"{agent.log_prefix}   🌐 Endpoint: {base_url}", force=True)
+    # Actionable guidance for common auth errors
+    if classified.is_auth or classified.reason == FailoverReason.billing:
+        if classified.reason == FailoverReason.billing and _print_billing_or_entitlement_guidance(
+            agent,
+            capability="model access",
+            provider=provider,
+            base_url=str(base_url),
+            model=model,
+            unverified=classified.billing_unverified,
+        ):
+            pass
+        elif provider == "nous" and _print_nous_entitlement_guidance(
+            agent,
+            "Nous model access",
+        ):
+            pass
+        elif provider in {"openai-codex", "xai-oauth", "nous"} and status_code == 401:
+            if provider == "openai-codex":
+                agent._vprint(f"{agent.log_prefix}   💡 Codex OAuth token was rejected (HTTP 401). Your token may have been", force=True)
+                agent._vprint(f"{agent.log_prefix}      refreshed by another client (Codex CLI, VS Code). To fix:", force=True)
+                agent._vprint(f"{agent.log_prefix}      1. Run `codex` in your terminal to generate fresh tokens.", force=True)
+                agent._vprint(f"{agent.log_prefix}      2. Then run `hermes auth` to re-authenticate.", force=True)
+            elif provider == "xai-oauth":
+                agent._vprint(f"{agent.log_prefix}   💡 xAI OAuth token was rejected (HTTP 401). To fix:", force=True)
+                agent._vprint(f"{agent.log_prefix}      re-authenticate with xAI Grok OAuth (SuperGrok / Premium+) from `hermes model`.", force=True)
+            else:  # nous
+                agent._vprint(f"{agent.log_prefix}   💡 Nous Portal OAuth token was rejected (HTTP 401). Your token may be", force=True)
+                agent._vprint(f"{agent.log_prefix}      expired, revoked, or your account may be out of credits. To fix:", force=True)
+                agent._vprint(f"{agent.log_prefix}      1. Re-authenticate: hermes portal", force=True)
+                agent._vprint(f"{agent.log_prefix}      2. Check your portal account: https://portal.nousresearch.com", force=True)
+                # ``:free`` is OpenRouter slug syntax; Nous Portal will reject
+                # the model name even after a successful re-auth.
+                if isinstance(model, str) and model.endswith(":free"):
+                    agent._vprint(f"{agent.log_prefix}      ⚠️  Note: `{model}` looks like an OpenRouter slug (`:free` suffix).", force=True)
+                    agent._vprint(f"{agent.log_prefix}         Nous Portal won't recognize that model name. Either switch to a", force=True)
+                    agent._vprint(f"{agent.log_prefix}         Nous catalog model, or run `/model openrouter:{model}` to use OpenRouter.", force=True)
+        else:
+            agent._vprint(f"{agent.log_prefix}   💡 Your API key was rejected by the provider. Check:", force=True)
+            agent._vprint(f"{agent.log_prefix}      • Is the key valid? Run: hermes setup", force=True)
+            agent._vprint(f"{agent.log_prefix}      • Does your account have access to {model}?", force=True)
+            if base_url_host_matches(str(base_url), "openrouter.ai"):
+                agent._vprint(f"{agent.log_prefix}      • Check credits: https://openrouter.ai/settings/credits", force=True)
+    else:
+        agent._vprint(f"{agent.log_prefix}   💡 This type of error won't be fixed by retrying.", force=True)
+    # Content-policy blocks get their own guidance: the provider refused
+    # this prompt, so recovery is a rephrase or another model, not
+    # key/retry advice.
+    if classified.reason == FailoverReason.content_policy_blocked:
+        agent._vprint(
+            f"{agent.log_prefix}   💡 The provider's safety filter rejected this specific prompt.",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      • Try rephrasing the request, narrowing the context, or splitting into smaller steps.",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      • Configure a fallback provider so future blocks route automatically:",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}        hermes fallback add   (interactive picker — same as `hermes model`)",
+            force=True,
+        )
+    # TLS certificate failures are environment problems — name the knobs
+    # that fix each common cause.
+    if classified.reason == FailoverReason.ssl_cert_verification:
+        agent._vprint(
+            f"{agent.log_prefix}   💡 The TLS certificate chain could not be verified. This fails the same",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      way on every retry — fix the environment, then try again:",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      • Corporate TLS-inspecting proxy? Point Python at its CA bundle:",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}        export SSL_CERT_FILE=/path/to/corp-ca.pem  (also REQUESTS_CA_BUNDLE)",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      • Missing/stale system CA store? Install/refresh it:",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}        pip install --upgrade certifi   (macOS: run 'Install Certificates.command')",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      • Self-signed local endpoint (llama.cpp, LM Studio, vLLM)? Use http://",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}        for localhost, or add the server's cert to your trust store.",
+            force=True,
+        )
+    logger.error("%sNon-retryable client error: %s", agent.log_prefix, api_error)
+    # Skip persistence on likely context-overflow (400 + large session):
+    # persisting the failed message grows the session and repeats the
+    # failure. (#1630)
+    if status_code == 400 and (approx_tokens > 50000 or len(api_messages) > 80):
+        agent._vprint(
+            f"{agent.log_prefix}⚠️  Skipping session persistence "
+            f"for large failed session to prevent growth loop.",
+            force=True,
+        )
+    else:
+        agent._persist_session(messages, conversation_history)
+    if classified.reason == FailoverReason.content_policy_blocked:
+        _policy_response = (
+            "⚠️  The model provider's safety filter blocked this request "
+            "(not a Hermes/gateway failure).\n\n"
+            f"Provider message: {_nonretryable_summary}\n\n"
+            f"{_CONTENT_POLICY_RECOVERY_HINT}"
+        )
+        return _content_policy_blocked_result(
+            messages,
+            api_call_count,
+            final_response=_policy_response,
+            error_detail=_nonretryable_summary,
+        )
+    # Billing walls get the same structured recovery descriptor as the
+    # max-retries path so every surface renders one consistent signal.
+    if classified.reason == FailoverReason.billing:
+        return _billing_failure_result(
+            classified=classified,
+            summary=_nonretryable_summary,
+            messages=messages,
+            api_call_count=api_call_count,
+            provider=provider,
+            base_url=base_url,
+            model=model,
+        )
+    return {
+        "final_response": _nonretryable_summary,
+        "messages": messages,
+        "api_calls": api_call_count,
+        "completed": False,
+        "failed": True,
+        "error": _nonretryable_summary,
+    }
+
+
+def max_retries_exhausted_result(
+    agent: Any,
+    api_error: Exception,
+    classified: Any,
+    *,
+    max_retries: int,
+    is_rate_limited: bool,
+    error_msg: str,
+    api_kwargs: Any,
+    api_messages: Any,
+    messages: List[Dict[str, Any]],
+    conversation_history: Any,
+    api_call_count: int,
+    approx_tokens: int,
+    provider: Any,
+    base_url: Any,
+    model: Any,
+) -> Dict[str, Any]:
+    """Terminal path once ``retry_count >= max_retries`` and transport recovery +
+    fallback both failed: flush the buffered trace, emit the billing / rate-limit /
+    generic status line, print stream-drop or thinking-timeout guidance (the latter
+    wins, #52310), persist, and build the failed-turn result dict carrying the
+    classified ``failure_reason`` / ``failure_retryable`` / ``billing_block``."""
+    # Result/guidance helpers stay in the loop module (tests import + patch them
+    # there); lazy import avoids a load-time cycle.
+    from agent.conversation_loop import (
+        _billing_block_dict,
+        _billing_or_entitlement_message,
+        _billing_terminal_label,
+        _print_billing_or_entitlement_guidance,
+    )
+
+    # Terminal — flush buffered retry/fallback trace.
+    agent._flush_status_buffer()
+    _final_summary = agent._summarize_api_error(api_error)
+    _billing_guidance = ""
+    if classified.reason == FailoverReason.billing:
+        if classified.billing_unverified:
+            # Ambiguous body (#82154) — hedge the terminal line.
+            agent._emit_status(
+                "❌ Provider reported usage/credit exhaustion "
+                f"(unverified — may be a content-filter rejection) — {_final_summary}"
+            )
+        else:
+            agent._emit_status(f"❌ Billing or credits exhausted — {_final_summary}")
+        _billing_guidance = _billing_or_entitlement_message(
+            capability="model access",
+            provider=provider,
+            base_url=str(base_url),
+            model=model,
+            unverified=classified.billing_unverified,
+        )
+        _print_billing_or_entitlement_guidance(
+            agent,
+            capability="model access",
+            provider=provider,
+            base_url=str(base_url),
+            model=model,
+            unverified=classified.billing_unverified,
+        )
+    elif is_rate_limited:
+        agent._emit_status(f"❌ Rate limited after {max_retries} retries — {_final_summary}")
+    else:
+        agent._emit_status(f"❌ API failed after {max_retries} retries — {_final_summary}")
+    agent._vprint(f"{agent.log_prefix}   💀 Final error: {_final_summary}", force=True)
+
+    # SSE stream-drop (e.g. "Network connection lost"): usually a
+    # proxy/CDN cutting a very large tool call mid-response; give
+    # actionable guidance.
+    _is_stream_drop = (
+        not getattr(api_error, "status_code", None)
+        and any(p in error_msg for p in (
+            "connection lost", "connection reset",
+            "connection closed", "network connection",
+            "network error", "terminated",
+        ))
+    )
+    if _is_stream_drop:
+        agent._vprint(
+            f"{agent.log_prefix}   💡 The provider's stream "
+            f"connection keeps dropping. This often happens "
+            f"when the model tries to write a very large "
+            f"file in a single tool call.",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      Try asking the model "
+            f"to use execute_code with Python's open() for "
+            f"large files, or to write the file in smaller "
+            f"sections.",
+            force=True,
+        )
+
+    # Thinking-timeout: a known reasoning model hit a transport error
+    # before the first content token. Distinct from _is_stream_drop;
+    # detection lives in agent.thinking_timeout_guidance. (#52310)
+    from agent.thinking_timeout_guidance import (
+        is_thinking_timeout,
+    )
+    _is_thinking_timeout = is_thinking_timeout(
+        classified,
+        model,
+        error_msg,
+    )
+    if _is_thinking_timeout:
+        agent._vprint(
+            f"{agent.log_prefix}   💡 The model's thinking "
+            f"phase exceeded the upstream proxy's idle "
+            f"timeout before the first content token "
+            f"arrived. This is a known issue with "
+            f"reasoning models behind cloud gateways "
+            f"(NVIDIA NIM, OpenAI, Anthropic, DeepSeek).",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      Workarounds in priority order:",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      1. Set "
+            f"`providers.{provider}.models.{model}.stale_timeout_seconds: 900` "
+            f"in `~/.hermes/config.yaml` to extend the per-call "
+            f"timeout. (Hermes's built-in floor is 600s for "
+            f"known reasoning models — if you still see this "
+            f"after raising, the upstream cap is even shorter.)",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      2. Lower `reasoning_budget` or set "
+            f"`reasoning_effort: medium` on this model if the provider supports it.",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}      3. Use a smaller / faster reasoning "
+            f"model if the task doesn't require deep thinking.",
+            force=True,
+        )
+
+    logger.error(
+        "%sAPI call failed after %s retries. %s | provider=%s model=%s msgs=%s tokens=~%s",
+        agent.log_prefix, max_retries, _final_summary,
+        provider, model, len(api_messages), f"{approx_tokens:,}",
+    )
+    if api_kwargs is not None:
+        agent._dump_api_request_debug(
+            api_kwargs, reason="max_retries_exhausted", error=api_error,
+        )
+    agent._persist_session(messages, conversation_history)
+    _billing_block = None
+    _billing_unverified = False
+    if classified.reason == FailoverReason.billing:
+        _billing_unverified = classified.billing_unverified
+        _final_response = _billing_terminal_label(
+            _final_summary, _billing_unverified
+        )
+        if _billing_guidance:
+            _final_response += f"\n\n{_billing_guidance}"
+        # Structured recovery descriptor so every surface renders
+        # the same link + label from one signal (see helper).
+        _billing_block = _billing_block_dict(
+            provider, base_url, model, _billing_guidance,
+            unverified=_billing_unverified,
+        )
+    else:
+        _final_response = f"API call failed after {max_retries} retries: {_final_summary}"
+    if _is_thinking_timeout:
+        # Thinking-timeout guidance overrides stream-drop guidance,
+        # which would wrongly suggest splitting large file writes.
+        from agent.thinking_timeout_guidance import (
+            build_thinking_timeout_guidance,
+        )
+        _final_response += build_thinking_timeout_guidance(
+            provider=provider,
+            model=model,
+        )
+    elif _is_stream_drop:
+        _final_response += (
+            "\n\nThe provider's stream connection keeps "
+            "dropping — this often happens when generating "
+            "very large tool call responses (e.g. write_file "
+            "with long content). Try asking me to use "
+            "execute_code with Python's open() for large "
+            "files, or to write in smaller sections."
+        )
+    return {
+        "final_response": _final_response,
+        "messages": messages,
+        "api_calls": api_call_count,
+        "completed": False,
+        "failed": True,
+        "error": _final_summary,
+        # Expose the classified reason so callers (kanban worker in
+        # cli.py) can tell a quota wall (``rate_limit`` / ``billing``)
+        # from a task failure.
+        "failure_reason": classified.reason.value,
+        # The classifier's own retry verdict — UI surfaces use
+        # this instead of re-deriving from the reason string.
+        "failure_retryable": bool(classified.retryable),
+        # True when the billing verdict rests on an ambiguous
+        # body (#82154) — may be a content-filter rejection.
+        "billing_unverified": _billing_unverified,
+        # Present only for billing walls: structured recovery
+        # descriptor (provider, billing_url, is_nous, message).
+        "billing_block": _billing_block,
+    }
