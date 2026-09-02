@@ -11,7 +11,6 @@ from tools.mcp_tool_common import mcp_field
 
 logger = logging.getLogger("tools.mcp_tool")
 
-
 # Prompt-injection indicators in MCP tool descriptions. WARNING-level only:
 # log but never block, since false positives would break legitimate servers.
 _MCP_INJECTION_PATTERNS = [
@@ -43,7 +42,6 @@ def _scan_mcp_description(server_name: str, tool_name: str, description: str) ->
             server_name, tool_name, "; ".join(findings), description,
         )
     return findings
-
 
 _EMPTY_OBJECT_SCHEMA = {"type": "object", "properties": {}}
 
@@ -125,7 +123,6 @@ def sanitize_mcp_name_component(value: str) -> str:
     the historical behavior) so generated names pass provider validation."""
     return re.sub(r"[^A-Za-z0-9_]", "_", str(value or ""))
 
-
 # ``mcp__<server>__<tool>``: the convention shared by Claude Code, Codex and
 # OpenCode. The double underscore disambiguates the server/tool boundary even
 # when either contains underscores, and matches the Anthropic-OAuth wire form.
@@ -146,7 +143,6 @@ def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
         "description": strip_unicode_tags(mcp_tool.description or f"MCP tool {mcp_tool.name} from {server_name}"),
         "parameters": _normalize_mcp_input_schema(mcp_field(mcp_tool, "input_schema", "inputSchema")),
     }
-
 
 # Utility tools generated per server: handler_key -> (description template,
 # parameter properties, required names). Schemas are FROZEN wire bytes — the
@@ -208,7 +204,6 @@ def matches_name_filter(tool_name: str, patterns: set[str]) -> bool:
     if tool_name in patterns:
         return True
     return any(fnmatch.fnmatchcase(tool_name, p) for p in patterns if "*" in p or "?" in p or "[" in p)
-
 
 # Utility handler -> ClientSession method it needs (legacy gate when no
 # initialize_result was captured).

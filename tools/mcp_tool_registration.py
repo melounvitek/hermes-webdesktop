@@ -257,16 +257,13 @@ def _log_foreign_owner(name: str, c: _Candidate, existing_toolset: str, lazy: bo
     if lazy:
         if not c.is_utility:
             logger.warning("MCP server '%s' (lazy): cached tool '%s' collides with toolset '%s' — skipping", name, c.registry_name, existing_toolset)
-    elif existing_toolset.startswith("mcp-"):
-        logger.error(
-            "MCP server '%s': %s normalizes to '%s', already owned by MCP toolset '%s' — skipping to preserve the existing owner",
-            name, c.origin, c.registry_name, existing_toolset,
-        )
-    else:
-        logger.warning(
-            "MCP server '%s': %s (→ '%s') collides with built-in tool in toolset '%s' — skipping to preserve built-in",
-            name, c.origin, c.registry_name, existing_toolset,
-        )
+        return
+    log, fmt = (
+        (logger.error, "MCP server '%s': %s normalizes to '%s', already owned by MCP toolset '%s' — skipping to preserve the existing owner")
+        if existing_toolset.startswith("mcp-") else
+        (logger.warning, "MCP server '%s': %s (→ '%s') collides with built-in tool in toolset '%s' — skipping to preserve built-in")
+    )
+    log(fmt, name, c.origin, c.registry_name, existing_toolset)
 
 
 def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: Callable, scope: Callable[[], Optional[str]], lazy: bool) -> List[str]:

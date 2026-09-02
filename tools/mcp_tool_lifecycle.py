@@ -10,7 +10,6 @@ from tools.mcp_tool_common import _core
 
 logger = logging.getLogger("tools.mcp_tool")
 
-
 # Live stdio MCP children (pid -> server_name), added after connection and
 # removed on normal shutdown, so they can be force-killed if SDK teardown fails.
 _stdio_pids: Dict[int, str] = {}
@@ -57,7 +56,6 @@ def _snapshot_child_pids() -> set:
         pass
 
     return set()
-
 
 # argv markers of non-MCP gateway children that can race into the snapshot
 # delta during an MCP spawn (defense-in-depth; LSP/slash_worker already use

@@ -10,7 +10,6 @@ from tools.mcp_tool_common import _core
 
 logger = logging.getLogger("tools.mcp_tool")
 
-
 # Serializes in-place swaps of ``agent.tools`` / ``agent.valid_tool_names`` by
 # the reload RPC, gateway reload and late-binding refresh thread; the run loop
 # reads them during tool iteration and must never see a half-updated pair.

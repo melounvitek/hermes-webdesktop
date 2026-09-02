@@ -163,11 +163,16 @@ class SamplingHandler:
         self.metrics["errors"] += 1
         return self._error(message)
 
-    def _build_tool_use_result(self, choice, response):
-        """Build a CreateMessageResultWithTools from an LLM tool_calls response."""
-        self.metrics["tool_use_count"] += 1
+    def _log_response(self, response, suffix: str = "", *args) -> None:
+        logger.log(
+            self.audit_level, "MCP server '%s' sampling response: model=%s, tokens=%s" + suffix,
+            self.server_name, response.model, _response_total_tokens(response, "?"), *args,
+        )
 
-        # Tool-loop governance.
+    def _build_tool_use_result(self, choice, response):
+        """Build a CreateMessageResultWithTools from an LLM tool_calls response,
+        subject to tool-loop governance (``max_tool_rounds``; 0 disables)."""
+        self.metrics["tool_use_count"] += 1
         if self.max_tool_rounds == 0:
             self._tool_loop_count = 0
             return self._error(f"Tool loops disabled for server '{self.server_name}' (max_tool_rounds=0)")
@@ -177,7 +182,6 @@ class SamplingHandler:
             return self._error(
                 f"Tool loop limit exceeded for server '{self.server_name}' (max {self.max_tool_rounds} rounds)"
             )
-
         content_blocks = [
             _core.ToolUseContent(
                 type="tool_use", id=tc.id, name=tc.function.name,
@@ -185,11 +189,7 @@ class SamplingHandler:
             )
             for tc in choice.message.tool_calls
         ]
-        logger.log(
-            self.audit_level,
-            "MCP server '%s' sampling response: model=%s, tokens=%s, tool_calls=%d",
-            self.server_name, response.model, _response_total_tokens(response, "?"), len(content_blocks),
-        )
+        self._log_response(response, ", tool_calls=%d", len(content_blocks))
         return _core.CreateMessageResultWithTools(
             role="assistant", content=content_blocks, model=response.model, stopReason="toolUse",
         )
@@ -197,11 +197,7 @@ class SamplingHandler:
     def _build_text_result(self, choice, response):
         """Build a CreateMessageResult from a normal text response (resets the tool loop)."""
         self._tool_loop_count = 0
-        logger.log(
-            self.audit_level,
-            "MCP server '%s' sampling response: model=%s, tokens=%s",
-            self.server_name, response.model, _response_total_tokens(response, "?"),
-        )
+        self._log_response(response)
         return _core.CreateMessageResult(
             role="assistant",
             content=_core.TextContent(type="text", text=_sanitize_error(choice.message.content or "")),
@@ -326,6 +322,8 @@ class ElicitationHandler:
     # asyncio-side safety net over the approval's own input() timeout so the
     # MCP loop never blocks indefinitely if the inner timeout is bypassed.
     _OUTER_TIMEOUT_GRACE_SECONDS = 5
+    # consent answer -> (ElicitResult action, metric); anything else declines.
+    _ANSWER_RESULTS = {"accept": ("accept", "accepted"), "cancel": ("cancel", "errors")}
 
     def __init__(self, server_name: str, config: dict, owner: Optional["MCPServerTask"] = None):
         self.server_name = server_name
@@ -344,9 +342,7 @@ class ElicitationHandler:
     def _result(self, action: str, metric: str):
         """Count *metric* and return ``ElicitResult(action)`` (accept carries empty content)."""
         self.metrics[metric] += 1
-        if action == "accept":
-            return _core.ElicitResult(action="accept", content={})
-        return _core.ElicitResult(action=action)
+        return _core.ElicitResult(action=action, content={}) if action == "accept" else _core.ElicitResult(action=action)
 
     def _consent_thunk(self, message: str, description: str) -> Callable[[], str]:
         """Sync consent call, replaying the agent's contextvars snapshot when the
@@ -402,8 +398,4 @@ class ElicitationHandler:
             logger.error("MCP server '%s' elicitation failed: %s", self.server_name, exc, exc_info=True)
             return self._result("decline", "errors")
 
-        if answer == "accept":
-            return self._result("accept", "accepted")
-        if answer == "cancel":
-            return self._result("cancel", "errors")
-        return self._result("decline", "declined")
+        return self._result(*self._ANSWER_RESULTS.get(answer, ("decline", "declined")))
