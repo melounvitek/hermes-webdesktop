@@ -1,7 +1,6 @@
 """Subagent result post-processing: summary budget/spill, tool-trace summaries, lifecycle hooks and cost rollup.
 
-Split out of ``tools/delegate_tool.py``; every moved name is re-imported there, so
-``tools.delegate_tool.<name>`` keeps resolving (and monkeypatching) as before.
+Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
 """
 
 from __future__ import annotations
@@ -83,17 +82,12 @@ def _stringify_tool_content(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-                else:
-                    parts.append(json.dumps(item, ensure_ascii=False, default=str))
-            else:
-                parts.append(str(item))
-        return "\n".join(parts)
+        return "\n".join(
+            item["text"] if isinstance(item, dict) and isinstance(item.get("text"), str)
+            else json.dumps(item, ensure_ascii=False, default=str) if isinstance(item, dict)
+            else str(item)
+            for item in content
+        )
     if isinstance(content, dict):
         return json.dumps(content, ensure_ascii=False, default=str)
     return str(content)
@@ -249,12 +243,7 @@ def _looks_like_error_output(content: Any) -> bool:
             pass
 
     first = content.splitlines()[0].strip().lower() if content.splitlines() else ""
-    return (
-        first.startswith("error:")
-        or first.startswith("failed:")
-        or first.startswith("traceback ")
-        or first.startswith("exception:")
-    )
+    return first.startswith(("error:", "failed:", "traceback ", "exception:"))
 
 
 # Hard per-summary character ceiling layered on top of the dynamic
@@ -494,6 +483,76 @@ def _parent_finalization_lock(parent_agent) -> threading.RLock:
     return lock
 
 
+def _notify_memory_manager(results, task_list, child_by_index, parent_agent) -> None:
+    memory = getattr(parent_agent, "_memory_manager", None) if parent_agent else None
+    if not memory:
+        return
+    for entry in results:
+        try:
+            task_index = entry.get("task_index", -1)
+            in_range = isinstance(task_index, int) and 0 <= task_index < len(task_list)
+            memory.on_delegation(
+                task=task_list[task_index]["goal"] if in_range else "",
+                result=entry.get("summary", "") or "",
+                child_session_id=getattr(child_by_index.get(task_index), "session_id", ""),
+            )
+        except Exception:
+            pass
+
+
+def _fire_subagent_stop_hooks(results, child_by_index, parent_agent) -> float:
+    """Pop the model-hidden ``_child_role`` / ``_child_cost_usd`` fields from every
+    entry, fire ``subagent_stop`` per child, and return the summed child cost."""
+    try:
+        from hermes_cli.plugins import invoke_hook as invoke_hook
+    except Exception:
+        invoke_hook = None
+
+    children_cost_total = 0.0
+    for entry in results:
+        child_role = entry.pop("_child_role", None)
+        child_cost = entry.pop("_child_cost_usd", 0.0)
+        try:
+            if child_cost:
+                children_cost_total += float(child_cost)
+        except (TypeError, ValueError):
+            pass
+        if invoke_hook is None:
+            continue
+        try:
+            child = child_by_index.get(entry.get("task_index", -1))
+            invoke_hook(
+                "subagent_stop",
+                parent_session_id=getattr(parent_agent, "session_id", None),
+                parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "",
+                child_session_id=getattr(child, "session_id", None),
+                child_role=child_role,
+                child_summary=entry.get("summary"),
+                child_status=entry.get("status"),
+                tool_call_history=_subagent_stop_tool_call_history(entry.get("tool_trace")),
+                duration_ms=int((entry.get("duration_seconds") or 0) * 1000),
+            )
+        except Exception:
+            logger.debug("subagent_stop hook invocation failed", exc_info=True)
+    return children_cost_total
+
+
+def _rollup_children_cost(parent_agent, children_cost_total: float) -> None:
+    """Fold the children's spend into the parent's session cost (source/status
+    only set when the parent had none of its own)."""
+    if children_cost_total <= 0.0:
+        return
+    try:
+        current = float(getattr(parent_agent, "session_estimated_cost_usd", 0.0) or 0.0)
+        parent_agent.session_estimated_cost_usd = current + children_cost_total
+        if getattr(parent_agent, "session_cost_source", "none") in {None, "", "none"}:
+            parent_agent.session_cost_source = "subagent"
+        if getattr(parent_agent, "session_cost_status", "unknown") in {None, "", "unknown"}:
+            parent_agent.session_cost_status = "estimated"
+    except Exception:
+        logger.debug("Subagent cost rollup failed", exc_info=True)
+
+
 def _finalize_child_results(
     results: List[Dict[str, Any]],
     task_list: List[Dict[str, Any]],
@@ -504,82 +563,8 @@ def _finalize_child_results(
     with _parent_finalization_lock(parent_agent):
         _apply_summary_budget(results, parent_agent)
         child_by_index = {index: child for index, _task, child in children}
-
-        if parent_agent and getattr(parent_agent, "_memory_manager", None):
-            for entry in results:
-                try:
-                    task_index = entry.get("task_index", -1)
-                    task_goal = (
-                        task_list[task_index]["goal"]
-                        if isinstance(task_index, int)
-                        and 0 <= task_index < len(task_list)
-                        else ""
-                    )
-                    child = child_by_index.get(task_index)
-                    parent_agent._memory_manager.on_delegation(
-                        task=task_goal,
-                        result=entry.get("summary", "") or "",
-                        child_session_id=getattr(child, "session_id", ""),
-                    )
-                except Exception:
-                    pass
-
-        parent_session_id = getattr(parent_agent, "session_id", None)
-        try:
-            from hermes_cli.plugins import invoke_hook as invoke_hook
-        except Exception:
-            invoke_hook = None
-
-        children_cost_total = 0.0
-        for entry in results:
-            child_role = entry.pop("_child_role", None)
-            child_cost = entry.pop("_child_cost_usd", 0.0)
-            try:
-                if child_cost:
-                    children_cost_total += float(child_cost)
-            except (TypeError, ValueError):
-                pass
-            if invoke_hook is None:
-                continue
-            try:
-                child_index = entry.get("task_index", -1)
-                child = child_by_index.get(child_index)
-                invoke_hook(
-                    "subagent_stop",
-                    parent_session_id=parent_session_id,
-                    parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "",
-                    child_session_id=getattr(child, "session_id", None),
-                    child_role=child_role,
-                    child_summary=entry.get("summary"),
-                    child_status=entry.get("status"),
-                    tool_call_history=_subagent_stop_tool_call_history(
-                        entry.get("tool_trace")
-                    ),
-                    duration_ms=int((entry.get("duration_seconds") or 0) * 1000),
-                )
-            except Exception:
-                logger.debug("subagent_stop hook invocation failed", exc_info=True)
-
-        if children_cost_total > 0.0:
-            try:
-                current = float(
-                    getattr(parent_agent, "session_estimated_cost_usd", 0.0) or 0.0
-                )
-                parent_agent.session_estimated_cost_usd = current + children_cost_total
-                if getattr(parent_agent, "session_cost_source", "none") in {
-                    None,
-                    "",
-                    "none",
-                }:
-                    parent_agent.session_cost_source = "subagent"
-                if getattr(parent_agent, "session_cost_status", "unknown") in {
-                    None,
-                    "",
-                    "unknown",
-                }:
-                    parent_agent.session_cost_status = "estimated"
-            except Exception:
-                logger.debug("Subagent cost rollup failed", exc_info=True)
+        _notify_memory_manager(results, task_list, child_by_index, parent_agent)
+        _rollup_children_cost(parent_agent, _fire_subagent_stop_hooks(results, child_by_index, parent_agent))
 
 
 def _run_child_lifecycle(

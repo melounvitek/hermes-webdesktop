@@ -1,7 +1,6 @@
 """Child progress relay, console formatting and child system-prompt construction for delegate_task.
 
-Split out of ``tools/delegate_tool.py``; every moved name is re-imported there, so
-``tools.delegate_tool.<name>`` keeps resolving (and monkeypatching) as before.
+Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
 """
 
 from __future__ import annotations

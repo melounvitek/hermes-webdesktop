@@ -1,7 +1,6 @@
 """Live-subagent registry + model-facing control plane (list/steer/stop) for delegate_task.
 
-Split out of ``tools/delegate_tool.py``; every moved name is re-imported there, so
-``tools.delegate_tool.<name>`` keeps resolving (and monkeypatching) as before.
+Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
 """
 
 from __future__ import annotations
@@ -217,6 +216,10 @@ def _capture_gateway_steer_authority(
         return None, None
 
 
+# Registry record fields never exposed to the TUI/RPC snapshot.
+_PRIVATE_RECORD_KEYS = frozenset({"agent", "owner_session_id", "owner_transport", "owner_session_record", "accepting_steer"})
+
+
 def list_active_subagents() -> List[Dict[str, Any]]:
     """Snapshot of the currently running subagent tree.
 
@@ -224,21 +227,7 @@ def list_active_subagents() -> List[Dict[str, Any]]:
     tool_count, status}.  Safe to call from any thread — returns a copy.
     """
     with _active_subagents_lock:
-        return [
-            {
-                k: v
-                for k, v in r.items()
-                if k
-                not in {
-                    "agent",
-                    "owner_session_id",
-                    "owner_transport",
-                    "owner_session_record",
-                    "accepting_steer",
-                }
-            }
-            for r in _active_subagents.values()
-        ]
+        return [{k: v for k, v in r.items() if k not in _PRIVATE_RECORD_KEYS} for r in _active_subagents.values()]
 
 
 def _is_descendant_of(child_agent: Any, parent_agent: Any, max_hops: int = 8) -> bool:

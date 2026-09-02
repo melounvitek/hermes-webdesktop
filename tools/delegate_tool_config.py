@@ -1,7 +1,6 @@
 """Delegation config knobs (delegation.* keys) and child credential/provider resolution.
 
-Split out of ``tools/delegate_tool.py``; every moved name is re-imported there, so
-``tools.delegate_tool.<name>`` keeps resolving (and monkeypatching) as before.
+Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
 """
 
 from __future__ import annotations

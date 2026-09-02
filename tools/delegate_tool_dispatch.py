@@ -32,6 +32,29 @@ def _future_entry(future: Any, idx: int, child: Any) -> Dict[str, Any]:
         return _fabricated_entry(idx, "error", str(exc), child)
 
 
+def _report_child_done(parent_agent, spinner_ref, entry, tag, task_labels, n_tasks, remaining) -> None:
+    """Print one completion line for a finished child and refresh the spinner text."""
+    idx = entry["task_index"]
+    label = task_labels[idx] if idx < len(task_labels) else f"Task {idx}"
+    status = entry.get("status", "?")
+    _slot = f"{tag} · {idx+1}/{n_tasks}" if tag else f"{idx+1}/{n_tasks}"
+    completion_line = f"{'✓' if status == 'completed' else '✗'} [{_slot}] {label}  ({entry.get('duration_seconds', 0)}s)"
+    # Failed/errored/timed-out children: say WHY on the same line — a bare ✗
+    # reads as "silently dropped".
+    if status in SUBAGENT_FAILURE_STATUSES:
+        _err_line = _clean_error_text(entry.get("error"), max_chars=120)
+        if _err_line:
+            completion_line += f" — {_err_line}"
+    _print_completion_line(parent_agent, spinner_ref, completion_line)
+    if spinner_ref and remaining > 0:
+        try:
+            spinner_ref.update_text(
+                f"🔀 {'[' + tag + '] ' if tag else ''}{remaining} task{'s' if remaining != 1 else ''} remaining"
+            )
+        except Exception as e:
+            logger.debug("Spinner update_text failed: %s", e)
+
+
 def _run_children_parallel(
     children: List[tuple],
     results: list,
@@ -111,28 +134,7 @@ def _run_children_parallel(
                 results.append(entry)
                 completed_count += 1
 
-                idx = entry["task_index"]
-                label = task_labels[idx] if idx < len(task_labels) else f"Task {idx}"
-                status = entry.get("status", "?")
-                icon = "✓" if status == "completed" else "✗"
-                remaining = n_tasks - completed_count
-                _slot = f"{_tag} · {idx+1}/{n_tasks}" if _tag else f"{idx+1}/{n_tasks}"
-                completion_line = f"{icon} [{_slot}] {label}  ({entry.get('duration_seconds', 0)}s)"
-                # Failed/errored/timed-out children: say WHY on the same line —
-                # a bare ✗ reads as "silently dropped".
-                if status in SUBAGENT_FAILURE_STATUSES:
-                    _err_line = _clean_error_text(entry.get("error"), max_chars=120)
-                    if _err_line:
-                        completion_line += f" — {_err_line}"
-                _print_completion_line(parent_agent, spinner_ref, completion_line)
-
-                if spinner_ref and remaining > 0:
-                    try:
-                        spinner_ref.update_text(
-                            f"🔀 {'[' + _tag + '] ' if _tag else ''}{remaining} task{'s' if remaining != 1 else ''} remaining"
-                        )
-                    except Exception as e:
-                        logger.debug("Spinner update_text failed: %s", e)
+                _report_child_done(parent_agent, spinner_ref, entry, _tag, task_labels, n_tasks, n_tasks - completed_count)
 
     # Sort by task_index so results match input order
     results.sort(key=lambda r: r["task_index"])
