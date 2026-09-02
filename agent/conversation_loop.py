@@ -45,6 +45,7 @@ from agent.turn_context import (
 from agent.turn_retry_state import TurnRetryState
 from agent.turn_usage import record_response_usage
 from agent.turn_overflow import recover_from_overflow
+from agent.turn_truncation import recover_from_truncation
 from agent.turn_recovery import (
     log_api_error_attempt,
     max_retries_exhausted_result,
@@ -3288,399 +3289,35 @@ def run_conversation(
                     )
 
                 if finish_reason == "length":
-                    if getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID:
-                        agent._vprint(
-                            f"{agent.log_prefix}⚠️  Response truncated — stream "
-                            f"ended before completion",
-                            force=True,
-                        )
-                    else:
-                        agent._vprint(
-                            f"{agent.log_prefix}⚠️  Response truncated "
-                            f"(finish_reason='length') - model hit max output tokens",
-                            force=True,
-                        )
-
-                    # Normalize to one OpenAI-style message so continuation and tool-
-                    # call retry work across transports (Anthropic reuses the loop's
-                    # adapter).
-                    _trunc_msg = None
-                    _trunc_transport = agent._get_transport()
-                    if agent.api_mode == "anthropic_messages":
-                        _trunc_result = _trunc_transport.normalize_response(
-                            response, strip_tool_prefix=agent._is_anthropic_oauth
-                        )
-                    else:
-                        _trunc_result = _trunc_transport.normalize_response(response)
-                    _trunc_msg = _trunc_result
-
-                    _trunc_content = getattr(_trunc_msg, "content", None) if _trunc_msg else None
-                    _trunc_has_tool_calls = bool(getattr(_trunc_msg, "tool_calls", None)) if _trunc_msg else False
-
-                    # ── Detect thinking-budget exhaustion ──────────────
-                    # Only when reasoning blocks exist with no visible text after them;
-                    # content=None from non-<think> models is normal truncation.
-                    _has_think_tags = bool(
-                        _trunc_content and re.search(
-                            r'<(?:think|thinking|reasoning|REASONING_SCRATCHPAD)[^>]*>',
-                            _trunc_content,
-                            re.IGNORECASE,
-                        )
+                    _tv = recover_from_truncation(
+                        agent,
+                        response,
+                        finish_reason,
+                        _retry,
+                        messages=messages,
+                        conversation_history=conversation_history,
+                        api_kwargs=api_kwargs,
+                        api_call_count=api_call_count,
+                        effective_task_id=effective_task_id,
+                        current_turn_user_idx=current_turn_user_idx,
+                        length_continue_retries=length_continue_retries,
+                        truncated_response_parts=truncated_response_parts,
+                        truncated_tool_call_retries=truncated_tool_call_retries,
+                        retry_count=retry_count,
+                        compression_attempts=compression_attempts,
                     )
-                    _thinking_exhausted = (
-                        not _trunc_has_tool_calls
-                        and _has_think_tags
-                        and (
-                            (_trunc_content is not None and not agent._has_content_after_think_block(_trunc_content))
-                            or _trunc_content is None
-                        )
-                    )
-
-                    if _thinking_exhausted:
-                        _exhaust_error = (
-                            "Model used all output tokens on reasoning with none left "
-                            "for the response. Try lowering reasoning effort or "
-                            "increasing max_tokens."
-                        )
-                        agent._vprint(
-                            f"{agent.log_prefix}💭 Reasoning exhausted the output token budget — "
-                            f"no visible response was produced.",
-                            force=True,
-                        )
-                        # Return a user-friendly message as the response so CLI and
-                        # gateway display it.
-                        _exhaust_response = (
-                            "⚠️ **Thinking Budget Exhausted**\n\n"
-                            "The model used all its output tokens on reasoning "
-                            "and had none left for the actual response.\n\n"
-                            "To fix this:\n"
-                            "→ Lower reasoning effort: `/reasoning low` or `/reasoning minimal`\n"
-                            "→ Or switch to a larger/non-reasoning model with `/model`"
-                        )
-                        agent._cleanup_task_resources(effective_task_id)
-                        agent._persist_session(messages, conversation_history)
-                        return {
-                            "final_response": _exhaust_response,
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "partial": True,
-                            "error": _exhaust_error,
-                        }
-
-                    # ── Detect repetition-dominated truncation (#86581) ──
-                    # A repetition loop can burn the whole budget on one fragment; abort
-                    # like _thinking_exhausted (reasoning stripped first).
-                    _visible_trunc = (
-                        agent._strip_think_blocks(_trunc_content)
-                        if isinstance(_trunc_content, str)
-                        else _trunc_content
-                    )
-                    _repetition_dominated = (
-                        not _trunc_has_tool_calls
-                        and bool(_visible_trunc)
-                        and is_repetition_dominated(_visible_trunc)
-                    )
-                    if _repetition_dominated:
-                        _rep_error = (
-                            "Model output entered a repetition loop and was "
-                            "truncated mid-loop; refusing to continue a "
-                            "degenerate response."
-                        )
-                        agent._vprint(
-                            f"{agent.log_prefix}🔁 Response dominated by "
-                            f"repeated text — stopping instead of "
-                            f"continuing a degenerate response.",
-                            force=True,
-                        )
-                        _rep_response = (
-                            "⚠️ **Response Stopped — Repetition Detected**\n\n"
-                            "The model fell into a repetition loop while "
-                            "writing this response, so continuing would only "
-                            "produce more repeated text. The partial response "
-                            "was discarded.\n\n"
-                            "→ Switch to a different model with `/model`\n"
-                            "→ Or resend your message (your conversation "
-                            "history is preserved)"
-                        )
-                        agent._cleanup_task_resources(effective_task_id)
-                        agent._persist_session(messages, conversation_history)
-                        return {
-                            "final_response": _rep_response,
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "partial": True,
-                            "error": _rep_error,
-                        }
-
-                    if agent.api_mode in {"chat_completions", "bedrock_converse", "anthropic_messages"}:
-                        assistant_message = _trunc_msg
-                        # ── Content-filter stream stall → fallback (#32421) ──
-                        # ``_content_filter_terminated`` is content-deterministic;
-                        # escalate to the fallback before retrying the primary.
-                        _cf_terminated = getattr(
-                            response, "_content_filter_terminated", False
-                        )
-                        if (
-                            _cf_terminated
-                            and agent._fallback_index < len(agent._fallback_chain)
-                        ):
-                            agent._vprint(
-                                f"{agent.log_prefix}🛡️  Content filter terminated "
-                                f"stream — activating fallback provider...",
-                                force=True,
-                            )
-                            agent._emit_status(
-                                "Content filter terminated stream; switching to fallback..."
-                            )
-                            if agent._try_activate_fallback():
-                                # Roll partial content back to the last clean turn so
-                                # the fallback gets a coherent continuation point.
-                                if truncated_response_parts:
-                                    messages = agent._get_messages_up_to_last_assistant(messages)
-                                # Unmark survivors: their text left the stitched partial.
-                                for _frag in messages:
-                                    if isinstance(_frag, dict):
-                                        _frag.pop("_length_continuation_fragment", None)
-                                        _frag.pop("_length_continuation_nudge", None)
-                                agent._session_messages = messages
-                                length_continue_retries = 0
-                                truncated_response_parts = []
-                                retry_count = 0
-                                compression_attempts = 0
-                                _retry.primary_recovery_attempted = False
-                                _retry.restart_with_rebuilt_messages = True
-                                break
-                            # No fallback available — fall through to normal
-                            # continuation (best-effort, may loop).
-                            agent._vprint(
-                                f"{agent.log_prefix}⚠️  No fallback provider "
-                                f"configured — retrying with same provider "
-                                f"(may re-hit filter)...",
-                                force=True,
-                            )
-                        if assistant_message is not None and not _trunc_has_tool_calls:
-                            length_continue_retries += 1
-                            # Never append an interim assistant message with NO visible
-                            # content: strict providers reject it (HTTP 400), poisoning
-                            # history. Append only the nudge.
-                            _interim_content = getattr(assistant_message, "content", None)
-                            _is_empty_partial_stub = (
-                                getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
-                                and not _interim_content
-                            )
-                            if not _interim_content and not _is_empty_partial_stub:
-                                # Thinking-only truncation: continuing with thinking ON
-                                # re-burns the budget, so drop thinking for one request.
-                                agent._ephemeral_reasoning_off = True
-                            if _interim_content:
-                                interim_msg = agent._build_assistant_message(assistant_message, finish_reason)
-                                # Marked so the ceiling exit can drop the fragment trail.
-                                interim_msg["_length_continuation_fragment"] = True
-                                append_message(messages, interim_msg)
-                                truncated_response_parts.append(_interim_content)
-
-                            if length_continue_retries < 4:
-                                _is_partial_stream_stub = (
-                                    getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
-                                )
-                                _dropped_tools = getattr(
-                                    response, "_dropped_tool_names", None
-                                )
-
-                                if _is_partial_stream_stub and _dropped_tools:
-                                    _tool_list = ", ".join(_dropped_tools[:3])
-                                    agent._vprint(
-                                        f"{agent.log_prefix}↻ Stream interrupted mid "
-                                        f"tool-call ({_tool_list}) — requesting "
-                                        f"chunked retry "
-                                        f"({length_continue_retries}/4)..."
-                                    )
-                                elif _is_partial_stream_stub:
-                                    agent._vprint(
-                                        f"{agent.log_prefix}↻ Stream interrupted — "
-                                        f"requesting continuation "
-                                        f"({length_continue_retries}/4)..."
-                                    )
-                                else:
-                                    agent._vprint(
-                                        f"{agent.log_prefix}↻ Requesting continuation "
-                                        f"({length_continue_retries}/4)..."
-                                    )
-
-                                _continue_content = _get_continuation_prompt(
-                                    _is_partial_stream_stub, _dropped_tools
-                                )
-                                continue_msg = {
-                                    "role": "user",
-                                    "content": _continue_content,
-                                    "_length_continuation_nudge": True,
-                                }
-                                append_message(messages, continue_msg)
-                                agent._session_messages = messages
-                                _retry.restart_with_length_continuation = True
-                                break
-
-                            partial_response = agent._strip_think_blocks(_join_truncated_parts(truncated_response_parts)).strip()
-                            # The one-shot reasoning-off override must not leak into the
-                            # next turn when the ceiling exit skips the consuming call.
-                            agent._ephemeral_reasoning_off = False
-                            if partial_response:
-                                agent._vprint(
-                                    f"{agent.log_prefix}⚠️  Response still truncated "
-                                    f"after {length_continue_retries} continuation attempts — keeping the "
-                                    f"partial response received so far.",
-                                    force=True,
-                                )
-                                _ceiling_final = partial_response
-                            else:
-                                # Every fragment was empty (e.g. reasoning-only model):
-                                # return an actionable message, not a bare None.
-                                agent._vprint(
-                                    f"{agent.log_prefix}⚠️  Response still truncated "
-                                    f"after {length_continue_retries} continuation attempts — no visible "
-                                    f"text was produced.",
-                                    force=True,
-                                )
-                                _ceiling_final = (
-                                    "⚠️ **No visible answer was produced.** The "
-                                    "model hit its output-token limit on every "
-                                    "continuation attempt — its reasoning "
-                                    "consumed the entire budget each time.\n\n"
-                                    "To fix this:\n"
-                                    "→ Lower reasoning effort: `/reasoning low` "
-                                    "or `/reasoning none`\n"
-                                    "→ Or raise max_tokens for this model"
-                                )
-                            # Unanswered continue nudges made every later turn re-truncate.
-                            _turn_start = (
-                                current_turn_user_idx + 1
-                                if isinstance(current_turn_user_idx, int)
-                                and current_turn_user_idx >= 0
-                                else 0
-                            )
-                            messages[_turn_start:] = [
-                                m for m in messages[_turn_start:]
-                                if not (
-                                    isinstance(m, dict)
-                                    and (
-                                        m.get("_length_continuation_fragment")
-                                        or m.get("_length_continuation_nudge")
-                                    )
-                                )
-                            ]
-                            if partial_response:
-                                append_message(messages, {
-                                    "role": "assistant",
-                                    "content": partial_response,
-                                    "finish_reason": "length",
-                                })
-                            agent._session_messages = messages
-                            agent._cleanup_task_resources(effective_task_id)
-                            agent._persist_session(messages, conversation_history)
-                            return {
-                                "final_response": _ceiling_final,
-                                "messages": messages,
-                                "api_calls": api_call_count,
-                                "completed": False,
-                                "partial": True,
-                                "error": "Response remained truncated after 4 continuation attempts",
-                            }
-
-                    if agent.api_mode in {"chat_completions", "bedrock_converse", "anthropic_messages"}:
-                        assistant_message = _trunc_msg
-                        if assistant_message is not None and _trunc_has_tool_calls:
-                            _is_stub_stall = (
-                                getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
-                            )
-                            if truncated_tool_call_retries < 4:
-                                truncated_tool_call_retries += 1
-                                if _is_stub_stall:
-                                    # Stream broke mid tool-call (network), not a real
-                                    # output cap — say so.
-                                    agent._buffer_vprint(
-                                        f"⚠️  Stream interrupted mid tool-call — "
-                                        f"retrying ({truncated_tool_call_retries}/4)..."
-                                    )
-                                else:
-                                    agent._buffer_vprint(
-                                        f"⚠️  Truncated tool call detected — "
-                                        f"retrying API call "
-                                        f"({truncated_tool_call_retries}/4)..."
-                                    )
-                                # Boost max_tokens per retry: a real output-cap
-                                # truncation needs it; harmless for a stall.
-                                _tc_boost_base = agent.max_tokens if agent.max_tokens else 4096
-                                _tc_boost = _tc_boost_base * (2 ** truncated_tool_call_retries)
-                                _tc_requested_cap = agent._requested_output_cap_from_api_kwargs(api_kwargs)
-                                if _tc_requested_cap is not None:
-                                    _tc_boost = max(_tc_boost, _tc_requested_cap)
-                                _tc_boost_cap = max(32768, _tc_requested_cap or 0)
-                                agent._ephemeral_max_output_tokens = min(_tc_boost, _tc_boost_cap)
-                                # Don't append the broken response; re-run the same call
-                                # from current state.
-                                continue
-                            agent._flush_status_buffer()
-                            if _is_stub_stall:
-                                agent._vprint(
-                                    f"{agent.log_prefix}⚠️  Stream kept dropping mid tool-call after 4 retries — the action was not executed.",
-                                    force=True,
-                                )
-                            else:
-                                agent._vprint(
-                                    f"{agent.log_prefix}⚠️  Truncated tool call response detected again — refusing to execute incomplete tool arguments.",
-                                    force=True,
-                                )
-                            agent._cleanup_task_resources(effective_task_id)
-                            _final_response = (
-                                "Stream repeatedly dropped mid tool-call (network); "
-                                "the tool was not executed"
-                                if _is_stub_stall
-                                else "Response truncated due to output length limit"
-                            )
-                            # Prior tool batches can leave a tool-result tail; this path
-                            # never reaches finalize_turn (#48879).
-                            close_interrupted_tool_sequence(messages, _final_response)
-                            agent._persist_session(messages, conversation_history)
-                            return {
-                                "final_response": _final_response,
-                                "messages": messages,
-                                "api_calls": api_call_count,
-                                "completed": False,
-                                "partial": True,
-                                "error": _final_response,
-                            }
-
-                    # If we have prior messages, roll back to last complete state
-                    if len(messages) > 1:
-                        agent._vprint(f"{agent.log_prefix}   ⏪ Rolling back to last complete assistant turn")
-                        rolled_back_messages = agent._get_messages_up_to_last_assistant(messages)
-
-                        agent._cleanup_task_resources(effective_task_id)
-                        agent._persist_session(messages, conversation_history)
-
-                        return {
-                            "final_response": "Response truncated due to output length limit",
-                            "messages": rolled_back_messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "partial": True,
-                            "error": "Response truncated due to output length limit"
-                        }
-                    else:
-                        # First message was truncated - mark as failed
-                        agent._flush_status_buffer()
-                        agent._vprint(f"{agent.log_prefix}❌ First response truncated - cannot recover", force=True)
-                        agent._persist_session(messages, conversation_history)
-                        return {
-                            "final_response": "First response truncated due to output length limit",
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "failed": True,
-                            "error": "First response truncated due to output length limit"
-                        }
+                    messages = _tv.messages
+                    length_continue_retries = _tv.length_continue_retries
+                    truncated_response_parts = _tv.truncated_response_parts
+                    truncated_tool_call_retries = _tv.truncated_tool_call_retries
+                    retry_count = _tv.retry_count
+                    compression_attempts = _tv.compression_attempts
+                    if _tv.action == "return":
+                        return _tv.result
+                    if _tv.action == "break":
+                        break
+                    if _tv.action == "continue":
+                        continue
                 
                 # Fold provider usage into compressor / anchors / session counters / state.db
                 # (agent/turn_usage.py). A rearmed budget also clears the preflight-block latch.
