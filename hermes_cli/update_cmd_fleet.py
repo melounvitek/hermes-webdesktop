@@ -1287,7 +1287,6 @@ def _restart_gateway_fleet_after_update(_pre_update_plan, gateway_mode: bool):
         except Exception:
             pass
 
-
         # --- Post-restart survivor sweep (#17648) ---------------------
         # Gateways that ignore SIGTERM (stuck drain, blocked I/O, zombie)
         # never exit, so the 120s profile watcher never respawns and the
