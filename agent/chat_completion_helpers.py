@@ -2000,6 +2000,49 @@ def _reasoning_config_for_wire(agent):
     return agent.reasoning_config
 
 
+def _alias_tool_search_bridge_for_xai(agent, transport, tools_for_api):
+    """xAI chat-completions reserves the function name ``tool_search`` for its
+    native tool and 400s when the client bridge declares it (#95003) — same
+    reserved-name class the codex branch sanitizes (#27197). Rename the wire
+    declaration to an alias; ``normalize_response`` maps calls back via the
+    transport's request-local ``_last_wire_aliases`` provenance, which is
+    reset here for THIS request so a stale map from an earlier request can't
+    reverse-map a name this one never aliased. Deep-copy first (#27907):
+    tools_for_api aliases agent.tools, so an in-place rename would corrupt
+    the shared registry for every later non-xAI request."""
+    if transport is not None and hasattr(transport, "_last_wire_aliases"):
+        transport._last_wire_aliases = {}
+    is_xai_chat = (
+        agent.provider in {"xai", "xai-oauth"}
+        or agent._base_url_hostname == "api.x.ai"
+    )
+    if not (is_xai_chat and tools_for_api):
+        return tools_for_api
+    try:
+        import copy as _copy_xai
+
+        from agent.transports.chat_completions import (
+            _rename_tool_search_bridge_for_xai,
+        )
+
+        has_bridge = any(
+            (t.get("function") or {}).get("name") == "tool_search"
+            for t in tools_for_api
+            if isinstance(t, dict)
+        )
+        if has_bridge:
+            tools_for_api = _copy_xai.deepcopy(tools_for_api)
+            tools_for_api, alias_map = _rename_tool_search_bridge_for_xai(tools_for_api)
+            if transport is not None:
+                transport._last_wire_aliases = alias_map
+    except Exception as exc:
+        logger.warning(
+            "%s⚠️ Failed to alias tool_search bridge for xAI: %s",
+            getattr(agent, "log_prefix", ""), exc,
+        )
+    return tools_for_api
+
+
 def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = None) -> dict:
     """Build the keyword arguments dict for the active API mode."""
     # One-shot continuation override — consumed exactly once, on the FIRST
@@ -2138,53 +2181,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
     # ── chat_completions (default) ─────────────────────────────────────
     _ct = agent._get_transport()
 
-    # xAI's chat-completions endpoint reserves the function name
-    # ``tool_search`` for its native server-side tool and rejects the whole
-    # request when the client Tool Search bridge declares it (HTTP 400
-    # "The function name tool_search is reserved for the tool_search tool",
-    # #95003) — same reserved-name class the codex_responses branch above
-    # already sanitizes tools for (#27197). Rename the bridge's wire
-    # declaration to an alias; normalize_response maps model calls back.
-    # Deep-copy first (the #27907 in-place-mutation lesson): tools_for_api
-    # aliases agent.tools, and renaming in place would corrupt the shared
-    # per-agent tool registry for every later non-xAI request.
-    _is_xai_chat = (
-        agent.provider in {"xai", "xai-oauth"}
-        or agent._base_url_hostname == "api.x.ai"
-    )
-    # Reset request-local alias provenance for THIS request; the rewrite
-    # below repopulates it when it actually emits aliases. Without the
-    # reset, a stale map from an earlier request on the same transport
-    # could reverse-map a name this request never aliased.
-    if _ct is not None and hasattr(_ct, "_last_wire_aliases"):
-        _ct._last_wire_aliases = {}
-    if _is_xai_chat and tools_for_api:
-        try:
-            import copy as _copy_xai
-
-            from agent.transports.chat_completions import (
-                _rename_tool_search_bridge_for_xai,
-            )
-
-            _has_bridge = any(
-                (t.get("function") or {}).get("name") == "tool_search"
-                for t in tools_for_api
-                if isinstance(t, dict)
-            )
-            if _has_bridge:
-                tools_for_api = _copy_xai.deepcopy(tools_for_api)
-                tools_for_api, _xai_alias_map = _rename_tool_search_bridge_for_xai(
-                    tools_for_api
-                )
-                # Record provenance so normalize_response reverses ONLY the
-                # aliases this request put on the wire.
-                if _ct is not None:
-                    _ct._last_wire_aliases = _xai_alias_map
-        except Exception as exc:
-            logger.warning(
-                "%s⚠️ Failed to alias tool_search bridge for xAI: %s",
-                getattr(agent, "log_prefix", ""), exc,
-            )
+    tools_for_api = _alias_tool_search_bridge_for_xai(agent, _ct, tools_for_api)
 
     # Provider detection flags
     _is_qwen = agent._is_qwen_portal()
@@ -2246,59 +2243,21 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
             "promptId": str(uuid.uuid4()),
         }
 
-    # ── Provider profile path (registered providers) ───────────────────
-    # Profiles handle per-provider quirks via hooks. When a profile is
-    # found, delegate fully; otherwise fall through to the legacy flag path.
+    # ── Provider profile path (registered providers) vs legacy flag path ──
     try:
         from providers import get_provider_profile
         _profile = get_provider_profile(agent.provider)
     except Exception:
         _profile = None
 
-    if _profile:
-        _ephemeral_out = getattr(agent, "_ephemeral_max_output_tokens", None)
-        if _ephemeral_out is not None:
-            agent._ephemeral_max_output_tokens = None
-
-        # Strip image parts for non-vision models that have provider profiles
-        # (e.g. DeepSeek, Kimi). The legacy path below already does this, but
-        # registered providers with profiles were bypassing the strip.
-        api_messages = agent._prepare_messages_for_non_vision_model(api_messages)
-
-        return _ct.build_kwargs(
-            model=agent.model,
-            messages=api_messages,
-            tools=tools_for_api,
-            base_url=agent.base_url,
-            timeout=agent._resolved_api_call_timeout(),
-            max_tokens=agent.max_tokens,
-            ephemeral_max_output_tokens=_ephemeral_out,
-            max_tokens_param_fn=agent._max_tokens_param,
-            reasoning_config=_wire_reasoning_config,
-            request_overrides=_request_overrides,
-            session_id=getattr(agent, "session_id", None),
-            cache_scope_id=_cache_scope_id,
-            provider_profile=_profile,
-            ollama_num_ctx=agent._ollama_num_ctx,
-            # Context forwarded to profile hooks:
-            provider_preferences=_prefs or None,
-            openrouter_min_coding_score=agent.openrouter_min_coding_score,
-            anthropic_max_output=_ant_max,
-            supports_reasoning=agent._supports_reasoning_extra_body(),
-            qwen_session_metadata=_qwen_meta,
-        )
-
-    # ── Legacy flag path ────────────────────────────────────────────
-    # Reached only when get_provider_profile() returns None — i.e. a
-    # completely unknown provider not in providers/ registry.
+    # One-shot ephemeral output cap is consumed by whichever path builds the request.
     _ephemeral_out = getattr(agent, "_ephemeral_max_output_tokens", None)
     if _ephemeral_out is not None:
         agent._ephemeral_max_output_tokens = None
-
-    # Strip image parts for non-vision models (no-op when vision-capable).
+    # Strip image parts for non-vision models (no-op when vision-capable) —
+    # on BOTH paths; registered providers with profiles used to bypass it.
     _msgs_for_chat = agent._prepare_messages_for_non_vision_model(api_messages)
-
-    return _ct.build_kwargs(
+    _common = dict(
         model=agent.model,
         messages=_msgs_for_chat,
         tools=tools_for_api,
@@ -2311,6 +2270,23 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
         request_overrides=_request_overrides,
         session_id=getattr(agent, "session_id", None),
         cache_scope_id=_cache_scope_id,
+        ollama_num_ctx=agent._ollama_num_ctx,
+        provider_preferences=_prefs or None,
+        openrouter_min_coding_score=agent.openrouter_min_coding_score,
+        anthropic_max_output=_ant_max,
+        supports_reasoning=agent._supports_reasoning_extra_body(),
+        qwen_session_metadata=_qwen_meta,
+    )
+
+    if _profile:
+        # Profiles handle per-provider quirks via hooks fed the context above.
+        return _ct.build_kwargs(provider_profile=_profile, **_common)
+
+    # ── Legacy flag path ────────────────────────────────────────────
+    # Reached only when get_provider_profile() returns None — i.e. a
+    # completely unknown provider not in providers/ registry.
+    return _ct.build_kwargs(
+        **_common,
         model_lower=(agent.model or "").lower(),
         is_openrouter=_is_or,
         is_nous=_is_nous,
@@ -2321,18 +2297,12 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
         is_tokenhub=_is_tokenhub,
         is_lmstudio=_is_lmstudio,
         is_custom_provider=agent.provider == "custom",
-        ollama_num_ctx=agent._ollama_num_ctx,
-        provider_preferences=_prefs or None,
-        openrouter_min_coding_score=agent.openrouter_min_coding_score,
         qwen_prepare_fn=agent._qwen_prepare_chat_messages if _is_qwen else None,
         qwen_prepare_inplace_fn=agent._qwen_prepare_chat_messages_inplace if _is_qwen else None,
-        qwen_session_metadata=_qwen_meta,
         fixed_temperature=_fixed_temp,
         omit_temperature=_omit_temp,
-        supports_reasoning=agent._supports_reasoning_extra_body(),
         github_reasoning_extra=agent._github_models_reasoning_extra_body() if _is_gh else None,
         lmstudio_reasoning_options=agent._lmstudio_reasoning_options_cached() if _is_lmstudio else None,
-        anthropic_max_output=_ant_max,
         provider_name=agent.provider,
     )
 
