@@ -165,3 +165,36 @@ def test_resume_with_no_relaunched_profiles_key_does_not_crash_the_merge():
     for profile in token.get("relaunched_profiles") or []:
         relaunched_profiles.append(profile)
     assert relaunched_profiles == []
+
+
+def test_merge_helper_reads_token_keys_into_restart_outcome(monkeypatch):
+    """Drive the real merge helper (not a mirror): the Windows resume token's
+    ``relaunched_profiles`` / ``restarted_services`` / ``service_profiles`` /
+    ``services`` keys must land in the shared restart bookkeeping."""
+    from hermes_cli import update_cmd
+
+    monkeypatch.setattr(hm, "_resume_windows_gateways_after_update", lambda token: None)
+    outcome = update_cmd._GatewayRestartOutcome(
+        incomplete=False,
+        phase_errors=[],
+        pre_restart_gateway_pids=[],
+        restarted_services=["hermes-gateway"],
+        failed_or_stale_units=[],
+        relaunched_profiles=[],
+        externally_supervised_profiles=[],
+        killed_pids=set(),
+    )
+    token = {
+        "resume_needed": False,
+        "relaunched_profiles": ["p1"],
+        "restarted_services": ["svc"],
+        "service_profiles": {"svc": "p2", "pending": "p3"},
+        "services": ["pending"],
+    }
+    with patch("hermes_cli.update_receipt.record_gateway_restart", lambda **kw: None):
+        update_cmd._resume_windows_gateways_and_merge_outcome(outcome, token, False)
+
+    assert outcome.relaunched_profiles == ["p1", "p2"]
+    assert outcome.restarted_services == ["hermes-gateway", "svc"]
+    assert outcome.failed_or_stale_units == ["p3"]
+    assert outcome.incomplete is False

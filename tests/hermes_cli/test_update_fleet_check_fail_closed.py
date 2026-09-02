@@ -130,7 +130,9 @@ class TestCallSiteWiring:
     def _impl_source(self):
         from hermes_cli import update_cmd
 
-        return inspect.getsource(update_cmd._cmd_update_impl)
+        # The fleet-version probe lives in the post-restart verifier that
+        # _cmd_update_impl calls; guard the wiring there.
+        return inspect.getsource(update_cmd._verify_fleet_after_update)
 
     def test_settle_sleep_gated_on_expected_runtimes(self):
         src = self._impl_source()
