@@ -25,6 +25,7 @@ from gateway.shutdown_watchdog import (
     DEFAULT_LOOP_WATCHDOG_TIMEOUT_S,
 )
 from utils import is_truthy_value
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -2062,10 +2063,8 @@ def _env_int_extra(extra: Dict[str, Any], key: str, env: str) -> None:
     """Set an int extra from env; a non-integer value is silently ignored."""
     raw = _getenv_str(env)
     if raw:
-        try:
+        with contextlib.suppress(ValueError):
             extra[key] = int(raw)
-        except ValueError:
-            pass
 
 
 def _env_home_channel(
@@ -2627,10 +2626,8 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     for env, attr in (("SESSION_IDLE_MINUTES", "idle_minutes"), ("SESSION_RESET_HOUR", "at_hour")):
         raw = getenv(env)
         if raw:
-            try:
+            with contextlib.suppress(ValueError):
                 setattr(config.default_reset_policy, attr, int(raw))
-            except ValueError:
-                pass
 
     _enable_plugin_platforms_from_env(config)
 

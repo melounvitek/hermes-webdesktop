@@ -8,6 +8,7 @@ import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+import contextlib
 
 
 _INITIAL_RETRY_DELAY_SECONDS = 1.0
@@ -137,10 +138,8 @@ class RecoverableHandleCache:
             close_rejected = self._close_rejected if stale else None
         if stale:
             if close_rejected is not None:
-                try:
+                with contextlib.suppress(Exception):
                     close_rejected(handle)
-                except Exception:
-                    pass
             return None
         _publish_health(self._health_source, path, "ok")
         if was_unavailable and on_recovered is not None:
@@ -157,10 +156,8 @@ class RecoverableHandleCache:
             self.handles.clear()
             self._unavailable.clear()
         for handle in handles:
-            try:
+            with contextlib.suppress(Exception):
                 close(handle)
-            except Exception:
-                pass
         with _health_lock:
             states = _health_states.get(self._health_source)
             if states is not None:

@@ -21,6 +21,7 @@ from gateway.hosted_room_peer import (
     TransportSecurity,
     validate_room_link_url,
 )
+import contextlib
 
 
 MAX_LINKS = 512
@@ -164,10 +165,8 @@ def save_room_link(db_path: Path | str, link: StoredRoomLink) -> None:
         db_path, record=link.as_record(), max_links=MAX_LINKS
     )
     if os.name == "posix":
-        try:
+        with contextlib.suppress(OSError):
             Path(db_path).chmod(0o600)
-        except OSError:
-            pass
 
 
 def mark_room_link_status(

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agent.i18n import t
+import contextlib
 
 # Match the logger run.py uses (logging.getLogger(__name__) where __name__ ==
 # "gateway.run") so extracted log records keep their original logger name.
@@ -164,10 +165,8 @@ def _release_singleton_lock(handle) -> None:
         _release_file_lock(handle)
     except Exception:
         pass
-    try:
+    with contextlib.suppress(Exception):
         handle.close()
-    except Exception:
-        pass
 
 
 def _wake_scope_id(adapter: Any, sub: dict) -> Optional[str]:
@@ -341,7 +340,7 @@ class GatewayKanbanWatchersMixin:
                     )
                     active_platforms = {
                         getattr(platform, "value", str(platform)).lower()
-                        for platform in self.adapters.keys()
+                        for platform in self.adapters
                     }
                     # Widen to every platform any secondary profile has live,
                     # not just the default profile's. This is only a coarse
@@ -359,7 +358,7 @@ class GatewayKanbanWatchersMixin:
                     for _profile_adapter_map in getattr(self, "_profile_adapters", {}).values():
                         active_platforms.update(
                             getattr(platform, "value", str(platform)).lower()
-                            for platform in _profile_adapter_map.keys()
+                            for platform in _profile_adapter_map
                         )
                     if not active_platforms:
                         logger.debug("kanban notifier: no connected adapters; skipping tick")
@@ -1606,10 +1605,8 @@ class GatewayKanbanWatchersMixin:
                 return None
             finally:
                 if conn is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         conn.close()
-                    except Exception:
-                        pass
 
         def _tick_once() -> "list[tuple[str, Optional[object]]]":
             """Run one dispatch_once per board. Returns (slug, result) pairs.
@@ -1664,10 +1661,8 @@ class GatewayKanbanWatchersMixin:
                     continue
                 finally:
                     if conn is not None:
-                        try:
+                        with contextlib.suppress(Exception):
                             conn.close()
-                        except Exception:
-                            pass
             return False
 
         # Auto-decompose: turn fresh triage tasks into ready workgraphs

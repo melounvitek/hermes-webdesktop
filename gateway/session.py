@@ -104,6 +104,7 @@ from .whatsapp_identity import (
 )
 from utils import atomic_replace
 from agent.turn_context import extract_api_content_sidecar
+import contextlib
 
 # Session keys/ids flow into filesystem paths downstream (e.g.
 # ``sessions_dir / f"{session_id}.json"`` in hermes_state, request-dump
@@ -1378,7 +1379,7 @@ class SessionStore:
         once it expires, one caller reopens while concurrent callers keep
         using the JSONL fallback.
         """
-        from hermes_state import SessionDB, _default_db_path, get_shared_session_db
+        from hermes_state import _default_db_path, get_shared_session_db
 
         path = Path(db_path) if db_path is not None else Path(_default_db_path())
         def _open():
@@ -2547,10 +2548,8 @@ class SessionStore:
             return
         try:
             origin_json = None
-            try:
+            with contextlib.suppress(Exception):
                 origin_json = json.dumps(source.to_dict())
-            except Exception:
-                pass
             recorder(
                 session_id,
                 source=source.platform.value,

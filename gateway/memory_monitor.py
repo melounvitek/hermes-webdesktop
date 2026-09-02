@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 from typing import Optional
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -205,10 +206,8 @@ def stop_memory_monitoring(timeout: float = 2.0) -> None:
             return
 
         # Final snapshot before teardown so "last RSS" is always in the log.
-        try:
+        with contextlib.suppress(Exception):
             log_memory_usage(prefix="shutdown")
-        except Exception:
-            pass
 
         _stop_event.set()
         thread = _monitor_thread
@@ -216,10 +215,8 @@ def stop_memory_monitoring(timeout: float = 2.0) -> None:
         _stop_event = None
 
     # Join outside the lock so a stuck log call can't deadlock shutdown.
-    try:
+    with contextlib.suppress(Exception):
         thread.join(timeout=timeout)
-    except Exception:
-        pass
 
     logger.info("[MEMORY] Periodic memory monitoring stopped")
 

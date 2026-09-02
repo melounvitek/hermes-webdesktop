@@ -38,6 +38,7 @@ from typing import Any, Callable, Dict, Optional
 from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ def start_loop_liveness_watchdog(
 
             if stop_event.is_set():
                 return
-            try:
+            with contextlib.suppress(Exception):
                 logger.critical(
                     "Gateway event loop missed %d consecutive liveness probes; "
                     "dumping all thread stacks and exiting with code %d so the "
@@ -183,8 +184,6 @@ def start_loop_liveness_watchdog(
                     strikes,
                     exit_code,
                 )
-            except Exception:
-                pass
             try:
                 faulthandler.dump_traceback(all_threads=True)
             except Exception:
@@ -406,21 +405,17 @@ def arm_shutdown_watchdog(
         target = dump_path if dump_path is not None else get_shutdown_watchdog_dump_path()
         _write_watchdog_dump(target, delay_s=delay, snapshot=snapshot)
 
-        try:
+        with contextlib.suppress(Exception):
             logger.critical(
                 "Shutdown watchdog fired after %.0fs — forcing process exit "
                 "(asyncio drain path appears wedged; see %s)",
                 delay,
                 target,
             )
-        except Exception:
-            pass
 
         for stream in (sys.stdout, sys.stderr):
-            try:
+            with contextlib.suppress(Exception):
                 stream.flush()
-            except Exception:
-                pass
         # Mirror _exit_after_graceful_shutdown: release PID file + runtime
         # lock BEFORE the log drain (locks must never be stranded), then
         # drain the async log queue so the logger.critical above actually
@@ -470,10 +465,8 @@ async def _tick_socket_handler(
     except Exception:
         pass
     finally:
-        try:
+        with contextlib.suppress(Exception):
             writer.close()
-        except Exception:
-            pass
 
 
 async def loop_heartbeat_forever(
@@ -638,12 +631,8 @@ async def loop_heartbeat_forever(
     finally:
         if tick_server is not None:
             tick_server.close()
-            try:
+            with contextlib.suppress(Exception):
                 await tick_server.wait_closed()
-            except Exception:
-                pass
             if tick_socket_path is not None:
-                try:
+                with contextlib.suppress(Exception):
                     tick_socket_path.unlink(missing_ok=True)
-                except Exception:
-                    pass

@@ -29,6 +29,7 @@ import time
 from typing import List, Optional
 
 from hermes_constants import get_hermes_home
+import contextlib
 
 logger = logging.getLogger("gateway.run")
 
@@ -119,10 +120,8 @@ def record_restart_interrupted_boot(
 
 def clear() -> None:
     """Remove the persisted boot log (used on clean shutdown / by tests)."""
-    try:
+    with contextlib.suppress(OSError):
         _state_path().unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def check_and_record(

@@ -30,6 +30,7 @@ from gateway.restart import (
     DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
     resolve_systemd_timeout_stop_sec,
 )
+import contextlib
 
 
 _SIGNAL_NAME_BY_NUM: Dict[int, str] = {}
@@ -91,10 +92,8 @@ def _proc_summary(pid: int) -> Dict[str, Any]:
         summary["state"] = state
     ppid = _read_proc_field(pid, "PPid")
     if ppid is not None:
-        try:
+        with contextlib.suppress(ValueError):
             summary["ppid"] = int(ppid)
-        except ValueError:
-            pass
     uid = _read_proc_field(pid, "Uid")
     if uid is not None:
         # "real effective saved fs"
@@ -149,10 +148,8 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
 
     # Load average — high load points the finger at "something else
     # crushing the box" rather than "external killer".
-    try:
+    with contextlib.suppress(OSError, AttributeError):
         ctx["loadavg_1m"] = os.getloadavg()[0]
-    except (OSError, AttributeError):
-        pass
 
     # /proc/self/status TracerPid: nonzero means a debugger / strace is
     # attached.  Useful when "phantom SIGKILL" turns out to be a manual
@@ -268,17 +265,13 @@ def spawn_async_diagnostic(
             close_fds=True,
         )
     except (FileNotFoundError, OSError):
-        try:
+        with contextlib.suppress(OSError):
             os.close(fd)
-        except OSError:
-            pass
         return None
     finally:
         # Subprocess inherited the fd; we can drop our handle.
-        try:
+        with contextlib.suppress(OSError):
             os.close(fd)
-        except OSError:
-            pass
 
     return proc.pid
 

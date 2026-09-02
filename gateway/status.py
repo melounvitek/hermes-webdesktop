@@ -29,6 +29,7 @@ from pathlib import Path
 from hermes_constants import get_hermes_home, _get_platform_default_hermes_home
 from typing import Any, Callable, NamedTuple, Optional
 from utils import atomic_json_write
+import contextlib
 
 if sys.platform == "win32":
     import msvcrt
@@ -659,9 +660,7 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
     # absence is not disqualifying — only a conflicting explicit value is.
     if "--profile " in command_lc or " -p " in command_lc:
         return False
-    if "hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc:
-        return False
-    return True
+    return not ("hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc)
 
 
 def _record_matches_live_gateway_pid(
@@ -688,11 +687,7 @@ def _record_matches_live_gateway_pid(
     if live_cmdline:
         if not looks_like_gateway_runtime_command_line(live_cmdline):
             return False
-        if expected_home is not None and not _command_line_belongs_to_profile(
-            live_cmdline, expected_home
-        ):
-            return False
-        return True
+        return not (expected_home is not None and not _command_line_belongs_to_profile(live_cmdline, expected_home))
     return _record_looks_like_gateway(record)
 
 
@@ -877,14 +872,10 @@ def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
     if not cleanup_stale:
         return
     _clear_running_pid_cache()
-    try:
+    with contextlib.suppress(Exception):
         pid_path.unlink(missing_ok=True)
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         _get_gateway_lock_path(pid_path).unlink(missing_ok=True)
-    except Exception:
-        pass
 
 
 def _write_gateway_lock_record(handle) -> None:
@@ -892,10 +883,8 @@ def _write_gateway_lock_record(handle) -> None:
     handle.truncate()
     json.dump(_build_pid_record(), handle)
     handle.flush()
-    try:
+    with contextlib.suppress(OSError):
         os.fsync(handle.fileno())
-    except OSError:
-        pass
 
 
 def _try_acquire_file_lock(handle) -> bool:
@@ -1089,10 +1078,8 @@ def release_gateway_runtime_lock() -> None:
         return
     _gateway_lock_handle = None
     _release_file_lock(handle)
-    try:
+    with contextlib.suppress(OSError):
         handle.close()
-    except OSError:
-        pass
     _clear_running_pid_cache()
 
 
@@ -1127,10 +1114,8 @@ def is_gateway_runtime_lock_active(lock_path: Optional[Path] = None) -> bool:
         # session that ran as root.  The parent directory owner can unlink
         # files even when they don't own them, so remove the stale lock
         # and report inactive — the new process will create a fresh one.
-        try:
+        with contextlib.suppress(OSError):
             resolved_lock_path.unlink()
-        except OSError:
-            pass
         return False
     try:
         if _try_acquire_file_lock(handle):
@@ -1138,10 +1123,8 @@ def is_gateway_runtime_lock_active(lock_path: Optional[Path] = None) -> bool:
             return False
         return True
     finally:
-        try:
+        with contextlib.suppress(OSError):
             handle.close()
-        except OSError:
-            pass
 
 
 def _strict_path_exists(path: Path, label: str) -> bool:
@@ -1170,10 +1153,8 @@ def _is_gateway_runtime_lock_active_strict(lock_path: Path) -> bool:
     except OSError as exc:
         raise RuntimeError(f"gateway runtime lock probe failed: {exc}") from exc
     finally:
-        try:
+        with contextlib.suppress(OSError):
             handle.close()
-        except OSError:
-            pass
 
 
 def write_pid_file() -> None:
@@ -1195,10 +1176,8 @@ def write_pid_file() -> None:
             f.write(record)
         _clear_running_pid_cache()
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 
@@ -1358,13 +1337,7 @@ def runtime_status_pid_is_live(record: Optional[dict[str, Any]]) -> bool:
         return False
     recorded_start = (record or {}).get("start_time")
     current_start = _get_process_start_time(pid)
-    if (
-        recorded_start is not None
-        and current_start is not None
-        and current_start != recorded_start
-    ):
-        return False
-    return True
+    return not (recorded_start is not None and current_start is not None and current_start != recorded_start)
 
 
 def parse_active_agents(raw: Any) -> int:
@@ -1673,10 +1646,8 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         # stale.  This happens when a previous process was killed between
         # O_CREAT|O_EXCL and the subsequent json.dump() (e.g. DNS failure
         # during rapid Slack reconnect retries).
-        try:
+        with contextlib.suppress(OSError):
             lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
     if existing:
         try:
             existing_pid = int(existing["pid"])
@@ -1772,10 +1743,8 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
             except OSError:
                 pass
             else:
-                try:
+                with contextlib.suppress(OSError):
                     tombstone.unlink(missing_ok=True)
-                except OSError:
-                    pass
         else:
             return False, existing
 
@@ -1787,10 +1756,8 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(record, handle)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
     return True, None
 
@@ -1807,10 +1774,8 @@ def release_scoped_lock(scope: str, identity: str) -> None:
     # start_time equality: on-disk null vs a live fingerprint (macOS/psutil
     # timing) would otherwise leave the lock stuck across Discord/Telegram
     # reconnects (#81468). start_time only guards PID reuse for *other* PIDs.
-    try:
+    with contextlib.suppress(OSError):
         lock_path.unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def release_all_scoped_locks(
@@ -1924,17 +1889,13 @@ def _consume_pid_marker_for_self(
         target_start_time = record.get(start_time_field)
         written_at = record.get("written_at") or ""
     except (KeyError, TypeError, ValueError):
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return False
 
     if _marker_is_stale(written_at, ttl_s):
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return False
 
     # Cross-profile guard (#29092): new markers explicitly name the verified
@@ -1977,10 +1938,8 @@ def _consume_pid_marker_for_self(
     else:
         matches = True
 
-    try:
+    with contextlib.suppress(OSError):
         path.unlink(missing_ok=True)
-    except OSError:
-        pass
 
     return matches
 
@@ -2050,10 +2009,8 @@ def consume_takeover_marker_for_self() -> bool:
 
 def clear_takeover_marker(target_home: Optional[Path] = None) -> None:
     """Remove the takeover marker unconditionally. Safe to call repeatedly."""
-    try:
+    with contextlib.suppress(OSError):
         _get_takeover_marker_path(target_home).unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def _validated_scoped_lock_gateway_owner(
@@ -2420,19 +2377,15 @@ def planned_stop_marker_targets_self() -> bool:
         written_at = record.get("written_at") or ""
     except (KeyError, TypeError, ValueError):
         # Malformed marker can never match anyone — drop it.
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return False
 
     if _marker_is_stale(written_at, _PLANNED_STOP_MARKER_TTL_S):
         # A marker this old is past its useful life regardless of target —
         # clean it up so it cannot crash-loop a freshly booted gateway.
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return False
 
     our_pid = os.getpid()
@@ -2455,10 +2408,8 @@ def planned_stop_marker_targets_self() -> bool:
 
 def clear_planned_stop_marker() -> None:
     """Remove the planned-stop marker unconditionally."""
-    try:
+    with contextlib.suppress(OSError):
         _get_planned_stop_marker_path().unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def get_running_pid(

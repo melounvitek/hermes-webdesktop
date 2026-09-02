@@ -338,9 +338,7 @@ class RelayAdapter(BasePlatformAdapter):
             platform = self._platform_by_chat.get(str(chat_id))
         if platform is None:
             platform = getattr(desc, "platform", None)
-        if self._slack_unfurl_hints(platform):
-            return False
-        return True
+        return not self._slack_unfurl_hints(platform)
 
     def prefers_fresh_final_streaming(
         self,

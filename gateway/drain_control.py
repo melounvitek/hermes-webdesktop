@@ -42,6 +42,7 @@ from typing import Any, Optional
 
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
+import contextlib
 
 _log = logging.getLogger(__name__)
 
@@ -71,10 +72,8 @@ def current_instantiation_epoch() -> str:
     which disables the epoch check downstream — never fail-closed.
     """
     boot_id = ""
-    try:
+    with contextlib.suppress(OSError):
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-    except OSError:
-        pass
 
     pid1_start = ""
     try:

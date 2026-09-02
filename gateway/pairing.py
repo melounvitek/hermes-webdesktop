@@ -39,6 +39,7 @@ from hermes_constants import (
     get_hermes_home,
 )
 from utils import atomic_replace
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -304,20 +305,16 @@ def _sync_live_adapter_allowlist_remove(platform: str, user_id: str) -> None:
         if _adapter_platform_name(adapter) != platform_name:
             continue
         if hasattr(adapter, "_allow_from"):
-            try:
+            with contextlib.suppress(Exception):
                 adapter._allow_from = _purge_allowlist_entries(
                     set(adapter._allow_from or ()), platform_name, user_id
                 )
-            except Exception:
-                pass
         extra = getattr(getattr(adapter, "config", None), "extra", None)
         if isinstance(extra, dict) and "allow_from" in extra:
-            try:
+            with contextlib.suppress(Exception):
                 extra["allow_from"] = _purge_allowlist_entries(
                     extra.get("allow_from"), platform_name, user_id
                 )
-            except Exception:
-                pass
 
 
 def _sync_allowlist_remove(platform: str, user_id: str) -> None:
@@ -426,10 +423,8 @@ def _secure_write(path: Path, data: str) -> None:
         except OSError:
             pass  # Windows doesn't support chmod the same way
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
 
 

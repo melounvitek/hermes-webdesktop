@@ -38,6 +38,7 @@ from gateway.response_filters import (
     is_intentional_silence_response as _is_intentional_silence_response,
     is_partial_silence_marker as _is_partial_silence_marker,
 )
+import contextlib
 
 logger = logging.getLogger("gateway.stream_consumer")
 
@@ -685,9 +686,7 @@ class GatewayStreamConsumer:
             return True
         # A segment break / commentary may have delivered the final text
         # earlier in the turn under a different record.
-        if self.has_delivered_text(final_text):
-            return True
-        return False
+        return bool(self.has_delivered_text(final_text))
 
     def has_delivered_text(self, text: str) -> bool:
         """Return True if *text* was already delivered as visible chat content."""
@@ -752,10 +751,8 @@ class GatewayStreamConsumer:
         race conditions with pending deltas or other queue items.
         """
         loop = None
-        try:
+        with contextlib.suppress(RuntimeError):
             loop = asyncio.get_running_loop()
-        except RuntimeError:
-            pass
 
         if not self._use_native_streaming:
             # No native stream to close — return resolved future
@@ -774,10 +771,7 @@ class GatewayStreamConsumer:
         # Create a future that run() will resolve after processing.
         # cancelled_flag is retained for backward compatibility with callers
         # (run.py sets it on timeout) but the handler always finalizes regardless.
-        if loop:
-            boundary_future = loop.create_future()
-        else:
-            boundary_future = concurrent.futures.Future()
+        boundary_future = loop.create_future() if loop else concurrent.futures.Future()
 
         cancelled_flag = {"cancelled": False}
         self._queue.put((_APPROVAL_BOUNDARY, boundary_future, cancelled_flag))
@@ -854,10 +848,8 @@ class GatewayStreamConsumer:
         """
         if flush_event is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             flush_event.set()
-        except Exception:
-            pass
 
     def _reset_segment_state(self, *, preserve_no_edit: bool = False) -> None:
         if preserve_no_edit and self._message_id == "__no_edit__":
@@ -1040,10 +1032,7 @@ class GatewayStreamConsumer:
             # Resolve future so approval callback knows the result
             if boundary_future is not None:
                 try:
-                    if isinstance(boundary_future, asyncio.Future):
-                        if not boundary_future.done():
-                            boundary_future.set_result(boundary_ok)
-                    elif isinstance(boundary_future, concurrent.futures.Future):
+                    if isinstance(boundary_future, (asyncio.Future, concurrent.futures.Future)):
                         if not boundary_future.done():
                             boundary_future.set_result(boundary_ok)
                 except Exception:
@@ -1995,14 +1984,12 @@ class GatewayStreamConsumer:
             # _final_response_sent itself; this handler owns the flags.
             _best_effort_ok = False
             if self._accumulated and self._message_id:
-                try:
+                with contextlib.suppress(Exception):
                     _best_effort_ok = bool(
                         await self._send_or_edit(
                             self._accumulated, finalize=True, is_turn_final=False,
                         )
                     )
-                except Exception:
-                    pass
             elif self._message_id is None:
                 # Native draft path deliberately keeps _message_id=None, so
                 # the best-effort edit above never runs for it — the stream

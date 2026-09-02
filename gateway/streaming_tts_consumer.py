@@ -33,6 +33,7 @@ import threading
 from typing import Any, Dict, Optional
 
 from gateway.platforms.base import AudioFormat, StreamingTTSHandle
+import contextlib
 
 logger = logging.getLogger("gateway.streaming_tts_consumer")
 
@@ -300,16 +301,12 @@ class StreamingTTSConsumer:
         else:
             logger.debug("streaming TTS _ABORT sentinel could not be enqueued")
         if self._handle is not None and not self._handle.aborted:
-            try:
+            with contextlib.suppress(Exception):
                 self._loop.call_soon_threadsafe(asyncio.create_task, self._safe_abort(reason))
-            except Exception:
-                pass
 
     async def wait_complete(self, timeout: float = 10.0) -> bool:
         """Wait for the drain task to finish. Returns True only on full success."""
         if self._task is not None:
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(asyncio.shield(self._task), timeout=timeout)
-            except (asyncio.CancelledError, Exception):
-                pass
         return self._completed

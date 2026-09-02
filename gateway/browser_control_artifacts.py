@@ -60,6 +60,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -338,10 +339,8 @@ class ArtifactStore:
         except Exception:
             with self._lock:
                 self._entries.pop(artifact_id, None)
-            try:
+            with contextlib.suppress(Exception):
                 temp.unlink(missing_ok=True)
-            except Exception:
-                pass
             raise
         return receipt
 
@@ -397,10 +396,8 @@ class ArtifactStore:
             for artifact_id, entry in list(self._entries.items()):
                 if entry.receipt.expires_at <= now:
                     self._entries.pop(artifact_id, None)
-                    try:
+                    with contextlib.suppress(OSError):
                         entry.path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
                     removed += 1
             for temp in self._root.glob(f"*{_TEMP_SUFFIX}"):
                 try:
@@ -435,10 +432,8 @@ class ArtifactStore:
                 raise ArtifactNotFound(f"unknown artifact {artifact_id!r}")
             if entry.receipt.expires_at <= now:
                 self._entries.pop(artifact_id, None)
-                try:
+                with contextlib.suppress(OSError):
                     path.unlink(missing_ok=True)
-                except OSError:
-                    pass
                 raise ArtifactExpired(f"artifact {artifact_id!r} expired")
             if entry.receipt.scope_key != scope_key:
                 raise ArtifactScopeMismatch(
@@ -450,10 +445,8 @@ class ArtifactStore:
         for artifact_id, entry in list(self._entries.items()):
             if entry.receipt.expires_at <= now:
                 self._entries.pop(artifact_id, None)
-                try:
+                with contextlib.suppress(OSError):
                     entry.path.unlink(missing_ok=True)
-                except OSError:
-                    pass
 
     def _artifact_path(self, artifact_id: str) -> Path:
         """Resolve a minted id strictly inside the controlled root."""
