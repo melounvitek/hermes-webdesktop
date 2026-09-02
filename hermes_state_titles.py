@@ -166,18 +166,15 @@ class SessionTitlesMixin:
         if source not in self._TITLE_SOURCE_RANK:
             raise ValueError(f"invalid title source: {source!r}")
         return self._write_rowcount(
-            "UPDATE sessions SET title_source = ? "
-            "WHERE id = ? AND title IS NOT NULL",
+            "UPDATE sessions SET title_source = ? WHERE id = ? AND title IS NOT NULL",
             (source, session_id),
         ) > 0
 
     def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         """Look up a session by exact title. Returns session dict or None."""
         row = self._read_one(
-            "SELECT s.*, "
-            "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
-            "FROM sessions s "
-            "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
+            "SELECT s.*, COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
+            "FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
             "WHERE s.title = ?",
             (title,),
         )

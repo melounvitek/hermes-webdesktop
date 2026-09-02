@@ -91,6 +91,12 @@ def _ended_by_compression(row) -> bool:
     return row is not None and row["ended_at"] is not None and row["end_reason"] == "compression"
 
 
+def _stale_holder(row, now: float) -> bool:
+    """A lock/lease row whose holder is expired or a provably dead local process."""
+    from hermes_state import _compression_lock_holder_process_is_dead
+    return float(row["expires_at"]) <= now or _compression_lock_holder_process_is_dead(row["holder"])
+
+
 class SessionMessagesMixin:
     """Message append/replace/rewind, reactions, resume conversations, replay dedupe."""
 
@@ -216,17 +222,13 @@ class SessionMessagesMixin:
         ``reject_active_compression_lock`` / ``reject_active_turn_lease`` so a compressor
         that captured its watermark cannot resurrect the removed turn.
         """
-        from hermes_state import CompressionSessionClosedError, SessionCompressionInProgressError, SessionTurnLeaseLostError, _compression_lock_holder_process_is_dead
+        from hermes_state import CompressionSessionClosedError, SessionCompressionInProgressError, SessionTurnLeaseLostError
         if reject_active_compression_lock:
             active_lock = conn.execute(_COMPRESSION_LOCK_ROW_SQL, (session_id,)).fetchone()
             if active_lock is not None:
-                current_holder = active_lock["holder"]
-                if (
-                    float(active_lock["expires_at"]) <= time.time()
-                    or _compression_lock_holder_process_is_dead(current_holder)
-                ):
-                    conn.execute(_DELETE_COMPRESSION_LOCK_SQL, (session_id, current_holder))
-                elif current_holder != compression_lock_holder:
+                if _stale_holder(active_lock, time.time()):
+                    conn.execute(_DELETE_COMPRESSION_LOCK_SQL, (session_id, active_lock["holder"]))
+                elif active_lock["holder"] != compression_lock_holder:
                     raise SessionCompressionInProgressError(
                         f"Session {session_id!r} is being compressed by another writer"
                     )
@@ -249,21 +251,16 @@ class SessionMessagesMixin:
                         (now + max(0.1, float(turn_lease_ttl_seconds)), conversation_id, turn_lease_holder),
                     )
             elif lease is not None:
-                current_holder = lease["holder"]
-                if (
-                    float(lease["expires_at"]) <= now
-                    or _compression_lock_holder_process_is_dead(current_holder)
-                ):
-                    # Same reclaim rule as acquisition (expired or provably dead owner);
-                    # deleting here also fences a stale late flush after the mutation.
-                    conn.execute(
-                        "DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
-                        (conversation_id, current_holder),
-                    )
-                else:
+                if not _stale_holder(lease, now):
                     raise SessionTurnLeaseLostError(
                         f"Session has an active turn lease; refusing transcript mutation for {session_id!r}"
                     )
+                # Same reclaim rule as acquisition (expired or provably dead owner);
+                # deleting here also fences a stale late flush after the mutation.
+                conn.execute(
+                    "DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
+                    (conversation_id, lease["holder"]),
+                )
         session = conn.execute(_ENDED_BY_COMPRESSION_SQL, (session_id,)).fetchone()
         if _ended_by_compression(session) and not allow_closed_compression_parent:
             raise CompressionSessionClosedError(session_id)
@@ -519,8 +516,7 @@ class SessionMessagesMixin:
         def _do(conn):
             rows = conn.execute(
                 "SELECT id, role, content, display_metadata FROM messages "
-                "WHERE session_id = ? AND active = 1 AND display_metadata IS NOT NULL "
-                "ORDER BY id",
+                "WHERE session_id = ? AND active = 1 AND display_metadata IS NOT NULL ORDER BY id",
                 (session_id,),
             ).fetchall()
             pending = []
@@ -758,8 +754,7 @@ class SessionMessagesMixin:
                 tail_ids, tail_tool_calls = self._tail_rows_after_watermark(
                     conn,
                     "SELECT id, tool_calls FROM messages "
-                    "WHERE session_id = ? AND active = 1 AND id > ? "
-                    "ORDER BY id",
+                    "WHERE session_id = ? AND active = 1 AND id > ? ORDER BY id",
                     (session_id, int(watermark)),
                 )
             # Rewind targets sit AT/BELOW the watermark (the compressor only saw rows up
@@ -768,8 +763,7 @@ class SessionMessagesMixin:
             if tail_count > 0:
                 if watermark is not None:
                     tail_rows = conn.execute(
-                        "SELECT id FROM messages "
-                        "WHERE session_id = ? AND active = 1 AND id <= ? "
+                        "SELECT id FROM messages WHERE session_id = ? AND active = 1 AND id <= ? "
                         "ORDER BY id DESC LIMIT ?",
                         (session_id, int(watermark), int(tail_count)),
                     ).fetchall()
@@ -840,10 +834,8 @@ class SessionMessagesMixin:
         """
         from hermes_state import _scrub_surrogates
         return self._write_rowcount(
-            "UPDATE messages SET api_content = ? WHERE id = ("
-            "SELECT id FROM messages "
-            "WHERE session_id = ? AND role = 'user' AND active = 1 "
-            "ORDER BY id DESC LIMIT 1"
+            "UPDATE messages SET api_content = ? WHERE id = (SELECT id FROM messages "
+            "WHERE session_id = ? AND role = 'user' AND active = 1 ORDER BY id DESC LIMIT 1"
             ") AND content IS ?",
             (_scrub_surrogates(api_content), session_id, self._encode_content(content)),
         )
@@ -991,15 +983,11 @@ class SessionMessagesMixin:
             if not anchor_exists:
                 return {"window": [], "messages_before": 0, "messages_after": 0}
             before_rows = conn.execute(
-                "SELECT * FROM messages "
-                "WHERE session_id = ? AND id <= ? "
-                "ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM messages WHERE session_id = ? AND id <= ? ORDER BY id DESC LIMIT ?",
                 (session_id, around_message_id, window + 1),
             ).fetchall()
             after_rows = conn.execute(
-                "SELECT * FROM messages "
-                "WHERE session_id = ? AND id > ? "
-                "ORDER BY id ASC LIMIT ?",
+                "SELECT * FROM messages WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
                 (session_id, around_message_id, window),
             ).fetchall()
         rows = list(reversed(before_rows)) + list(after_rows)
@@ -1046,8 +1034,7 @@ class SessionMessagesMixin:
                     best = current
                 try:
                     child_row = conn.execute(
-                        "SELECT id FROM sessions AS child "
-                        "WHERE child.parent_session_id = ? "
+                        "SELECT id FROM sessions AS child WHERE child.parent_session_id = ? "
                         "  AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL "
                         "  AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL "
                         "  AND json_extract(COALESCE(child.model_config, '{}'), '$._reset_from') IS NULL "
