@@ -32,6 +32,13 @@ _LEGACY_MAX_ASYNC_WARNED = False
 DEFAULT_CHILD_TIMEOUT: Optional[float] = None
 
 
+def _cfg() -> dict:
+    """The ``delegation`` section, read through the origin so tests can patch it."""
+    from tools.delegate_tool import _load_config
+
+    return _load_config()
+
+
 # ── Subagent approval callbacks ─────────────────────────────────────────────
 # Subagent worker threads don't inherit the CLI's threading.local approval
 # callback, so prompt_dangerous_approval() would fall back to input() and
@@ -60,10 +67,7 @@ def _subagent_auto_approve(command: str, description: str, **kwargs) -> str:
 
 def _get_subagent_approval_callback():
     """Callback for subagent worker threads per delegation.subagent_auto_approve (default False)."""
-    from tools.delegate_tool import _load_config
-    cfg = _load_config()
-    val = cfg.get("subagent_auto_approve", False)
-    if is_truthy_value(val):
+    if is_truthy_value(_cfg().get("subagent_auto_approve", False)):
         return _subagent_auto_approve
     return _subagent_auto_deny
 
@@ -73,22 +77,10 @@ def _get_max_concurrent_children() -> int:
 
     Floor of 1 is the only bound enforced; there is no ceiling.
     """
-    from tools.delegate_tool import _load_config
-    cfg = _load_config()
-    val = cfg.get("max_concurrent_children")
+    val = _cfg().get("max_concurrent_children")
     if val is not None:
         try:
             result = max(1, int(val))
-            if result > 10:
-                global _HIGH_CONCURRENCY_WARNED
-                if not _HIGH_CONCURRENCY_WARNED:
-                    _HIGH_CONCURRENCY_WARNED = True
-                    logger.warning(
-                        "delegation.max_concurrent_children=%d: each child consumes API tokens "
-                        "independently. High values multiply cost linearly.",
-                        result,
-                    )
-            return result
         except (TypeError, ValueError):
             logger.warning(
                 "delegation.max_concurrent_children=%r is not a valid integer; "
@@ -97,6 +89,16 @@ def _get_max_concurrent_children() -> int:
                 _DEFAULT_MAX_CONCURRENT_CHILDREN,
             )
             return _DEFAULT_MAX_CONCURRENT_CHILDREN
+        if result > 10:
+            global _HIGH_CONCURRENCY_WARNED
+            if not _HIGH_CONCURRENCY_WARNED:
+                _HIGH_CONCURRENCY_WARNED = True
+                logger.warning(
+                    "delegation.max_concurrent_children=%d: each child consumes API tokens "
+                    "independently. High values multiply cost linearly.",
+                    result,
+                )
+        return result
     env_val = os.getenv("DELEGATION_MAX_CONCURRENT_CHILDREN")
     if env_val:
         try:
@@ -113,9 +115,7 @@ def _get_worktree_isolation() -> bool:
     parallel children never contend for one working copy. Git-only and
     local-backend-only; otherwise silently ignored (shared workspace as before).
     """
-    from tools.delegate_tool import _load_config
-    cfg = _load_config()
-    return bool(cfg.get("worktree_isolation", False))
+    return bool(_cfg().get("worktree_isolation", False))
 
 
 def _get_max_async_children() -> int:
@@ -126,10 +126,9 @@ def _get_max_async_children() -> int:
     A leftover ``delegation.max_async_children`` key is ignored with a one-time
     deprecation warning.
     """
-    from tools.delegate_tool import _get_max_concurrent_children, _load_config
+    from tools.delegate_tool import _get_max_concurrent_children
     global _LEGACY_MAX_ASYNC_WARNED
-    cfg = _load_config()
-    if cfg.get("max_async_children") is not None and not _LEGACY_MAX_ASYNC_WARNED:
+    if _cfg().get("max_async_children") is not None and not _LEGACY_MAX_ASYNC_WARNED:
         _LEGACY_MAX_ASYNC_WARNED = True
         logger.warning(
             "delegation.max_async_children is deprecated and ignored; "
@@ -137,6 +136,12 @@ def _get_max_async_children() -> int:
             "delegations too. Remove the stale key from config.yaml."
         )
     return _get_max_concurrent_children()
+
+
+def _parse_timeout(raw: Any) -> Optional[float]:
+    """Seconds → None (<= 0 disables) or max(30, value). Raises on non-numeric."""
+    parsed = float(raw)
+    return None if parsed <= 0 else max(30.0, parsed)
 
 
 def _get_child_timeout() -> Optional[float]:
@@ -147,28 +152,22 @@ def _get_child_timeout() -> Optional[float]:
     staleness monitor. delegation.child_timeout_seconds > 0 opts in (floor 30 s);
     0 or negative disables. Env fallback: DELEGATION_CHILD_TIMEOUT_SECONDS.
     """
-    from tools.delegate_tool import _load_config
-    cfg = _load_config()
-    val = cfg.get("child_timeout_seconds")
+    val = _cfg().get("child_timeout_seconds")
     if val is not None:
         try:
-            parsed = float(val)
+            return _parse_timeout(val)
         except (TypeError, ValueError):
             logger.warning(
                 "delegation.child_timeout_seconds=%r is not a valid number; "
                 "using default (no timeout)",
                 val,
             )
-        else:
-            return None if parsed <= 0 else max(30.0, parsed)
     env_val = os.getenv("DELEGATION_CHILD_TIMEOUT_SECONDS")
     if env_val:
         try:
-            parsed = float(env_val)
+            return _parse_timeout(env_val)
         except (TypeError, ValueError):
             pass
-        else:
-            return None if parsed <= 0 else max(30.0, parsed)
     return DEFAULT_CHILD_TIMEOUT
 
 
@@ -178,9 +177,7 @@ def _get_max_spawn_depth() -> int:
     Depth 0 is the parent; agents at depths 0..N-1 may spawn, depth N is the
     leaf floor. Default 1 is flat. Each extra level multiplies API cost.
     """
-    from tools.delegate_tool import _load_config
-    cfg = _load_config()
-    val = cfg.get("max_spawn_depth")
+    val = _cfg().get("max_spawn_depth")
     if val is None:
         return MAX_DEPTH
     try:
@@ -205,9 +202,7 @@ def _get_max_spawn_depth() -> int:
 
 def _get_orchestrator_enabled() -> bool:
     """delegation.orchestrator_enabled kill switch (default True): False forces every child to leaf."""
-    from tools.delegate_tool import _load_config
-    cfg = _load_config()
-    val = cfg.get("orchestrator_enabled", True)
+    val = _cfg().get("orchestrator_enabled", True)
     if isinstance(val, bool):
         return val
     # Accept "true"/"false" strings from YAML that doesn't auto-coerce.
@@ -218,13 +213,12 @@ def _get_orchestrator_enabled() -> bool:
 
 def _get_inherit_mcp_toolsets() -> bool:
     """Whether narrowed child toolsets should keep the parent's MCP toolsets."""
-    from tools.delegate_tool import _load_config
-    cfg = _load_config()
-    return is_truthy_value(cfg.get("inherit_mcp_toolsets"), default=True)
+    return is_truthy_value(_cfg().get("inherit_mcp_toolsets"), default=True)
 
 
 def _normalized_runtime_url(value: Any) -> str:
     return str(value or "").strip().rstrip("/")
+
 
 def _inherit_parent_capabilities(
     parent_agent, override_provider, override_base_url
@@ -255,27 +249,25 @@ def _inherit_parent_base_url(parent_agent, fallback_base_url: Optional[str]) -> 
     """
     surface_url = _normalized_runtime_url(fallback_base_url)
     client_kwargs = getattr(parent_agent, "_client_kwargs", None)
-    if isinstance(client_kwargs, dict):
-        kwargs_url = _normalized_runtime_url(client_kwargs.get("base_url"))
-        if (
-            kwargs_url
-            and kwargs_url != surface_url
-            and kwargs_url.startswith(("http://", "https://"))
-        ):
-            return kwargs_url
-
     client = getattr(parent_agent, "client", None)
-    if client is not None:
+    live_candidates = (
+        client_kwargs.get("base_url") if isinstance(client_kwargs, dict) else None,
         # OpenAI SDK exposes base_url as httpx.URL — coerce before comparing.
-        live_url = _normalized_runtime_url(getattr(client, "base_url", ""))
-        if (
-            live_url
-            and live_url != surface_url
-            and live_url.startswith(("http://", "https://"))
-        ):
-            return live_url
-
+        getattr(client, "base_url", "") if client is not None else None,
+    )
+    for raw in live_candidates:
+        url = _normalized_runtime_url(raw)
+        if url and url != surface_url and url.startswith(("http://", "https://")):
+            return url
     return fallback_base_url or None
+
+
+def _loaded_pool(key: Any):
+    """``load_pool(key)`` when it holds credentials, else None."""
+    from agent.credential_pool import load_pool
+
+    pool = load_pool(key)
+    return pool if pool is not None and pool.has_credentials() else None
 
 
 def _resolve_child_credential_pool(
@@ -291,15 +283,14 @@ def _resolve_child_credential_pool(
     pool across different custom endpoints would overwrite the child's delegated
     base_url on lease.
     """
-    if not effective_provider:
-        return getattr(parent_agent, "_credential_pool", None)
-
-    parent_provider = getattr(parent_agent, "provider", None) or ""
     parent_pool = getattr(parent_agent, "_credential_pool", None)
+    if not effective_provider:
+        return parent_pool
+    parent_provider = getattr(parent_agent, "provider", None) or ""
 
     if effective_provider == "custom":
         try:
-            from agent.credential_pool import get_custom_provider_pool_key, load_pool
+            from agent.credential_pool import get_custom_provider_pool_key
 
             child_key = get_custom_provider_pool_key(effective_base_url)
             if child_key is None:
@@ -316,10 +307,7 @@ def _resolve_child_credential_pool(
                 and parent_key == child_key
             ):
                 return parent_pool
-
-            pool = load_pool(child_key)
-            if pool is not None and pool.has_credentials():
-                return pool
+            return _loaded_pool(child_key)
         except Exception as exc:
             logger.debug(
                 "Could not resolve custom credential pool for child endpoint '%s': %s",
@@ -330,13 +318,8 @@ def _resolve_child_credential_pool(
 
     if parent_pool is not None and effective_provider == parent_provider:
         return parent_pool
-
     try:
-        from agent.credential_pool import load_pool
-
-        pool = load_pool(effective_provider)
-        if pool is not None and pool.has_credentials():
-            return pool
+        return _loaded_pool(effective_provider)
     except Exception as exc:
         logger.debug(
             "Could not load credential pool for child provider '%s': %s",
@@ -374,115 +357,84 @@ def _merge_request_overrides(runtime_overrides, explicit_overrides):
     return merged or None
 
 
-def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
-    """Resolve the child credential bundle from the ``delegation`` config section.
+# Native-SDK providers speak their own wire protocol and can't be reached via
+# chat_completions against a base_url: always take the runtime-provider path
+# (a configured base_url still flows through it, e.g. a Bedrock region).
+_NATIVE_SDK_PROVIDERS = frozenset({"bedrock", "vertex", "google", "google-genai"})
+_EXPLICIT_API_MODES = frozenset({"chat_completions", "codex_responses", "anthropic_messages"})
 
-    Three branches: ``base_url`` set → direct endpoint (``api_key`` None means
-    inherit the parent's key, so providers keyed outside OPENAI_API_KEY work);
-    ``provider`` set → full bundle via the runtime provider system (same path as
-    CLI/gateway startup); neither → None values, child inherits everything.
-    ``request_overrides`` is honored on every branch. Raises ValueError with a
-    user-facing message on credential failure.
-    """
-    configured_model = str(cfg.get("model") or "").strip() or None
-    configured_provider = str(cfg.get("provider") or "").strip() or None
-    configured_base_url = str(cfg.get("base_url") or "").strip() or None
-    configured_api_key = str(cfg.get("api_key") or "").strip() or None
-    configured_api_mode = str(cfg.get("api_mode") or "").strip().lower() or None
 
-    explicit_request_overrides = (
-        cfg.get("request_overrides")
-        if isinstance(cfg.get("request_overrides"), dict)
-        else None
+def _require_pinned_command(command: Optional[str], message: str) -> None:
+    """A pinned ACP transport command must exist on PATH — refuse loudly rather
+    than let the child silently fall back to another transport."""
+    if not command:
+        return
+    import shutil as _shutil
+
+    if not _shutil.which(command):
+        raise ValueError(message)
+
+
+def _direct_endpoint_credentials(cfg_values: dict, explicit_request_overrides) -> dict:
+    """``delegation.base_url`` branch: provider/api_mode from URL heuristics."""
+    configured_model, configured_provider, configured_base_url, configured_api_key, configured_api_mode = (
+        cfg_values["model"], cfg_values["provider"], cfg_values["base_url"],
+        cfg_values["api_key"], cfg_values["api_mode"],
     )
+    # Shared URL-based api_mode detector so Anthropic-compatible direct
+    # endpoints (/anthropic suffix: Azure AI Foundry, MiniMax, Zhipu, LiteLLM)
+    # get the Messages transport instead of 404ing on chat_completions.
+    from hermes_cli.runtime_provider import _detect_api_mode_for_url
 
-    # Native-SDK providers speak their own wire protocol and can't be reached
-    # via chat_completions against a base_url: always take the runtime-provider
-    # path (a configured base_url still flows through it, e.g. a Bedrock region).
-    _NATIVE_SDK_PROVIDERS = {"bedrock", "vertex", "google", "google-genai"}
-    _provider_lower = (configured_provider or "").strip().lower()
-    _is_native_sdk_provider = _provider_lower in _NATIVE_SDK_PROVIDERS
+    base_lower = configured_base_url.lower()
+    host = base_url_hostname(configured_base_url)
+    provider = "custom"
+    api_mode = _detect_api_mode_for_url(configured_base_url) or "chat_completions"
+    if host == "chatgpt.com" and "/backend-api/codex" in base_lower:
+        provider, api_mode = "openai-codex", "codex_responses"
+    elif host == "api.anthropic.com":
+        provider, api_mode = "anthropic", "anthropic_messages"
+    elif "api.kimi.com/coding" in base_lower:
+        api_mode = "anthropic_messages"
+    # Explicit delegation.api_mode always wins over the URL heuristic.
+    if configured_api_mode in _EXPLICIT_API_MODES:
+        api_mode = configured_api_mode
 
-    if configured_base_url and not _is_native_sdk_provider:
-        api_key = configured_api_key  # None → inherited from parent in _build_child_agent
+    # provider configured ALONGSIDE base_url: pull that provider's request
+    # personality (request_overrides / max_output_tokens) onto the explicit
+    # endpoint. Best-effort — a resolution failure only skips the overrides.
+    request_overrides = None
+    max_output_tokens = None
+    if configured_provider:
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
 
-        # Shared URL-based api_mode detector so Anthropic-compatible direct
-        # endpoints (/anthropic suffix: Azure AI Foundry, MiniMax, Zhipu, LiteLLM)
-        # get the Messages transport instead of 404ing on chat_completions.
-        from hermes_cli.runtime_provider import _detect_api_mode_for_url
+            runtime = resolve_runtime_provider(
+                requested=configured_provider, target_model=configured_model
+            )
+            request_overrides = dict(runtime.get("request_overrides") or {}) or None
+            max_output_tokens = runtime.get("max_output_tokens")
+        except Exception as exc:
+            logger.debug(
+                "delegation.base_url: runtime resolution for provider '%s' "
+                "failed; proceeding without request_overrides: %s",
+                configured_provider,
+                exc,
+            )
+    return {
+        "model": configured_model,
+        "provider": provider,
+        "base_url": configured_base_url,
+        "api_key": configured_api_key,  # None → inherited from parent in _build_child_agent
+        "api_mode": api_mode,
+        "request_overrides": _merge_request_overrides(request_overrides, explicit_request_overrides),
+        "max_output_tokens": max_output_tokens,
+    }
 
-        base_lower = configured_base_url.lower()
-        provider = "custom"
-        api_mode = _detect_api_mode_for_url(configured_base_url) or "chat_completions"
-        if (
-            base_url_hostname(configured_base_url) == "chatgpt.com"
-            and "/backend-api/codex" in base_lower
-        ):
-            provider = "openai-codex"
-            api_mode = "codex_responses"
-        elif base_url_hostname(configured_base_url) == "api.anthropic.com":
-            provider = "anthropic"
-            api_mode = "anthropic_messages"
-        elif "api.kimi.com/coding" in base_lower:
-            provider = "custom"
-            api_mode = "anthropic_messages"
 
-        # Explicit delegation.api_mode always wins over the URL heuristic.
-        if configured_api_mode in {"chat_completions", "codex_responses", "anthropic_messages"}:
-            api_mode = configured_api_mode
-
-        # provider configured ALONGSIDE base_url: pull that provider's request
-        # personality (request_overrides / max_output_tokens) onto the explicit
-        # endpoint. Best-effort — a resolution failure only skips the overrides.
-        request_overrides = None
-        max_output_tokens = None
-        if configured_provider:
-            try:
-                from hermes_cli.runtime_provider import resolve_runtime_provider
-
-                runtime = resolve_runtime_provider(
-                    requested=configured_provider, target_model=configured_model
-                )
-                request_overrides = dict(runtime.get("request_overrides") or {}) or None
-                max_output_tokens = runtime.get("max_output_tokens")
-            except Exception as exc:
-                logger.debug(
-                    "delegation.base_url: runtime resolution for provider '%s' "
-                    "failed; proceeding without request_overrides: %s",
-                    configured_provider,
-                    exc,
-                )
-
-        request_overrides = _merge_request_overrides(
-            request_overrides, explicit_request_overrides
-        )
-
-        return {
-            "model": configured_model,
-            "provider": provider,
-            "base_url": configured_base_url,
-            "api_key": api_key,
-            "api_mode": api_mode,
-            "request_overrides": request_overrides,
-            "max_output_tokens": max_output_tokens,
-        }
-
-    if not configured_provider:
-        # Pure inherit; explicit request_overrides still merge OVER the parent's.
-        return {
-            "model": configured_model,
-            "provider": None,
-            "base_url": None,
-            "api_key": None,
-            "api_mode": None,
-            "request_overrides": _merge_request_overrides(
-                getattr(parent_agent, "request_overrides", None),
-                explicit_request_overrides,
-            ),
-            "max_output_tokens": None,
-        }
-
-    # Provider is configured — resolve full credentials
+def _runtime_provider_credentials(cfg_values: dict, explicit_request_overrides) -> dict:
+    """``delegation.provider`` branch: full bundle via the runtime provider system."""
+    configured_model, configured_provider = cfg_values["model"], cfg_values["provider"]
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
 
@@ -501,20 +453,13 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             f"Delegation provider '{configured_provider}' resolved but has no API key. "
             f"Set the appropriate environment variable or run 'hermes auth'."
         )
-
-    # A pinned ACP transport command must exist — refuse loudly rather than let
-    # the child silently fall back to another transport.
     pinned_command = runtime.get("command")
-    if pinned_command:
-        import shutil as _shutil
-
-        if not _shutil.which(pinned_command):
-            raise ValueError(
-                f"Delegation provider '{configured_provider}' is pinned to the "
-                f"'{pinned_command}' command, which was not found on PATH. "
-                f"Install it or choose a different delegation provider."
-            )
-
+    _require_pinned_command(
+        pinned_command,
+        f"Delegation provider '{configured_provider}' is pinned to the "
+        f"'{pinned_command}' command, which was not found on PATH. "
+        f"Install it or choose a different delegation provider.",
+    )
     return {
         "model": configured_model or runtime.get("model") or None,
         "provider": configured_provider if runtime.get("provider") == _RUNTIME_PROVIDER_CUSTOM else runtime.get("provider"),
@@ -531,6 +476,44 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     }
 
 
+def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
+    """Resolve the child credential bundle from the ``delegation`` config section.
+
+    Three branches: ``base_url`` set → direct endpoint (``api_key`` None means
+    inherit the parent's key, so providers keyed outside OPENAI_API_KEY work);
+    ``provider`` set → full bundle via the runtime provider system (same path as
+    CLI/gateway startup); neither → None values, child inherits everything.
+    ``request_overrides`` is honored on every branch. Raises ValueError with a
+    user-facing message on credential failure.
+    """
+    values = {k: str(cfg.get(k) or "").strip() or None for k in ("model", "provider", "base_url", "api_key")}
+    values["api_mode"] = str(cfg.get("api_mode") or "").strip().lower() or None
+    explicit_request_overrides = (
+        cfg.get("request_overrides")
+        if isinstance(cfg.get("request_overrides"), dict)
+        else None
+    )
+    is_native_sdk_provider = (values["provider"] or "").strip().lower() in _NATIVE_SDK_PROVIDERS
+
+    if values["base_url"] and not is_native_sdk_provider:
+        return _direct_endpoint_credentials(values, explicit_request_overrides)
+    if not values["provider"]:
+        # Pure inherit; explicit request_overrides still merge OVER the parent's.
+        return {
+            "model": values["model"],
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+            "request_overrides": _merge_request_overrides(
+                getattr(parent_agent, "request_overrides", None),
+                explicit_request_overrides,
+            ),
+            "max_output_tokens": None,
+        }
+    return _runtime_provider_credentials(values, explicit_request_overrides)
+
+
 def _load_config() -> dict:
     """Return the ``delegation`` config section (read-only — do NOT mutate).
 
@@ -540,13 +523,11 @@ def _load_config() -> dict:
     ``HERMES_IGNORE_USER_CONFIG=1`` is only honored by the legacy loader, so it
     stays authoritative when that flag is set.
     """
-    prefer_legacy = os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1"
-    if not prefer_legacy:
+    if os.environ.get("HERMES_IGNORE_USER_CONFIG") != "1":
         try:
             from hermes_cli.config import load_config_readonly
 
-            full = load_config_readonly()
-            cfg = full.get("delegation") or {}
+            cfg = load_config_readonly().get("delegation") or {}
             if isinstance(cfg, dict):
                 return cfg
         except Exception:
