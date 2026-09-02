@@ -1,19 +1,32 @@
 """Registering a connected (or schema-cached) MCP server's tools into the tool
 registry: include/exclude filtering, trust-tier metadata capture, utility-tool
-selection, name-collision resolution and the schema-cache write-through."""
+selection, name-collision resolution and the schema-cache write-through.
+
+Both entry points (``_register_server_tools`` for a live server,
+``_register_from_cache_sync`` for a lazy cached manifest) build a list of
+``_Candidate`` records and hand them to the single ``_register_candidates`` loop."""
 
 import logging
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Callable, Dict, List
-from tools.mcp_tool_common import _parse_boolish, _core
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
+from tools.mcp_tool_common import _parse_boolish, _core, _resolve_tool_timeout
 from tools.mcp_tool_handlers import _make_check_fn, _make_get_prompt_handler, _make_list_prompts_handler, _make_list_resources_handler, _make_read_resource_handler
-from tools.mcp_tool_common import _resolve_tool_timeout
 from tools.mcp_tool_schema import _UTILITY_CAPABILITY_ATTRS, _UTILITY_CAPABILITY_METHODS, _build_utility_schemas, _normalize_name_filter, matches_name_filter
 
 if TYPE_CHECKING:  # pragma: no cover
     from tools.mcp_tool import MCPServerTask
 
 logger = logging.getLogger("tools.mcp_tool")
+
+_UTILITY_ORIGIN_PREFIX = "generated utility "
+
+# Utility tool key -> handler factory; each takes (server_name, tool_timeout).
+_UTILITY_HANDLER_FACTORIES = {
+    "list_resources": _make_list_resources_handler,
+    "read_resource": _make_read_resource_handler,
+    "list_prompts": _make_list_prompts_handler,
+    "get_prompt": _make_get_prompt_handler,
+}
 
 
 def _normalize_server_trust(value: Any) -> str:
@@ -23,10 +36,8 @@ def _normalize_server_trust(value: Any) -> str:
     if value is None:
         return _core._TRUST_FULL
     text = str(value).strip().lower()
-    if text == _core._TRUST_FULL:
-        return _core._TRUST_FULL
-    if text == _core._TRUST_UNTRUSTED:
-        return _core._TRUST_UNTRUSTED
+    if text in (_core._TRUST_FULL, _core._TRUST_UNTRUSTED):
+        return text
     logger.warning(
         "MCP trust: unrecognized trust value %r — treating as 'untrusted' "
         "(valid values: full, untrusted)", value,
@@ -42,20 +53,16 @@ def _annotation_read_only_hint(mcp_tool: Any) -> bool:
     if annotations is None:
         return False
     if isinstance(annotations, dict):
-        hint = annotations.get("readOnlyHint")
-    else:
-        hint = getattr(annotations, "readOnlyHint", None)
-    return hint is True
+        return annotations.get("readOnlyHint") is True
+    return getattr(annotations, "readOnlyHint", None) is True
 
 
-def _record_tool_trust_metadata(
-    server_name: str, config: dict, tools: List[Any]
-) -> None:
-    """Capture per-server trust and per-tool readOnlyHint at discovery."""
+def _record_tool_trust_metadata(server_name: str, config: dict, tools: List[Any]) -> None:
+    """Capture per-server trust and per-tool readOnlyHint at discovery (the
+    security boundary: the call-time gate classifies from data we control,
+    never re-read server-supplied state)."""
     with _core._lock:
-        _core._server_trust_levels[server_name] = _normalize_server_trust(
-            (config or {}).get("trust")
-        )
+        _core._server_trust_levels[server_name] = _normalize_server_trust((config or {}).get("trust"))
         hints = _core._tool_read_only_hints.setdefault(server_name, {})
         for tool in tools:
             name = getattr(tool, "name", None)
@@ -78,51 +85,39 @@ def _forget_mcp_tool_server(tool_name: str) -> None:
 def _select_utility_schemas(server_name: str, server: "MCPServerTask", config: dict) -> List[dict]:
     """Select utility schemas based on config and server capabilities."""
     tools_filter = config.get("tools") or {}
-    resources_enabled = _parse_boolish(tools_filter.get("resources"), default=True)
-    prompts_enabled = _parse_boolish(tools_filter.get("prompts"), default=True)
-
+    family_enabled = {
+        family: _parse_boolish(tools_filter.get(family), default=True)
+        for family in ("resources", "prompts")
+    }
     # ``initialize_result.capabilities`` is the source of truth: its sub-objects
     # are non-None iff the server advertises that request family. The old
     # ``hasattr(server.session, ...)`` gate never filtered anything because
     # ClientSession defines all four methods on the class.
-    advertised_caps = None
     init_result = getattr(server, "initialize_result", None)
-    if init_result is not None:
-        advertised_caps = getattr(init_result, "capabilities", None)
+    advertised_caps = getattr(init_result, "capabilities", None) if init_result is not None else None
 
     selected: List[dict] = []
     for entry in _build_utility_schemas(server_name):
         handler_key = entry["handler_key"]
-        if handler_key in {"list_resources", "read_resource"} and not resources_enabled:
-            logger.debug("MCP server '%s': skipping utility '%s' (resources disabled)", server_name, handler_key)
+        family = _UTILITY_CAPABILITY_ATTRS[handler_key]
+        if not family_enabled[family]:
+            logger.debug("MCP server '%s': skipping utility '%s' (%s disabled)", server_name, handler_key, family)
             continue
-        if handler_key in {"list_prompts", "get_prompt"} and not prompts_enabled:
-            logger.debug("MCP server '%s': skipping utility '%s' (prompts disabled)", server_name, handler_key)
-            continue
-
         if advertised_caps is not None:
-            cap_attr = _UTILITY_CAPABILITY_ATTRS[handler_key]
-            if getattr(advertised_caps, cap_attr, None) is None:
+            if getattr(advertised_caps, family, None) is None:
                 logger.debug(
-                    "MCP server '%s': skipping utility '%s' "
-                    "(server does not advertise '%s' capability)",
-                    server_name,
-                    handler_key,
-                    cap_attr,
+                    "MCP server '%s': skipping utility '%s' (server does not advertise '%s' capability)",
+                    server_name, handler_key, family,
                 )
                 continue
-        else:
-            # Legacy fallback when initialize_result wasn't captured (test
-            # fixtures, older paths): register every stub, as before.
-            required_method = _UTILITY_CAPABILITY_METHODS[handler_key]
-            if not hasattr(server.session, required_method):
-                logger.debug(
-                    "MCP server '%s': skipping utility '%s' (session lacks %s)",
-                    server_name,
-                    handler_key,
-                    required_method,
-                )
-                continue
+        # Legacy fallback when initialize_result wasn't captured (test
+        # fixtures, older paths): register every stub the session can serve.
+        elif not hasattr(server.session, _UTILITY_CAPABILITY_METHODS[handler_key]):
+            logger.debug(
+                "MCP server '%s': skipping utility '%s' (session lacks %s)",
+                server_name, handler_key, _UTILITY_CAPABILITY_METHODS[handler_key],
+            )
+            continue
         selected.append(entry)
     return selected
 
@@ -135,28 +130,17 @@ def _existing_tool_names() -> List[str]:
             names.extend(server._registered_tool_names)
             continue
         for mcp_tool in server._tools:
-            schema = _core._convert_mcp_schema(server.name, mcp_tool)
-            names.append(schema["name"])
+            names.append(_core._convert_mcp_schema(server.name, mcp_tool)["name"])
     # Lazy servers registered from the schema cache have no MCPServerTask yet —
     # their tools live only in the registry.
     with _core._lock:
-        lazy_names = [
+        names.extend(
             n
             for sname, tool_names in _core._lazy_server_tool_names.items()
             if sname not in _core._servers
             for n in tool_names
-        ]
-    names.extend(lazy_names)
+        )
     return names
-
-
-# Utility tool key -> handler factory; each takes (server_name, tool_timeout).
-_UTILITY_HANDLER_FACTORIES = {
-    "list_resources": _make_list_resources_handler,
-    "read_resource": _make_read_resource_handler,
-    "list_prompts": _make_list_prompts_handler,
-    "get_prompt": _make_get_prompt_handler,
-}
 
 
 def _make_tool_filter(name: str, config: dict) -> Callable[[str], bool]:
@@ -171,9 +155,7 @@ def _make_tool_filter(name: str, config: dict) -> Callable[[str], bool]:
     include_raw = tools_filter.get("include")
     include_set = _normalize_name_filter(include_raw, f"mcp_servers.{name}.tools.include")
     include_active = isinstance(include_raw, (str, list, tuple, set))
-    exclude_set = _normalize_name_filter(
-        tools_filter.get("exclude"), f"mcp_servers.{name}.tools.exclude"
-    )
+    exclude_set = _normalize_name_filter(tools_filter.get("exclude"), f"mcp_servers.{name}.tools.exclude")
 
     def _should_register(tool_name: str) -> bool:
         if include_active:
@@ -185,69 +167,206 @@ def _make_tool_filter(name: str, config: dict) -> Callable[[str], bool]:
     return _should_register
 
 
-def _resolve_name_collisions(name: str, candidates: List[dict]):
+class _CachedMCPTool:
+    """Minimal stand-in for MCP Tool objects loaded from the schema cache.
+    Missing/non-dict ``annotations`` (older cache files) fail closed to
+    write-capable via ``_annotation_read_only_hint``."""
+
+    __slots__ = ("name", "description", "inputSchema", "annotations")
+
+    def __init__(self, name: str, description: str, inputSchema: dict, annotations: Optional[dict] = None):
+        self.name = name
+        self.description = description
+        self.inputSchema = inputSchema or {}
+        self.annotations = annotations if isinstance(annotations, dict) else None
+
+    @classmethod
+    def from_cache_dicts(cls, raws: Iterable[Any]) -> List["_CachedMCPTool"]:
+        """Cached tool rows -> stand-ins; rows that are not dicts or lack a name are dropped."""
+        tools = []
+        for raw in raws:
+            if not isinstance(raw, dict) or not raw.get("name"):
+                continue
+            schema = raw.get("inputSchema")
+            tools.append(cls(
+                raw["name"],
+                raw.get("description") or "",
+                schema if isinstance(schema, dict) else {},
+                raw.get("annotations"),
+            ))
+        return tools
+
+
+@dataclass
+class _Candidate:
+    """One registry registration attempt for a server: a native tool or a
+    generated utility. ``origin`` is the human-readable provenance used in
+    collision diagnostics."""
+
+    registry_name: str
+    origin: str
+    schema: dict
+    handler: Callable
+
+    @property
+    def is_utility(self) -> bool:
+        return self.origin.startswith(_UTILITY_ORIGIN_PREFIX)
+
+    @property
+    def description(self) -> str:
+        return self.schema.get("description") or ""
+
+
+def _tool_candidates(name: str, tools: Iterable[Any], should_register: Callable[[str], bool], tool_timeout) -> List[_Candidate]:
+    """Native tools (live SDK objects or ``_CachedMCPTool``) -> candidates.
+    The description scan runs on BOTH paths: the cache file is user-writable JSON."""
+    candidates: List[_Candidate] = []
+    for mcp_tool in tools:
+        if not should_register(mcp_tool.name):
+            logger.debug("MCP server '%s': skipping tool '%s' (filtered by config)", name, mcp_tool.name)
+            continue
+        _core._scan_mcp_description(name, mcp_tool.name, mcp_tool.description or "")
+        schema = _core._convert_mcp_schema(name, mcp_tool)
+        candidates.append(_Candidate(
+            schema["name"], f"tool {mcp_tool.name!r}", schema,
+            _core._make_tool_handler(name, mcp_tool.name, tool_timeout),
+        ))
+    return candidates
+
+
+def _utility_candidates(name: str, entries: Iterable[Any], tool_timeout) -> List[_Candidate]:
+    """``{schema, handler_key}`` rows (live selection or cache) -> candidates;
+    malformed rows are dropped."""
+    candidates: List[_Candidate] = []
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        schema, handler_key = raw.get("schema"), raw.get("handler_key")
+        if not isinstance(schema, dict) or handler_key not in _UTILITY_HANDLER_FACTORIES or not schema.get("name"):
+            continue
+        candidates.append(_Candidate(
+            schema["name"], f"{_UTILITY_ORIGIN_PREFIX}{handler_key!r}", schema,
+            _UTILITY_HANDLER_FACTORIES[handler_key](name, tool_timeout),
+        ))
+    return candidates
+
+
+def _resolve_name_collisions(name: str, candidates: List[_Candidate]) -> List[_Candidate]:
     """Preflight registry-name collisions among one server's candidates.
 
-    Returns ``(unique_candidates, ambiguous_names, shadowed_utilities)``. Exact
-    duplicate rows (same name + origin) are dropped silently; a generated
+    Exact duplicate rows (same name + origin) are dropped silently; a generated
     utility that normalizes onto a server-native tool's name is shadowed (the
     native tool wins); any other multi-origin collision is ambiguous and every
-    colliding entry is skipped (fail closed).
+    colliding entry is skipped (fail closed). Returns the survivors in order.
     """
-    unique_candidates: List[dict] = []
-    seen_candidates: set[tuple[str, str]] = set()
+    unique: List[_Candidate] = []
+    seen: set[tuple[str, str]] = set()
     origins_by_name: Dict[str, set[str]] = {}
-    for candidate in candidates:
-        key = (candidate["registry_name"], candidate["origin"])
-        if key in seen_candidates:
+    for c in candidates:
+        if (c.registry_name, c.origin) in seen:
             logger.debug(
-                "MCP server '%s': duplicate registration candidate %s for '%s'; "
-                "keeping one",
-                name,
-                candidate["origin"],
-                candidate["registry_name"],
+                "MCP server '%s': duplicate registration candidate %s for '%s'; keeping one",
+                name, c.origin, c.registry_name,
             )
             continue
-        seen_candidates.add(key)
-        unique_candidates.append(candidate)
-        origins_by_name.setdefault(candidate["registry_name"], set()).add(
-            candidate["origin"]
-        )
+        seen.add((c.registry_name, c.origin))
+        unique.append(c)
+        origins_by_name.setdefault(c.registry_name, set()).add(c.origin)
 
-    ambiguous_names: Dict[str, List[str]] = {}
-    shadowed_utilities: set[tuple[str, str]] = set()
+    ambiguous: Dict[str, List[str]] = {}
+    shadowed: set[tuple[str, str]] = set()
     for registry_name, origins in origins_by_name.items():
         if len(origins) <= 1:
             continue
-        utility_origins = sorted(
-            o for o in origins if o.startswith("generated utility ")
-        )
+        utility_origins = sorted(o for o in origins if o.startswith(_UTILITY_ORIGIN_PREFIX))
         native_origins = sorted(origins - set(utility_origins))
         if len(native_origins) == 1 and utility_origins:
-            for util_origin in utility_origins:
-                shadowed_utilities.add((registry_name, util_origin))
+            shadowed.update((registry_name, o) for o in utility_origins)
             logger.info(
                 "MCP server '%s': generated utility %s normalizes onto "
                 "server-native %s — keeping the native tool and dropping the "
                 "utility (the utility only applies when the server has no such "
                 "tool of its own)",
-                name,
-                ", ".join(utility_origins),
-                native_origins[0],
+                name, ", ".join(utility_origins), native_origins[0],
             )
             continue
-        ambiguous_names[registry_name] = sorted(origins)
+        ambiguous[registry_name] = sorted(origins)
 
-    for registry_name, origins in sorted(ambiguous_names.items()):
+    for registry_name, origins in sorted(ambiguous.items()):
         logger.error(
             "MCP server '%s': name normalization collision for '%s' from %s; "
-            "skipping every colliding entry instead of choosing an arbitrary "
-            "handler",
-            name,
-            registry_name,
-            ", ".join(origins),
+            "skipping every colliding entry instead of choosing an arbitrary handler",
+            name, registry_name, ", ".join(origins),
         )
-    return unique_candidates, ambiguous_names, shadowed_utilities
+    return [
+        c for c in unique
+        if c.registry_name not in ambiguous and (c.registry_name, c.origin) not in shadowed
+    ]
+
+
+def _log_foreign_owner(name: str, c: _Candidate, existing_toolset: str, lazy: bool) -> None:
+    """Diagnostics for a candidate whose registry name is already owned by
+    another toolset (skipped to preserve the existing owner)."""
+    if lazy:
+        if not c.is_utility:
+            logger.warning(
+                "MCP server '%s' (lazy): cached tool '%s' collides with toolset '%s' — skipping",
+                name, c.registry_name, existing_toolset,
+            )
+    elif existing_toolset.startswith("mcp-"):
+        logger.error(
+            "MCP server '%s': %s normalizes to '%s', already owned by MCP toolset '%s' "
+            "— skipping to preserve the existing owner",
+            name, c.origin, c.registry_name, existing_toolset,
+        )
+    else:
+        logger.warning(
+            "MCP server '%s': %s (→ '%s') collides with built-in tool in toolset '%s' "
+            "— skipping to preserve built-in",
+            name, c.origin, c.registry_name, existing_toolset,
+        )
+
+
+def _register_candidates(
+    name: str, candidates: List[_Candidate], *, check_fn: Callable, scope: Callable[[], Optional[str]], lazy: bool,
+) -> List[str]:
+    """Register candidates under toolset ``mcp-{name}``; returns the names that
+    actually landed. The ownership pre-check is advisory only — multiple
+    servers connect in parallel, so ``ToolRegistry.register()`` is the atomic
+    ownership gate and its verdict is re-read after every call."""
+    from tools.registry import registry
+
+    toolset_name = f"mcp-{name}"
+    registered: List[str] = []
+    for c in candidates:
+        existing_toolset = registry.get_toolset_for_tool(c.registry_name)
+        if existing_toolset and existing_toolset != toolset_name:
+            _log_foreign_owner(name, c, existing_toolset, lazy)
+            continue
+        registry.register(
+            name=c.registry_name,
+            toolset=toolset_name,
+            schema=c.schema,
+            handler=c.handler,
+            check_fn=check_fn,
+            is_async=False,
+            description=c.description,
+            scope=scope(),
+        )
+        if registry.get_toolset_for_tool(c.registry_name) != toolset_name:
+            if not lazy:
+                logger.error(
+                    "MCP server '%s': registration of %s as '%s' was rejected by "
+                    "the registry; skipping provenance/count updates",
+                    name, c.origin, c.registry_name,
+                )
+            continue
+        _core._track_mcp_tool_server(c.registry_name, name)
+        registered.append(c.registry_name)
+
+    if registered:
+        registry.register_toolset_alias(name, toolset_name)
+    return registered
 
 
 def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should_register) -> None:
@@ -256,7 +375,7 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
     try:
         from tools.mcp_schema_cache import config_fingerprint, write_cache_entry
 
-        tools_payload: List[dict] = []
+        tools_payload = []
         for mcp_tool in server._tools:
             if not should_register(mcp_tool.name):
                 continue
@@ -266,9 +385,7 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
                 "description": mcp_tool.description or "",
                 "inputSchema": schema_obj if isinstance(schema_obj, dict) else {},
                 # Persisted so the lazy path trust-gates identically next startup.
-                "annotations": {
-                    "readOnlyHint": _annotation_read_only_hint(mcp_tool),
-                },
+                "annotations": {"readOnlyHint": _annotation_read_only_hint(mcp_tool)},
             })
         utility_payload = [
             {"schema": entry["schema"], "handler_key": entry["handler_key"]}
@@ -295,243 +412,44 @@ def _register_server_tools(name: str, server: "MCPServerTask", config: dict) -> 
     live registry rather than mutating ``toolsets.TOOLSETS``. Lossy name
     normalization can map distinct raw names (``read-file``/``read_file``) to
     one registry name; such collisions fail closed — every ambiguous entry is
-    skipped. Returns the registered prefixed names.
+    skipped. Generated utilities share the namespace and join the same
+    preflight. Returns the registered prefixed names.
     """
-    from tools.registry import registry
-
-    registered_names: List[str] = []
-    toolset_name = f"mcp-{name}"
-
-    _should_register = _make_tool_filter(name, config)
+    should_register = _make_tool_filter(name, config)
     check_fn = _make_check_fn(name)
-    candidates: List[dict] = []
-
-    # Security boundary: capture trust tier and readOnlyHint NOW, at discovery,
-    # so the call-time gate classifies from data we control, not re-read
-    # server-supplied state.
     _record_tool_trust_metadata(name, config, server._tools)
-
-    for mcp_tool in server._tools:
-        if not _should_register(mcp_tool.name):
-            logger.debug(
-                "MCP server '%s': skipping tool '%s' (filtered by config)",
-                name,
-                mcp_tool.name,
-            )
-            continue
-
-        _core._scan_mcp_description(name, mcp_tool.name, mcp_tool.description or "")
-        schema = _core._convert_mcp_schema(name, mcp_tool)
-        candidates.append(
-            {
-                "registry_name": schema["name"],
-                "origin": f"tool {mcp_tool.name!r}",
-                "schema": schema,
-                "handler": _core._make_tool_handler(
-                    name, mcp_tool.name, server.tool_timeout
-                ),
-                "check_fn": check_fn,
-            }
-        )
-
-    # Generated resource/prompt utility tools share the same namespace as raw
-    # MCP tools, so they must participate in the same collision preflight.
-    for entry in _select_utility_schemas(name, server, config):
-        schema = entry["schema"]
-        handler_key = entry["handler_key"]
-        candidates.append(
-            {
-                "registry_name": schema["name"],
-                "origin": f"generated utility {handler_key!r}",
-                "schema": schema,
-                "handler": _UTILITY_HANDLER_FACTORIES[handler_key](
-                    name, server.tool_timeout
-                ),
-                "check_fn": check_fn,
-            }
-        )
-
-    unique_candidates, ambiguous_names, shadowed_utilities = _resolve_name_collisions(name, candidates)
-
-    for candidate in unique_candidates:
-        registry_name = candidate["registry_name"]
-        if registry_name in ambiguous_names:
-            continue
-        if (registry_name, candidate["origin"]) in shadowed_utilities:
-            continue
-
-        existing_toolset = registry.get_toolset_for_tool(registry_name)
-        if existing_toolset and existing_toolset != toolset_name:
-            if existing_toolset.startswith("mcp-"):
-                logger.error(
-                    "MCP server '%s': %s normalizes to '%s', already owned by "
-                    "MCP toolset '%s' — skipping to preserve the existing owner",
-                    name,
-                    candidate["origin"],
-                    registry_name,
-                    existing_toolset,
-                )
-            else:
-                logger.warning(
-                    "MCP server '%s': %s (→ '%s') collides with built-in tool "
-                    "in toolset '%s' — skipping to preserve built-in",
-                    name,
-                    candidate["origin"],
-                    registry_name,
-                    existing_toolset,
-                )
-            continue
-
-        registry.register(
-            name=registry_name,
-            toolset=toolset_name,
-            schema=candidate["schema"],
-            handler=candidate["handler"],
-            check_fn=candidate["check_fn"],
-            is_async=False,
-            description=candidate["schema"]["description"],
-            scope=_core._server_registry_scope(name),
-        )
-
-        # The pre-check above is advisory only. Multiple servers connect in
-        # parallel, so ToolRegistry.register() is the atomic ownership gate.
-        if registry.get_toolset_for_tool(registry_name) != toolset_name:
-            logger.error(
-                "MCP server '%s': registration of %s as '%s' was rejected by "
-                "the registry; skipping provenance/count updates",
-                name,
-                candidate["origin"],
-                registry_name,
-            )
-            continue
-
-        _core._track_mcp_tool_server(registry_name, name)
-        registered_names.append(registry_name)
-
-    if registered_names:
-        registry.register_toolset_alias(name, toolset_name)
-        _write_schema_cache(name, server, config, _should_register)
-
-    return registered_names
-
-
-class _CachedMCPTool:
-    """Minimal stand-in for MCP Tool objects loaded from the schema cache."""
-
-    __slots__ = ("name", "description", "inputSchema")
-
-    def __init__(self, name: str, description: str, inputSchema: dict):
-        self.name = name
-        self.description = description
-        self.inputSchema = inputSchema or {}
+    candidates = _tool_candidates(name, server._tools, should_register, server.tool_timeout)
+    candidates += _utility_candidates(name, _select_utility_schemas(name, server, config), server.tool_timeout)
+    registered = _register_candidates(
+        name, _resolve_name_collisions(name, candidates),
+        check_fn=check_fn, scope=lambda: _core._server_registry_scope(name), lazy=False,
+    )
+    if registered:
+        _write_schema_cache(name, server, config, should_register)
+    return registered
 
 
 def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]:
     """Lazy startup: register a server's tools from a cached manifest with no
     child process. The first real call routes through
-    ``_get_connected_server_for_call`` -> ``_ensure_lazy_server_connected``."""
-    from tools.registry import registry
-    from tools.mcp_schema_cache import (
-        config_fingerprint,
-        tools_from_cache_entry,
-        utility_tools_from_cache_entry,
-    )
+    ``_get_connected_server_for_call`` -> ``_ensure_lazy_server_connected``.
+    Trust metadata is recorded first so the call-time gate is identical whether
+    the server was spawned live or registered from cache."""
+    from tools.mcp_schema_cache import config_fingerprint, tools_from_cache_entry, utility_tools_from_cache_entry
 
-    registered_names: List[str] = []
-    toolset_name = f"mcp-{name}"
-    fingerprint = config_fingerprint(config)
     tool_timeout = _resolve_tool_timeout(config)
-    _should_register = _make_tool_filter(name, config)
     check_fn = _make_check_fn(name)
-    # Record trust metadata before registration so the call-time gate is
-    # identical whether the server was spawned live or registered from cache.
-    # Missing "annotations" in older cache files fails closed to write-capable.
-    cached_tool_objs = [
-        SimpleNamespace(
-            name=raw.get("name"),
-            annotations=raw.get("annotations")
-            if isinstance(raw.get("annotations"), dict) else None,
-        )
-        for raw in tools_from_cache_entry(entry)
-        if isinstance(raw, dict) and raw.get("name")
-    ]
-    _record_tool_trust_metadata(name, config, cached_tool_objs)
-    for raw in tools_from_cache_entry(entry):
-        if not isinstance(raw, dict):
-            continue
-        raw_name = raw.get("name")
-        if not raw_name or not _should_register(raw_name):
-            continue
-        raw_schema = raw.get("inputSchema")
-        mcp_tool = _CachedMCPTool(
-            raw_name,
-            raw.get("description") or "",
-            raw_schema if isinstance(raw_schema, dict) else {},
-        )
-        # Defense-in-depth: the cache file is user-writable JSON, so apply the
-        # same injection scan as eager discovery.
-        _core._scan_mcp_description(name, mcp_tool.name, mcp_tool.description or "")
-        schema = _core._convert_mcp_schema(name, mcp_tool)
-        registry_name = schema["name"]
-        existing_toolset = registry.get_toolset_for_tool(registry_name)
-        if existing_toolset and existing_toolset != toolset_name:
-            logger.warning(
-                "MCP server '%s' (lazy): cached tool '%s' collides with "
-                "toolset '%s' — skipping",
-                name, registry_name, existing_toolset,
-            )
-            continue
-        registry.register(
-            name=registry_name,
-            toolset=toolset_name,
-            schema=schema,
-            handler=_core._make_tool_handler(name, raw_name, tool_timeout),
-            check_fn=check_fn,
-            is_async=False,
-            description=schema["description"],
-            scope=_core._mcp_registry_scope(),
-        )
-        if registry.get_toolset_for_tool(registry_name) != toolset_name:
-            continue
-        _core._track_mcp_tool_server(registry_name, name)
-        registered_names.append(registry_name)
-
-    for raw in utility_tools_from_cache_entry(entry):
-        if not isinstance(raw, dict):
-            continue
-        schema = raw.get("schema")
-        handler_key = raw.get("handler_key")
-        if not isinstance(schema, dict) or handler_key not in _UTILITY_HANDLER_FACTORIES:
-            continue
-        util_name = schema.get("name") or ""
-        if not util_name:
-            continue
-        existing_toolset = registry.get_toolset_for_tool(util_name)
-        if existing_toolset and existing_toolset != toolset_name:
-            continue
-        registry.register(
-            name=util_name,
-            toolset=toolset_name,
-            schema=schema,
-            handler=_UTILITY_HANDLER_FACTORIES[handler_key](name, tool_timeout),
-            check_fn=check_fn,
-            is_async=False,
-            description=schema.get("description") or "",
-            scope=_core._mcp_registry_scope(),
-        )
-        if registry.get_toolset_for_tool(util_name) != toolset_name:
-            continue
-        _core._track_mcp_tool_server(util_name, name)
-        registered_names.append(util_name)
-
-    if registered_names:
-        registry.register_toolset_alias(name, toolset_name)
+    cached_tools = _CachedMCPTool.from_cache_dicts(tools_from_cache_entry(entry))
+    _record_tool_trust_metadata(name, config, cached_tools)
+    candidates = _tool_candidates(name, cached_tools, _make_tool_filter(name, config), tool_timeout)
+    candidates += _utility_candidates(name, utility_tools_from_cache_entry(entry), tool_timeout)
+    registered = _register_candidates(
+        name, candidates, check_fn=check_fn, scope=_core._mcp_registry_scope, lazy=True,
+    )
+    if registered:
         with _core._lock:
             _core._lazy_server_configs[name] = dict(config)
-            _core._lazy_server_fingerprints[name] = fingerprint
-            _core._lazy_server_tool_names[name] = list(registered_names)
-        logger.info(
-            "MCP server '%s' (lazy): registered %d tool(s) from schema cache",
-            name, len(registered_names),
-        )
-    return registered_names
+            _core._lazy_server_fingerprints[name] = config_fingerprint(config)
+            _core._lazy_server_tool_names[name] = list(registered)
+        logger.info("MCP server '%s' (lazy): registered %d tool(s) from schema cache", name, len(registered))
+    return registered
