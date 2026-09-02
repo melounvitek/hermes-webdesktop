@@ -25,8 +25,12 @@ from __future__ import annotations
 import logging
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.conversation_compression import COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE
+from agent.model_metadata import is_output_cap_error, parse_available_output_tokens_from_error
+from agent.retry_utils import is_zai_coding_overload_error, zai_coding_overload_retry_ceiling
 from agent.error_classifier import FailoverReason
 from agent.message_sanitization import (
     _looks_like_image_content_rejection,
@@ -1414,3 +1418,344 @@ def describe_invalid_response(agent: Any, response: Any, api_duration: float) ->
     else:
         _failure_hint = f"response time {api_duration:.1f}s"
     return error_msg, provider_name, _failure_hint
+
+
+@dataclass
+class ClassifiedErrorVerdict:
+    """Outcome of ``route_classified_error``.
+
+    ``action``: ``"return"`` (terminal result), ``"break"`` (restart armed on
+    ``_retry``), ``"continue"`` (re-enter the retry loop; Nous guard re-check) or
+    ``"fallthrough"`` (proceed to overflow / client-error / backoff handling). The
+    remaining fields are loop locals the router may have rebound or computed for the
+    later steps (``is_rate_limited``, ``wrapped_output_cap_budget``,
+    ``is_zai_coding_overload`` feed the overflow entry, client-error gate and backoff)."""
+
+    action: str
+    result: Optional[Dict[str, Any]]
+    status_code: Optional[int]
+    messages: List[Dict[str, Any]]
+    active_system_prompt: Any
+    conversation_history: Any
+    retry_count: int
+    max_retries: int
+    compression_attempts: int
+    provider_overflow_recovery_pending: bool
+    is_rate_limited: bool
+    wrapped_output_cap_budget: Optional[int]
+    is_zai_coding_overload: bool
+
+
+def route_classified_error(
+    agent: Any,
+    api_error: Exception,
+    classified: Any,
+    _retry: TurnRetryState,
+    *,
+    error_msg: str,
+    error_context: Any,
+    recovered_with_pool: bool,
+    base_url: Any,
+    model: Any,
+    messages: List[Dict[str, Any]],
+    api_messages: Any,
+    system_message: Any,
+    active_system_prompt: Any,
+    conversation_history: Any,
+    retry_count: int,
+    max_retries: int,
+    compression_attempts: int,
+    max_compression_attempts: int,
+    api_call_count: int,
+    effective_task_id: Any,
+) -> ClassifiedErrorVerdict:
+    """Ordered recovery steps between classification logging and overflow handling:
+    compaction-disabled overflow → terminal error (output-cap errors exempt);
+    Anthropic long-context tier 429 → cap at 200k and compress; eager fallback for
+    rate-limit/billing (immediately) and transport failures (after 1 retry), unless
+    credential-pool rotation may still recover (#11314; upstream-aggregator 429s always
+    fall back); persistent 401/403 → fallback chain once; genuine Nous 429 → record to
+    the cross-session breaker and re-enter the loop exactly once so the top-of-loop guard
+    runs. Order is load-bearing."""
+    from agent.conversation_loop import (
+        _arm_fallback_restart,
+        _ra,
+        conversation_history_after_compression,
+        estimate_request_tokens_rough,
+    )
+
+    _base = base_url
+    _model = model
+    _provider_overflow_recovery_pending = False
+    is_rate_limited = False
+    _wrapped_output_cap_budget = None
+    _is_zai_coding_overload = False
+
+    def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ClassifiedErrorVerdict:
+        return ClassifiedErrorVerdict(
+            action=action,
+            result=result,
+            status_code=status_code,
+            messages=messages,
+            active_system_prompt=active_system_prompt,
+            conversation_history=conversation_history,
+            retry_count=retry_count,
+            max_retries=max_retries,
+            compression_attempts=compression_attempts,
+            provider_overflow_recovery_pending=_provider_overflow_recovery_pending,
+            is_rate_limited=is_rate_limited,
+            wrapped_output_cap_budget=_wrapped_output_cap_budget,
+            is_zai_coding_overload=_is_zai_coding_overload,
+        )
+
+    # Check 413 BEFORE the generic 4xx handler: compress + retry, not abort.
+    status_code = getattr(api_error, "status_code", None)
+
+    # ── Respect disabled auto-compaction on overflow ──────
+    # ``compression.enabled: false`` forbids every automatic trigger, incl.
+    # these overflow recovery paths; error out. Output-cap errors exempt.
+    _overflow_reasons = {
+        FailoverReason.long_context_tier,
+        FailoverReason.payload_too_large,
+        FailoverReason.context_overflow,
+    }
+    _is_output_cap_error = (
+        is_output_cap_error(error_msg)
+        or parse_available_output_tokens_from_error(error_msg) is not None
+    )
+    if (
+        classified.reason in _overflow_reasons
+        and not getattr(agent, "compression_enabled", True)
+        and not _is_output_cap_error
+    ):
+        agent._flush_status_buffer()
+        agent._vprint(
+            f"{agent.log_prefix}❌ Context overflow, but auto-compaction is disabled "
+            f"(compression.enabled: false).",
+            force=True,
+        )
+        agent._vprint(
+            f"{agent.log_prefix}   💡 Run /compress to compact manually, /new to start fresh, "
+            f"switch to a larger-context model, or reduce attachments.",
+            force=True,
+        )
+        logger.error(
+            f"{agent.log_prefix}Context overflow ({classified.reason.value}) with "
+            f"auto-compaction disabled — not compressing."
+        )
+        agent._persist_session(messages, conversation_history)
+        _final_response = (
+            "Context overflow and auto-compaction is disabled "
+            "(compression.enabled: false). Run /compress to compact manually, "
+            "/new to start fresh, or switch to a larger-context model."
+        )
+        return _verdict("return", {
+            "final_response": _final_response,
+            "messages": messages,
+            "completed": False,
+            "api_calls": api_call_count,
+            "error": _final_response,
+            "partial": True,
+            "failed": True,
+            "compaction_disabled": True,
+        })
+
+    # ── Anthropic Sonnet long-context tier gate ───────────
+    # 429 "Extra usage is required for long context requests" is a
+    # subscription-tier limit, not transient: cap at 200k and compress.
+    if classified.reason == FailoverReason.long_context_tier:
+        _reduced_ctx = 200000
+        compressor = agent.context_compressor
+        old_ctx = compressor.context_length
+        if old_ctx > _reduced_ctx:
+            compressor.update_model(
+                model=agent.model,
+                context_length=_reduced_ctx,
+                base_url=agent.base_url,
+                api_key=getattr(agent, "api_key", ""),
+                provider=agent.provider,
+                api_mode=agent.api_mode,
+            )
+            # Context probing flags — only set on built-in
+            # compressor (plugin engines manage their own).
+            if hasattr(compressor, "_context_probed"):
+                compressor._context_probed = True
+                # Don't persist — subscription-tier limit, not a model
+                # capability; 1M should return if extra usage is enabled.
+                compressor._context_probe_persistable = False
+            agent._buffer_vprint(
+                f"⚠️  Anthropic long-context tier "
+                f"requires extra usage — reducing context: "
+                f"{old_ctx:,} → {_reduced_ctx:,} tokens"
+            )
+
+        compression_attempts += 1
+        if compression_attempts <= max_compression_attempts:
+            original_len = len(messages)
+            # Option A (LCM issue 441): overhead-aware request size so recovery arms on
+            # the true request (msgs + tools + system), not the tool-blind message count.
+            messages, active_system_prompt = agent._compress_context(
+                messages, system_message,
+                approx_tokens=estimate_request_tokens_rough(api_messages, tools=agent.tools or None),
+                task_id=effective_task_id,
+            )
+            conversation_history = conversation_history_after_compression(
+                agent, messages, conversation_history
+            )
+            if len(messages) < original_len or old_ctx > _reduced_ctx:
+                agent._buffer_status(
+                    COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE.format(
+                        new_ctx=_reduced_ctx, old_ctx=old_ctx
+                    )
+                )
+                time.sleep(2)
+                # Provider proved the request doesn't fit the reduced
+                # window; row count isn't proof the rebuilt one does.
+                # Recheck the complete request before the next call.
+                _provider_overflow_recovery_pending = True
+                _retry.restart_with_compressed_messages = True
+                return _verdict("break")
+        # Fall through to normal error handling if compression
+        # is exhausted or didn't help.
+
+    # Eager fallback: rate-limit/billing switch immediately (primary won't
+    # recover in the retry window); transport errors get 1 retry first.
+    is_rate_limited = classified.reason in {
+        FailoverReason.rate_limit,
+        FailoverReason.billing,
+        FailoverReason.upstream_rate_limit,
+    }
+    # Some relays wrap upstream output-cap 400s as 429 (rate_limit). Only
+    # the max_tokens clamp fixes it (#72281). Parsed once; gates the
+    # eager-fallback exemption and the overflow entry below.
+    _wrapped_output_cap_budget = (
+        parse_available_output_tokens_from_error(error_msg)
+        if classified.reason == FailoverReason.rate_limit
+        else None
+    )
+    _is_transport_failure = classified.reason in {
+        FailoverReason.timeout,
+        FailoverReason.overloaded,
+    }
+    # Z.AI overload 429s classify `overloaded`, which `is_rate_limited`
+    # excludes. Detect directly so the long backoff runs, and raise the
+    # ceiling to reach it (see zai_coding_overload_retry_ceiling()).
+    _is_zai_coding_overload = is_zai_coding_overload_error(
+        base_url=str(_base), model=_model, error=api_error
+    )
+    if _is_zai_coding_overload:
+        max_retries = max(max_retries, zai_coding_overload_retry_ceiling())
+    _should_fallback = (
+        (is_rate_limited and _wrapped_output_cap_budget is None)
+        or (_is_transport_failure and retry_count >= 2)
+    )
+    if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
+        # No eager fallback while credential pool rotation may recover
+        # (_pool_may_recover_from_rate_limit, #11314). Exception: an
+        # upstream-aggregator 429 — the pool can't help, always fall back.
+        _is_upstream = classified.reason == FailoverReason.upstream_rate_limit
+        pool_may_recover = (
+            False if _is_upstream
+            else _ra()._pool_may_recover_from_rate_limit(
+                agent._credential_pool,
+            )
+        )
+        if not pool_may_recover:
+            if _is_upstream:
+                _upstream_name = (classified.error_context or {}).get(
+                    "upstream_provider", "aggregator"
+                )
+                agent._buffer_status(
+                    f"⚠️ Upstream {_upstream_name} rate-limited — "
+                    "switching to fallback model..."
+                )
+            elif classified.reason == FailoverReason.billing:
+                if classified.billing_unverified:
+                    # Ambiguous body (#82154) — don't assert billing.
+                    agent._buffer_status(
+                        "⚠️ Provider reported usage/credit exhaustion "
+                        "(unverified — may be a content-filter rejection) "
+                        "— switching to fallback provider..."
+                    )
+                else:
+                    agent._buffer_status(
+                        "⚠️ Billing or credits exhausted — switching to fallback provider..."
+                    )
+            elif _is_transport_failure:
+                agent._buffer_status(
+                    "⚠️ Provider unreachable — switching to fallback provider..."
+                )
+            else:
+                agent._buffer_status("⚠️ Rate limited — switching to fallback provider...")
+            if agent._try_activate_fallback(reason=classified.reason):
+                active_system_prompt = _arm_fallback_restart(
+                    agent, api_messages, active_system_prompt, _retry)
+                retry_count = 0
+                compression_attempts = 0
+                return _verdict("break")
+
+    # ── Auth-failure provider failover ───────────────────────
+    # A 401/403 surviving credential refresh means a broken credential or
+    # endpoint: escalate to the fallback chain; False -> terminal handling.
+    if (
+        classified.is_auth
+        and not _retry.auth_failover_attempted
+        and agent._fallback_index < len(agent._fallback_chain)
+    ):
+        _retry.auth_failover_attempted = True
+        agent._buffer_status(
+            "🔐 Authentication failed and could not be refreshed — "
+            "switching to fallback provider..."
+        )
+        if agent._try_activate_fallback(reason=classified.reason):
+            active_system_prompt = _arm_fallback_restart(
+                agent, api_messages, active_system_prompt, _retry)
+            retry_count = 0
+            compression_attempts = 0
+            return _verdict("break")
+
+    # ── Nous Portal: record rate limit & skip retries ─────
+    # A genuine account-level 429 is recorded to a shared file so ALL
+    # sessions back off; is_genuine_nous_rate_limit excludes upstream 429s.
+    if (
+        is_rate_limited
+        and agent.provider == "nous"
+        and classified.reason == FailoverReason.rate_limit
+        and not recovered_with_pool
+    ):
+        _genuine_nous_rate_limit = False
+        try:
+            from agent.nous_rate_guard import (
+                is_genuine_nous_rate_limit,
+                record_nous_rate_limit,
+            )
+            _err_resp = getattr(api_error, "response", None)
+            _err_hdrs = (
+                getattr(_err_resp, "headers", None)
+                if _err_resp else None
+            )
+            _genuine_nous_rate_limit = is_genuine_nous_rate_limit(
+                headers=_err_hdrs,
+                last_known_state=agent._rate_limit_state,
+            )
+            if _genuine_nous_rate_limit:
+                record_nous_rate_limit(
+                    headers=_err_hdrs,
+                    error_context=error_context,
+                )
+            else:
+                logger.info(
+                    "Nous 429 looks like upstream capacity "
+                    "(no exhausted bucket in headers or "
+                    "last-known state) -- not tripping "
+                    "cross-session breaker."
+                )
+        except Exception:
+            pass
+        if _genuine_nous_rate_limit:
+            # Re-enter the loop exactly once so the top-of-loop Nous guard
+            # runs (retry_count = max_retries would skip it entirely).
+            retry_count = max(0, max_retries - 1)
+            return _verdict("continue")
+        # Upstream capacity 429: normal retry logic will typically succeed.
+    return _verdict("fallthrough")
