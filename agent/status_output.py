@@ -74,11 +74,10 @@ class StatusOutputMixin:
             and getattr(self, "platform", "") == "cli"
         )
 
-    def _emit_status(self, message: str) -> None:
-        """Emit a lifecycle status message to both CLI (``_vprint(force=True)``) and gateway
-        (``status_callback``).
+    def _emit_status_kind(self, kind: str, message: str, *, origin: str) -> None:
+        """Print to the CLI (``_vprint(force=True)``) and forward to ``status_callback(kind, message)``.
 
-        Never raises — it must not interrupt the retry/fallback logic.
+        Never raises — status output must not interrupt the retry/fallback logic.
         """
         try:
             self._vprint(f"{self.log_prefix}{message}", force=True)
@@ -86,25 +85,18 @@ class StatusOutputMixin:
             pass
         if self.status_callback:
             try:
-                self.status_callback("lifecycle", message)
+                self.status_callback(kind, message)
             except Exception:
-                logger.debug("status_callback error in _emit_status", exc_info=True)
+                logger.debug("status_callback error in %s", origin, exc_info=True)
+
+    def _emit_status(self, message: str) -> None:
+        """Emit a lifecycle status message (CLI + gateway ``status_callback``)."""
+        self._emit_status_kind("lifecycle", message, origin="_emit_status")
 
     def _emit_warning(self, message: str) -> None:
-        """Emit a user-visible warning through the same status plumbing.
-
-        For degraded side paths (auxiliary compression, memory flushes) where the turn continues but the user
-        must know.
-        """
-        try:
-            self._vprint(f"{self.log_prefix}{message}", force=True)
-        except Exception:
-            pass
-        if self.status_callback:
-            try:
-                self.status_callback("warn", message)
-            except Exception:
-                logger.debug("status_callback error in _emit_warning", exc_info=True)
+        """Emit a user-visible warning for degraded side paths (aux compression, memory flushes) where the
+        turn continues but the user must know."""
+        self._emit_status_kind("warn", message, origin="_emit_warning")
 
     def _warn_context_overflow_blocked(
         self, reason: str, preflight_tokens: int, threshold_tokens: int
@@ -196,32 +188,26 @@ class StatusOutputMixin:
     # Retry chatter is buffered and shown only when every retry/fallback is exhausted; dropped on
     # success. Backend logs are unaffected (every site still logs).
 
-    def _buffer_status(self, message: str) -> None:
-        """Buffer a retry/fallback status message as ``(kind, text)``.
+    def _buffer_retry_message(self, kind: str, message: str) -> None:
+        """Buffer a retry/fallback line as ``(kind, text)`` until we know whether the turn recovered.
 
         ``kind`` is ``"status"`` (replays via ``_emit_status``), ``"vprint"`` (``_vprint(force=True)``) or
-        ``"warn"`` (``_emit_warning``). Deferred until we know whether the turn recovered.
+        ``"warn"`` (``_emit_warning``). Never breaks the retry loop on a buffer hiccup.
         """
         try:
             buf = getattr(self, "_retry_status_buffer", None)
             if buf is None:
                 buf = []
                 self._retry_status_buffer = buf
-            buf.append(("status", message))
+            buf.append((kind, message))
         except Exception:
-            # Never break the retry loop on a buffer hiccup.
             pass
 
+    def _buffer_status(self, message: str) -> None:
+        self._buffer_retry_message("status", message)
+
     def _buffer_vprint(self, message: str) -> None:
-        """Buffer a vprint(force=True) retry/fallback line."""
-        try:
-            buf = getattr(self, "_retry_status_buffer", None)
-            if buf is None:
-                buf = []
-                self._retry_status_buffer = buf
-            buf.append(("vprint", message))
-        except Exception:
-            pass
+        self._buffer_retry_message("vprint", message)
 
     def _clear_status_buffer(self) -> None:
         """Drop buffered retry messages — call on successful recovery."""
