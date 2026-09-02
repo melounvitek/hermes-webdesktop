@@ -185,10 +185,7 @@ def _pop_session_locked(sid: str) -> Tuple[Optional[ComputerUseBackend], Optiona
 def _stop_backend(backend: ComputerUseBackend, call_lock: Optional[threading.RLock]) -> None:
     """Stop under the session call lock (if any) so an in-flight action finishes first.
     Never called under ``_backend_lock``: unrelated sessions stay free meanwhile. Raises."""
-    if call_lock is not None:
-        with call_lock:
-            backend.stop()
-    else:
+    with call_lock if call_lock is not None else contextlib.nullcontext():
         backend.stop()
 
 def _get_backend(session_id: str = "") -> ComputerUseBackend:
