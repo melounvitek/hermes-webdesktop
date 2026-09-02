@@ -27,7 +27,7 @@ from pathlib import Path
 
 def _load_handle_enter_node() -> ast.FunctionDef:
     """Extract the ``handle_enter`` nested function node from cli.py."""
-    cli_path = Path(__file__).resolve().parents[2] / "cli.py"
+    cli_path = Path(__file__).resolve().parents[2] / "hermes_cli" / "cli_tui_mixin.py"
     tree = ast.parse(cli_path.read_text(encoding="utf-8"))
 
     target = None
@@ -35,7 +35,7 @@ def _load_handle_enter_node() -> ast.FunctionDef:
         if isinstance(node, ast.FunctionDef) and node.name == "_tui_handle_enter":
             target = node
             break
-    assert target is not None, "handle_enter closure not found in cli.py"
+    assert target is not None, "_tui_handle_enter not found in cli_tui_mixin.py"
     return target
 
 

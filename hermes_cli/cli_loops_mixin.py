@@ -1,0 +1,725 @@
+"""Simple slash-command wrappers plus goal/heartbeat/loop manager hooks for the interactive CLI
+
+Mixin split out of ``cli.py``; bound onto ``HermesCLI`` via the MRO. cli.py-internal
+symbols are imported LAZILY inside each method (``from cli import ...``) — the mixin
+never imports ``cli`` at module load time (import cycle).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+import threading
+import time
+
+from rich.markup import escape as _escape
+
+
+class CLILoopsMixin:
+    """Simple slash-command wrappers plus goal/heartbeat/loop manager hooks for the interactive CLI"""
+
+    def _cmd_exit(self, cmd_original: str):
+        # /exit --delete also removes the session's transcripts + SQLite history.
+        from cli import _DIM, _RST, _cprint, _slash_args
+        _args = _slash_args(cmd_original).lower()
+        if _args in {"--delete", "-d"}:
+            self._delete_session_on_exit = True
+        elif _args:
+            _cprint(f"  {_DIM}✗ Unknown argument: {_escape(_args)}. Use /exit --delete to also remove session history.{_RST}")
+            return True
+        return False
+
+    def _cmd_help(self, cmd_original: str):
+        from cli import _slash_args
+        self.show_help(_slash_args(cmd_original))
+
+    def _cmd_redraw(self, cmd_original: str):
+        # Manual recovery for terminal buffer drift from multiplexer
+        # tab switches, subshell ``clear``, SSH window restores, etc.
+        # See issue #8688 (cmux). Ctrl+L is bound to the same helper.
+        from cli import _DIM, _RST, _cprint
+        self._force_full_redraw()
+        _cprint(f"  {_DIM}✓ UI redrawn{_RST}")
+
+    def _cmd_clear(self, cmd_original: str):
+        from cli import (
+            ChatConsole,
+            _build_compact_banner,
+            _clear_output_history,
+            _cprint,
+            build_welcome_banner,
+            get_tool_definitions,
+        )
+        if self._confirm_destructive_slash(
+            "clear",
+            "This clears the screen and starts a new session.\n"
+            "The current conversation history will be discarded.",
+            cmd_original=cmd_original,
+        ) is None:
+            return True  # confirmation cancelled — command handled, keep REPL alive
+        self.new_session(silent=True)
+        _clear_output_history()
+        # Clear terminal screen.  Inside the TUI, Rich's console.clear()
+        # goes through patch_stdout's StdoutProxy which swallows the
+        # screen-clear escape sequences.  Use prompt_toolkit's output
+        # object directly to actually clear the terminal.
+        if self._app:
+            out = self._app.output
+            out.erase_screen()
+            out.cursor_goto(0, 0)
+            out.flush()
+        else:
+            self.console.clear()
+        # Show fresh banner.  Inside the TUI we must route Rich output
+        # through ChatConsole (which uses prompt_toolkit's native ANSI
+        # renderer) instead of self.console (which writes raw to stdout
+        # and gets mangled by patch_stdout).
+        if self._app:
+            cc = ChatConsole()
+            term_w = shutil.get_terminal_size().columns
+            if self.compact or term_w < 80:
+                cc.print(_build_compact_banner())
+            else:
+                tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+                cwd = os.getenv("TERMINAL_CWD", os.getcwd())
+                ctx_len = None
+                if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
+                    ctx_len = self.agent.context_compressor.context_length
+                build_welcome_banner(
+                    console=cc,
+                    model=self.model,
+                    cwd=cwd,
+                    tools=tools,
+                    enabled_toolsets=self.enabled_toolsets,
+                    session_id=self.session_id,
+                    context_length=ctx_len,
+                    provider=self.provider,
+                )
+            _cprint("  ✨ (◕‿◕)✨ Fresh start! Screen cleared and conversation reset.\n")
+            self._print_random_tip()
+        else:
+            self.show_banner()
+            print("  ✨ (◕‿◕)✨ Fresh start! Screen cleared and conversation reset.\n")
+            self._print_random_tip()
+
+    def _cmd_title(self, cmd_original: str):
+        from cli import _cprint
+        parts = cmd_original.split(maxsplit=1)
+        if len(parts) > 1:
+            raw_title = parts[1].strip()
+            if raw_title:
+                if self._session_db:
+                    # Sanitize the title early so feedback matches what gets stored
+                    try:
+                        from hermes_state import SessionDB
+                        new_title = SessionDB.sanitize_title(raw_title)
+                    except ValueError as e:
+                        # sanitize_title rejected the input (e.g. too long).
+                        # Print that one reason and stop — don't fall
+                        # through to the "empty after cleanup" branch and
+                        # print a second, contradictory error (SC-05).
+                        _cprint(f"  {e}")
+                        return True
+                    if not new_title:
+                        _cprint("  Title is empty after cleanup. Please use printable characters.")
+                    elif self._session_db.get_session(self.session_id):
+                        # Session exists in DB — set title directly
+                        try:
+                            if self._session_db.set_session_title(self.session_id, new_title):
+                                self._status_bar_title_checked_at = 0.0
+                                _cprint(f"  Session title set: {new_title}")
+                            else:
+                                _cprint("  Session not found in database.")
+                        except ValueError as e:
+                            _cprint(f"  {e}")
+                    else:
+                        # Session not created yet — defer the title
+                        # Check uniqueness proactively with the sanitized title
+                        existing = self._session_db.get_session_by_title(new_title)
+                        if existing:
+                            _cprint(f"  Title '{new_title}' is already in use by session {existing['id']}")
+                        else:
+                            self._pending_title = new_title
+                            _cprint(f"  Session title queued: {new_title} (will be saved on first message)")
+                else:
+                    from hermes_state import format_session_db_unavailable
+                    _cprint(f"  {format_session_db_unavailable()}")
+            else:
+                _cprint("  Usage: /title <your session title>")
+        # Show current title and session ID if no argument given
+        elif self._session_db:
+            _cprint(f"  Session ID: {self.session_id}")
+            session = self._session_db.get_session(self.session_id)
+            if session and session.get("title"):
+                _cprint(f"  Title: {session['title']}")
+            elif self._pending_title:
+                _cprint(f"  Title (pending): {self._pending_title}")
+            else:
+                _cprint("  No title set. Usage: /title <your session title>")
+        else:
+            from hermes_state import format_session_db_unavailable
+            _cprint(f"  {format_session_db_unavailable()}")
+
+    def _cmd_new(self, cmd_original: str):
+        # Strip inline-skip tokens (now/--yes/-y) before deriving the title
+        # so "/new now My Session" yields title="My Session" instead of
+        # title="now My Session". See _split_destructive_skip.
+        _new_args, _ = self._split_destructive_skip(cmd_original)
+        title = _new_args.strip() or None
+        if self._confirm_destructive_slash(
+            "new",
+            "This starts a fresh session.\n"
+            "The current conversation history will be discarded.",
+            cmd_original=cmd_original,
+        ) is None:
+            return True  # confirmation cancelled — command handled, keep REPL alive
+        self.new_session(title=title)
+
+    def _cmd_retry(self, cmd_original: str):
+        retry_msg = self.retry_last()
+        if retry_msg and hasattr(self, '_pending_input'):
+            # Re-queue the message so process_loop sends it to the agent
+            self._pending_input.put(retry_msg)
+
+    def _cmd_undo(self, cmd_original: str):
+        # Parse optional turn count: "/undo" → 1, "/undo 3" → 3.
+        _undo_n = 1
+        _undo_parts = cmd_original.split()
+        if len(_undo_parts) > 1:
+            try:
+                _undo_n = int(_undo_parts[1])
+            except ValueError:
+                print(f"(._.) Invalid count {_undo_parts[1]!r} — use /undo or /undo N.")
+                return True  # bad arg — command handled, keep the REPL alive
+            if _undo_n < 1:
+                _undo_n = 1
+        # Nothing to undo → say so immediately; don't pop a destructive
+        # confirmation dialog for a guaranteed no-op (SC-06).
+        if not self.conversation_history:
+            print("(._.) No messages to undo.")
+            return True
+        _undo_desc = (
+            "This removes the last user/assistant exchange from history."
+            if _undo_n == 1
+            else f"This removes the last {_undo_n} user turns from history."
+        )
+        if self._confirm_destructive_slash(
+            "undo",
+            _undo_desc,
+            cmd_original=cmd_original,
+        ) is None:
+            return True  # confirmation cancelled — command handled, keep REPL alive
+        self.undo_last(_undo_n)
+
+    def _cmd_skills(self, cmd_original: str):
+        with self._busy_command(self._slow_command_status(cmd_original)):
+            self._handle_skills_command(cmd_original)
+
+    def _cmd_egress(self, cmd_original: str):
+        from hermes_cli.slash_exec import CommandContext, execute_command
+
+        self._console_print(
+            execute_command("egress", CommandContext(surface="cli")).text,
+            highlight=False, markup=False,
+        )
+
+    def _cmd_statusbar(self, cmd_original: str):
+        self._status_bar_visible = not self._status_bar_visible
+        state = "visible" if self._status_bar_visible else "hidden"
+        self._console_print(f"  Status bar {state}")
+
+    def _cmd_update(self, cmd_original: str) -> bool:
+        # A truthy result means the process is relaunching — leave the REPL.
+        return not self._handle_update_command()
+
+    def _cmd_version(self, cmd_original: str):
+        from hermes_cli.main import _print_version_info
+
+        _print_version_info(check_updates=True)
+
+    def _cmd_reload(self, cmd_original: str):
+        from hermes_cli.config import reload_env
+        count = reload_env()
+        print(f"  Reloaded .env ({count} var(s) updated)")
+
+    def _cmd_reload_skills(self, cmd_original: str):
+        with self._busy_command(self._slow_command_status(cmd_original)):
+            self._reload_skills()
+
+    def _cmd_plugins(self, cmd_original: str):
+        from cli import display_hermes_home
+        try:
+            # Discover from disk (bundled + user), matching `hermes plugins
+            # list` — so installed-but-not-enabled plugins are visible here
+            # too. The plugin manager only knows about *loaded* plugins, so
+            # using it alone made freshly-installed, not-yet-enabled plugins
+            # look like "nothing installed".
+            from hermes_cli.plugins_cmd import (
+                _discover_all_plugins,
+                _get_disabled_set,
+                _get_enabled_set,
+                _plugin_status,
+            )
+
+            entries = _discover_all_plugins()
+            enabled = _get_enabled_set()
+            disabled = _get_disabled_set()
+
+            # `/plugins` is a quick glance — default to user-installed
+            # plugins (what the user actually added). Bundled provider/
+            # platform plugins are summarized on one line; the full
+            # catalog lives behind `hermes plugins list`.
+            user_entries = [e for e in entries if e[3] != "bundled"]
+            bundled_count = len(entries) - len(user_entries)
+
+            if not user_entries:
+                print("No user plugins installed.")
+                print("  Install one: hermes plugins install owner/repo")
+                print(f"  Or drop a plugin directory into {display_hermes_home()}/plugins/")
+                if bundled_count:
+                    print(f"  ({bundled_count} bundled plugins available — see: hermes plugins list)")
+            else:
+                # Loaded-plugin details (tools/hooks/commands counts, errors)
+                # keyed by name, when available.
+                loaded: dict = {}
+                try:
+                    from hermes_cli.plugins import get_plugin_manager
+                    for p in get_plugin_manager().list_plugins():
+                        loaded[p["name"]] = p
+                except Exception:
+                    loaded = {}
+
+                print(f"User plugins ({len(user_entries)}):")
+                for name, version, _desc, source, _dir, key in sorted(user_entries):
+                    state = _plugin_status(name, enabled, disabled, key=key)
+                    glyph = {"enabled": "✓", "disabled": "✗"}.get(state, "○")
+                    ver = f" v{version}" if version else ""
+                    info = loaded.get(name) or {}
+                    bits = []
+                    if info.get("tools"):
+                        bits.append(f"{info['tools']} tools")
+                    if info.get("hooks"):
+                        bits.append(f"{info['hooks']} hooks")
+                    if info.get("commands"):
+                        bits.append(f"{info['commands']} commands")
+                    detail = f" ({', '.join(bits)})" if bits else ""
+                    label = "" if state == "enabled" else f" [{state}]"
+                    error = f" — {info['error']}" if info.get("error") else ""
+                    print(f"  {glyph} {name}{ver}{label}{detail}{error}")
+                if bundled_count:
+                    print(f"  (+{bundled_count} bundled — see: hermes plugins list)")
+                print("  Enable/disable: hermes plugins enable/disable <name>")
+        except Exception as e:
+            print(f"Plugin system error: {e}")
+
+    def _cmd_queue(self, cmd_original: str):
+        from cli import _cprint, _slash_args
+        payload = self._expand_paste_references(_slash_args(cmd_original))
+        if not payload:
+            _cprint("  Usage: /queue <prompt>")
+        else:
+            self._pending_input.put(payload)
+            if self._agent_running:
+                _cprint(f"  Queued for the next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
+            else:
+                _cprint(f"  Queued: {payload[:80]}{'...' if len(payload) > 80 else ''}")
+
+    def _cmd_steer(self, cmd_original: str):
+        # Inject a message after the next tool call without interrupting.
+        # If the agent is actively running, push the text into the agent's
+        # pending_steer slot — the drain hook in _execute_tool_calls_*
+        # will append it to the next tool result's content. If no agent
+        # is running, fall back to queue semantics (same as /queue).
+        from cli import _cprint, _slash_args
+        payload = _slash_args(cmd_original)
+        if not payload:
+            _cprint("  Usage: /steer <prompt>")
+        elif self._agent_running and self.agent is not None and hasattr(self.agent, "steer"):
+            try:
+                accepted = self.agent.steer(payload)
+            except Exception as exc:
+                _cprint(f"  Steer failed: {exc}")
+            else:
+                if accepted:
+                    _cprint(f"  ⏩ Steer queued — arrives after the next tool call: {payload[:80]}{'...' if len(payload) > 80 else ''}")
+                else:
+                    _cprint("  Steer rejected (empty payload).")
+        else:
+            # No active run — treat as a normal next-turn message.
+            self._pending_input.put(payload)
+            _cprint(f"  No agent running; queued as next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
+
+    # ────────────────────────────────────────────────────────────────
+    # /goal — persistent cross-turn goals (Ralph-style loop)
+    # ────────────────────────────────────────────────────────────────
+    def _get_goal_manager(self):
+        """Return the GoalManager bound to the current session_id.
+
+        Cached on ``self._goal_manager`` and rebound lazily when
+        ``session_id`` changes (e.g. after /new or a compression-driven
+        session split).
+        """
+        try:
+            from hermes_cli.goals import GoalManager
+            from hermes_cli.config import load_config
+        except Exception as exc:
+            logging.debug("goal manager unavailable: %s", exc)
+            return None
+
+        sid = getattr(self, "session_id", None) or ""
+        if not sid:
+            return None
+
+        existing = getattr(self, "_goal_manager", None)
+        if existing is not None and getattr(existing, "session_id", None) == sid:
+            return existing
+
+        try:
+            cfg = load_config() or {}
+            goals_cfg = cfg.get("goals") or {}
+            max_turns = int(goals_cfg.get("max_turns", 20) or 20)
+        except Exception:
+            max_turns = 20
+
+        mgr = GoalManager(session_id=sid, default_max_turns=max_turns)
+        self._goal_manager = mgr
+        return mgr
+
+    def _get_heartbeat_manager(self):
+        """Return the HeartbeatManager bound to the current session_id.
+
+        Cached on ``self._heartbeat_manager`` and rebound lazily when
+        ``session_id`` changes (mirrors ``_get_goal_manager``).
+        """
+        try:
+            from hermes_cli.heartbeat import HeartbeatManager
+        except Exception as exc:
+            logging.debug("heartbeat manager unavailable: %s", exc)
+            return None
+
+        sid = getattr(self, "session_id", None) or ""
+        if not sid:
+            return None
+
+        existing = getattr(self, "_heartbeat_manager", None)
+        if existing is not None and getattr(existing, "session_id", None) == sid:
+            return existing
+
+        mgr = HeartbeatManager(session_id=sid)
+        self._heartbeat_manager = mgr
+        return mgr
+
+    def _start_heartbeat_watchdog(self):
+        """Start the idle-poll thread that fires due heartbeats.
+
+        Same pattern as the wake-word watchdog: a daemon thread polls a few
+        times a minute; when the session is idle (no agent running, empty
+        input queue) and the heartbeat is due, its prompt is injected into
+        ``_pending_input`` as a normal user turn. Missed ticks coalesce —
+        the anchor resets on fire, so a busy hour yields ONE heartbeat turn,
+        not a backlog. Idempotent; safe to call on every /heartbeat set.
+        """
+        if getattr(self, "_heartbeat_watchdog_started", False):
+            return
+        self._heartbeat_watchdog_started = True
+
+        from hermes_cli.heartbeat import POLL_SECONDS
+
+        def _loop():
+            try:
+                while not getattr(self, "_should_exit", False):
+                    time.sleep(POLL_SECONDS)
+                    try:
+                        mgr = self._get_heartbeat_manager()
+                        if mgr is None or not mgr.is_active():
+                            continue
+                        busy = (
+                            self._agent_running
+                            or getattr(self, "_voice_recording", False)
+                            or getattr(self, "_voice_processing", False)
+                            or not self._pending_input.empty()
+                        )
+                        if busy:
+                            continue
+                        prompt = mgr.due_prompt()
+                        if prompt:
+                            self._pending_input.put(prompt)
+                    except Exception as exc:
+                        logging.debug("heartbeat watchdog tick failed: %s", exc)
+            finally:
+                self._heartbeat_watchdog_started = False
+
+        threading.Thread(target=_loop, daemon=True, name="heartbeat-watchdog").start()
+
+    # ────────────────────────────────────────────────────────────────
+    # /loop — recurring in-session wakeups (Claude Code /loop parity)
+    # ────────────────────────────────────────────────────────────────
+    def _get_loop_manager(self):
+        """Return the LoopManager bound to the current session_id.
+
+        Cached on ``self._loop_manager`` and rebound lazily when
+        ``session_id`` changes (mirrors ``_get_goal_manager``).
+        """
+        try:
+            from hermes_cli.loops import LoopManager
+        except Exception as exc:
+            logging.debug("loop manager unavailable: %s", exc)
+            return None
+
+        sid = getattr(self, "session_id", None) or ""
+        if not sid:
+            return None
+
+        existing = getattr(self, "_loop_manager", None)
+        if existing is not None and getattr(existing, "session_id", None) == sid:
+            return existing
+
+        mgr = LoopManager(session_id=sid)
+        self._loop_manager = mgr
+        return mgr
+
+    def _maybe_fire_loop_tick(self) -> None:
+        """Idle hook run from process_loop: fire a due /loop wakeup.
+
+        Only runs while the agent is idle and nothing is queued — a real
+        user message always wins the idle boundary. An active (non-parked)
+        /goal also wins: its judge-driven continuations own the idle
+        boundary, so the loop defers to the next poll.
+        """
+        from cli import _DIM, _RST, _cprint
+        mgr = self._get_loop_manager()
+        if mgr is None or not mgr.is_due():
+            return
+        # The idle poll runs at ~10 Hz; once a tick is due but deferred
+        # (queued input / active goal), every poll would otherwise hit the
+        # DB via goal_blocks_loop_tick. Throttle the deferred re-check.
+        now = time.time()
+        if now - getattr(self, "_last_loop_tick_check", 0.0) < 2.0:
+            return
+        self._last_loop_tick_check = now
+        # Real user input (or anything else queued) takes priority; the
+        # loop stays due and fires at the next idle poll.
+        try:
+            if not self._pending_input.empty():
+                return
+        except Exception:
+            return
+        try:
+            from hermes_cli.loops import goal_blocks_loop_tick
+
+            if goal_blocks_loop_tick(mgr.session_id):
+                return
+        except Exception:
+            pass
+
+        wakeup = mgr.fire_tick()
+        if not wakeup:
+            return
+        try:
+            state = mgr.state
+            tick_no = state.ticks_fired if state else "?"
+            _cprint(f"  {_DIM}↻ /loop wakeup #{tick_no} firing…{_RST}")
+            self._pending_input.put(wakeup)
+        except Exception as exc:
+            logging.debug("loop tick injection failed: %s", exc)
+            try:
+                mgr.abandon_tick()
+            except Exception:
+                pass
+            return
+        # A slash-command loop (e.g. `/loop 10m /recap`) is dispatched via
+        # process_command, which never reaches the post-turn chat() finally
+        # block — so the tick would never complete and the loop would wedge
+        # on awaiting_response. Slash ticks have no model reply to evaluate;
+        # complete them immediately (caps and scheduling still apply).
+        if wakeup.lstrip().startswith("/"):
+            try:
+                decision = mgr.complete_tick("")
+                msg = decision.get("message") or ""
+                if msg:
+                    _cprint(f"  {msg}")
+            except Exception:
+                pass
+
+    def _maybe_complete_loop_tick_after_turn(self) -> None:
+        """Post-turn hook: evaluate a finished /loop wakeup turn.
+
+        No-op unless the turn that just ended was a loop wakeup
+        (``awaiting_response`` set by ``fire_tick``). Detects the
+        LOOP_COMPLETE marker, judges --until, applies caps, and schedules
+        the next tick. Mirrors _maybe_continue_goal_after_turn's shape.
+        """
+        from cli import _DIM, _RST, _cprint
+        mgr = self._get_loop_manager()
+        if mgr is None:
+            return
+        state = mgr.state
+        if state is None or not state.awaiting_response:
+            return
+
+        # A user-interrupted wakeup turn pauses the loop (recoverable via
+        # /loop resume) — same contract as the goal loop's Ctrl+C handling.
+        if getattr(self, "_last_turn_interrupted", False):
+            try:
+                mgr.pause(reason="user-interrupted (Ctrl+C)")
+            except Exception:
+                pass
+            _cprint(
+                f"  {_DIM}⏸ Loop paused — wakeup turn was interrupted. "
+                f"Use /loop resume to continue, or /loop stop to end it.{_RST}"
+            )
+            return
+
+        last_response = ""
+        try:
+            hist = self.conversation_history or []
+            for msg in reversed(hist):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        parts = [
+                            p.get("text", "")
+                            for p in content
+                            if isinstance(p, dict) and p.get("type") in {"text", "output_text"}
+                        ]
+                        last_response = "\n".join(t for t in parts if t)
+                    else:
+                        last_response = str(content or "")
+                    break
+        except Exception:
+            last_response = ""
+
+        decision = mgr.complete_tick(last_response)
+        msg = decision.get("message") or ""
+        if msg:
+            _cprint(f"  {msg}")
+        elif decision.get("status") == "active" and mgr.state is not None:
+            _cprint(f"  {_DIM}↻ Loop: {mgr.state.remaining_label()}.{_RST}")
+
+    def _maybe_continue_goal_after_turn(self) -> None:
+        """Hook run after every CLI turn. Judges + maybe re-queues.
+
+        Safe to call when no goal is set — returns quickly.
+
+        Preemption is automatic: if a real user message is already in
+        ``_pending_input`` we skip judging (the user's new input takes
+        priority and we'll re-judge after that turn). If judge says done,
+        mark it done and tell the user. If judge says continue and we're
+        under budget, push the continuation prompt onto the queue.
+
+        Interrupt handling: if the turn was user-cancelled (Ctrl+C), we
+        AUTO-PAUSE the goal instead of judging + re-queuing. Otherwise
+        Ctrl+C feels like it did nothing — the judge runs on whatever
+        partial output landed, almost always says "continue", and the
+        loop keeps going. Auto-pause keeps the goal recoverable via
+        ``/goal resume`` once the user has sorted out what they want.
+        The empty-response skip mirrors the gateway guard at
+        ``_handle_message`` in ``gateway/run.py``.
+        """
+        from cli import _DIM, _RST, _cprint, _looks_like_slash_command
+        mgr = self._get_goal_manager()
+        if mgr is None or not mgr.is_active():
+            return
+
+        # If a real user message is already queued, don't inject a
+        # continuation prompt on top — let the user's turn go first.
+        # Slash commands don't count as "real user messages" for this
+        # check: they're inspection/mutation (e.g. /subgoal added mid-
+        # run) and the process_loop dispatches them via process_command,
+        # not via chat(). If we treat a queued /subgoal as preempting,
+        # the goal loop silently stalls — we'd return here, then the
+        # slash command consumes its queue slot via process_command()
+        # which never re-fires the goal hook. Peek at all queued entries
+        # and only defer when there's a non-slash payload.
+        try:
+            pending = getattr(self, "_pending_input", None)
+            if pending is not None and not pending.empty():
+                has_real_message = False
+                try:
+                    # Queue.queue is the underlying deque — direct peek
+                    # without disturbing FIFO order.
+                    for entry in list(pending.queue):
+                        # Bundled payloads are (text, images) tuples;
+                        # unpack for inspection.
+                        if isinstance(entry, tuple) and entry:
+                            entry = entry[0]
+                        if isinstance(entry, str) and _looks_like_slash_command(entry):
+                            continue
+                        has_real_message = True
+                        break
+                except Exception:
+                    # Fallback: if we can't introspect the queue, behave
+                    # like the old check and defer to be safe.
+                    has_real_message = True
+                if has_real_message:
+                    return
+        except Exception:
+            pass
+
+        # If the turn was user-interrupted (Ctrl+C), auto-pause the goal
+        # and bail. The judge call would almost always return "continue"
+        # on the partial output and immediately re-queue another turn,
+        # which is exactly what the user cancelled. Pausing (rather than
+        # silently skipping) is the observable, recoverable behavior.
+        if getattr(self, "_last_turn_interrupted", False):
+            try:
+                mgr.pause(reason="user-interrupted (Ctrl+C)")
+            except Exception as exc:
+                logging.debug("goal pause-on-interrupt failed: %s", exc)
+            _cprint(
+                f"  {_DIM}⏸ Goal paused — turn was interrupted. "
+                f"Use /goal resume to continue, or /goal clear to stop.{_RST}"
+            )
+            return
+
+        # Extract the agent's final response for this turn.
+        last_response = ""
+        try:
+            hist = self.conversation_history or []
+            for msg in reversed(hist):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        # Multimodal content — flatten text parts.
+                        parts = [
+                            p.get("text", "")
+                            for p in content
+                            if isinstance(p, dict) and p.get("type") in {"text", "output_text"}
+                        ]
+                        last_response = "\n".join(t for t in parts if t)
+                    else:
+                        last_response = str(content or "")
+                    break
+        except Exception:
+            last_response = ""
+
+        # Skip judging on empty/whitespace-only responses. These are almost
+        # always transient failures (API error, empty stream) where the
+        # judge would say "continue" and trip the consecutive-parse-failures
+        # backstop unnecessarily. Mirrors the gateway guard.
+        if not last_response.strip():
+            return
+
+        try:
+            from hermes_cli.goals import gather_background_processes as _gather_bg
+            _bg_procs = _gather_bg()
+        except Exception:
+            _bg_procs = None
+
+        decision = mgr.evaluate_after_turn(
+            last_response,
+            user_initiated=True,
+            background_processes=_bg_procs,
+        )
+        msg = decision.get("message") or ""
+        if msg:
+            _cprint(f"  {msg}")
+
+        if decision.get("should_continue"):
+            prompt = decision.get("continuation_prompt")
+            if prompt:
+                try:
+                    self._pending_input.put(prompt)
+                except Exception as exc:
+                    logging.debug("goal continuation enqueue failed: %s", exc)
