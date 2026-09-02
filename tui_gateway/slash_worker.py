@@ -6,12 +6,9 @@ Protocol: reads JSON lines from stdin {id, command}, writes {id, ok, output|erro
 # Stop a ``utils/`` (or ``proxy/``, ``ui/``) package in the launch directory
 # from shadowing Hermes's own top-level modules.  This worker is spawned as
 # ``-m tui_gateway.slash_worker`` and inherits the user's CWD, so the ``import
-# cli`` below would otherwise resolve ``utils`` to a colliding local package
-# and crash the child in a retry loop (issue #51286).  ``hermes_bootstrap``
-# lives at the repo root, so importing it is safe before the guard runs (its
-# name won't collide with a user package), and it owns the canonical
-# path-hardening logic shared with the other entry points — #51693 added the
-# guard to ``entry.py``/``acp_adapter/entry.py`` but missed this child.
+# cli`` below would otherwise resolve ``utils`` to a colliding local package and
+# crash the child in a retry loop.  ``hermes_bootstrap`` lives at the repo root
+# (no collision risk), so importing it before the guard runs is safe.
 import hermes_bootstrap
 
 hermes_bootstrap.harden_import_path()
@@ -28,26 +25,13 @@ import time
 
 import cli as cli_mod
 from cli import HermesCLI
+from tui_gateway._env import env_float
 from tui_gateway._stdin_recovery import handle_spurious_eof
 from rich.console import Console
 
 # Env-overridable so the integration test can drive sub-second timing.
-def _env_float(name: str, default: float) -> float:
-    """Parse a float env knob, falling back to ``default`` on absent/malformed
-    values. A bare ``float(os.environ.get(...))`` would raise ValueError at
-    import time on a typo (e.g. ``HERMES_SLASH_WATCHDOG_POLL_S=2s``) and kill
-    the worker before it can serve a single command."""
-    raw = os.environ.get(name)
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-_WATCHDOG_POLL_S = max(0.05, _env_float("HERMES_SLASH_WATCHDOG_POLL_S", 2.0))
-_ORPHAN_GRACE_S = max(0.0, _env_float("HERMES_SLASH_WATCHDOG_GRACE_S", 5.0))
+_WATCHDOG_POLL_S = max(0.05, env_float("HERMES_SLASH_WATCHDOG_POLL_S", 2.0))
+_ORPHAN_GRACE_S = max(0.0, env_float("HERMES_SLASH_WATCHDOG_GRACE_S", 5.0))
 _in_flight = threading.Event()  # set while a command is executing
 logger = logging.getLogger(__name__)
 
@@ -61,20 +45,11 @@ def _prepare_slash_worker_runtime() -> None:
     """Start bounded MCP discovery before HermesCLI snapshots tools.
 
     Each slash_worker child is its own process — the parent ``hermes serve``
-    discovery thread does not populate this registry (issue #61891).
+    discovery thread does not populate this registry.
     """
-    import logging
+    from hermes_cli.mcp_startup import start_background_mcp_discovery, wait_for_mcp_discovery
 
-    from hermes_cli.mcp_startup import (
-        start_background_mcp_discovery,
-        wait_for_mcp_discovery,
-    )
-
-    logger = logging.getLogger(__name__)
-    start_background_mcp_discovery(
-        logger=logger,
-        thread_name="slash-worker-mcp-discovery",
-    )
+    start_background_mcp_discovery(logger=logger, thread_name="slash-worker-mcp-discovery")
     wait_for_mcp_discovery()
 
 
@@ -99,9 +74,8 @@ def _run(cli: HermesCLI, command: str) -> str:
 
     buf = io.StringIO()
 
-    # Rich Console captures its file handle at construction time, so
-    # contextlib.redirect_stdout won't affect it. Swap the console's
-    # underlying file to our buffer so self.console.print() is captured.
+    # Rich Console captures its file handle at construction, so redirect_stdout
+    # won't affect it; swap the console's file so self.console.print() is captured.
     cli.console = Console(file=buf, force_terminal=True, width=120)
 
     old = getattr(cli_mod, "_cprint", None)
@@ -115,11 +89,9 @@ def _run(cli: HermesCLI, command: str) -> str:
         if old is not None:
             cli_mod._cprint = old
 
-    # Desktop chat bubbles render plain text, not ANSI. A worker-routed command
-    # that emits Rich color (e.g. /journey building its own Console, which picks
-    # up truecolor from the gateway's inherited COLORTERM) would otherwise leak
-    # raw escapes; strip them at the single choke point. (The TUI opens /journey
-    # as an overlay, so it never travels this path.)
+    # Desktop chat bubbles render plain text, not ANSI.  A command that emits
+    # Rich color (e.g. /journey building its own Console under the gateway's
+    # inherited COLORTERM) would leak raw escapes; strip at this single choke point.
     from tools.ansi_strip import strip_ansi
 
     return strip_ansi(buf.getvalue().rstrip())
@@ -136,16 +108,14 @@ def main():
 
     # Start before the (hundreds-of-ms) HermesCLI build — that window is itself
     # an orphan risk if the gateway dies mid-spawn.
-    orig_ppid = os.getppid()
-    _start_parent_death_watchdog(orig_ppid)
+    _start_parent_death_watchdog(os.getppid())
     _prepare_slash_worker_runtime()
 
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         cli = HermesCLI(model=args.model or None, compact=True, resume=args.session_key, verbose=False)
 
-    # Spurious stdin-EOF recovery (same O_NONBLOCK shared file-description
-    # issue as the gateway entry point — any child inheriting fd 0 can flip
-    # the flag and launder EAGAIN into an apparent EOF).
+    # Spurious stdin-EOF recovery (same shared-file-description O_NONBLOCK issue
+    # as the gateway entry point — any child inheriting fd 0 can flip the flag).
     _sw_recovery_times: list[float] = []
 
     def _sw_log(reason: str) -> None:
@@ -175,21 +145,16 @@ def main():
             sys.stdout.flush()
         finally:
             _in_flight.clear()
-            # Workers persist for the TUI session, so release allocator pages at
-            # the same command boundary as other long-lived gateway processes.
-            # trim_memory's shared cooldown coalesces this with nearby activity.
+            # Workers persist for the TUI session: release allocator pages at the
+            # command boundary like other long-lived gateway processes
+            # (trim_memory's shared cooldown coalesces nearby activity).
             try:
                 from hermes_cli.mem_trim import trim_memory
 
                 trim_memory(reason="slash worker command completion")
             except Exception as exc:
-                # debug, not warning — a persistent failure would repeat on
-                # every slash command forever.
-                logger.debug(
-                    "slash worker memory trim failed: %s: %s",
-                    type(exc).__name__,
-                    exc,
-                )
+                # debug, not warning — a persistent failure would repeat every command.
+                logger.debug("slash worker memory trim failed: %s: %s", type(exc).__name__, exc)
 
 
 if __name__ == "__main__":

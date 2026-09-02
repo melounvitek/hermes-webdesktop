@@ -8,6 +8,7 @@ not contend with the serving process' event loop for the same GIL.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -47,11 +48,15 @@ MUTATOR_ROUTE_TABLE: dict[str, str] = {
 _REGISTRY_NAME = "dashboard-compute-host.json"
 _RESPAWN_WINDOW_SECS = 300.0
 _SHUTDOWN_TIMEOUT_SECS = 10.0
-# Late control-ack handlers (#97948): a compress that outlives its RPC waiter
-# can legitimately run for the full compression ceiling plus a stall-fallback
-# retry, so keep registrations around well past that — but bounded.
+# Late control-ack handlers: a compress that outlives its RPC waiter can run for
+# the full compression ceiling plus a stall-fallback retry, so keep
+# registrations well past that — but bounded.
 _LATE_CONTROL_TTL_SECS = 1800.0
 _LATE_CONTROL_MAX = 64
+# Host frames whose ``request_id`` resolves a pending/late control waiter.
+_CONTROL_REPLY_TYPES = frozenset(
+    {"control.ack", "control.error", "respond.ack", "respond.error", "interrupt.ack", "reload_mcp.ack", "shutdown.ack"}
+)
 
 
 def append_log_record(path: str | Path, record: str) -> None:
@@ -72,6 +77,8 @@ def _repo_root() -> Path:
 
 
 def _build_sha() -> str:
+    """Current checkout's HEAD sha, or ``"unknown"``. Shared with ``compute_host``
+    so the hello handshake and the supervisor's expectation agree byte-for-byte."""
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
@@ -107,14 +114,10 @@ def _pid_alive(pid: int) -> bool:
 def _pid_command(pid: int) -> str:
     if pid <= 0:
         return ""
-    # Linux fast path.
-    proc_cmdline = Path("/proc") / str(pid) / "cmdline"
-    try:
-        data = proc_cmdline.read_bytes()
+    with contextlib.suppress(Exception):  # Linux fast path
+        data = (Path("/proc") / str(pid) / "cmdline").read_bytes()
         if data:
             return data.replace(b"\x00", b" ").decode("utf-8", errors="replace")
-    except Exception:
-        pass
     try:
         return subprocess.check_output(
             ["ps", "-p", str(pid), "-o", "command="],
@@ -129,8 +132,7 @@ def _pid_command(pid: int) -> str:
 
 
 def is_compute_host_identity(pid: int) -> bool:
-    cmd = _pid_command(pid)
-    return "tui_gateway.compute_host" in cmd
+    return "tui_gateway.compute_host" in _pid_command(pid)
 
 
 class HostSupervisor:
@@ -173,9 +175,8 @@ class HostSupervisor:
         self._pending_turns: dict[str, tuple[str, Callable[[dict], None] | None]] = {}
         self._pending_controls: dict[str, queue.Queue[dict]] = {}
         # request_id -> (registered_at, handler) for control waiters that timed
-        # out but whose host work is still running (#97948). The host emits
-        # its control.ack whenever it finishes; without this the ack matched
-        # no queue and was silently dropped.
+        # out while their host work still runs; without it the eventual
+        # control.ack matched no queue and was silently dropped.
         self._late_control_handlers: dict[str, tuple[float, Callable[[dict], None]]] = {}
         self._stderr_tail: list[str] = []
         self._last_progress_counter = 0
@@ -254,9 +255,7 @@ class HostSupervisor:
         self.start()
         request_id = str(frame.get("request_id") or uuid.uuid4().hex)
         sid = str(frame.get("sid") or "")
-        payload = dict(frame)
-        payload["type"] = "turn.start"
-        payload["request_id"] = request_id
+        payload = {**frame, "type": "turn.start", "request_id": request_id}
         with self._lock:
             self._pending_turns[request_id] = (sid, on_complete)
         try:
@@ -264,15 +263,8 @@ class HostSupervisor:
         except Exception as exc:
             with self._lock:
                 self._pending_turns.pop(request_id, None)
-            err = {
-                "type": "turn.error",
-                "sid": sid,
-                "request_id": request_id,
-                "reason": "send_failed",
-                "message": str(exc),
-            }
             if on_complete is not None:
-                on_complete(err)
+                on_complete({"type": "turn.error", "sid": sid, "request_id": request_id, "reason": "send_failed", "message": str(exc)})
             raise
         return request_id
 
@@ -288,14 +280,7 @@ class HostSupervisor:
         with self._lock:
             self._pending_controls[request_id] = q
         try:
-            self._send_frame(
-                {
-                    "type": "respond",
-                    "sid": sid,
-                    "request_id": request_id,
-                    "params": dict(params),
-                }
-            )
+            self._send_frame({"type": "respond", "sid": sid, "request_id": request_id, "params": dict(params)})
             return q.get(timeout=timeout)
         finally:
             with self._lock:
@@ -321,22 +306,16 @@ class HostSupervisor:
     ) -> dict:
         """Send a control frame; with ``wait`` block up to ``timeout`` for its ack.
 
-        ``on_late_ack`` (only meaningful with ``wait``) keeps the request
-        adoptable after the waiter gives up: when the host's ``control.ack`` /
-        ``control.error`` / ``error`` for this ``request_id`` eventually
-        arrives, the handler fires once instead of the frame being dropped.
-        Registrations are bounded by ``_LATE_CONTROL_TTL_SECS`` /
-        ``_LATE_CONTROL_MAX``.
+        ``on_late_ack`` (only with ``wait``) keeps the request adoptable after the
+        waiter gives up: the host's eventual ``control.ack``/``control.error``/
+        ``error`` for this ``request_id`` fires the handler once instead of being
+        dropped. Bounded by ``_LATE_CONTROL_TTL_SECS`` / ``_LATE_CONTROL_MAX``.
         """
         if route_name not in MUTATOR_ROUTE_TABLE:
             raise ValueError(f"unclassified host mutator route: {route_name}")
         self.start()
         request_id = str((payload or {}).get("request_id") or uuid.uuid4().hex)
-        frame = dict(payload or {})
-        frame.setdefault("type", "control")
-        frame["sid"] = sid
-        frame["route_name"] = route_name
-        frame["request_id"] = request_id
+        frame = {"type": "control", **(payload or {}), "sid": sid, "route_name": route_name, "request_id": request_id}
         q: queue.Queue[dict] | None = None
         if wait:
             q = queue.Queue(maxsize=1)
@@ -358,12 +337,7 @@ class HostSupervisor:
     def _register_late_control_handler(self, request_id: str, handler: Callable[[dict], None]) -> None:
         now = time.monotonic()
         with self._lock:
-            expired = [
-                rid
-                for rid, (registered_at, _cb) in self._late_control_handlers.items()
-                if now - registered_at > _LATE_CONTROL_TTL_SECS
-            ]
-            for rid in expired:
+            for rid in [r for r, (at, _cb) in self._late_control_handlers.items() if now - at > _LATE_CONTROL_TTL_SECS]:
                 self._late_control_handlers.pop(rid, None)
             while len(self._late_control_handlers) >= _LATE_CONTROL_MAX:
                 oldest = min(self._late_control_handlers, key=lambda rid: self._late_control_handlers[rid][0])
@@ -375,16 +349,13 @@ class HostSupervisor:
             q = self._pending_controls.get(request_id)
             late = None if q is not None else self._late_control_handlers.pop(request_id, None)
         if q is not None:
-            try:
+            with contextlib.suppress(queue.Full):
                 q.put_nowait(frame)
-            except queue.Full:
-                pass
             return
         if late is None:
             return
-        _registered_at, handler = late
         try:
-            handler(frame)
+            late[1](frame)
         except Exception:
             logger.exception("compute host late control ack handler failed (request_id=%s)", request_id)
 
@@ -398,9 +369,10 @@ class HostSupervisor:
         if self.env:
             env.update(self.env)
         env["HERMES_COMPUTE_HOST_HEARTBEAT_SECS"] = str(self.heartbeat_secs)
-        env.setdefault("PYTHONPATH", str(_repo_root()))
-        if str(_repo_root()) not in env["PYTHONPATH"].split(os.pathsep):
-            env["PYTHONPATH"] = str(_repo_root()) + os.pathsep + env["PYTHONPATH"]
+        root = str(_repo_root())
+        env.setdefault("PYTHONPATH", root)
+        if root not in env["PYTHONPATH"].split(os.pathsep):
+            env["PYTHONPATH"] = root + os.pathsep + env["PYTHONPATH"]
         proc = subprocess.Popen(
             self.argv,
             cwd=str(self.cwd),
@@ -409,9 +381,8 @@ class HostSupervisor:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            # Lossy UTF-8 decode — the compute host emits UTF-8; a
-            # locale-mismatched byte must not raise inside the drain
-            # threads and kill the supervisor (#52649).
+            # Lossy UTF-8 decode: a locale-mismatched byte must not raise inside
+            # the drain threads and kill the supervisor.
             encoding="utf-8",
             errors="replace",
             bufsize=1,
@@ -421,9 +392,8 @@ class HostSupervisor:
         self._stdout_thread = _Thread(target=self._drain_stdout, args=(proc,), name="compute-host-stdout", daemon=True)
         self._stderr_thread = _Thread(target=self._drain_stderr, args=(proc,), name="compute-host-stderr", daemon=True)
         self._wait_thread = _Thread(target=self._wait_for_exit, args=(proc,), name="compute-host-wait", daemon=True)
-        self._stdout_thread.start()
-        self._stderr_thread.start()
-        self._wait_thread.start()
+        for t in (self._stdout_thread, self._stderr_thread, self._wait_thread):
+            t.start()
         if not self._hello_event.wait(timeout=10.0):
             self._terminate_process(proc)
             raise RuntimeError(f"compute host did not send hello; stderr={self._stderr_tail[-5:]}")
@@ -457,9 +427,7 @@ class HostSupervisor:
 
     def _remove_registry(self) -> None:
         try:
-            self.registry_path.unlink()
-        except FileNotFoundError:
-            pass
+            self.registry_path.unlink(missing_ok=True)
         except Exception:
             logger.debug("failed to remove compute host registry", exc_info=True)
 
@@ -492,38 +460,42 @@ class HostSupervisor:
 
     def _handle_host_frame(self, frame: dict[str, Any]) -> None:
         ftype = str(frame.get("type") or "")
-        if ftype == "hello":
-            self._hello = dict(frame)
-            self._hello_event.set()
-            return
-        if ftype == "hb":
-            self._last_progress_counter = int(frame.get("progress_counter") or self._last_progress_counter)
-            logger.debug("compute host heartbeat: %s", frame)
-            return
-        if ftype == "rpc":
-            message = frame.get("message")
-            if isinstance(message, dict):
-                self.rpc_sink(message)
-            return
-        if ftype in {"turn.end", "turn.error"}:
-            self._complete_turn(frame)
-            return
-        if ftype in {"control.ack", "control.error", "respond.ack", "respond.error", "interrupt.ack", "reload_mcp.ack", "shutdown.ack"}:
+        if ftype in _CONTROL_REPLY_TYPES or (ftype == "error" and frame.get("request_id")):
             self._deliver_control_frame(str(frame.get("request_id") or ""), frame)
             return
-        if ftype == "error" and frame.get("request_id"):
-            self._deliver_control_frame(str(frame.get("request_id") or ""), frame)
+        handler = self._HOST_FRAME_HANDLERS.get(ftype)
+        if handler is not None:
+            getattr(self, handler)(frame)
+
+    # host frame ``type`` -> handler method name (see also _CONTROL_REPLY_TYPES).
+    _HOST_FRAME_HANDLERS: dict[str, str] = {
+        "hello": "_on_hello",
+        "hb": "_on_heartbeat",
+        "rpc": "_on_rpc",
+        "turn.end": "_complete_turn",
+        "turn.error": "_complete_turn",
+    }
+
+    def _on_hello(self, frame: dict[str, Any]) -> None:
+        self._hello = dict(frame)
+        self._hello_event.set()
+
+    def _on_heartbeat(self, frame: dict[str, Any]) -> None:
+        self._last_progress_counter = int(frame.get("progress_counter") or self._last_progress_counter)
+        logger.debug("compute host heartbeat: %s", frame)
+
+    def _on_rpc(self, frame: dict[str, Any]) -> None:
+        message = frame.get("message")
+        if isinstance(message, dict):
+            self.rpc_sink(message)
 
     def _complete_turn(self, frame: dict[str, Any]) -> None:
         request_id = str(frame.get("request_id") or "")
         with self._lock:
             pending = self._pending_turns.pop(request_id, None)
-        if pending is None:
-            return
-        _sid, cb = pending
-        if cb is not None:
+        if pending is not None and pending[1] is not None:
             try:
-                cb(frame)
+                pending[1](frame)
             except Exception:
                 logger.exception("compute host turn completion callback failed")
 
@@ -544,32 +516,20 @@ class HostSupervisor:
             pending = self._pending_turns
             self._pending_turns = {}
         for request_id, (sid, cb) in pending.items():
-            frame = {
-                "type": "turn.error",
-                "sid": sid,
-                "request_id": request_id,
-                "reason": reason,
-                "message": message,
-            }
             self.rpc_sink(
                 {
                     "jsonrpc": "2.0",
                     "method": "event",
-                    "params": {
-                        "type": "error",
-                        "session_id": sid,
-                        "payload": {"message": message, "reason": reason},
-                    },
+                    "params": {"type": "error", "session_id": sid, "payload": {"message": message, "reason": reason}},
                 }
             )
             if cb is not None:
                 try:
-                    cb(frame)
+                    cb({"type": "turn.error", "sid": sid, "request_id": request_id, "reason": reason, "message": message})
                 except Exception:
                     logger.exception("compute host error callback failed")
-        # A crashed host will never emit the late acks the timed-out control
-        # waiters are still expecting; fail them the same way so the client's
-        # "still running in the background" notice does not hang forever.
+        # A crashed host never emits the late acks timed-out control waiters still
+        # expect; fail them too so the client's "still running" notice can't hang.
         with self._lock:
             late = self._late_control_handlers
             self._late_control_handlers = {}
@@ -602,8 +562,7 @@ class HostSupervisor:
 
         _Thread(target=_respawn, name="compute-host-respawn", daemon=True).start()
 
-    def _pid_matches_compute_host(self, pid: int) -> bool:
-        return is_compute_host_identity(pid)
+    _pid_matches_compute_host = staticmethod(is_compute_host_identity)
 
     def _terminate_pid(self, pid: int, *, timeout: float = _SHUTDOWN_TIMEOUT_SECS) -> None:
         try:
@@ -634,14 +593,10 @@ class HostSupervisor:
             return
         except Exception:
             pass
-        try:
+        with contextlib.suppress(Exception):
             proc.kill()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             proc.wait(timeout=2)
-        except Exception:
-            pass
 
 
 __all__ = [
