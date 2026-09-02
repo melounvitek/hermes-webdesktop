@@ -2972,118 +2972,27 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
-def create_task(
+def _resolve_project_link(
     conn: sqlite3.Connection,
-    *,
-    title: str,
-    body: Optional[str] = None,
-    assignee: Optional[str] = None,
-    created_by: Optional[str] = None,
-    workspace_kind: str = "scratch",
-    workspace_path: Optional[str] = None,
-    branch_name: Optional[str] = None,
-    tenant: Optional[str] = None,
-    priority: int = 0,
-    parents: Iterable[str] = (),
-    triage: bool = False,
-    idempotency_key: Optional[str] = None,
-    max_runtime_seconds: Optional[int] = None,
-    skills: Optional[Iterable[str]] = None,
-    max_retries: Optional[int] = None,
-    model_override: Optional[str] = None,
-    provider_override: Optional[str] = None,
-    reasoning_effort: Optional[str] = None,
-    goal_mode: bool = False,
-    goal_max_turns: Optional[int] = None,
-    initial_status: str = "running",
-    session_id: Optional[str] = None,
-    board: Optional[str] = None,
-    project_id: Optional[str] = None,
-    project_source_task_id: Optional[str] = None,
-) -> str:
-    """Create a new task and optionally link it under parent tasks.
+    project_id: Optional[str],
+    project_source_task_id: Optional[str],
+    workspace_kind: str,
+    workspace_path: Optional[str],
+) -> tuple[Optional[str], Any, Optional[str], str]:
+    """Resolve the optional first-class Project link for ``create_task``.
 
-    Returns the new task id.  Status is ``ready`` when there are no
-    parents (or all parents already ``done``), otherwise ``todo``.
-    If ``triage=True``, status is forced to ``triage`` regardless of
-    parents — a specifier/triager is expected to promote the task to
-    ``todo`` once the spec is fleshed out.
-
-    If ``idempotency_key`` is provided and a non-archived task with the
-    same key already exists, returns the existing task's id instead of
-    creating a duplicate. Useful for retried webhooks / automation that
-    should not double-write.
-
-    ``max_runtime_seconds`` caps how long a worker may run before the
-    dispatcher SIGTERMs (then SIGKILLs after a grace window) and
-    re-queues the task. ``None`` means no cap (default).
-
-    ``skills`` is an optional list of skill names to force-load into
-    the worker when dispatched. Stored as JSON; the dispatcher passes
-    each name to ``hermes --skills ...``. Use this to pin a task to a
-    specialist skill (e.g. ``skills=["translation"]`` so the worker loads the
-    translation skill regardless of the profile's default config).
-
-    ``model_override`` / ``provider_override`` pin the worker to a specific
-    model (and optionally its provider) without touching the profile's
-    config — passed to the worker as ``-m <model> [--provider <name>]``.
-    ``provider_override`` requires ``model_override``.
-
-    ``reasoning_effort`` pins the worker's thinking depth for this task
-    (``minimal``…``ultra``, or ``none`` to disable thinking), passed as
-    ``--reasoning <level>``. It is independent of ``model_override``: a task
-    can run the profile's own model at a different depth.
-
-    ``project_source_task_id`` is an internal cross-profile fallback for a
-    worker-created child. When the active profile cannot resolve ``project_id``
-    in its own projects.db, a matching canonical project-linked task in this
-    board can supply the repo and branch convention. Its literal worktree is
-    never reused; the new task still gets its own task-id-keyed path.
+    Returns ``(project_id, project_obj, project_repo, workspace_kind)``. A
+    project-linked task is anchored to the project's primary repo as a git
+    worktree so its branch can be named deterministically (project slug + task
+    id) instead of the random ``wt/<task-id>`` worker fallback. Projects live in
+    the creator's per-profile projects.db; the repo path is absolute and the
+    branch name pure, so the cross-profile dispatcher needs no projects.db
+    access at dispatch time. ``project_repo`` is the primary repo of a
+    project-linked worktree task whose path still has to be derived once the
+    task id exists. An unresolvable id/slug drops the link (never a dangling
+    reference, never a crash).
     """
-    model_override = (model_override or "").strip() or None
-    provider_override = (provider_override or "").strip() or None
-    reasoning_effort = normalize_reasoning_effort(reasoning_effort)
-    if provider_override and not model_override:
-        raise ValueError("provider_override requires a model_override")
-    assignee = _canonical_assignee(assignee)
-    if not title or not title.strip():
-        raise ValueError("title is required")
-    if initial_status not in VALID_INITIAL_STATUSES:
-        raise ValueError(
-            f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}"
-        )
-    if workspace_kind not in VALID_WORKSPACE_KINDS:
-        raise ValueError(
-            f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
-            f"got {workspace_kind!r}"
-        )
-    if branch_name is not None:
-        branch_name = str(branch_name).strip() or None
-    if branch_name and workspace_kind != "worktree":
-        raise ValueError("branch_name is only valid for worktree workspaces")
-
-    # Inherit the board's scoped project when the caller didn't name one, so a
-    # project-scoped board anchors every new task to that project's repo
-    # (deterministic worktree + branch) without each surface repeating it.
-    if project_id is None:
-        try:
-            _bmeta = read_board_metadata(board if board else get_current_board())
-            _board_project = (_bmeta.get("project_id") or "").strip()
-            if _board_project:
-                project_id = _board_project
-        except Exception:
-            pass
-
-    # Resolve an optional first-class Project link. A project-linked task is
-    # anchored to the project's primary repo as a git worktree, so its branch
-    # can be named deterministically (project slug + task id) instead of the
-    # random ``wt/<task-id>`` fallback the worker skill applies when no branch
-    # is set. Projects live in the creator's per-profile projects.db; the repo
-    # path is absolute (profile-independent) and the branch name is pure, so the
-    # cross-profile dispatcher needs no projects.db access at dispatch time.
     project_obj = None
-    # Primary repo of a project-linked worktree task whose path we still need to
-    # derive (a fresh worktree dir under the repo, computed once task_id exists).
     project_repo: Optional[str] = None
     if project_id is not None:
         project_id = str(project_id).strip() or None
@@ -3162,53 +3071,145 @@ def create_task(
                 # Defer the concrete path to the insert loop: it's a fresh
                 # ``<repo>/.worktrees/<task-id>`` dir keyed on the new task id.
                 project_repo = str(project_obj.primary_path)
+    return project_id, project_obj, project_repo, workspace_kind
+
+
+def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str]]:
+    """Strip, drop empties, dedupe (order-preserving) a per-task skills list.
+
+    Refuses commas inside a single name so a comma-joined string is never
+    splattered into one argv slot (the ``hermes --skills X,Y`` comma syntax is
+    handled in the dispatcher, not here). Toolset names are rejected all at
+    once — agents that confuse skills with toolsets usually pass several
+    (``["web", "browser", "terminal"]``) and serial-correcting wastes tokens.
+    """
+    if skills is None:
+        return None
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    toolset_typos: list[str] = []
+    for s in skills:
+        if not s:
+            continue
+        name = str(s).strip()
+        if not name:
+            continue
+        if "," in name:
+            raise ValueError(
+                f"skill name cannot contain comma: {name!r} "
+                f"(pass a list of separate names instead of a comma-joined string)"
+            )
+        if name.casefold() in KNOWN_TOOLSET_NAMES:
+            toolset_typos.append(name)
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        cleaned.append(name)
+    if toolset_typos:
+        quoted = ", ".join(repr(n) for n in toolset_typos)
+        noun = "is a toolset name" if len(toolset_typos) == 1 else "are toolset names"
+        raise ValueError(
+            f"{quoted} {noun}, not skill name(s). "
+            "Put toolsets in the assignee profile's `toolsets:` config "
+            "instead of per-task skills. Skills are named skill bundles "
+            "(e.g. `blogwatcher`, `github-code-review`); toolsets are runtime "
+            "capabilities (e.g. `web`, `browser`, `terminal`)."
+        )
+    return cleaned
+
+
+def create_task(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    body: Optional[str] = None,
+    assignee: Optional[str] = None,
+    created_by: Optional[str] = None,
+    workspace_kind: str = "scratch",
+    workspace_path: Optional[str] = None,
+    branch_name: Optional[str] = None,
+    tenant: Optional[str] = None,
+    priority: int = 0,
+    parents: Iterable[str] = (),
+    triage: bool = False,
+    idempotency_key: Optional[str] = None,
+    max_runtime_seconds: Optional[int] = None,
+    skills: Optional[Iterable[str]] = None,
+    max_retries: Optional[int] = None,
+    model_override: Optional[str] = None,
+    provider_override: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    goal_mode: bool = False,
+    goal_max_turns: Optional[int] = None,
+    initial_status: str = "running",
+    session_id: Optional[str] = None,
+    board: Optional[str] = None,
+    project_id: Optional[str] = None,
+    project_source_task_id: Optional[str] = None,
+) -> str:
+    """Create a new task and optionally link it under parent tasks; returns its id.
+
+    Status is ``ready`` with no parents (or all parents ``done``), else ``todo``;
+    ``triage=True`` forces ``triage`` regardless of parents (a specifier promotes
+    it later); ``initial_status="blocked"`` parks it for human-ops review.
+
+    ``idempotency_key``: if a non-archived task with the same key exists its id
+    is returned instead of creating a duplicate (retried webhooks/automation).
+    ``max_runtime_seconds``: cap before the dispatcher SIGTERMs (then SIGKILLs
+    after a grace window) and re-queues; ``None`` = no cap.
+    ``skills``: skill names force-loaded into the worker (``hermes --skills``);
+    see ``_normalize_task_skills``. ``model_override``/``provider_override`` pin
+    the worker model (``-m <model> [--provider <name>]``); provider requires
+    model. ``reasoning_effort`` pins thinking depth (``--reasoning <level>``),
+    independent of the model override.
+    ``project_source_task_id``: internal cross-profile fallback for a
+    worker-created child — when the active profile cannot resolve
+    ``project_id`` in its own projects.db, a canonical project-linked task in
+    this board supplies the repo and branch convention (its literal worktree is
+    never reused). See ``_resolve_project_link``.
+    """
+    model_override = (model_override or "").strip() or None
+    provider_override = (provider_override or "").strip() or None
+    reasoning_effort = normalize_reasoning_effort(reasoning_effort)
+    if provider_override and not model_override:
+        raise ValueError("provider_override requires a model_override")
+    assignee = _canonical_assignee(assignee)
+    if not title or not title.strip():
+        raise ValueError("title is required")
+    if initial_status not in VALID_INITIAL_STATUSES:
+        raise ValueError(
+            f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}"
+        )
+    if workspace_kind not in VALID_WORKSPACE_KINDS:
+        raise ValueError(
+            f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
+            f"got {workspace_kind!r}"
+        )
+    if branch_name is not None:
+        branch_name = str(branch_name).strip() or None
+    if branch_name and workspace_kind != "worktree":
+        raise ValueError("branch_name is only valid for worktree workspaces")
+
+    # Inherit the board's scoped project when the caller didn't name one, so a
+    # project-scoped board anchors every new task to that project's repo
+    # (deterministic worktree + branch) without each surface repeating it.
+    if project_id is None:
+        try:
+            _bmeta = read_board_metadata(board if board else get_current_board())
+            _board_project = (_bmeta.get("project_id") or "").strip()
+            if _board_project:
+                project_id = _board_project
+        except Exception:
+            pass
+
+    project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
+        conn, project_id, project_source_task_id, workspace_kind, workspace_path
+    )
 
     parents = tuple(p for p in parents if p)
 
-    # Normalise + validate skills: strip whitespace, drop empties, dedupe
-    # (preserving order). Refuse commas inside a single name so we don't
-    # invisibly splatter a comma-joined string into one argv slot — the
-    # `hermes --skills X,Y` comma syntax is handled in the dispatcher,
-    # not here.
-    skills_list: Optional[list[str]] = None
-    if skills is not None:
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        # Collect all toolset-name confusions up front so the user sees the
-        # whole list at once. Raising on the first hit is friendly when the
-        # input has one mistake, but agents that confuse skills with toolsets
-        # usually pass several at once (`skills=["web", "browser", "terminal"]`)
-        # and serial-correcting one per failure round-trips wastes tokens.
-        toolset_typos: list[str] = []
-        for s in skills:
-            if not s:
-                continue
-            name = str(s).strip()
-            if not name:
-                continue
-            if "," in name:
-                raise ValueError(
-                    f"skill name cannot contain comma: {name!r} "
-                    f"(pass a list of separate names instead of a comma-joined string)"
-                )
-            if name.casefold() in KNOWN_TOOLSET_NAMES:
-                toolset_typos.append(name)
-                continue
-            if name in seen:
-                continue
-            seen.add(name)
-            cleaned.append(name)
-        if toolset_typos:
-            quoted = ", ".join(repr(n) for n in toolset_typos)
-            noun = "is a toolset name" if len(toolset_typos) == 1 else "are toolset names"
-            raise ValueError(
-                f"{quoted} {noun}, not skill name(s). "
-                "Put toolsets in the assignee profile's `toolsets:` config "
-                "instead of per-task skills. Skills are named skill bundles "
-                "(e.g. `blogwatcher`, `github-code-review`); toolsets are runtime "
-                "capabilities (e.g. `web`, `browser`, `terminal`)."
-            )
-        skills_list = cleaned
+    skills_list = _normalize_task_skills(skills)
 
     # Idempotency check — return the existing task instead of creating a
     # duplicate. Done BEFORE entering write_txn to keep the fast path fast
@@ -3290,7 +3291,8 @@ def create_task(
                             project_repo, ".worktrees", task_id
                         )
                     if not branch_name:
-                        # _pdb was imported above when project_obj was resolved.
+                        from hermes_cli import projects_db as _pdb
+
                         try:
                             branch_name = _pdb.branch_name_for(
                                 project_obj, task_id, title=title or ""
