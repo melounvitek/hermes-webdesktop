@@ -358,9 +358,7 @@ def _delete_delegate_children(conn, parent_ids: List[str]) -> List[str]:
         conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", ids)
         # FK safety: orphan any untagged stragglers pointing at a doomed row.
         conn.execute(
-            f"UPDATE sessions SET parent_session_id = NULL "
-            f"WHERE parent_session_id IN ({ph})",
-            ids,
+            f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", ids,
         )
         conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", ids)
     return ids
@@ -512,8 +510,7 @@ class _PathReadBudget:
             logger.warning(
                 "%d live SessionDB handles on %s in this process; each holds "
                 "its own writer connection (read connections are capped at %d "
-                "for the file). A long-lived process should share one handle "
-                "per path.",
+                "for the file). A long-lived process should share one handle per path.",
                 handles,
                 db.db_path,
                 _READ_POOL_MAX,
@@ -763,8 +760,7 @@ def _ensure_test_isolation(db_path: Path) -> None:
                 f"state.db at {resolved} (under real Hermes root {root}). "
                 "Tests must run against a temporary HERMES_HOME — pass an "
                 "explicit tmp db_path or let the hermetic conftest redirect "
-                "HERMES_HOME. If this test genuinely needs the live "
-                "database, mark it with "
+                "HERMES_HOME. If this test genuinely needs the live database, mark it with "
                 "@pytest.mark.live_system_guard_bypass — or, for a spawned "
                 f"child process, export {_STATE_DB_GUARD_BYPASS_ENV}=1 in "
                 "its environment."
@@ -1210,8 +1206,7 @@ _STATE_DB_GENERATION_KEY = "db_file_generation"
 _STATE_DB_REPLACED_MSG = (
     "FATAL: state.db was replaced underneath the gateway; refusing further "
     "writes to this file. Divert transcripts to sessions/<id>.jsonl (and the "
-    "gateway pending_messages spool) and restore or reopen after operator "
-    "intervention."
+    "gateway pending_messages spool) and restore or reopen after operator intervention."
 )
 _DELETED_WAL_GENERATION_MSG = (
     "FATAL: a live process holds a deleted state.db-wal or state.db-shm "
@@ -1397,11 +1392,8 @@ class SessionDB(
     @staticmethod
     def _delete_unreferenced_system_prompts(conn) -> None:
         conn.execute(
-            "DELETE FROM system_prompts "
-            "WHERE NOT EXISTS ("
-            "SELECT 1 FROM sessions "
-            "WHERE sessions.system_prompt_hash = system_prompts.hash"
-            ")"
+            "DELETE FROM system_prompts WHERE NOT EXISTS ("
+            "SELECT 1 FROM sessions WHERE sessions.system_prompt_hash = system_prompts.hash)"
         )
 
     @staticmethod
@@ -1884,8 +1876,7 @@ class SessionDB(
             raise sqlite3.OperationalError(
                 f"state.db connection was closed while a {context} was still "
                 f"in flight (a session-teardown path called close() before "
-                f"this worker finished — #94736) and the automatic reopen "
-                f"failed: {exc}"
+                f"this worker finished — #94736) and the automatic reopen failed: {exc}"
             ) from exc
         try:
             conn.row_factory = sqlite3.Row
@@ -1896,8 +1887,7 @@ class SessionDB(
         except Exception as exc:
             self._close_connection_quietly(conn)
             raise sqlite3.OperationalError(
-                f"state.db reopen after close() succeeded but connection "
-                f"setup failed: {exc}"
+                f"state.db reopen after close() succeeded but connection setup failed: {exc}"
             ) from exc
         # Schema was initialised by the original open; no _init_schema here (no
         # DDL races with siblings during teardown).
@@ -1928,8 +1918,7 @@ class SessionDB(
         v11..v22, or the v10-era external single-column) lacks tool_name, so
         "stored CREATE lacks tool_name" catches both. False when absent (fresh DB)."""
         row = cursor.execute(
-            "SELECT sql FROM sqlite_master "
-            "WHERE type = 'table' AND name = 'messages_fts'"
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'"
         ).fetchone()
         if row is None:
             return False
@@ -1957,8 +1946,7 @@ class SessionDB(
         logger.warning(
             "SQLite FTS5 unavailable for %s; full-text session search "
             "disabled. Run `hermes update` to rebuild the venv with a "
-            "current Python (managed uv guarantees FTS5). "
-            "(underlying error: %s)",
+            "current Python (managed uv guarantees FTS5). (underlying error: %s)",
             self.db_path,
             exc,
         )
@@ -1978,8 +1966,7 @@ class SessionDB(
         """
         try:
             cjk_present = bool(cursor.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-                "AND name = 'messages_fts_cjk'"
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts_cjk'"
             ).fetchone())
             if not self._fts_cjk_loaded:
                 if cjk_present:
@@ -2047,8 +2034,7 @@ class SessionDB(
                 return
             cursor.executescript(FTS_CJK_TRIGGER_SQL)
             backfill_pending = cursor.execute(
-                "SELECT 1 FROM state_meta "
-                "WHERE key = 'fts_cjk_rebuild_high_water' LIMIT 1"
+                "SELECT 1 FROM state_meta WHERE key = 'fts_cjk_rebuild_high_water' LIMIT 1"
             ).fetchone()
             self._fts_cjk_available = not backfill_pending
         except sqlite3.OperationalError:  # incl. "no such tokenizer" after a failed registration
@@ -2389,8 +2375,7 @@ class SessionDB(
             "state.db %s reported structural corruption outside the FTS "
             "indexes (%s); quarantining this handle: no further writes, no "
             "automatic reopen, no explicit WAL checkpoint at close. Stop the "
-            "gateway and run `hermes sessions recover --source %s "
-            "--inspect-only`.",
+            "gateway and run `hermes sessions recover --source %s --inspect-only`.",
             self.db_path,
             exc,
             self.db_path,
@@ -2418,10 +2403,8 @@ class SessionDB(
             setconfig(flag, True)
         except Exception:
             logger.debug(
-                "Could not disable SQLite's close-time checkpoint on the "
-                "quarantined handle for %s",
-                self.db_path,
-                exc_info=True,
+                "Could not disable SQLite's close-time checkpoint on the quarantined handle for %s",
+                self.db_path, exc_info=True,
             )
 
     def _raise_if_db_corrupt(self) -> None:
@@ -2574,8 +2557,7 @@ class SessionDB(
                     raise
         except sqlite3.Error as detach_exc:
             logger.error(
-                "Could not detach corrupt FTS indexes; canonical write still "
-                "cannot proceed: %s",
+                "Could not detach corrupt FTS indexes; canonical write still cannot proceed: %s",
                 detach_exc,
             )
             return False
@@ -2652,8 +2634,7 @@ class SessionDB(
                         "Skipping the close-time WAL checkpoint for %s: this "
                         "handle observed structural corruption (%s). Take a "
                         "snapshot of state.db, -wal and -shm before restarting, "
-                        "then run `hermes sessions recover --source %s "
-                        "--inspect-only`.",
+                        "then run `hermes sessions recover --source %s --inspect-only`.",
                         self.db_path,
                         self._db_corrupt_reason,
                         self.db_path,
@@ -2709,8 +2690,7 @@ class SessionDB(
         """True when demoted v22 shadow tables are still awaiting teardown.
         Caller must hold ``self._lock`` (or pass a migration-time cursor)."""
         return bool(conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-            "AND name LIKE ? ESCAPE '\\' LIMIT 1",
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name LIKE ? ESCAPE '\\' LIMIT 1",
             (self._FTS_TRASH_PREFIX.replace("_", "\\_") + "%",),
         ).fetchone())
 
@@ -2972,8 +2952,7 @@ class SessionDB(
         "  AND COALESCE(json_extract(COALESCE({alias}model_config, '{{}}'),"
         " '$._branched_from'), '') != ?\n"
         "  AND COALESCE(json_extract(COALESCE({alias}model_config, '{{}}'),"
-        " '$._delegate_from'), '') != ?\n"
-        "  AND COALESCE({alias}source, '') != 'tool'\n"
+        " '$._delegate_from'), '') != ?\n  AND COALESCE({alias}source, '') != 'tool'\n"
     )
 
     def end_session(self, session_id: str, end_reason: str) -> None:
@@ -3001,8 +2980,7 @@ class SessionDB(
             placeholders = ",".join("?" for _ in _RESET_END_REASONS)
             conn.execute(
                 "UPDATE sessions AS child SET model_config = json_set("
-                "COALESCE(child.model_config, '{}'), '$._reset_from', "
-                "child.parent_session_id) "
+                "COALESCE(child.model_config, '{}'), '$._reset_from', child.parent_session_id) "
                 "WHERE child.parent_session_id = ? "
                 "AND json_extract(COALESCE(child.model_config, '{}'), "
                 "                 '$._reset_from') IS NULL "
@@ -3124,8 +3102,7 @@ class SessionDB(
         params.extend((session_id, cwd, generation))
         return self._write_rowcount(
             f"UPDATE sessions SET {', '.join(sets)} "
-            "WHERE id = ? AND cwd = ? "
-            "AND git_metadata_generation = ?",
+            "WHERE id = ? AND cwd = ? AND git_metadata_generation = ?",
             params,
         ) == 1
 
@@ -3160,10 +3137,8 @@ class SessionDB(
         desc = bound_activity_description(description)
         prov = normalize_activity_provenance(provenance).value
         self._write_sql(
-            "UPDATE sessions SET "
-            "last_activity_at = ?, "
-            "last_activity_description = ?, "
-            "last_activity_provenance = ? "
+            "UPDATE sessions SET last_activity_at = ?, "
+            "last_activity_description = ?, last_activity_provenance = ? "
             "WHERE id = ? AND (last_activity_at IS NULL OR last_activity_at < ?)",
             (when, desc, prov, session_id, when),
             patience_s=self._ACTIVITY_WRITE_PATIENCE_S,
@@ -3188,10 +3163,8 @@ class SessionDB(
         if row is not None and not row[0] and (not row[1] or row[1] == ActivityProvenance.UNKNOWN.value):
             return
         self._write_sql(
-            "UPDATE sessions SET "
-            "last_activity_description = ?, "
-            "last_activity_provenance = ? "
-            "WHERE id = ?",
+            "UPDATE sessions SET last_activity_description = ?, "
+            "last_activity_provenance = ? WHERE id = ?",
             ("", ActivityProvenance.UNKNOWN.value, session_id),
             patience_s=self._ACTIVITY_WRITE_PATIENCE_S,
         )
@@ -3223,8 +3196,7 @@ class SessionDB(
         def _do(conn):
             system_prompt_hash = self._store_system_prompt(conn, system_prompt)
             conn.execute(
-                "UPDATE sessions "
-                "SET system_prompt_hash = ?, system_prompt = NULL WHERE id = ?",
+                "UPDATE sessions SET system_prompt_hash = ?, system_prompt = NULL WHERE id = ?",
                 (system_prompt_hash, session_id),
             )
             self._delete_unreferenced_system_prompts(conn)
@@ -3259,10 +3231,8 @@ class SessionDB(
             patch["provider"] = provider
         self._write_model_config_patch(
             session_id, patch,
-            "UPDATE sessions SET "
-            "model = ?, model_config = ?, "
-            "system_prompt = NULL, system_prompt_hash = NULL "
-            "WHERE id = ?",
+            "UPDATE sessions SET model = ?, model_config = ?, "
+            "system_prompt = NULL, system_prompt_hash = NULL WHERE id = ?",
             lambda merged: (model, merged, session_id),
             clear_prompts=True,
         )
@@ -3398,10 +3368,8 @@ class SessionDB(
         """Get a session by ID (drains queued token deltas first so cost readers see exact totals)."""
         self.flush_token_counts()
         row = self._read_one(
-            "SELECT s.*, "
-            "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
-            "FROM sessions s "
-            "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
+            "SELECT s.*, COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
+            "FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
             "WHERE s.id = ?",
             (session_id,),
         )
@@ -3605,8 +3573,7 @@ class SessionDB(
             return f"%{_escape_like(needle)}%"
         if id_needle:
             clauses.append(
-                "EXISTS (SELECT 1 FROM chain cq"
-                "        WHERE cq.root_id = s.id"
+                "EXISTS (SELECT 1 FROM chain cq        WHERE cq.root_id = s.id"
                 "          AND LOWER(cq.cur_id) LIKE ? ESCAPE '\\')"
             )
             params.append(_like_pattern(id_needle))
@@ -3617,10 +3584,8 @@ class SessionDB(
                 " '-', ''), '_', ''), '.', ''), ' ', '')"
             )
             search_clause = (
-                "EXISTS (SELECT 1 FROM chain cq"
-                " JOIN sessions cs ON cs.id = cq.cur_id"
-                " WHERE cq.root_id = s.id"
-                " AND (LOWER(COALESCE(cs.title, '')) LIKE ? ESCAPE '\\'"
+                "EXISTS (SELECT 1 FROM chain cq JOIN sessions cs ON cs.id = cq.cur_id"
+                " WHERE cq.root_id = s.id AND (LOWER(COALESCE(cs.title, '')) LIKE ? ESCAPE '\\'"
                 " OR LOWER(cq.cur_id) LIKE ? ESCAPE '\\'"
             )
             params.extend([_like_pattern(search_needle)] * 2)
@@ -3857,8 +3822,7 @@ class SessionDB(
         "id, role, content, tool_call_id, tool_calls, tool_name, effect_disposition, "
         "finish_reason, reasoning, reasoning_content, reasoning_details, "
         "codex_reasoning_items, codex_message_items, platform_message_id, observed, "
-        "_compressed_summary, timestamp, active, "
-        "api_content, display_kind, display_metadata"
+        "_compressed_summary, timestamp, active, api_content, display_kind, display_metadata"
     )
 
     def assert_export_safe(self, session_id: str, max_messages: Optional[int] = None) -> int:
@@ -3874,8 +3838,7 @@ class SessionDB(
             return 0
         row = self._read_one(
             "SELECT COUNT(*) FROM ("
-            "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT ?"
-            ")",
+            "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT ?)",
             (session_id, max_messages + 1),
         )
         message_count = int(row[0] if row else 0)
@@ -3920,11 +3883,9 @@ class SessionDB(
         scopes to one workspace (:func:`workspace_key` semantics) so
         ``hermes -c``/``--resume`` picks the current workspace's last session."""
         select_with_last_active = (
-            "SELECT s.*, "
-            "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved, "
+            "SELECT s.*, COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved, "
             f"{_sql_session_last_active('s')} AS last_active "
-            "FROM sessions s "
-            "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
+            "FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
         )
         where_clauses = []
         params: list = []
@@ -3938,8 +3899,7 @@ class SessionDB(
         where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         params.extend([limit, offset])
         return [self._session_row_dict(row) for row in self._read_all(
-            f"{select_with_last_active}"
-            f"{where_sql} "
+            f"{select_with_last_active}{where_sql} "
             "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
             params,
         )]
@@ -3986,8 +3946,7 @@ class SessionDB(
             rows = conn.execute(
                 "SELECT COALESCE(NULLIF(s.source, ''), 'cli') AS source, COUNT(*) AS count "
                 f"FROM sessions s{where_sql} "
-                "GROUP BY COALESCE(NULLIF(s.source, ''), 'cli') "
-                "ORDER BY count DESC",
+                "GROUP BY COALESCE(NULLIF(s.source, ''), 'cli') ORDER BY count DESC",
                 params,
             ).fetchall()
         return {str(row["source"]): int(row["count"] or 0) for row in rows}
@@ -4050,8 +4009,7 @@ class SessionDB(
                 return False
             removed_delegate_ids.extend(_delete_delegate_children(conn, [session_id]))
             conn.execute(  # orphan remaining children (branches) so FK is satisfied
-                "UPDATE sessions SET parent_session_id = NULL "
-                "WHERE parent_session_id = ?",
+                "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?",
                 (session_id,),
             )
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
@@ -4139,12 +4097,8 @@ class SessionDB(
     #: recoverable copy) — so NOT EXISTS is the authority; message_count = 0 is
     #: a cheap prefilter.
     _EMPTY_SESSION_WHERE = (
-        "message_count = 0 "
-        "AND ended_at IS NOT NULL "
-        "AND archived = 0 "
-        "AND NOT EXISTS ("
-        "SELECT 1 FROM messages WHERE messages.session_id = sessions.id"
-        ")"
+        "message_count = 0 AND ended_at IS NOT NULL AND archived = 0 AND NOT EXISTS ("
+        "SELECT 1 FROM messages WHERE messages.session_id = sessions.id)"
     )
 
     def count_empty_sessions(self) -> int:
