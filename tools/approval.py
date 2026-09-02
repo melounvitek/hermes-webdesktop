@@ -10,21 +10,13 @@ Single source of truth for the dangerous command system:
 - Permanent allowlist persistence (config.yaml)
 """
 
-import contextvars
-import fnmatch
 from dataclasses import dataclass
 import hashlib
 import logging
 import os
-import re
-import sys
 import threading
-import time
-import uuid
 from typing import Optional
-from hermes_cli.config import cfg_get
 
-from tools.interrupt import is_interrupted
 from utils import env_var_enabled, is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -34,77 +26,15 @@ logger = logging.getLogger(__name__)
 # escalation path).
 _YOLO_MODE_FROZEN: bool = is_truthy_value(os.getenv("HERMES_YOLO_MODE", ""))
 
-# Per-thread/per-task gateway session identity. Gateway runs agent turns
-# concurrently in executor threads, so a process-global env var is racy; the
-# env fallback stays for legacy single-threaded callers.
-_approval_session_key: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "approval_session_key", default="",
-)
-_approval_turn_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "approval_turn_id", default="",
-)
-_approval_tool_call_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "approval_tool_call_id", default="",
-)
-# Hermes session id (observability identity, distinct from the gateway routing
-# session_key). Forwarded to approval hooks so observer plugins attach marks to
-# the REAL session scope — without it they fall back to a synthetic "default"
-# session whose scope never closes, so close-time exporters never ship them.
-_approval_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "approval_session_id", default="",
-)
-
-# Interactive-CLI flag. Concurrent ACP sessions share a ThreadPoolExecutor, so
-# mutating os.environ["HERMES_INTERACTIVE"] races: one session's `finally`
-# restore can clobber another's set mid-run, dropping it onto the
-# non-interactive auto-approve path so a dangerous command runs without the
-# approval callback firing (GHSA-96vc-wcxf-jjff). None = unset → fall back to
-# the env var for legacy single-threaded CLI callers.
-_hermes_interactive_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "hermes_interactive", default=None,
-)
 
 
-def set_hermes_interactive_context(interactive: bool) -> contextvars.Token:
-    """Bind interactive mode for the current context instead of mutating os.environ."""
-    return _hermes_interactive_ctx.set("1" if interactive else "")
 
 
-def reset_hermes_interactive_context(token: contextvars.Token) -> None:
-    """Restore the prior value from :func:`set_hermes_interactive_context`."""
-    _hermes_interactive_ctx.reset(token)
 
 
-def _is_interactive_cli() -> bool:
-    """True for an interactive CLI/ACP session (contextvar first, env fallback)."""
-    ctx_val = _hermes_interactive_ctx.get()
-    if ctx_val is not None:
-        return is_truthy_value(ctx_val)
-    return env_var_enabled("HERMES_INTERACTIVE")
 
 
-def _fire_approval_hook(hook_name: str, **kwargs) -> None:
-    """Invoke a plugin lifecycle hook (pre_approval_request / post_approval_response).
 
-    Lazy-imports the plugin manager (approval.py is imported long before plugins
-    are discovered). Never raises: approval flow is safety-critical, plugin
-    observability is not.
-    """
-    try:
-        from hermes_cli.lifecycle import invoke_hook
-    except Exception:
-        return  # plugin system unavailable (bare tool-only imports, minimal tests)
-    try:
-        kwargs.setdefault("turn_id", _approval_turn_id.get())
-        kwargs.setdefault("tool_call_id", _approval_tool_call_id.get())
-        _session_id = _approval_session_id.get()
-        if _session_id:
-            kwargs.setdefault("session_id", _session_id)
-        invoke_hook(hook_name, **kwargs)
-    except Exception as exc:
-        # invoke_hook() swallows per-callback errors; reaching here means the
-        # dispatch layer itself failed.
-        logger.debug("Approval hook %s dispatch failed: %s", hook_name, exc)
 
 
 def _prepare_smart_approval_observer(
@@ -153,154 +83,89 @@ def _observe_smart_approval_verdict(payload: dict | None, verdict: str) -> None:
     )
 
 
-def set_current_session_key(session_key: str) -> contextvars.Token[str]:
-    """Bind the active approval session key to the current context."""
-    return _approval_session_key.set(session_key or "")
 
 
-def reset_current_session_key(token: contextvars.Token[str]) -> None:
-    """Restore the prior approval session key context."""
-    _approval_session_key.reset(token)
 
 
-def set_current_observability_context(
-    *,
-    turn_id: str = "",
-    tool_call_id: str = "",
-    session_id: str = "",
-) -> tuple[
-    contextvars.Token[str], contextvars.Token[str], contextvars.Token[str]
-]:
-    """Bind active tool correlation IDs to approval hooks."""
-    return (
-        _approval_turn_id.set(turn_id or ""),
-        _approval_tool_call_id.set(tool_call_id or ""),
-        _approval_session_id.set(session_id or ""),
-    )
 
 
-def reset_current_observability_context(
-    tokens: tuple[
-        contextvars.Token[str], contextvars.Token[str], contextvars.Token[str]
-    ],
-) -> None:
-    """Restore prior approval hook correlation IDs."""
-    turn_token, tool_token, session_token = tokens
-    _approval_session_id.reset(session_token)
-    _approval_tool_call_id.reset(tool_token)
-    _approval_turn_id.reset(turn_token)
 
 
-def get_current_session_key(default: str = "default") -> str:
-    """Return the active session key: approval contextvar → session_context → os.environ."""
-    session_key = _approval_session_key.get()
-    if session_key:
-        return session_key
-    from gateway.session_context import get_session_env
-    return get_session_env("HERMES_SESSION_KEY", default)
 
 
-def _session_env_flag(name: str) -> bool:
-    """Truthy session-scoped env flag, contextvar-first so one cron/-q job cannot
-    taint unrelated gateway/API/TUI turns in the same process; process env is
-    the fallback for CLI tests and older entrypoints."""
-    try:
-        from gateway.session_context import get_session_env
-
-        return is_truthy_value(get_session_env(name, ""))
-    except Exception:
-        return env_var_enabled(name)
 
 
-def _get_session_platform() -> str:
-    """Return the current gateway platform from contextvars/env fallback."""
-    try:
-        from gateway.session_context import get_session_env
-
-        return get_session_env("HERMES_SESSION_PLATFORM", "") or ""
-    except Exception:
-        return os.getenv("HERMES_SESSION_PLATFORM", "") or ""
 
 
-def _is_cron_approval_context() -> bool:
-    """True when the current approval decision is running inside cron."""
-    return _session_env_flag("HERMES_CRON_SESSION")
 
 
-#: Programmatic/unattended platforms: no human can answer a prompt and the
-#: adapter has no ``send_exec_approval`` / ``/approve`` surface. Governed by
-#: ``approvals.unattended_mode`` (default deny), mirroring ``cron_mode`` —
-#: never an interactive round-trip that blocks for the full timeout with
-#: nobody to answer (#37284, #87509).
-_UNATTENDED_APPROVAL_PLATFORMS = frozenset({
-    "webhook",
-    "msgraph_webhook",
-    "api_server",
-})
 
 
-def _is_unattended_platform_approval_context() -> bool:
-    """True when the session platform is a programmatic/unattended surface."""
-    return _get_session_platform() in _UNATTENDED_APPROVAL_PLATFORMS
 
 
-def _is_single_query_approval_context() -> bool:
-    """True for a single-query (-q) session.
-
-    ``hermes chat -q`` exports ``HERMES_INTERACTIVE=1`` (so sudo password
-    prompts work) but nobody is waiting to answer approvals; without this
-    marker the gate would wait the full timeout for a human who never comes,
-    then fail closed and push the agent toward workarounds (e.g. execute_code).
-    ``approvals.single_query_mode`` makes the path deterministic.
-    """
-    return _session_env_flag("HERMES_SINGLE_QUERY_SESSION")
 
 
-def _is_gateway_approval_context() -> bool:
-    """True inside a gateway/API session that can answer an approval.
-
-    Legacy integrations set HERMES_GATEWAY_SESSION; concurrent paths bind
-    HERMES_SESSION_PLATFORM via contextvars. Cron is NEVER a gateway approval
-    context even when it originated from a platform (cron binds the platform
-    for delivery routing): falling through would submit a pending approval with
-    no listener and block the job indefinitely. Unattended platforms are
-    excluded for the same reason (#37284, #87509).
-    """
-    if _is_cron_approval_context():
-        return False
-    if _is_unattended_platform_approval_context():
-        return False
-    if env_var_enabled("HERMES_GATEWAY_SESSION"):
-        return True
-    return bool(_get_session_platform())
 
 
-def _resolve_cli_approval_callback(approval_callback=None):
-    """Explicit callback, else the per-thread one from ``terminal_tool.set_approval_callback``."""
-    if approval_callback is not None:
-        return approval_callback
-    try:
-        from tools.terminal_tool import _get_approval_callback
-        return _get_approval_callback()
-    except Exception:
-        return None
 
 
-def _should_fall_through_to_cli_approval(
-    *,
-    is_cli: bool,
-    approval_callback,
-    notify_cb,
-) -> bool:
-    """Prefer the CLI Dangerous Command panel over a silent pending approval.
 
-    ``HERMES_EXEC_ASK`` (or a platform marker) can leak into an interactive CLI
-    process — historically via ``import gateway.run``. Without a gateway notify
-    listener the ask branch used to return ``pending_approval`` immediately and
-    skip the panel the user can actually answer.
-    """
-    return bool(is_cli and approval_callback is not None and notify_cb is None)
-
+from tools.approval_context import (  # noqa: F401 -- re-exported for callers/tests
+    _approval_session_key,
+    _approval_turn_id,
+    _approval_tool_call_id,
+    _approval_session_id,
+    _hermes_interactive_ctx,
+    set_hermes_interactive_context,
+    reset_hermes_interactive_context,
+    _is_interactive_cli,
+    _fire_approval_hook,
+    set_current_session_key,
+    reset_current_session_key,
+    set_current_observability_context,
+    reset_current_observability_context,
+    get_current_session_key,
+    _session_env_flag,
+    _get_session_platform,
+    _is_cron_approval_context,
+    _UNATTENDED_APPROVAL_PLATFORMS,
+    _is_unattended_platform_approval_context,
+    _is_single_query_approval_context,
+    _is_gateway_approval_context,
+    _resolve_cli_approval_callback,
+    _should_fall_through_to_cli_approval,
+    _normalize_approval_mode,
+    _get_approval_config,
+    _get_approval_mode,
+    _get_approval_timeout,
+    _binary_approval_mode,
+    _get_cron_approval_mode,
+    _get_single_query_approval_mode,
+    _get_unattended_approval_mode,
+    _tirith_fail_open,
+    _get_approval_transport_config,
+)
+from tools.approval_prompt import (  # noqa: F401 -- re-exported for callers/tests
+    prompt_dangerous_approval,
+    _CLI_CHOICE_ALIASES,
+    _CLI_CHOICE_I18N,
+    _prompt_dangerous_approval_inner,
+    get_plugin_manager,
+    _present_with_selected_transport,
+    _transport_denied_result,
+    _transport_choice,
+)
+from tools.approval_floors import (  # noqa: F401 -- re-exported for callers/tests
+    _match_user_deny_rule,
+    _user_deny_block_result,
+    _save_blocked_payload,
+    _hardline_block_result,
+    _sudo_stdin_block_result,
+    _SHELL_CONTROL_CHARS,
+    _REINTERPRETED_ARGUMENT_RE,
+    _has_allowlist_shell_operator,
+    _command_matches_permanent_allowlist,
+)
 from tools.approval_detection import (  # noqa: F401 -- re-exported for callers/tests
     _CREDENTIAL_FILES,
     _SYSTEM_CONFIG_PATH,
@@ -348,134 +213,14 @@ from tools.approval_gateway_wait import (  # noqa: F401 -- re-exported for calle
 )
 
 
-def _match_user_deny_rule(command: str) -> str | None:
-    """Return the matching ``approvals.deny`` glob, or None.
-
-    User-defined fnmatch globs that block unconditionally — like the hardline
-    floor, a match fires BEFORE the yolo / mode=off bypass ("never let the
-    agent run this, even under yolo"). Case-insensitive, run over the same
-    normalized/deobfuscated variants the dangerous-pattern detector uses so
-    quoting tricks (``r\\m``, ``git st""atus``) can't sidestep a rule.
-    """
-    try:
-        deny_patterns = _get_approval_config().get("deny") or []
-    except Exception:
-        return None
-    globs = [p.strip() for p in deny_patterns
-             if isinstance(p, str) and p.strip()]
-    if not globs:
-        return None
-    for command_variant in _command_detection_variants(command):
-        candidate = command_variant.lower().strip()
-        for pattern in globs:
-            if fnmatch.fnmatchcase(candidate, pattern.lower()):
-                return pattern
-    return None
 
 
-def _user_deny_block_result(pattern: str) -> dict:
-    """Build the standard block result for an ``approvals.deny`` match."""
-    return {
-        "approved": False,
-        "user_deny": True,
-        "message": (
-            f"BLOCKED: this command matches the user-defined deny rule "
-            f"'{pattern}' (approvals.deny in config.yaml). It cannot be "
-            "executed via the agent — not even with --yolo, /yolo, or "
-            "approvals.mode=off. Do NOT retry or rephrase this command; "
-            "the user has explicitly forbidden it."
-        ),
-    }
 
 
-def _save_blocked_payload(command: str) -> Optional[str]:
-    """Persist a parser-limit-blocked command as a runnable script.
-
-    The parser-limit block fires on payload SIZE/shape, not the operation —
-    usually a legitimate script the model inlined. Saving it makes recovery one
-    turn (`bash <file>`) instead of two, and is strictly safer than the
-    hint-only path: the file goes through the normal execution pipeline
-    (including the referenced-script content guard) and nothing runs here.
-    Returns the path, or None on any failure (hint falls back to write_file).
-    """
-    try:
-        from hermes_constants import get_hermes_home
-        script_dir = get_hermes_home() / "cache" / "blocked-scripts"
-        script_dir.mkdir(parents=True, exist_ok=True)
-        # Opportunistic cleanup: blocked payloads older than 7 days.
-        cutoff = time.time() - 7 * 86400
-        for old in script_dir.glob("blocked-*.sh"):
-            try:
-                if old.stat().st_mtime < cutoff:
-                    old.unlink()
-            except OSError:
-                pass
-        path = script_dir / f"blocked-{int(time.time())}-{uuid.uuid4().hex[:8]}.sh"
-        path.write_text(
-            "#!/bin/bash\n"
-            "# Auto-saved by Hermes: this command exceeded the inline command\n"
-            "# parser limit and was blocked from direct execution. Review it,\n"
-            "# then run it via: bash " + str(path) + "\n"
-            + command
-            + ("\n" if not command.endswith("\n") else ""),
-            encoding="utf-8", errors="replace",
-        )
-        return str(path)
-    except Exception:
-        logger.debug("failed to save blocked payload", exc_info=True)
-        return None
 
 
-def _hardline_block_result(description: str, command: str = "") -> dict:
-    """Build the standard block result for a hardline match."""
-    message = (
-        f"BLOCKED (hardline): {description}. "
-        "This command is on the unconditional blocklist and cannot "
-        "be executed via the agent — not even with --yolo, /yolo, "
-        "approvals.mode=off, or cron approve mode. If you genuinely "
-        "need to run it, run it yourself in a terminal outside the "
-        "agent."
-    )
-    # The parser-limit block is almost always a giant inline payload, not a
-    # forbidden operation, and is typically followed by blind rephrase
-    # retries — point at the saved script (or the write_file recipe).
-    if description in (_PARSER_LIMIT_DESCRIPTION, _MALFORMED_EXEC_DESCRIPTION):
-        saved = _save_blocked_payload(command) if command else None
-        if saved:
-            message += (
-                " RECOVERY: this block fires on oversized/unparseable inline "
-                "command payloads (heredocs, giant one-liners), not on the "
-                f"operation itself. Your command was saved to {saved} — "
-                f"review it, then run: terminal(command=\"bash {saved}\"). "
-                "Do not retry inline."
-            )
-        else:
-            message += (
-                " RECOVERY: this block fires on oversized/unparseable inline "
-                "command payloads (heredocs, giant one-liners), not on the "
-                "operation itself. Write the script to a file with write_file, "
-                "then run it: terminal(command=\"bash /path/script.sh\") or "
-                "\"python3 /path/script.py\". Do not retry inline."
-            )
-    return {
-        "approved": False,
-        "hardline": True,
-        "message": message,
-    }
 
 
-def _sudo_stdin_block_result(description: str) -> dict:
-    """Build the standard block result for sudo stdin guard."""
-    return {
-        "approved": False,
-        "message": (
-            f"BLOCKED: {description}. "
-            "Do not pipe passwords to 'sudo -S' — this is a brute-force "
-            "attack vector. Set SUDO_PASSWORD in your .env file if the "
-            "agent needs passwordless sudo, or run the sudo command "
-            "manually in your own terminal."
-        ),
-    }
 
 
 # =========================================================================
@@ -788,101 +533,10 @@ def _persist_choice(session_key: str, choice: str, warnings: list[tuple]) -> Non
             save_permanent_allowlist(_permanent_approved)
 
 
-# Shell control characters that make a command compound when they appear
-# OUTSIDE quotes. Inside quotes they are literal to the outer shell — but they
-# become executable again if an option like `-c`/`-e`/`--eval` (or a git
-# `-c alias.x=!...`) hands the quoted argument to another interpreter, so quoted
-# control chars only disqualify a command when such an option is present.
-_SHELL_CONTROL_CHARS = frozenset("\n\r;&|<>`$()")
-_REINTERPRETED_ARGUMENT_RE = re.compile(
-    r"(?:^|[ \t])(?:-[^-\s]*[ce]|--(?:command|eval))(?:[= \t]|$)"
-)
 
 
-def _has_allowlist_shell_operator(command: str) -> bool:
-    """Return True when a command is too compound for the allowlist shortcut.
-
-    Quote-aware: metacharacters inside quotes or behind a backslash are literal
-    arguments (``cargo bench -- '^a(b|c)$'``), not shell syntax. Still
-    disqualifying: ``$`` or backtick inside DOUBLE quotes (expansion stays
-    active), and any quoted/escaped control character when the command also
-    carries a ``-c``/``-e``/``--command``/``--eval``-style option that would
-    hand the quoted text to another interpreter.
-    """
-    command = command or ""
-    quote = None  # None | "'" | '"'
-    has_reinterpretable = False
-    i = 0
-    n = len(command)
-    while i < n:
-        ch = command[i]
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            elif ch in _SHELL_CONTROL_CHARS:
-                has_reinterpretable = True
-            i += 1
-            continue
-        if ch == "\\":
-            nxt = command[i + 1] if i + 1 < n else ""
-            if nxt in _SHELL_CONTROL_CHARS:
-                has_reinterpretable = True
-            i += 2
-            continue
-        if quote == '"':
-            if ch == '"':
-                quote = None
-            elif ch in ("`", "$"):
-                return True  # expansion is active inside double quotes
-            elif ch in _SHELL_CONTROL_CHARS:
-                has_reinterpretable = True
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            i += 1
-            continue
-        if ch == "$":
-            # Unquoted $ is only compound when it opens a substitution
-            # ("$HOME" stays simple, matching the historical `\$\(` behavior).
-            if i + 1 < n and command[i + 1] == "(":
-                return True
-            i += 1
-            continue
-        if ch in _SHELL_CONTROL_CHARS and ch not in "()":
-            return True
-        i += 1
-    # An unterminated quote means we can't reason about the command shape.
-    if quote is not None:
-        return True
-    return has_reinterpretable and bool(_REINTERPRETED_ARGUMENT_RE.search(command))
 
 
-def _command_matches_permanent_allowlist(command: str) -> bool:
-    """True when command_allowlist holds this exact command text or a matching glob.
-
-    Permanent approvals historically store dangerous-pattern keys such as
-    ``recursive delete``; manual entries are command text, possibly with
-    shell-style wildcards like ``podman *``.
-    """
-    command = (command or "").strip()
-    if not command or _has_allowlist_shell_operator(command):
-        return False
-
-    with _lock:
-        patterns = tuple(_permanent_approved)
-
-    for pattern in patterns:
-        if not isinstance(pattern, str):
-            continue
-        pattern = pattern.strip()
-        if not pattern:
-            continue
-        if command == pattern:
-            return True
-        if any(ch in pattern for ch in "*?[") and fnmatch.fnmatchcase(command, pattern):
-            return True
-    return False
 
 
 # =========================================================================
@@ -919,237 +573,20 @@ def save_permanent_allowlist(patterns: set):
 # Approval prompting (CLI)
 # =========================================================================
 
-def prompt_dangerous_approval(command: str, description: str,
-                              timeout_seconds: int | None = None,
-                              allow_permanent: bool = True,
-                              approval_callback=None,
-                              *, allow_session: bool = True,
-                              smart_denied: bool = False) -> str:
-    """Prompt the user to approve a dangerous command (CLI only).
-
-    Args:
-        allow_permanent: When False, hide [a]lways (tirith warnings present:
-            broad permanent allowlisting is wrong for content-level findings).
-        allow_session: When False, hide [s]ession too — the caller grants one
-            operation and re-asks next time (the protected agent-instruction
-            gate in ``tools/file_tools.py``). Offering a scope the caller
-            discards makes every later write re-prompt and reads as broken.
-        smart_denied: Owner override of a Smart DENY: offer only once/deny.
-        approval_callback: CLI prompt_toolkit callback,
-            ``(command, description, *, allow_permanent=True,
-            allow_session=True, smart_denied=False) -> str``. Legacy
-            signatures keep working while both keywords hold their defaults.
-
-    Returns: 'once', 'session', 'always', 'deny', or 'timeout'. 'timeout'
-        means no user response — still blocked (fail-closed), but callers
-        report "no response" rather than an explicit denial.
-    """
-    if timeout_seconds is None:
-        timeout_seconds = _get_approval_timeout()
-
-    # Everything below is a human prompt (callback panel or input() fallback,
-    # both bounded by the approval deadline): record it as human-wait time so
-    # the concurrent batch deadline excludes it (#79719).
-    with human_wait_window():
-        return _prompt_dangerous_approval_inner(
-            command,
-            description,
-            timeout_seconds,
-            allow_permanent,
-            approval_callback,
-            allow_session=allow_session,
-            smart_denied=smart_denied,
-        )
 
 
-_CLI_CHOICE_ALIASES = {
-    "o": "once", "once": "once",
-    "s": "session", "session": "session",
-    "a": "always", "always": "always",
-}
-_CLI_CHOICE_I18N = {
-    "once": "approval.allowed_once",
-    "session": "approval.allowed_session",
-    "always": "approval.allowed_always",
-    "deny": "approval.denied",
-}
 
 
-def _prompt_dangerous_approval_inner(command: str, description: str,
-                                     timeout_seconds: int,
-                                     allow_permanent: bool = True,
-                                     approval_callback=None,
-                                     *, allow_session: bool = True,
-                                     smart_denied: bool = False) -> str:
-    # Redact before any user-visible rendering; the original `command` is
-    # still what executes after approval. Same redactor as memory/log
-    # sanitization so tokens mask consistently across surfaces.
-    from agent.redact import redact_sensitive_text
-    display_command = redact_sensitive_text(command)
-    display_description = redact_sensitive_text(description)
-
-    # Smart DENY and a session-less gate both reduce the menu to once/deny.
-    once_only = smart_denied or not allow_session
-
-    if approval_callback is not None:
-        try:
-            callback_kwargs = {"allow_permanent": allow_permanent}
-            if not allow_session:
-                callback_kwargs["allow_session"] = False
-            if smart_denied:
-                callback_kwargs["smart_denied"] = True
-            return approval_callback(
-                display_command, display_description, **callback_kwargs
-            )
-        except Exception as e:
-            logger.error("Approval callback failed: %s", e, exc_info=True)
-            return "deny"
-
-    # Fail-closed guard: when prompt_toolkit owns the terminal and no callback
-    # is registered on this thread, the input() fallback would spawn a daemon
-    # thread whose read never sees Enter (keystrokes go to prompt_toolkit) —
-    # an invisible deadlock (#15216). Deny loudly instead; threads needing
-    # interactive approval must install a callback via
-    # tools.terminal_tool.set_approval_callback() first.
-    try:
-        from prompt_toolkit.application.current import get_app_or_none
-        if get_app_or_none() is not None:
-            logger.warning(
-                "Dangerous-command approval requested on a thread with no "
-                "approval callback while prompt_toolkit is active; denying "
-                "to avoid stdin deadlock. command=%r description=%r",
-                command, description,
-            )
-            return "deny"
-    except Exception:
-        pass  # prompt_toolkit absent or detection failed: legacy input() path is safe
-
-    os.environ["HERMES_SPINNER_PAUSE"] = "1"
-    try:
-        from agent.i18n import t
-        if once_only:
-            prompt = t("approval.prompt_smart_deny")
-        else:
-            prompt = t("approval.prompt_long") if allow_permanent else t("approval.prompt_short")
-        while True:
-            print()
-            print(f"  {t('approval.dangerous_header', description=display_description)}")
-            print(f"      {display_command}")
-            print()
-            if once_only:
-                print(t("approval.choose_smart_deny"))
-            elif allow_permanent:
-                print(t("approval.choose_long"))
-            else:
-                print(t("approval.choose_short"))
-            print()
-            sys.stdout.flush()
-
-            result = {"choice": ""}
-
-            def get_input():
-                try:
-                    result["choice"] = input(prompt).strip().lower()
-                except (EOFError, OSError):
-                    result["choice"] = ""
-
-            thread = threading.Thread(target=get_input, daemon=True)
-            thread.start()
-            thread.join(timeout=timeout_seconds)
-
-            if thread.is_alive():
-                print("\n" + t("approval.timeout"))
-                return "timeout"  # distinct from deny: the user never answered
-
-            choice = result["choice"]
-            if once_only:
-                choice_map = {
-                    **{
-                        value: "once"
-                        for value in t("approval.smart_deny_once_inputs").split(",")
-                    },
-                    **{
-                        value: "deny"
-                        for value in t("approval.smart_deny_deny_inputs").split(",")
-                    },
-                }
-                decision = choice_map.get(choice, "deny")
-            else:
-                decision = _CLI_CHOICE_ALIASES.get(choice, "deny")
-                if decision == "always" and not allow_permanent:
-                    decision = "session"
-            print(t(_CLI_CHOICE_I18N[decision]))
-            return decision
-
-    except (EOFError, KeyboardInterrupt):
-        print("\n" + t("approval.cancelled"))
-        return "deny"
-    finally:
-        if "HERMES_SPINNER_PAUSE" in os.environ:
-            del os.environ["HERMES_SPINNER_PAUSE"]
-        print()
-        sys.stdout.flush()
 
 
 # =========================================================================
 # Config readers
 # =========================================================================
 
-def _normalize_approval_mode(mode) -> str:
-    """Normalize approval mode values loaded from YAML/config.
-
-    YAML 1.1 parses a bare ``off`` as False, so ``mode: off`` arrives as a bool;
-    treat it as the intended string mode. Unknown strings (e.g. 'auto') warn and
-    fall back to 'manual' instead of silently failing every mode check.
-    """
-    _VALID_MODES = ("manual", "smart", "off")
-    if isinstance(mode, bool):
-        return "off" if mode is False else "manual"
-    if isinstance(mode, str):
-        normalized = mode.strip().lower()
-        if not normalized:
-            return "manual"
-        if normalized in _VALID_MODES:
-            return normalized
-        logger.warning(
-            "Unknown approvals.mode %r — defaulting to 'manual'. "
-            "Valid values: %s",
-            mode,
-            ", ".join(_VALID_MODES),
-        )
-        return "manual"
-    return "manual"
 
 
-def _get_approval_config() -> dict:
-    """Read the approvals config block.
-
-    Returns the LIVE config-cache sub-dict (load_config_readonly contract) —
-    callers must not mutate it or any nested structure.
-    """
-    try:
-        from hermes_cli.config import load_config_readonly
-        config = load_config_readonly()
-        return config.get("approvals", {}) or {}
-    except Exception as e:
-        logger.warning("Failed to load approval config: %s", e)
-        return {}
 
 
-def _get_approval_mode() -> str:
-    """Return 'manual', 'smart', or 'off' (a hosted-room policy overrides config)."""
-    try:
-        from gateway.hosted_room_execution_policy import (
-            current_room_execution_policy,
-        )
-
-        room_policy = current_room_execution_policy()
-        if room_policy is not None:
-            return room_policy.approval_mode
-    except Exception:
-        pass
-    mode = _get_approval_config().get("mode", "manual")
-    return _normalize_approval_mode(mode)
 
 
 def is_approval_bypass_active_for_session(session_key: str) -> bool:
@@ -1173,81 +610,16 @@ def is_approval_bypass_active() -> bool:
     )
 
 
-def _get_approval_timeout() -> int:
-    """Read ``approvals.timeout`` (default 300s: gateway push notifications may
-    not be seen for minutes; 60s failed closed before Telegram taps landed).
-
-    Clamped to ``agent.deadline.MAX_SAFE_TIMEOUT_S`` (~1 year): a larger value
-    overflows ``time_t`` inside ``Thread.join`` / ``Lock.acquire`` on macOS and
-    crashed every parallel tool batch (#83220). Clamping at the single
-    config-read site keeps every consumer platform-safe at once.
-    """
-    try:
-        raw = int(_get_approval_config().get("timeout", 300))
-    except (ValueError, TypeError):
-        return 300
-    try:
-        from agent.deadline import MAX_SAFE_TIMEOUT_S
-
-        safe_cap = int(MAX_SAFE_TIMEOUT_S)
-    except Exception:
-        # Fail CLOSED: the raw value would re-open the overflow this prevents.
-        safe_cap = 365 * 24 * 3600
-    if raw > safe_cap:
-        logger.warning(
-            "approvals.timeout=%s exceeds the platform-safe maximum; "
-            "clamping to %ss",
-            raw,
-            safe_cap,
-        )
-        return safe_cap
-    return raw
 
 
-def _binary_approval_mode(key: str) -> str:
-    """Read ``approvals.<key>`` as 'approve' or 'deny' (default deny)."""
-    try:
-        from hermes_cli.config import load_config_readonly
-        config = load_config_readonly()
-        mode = str(cfg_get(config, "approvals", key, default="deny")).lower().strip()
-        if mode in {"approve", "off", "allow", "yes"}:
-            return "approve"
-        return "deny"
-    except Exception:
-        return "deny"
 
 
-def _get_cron_approval_mode() -> str:
-    """Read the cron approval mode from config. Returns 'deny' or 'approve'."""
-    return _binary_approval_mode("cron_mode")
 
 
-def _get_single_query_approval_mode() -> str:
-    """Read the single-query (-q) approval mode from config. Returns 'deny' or 'approve'."""
-    return _binary_approval_mode("single_query_mode")
 
 
-def _get_unattended_approval_mode() -> str:
-    """Approval mode for webhook / msgraph_webhook / api_server sessions; default
-    deny — an unattended session never silently runs a flagged action unless the
-    operator explicitly trusts it."""
-    return _binary_approval_mode("unattended_mode")
 
 
-def _tirith_fail_open() -> bool:
-    """``security.tirith_fail_open`` (default True; True when config is unreadable).
-
-    False means the operator opted into fail-closed: an un-importable scanner
-    must not silently grant access (#20733).
-    """
-    try:
-        from hermes_cli.config import load_config_readonly as _load_cfg
-        _sec = (_load_cfg() or {}).get("security", {}) or {}
-        if _sec.get("tirith_enabled", True):
-            return bool(_sec.get("tirith_fail_open", True))
-    except Exception:
-        pass
-    return True
 
 
 # =========================================================================
@@ -2015,172 +1387,10 @@ def _format_tirith_description(tirith_result: dict) -> str:
         return f"Security scan: {summary}"
     return "Security scan — " + "; ".join(parts)
 
-def get_plugin_manager():
-    """Lazy plugin-manager seam used by tests and early tool-only imports."""
-    from hermes_cli.plugins import discover_plugins, get_plugin_manager as _get_manager
 
-    # Approval can be imported before model_tools (which triggers discovery);
-    # make an explicitly selected transport available on the first approval
-    # instead of treating the undiscovered registry as unavailable.
-    discover_plugins()
-    return _get_manager()
 
-def _get_approval_transport_config() -> tuple[str, str | None]:
-    """Return explicitly selected transport and fail-closed fallback mode."""
-    try:
-        from hermes_cli.config import load_config_readonly
 
-        config = load_config_readonly() or {}
-        approval_config = ((config.get("security") or {}).get("approval") or {})
-        selected = str(approval_config.get("transport") or "builtin").strip().lower()
-        fallback = str(approval_config.get("transport_fallback") or "").strip().lower()
-    except Exception:
-        # An unreadable/malformed selection must not silently materialize a
-        # prompt on a built-in surface the operator may not be watching.
-        return "config-error", None
-    return selected or "builtin", "builtin" if fallback == "builtin" else None
 
-def _present_with_selected_transport(
-    *,
-    command: str,
-    description: str,
-    pattern_key: str,
-    pattern_keys: list[str],
-    session_key: str,
-    surface: str,
-    allow_session: bool,
-    allow_permanent: bool,
-) -> dict:
-    """Present through an explicitly selected plugin transport, if any.
-
-    A selected transport replaces every built-in prompt surface; detection,
-    allowed scopes, persistence, timeout, and final authorization stay
-    host-owned. A failed transport reaches a built-in surface only under the
-    explicit ``transport_fallback: builtin`` opt-in.
-    """
-    name, fallback = _get_approval_transport_config()
-    if name == "builtin":
-        return {"selected": False}
-
-    try:
-        registered = get_plugin_manager().get_approval_transport(name)
-    except Exception:
-        # Plugin/discovery exception text may contain plugin-owned secrets.
-        logger.warning("Could not resolve selected approval transport %r", name)
-        registered = None
-    if registered is None:
-        logger.warning("Selected approval transport %r is unavailable", name)
-        return {
-            "selected": True,
-            "choice": "deny",
-            "failure": "unavailable",
-            "fallback": fallback,
-            "name": name,
-        }
-
-    try:
-        from agent.redact import redact_sensitive_text
-        from hermes_cli.approval_transport import ApprovalRequest, invoke_approval_transport
-
-        timeout_seconds = _get_approval_timeout()
-        request = ApprovalRequest.create(
-            command=redact_sensitive_text(command, force=True),
-            description=redact_sensitive_text(description, force=True),
-            pattern_key=pattern_key,
-            pattern_keys=tuple(pattern_keys),
-            session_key=session_key,
-            surface=surface,
-            allow_session=allow_session,
-            allow_permanent=allow_permanent,
-            timeout_seconds=timeout_seconds,
-        )
-    except Exception:
-        # Never fall back to raw text if redaction or request construction
-        # fails: fail closed without calling the plugin or leaking the
-        # unredacted payload to logs/hooks.
-        logger.warning("Could not build redacted plugin approval request")
-        return {
-            "selected": True,
-            "choice": "deny",
-            "failure": "error",
-            "fallback": None,
-            "name": name,
-        }
-    hook_kwargs = dict(
-        command=request.command,
-        description=request.description,
-        pattern_key=pattern_key,
-        pattern_keys=list(pattern_keys),
-        session_key=session_key,
-        surface=f"transport:{name}",
-        request_id=request.request_id,
-        request_digest=request.digest,
-    )
-    _fire_approval_hook("pre_approval_request", **hook_kwargs)
-    try:
-        from tools.environments.base import touch_activity_if_due
-    except Exception:  # pragma: no cover - minimal tool-only environments
-        touch_activity_if_due = None
-    now = time.monotonic()
-    activity_state = {"last_touch": now, "start": now}
-
-    def _poll() -> None:
-        if touch_activity_if_due is not None:
-            touch_activity_if_due(activity_state, "waiting for plugin approval transport")
-
-    with human_wait_window(session_key):
-        result = invoke_approval_transport(
-            registered.present,
-            request,
-            timeout_seconds=timeout_seconds,
-            on_poll=_poll,
-            is_interrupted=is_interrupted,
-        )
-    hook_choice = result.choice if result.failure is None else f"transport_{result.failure}"
-    _fire_approval_hook("post_approval_response", **hook_kwargs, choice=hook_choice)
-    return {
-        "selected": True,
-        "choice": result.choice,
-        "failure": result.failure,
-        "fallback": fallback,
-        "name": name,
-    }
-
-def _transport_denied_result(
-    *, pattern_key: str, description: str, failure: str
-) -> dict:
-    breaker_addendum = _denial_breaker_addendum(get_current_session_key())
-    return _denied(
-        f"BLOCKED: Selected approval transport failed ({failure}); the user "
-        "has NOT consented to this action. Do NOT retry this command or "
-        "attempt the same outcome through another route."
-        f"{breaker_addendum}",
-        pattern_key=pattern_key, description=description,
-        outcome=f"transport_{failure}",
-    )
-
-def _transport_choice(attempt: dict, *, pattern_key: str, description: str):
-    """Interpret a ``_present_with_selected_transport`` attempt.
-
-    Returns ``(choice, denied_result)``: both None when the built-in surfaces
-    should run (no transport selected, or a failure with the explicit builtin
-    fallback); a denied result for any other failure; else the user's choice.
-    """
-    if not attempt.get("selected"):
-        return None, None
-    failure = attempt.get("failure")
-    if failure and attempt.get("fallback") == "builtin":
-        logger.warning(
-            "Approval transport %r failed (%s); using explicit builtin fallback",
-            attempt.get("name"),
-            failure,
-        )
-        return None, None
-    if failure:
-        return None, _transport_denied_result(
-            pattern_key=pattern_key, description=description, failure=failure,
-        )
-    return attempt.get("choice"), None
 
 def _tirith_scan(command: str) -> dict:
     """Tirith result for the interactive flow; an un-importable scanner allows
