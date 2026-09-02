@@ -18,48 +18,15 @@ from urllib.parse import unquote, urlparse
 
 import acp
 from acp.schema import (
-    AgentCapabilities,
-    AgentMessageChunk,
-    AuthenticateResponse,
-    AvailableCommand,
-    AvailableCommandsUpdate,
-    BlobResourceContents,
-    ClientCapabilities,
-    EmbeddedResourceContentBlock,
-    ForkSessionResponse,
-    ImageContentBlock,
-    AudioContentBlock,
-    Implementation,
-    InitializeResponse,
-    ListSessionsResponse,
-    LoadSessionResponse,
-    McpServerHttp,
-    McpServerSse,
-    McpServerStdio,
-    ModelInfo,
-    NewSessionResponse,
-    PromptCapabilities,
-    PromptResponse,
-    ResumeSessionResponse,
-    SetSessionConfigOptionResponse,
-    SetSessionModelResponse,
-    SetSessionModeResponse,
-    ResourceContentBlock,
-    SessionCapabilities,
-    SessionForkCapabilities,
-    SessionInfoUpdate,
-    SessionListCapabilities,
-    SessionMode,
-    SessionModeState,
-    SessionModelState,
-    SessionResumeCapabilities,
-    SessionInfo,
-    TextContentBlock,
-    TextResourceContents,
-    UnstructuredCommandInput,
-    Usage,
-    UsageUpdate,
-    UserMessageChunk,
+    AgentCapabilities, AgentMessageChunk, AudioContentBlock, AuthenticateResponse, AvailableCommand,
+    AvailableCommandsUpdate, BlobResourceContents, ClientCapabilities, EmbeddedResourceContentBlock,
+    ForkSessionResponse, ImageContentBlock, Implementation, InitializeResponse, ListSessionsResponse,
+    LoadSessionResponse, McpServerHttp, McpServerSse, McpServerStdio, ModelInfo, NewSessionResponse,
+    PromptCapabilities, PromptResponse, ResourceContentBlock, ResumeSessionResponse, SessionCapabilities,
+    SessionForkCapabilities, SessionInfo, SessionInfoUpdate, SessionListCapabilities, SessionMode,
+    SessionModeState, SessionModelState, SessionResumeCapabilities, SetSessionConfigOptionResponse,
+    SetSessionModeResponse, SetSessionModelResponse, TextContentBlock, TextResourceContents,
+    UnstructuredCommandInput, Usage, UsageUpdate, UserMessageChunk,
 )
 
 from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID, build_auth_methods, detect_provider
@@ -96,22 +63,13 @@ PromptBlock = (
 
 
 def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, str]]]]:
-    """Return ``(slug, label, [(model_id, description), ...])`` for named endpoints.
+    """``(slug, label, [(model_id, description), ...])`` for named endpoints (v12 ``providers:``
+    and legacy ``custom_providers:``), which canonical provider enumeration never lists.
 
-    Covers both the v12 ``providers:`` mapping and the legacy ``custom_providers:``
-    list. These endpoints never appear in canonical provider enumeration, so
-    without this the ACP model selector hides every named endpoint the TUI
-    ``/model`` picker renders.
-
-    Model lists come from the entry's declared models (``default_model`` +
-    ``models``), refreshed from the endpoint's live ``/models`` listing when a
-    credential is available and ``discover_models`` is not disabled. Declared
-    models survive a failed live discovery — some OpenAI-compatible endpoints
-    expose no ``/models`` route yet serve the declared models fine.
-
-    Slugs use the ``custom:<name>`` shape that ``parse_model_input`` and
-    ``resolve_runtime_provider`` already resolve, so encoded choice ids
-    (``custom:<name>:<model>``) round-trip through ``set_session_model``.
+    Models = the entry's declared models, refreshed from the live ``/models`` listing when a
+    credential exists and ``discover_models`` isn't disabled; declared models survive a failed
+    discovery (some endpoints have no ``/models`` route). Slugs use the ``custom:<name>`` shape
+    ``parse_model_input``/``resolve_runtime_provider`` resolve, so choice ids round-trip.
     """
     try:
         from hermes_cli.config import (
@@ -138,8 +96,7 @@ def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, st
         logger.debug("Could not load named custom providers", exc_info=True)
         return []
 
-    # ``get_compatible_custom_providers`` drops the ``enabled`` flag during
-    # normalization; collect disabled keys from the raw config instead.
+    # ``get_compatible_custom_providers`` drops ``enabled``; read disabled keys from raw config.
     raw_providers = cfg.get("providers") if isinstance(cfg, dict) else None
     disabled_keys = {
         str(key).strip().lower()
@@ -209,16 +166,13 @@ try:
 except Exception:
     HERMES_VERSION = "0.0.0"
 
-# Thread pool for running AIAgent (synchronous) in parallel.
+# Runs the synchronous AIAgent off the event loop.
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="acp-agent")
 
-# ACP ListSessionsRequest has no client-side limit; clients paginate this fixed
-# page via `cursor` / `next_cursor`.
+# ListSessionsRequest has no client-side limit; clients paginate via `cursor`/`next_cursor`.
 _LIST_SESSIONS_PAGE_SIZE = 50
-# Per-provider cap for the ACP model selector: clients (Zed, Buzz) render the
-# whole `availableModels` array in one dropdown. Mirrors the MoA picker cap
-# (`hermes_cli/moa_cmd.py`). Bounds each provider's row, not the total; the
-# current model is always kept via the fallback insert in `_build_model_state`.
+# Per-provider row cap (clients render all `availableModels` in one dropdown; mirrors the
+# MoA picker cap). Not a total cap; the current model is always kept via the fallback insert.
 ACP_MAX_MODELS_PER_PROVIDER = 200
 _MAX_ACP_RESOURCE_BYTES = 512 * 1024
 _TEXT_RESOURCE_MIME_PREFIXES = ("text/",)
@@ -280,11 +234,8 @@ def _image_data_url(data: bytes, mime_type: str) -> str:
 
 
 def _path_from_file_uri(uri: str) -> Path | None:
-    """Convert local file URIs/paths from ACP clients into a readable Path.
-
-    Zed may send POSIX file URIs from Linux/WSL workspaces or Windows-ish paths
-    when launched through wsl.exe; the Windows drive form becomes /mnt/<drive>/...
-    """
+    """Local file URI/path from an ACP client -> readable Path (None for non-file URIs).
+    Windows drive forms (Zed via wsl.exe) become ``/mnt/<drive>/...``."""
     raw = (uri or "").strip()
     if not raw:
         return None
@@ -343,12 +294,8 @@ def _image_parts(uri: str, display: str, data: bytes, mime: str) -> list[dict[st
 
 
 def _resource_link_to_parts(block: ResourceContentBlock) -> list[dict[str, Any]]:
-    """Convert an ACP resource_link block to OpenAI content parts.
-
-    Image resources produce an image_url part with a small text header so the
-    model knows which attachment it is; other resources return a single text
-    part with the inlined file body (or a binary-omit note).
-    """
+    """ACP resource_link -> OpenAI content parts: images become a text header + image_url,
+    everything else a single text part with the inlined body (or a binary-omit note)."""
     uri = str(getattr(block, "uri", "") or "").strip()
     if not uri:
         return []
@@ -485,8 +432,7 @@ def _content_blocks_to_openai_user_content(prompt: list[PromptBlock]) -> str | l
     if not parts:
         return _extract_text(prompt)
 
-    # Pure text prompts stay strings so slash-command handling and text-only
-    # providers keep the legacy path; structured content only for real media.
+    # Pure text stays a string (slash commands, text-only providers); structured only for media.
     if all(part.get("type") == "text" for part in parts):
         return "\n".join(text_parts)
 
@@ -554,12 +500,8 @@ def _estimate_tokens(history: list, agent: Any, system_prompt: str | None = None
 
 
 def _flatten_history_text(value: Any) -> str:
-    """Normalize a persisted text-or-text-parts value into one stripped string.
-
-    Content (and provider reasoning fields) may be a scalar string or a list of
-    ``{"text": ...}`` / ``{"type": "text", "content": ...}`` parts. Whitespace-only
-    input collapses to ``""`` so callers can treat that as "nothing to emit".
-    """
+    """Persisted content/reasoning (str, or list of ``{"text"}`` / ``{"type": "text", "content"}``
+    parts) -> one stripped string; whitespace-only collapses to ``""`` ("nothing to emit")."""
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, list):
@@ -578,9 +520,8 @@ def _flatten_history_text(value: Any) -> str:
 
 
 def _history_reasoning_text(message: dict[str, Any]) -> str:
-    """First non-empty of ``reasoning_content`` (DeepSeek/Moonshot, chat-completions
-    normalizer) and ``reasoning`` (codex projector and other transports). Both are
-    live keys for different transports, not old-vs-new."""
+    """First non-empty of ``reasoning_content`` and ``reasoning`` — both live keys, for
+    different transports (not old-vs-new)."""
     for key in ("reasoning_content", "reasoning"):
         text = _flatten_history_text(message.get(key))
         if text:
@@ -591,19 +532,14 @@ def _history_reasoning_text(message: dict[str, Any]) -> str:
 def _history_summary_meta(message: dict[str, Any], text: str) -> dict[str, Any] | None:
     """``_meta`` for a replayed compaction summary, else None.
 
-    Summaries are persisted as ordinary history messages — standalone handoffs
-    under either role (whichever keeps alternation valid) or merged into the
-    first preserved tail message. Two distinct ``_meta.hermes`` keys so clients
-    cannot accidentally hide real content: ``compactionSummary`` (whole chunk is
-    the summary; safe to collapse) vs ``containsCompactionSummary`` (real turn
-    content followed by the summary; collapsing would hide preserved content).
-    Honors the in-process ``_compressed_summary`` flag and falls back to content
-    classification so DB-reloaded sessions still tag correctly.
+    Summaries persist as ordinary messages, standalone (either role) or merged into the first
+    preserved tail message. Two keys so clients can't hide real content: ``compactionSummary``
+    (whole chunk; safe to collapse) vs ``containsCompactionSummary`` (real content + summary).
+    Uses the in-process flag, falling back to content classification for DB-reloaded sessions.
     """
     kind = ContextCompressor.classify_summary_content(text)
     if kind is None and message.get(COMPRESSED_SUMMARY_METADATA_KEY):
-        # Flagged but unclassified (prefix drift): the flag is only ever set on
-        # summary-bearing messages, so treat as standalone.
+        # Flagged but unclassified (prefix drift): the flag only marks summaries -> standalone.
         kind = "standalone"
     if kind == "standalone":
         return {"hermes": {"compactionSummary": True}}
@@ -660,12 +596,11 @@ def _attach_interrupted_prompt(interrupted_prompt: str, guidance: str) -> str:
 
 @dataclass
 class _ModelCatalog:
-    """Deduplicated ACP model rows collected from the inventory + named endpoints.
+    """Deduplicated ACP model rows from the inventory + named endpoints.
 
-    Dedupes on both the encoded choice id and a semantic ``provider:model`` id
-    (``ollama``/``custom:ollama`` are one provider). Also resolves the current
-    provider identity: a bare/``custom`` current provider whose base_url matches
-    an ollama inventory row is really ``custom:ollama``.
+    Dedupes on the encoded choice id AND a semantic ``provider:model`` id (``ollama`` ==
+    ``custom:ollama``). A bare/``custom`` current provider whose base_url matches an ollama
+    inventory row is resolved to ``custom:ollama``.
     """
 
     normalize_provider: Callable[[str], str]
@@ -843,12 +778,8 @@ class HermesACPAgent(acp.Agent):
         loop.call_soon(asyncio.create_task, make_coro())
 
     def _session_modes(self, state: SessionState) -> SessionModeState:
-        """ACP session modes carrying the edit-approval policy.
-
-        Zed renders ``config_options`` in the prominent selector slot where the
-        model picker lives; Claude/Codex expose policy controls as ACP modes,
-        which coexist with the picker, so Hermes maps edit approval onto modes.
-        """
+        """Edit-approval policy as ACP modes. Zed renders ``config_options`` in the model
+        picker's slot; modes (as Claude/Codex use) coexist with the picker."""
         current = str(getattr(state, "mode", "") or self._MODE_DEFAULT)
         if current not in self._MODES:
             current = self._MODE_DEFAULT
@@ -872,12 +803,8 @@ class HermesACPAgent(acp.Agent):
         return f"{raw_provider}:{raw_model}" if raw_provider else raw_model
 
     def _build_model_state(self, state: SessionState) -> SessionModelState | None:
-        """Authenticated providers and their models for ACP clients.
-
-        Uses the shared Hermes inventory (also behind ``hermes model``, the TUI
-        and the dashboard) so the selector doesn't collapse to the current
-        provider's curated list.
-        """
+        """Authenticated providers + models, from the shared Hermes inventory (same substrate
+        as ``hermes model``/TUI/dashboard) so the selector isn't just the current curated list."""
         model = str(state.model or getattr(state.agent, "model", "") or "").strip()
         provider = getattr(state.agent, "provider", None) or detect_provider() or "openrouter"
 
@@ -973,11 +900,8 @@ class HermesACPAgent(acp.Agent):
     def _switch_model(
         self, state: SessionState, raw_model: str, *, keep_endpoint: bool = False
     ) -> tuple[str | None, str, str]:
-        """Rebuild the session agent on a new model; returns (old provider, new provider, model).
-
-        ``keep_endpoint`` carries the current base_url/api_mode over when the
-        provider is unchanged (ACP ``set_session_model``).
-        """
+        """Rebuild the session agent on a new model -> (old provider, new provider, model).
+        ``keep_endpoint`` carries base_url/api_mode over when the provider is unchanged."""
         current_provider = getattr(state.agent, "provider", None)
         target_provider, new_model = self._resolve_model_selection(raw_model, current_provider or "openrouter")
         state.model = new_model
@@ -996,9 +920,8 @@ class HermesACPAgent(acp.Agent):
 
     @staticmethod
     def _build_usage_update(state: SessionState) -> UsageUpdate | None:
-        """ACP ``usage_update`` driving Zed's context indicator: ``size`` is the
-        model context window, ``used`` the estimated request pressure (system
-        prompt + history + tool schemas — the same buckets sent to providers)."""
+        """``usage_update`` for Zed's context indicator: ``size`` = context window, ``used`` =
+        estimated request pressure (system prompt + history + tool schemas)."""
         agent = state.agent
         compressor = getattr(agent, "context_compressor", None)
         size = int(getattr(compressor, "context_length", 0) or 0)
@@ -1038,9 +961,8 @@ class HermesACPAgent(acp.Agent):
         self, session_id: str, *,
         current_hermes_session_id: Optional[str] = None, previous_hermes_session_id: Optional[str] = None,
     ) -> None:
-        """Send ACP session metadata after Hermes changes it. Pass
-        ``previous_hermes_session_id`` when the internal head rotated
-        (compression split) so the provenance meta flags the reason."""
+        """Session metadata update; pass ``previous_hermes_session_id`` when the internal head
+        rotated (compression split) so provenance flags the reason."""
         if not self._conn:
             return
         try:
@@ -1052,8 +974,7 @@ class HermesACPAgent(acp.Agent):
             return
 
         title = row.get("title")
-        # `sessions` has no `updated_at` column (only started_at/ended_at); "now"
-        # is right because this fires precisely when the title was refreshed.
+        # `sessions` has no `updated_at`; "now" is right since this fires when the title changed.
         update = SessionInfoUpdate(
             session_update="session_info_update",
             title=title if isinstance(title, str) and title.strip() else None,
@@ -1114,19 +1035,14 @@ class HermesACPAgent(acp.Agent):
             )
 
     def _schedule_mcp_late_refresh(self, state: SessionState) -> None:
-        """Refresh the agent's tool snapshot when background MCP discovery lands late.
+        """Refresh the tool snapshot when background MCP discovery lands after agent build
+        (``_make_agent`` only joins ~1.5s). Waits up to 30s off the critical path, then rebuilds
+        via ``refresh_agent_mcp_tools`` (same as ``/reload-mcp``).
 
-        entry.py runs MCP discovery in a daemon thread; ``_make_agent`` joins it
-        only briefly (~1.5s), so a slower server lands after the agent is built
-        and its tools would be absent for the whole session. This waits for
-        discovery (bounded 30s) off the critical path, then rebuilds via the same
-        ``refresh_agent_mcp_tools`` that ``/reload-mcp`` uses.
-
-        Cache safety: rebuild only while the session is pre-first-turn (nothing
-        cached yet). After the first message the snapshot stays frozen; later
-        servers are picked up cache-safely by the between-turns prologue refresh
-        (``agent/turn_context.py``). No-op when discovery already finished, the
-        join times out, the registry was unchanged, or the session was closed.
+        Cache safety: only pre-first-turn (nothing cached yet); afterwards the snapshot stays
+        frozen and late servers land via the between-turns prologue refresh
+        (``agent/turn_context.py``). No-op if discovery finished, join timed out, registry
+        unchanged, or session closed.
         """
         try:
             from hermes_cli.mcp_startup import mcp_discovery_in_flight
@@ -1147,17 +1063,14 @@ class HermesACPAgent(acp.Agent):
                 if not join_mcp_discovery(timeout=30.0):
                     return
 
-                # In-memory-only lookup on purpose: ``get_session()`` would
-                # restore from DB and build a whole new AIAgent just to say no-op.
+                # In-memory only: ``get_session()`` would restore from DB and build a new AIAgent.
                 with self.session_manager._lock:
                     current = self.session_manager._sessions.get(session_id)
                 if current is None or current.agent is not agent:
                     return
 
-                # Serialized with turn start: ``prompt()`` flips ``is_running``
-                # under ``runtime_lock`` before dispatching, so holding it here
-                # (and bailing when a turn is running) closes the window where
-                # the refresh would swap ``tools=`` mid-turn and break the cache.
+                # ``prompt()`` flips ``is_running`` under ``runtime_lock`` before dispatching, so
+                # holding it here closes the window where a refresh would swap ``tools=`` mid-turn.
                 with current.runtime_lock:
                     if current.is_running:
                         return
@@ -1212,16 +1125,14 @@ class HermesACPAgent(acp.Agent):
         )
 
     async def authenticate(self, method_id: str, **kwargs: Any) -> AuthenticateResponse | None:
-        # Only acknowledge the method_id advertised in initialize(); accepting
-        # any id would be poor hygiene if ACP ever grows multi-method auth.
+        # Only acknowledge the method_id advertised in initialize().
         if not isinstance(method_id, str):
             return None
         normalized_method = method_id.strip().lower()
         provider = detect_provider()
 
         if normalized_method == TERMINAL_SETUP_AUTH_METHOD_ID:
-            # Terminal auth runs Hermes setup out-of-band; succeed only once it
-            # has produced usable runtime credentials.
+            # Terminal auth runs setup out-of-band; succeed only once credentials exist.
             return AuthenticateResponse() if provider else None
 
         if not provider or normalized_method != provider:
@@ -1231,10 +1142,8 @@ class HermesACPAgent(acp.Agent):
     # ---- Session management -------------------------------------------------
 
     async def _replay_session_history(self, state: SessionState) -> None:
-        """Replay persisted history as user/assistant chunks, thought chunks and
-        reconstructed tool-call start/completion notifications, so the editor
-        shows the transcript instead of a clean thread. Awaited inline from
-        ``load_session``/``resume_session`` (see there for why)."""
+        """Replay history as user/assistant/thought chunks plus reconstructed tool-call
+        start/complete events so the editor shows the transcript, not a clean thread."""
         if not self._conn or not state.history:
             return
 
@@ -1299,12 +1208,9 @@ class HermesACPAgent(acp.Agent):
                         return
 
     async def _replay_history_guarded(self, state: SessionState, verb: str) -> None:
-        """Per ACP spec, ``session/load`` and ``session/resume`` must stream the
-        prior conversation via ``session/update`` BEFORE responding, so clients
-        get the transcript within the request's lifetime (Codex, Claude Code,
-        OpenCode, Zed all rely on this; deferring via ``call_soon`` broke them).
-        Replay is best-effort: a corrupt message shape must not turn a
-        successful load into a JSON-RPC error."""
+        """Per ACP spec, load/resume must stream history via ``session/update`` BEFORE
+        responding (Codex/Claude Code/OpenCode/Zed rely on this; deferring via ``call_soon``
+        broke them). Best-effort: a corrupt message must not turn the load into an error."""
         try:
             await self._replay_session_history(state)
         except Exception:
@@ -1316,8 +1222,8 @@ class HermesACPAgent(acp.Agent):
             )
 
     def _session_response_fields(self, state: SessionState) -> dict[str, Any]:
-        """Common ``models``/``modes``/``field_meta`` for session responses; also
-        schedules the command advertisement and usage refresh."""
+        """``models``/``modes``/``field_meta`` for session responses; schedules command
+        advertisement + usage refresh."""
         self._schedule_available_commands_update(state.session_id)
         self._schedule_usage_update(state)
         return {
@@ -1367,8 +1273,7 @@ class HermesACPAgent(acp.Agent):
             with state.runtime_lock:
                 if state.is_running and state.current_prompt_text:
                     state.interrupted_prompt_text = state.current_prompt_text
-                # Publish cancellation and hard-stop the agent before another
-                # prompt can acquire this lock and mistake the turn for
+                # Cancel + hard-stop under the lock so no other prompt mistakes this turn for
                 # redirectable work.
                 state.cancel_event.set()
                 try:
@@ -1397,10 +1302,8 @@ class HermesACPAgent(acp.Agent):
     async def list_sessions(
         self, cursor: str | None = None, cwd: str | None = None, **kwargs: Any
     ) -> ListSessionsResponse:
-        """``cwd`` filtering is done by ``SessionManager.list_sessions``. ``cursor``
-        is a ``session_id`` previously returned as ``next_cursor``; results
-        resume after it (unknown cursor -> empty page, never the full list).
-        Pages are capped at ``_LIST_SESSIONS_PAGE_SIZE``."""
+        """``cursor`` is a ``session_id`` returned as ``next_cursor``; results resume after it
+        (unknown cursor -> empty page, never the full list). Pages cap at the fixed size."""
         infos = self.session_manager.list_sessions(cwd=cwd)
 
         if cursor:
@@ -1431,17 +1334,11 @@ class HermesACPAgent(acp.Agent):
     def _rewrite_prompt_for_interrupt(
         self, state: SessionState, user_text: str, user_content: Any, text_only: bool
     ) -> tuple[str, Any]:
-        """Attach a client-cancelled prompt to the follow-up text, and run idle
-        ``/steer`` as a normal prompt.
-
-        ``/steer`` on an idle session has no in-flight tool call to inject into
-        (matching the gateway): if a prior prompt was just cancelled, replay it
-        with the steer text as explicit correction so the in-flight work isn't
-        lost; otherwise run the steer payload as a plain prompt instead of
-        silently queueing it ("No active turn — queued") as if the user typed
-        ``/queue``. Plain text after a cancel likewise keeps the cancelled request
-        attached ("stop and send" clients) so deictic follow-ups have a target.
-        """
+        """Idle ``/steer`` has nothing to inject into (gateway parity): if a prompt was just
+        cancelled, replay it with the steer text as explicit correction; otherwise run the steer
+        payload as a plain prompt rather than silently queueing it as if ``/queue`` was typed.
+        Plain text after a cancel likewise keeps the cancelled request attached ("stop and
+        send" clients) so deictic follow-ups have a target."""
         if not (text_only and isinstance(user_content, str)):
             return user_text, user_content
 
@@ -1477,9 +1374,8 @@ class HermesACPAgent(acp.Agent):
     def _claim_turn_or_queue(
         self, state: SessionState, session_id: str, user_text: str, user_content: Any, text_only: bool
     ) -> str | None:
-        """Mark the session running, or — if a turn is active — redirect it
-        (text-only, runtime supports it) or queue for the next turn. Returns the
-        message to send the client when the prompt was absorbed, else None."""
+        """Mark the session running; if a turn is active, redirect it (text-only, supported
+        runtime) or queue it. Returns the client message when absorbed, else None."""
         redirected = False
         queued_depth: int | None = None
         with state.runtime_lock:
@@ -1511,22 +1407,19 @@ class HermesACPAgent(acp.Agent):
         self, *, state: SessionState, session_id: str, user_text: str, user_content: Any, conn: Any,
         loop: asyncio.AbstractEventLoop, approval_cb: Any, edit_approval_requester: Any,
     ) -> dict:
-        """Executor-thread body of one turn. Runs inside ``contextvars.copy_context()``
-        so every ContextVar write below is isolated from concurrent sessions.
+        """Executor-thread body of one turn, run inside ``contextvars.copy_context()`` so
+        ContextVar writes are isolated from concurrent sessions.
 
-        Approval routing is thread-local, so it MUST be bound here (executor
-        thread), not on the event-loop thread. Interactive routing uses the
-        ``tools.approval`` contextvar rather than ``os.environ["HERMES_INTERACTIVE"]``
-        so concurrent workers can't race a process-global flag and drop another
-        session onto the non-interactive auto-approve path (GHSA-96vc-wcxf-jjff).
+        Approval routing is thread-local, so it MUST be bound here, not on the loop thread.
+        Interactive routing is a ``tools.approval`` contextvar, not ``HERMES_INTERACTIVE`` in
+        os.environ, so concurrent workers can't race a global flag onto the non-interactive
+        auto-approve path (GHSA-96vc-wcxf-jjff).
         """
         agent = state.agent
-        # Bind HERMES_SESSION_KEY so per-session caches (e.g. the interactive
-        # sudo password cache) scope to this ACP session, not the reused thread.
-        # ``cwd`` pins the logical working directory the system prompt reports
-        # (resolve_agent_cwd); without it the prompt advertises the global
-        # Hermes workspace while tools are rooted at the client's project, and
-        # edits land outside the editor's workspace. ``cron_session=""`` masks
+        # HERMES_SESSION_KEY scopes per-session caches (interactive sudo password) to this
+        # session, not the reused thread. ``cwd`` pins what the system prompt reports as the
+        # working directory — otherwise it advertises the Hermes workspace while tools are
+        # rooted at the client's project and edits land outside it. ``cron_session=""`` masks
         # any leaked process-global HERMES_CRON_SESSION.
         try:
             from gateway.session_context import clear_session_vars, set_session_vars
@@ -1555,13 +1448,11 @@ class HermesACPAgent(acp.Agent):
             except Exception:
                 logger.debug("Could not set ACP edit approval requester", exc_info=True)
         interactive_token = set_hermes_interactive_context(True)
-        # Tools tag side-effects with the originating ACP session (e.g.
-        # ``kanban_create``); save/restore so a reused thread never leaks it.
+        # Tools tag side-effects with the ACP session (``kanban_create``); save/restore it.
         previous_session_id = os.environ.get("HERMES_SESSION_ID")
         os.environ["HERMES_SESSION_ID"] = session_id
 
-        # Auto-titling fires in the turn prologue; deliver the new title now
-        # as a session-info update instead of waiting for the next one.
+        # Auto-titling fires in the turn prologue; push the title now as a session-info update.
         def _notify_title_update(_title: str, _source: str) -> None:
             if conn:
                 loop.call_soon_threadsafe(asyncio.create_task, self._send_session_info_update(session_id))
@@ -1619,8 +1510,7 @@ class HermesACPAgent(acp.Agent):
             state, user_text, user_content, text_only_prompt
         )
 
-        # Slash commands are text-only and handled locally without the LLM; a
-        # prompt with images/resources goes to the agent even if it starts with "/".
+        # Slash commands are text-only; a prompt with media goes to the agent even if it starts with "/".
         if text_only_prompt and isinstance(user_content, str) and user_text.startswith("/"):
             response_text = self._handle_slash_command(user_text, state)
             if response_text is not None:
@@ -1652,12 +1542,10 @@ class HermesACPAgent(acp.Agent):
             )
 
         try:
-            # The ACP `session_id` is the stable client handle; agent.session_id
-            # is the live internal head that compression may rotate. Snapshot it
-            # to detect a rotation after the turn.
+            # ACP `session_id` is the stable handle; agent.session_id is the internal head that
+            # compression may rotate — snapshot it to detect rotation after the turn.
             pre_turn_hermes_id = getattr(state.agent, "session_id", None)
-            # Fresh context copy so concurrent sessions on the shared executor
-            # don't stomp on each other's ContextVar writes.
+            # Fresh context copy: concurrent sessions on the shared executor must not share ContextVars.
             ctx = contextvars.copy_context()
             result = await loop.run_in_executor(_executor, ctx.run, _run_agent)
         except Exception:
@@ -1703,9 +1591,7 @@ class HermesACPAgent(acp.Agent):
 
         agent = state.agent
         agent.tool_progress_callback = cbs.tool_progress_cb
-        # ACP thought panes get provider reasoning deltas only — never Hermes'
-        # local status updates, and no fake "thinking" accordion when the
-        # provider emits no reasoning.
+        # Thought panes get provider reasoning only — no local status updates, no fake accordion.
         agent.thinking_callback = None
         agent.reasoning_callback = cbs.reasoning_cb
         agent.step_callback = cbs.step_cb
@@ -1721,8 +1607,7 @@ class HermesACPAgent(acp.Agent):
             state.history = result["messages"]
             self.session_manager.save_session(session_id)
 
-        # Internal head rotated (compression split): emit provenance so clients
-        # can render the boundary; the ACP session_id is unchanged.
+        # Head rotated (compression split): emit provenance so clients can render the boundary.
         post_turn_hermes_id = getattr(state.agent, "session_id", None)
         if (
             conn
@@ -1741,13 +1626,11 @@ class HermesACPAgent(acp.Agent):
         final_response = result.get("final_response", "")
         cancelled = bool(state.cancel_event and state.cancel_event.is_set())
         interrupted = bool(result.get("interrupted")) or cancelled
-        # The local "waiting for model response" interrupt status is metadata,
-        # not assistant prose — clients learn cancellation from stop_reason.
+        # The local "waiting for model" interrupt status is metadata, not prose; stop_reason carries it.
         from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 
         suppress_interrupt_response = interrupted and final_response.startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX)
-        # Deliver the final response when streaming didn't already, or when a
-        # plugin hook transformed it after streaming (transform_llm_output).
+        # Send the final text unless already streamed — or if a plugin hook transformed it after.
         if (
             final_response
             and conn
@@ -1756,8 +1639,7 @@ class HermesACPAgent(acp.Agent):
         ):
             await conn.session_update(session_id, acp.update_agent_message_text(final_response))
 
-        # Go idle before draining queued work so recursive prompt() calls can
-        # acquire the session; queued turns run as normal follow-up prompts.
+        # Go idle before draining so recursive prompt() calls can acquire the session.
         with state.runtime_lock:
             state.is_running = False
             state.current_prompt_text = ""
@@ -1805,8 +1687,7 @@ class HermesACPAgent(acp.Agent):
         self._schedule_soon(lambda: self._send_available_commands_update(session_id))
 
     def _handle_slash_command(self, text: str, state: SessionState) -> str | None:
-        """Dispatch a slash command; ``None`` for unknown commands so they fall
-        through to the LLM (the user may have typed ``/something`` as prose)."""
+        """Dispatch a slash command; ``None`` for unknown ones so they fall through to the LLM."""
         parts = text.split(maxsplit=1)
         cmd = parts[0].lstrip("/").lower()
         args = parts[1].strip() if len(parts) > 1 else ""
@@ -1815,11 +1696,9 @@ class HermesACPAgent(acp.Agent):
             return None
         handler = getattr(self, f"_cmd_{cmd}")
 
-        # Handlers run on the event-loop thread, OUTSIDE the per-turn context
-        # that pins the session cwd. ``/compress`` and ``/model`` REBUILD the
-        # system prompt (resolve_agent_cwd), so an unpinned handler would bake
-        # the Hermes install tree into the persisted cached prompt and poison
-        # every later turn. Pin inside a fresh context: no leak, no teardown.
+        # Handlers run on the loop thread, outside the per-turn cwd-pinning context. ``/compress``
+        # and ``/model`` REBUILD the system prompt, so unpinned they'd bake the Hermes install tree
+        # into the persisted cached prompt. Pin inside a fresh context: no leak, no teardown.
         def _dispatch() -> str | None:
             try:
                 from agent.runtime_cwd import set_session_cwd
@@ -1968,22 +1847,19 @@ class HermesACPAgent(acp.Agent):
             return "Nothing to compress — conversation is empty."
         try:
             agent = state.agent
-            # No compression_enabled gate: that flag only disables *automatic*
-            # compaction; manual /compress must keep working (CLI/gateway parity).
+            # No compression_enabled gate: it only disables *automatic* compaction (CLI/gateway parity).
             if not hasattr(agent, "_compress_context"):
                 return "Context compression not available for this agent."
 
             original_count = len(state.history)
-            # System prompt + tool schemas included so the figure reflects real
-            # request pressure, not a transcript-only underestimate.
+            # Include system prompt + tool schemas so the figure reflects real request pressure.
             _sys_prompt = getattr(agent, "_cached_system_prompt", "") or ""
             _tools = getattr(agent, "tools", None) or None
             approx_tokens = _estimate_tokens(state.history, agent, _sys_prompt, _tools)
             original_session_db = getattr(agent, "_session_db", None)
 
             try:
-                # ACP sessions keep a stable session id: suppress the SQLite
-                # session-splitting side effect inside _compress_context.
+                # Stable ACP session id: suppress _compress_context's SQLite session split.
                 agent._session_db = None
                 compressed, _ = agent._compress_context(
                     state.history, getattr(agent, "_cached_system_prompt", "") or "",

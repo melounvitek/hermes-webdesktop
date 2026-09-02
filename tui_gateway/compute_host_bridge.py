@@ -15,10 +15,9 @@ _registry = HandlerRegistry()
 
 _compute_host_supervisor = None
 _compute_host_supervisor_lock = threading.Lock()
-# Hard cap on how long session.compress blocks its RPC waiting for the compute
-# host (#97948). Must stay below the desktop's SESSION_COMPRESS_TIMEOUT_MS
-# (660s) so the client receives the `pending` answer instead of its own
-# timeout error; the late-ack path covers anything slower.
+# Cap on how long session.compress blocks its RPC on the compute host. Must stay
+# below the desktop's SESSION_COMPRESS_TIMEOUT_MS (660s) so the client gets the
+# `pending` answer, not its own timeout; the late-ack path covers anything slower.
 _COMPUTE_HOST_COMPRESS_WAIT_CAP_SECS = 630.0
 
 
@@ -36,9 +35,8 @@ def _turn_isolation_enabled(cfg: dict | None = None) -> bool:
 def _session_uses_compute_host(session: dict, cfg: dict | None = None) -> bool:
     if not _turn_isolation_enabled(cfg):
         return False
-    # Phase 1 routes lazy/dashboard sessions whose live AIAgent has not been
-    # built inside the serving process. Already-built in-process sessions keep
-    # the historical path unless a prior isolated turn marked host ownership.
+    # Routes lazy sessions whose AIAgent was never built in-process; already-built
+    # sessions keep the in-process path unless a prior isolated turn marked host ownership.
     return bool(session.get("_compute_host_active")) or (
         session.get("agent") is None and session.get("agent_ready") is not None
     )
@@ -60,22 +58,13 @@ def _get_compute_host_supervisor(cfg: dict | None = None):
 
 
 def _compute_host_turn_frame(
-    rid: str,
-    sid: str,
-    session: dict,
-    text: Any,
-    image_paths: list[str] | None = None,
-    queued_prompt_generation: int | None = None,
-    display_kind: str | None = None,
+    rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
+    queued_prompt_generation: int | None = None, display_kind: str | None = None,
 ) -> dict:
     with session["history_lock"]:
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
-        attached_images = (
-            list(image_paths)
-            if image_paths is not None
-            else list(session.get("attached_images", []))
-        )
+        attached_images = list(image_paths if image_paths is not None else session.get("attached_images", []))
     return {
         "type": "turn.start",
         "sid": sid,
@@ -103,26 +92,44 @@ def _metadata_mirror(session: dict | None) -> dict:
     return mirror if isinstance(mirror, dict) else {}
 
 
+def _compute_host_session_info(session: dict) -> dict:
+    # Tolerate a legacy one-arg _session_info (tests patch it that way).
+    try:
+        return _session_info(session.get("agent"), session)
+    except TypeError:
+        return _session_info(session.get("agent"))
+
+
+def _compute_host_adopt_frame_meta(session: dict, frame: dict) -> None:
+    """Adopt a host frame's session_key / history_version. Caller holds history_lock."""
+    if frame.get("session_key"):
+        session["session_key"] = str(frame.get("session_key"))
+    if frame.get("history_version") is not None:
+        try:
+            session["history_version"] = max(
+                int(session.get("history_version", 0)),
+                int(frame.get("history_version") or 0),
+            )
+        except Exception:
+            pass
+
+
 def _relay_compute_host_rpc(message: dict) -> bool:
     """Relay host events while retaining the clarify snapshot needed on resume."""
     params = message.get("params") if isinstance(message, dict) else None
-    if isinstance(params, dict) and params.get("type") == "clarify.request":
-        sid = str(params.get("session_id") or "")
+    kind = params.get("type") if isinstance(params, dict) else None
+    if kind in {"clarify.request", "clarify.expire"}:
+        session = _sessions.get(str(params.get("session_id") or ""))
         payload = params.get("payload")
-        session = _sessions.get(sid)
-        if session is not None and isinstance(payload, dict) and payload.get("request_id"):
-            with session.get("history_lock", threading.Lock()):
-                session["_compute_host_pending_clarify"] = dict(payload)
-    elif isinstance(params, dict) and params.get("type") == "clarify.expire":
-        sid = str(params.get("session_id") or "")
-        payload = params.get("payload")
-        session = _sessions.get(sid)
         request_id = payload.get("request_id") if isinstance(payload, dict) else None
         if session is not None and request_id:
             with session.get("history_lock", threading.Lock()):
-                pending = session.get("_compute_host_pending_clarify")
-                if isinstance(pending, dict) and pending.get("request_id") == request_id:
-                    session.pop("_compute_host_pending_clarify", None)
+                if kind == "clarify.request":
+                    session["_compute_host_pending_clarify"] = dict(payload)
+                else:
+                    pending = session.get("_compute_host_pending_clarify")
+                    if isinstance(pending, dict) and pending.get("request_id") == request_id:
+                        session.pop("_compute_host_pending_clarify", None)
     return write_json(message)
 
 
@@ -185,25 +192,13 @@ def _respond_compute_host_clarify(rid: str, params: dict) -> dict | None:
 
 
 def _apply_compute_host_metadata_mirror(session: dict, frame: dict | None) -> None:
-    """Mirror host-owned session metadata in the serving process.
-
-    The compute host is the only writer of live agent/history state while turn
-    isolation is active. The serving process keeps read metadata from the last
-    host frame so UI reads do not construct a second in-process agent.
-    """
+    """Mirror host-owned session metadata: while turn isolation is active the host is
+    the only writer of live agent/history state, and UI reads must not build a
+    second in-process agent."""
     if not isinstance(frame, dict):
         return
     with session.get("history_lock", threading.Lock()):
-        if frame.get("session_key"):
-            session["session_key"] = str(frame.get("session_key"))
-        if frame.get("history_version") is not None:
-            try:
-                session["history_version"] = max(
-                    int(session.get("history_version", 0)),
-                    int(frame.get("history_version") or 0),
-                )
-            except Exception:
-                pass
+        _compute_host_adopt_frame_meta(session, frame)
         if frame.get("message_count") is not None:
             try:
                 session["_metadata_message_count"] = int(frame.get("message_count") or 0)
@@ -218,60 +213,36 @@ def _apply_compute_host_metadata_mirror(session: dict, frame: dict | None) -> No
 
 
 def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -> None:
-    is_error = frame.get("type") == "turn.error"
     with session["history_lock"]:
-        if frame.get("session_key"):
-            session["session_key"] = str(frame.get("session_key"))
-        if frame.get("history_version") is not None:
-            try:
-                session["history_version"] = max(
-                    int(session.get("history_version", 0)),
-                    int(frame.get("history_version") or 0),
-                )
-            except Exception:
-                pass
+        _compute_host_adopt_frame_meta(session, frame)
         session["running"] = False
         session["last_active"] = time.time()
         _clear_inflight_turn(session)
         session.pop("_compute_host_pending_clarify", None)
-    if is_error:
+    if frame.get("type") == "turn.error":
         message = str(frame.get("message") or "compute host turn failed")
         _emit("message.complete", sid, {"text": f"Error: {message}", "status": "error"})
     _apply_compute_host_metadata_mirror(session, frame)
-    try:
-        info = _session_info(session.get("agent"), session)
-    except TypeError:
-        info = _session_info(session.get("agent"))
+    info = _compute_host_session_info(session)
     if not frame.get("session_info_emitted"):
         _emit("session.info", sid, info)
     _drain_queued_prompt(rid, sid, session)
 
 
 def _submit_prompt_to_compute_host(
-    rid: str,
-    sid: str,
-    session: dict,
-    text: Any,
-    image_paths: list[str] | None = None,
-    queued_prompt_generation: int | None = None,
-    display_kind: str | None = None,
+    rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
+    queued_prompt_generation: int | None = None, display_kind: str | None = None,
 ) -> dict:
     cfg = _load_dashboard_process_isolation_config()
     frame = _compute_host_turn_frame(
-        rid,
-        sid,
-        session,
-        text,
-        image_paths=image_paths,
-        queued_prompt_generation=queued_prompt_generation,
-        display_kind=display_kind,
+        rid, sid, session, text, image_paths=image_paths,
+        queued_prompt_generation=queued_prompt_generation, display_kind=display_kind,
     )
 
     def _complete(done: dict) -> None:
-        # submit_turn reports a synchronous pipe failure through the callback
-        # before re-raising. Leave the parent session untouched so prompt.submit
-        # can fail open to the historical in-process path without emitting a
-        # duplicate terminal error.
+        # submit_turn reports a synchronous pipe failure via the callback before
+        # re-raising; leave the session untouched so prompt.submit can fail open
+        # to the in-process path without a duplicate terminal error.
         if done.get("reason") == "send_failed":
             return
         _on_compute_host_turn_done(rid, sid, session, done)
@@ -288,74 +259,45 @@ def _submit_prompt_to_compute_host(
 
 
 def _send_compute_host_control(
-    sid: str,
-    *,
-    route_name: str,
-    command: str = "",
-    payload: dict | None = None,
-    wait: bool = True,
-    timeout: float = 30.0,
-    on_late_ack=None,
+    sid: str, *, route_name: str, command: str = "", payload: dict | None = None,
+    wait: bool = True, timeout: float = 30.0, on_late_ack=None,
 ) -> dict:
     frame = dict(payload or {})
     frame.setdefault("type", "control")
     frame.setdefault("command", command)
     return _get_compute_host_supervisor().control(
-        sid,
-        route_name=route_name,
-        payload=frame,
-        wait=wait,
-        timeout=timeout,
-        on_late_ack=on_late_ack,
+        sid, route_name=route_name, payload=frame, wait=wait, timeout=timeout, on_late_ack=on_late_ack
     )
 
 
 def _compute_host_compress_wait_seconds(cfg: dict | None = None) -> float:
-    """RPC wait budget for a compute-host compress control (#97948).
-
-    Manual compression legitimately runs up to the configured
-    ``compression.context_total_ceiling_seconds`` (default 600s), so a fixed
-    120s waiter reported a false timeout while the host kept working. Follow
-    the ceiling with a little slack, but cap the blocking wait so it stays
-    below the desktop's own RPC timeout; anything longer is adopted through
-    the late-ack path instead of failing.
-    """
+    """RPC wait budget for a compute-host compress control: the configured
+    ``compression.context_total_ceiling_seconds`` plus slack, capped below the
+    desktop's RPC timeout (a fixed waiter reported false timeouts while the host
+    kept working); anything slower lands via the late-ack path."""
     from agent.conversation_compression import resolve_context_compression_timeouts
 
     try:
         compression_cfg = (cfg if cfg is not None else _load_cfg()).get("compression", {})
     except Exception:
         compression_cfg = {}
-    _idle, ceiling = resolve_context_compression_timeouts(
-        compression_cfg if isinstance(compression_cfg, dict) else {}
-    )
+    _idle, ceiling = resolve_context_compression_timeouts(compression_cfg if isinstance(compression_cfg, dict) else {})
     return float(min(max(ceiling + 30.0, 120.0), _COMPUTE_HOST_COMPRESS_WAIT_CAP_SECS))
 
 
 def _announce_compute_host_compress_done(sid: str, session: dict, ack: dict) -> None:
-    """Mirror a compute-host compress ack and push the client-visible edges.
-
-    Emits the same ``session.info`` the in-process /compress path does plus
-    the ``compacted`` status edge, so a client whose own RPC wait already
-    expired still learns the transcript changed.
-    """
+    """Mirror a compress ack and push the same ``session.info`` + ``compacted`` edges
+    the in-process /compress path emits, so a client whose RPC wait expired still
+    learns the transcript changed."""
     _apply_compute_host_metadata_mirror(session, ack)
-    try:
-        info = _session_info(session.get("agent"), session)
-    except TypeError:
-        info = _session_info(session.get("agent"))
-    _emit("session.info", sid, info)
+    _emit("session.info", sid, _compute_host_session_info(session))
     _status_update(sid, "compacted", "✓ Context compression complete")
 
 
 def _adopt_late_compute_host_compress_ack(sid: str, session: dict, ack: dict, *, route_name: str) -> None:
-    """Adopt a compute-host compress ack that arrived after its RPC waiter gave up.
-
-    The RPC already answered ``status: pending``; this is the only place the
-    rotated session_key / history_version / session_info mirror can land, and
-    the only signal the client gets that the transcript changed. A late
-    ``control.error`` surfaces through the existing ``error`` event path.
-    """
+    """Adopt a compress ack that arrived after its RPC waiter answered ``pending``:
+    the only place the rotated session_key / history_version / mirror can land and
+    the client's only signal. A late ``control.error`` goes out via ``error``."""
     with _sessions_lock:
         live = _sessions.get(sid)
     if live is not session:

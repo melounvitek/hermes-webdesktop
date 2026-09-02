@@ -18,40 +18,18 @@ _registry = HandlerRegistry()
 _FUZZY_CACHE_TTL_S = 5.0
 _FUZZY_CACHE_MAX_FILES = 20000
 _FUZZY_FALLBACK_EXCLUDES = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".svn",
-        ".next",
-        ".cache",
-        ".venv",
-        "venv",
-        "node_modules",
-        "__pycache__",
-        "dist",
-        "build",
-        "target",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-    }
+    {".git", ".hg", ".svn", ".next", ".cache", ".venv", "venv", "node_modules", "__pycache__",
+     "dist", "build", "target", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 )
 _fuzzy_cache_lock = threading.Lock()
 _fuzzy_cache: dict[str, tuple[float, list[str]]] = {}
 
 
 def _list_repo_files(root: str) -> list[str]:
-    """Return file paths relative to ``root``.
-
-    Uses ``git ls-files`` from the repo top (resolved via
-    ``rev-parse --show-toplevel``) so the listing covers tracked + untracked
-    files anywhere in the repo, then converts each path back to be relative
-    to ``root``. Files outside ``root`` (parent directories of cwd, sibling
-    subtrees) are excluded so the picker stays scoped to what's reachable
-    from the gateway's cwd. Falls back to a bounded ``os.walk(root)`` when
-    ``root`` isn't inside a git repo. Result cached per-root for
-    ``_FUZZY_CACHE_TTL_S`` so rapid keystrokes don't respawn git processes.
-    """
+    """File paths relative to ``root`` (tracked + untracked via ``git ls-files`` from the
+    repo top; files outside ``root`` excluded so the picker stays Cmd-P scoped). Falls
+    back to a bounded ``os.walk(root)`` outside a git repo. Cached per-root for
+    ``_FUZZY_CACHE_TTL_S`` so rapid keystrokes don't respawn git."""
     now = time.monotonic()
     with _fuzzy_cache_lock:
         cached = _fuzzy_cache.get(root)
@@ -61,45 +39,20 @@ def _list_repo_files(root: str) -> list[str]:
     files: list[str] = []
     from hermes_cli._subprocess_compat import windows_hide_flags
 
-    _creationflags = windows_hide_flags()
+    run_kw = dict(capture_output=True, timeout=2.0, check=False, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
     try:
-        top_result = subprocess.run(
-            ["git", "-C", root, "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            timeout=2.0,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            creationflags=_creationflags,
-        )
+        top_result = subprocess.run(["git", "-C", root, "rev-parse", "--show-toplevel"], **run_kw)
         if top_result.returncode == 0:
             top = top_result.stdout.decode("utf-8", "replace").strip()
             list_result = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    top,
-                    "ls-files",
-                    "-z",
-                    "--cached",
-                    "--others",
-                    "--exclude-standard",
-                ],
-                capture_output=True,
-                timeout=2.0,
-                check=False,
-                stdin=subprocess.DEVNULL,
-                creationflags=_creationflags,
+                ["git", "-C", top, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], **run_kw
             )
             if list_result.returncode == 0:
                 for p in list_result.stdout.decode("utf-8", "replace").split("\0"):
                     if not p:
                         continue
-                    rel = os.path.relpath(os.path.join(top, p), root).replace(
-                        os.sep, "/"
-                    )
-                    # Skip parents/siblings of cwd — keep the picker scoped
-                    # to root-and-below, matching Cmd-P workspace semantics.
-                    if rel.startswith("../"):
+                    rel = os.path.relpath(os.path.join(top, p), root).replace(os.sep, "/")
+                    if rel.startswith("../"):  # parents/siblings of cwd: keep Cmd-P workspace scope
                         continue
                     files.append(rel)
                     if len(files) >= _FUZZY_CACHE_MAX_FILES:
@@ -108,16 +61,11 @@ def _list_repo_files(root: str) -> list[str]:
         pass
 
     if not files:
-        # Fallback walk: skip vendor/build dirs + dot-dirs so the walk stays
-        # tractable. Dotfiles themselves survive — the ranker decides based
-        # on whether the query starts with `.`.
+        # Fallback walk skips vendor/build dirs + dot-dirs; dotfiles survive (the ranker
+        # decides based on whether the query starts with `.`).
         try:
             for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-                dirnames[:] = [
-                    d
-                    for d in dirnames
-                    if d not in _FUZZY_FALLBACK_EXCLUDES and not d.startswith(".")
-                ]
+                dirnames[:] = [d for d in dirnames if d not in _FUZZY_FALLBACK_EXCLUDES and not d.startswith(".")]
                 rel_dir = os.path.relpath(dirpath, root)
                 for f in filenames:
                     rel = f if rel_dir == "." else f"{rel_dir}/{f}"
@@ -136,17 +84,9 @@ def _list_repo_files(root: str) -> list[str]:
 
 
 def _fuzzy_basename_rank(name: str, query: str) -> tuple[int, int] | None:
-    """Rank ``name`` against ``query``; lower is better. Returns None to reject.
-
-    Tiers (kind):
-      0 — exact basename
-      1 — basename prefix (e.g. `app` → `appChrome.tsx`)
-      2 — word-boundary / camelCase hit (e.g. `chrome` → `appChrome.tsx`)
-      3 — substring anywhere in basename
-      4 — subsequence match (every query char appears in order)
-
-    Secondary key is `len(name)` so shorter names win ties.
-    """
+    """Rank ``name`` against ``query`` as (tier, len(name)); lower wins, None rejects.
+    Tiers: 0 exact · 1 prefix · 2 word-boundary/camelCase hit (`chrome` → `appChrome.tsx`)
+    · 3 substring · 4 subsequence (query chars appear in order)."""
     if not query:
         return (3, len(name))
 
@@ -159,8 +99,7 @@ def _fuzzy_basename_rank(name: str, query: str) -> tuple[int, int] | None:
     if nl.startswith(ql):
         return (1, len(name))
 
-    # Word-boundary split: `foo-bar_baz.qux` → ["foo","bar","baz","qux"].
-    # camelCase split: `appChrome` → ["app","Chrome"]. Cheap approximation;
+    # Split on -_. and camelCase (`appChrome` → ["app","Chrome"]); cheap approximation,
     # falls through to substring/subsequence if it misses.
     parts: list[str] = []
     buf = ""
@@ -191,13 +130,9 @@ def _fuzzy_basename_rank(name: str, query: str) -> tuple[int, int] | None:
 
 
 def _abs_completion_prefix_exists(path_part: str) -> bool:
-    """True when ``path_part`` reads sensibly as an absolute path.
-
-    A leading `/` is only meant literally if something is actually there:
-    the parent directory has to exist, and a partially-typed final segment
-    has to match at least one of its entries. Used to decide whether
-    `@/foo` is the absolute `/foo` or shorthand for `foo` under the cwd.
-    """
+    """True when ``path_part`` reads sensibly as an absolute path: the parent dir exists
+    and a partially-typed final segment matches at least one entry. Decides whether
+    `@/foo` is the absolute `/foo` or shorthand for `foo` under the cwd."""
     expanded = _normalize_completion_path(path_part)
     parent = os.path.dirname(expanded.rstrip("/")) or "/"
     tail = os.path.basename(expanded.rstrip("/"))
@@ -219,13 +154,18 @@ def _details_completion_item(value: str, meta: str = "") -> dict:
     return {"text": value, "display": value, "meta": meta}
 
 
-def _details_root_completion_item(
-    value: str, meta: str, needs_leading_space: bool
-) -> dict:
-    return _details_completion_item(
-        f" {value}" if needs_leading_space else value,
-        meta,
-    )
+def _details_root_completion_item(value: str, meta: str, needs_leading_space: bool) -> dict:
+    return _details_completion_item(f" {value}" if needs_leading_space else value, meta)
+
+
+_DETAILS_SECTIONS = ("thinking", "tools", "subagents", "activity")
+_DETAILS_MODES = ("hidden", "collapsed", "expanded")
+
+
+def _details_root_meta(candidate: str) -> str:
+    if candidate in _DETAILS_SECTIONS:
+        return "section override"
+    return "cycle global mode" if candidate == "cycle" else "global mode"
 
 
 def _details_completions(text: str) -> list[dict] | None:
@@ -241,66 +181,34 @@ def _details_completions(text: str) -> list[dict] | None:
         body = body[1:]
     parts = body.split()
     has_trailing_space = text.endswith(" ")
-    sections = ("thinking", "tools", "subagents", "activity")
-    modes = ("hidden", "collapsed", "expanded")
+    sections, modes = _DETAILS_SECTIONS, _DETAILS_MODES
+    root_candidates = (*modes, "cycle", *sections)
 
     if not body or (len(parts) == 0 and has_trailing_space):
-        return [
-            *[
-                _details_root_completion_item(
-                    mode, "global mode", not has_trailing_space
-                )
-                for mode in modes
-            ],
-            _details_root_completion_item(
-                "cycle", "cycle global mode", not has_trailing_space
-            ),
-            *[
-                _details_root_completion_item(
-                    section, "section override", not has_trailing_space
-                )
-                for section in sections
-            ],
-        ]
+        return [_details_root_completion_item(c, _details_root_meta(c), not has_trailing_space) for c in root_candidates]
 
     if len(parts) == 1 and not has_trailing_space:
         prefix = parts[0].lower()
-        candidates = [*modes, "cycle", *sections]
         return [
-            _details_completion_item(
-                candidate,
-                (
-                    "section override"
-                    if candidate in sections
-                    else "cycle global mode" if candidate == "cycle" else "global mode"
-                ),
-            )
-            for candidate in candidates
-            if candidate.startswith(prefix) and candidate != prefix
+            _details_completion_item(c, _details_root_meta(c))
+            for c in root_candidates
+            if c.startswith(prefix) and c != prefix
         ]
 
-    if len(parts) == 1 and has_trailing_space and parts[0].lower() in sections:
-        return [
-            *[
-                _details_completion_item(mode, f"set {parts[0].lower()}")
-                for mode in modes
-            ],
-            _details_completion_item("reset", f"clear {parts[0].lower()} override"),
-        ]
+    section = parts[0].lower() if parts else ""
+    if section not in sections:
+        return []
 
-    if len(parts) == 2 and not has_trailing_space and parts[0].lower() in sections:
+    def section_meta(candidate: str) -> str:
+        return f"clear {section} override" if candidate == "reset" else f"set {section}"
+
+    if len(parts) == 1 and has_trailing_space:
+        return [_details_completion_item(c, section_meta(c)) for c in (*modes, "reset")]
+
+    if len(parts) == 2 and not has_trailing_space:
         prefix = parts[1].lower()
         return [
-            _details_completion_item(
-                candidate,
-                (
-                    f"clear {parts[0].lower()} override"
-                    if candidate == "reset"
-                    else f"set {parts[0].lower()}"
-                ),
-            )
-            for candidate in (*modes, "reset")
-            if candidate.startswith(prefix) and candidate != prefix
+            _details_completion_item(c, section_meta(c)) for c in (*modes, "reset") if c.startswith(prefix) and c != prefix
         ]
 
     return []
@@ -313,30 +221,22 @@ def _model_picker_context(agent):
     ctx = load_picker_context()
     provider = getattr(agent, "provider", "") if agent else ""
     base_url = getattr(agent, "base_url", "") if agent else ""
+    model = getattr(agent, "model", "") if agent else ""
     if str(provider or "").strip().lower() == "custom":
         try:
             from hermes_cli.runtime_provider import canonical_custom_identity
 
             provider = (
                 canonical_custom_identity(
-                    base_url=base_url or None,
-                    config_provider=ctx.current_provider,
-                    model=(getattr(agent, "model", "") if agent else "")
-                    or None,
+                    base_url=base_url or None, config_provider=ctx.current_provider, model=model or None
                 )
                 or provider
             )
         except Exception:
-            logger.debug(
-                "custom provider identity recovery failed (model picker)",
-                exc_info=True,
-            )
+            logger.debug("custom provider identity recovery failed (model picker)", exc_info=True)
 
     return ctx.with_overrides(
-        current_provider=provider,
-        current_model=(getattr(agent, "model", "") if agent else "")
-        or _resolve_model(),
-        current_base_url=base_url,
+        current_provider=provider, current_model=model or _resolve_model(), current_base_url=base_url
     )
 
 

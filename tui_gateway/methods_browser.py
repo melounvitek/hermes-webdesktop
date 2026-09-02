@@ -12,26 +12,14 @@ from .method_ctx import HandlerRegistry, bind_module
 _registry = HandlerRegistry()
 
 
-# ── Methods: browser / plugins / cron / skills ───────────────────────
-
-
 def _resolve_browser_cdp_url() -> str:
-    """Return the configured browser CDP override without network I/O.
+    """Configured browser CDP override without network I/O.
 
-    ``/browser status`` must be fast — calling
-    ``tools.browser_tool._get_cdp_override`` would invoke
-    ``_resolve_cdp_override``, which performs an HTTP probe to
-    ``.../json/version`` for discovery-style URLs.  That probe has
-    a multi-second timeout and would block the TUI on a slow or
-    unreachable host even though status only needs to report whether
-    an override is set.
-
-    Mirrors the env/config precedence of ``_get_cdp_override`` (env
-    var first, then ``browser.cdp_url`` from config.yaml) without the
-    websocket-resolution step, so the answer reflects user intent
-    even when the configured host is not currently reachable.  The
-    actual WS normalization happens in ``browser_navigate`` on the
-    next tool call.
+    ``/browser status`` must be fast: ``tools.browser_tool._get_cdp_override`` runs an
+    HTTP probe with a multi-second timeout for discovery-style URLs. Mirrors its
+    precedence (env var, then ``browser.cdp_url``) minus the WS-resolution step, so the
+    answer reflects user intent even when the host is unreachable; ``browser_navigate``
+    normalizes on the next tool call.
     """
     env_url = os.environ.get("BROWSER_CDP_URL", "").strip()
     if env_url:
@@ -49,23 +37,18 @@ def _resolve_browser_cdp_url() -> str:
 
 
 def _is_default_local_cdp(parsed) -> bool:
-    """Match the discovery-style local default; never the concrete WS form.
-
-    A user-supplied ``ws://127.0.0.1:9222/devtools/browser/<id>`` is a
-    real, connectable endpoint — collapsing it to bare ``http://...:9222``
-    would strip the path and break the connect.
-    """
+    """Match the discovery-style local default; never the concrete WS form — a
+    ``ws://127.0.0.1:9222/devtools/browser/<id>`` is connectable as-is and collapsing
+    it to bare ``http://...:9222`` would break the connect."""
     try:
         port = parsed.port or 80
     except ValueError:
         return False
-
-    discovery_path = parsed.path in {"", "/", "/json", "/json/version"}
     return (
         parsed.scheme in {"http", "ws"}
         and parsed.hostname in {"127.0.0.1", "localhost"}
         and port == 9222
-        and discovery_path
+        and parsed.path in {"", "/", "/json", "/json/version"}
     )
 
 
@@ -86,10 +69,8 @@ def _probe_urls(parsed) -> list[str]:
 
 
 def _normalize_cdp_url(parsed) -> str:
-    # Concrete ``/devtools/browser/<id>`` endpoints (Browserbase et al.)
-    # are connectable as-is. Discovery-style inputs collapse to bare
-    # ``scheme://host:port`` so ``_resolve_cdp_override`` can append
-    # ``/json/version`` later without doubling the path.
+    # Concrete ``/devtools/browser/<id>`` endpoints stay as-is; discovery-style inputs
+    # collapse to ``scheme://host:port`` so ``_resolve_cdp_override`` can append ``/json/version``.
     if parsed.path.startswith("/devtools/browser/"):
         return parsed.geturl()
     return parsed._replace(path="", params="", query="", fragment="").geturl()
@@ -123,9 +104,7 @@ def _browser_connect(rid, params: dict) -> dict:
 
     raw_url = params.get("url")
     if raw_url is not None and not isinstance(raw_url, str):
-        return _err(
-            rid, 4015, f"browser url must be a string, got {type(raw_url).__name__}"
-        )
+        return _err(rid, 4015, f"browser url must be a string, got {type(raw_url).__name__}")
     url = (raw_url or "").strip() or DEFAULT_BROWSER_CDP_URL
 
     sid = params.get("session_id") or ""
@@ -134,9 +113,7 @@ def _browser_connect(rid, params: dict) -> dict:
 
     def announce(message: str, *, level: str = "info") -> None:
         messages.append(message)
-        # Without a session id the TUI prints `messages` from the
-        # response; emitting an event would double-render. Only stream
-        # progress when there's a real session to scope it to.
+        # Without a session id the TUI prints `messages` from the response; an event would double-render.
         if sid:
             _emit("browser.progress", sid, {"message": message, "level": level})
 
@@ -150,20 +127,16 @@ def _browser_connect(rid, params: dict) -> dict:
     except ValueError:
         return _err(rid, 4015, f"invalid port in browser url: {url}")
 
-    # Always normalize default-local to 127.0.0.1:9222 so downstream
-    # comparisons + messaging match what we'll actually persist.
+    # Normalize default-local to 127.0.0.1:9222 so comparisons + messaging match what we persist.
     if _is_default_local_cdp(parsed):
         url = DEFAULT_BROWSER_CDP_URL
         parsed = urlparse(url)
         port = parsed.port or 9222
 
     try:
-        # ws[s]://.../devtools/browser/<id> endpoints (hosted CDP
-        # providers) don't serve the HTTP discovery path; just check
-        # TCP-level reachability and let browser_navigate handshake.
-        if parsed.scheme in {"ws", "wss"} and parsed.path.startswith(
-            "/devtools/browser/"
-        ):
+        # Hosted ws[s]://.../devtools/browser/<id> endpoints don't serve the HTTP discovery
+        # path: check TCP reachability only and let browser_navigate handshake.
+        if parsed.scheme in {"ws", "wss"} and parsed.path.startswith("/devtools/browser/"):
             import socket
 
             try:
@@ -179,12 +152,9 @@ def _browser_connect(rid, params: dict) -> dict:
                 local_port_in_use,
             )
 
-            # Dual-stack discovery: when another app (an IDE debugger,
-            # a dev server) squats the IPv4 loopback on the debug port,
-            # a browser asked to bind that port comes up on [::1] only.
-            # An IPv4-only probe misses it AND hangs against squatters
-            # that accept TCP but never answer HTTP — the historic
-            # cause of `browser.manage` RPC timeouts.
+            # Dual-stack discovery: when another app squats the IPv4 loopback on the debug
+            # port, a browser bound there comes up on [::1] only. An IPv4-only probe misses
+            # it AND hangs against squatters that accept TCP but never answer HTTP.
             discovered = discover_local_cdp_url(port, timeout=2.0)
             launch_port = port
 
@@ -192,20 +162,16 @@ def _browser_connect(rid, params: dict) -> dict:
                 if local_port_in_use(port):
                     launch_port = find_free_debug_port(port)
                     announce(
-                        f"Port {port} is occupied by another application that "
-                        "isn't a CDP browser (an IDE debugger or dev server may "
-                        f"be using it) — launching a debug browser on port "
-                        f"{launch_port} instead..."
+                        f"Port {port} is occupied by another application that isn't a CDP browser "
+                        "(an IDE debugger or dev server may be using it) — launching a debug browser "
+                        f"on port {launch_port} instead..."
                     )
                 else:
-                    announce(
-                        "Chromium-family browser isn't running with remote debugging — attempting to launch..."
-                    )
+                    announce("Chromium-family browser isn't running with remote debugging — attempting to launch...")
 
                 launch = launch_chrome_debug(launch_port, system)
                 if launch.launched:
-                    # Bounded wait: the whole connect must finish well
-                    # inside the client RPC timeout.
+                    # Bounded wait: the whole connect must finish inside the client RPC timeout.
                     deadline = time.monotonic() + 10.0
                     while time.monotonic() < deadline:
                         discovered = discover_local_cdp_url(launch_port, timeout=1.0)
@@ -214,37 +180,27 @@ def _browser_connect(rid, params: dict) -> dict:
                         time.sleep(0.5)
 
                 if discovered:
-                    announce(
-                        f"Chromium-family browser launched and listening on port {launch_port}"
-                    )
+                    announce(f"Chromium-family browser launched and listening on port {launch_port}")
                 else:
                     hint = launch.hint
                     if hint:
                         announce(hint, level="error")
                     for line in _failure_messages(url, launch_port, system)[1:]:
                         announce(line, level="error")
-                    return _ok(
-                        rid, {"connected": False, "url": url, "messages": messages}
-                    )
+                    return _ok(rid, {"connected": False, "url": url, "messages": messages})
             else:
                 announce(f"Chromium-family browser is already listening at {discovered}")
 
-            # Adopt whatever loopback/port actually answered (may be
-            # [::1] and/or an alternate port when 9222 was squatted).
+            # Adopt whatever loopback/port answered ([::1] and/or an alternate port when 9222 was squatted).
             url = discovered
             parsed = urlparse(url)
-        else:
-            probes = _probe_urls(parsed)
-            ok = any(_http_ok(p, timeout=2.0) for p in probes)
-            if not ok:
-                return _err(rid, 5031, f"could not reach browser CDP at {url}")
+        elif not any(_http_ok(p, timeout=2.0) for p in _probe_urls(parsed)):
+            return _err(rid, 5031, f"could not reach browser CDP at {url}")
 
         normalized = _normalize_cdp_url(parsed)
 
-        # Order matters: reap sessions BEFORE publishing the new env
-        # so an in-flight tool call sees the old supervisor closed,
-        # then again AFTER so the default task's cached supervisor
-        # is drained against the new URL.
+        # Reap BEFORE publishing the new env (an in-flight tool call sees the old supervisor
+        # closed) and AFTER (the default task's cached supervisor drains against the new URL).
         cleanup_all_browsers()
         os.environ["BROWSER_CDP_URL"] = normalized
         cleanup_all_browsers()
@@ -258,8 +214,7 @@ def _browser_connect(rid, params: dict) -> dict:
 
 
 def _browser_disconnect(rid) -> dict:
-    # Reap, drop the env override, reap again — closes the same swap
-    # window covered by ``_browser_connect``.
+    # Reap, drop the override, reap again — same swap window as ``_browser_connect``.
     def reap() -> None:
         try:
             from tools.browser_tool import cleanup_all_browsers

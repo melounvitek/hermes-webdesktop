@@ -1,8 +1,7 @@
 """Completion / model-key / paste JSON-RPC handlers.
 
-Everything defined here is rebound onto server.py's globals at install time
-(``method_ctx.bind_module``), so handlers and module-level helpers may
-reference server globals bare (``_ok``, ``_err``, ``_sessions``, ...).
+Rebound onto server.py's globals at install time (``method_ctx.bind_module``), so
+bodies reference server globals bare (``_ok``, ``_err``, ``_sessions``, ...).
 """
 
 
@@ -55,10 +54,9 @@ def _(rid, params: dict) -> dict:
 
 
 def _profile_mention_items(prefix: str) -> list[dict]:
-    """`@<profile>` completions: agent profiles as mentionable names (multi-agent
-    UIs and the Bot Mode plugin route `@<profile>` text to another profile).
-    Bare-word matches only, never for `@kind:` directives. The primary profile is
-    also offered as 'hermes' when no real profile claims that name."""
+    """`@<profile>` completions (multi-agent UIs route `@<profile>` text to another
+    profile). Bare-word matches only, never `@kind:` directives; the primary profile
+    is also offered as 'hermes' when no real profile claims that name."""
     out: list[dict] = []
     try:
         from hermes_cli.profiles import list_profiles
@@ -83,33 +81,32 @@ def _plugin_reference_items(pfx: str, qval: str) -> list[dict] | None:
     """`@<prefix>:<query>` autocomplete for a plugin ContextReferenceProvider; None when
     no provider owns ``pfx`` or it fails."""
     try:
-        from agent.context_references import get_context_reference_providers as _gcr
+        from agent.context_references import get_context_reference_providers
 
-        _prov = _gcr().get(pfx)
-        if _prov is None:
+        prov = get_context_reference_providers().get(pfx)
+        if prov is None:
             return None
-        import asyncio as _asyncio
+        import asyncio
 
-        _coro = _prov.autocomplete(qval, limit=20)
+        coro = prov.autocomplete(qval, limit=20)
         try:
-            _loop = _asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            _loop = None
-        if _loop and _loop.is_running():
-            import concurrent.futures as _cf
+            loop = None
+        if loop and loop.is_running():
+            import concurrent.futures
 
-            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
-                _ac = _pool.submit(_asyncio.run, _coro).result()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                ac = pool.submit(asyncio.run, coro).result()
         else:
-            _ac = _asyncio.run(_coro)
-        return [{"text": f"@{pfx}:{it.text}", "display": it.display, "meta": it.meta} for it in _ac]
+            ac = asyncio.run(coro)
+        return [{"text": f"@{pfx}:{it.text}", "display": it.display, "meta": it.meta} for it in ac]
     except Exception:
         return None
 
 
 def _fuzzy_basename_items(root: str, path_part: str, prefix_tag: str) -> list[dict]:
-    """Fuzzy basename search across the repo for a bare `@name` (what Cursor /
-    VS Code do for Cmd-P); path-ish queries take the directory-listing path."""
+    """Cmd-P style fuzzy basename search for a bare `@name`; path-ish queries take the listing path."""
     ranked: list[tuple[tuple[int, int], str, str, bool]] = []
     walked_dirs: set[str] = set()
     seen: set[str] = set()
@@ -123,9 +120,8 @@ def _fuzzy_basename_items(root: str, path_part: str, prefix_tag: str) -> list[di
             seen.add(rel)
             ranked.append((rank, rel, name, is_dir))
 
-    # Seed with root's immediate children: `_list_repo_files` is capped at
-    # _FUZZY_CACHE_MAX_FILES and outside a git repo the fallback walk can burn
-    # the whole budget on one deep subtree before reaching a sibling.
+    # Seed with root's immediate children: `_list_repo_files` is capped at _FUZZY_CACHE_MAX_FILES
+    # and the non-git fallback walk can burn the whole budget on one deep subtree.
     try:
         for entry in os.listdir(root):
             if entry not in _FUZZY_FALLBACK_EXCLUDES:
@@ -135,8 +131,7 @@ def _fuzzy_basename_items(root: str, path_part: str, prefix_tag: str) -> list[di
 
     for rel in _list_repo_files(root):
         _consider(rel, os.path.basename(rel), False)
-        # Directories are only implied by the file listing, so rank each ancestor
-        # too — otherwise a folder with no name-matching file inside is invisible.
+        # Rank each ancestor dir too — a folder with no name-matching file inside is otherwise invisible.
         parent = os.path.dirname(rel)
         while parent and parent not in walked_dirs:
             walked_dirs.add(parent)
@@ -170,8 +165,7 @@ def _(rid, params: dict) -> dict:
 
         if is_context and not query:
             items = [_item(t, m) for t, m in _AT_DIRECTIVE_HINTS]
-            # Agent profiles are mentionable — `@` alone reveals them too.
-            items.extend(_profile_mention_items(""))
+            items.extend(_profile_mention_items(""))  # `@` alone reveals agent profiles too
             try:
                 from agent.context_references import get_context_reference_providers
 
@@ -189,8 +183,7 @@ def _(rid, params: dict) -> dict:
                 if plugin_items is not None:
                     return _ok(rid, {"items": plugin_items})
 
-        # Accept both `@folder:path` and bare `@folder` so listings appear as soon
-        # as the keyword is typed, without accepting the static `@folder:` hint.
+        # Bare `@folder` lists as soon as the keyword is typed (the static `@folder:` hint is not accepted).
         if is_context and query in {"file", "folder"}:
             prefix_tag, path_part = query, ""
         elif is_context and query.startswith(("file:", "folder:")):
@@ -198,21 +191,15 @@ def _(rid, params: dict) -> dict:
         else:
             prefix_tag, path_part = "", query
 
-        # `@/foo` almost always means "foo, from here": take the absolute reading
-        # only when that prefix exists, else drop the slash and resolve relative
-        # to cwd — otherwise `@/Desktop` dead-ends. `@/usr/local` still resolves.
-        if (
-            is_context
-            and path_part.startswith("/")
-            and not path_part.startswith("//")
-            and not _abs_completion_prefix_exists(path_part)
-        ):
-            path_part = path_part.lstrip("/")
+        # `@/foo` usually means "foo, from here": absolute only when that prefix exists,
+        # else resolve relative to cwd (`@/Desktop` must not dead-end; `@/usr/local` still resolves).
+        if is_context and path_part.startswith("/") and not path_part.startswith("//"):
+            if not _abs_completion_prefix_exists(path_part):
+                path_part = path_part.lstrip("/")
 
         if is_context and path_part and len(path_part.strip()) >= 2 and "/" not in path_part and prefix_tag != "folder":
             items = _fuzzy_basename_items(root, path_part, prefix_tag)
-            # Bare `@name` may equally be an agent mention: profiles rank ABOVE file hits.
-            if not prefix_tag:
+            if not prefix_tag:  # bare `@name` may be an agent mention: profiles rank ABOVE file hits
                 items = _profile_mention_items(path_part) + items
             return _ok(rid, {"items": items})
 
@@ -240,8 +227,7 @@ def _(rid, params: dict) -> dict:
                 continue
             full = os.path.join(search_dir, entry)
             is_dir = os.path.isdir(full)
-            # Explicit `@folder:` / `@file:` filters: skip the opposite kind rather
-            # than rewriting the tag (which let `@folder:` list files).
+            # Explicit `@folder:` / `@file:` skip the opposite kind (never rewrite the tag).
             if prefix_tag and want_dir != is_dir:
                 continue
             rel = os.path.relpath(full, root).replace(os.sep, "/")
@@ -264,8 +250,7 @@ def _(rid, params: dict) -> dict:
     except Exception as e:
         return _err(rid, 5021, str(e))
 
-    # Bare-word `@name` (incl. single chars, which skip the fuzzy branch) may be
-    # an agent mention — profiles rank above path entries.
+    # Bare-word `@name` (incl. single chars, which skip the fuzzy branch): profiles rank above paths.
     try:
         if is_context and not prefix_tag and path_part and "/" not in path_part:
             items = _profile_mention_items(path_part) + items
@@ -292,15 +277,13 @@ def _(rid, params: dict) -> dict:
         completer = SlashCommandCompleter(
             skill_commands_provider=lambda: get_skill_commands(), skill_bundles_provider=lambda: get_skill_bundles()
         )
-        # Skills/bundles are the only completions for an inline `/skill` typed
-        # mid-message, so the class reaches the TUI as data — derived from the
-        # completer's own providers, not sniffed from the ⚡/▣ display glyphs.
+        # `kind` reaches the TUI as data (from the providers, not sniffed from ⚡/▣ glyphs):
+        # skills/bundles are the only completions for an inline `/skill` typed mid-message.
         skill_names = {key.lstrip("/").lower() for key in (*get_skill_commands(), *get_skill_bundles())}
 
         def to_items(doc: Document) -> list[dict]:
-            # prompt_toolkit's display/display_meta are FormattedText; the TUI's
-            # CompletionItem.display contract is a plain string (the raw list
-            # trips Ink's row layout into 1-char truncation of the next column).
+            # display/display_meta are FormattedText; the TUI contract is a plain string
+            # (the raw list trips Ink's row layout into 1-char truncation).
             return [
                 {
                     "text": c.text,
@@ -313,16 +296,12 @@ def _(rid, params: dict) -> dict:
 
         items = to_items(Document(text, len(text)))
 
-        # Rank and bound (see _rank_slash_completions) while a `/token` is under
-        # the cursor — the one stage skills are offered at. An argument stage
-        # (`/personality `, `/details c`) keeps the order its command chose.
+        # Rank + bound while a `/token` is under the cursor (the one stage skills are
+        # offered at); an argument stage (`/personality `) keeps its command's order.
         if text.rsplit(" ", 1)[-1].startswith("/"):
             score_of = None
-            # Description-aware fuzzy scoring at the command-token stage: the
-            # completer only emits name-prefix matches, so merge in catalog entries
-            # whose name SUBSTRING or DESCRIPTION words match (`/summary` surfaces a
-            # command whose description mentions summaries). Name matches outrank
-            # description matches.
+            # Command-token stage: the completer only emits name-prefix matches, so merge in
+            # catalog entries whose name SUBSTRING or DESCRIPTION words match (name outranks description).
             if " " not in text and len(text) > 1:
                 from tui_gateway.slash_fuzzy import fuzzy_rank_slash_items, normalize_slash_search_query
 
@@ -357,8 +336,8 @@ def _(rid, params: dict) -> dict:
 
         session = _sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
-        # Once an agent is spawned IT owns the live provider/model/base_url; empty
-        # agent attributes must NOT clobber disk config (with_overrides is truthy-only).
+        # A spawned agent owns the live provider/model/base_url; empty attributes must
+        # NOT clobber disk config (with_overrides is truthy-only).
         ctx = _model_picker_context(agent)
         payload = build_model_options_payload(
             ctx,
@@ -373,8 +352,7 @@ def _(rid, params: dict) -> dict:
 
 @method("model.save_key")
 def _(rid, params: dict) -> dict:
-    """Save an API key for provider ``slug`` and return its refreshed provider row
-    (same shape as model.options entries, with ``authenticated``)."""
+    """Save an API key for ``slug``; return its refreshed provider row (model.options shape + ``authenticated``)."""
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
         from hermes_cli.config import is_managed
@@ -384,10 +362,8 @@ def _(rid, params: dict) -> dict:
         api_key = (params.get("api_key") or "").strip()
         if not slug or not api_key:
             return _err(rid, 4001, "slug and api_key are required")
-
         if is_managed():
             return _err(rid, 4006, "managed install — credentials are read-only")
-
         pconfig = PROVIDER_REGISTRY.get(slug)
         if not pconfig:
             return _err(rid, 4002, f"unknown provider: {slug}")
@@ -396,32 +372,20 @@ def _(rid, params: dict) -> dict:
         if not pconfig.api_key_env_vars:
             return _err(rid, 4004, f"no env var defined for {pconfig.name}")
 
-        # Unified credential lifecycle so any stale config.yaml mirror of the old
-        # key (model.api_key, custom_providers[*].api_key) rotates in the same action.
+        # Unified lifecycle rotates stale config.yaml mirrors of the old key too.
         env_var = pconfig.api_key_env_vars[0]
         from hermes_cli.credential_lifecycle import save_provider_env_credential
 
         save_provider_env_credential(env_var, api_key)
-        import os
-
         os.environ[env_var] = api_key  # so the refreshed inventory sees it
 
-        # Shared inventory builder keeps this in lock-step with model.options and
-        # the dashboard; picker_hints=True carries `authenticated` for the TUI.
+        # Shared inventory builder (lock-step with model.options / dashboard); picker_hints carries `authenticated`.
         session = _sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
         payload = build_models_payload(_model_picker_context(agent), picker_hints=True, max_models=50)
         provider_data = next((p for p in payload["providers"] if p["slug"] == slug), None)
-        if provider_data is None:
-            # Key saved but provider didn't appear — still success.
-            provider_data = {
-                "slug": slug,
-                "name": pconfig.name,
-                "is_current": False,
-                "models": [],
-                "total_models": 0,
-                "authenticated": True,
-            }
+        if provider_data is None:  # key saved but provider didn't appear — still success
+            provider_data = {"slug": slug, "name": pconfig.name, "is_current": False, "models": [], "total_models": 0}
         provider_data["authenticated"] = True  # synthetic fallback bypasses picker_hints
         return _ok(rid, {"provider": provider_data})
     except Exception as e:
@@ -438,13 +402,10 @@ def _(rid, params: dict) -> dict:
         slug = (params.get("slug") or "").strip()
         if not slug:
             return _err(rid, 4001, "slug is required")
-
         pconfig = PROVIDER_REGISTRY.get(slug)
         cleared_env = False
-
-        # Remove env vars from .env/process plus every mirror (env-seeded pool
-        # entries, model cache rows, value-matched config.yaml copies) — otherwise
-        # the provider resurrects in the picker after restart.
+        # Remove env vars plus every mirror (env-seeded pool entries, model cache rows,
+        # value-matched config.yaml copies) or the provider resurrects in the picker after restart.
         if pconfig and pconfig.api_key_env_vars:
             for ev in pconfig.api_key_env_vars:
                 if remove_provider_env_credential(ev).get("found"):
@@ -452,10 +413,8 @@ def _(rid, params: dict) -> dict:
 
         # Full disconnect: removing OAuth grants is intended here, unlike key-only deletes.
         cleared_auth = clear_provider_auth(slug)
-
         if not cleared_env and not cleared_auth:
             return _err(rid, 4005, f"no credentials found for {slug}")
-
         return _ok(rid, {"slug": slug, "name": pconfig.name if pconfig else slug, "disconnected": True})
     except Exception as e:
         return _err(rid, 5035, str(e))

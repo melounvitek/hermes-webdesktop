@@ -12,17 +12,11 @@ from .method_ctx import HandlerRegistry, bind_module
 _registry = HandlerRegistry()
 
 
-# ── Auto-continue: resume a turn killed by a process/machine death ────
-#
-# A turn that concludes — success, handled error, interrupt — clears its
-# durable marker (see tui_gateway/turn_marker.py) in _run_prompt_submit's
-# finally. Only a process death leaves the marker behind, so a marker found
-# at session.resume time is positive proof the turn never finished AND the
-# client never saw a terminal frame. If the interruption is fresh, re-submit
-# the interrupted prompt automatically (the messaging gateway has done this
-# for restart-interrupted sessions since #27856); if it's stale, clear the
-# marker and let the recovered partial transcript speak for itself — the
-# user can ask to continue manually.
+# A concluded turn (success, handled error, interrupt) clears its durable marker
+# (turn_marker.py) in _run_prompt_submit's finally; only a process death leaves it
+# behind, so a marker at session.resume proves the turn never finished AND the
+# client never saw a terminal frame. Fresh: re-submit automatically (as the
+# messaging gateway does). Stale: clear it and let the partial transcript speak.
 
 _AUTO_CONTINUE_ENABLED_DEFAULT = True
 _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
@@ -57,12 +51,10 @@ def _session_home(session: dict) -> Path:
 def _retire_turn_marker(session: dict, *keys: str) -> None:
     """Drop the crash marker for a turn whose outcome is about to reach the client.
 
-    Called immediately before the terminal frame rather than at the end of the
-    turn thread: post-turn work (titles, memory sync, goal hooks) runs for a
-    second or more after the client has its answer, and quitting inside that
-    window would leave a marker that looks like a crash — re-running a finished
-    turn on the next launch. Extra ``keys`` cover a session_key that
-    compression rotated mid-turn.
+    Called right before the terminal frame, not at turn-thread end: post-turn work
+    (titles, memory sync, goal hooks) outlives the client's answer, and quitting in
+    that window would leave a marker that re-runs a finished turn on next launch.
+    Extra ``keys`` cover a session_key that compression rotated mid-turn.
     """
     home = _session_home(session)
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
@@ -71,10 +63,8 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
 
 
 def _auto_continue_note(prompt: str) -> str:
-    # Same opening as the messaging gateway's recovery notes so transcript
-    # tooling recognizes both. The original prompt is embedded because a hard
-    # crash persists nothing of the interrupted turn to the session DB — this
-    # note is the only copy the model will see.
+    # Same opening as the gateway's recovery notes (transcript tooling recognizes
+    # both). The prompt is embedded: a hard crash persists nothing else of the turn.
     return (
         f"{_AUTO_CONTINUE_NOTE_PREFIX} — the app or its backend process "
         "stopped before the turn could finish. Some of the work may already "
@@ -84,19 +74,23 @@ def _auto_continue_note(prompt: str) -> str:
     )
 
 
+def _ac_release_turn(session: dict, *, unschedule: bool = False) -> None:
+    with session["history_lock"]:
+        session["running"] = False
+        if unschedule:
+            session["_auto_continue_scheduled"] = False
+
+
 def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
     """Kick off a continuation turn for a crash-interrupted session.
 
-    Called from session.resume's cold paths after the live record is
-    registered. Returns a small descriptor for the resume payload when a
-    continuation was scheduled, else None. The turn itself runs on a
-    background thread after the (deferred) agent build finishes, through the
-    same _run_prompt_submit machinery as every other synthesized turn — so
-    the client that just resumed streams it live.
+    Called from session.resume's cold paths once the live record is registered.
+    Returns a descriptor for the resume payload when scheduled, else None. The turn
+    runs on a background thread after the deferred agent build via the normal
+    _run_prompt_submit path, so the client that just resumed streams it live.
     """
-    # Hosted room turns are recovered by their durable task/lease state
-    # machine. Generic session auto-continue would bypass its execution
-    # generation and can duplicate work after a process restart.
+    # Hosted room turns are recovered by their durable task/lease state machine;
+    # generic auto-continue would bypass its execution generation and duplicate work.
     if session.get("source") == "bot_room":
         return None
 
@@ -107,8 +101,7 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     enabled, freshness_secs, max_attempts = _auto_continue_config()
     age = time.time() - marker["started_at"]
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
-        # Stale, disabled, or crash-looping: stop trying. The journal/partial
-        # transcript still shows what happened; a manual message continues it.
+        # Stale, disabled, or crash-looping: stop trying; a manual message continues.
         clear_turn_marker(home, session_key)
         return None
     if session.get("_auto_continue_scheduled"):
@@ -131,92 +124,56 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             return
         with session["history_lock"]:
             if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
-                # A real user prompt beat us to it — their turn wins, and its
-                # own conclusion clears the marker.
+                # A real user prompt beat us; its own conclusion clears the marker.
                 session["_auto_continue_scheduled"] = False
                 return
             session["running"] = True
             session["last_active"] = time.time()
-        # Ownership admission BEFORE message.start: the interrupted-turn
-        # marker this continuation is recovering may have been written by a
-        # sibling backend that is still alive and mid-turn (#94778 — two
-        # backends share one HERMES_HOME; B resumes S while A runs it and
-        # sees A's fresh marker). Running the continuation anyway would be
-        # the double-writer this fence exists to prevent. Leave the marker:
-        # once the owner finishes or dies, a later resume retries.
+        # Ownership admission BEFORE message.start: a sibling backend sharing this
+        # HERMES_HOME may have written the marker and still be mid-turn. Leave the
+        # marker so a later resume retries once the owner finishes or dies.
         if _ensure_active_session_slot(sid, session) is not None:
-            logger.info(
-                "auto-continue for %s refused: session has another live owner",
-                session_key,
-            )
-            with session["history_lock"]:
-                session["running"] = False
-                session["_auto_continue_scheduled"] = False
+            logger.info("auto-continue for %s refused: session has another live owner", session_key)
+            _ac_release_turn(session, unschedule=True)
             return
         with session["history_lock"]:
-            # Hand this turn its own marker inputs (read back by
-            # _run_prompt_submit): count the attempt so a crash during the
-            # continuation trips the breaker, and re-record the ORIGINAL
-            # prompt so a second crash doesn't nest note inside note. Set
-            # here, not at schedule time, so a bail above leaves nothing
-            # behind for a racing user turn to inherit.
+            # Marker inputs read back by _run_prompt_submit: count the attempt (crash
+            # breaker) and re-record the ORIGINAL prompt (no nested notes). Set here,
+            # not at schedule time, so a bail above leaves nothing for a racing user turn.
             session["_auto_continue_attempt"] = attempt
             session["_auto_continue_prompt"] = marker["prompt"]
         try:
-            _emit(
-                "status.update",
-                sid,
-                {"kind": "process", "text": "Resuming interrupted turn…"},
-            )
+            _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
             _emit("message.start", sid)
             _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue")
         except Exception as exc:
-            print(
-                f"[tui_gateway] auto-continue dispatch failed: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            with session["history_lock"]:
-                session["running"] = False
+            print(f"[tui_gateway] auto-continue dispatch failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            _ac_release_turn(session)
 
     threading.Thread(target=kickoff, daemon=True).start()
     logger.info(
         "auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago)",
-        session_key,
-        attempt,
-        age,
+        session_key, attempt, age,
     )
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
 
 
-def _enqueue_prompt(
-    session: dict,
-    text: Any,
-    transport: Any,
-    image_paths: list[str] | None = None,
-) -> None:
+def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[str] | None = None) -> None:
     """Stash a message to run as the very next turn once the live one ends.
 
-    Used when a prompt arrives mid-turn (see ``_handle_busy_submit``). Text-only
-    arrivals share a slot and merge losslessly (mirroring the consecutive-user
-    merge in ``repair_message_sequence``). Image-bearing submissions stay as
-    separate envelopes, so their attachment ownership and chronology survive.
-    ``transport`` is pinned so the drained turn streams back to the client that
-    sent it even if the session transport is rebound meanwhile.
+    Text-only arrivals share a slot and merge losslessly (like the consecutive-user
+    merge in ``repair_message_sequence``); image-bearing ones stay separate envelopes
+    so attachment ownership/chronology survive. ``transport`` is pinned so the drained
+    turn streams back to its sender even if the session transport is rebound.
     """
     image_paths = list(image_paths or [])
-    # #84417: scrub any live-turn self-duplicates first so the consecutive-text
-    # merge below cannot glue "{original}\\n\\n{later}" and re-fire original
-    # on drain after a later correction settles.
+    # Scrub live-turn self-duplicates first so the text merge below can't glue
+    # "{original}\n\n{later}" and re-fire the original after a correction settles.
     _drop_queued_duplicates_of_inflight_user(session)
-    # Never queue a text-only self-copy of the live inflight user prompt. The
-    # live turn already owns that text; draining it after settle would restart
-    # the same user turn as a fresh agent invocation.
+    # Never queue a text-only self-copy of the live prompt: draining it would restart it.
     if not image_paths and isinstance(text, str):
         turn = session.get("inflight_turn")
-        original = (
-            str(turn.get("user") or "").strip() if isinstance(turn, dict) else ""
-        )
+        original = (str(turn.get("user") or "").strip() if isinstance(turn, dict) else "")
         if original and text.strip() == original:
             return
     queued = {"text": text, "transport": transport}
@@ -240,17 +197,12 @@ def _enqueue_prompt(
     session["queued_prompt"] = queued
 
 
-def _sanitize_queued_entry_vs_inflight_user(
-    entry: Any, original: str
-) -> dict | None:
-    """Drop or rewrite a queue envelope that re-carries the live user text.
+def _sanitize_queued_entry_vs_inflight_user(entry: Any, original: str) -> dict | None:
+    """Drop (``None``) or rewrite a queue envelope that re-carries the live user text.
 
-    Returns ``None`` to drop the envelope, or a (possibly rewritten) dict to
-    keep. Text-only self-duplicates of ``original`` are dropped. A merged
-    slot ``"{original}\\n\\n{later}"`` (from ``_enqueue_prompt``'s consecutive
-    text merge) is rewritten to just ``later`` so a later correction is not
-    lost and the original is not re-fired (#84417). Image-bearing envelopes
-    are left alone — their chronology/ownership is load-bearing.
+    Text-only self-duplicates are dropped; a merged slot ``"{original}\\n\\n{later}"``
+    is rewritten to ``later`` so the correction survives without re-firing the
+    original. Image-bearing envelopes are left alone (chronology is load-bearing).
     """
     if not original or not isinstance(entry, dict):
         return entry if isinstance(entry, dict) else None
@@ -260,9 +212,7 @@ def _sanitize_queued_entry_vs_inflight_user(
     if not isinstance(text, str):
         return entry
     stripped = text.strip()
-    if not stripped:
-        return None
-    if stripped == original:
+    if not stripped or stripped == original:
         return None
     # Lossless text-merge glued the live original onto a later follow-up.
     for sep in ("\n\n", "\n"):
@@ -271,24 +221,16 @@ def _sanitize_queued_entry_vs_inflight_user(
             rest = text[len(prefix) :].strip()
             if not rest or rest == original:
                 return None
-            cleaned = dict(entry)
-            cleaned["text"] = rest
-            return cleaned
+            return {**entry, "text": rest}
     return entry
 
 
 def _drop_queued_duplicates_of_inflight_user(session: dict) -> None:
     """Remove server-queue copies of the live turn's original user text.
 
-    A mid-turn ``prompt.submit`` of the same text can land in
-    ``queued_prompt`` when redirect is not yet available (model not active,
-    build window, tool boundary). If the user then corrects the turn with a
-    different prompt via redirect, that stale self-duplicate must not
-    ``_drain_queued_prompt`` after the redirected turn completes — otherwise
-    the original prompt restarts as a fresh agent turn (#84417).
-
-    Unrelated follow-ups (different text, image-bearing envelopes) stay.
-    Merged ``original + later`` slots are rewritten to ``later`` only.
+    A mid-turn ``prompt.submit`` of the same text can be queued while redirect is
+    unavailable (build window, tool boundary); after a later redirect it must not
+    drain and restart the original as a fresh turn. Unrelated follow-ups stay.
     """
     turn = session.get("inflight_turn")
     if not isinstance(turn, dict):
@@ -305,26 +247,24 @@ def _drop_queued_duplicates_of_inflight_user(session: dict) -> None:
         if cleaned is not None:
             kept.append(cleaned)
 
-    if not kept:
-        session["queued_prompt"] = None
-        session.pop("queued_prompts", None)
-        return
-    session["queued_prompt"] = kept[0]
-    if len(kept) > 1:
-        session["queued_prompts"] = kept[1:]
+    _ac_set_queue(session, kept)
+
+
+def _ac_set_queue(session: dict, entries: list) -> None:
+    """Write ``entries`` back as queued_prompt (head) + queued_prompts (rest)."""
+    session["queued_prompt"] = entries[0] if entries else None
+    if len(entries) > 1:
+        session["queued_prompts"] = entries[1:]
     else:
         session.pop("queued_prompts", None)
 
 
 def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
-    """Interrupt a busy turn without blocking the RPC reader or session lock.
+    """Interrupt a busy turn on a worker thread, never under ``history_lock``.
 
-    Some providers cannot apply ``interrupt()`` until a synchronous tool or
-    network call returns. Running that call inline used to leave
-    ``prompt.submit`` holding ``history_lock`` for the whole wait, which in turn
-    blocked ``session.resume`` and delayed the queued prompt itself. Keep at
-    most one interrupt worker per session so repeated steering cannot leak an
-    unbounded number of blocked threads.
+    Some providers can't apply ``interrupt()`` until a blocking tool/network call
+    returns; doing it inline stalled ``session.resume`` and the queued prompt.
+    At most one interrupt worker per session so repeated steering can't leak threads.
     """
     use_agent = agent is not None and hasattr(agent, "interrupt")
     use_compute_host = not use_agent and _session_uses_compute_host(session)
@@ -351,58 +291,49 @@ def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
     threading.Thread(target=interrupt, daemon=True, name=f"busy-interrupt-{sid}").start()
 
 
+def _ac_record_inflight_correction(session: dict, plain_text: str) -> None:
+    """Record an accepted steer/redirect; scrub stale self-duplicates so the
+    live turn's original text is not re-fired from the queue after settle."""
+    with session["history_lock"]:
+        _record_inflight_correction(session, plain_text)
+        _drop_queued_duplicates_of_inflight_user(session)
+        session["last_active"] = time.time()
+
+
 def _handle_busy_submit(
     rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False
 ) -> dict | None:
-    """Apply the ``display.busy_input_mode`` policy to a prompt that lands while
-    a turn is in flight, instead of rejecting it with ``session busy``.
+    """Apply ``display.busy_input_mode`` to a prompt that lands mid-turn instead of
+    rejecting it with ``session busy`` (rejection made clients busy-retry and
+    silently drop sends when teardown outlived their deadline).
 
-    The old rejection forced clients into a deadline-bounded busy-retry that
-    silently dropped the send when turn teardown outlived the deadline. The
-    default policy now redirects a capable core agent in place; older agents
-    retain the proven interrupt-and-queue path drained from ``run``'s tail.
-
-    Modes: ``interrupt`` (default) → redirect the live turn, falling back to
-    hard interrupt + queue for older agents; ``queue`` → queue without
-    interrupting; ``steer`` → inject after the current atomic action.
-
-    ``queued=True`` (client's queue drain, ``prompt.submit`` param) overrides
-    the mode entirely: the message was explicitly queued as "run after", so it
-    must NEVER become a live-turn correction or interrupt. Without this, a
-    drain that loses the settle race (client observed idle, server still
-    unwinding the turn) redirected the live turn with next-turn text — queue
-    semantics betrayed by a millisecond race the user can't see.
+    Modes: ``interrupt`` (default) → redirect the live turn, falling back to hard
+    interrupt + queue for older agents; ``queue`` → queue only; ``steer`` → inject
+    after the current atomic action. ``queued=True`` (client queue drain) forces
+    queue mode: a "run after" message must NEVER become a live-turn correction,
+    even when the drain loses the settle race against a still-unwinding turn.
     """
     mode = "queue" if queued else _load_busy_input_mode()
     agent = session.get("agent")
     with session["history_lock"]:
         if not session.get("running"):
-            # The turn ended between prompt.submit's first busy check and this
-            # helper. Let the caller retry and claim the now-idle session.
-            return None
-    with session["history_lock"]:
-        if not session.get("running"):
+            # Turn ended since prompt.submit's busy check; caller retries on the idle session.
             return None
         image_paths = list(session.get("attached_images", []))
         if image_paths:
-            # Claim at submission time. A later paste must not be consumed by
-            # this prompt after the active turn finally yields.
+            # Claim now so a later paste isn't consumed by this prompt when the turn yields.
             session["attached_images"] = []
     text_only = not image_paths and _is_text_only_busy_payload(text)
     plain_text = _coerce_message_text(text).strip() if text_only else ""
     if mode == "steer" and text_only and plain_text and agent is not None and hasattr(agent, "steer"):
         try:
             if agent.steer(plain_text):
-                with session["history_lock"]:
-                    _record_inflight_correction(session, plain_text)
-                    _drop_queued_duplicates_of_inflight_user(session)
-                    session["last_active"] = time.time()
+                _ac_record_inflight_correction(session, plain_text)
                 return _ok(rid, {"status": "steered"})
         except Exception:
             pass  # fall through to queue
-    # Text-only corrections redirect the live turn in place when the runtime
-    # supports it; media/attachment payloads and older agents fall through to
-    # the proven interrupt + queue path below.
+    # Text-only corrections redirect in place when supported; media payloads and
+    # older agents fall through to the proven interrupt + queue path.
     if (
         mode == "interrupt"
         and text_only
@@ -413,18 +344,12 @@ def _handle_busy_submit(
     ):
         try:
             if agent.redirect(plain_text):
-                with session["history_lock"]:
-                    _record_inflight_correction(session, plain_text)
-                    # #84417: do not re-fire the live turn's original user text
-                    # from a stale server-queue self-duplicate after settle.
-                    _drop_queued_duplicates_of_inflight_user(session)
-                    session["last_active"] = time.time()
+                _ac_record_inflight_correction(session, plain_text)
                 return _ok(rid, {"status": "redirected"})
         except Exception:
             pass  # preserve the proven interrupt + queue fallback below
-    # Queue before asking the live turn to stop. In particular, never call a
-    # provider or compute-host method while holding history_lock: an interrupt
-    # can wait behind the very operation it is trying to cancel.
+    # Queue before asking the live turn to stop. Never call a provider/compute-host
+    # method under history_lock: an interrupt can wait behind the op it cancels.
     with session["history_lock"]:
         if not session.get("running"):
             if image_paths:
@@ -433,17 +358,10 @@ def _handle_busy_submit(
         _enqueue_prompt(session, text, transport, image_paths=image_paths)
         session["last_active"] = time.time()
 
-    # Attachments need a separate model invocation. Queue them without
-    # cancelling the active turn so the user gets both results in order.
-    #
-    # #86134: ``steer`` mode must NEVER escalate to a hard interrupt. A burst
-    # of user messages while the agent is busy can land as a mix of accepted
-    # steers (stashed in ``AIAgent._pending_steer``) and fall-through queue
-    # envelopes (payload not steerable, ``steer()`` rejected/raised). A hard
-    # interrupt here kills the live turn AND ``AIAgent.interrupt()`` drops
-    # the pending steer buffer — silently destroying the earlier messages of
-    # the burst. Steer-mode fall-throughs keep queue semantics: preserved
-    # FIFO in ``queued_prompt``/``queued_prompts`` and drained on turn end.
+    # Attachments need their own model invocation: queue without cancelling so the
+    # user gets both results in order. ``steer`` must NEVER escalate to a hard
+    # interrupt: it would kill the live turn AND drop ``AIAgent._pending_steer``,
+    # destroying earlier accepted steers; steer fall-throughs stay FIFO-queued.
     if mode == "interrupt" and not image_paths:
         _interrupt_busy_session(sid, session, agent)
     return _ok(rid, {"status": "queued"})
@@ -452,9 +370,8 @@ def _handle_busy_submit(
 def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     """Fire a queued next-turn prompt if one is waiting and the session is idle.
 
-    Returns True if a queued prompt was dispatched (the caller should then skip
-    lower-priority follow-ups this cycle — the user's message wins). Mirrors the
-    claim-under-lock pattern used by the goal-continuation re-fire.
+    True when dispatched: the caller skips lower-priority follow-ups this cycle
+    (the user's message wins). Claim-under-lock like the goal-continuation re-fire.
     """
     with session["history_lock"]:
         if session.get("_closing"):
@@ -473,39 +390,24 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     use_compute_host = _session_uses_compute_host(session)
     with session["history_lock"]:
         if int(session.get("_queued_prompt_generation", 0)) != queue_generation:
-            # Generation cancelled the claim (Stop, compress re-anchor, …).
-            # Do not dispatch — but put the claimed envelope back so a
-            # legitimate follow-up is not silently dropped. Order: claimed
-            # head first, then whatever advanced into the slot while we held
-            # the claim (#84417 belt accuracy).
+            # Generation bump cancelled the claim (Stop, compress re-anchor, …): don't
+            # dispatch, but restore the envelope (claimed head first, then whatever
+            # advanced into the slot) so a legitimate follow-up isn't dropped.
             rest: list = []
             advanced = session.get("queued_prompt")
             if advanced:
                 rest.append(advanced)
             rest.extend(session.get("queued_prompts") or [])
-            session["queued_prompt"] = queued
-            if rest:
-                session["queued_prompts"] = rest
-            else:
-                session.pop("queued_prompts", None)
+            _ac_set_queue(session, [queued, *rest])
             session["running"] = False
             return True
+    kwargs: dict = {"queued_prompt_generation": queue_generation}
+    if queued.get("image_paths"):
+        kwargs["image_paths"] = queued["image_paths"]
     dispatch_failed = False
     try:
         if use_compute_host:
-            if queued.get("image_paths"):
-                resp = _submit_prompt_to_compute_host(
-                    rid,
-                    sid,
-                    session,
-                    queued["text"],
-                    image_paths=queued["image_paths"],
-                    queued_prompt_generation=queue_generation,
-                )
-            else:
-                resp = _submit_prompt_to_compute_host(
-                    rid, sid, session, queued["text"], queued_prompt_generation=queue_generation
-                )
+            resp = _submit_prompt_to_compute_host(rid, sid, session, queued["text"], **kwargs)
             if resp.get("error"):
                 message = str(((resp.get("error") or {}).get("message")) or "queued prompt failed")
                 with session["history_lock"]:
@@ -514,37 +416,14 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                 _emit("error", sid, {"message": message})
                 dispatch_failed = True
         else:
-            if queued.get("image_paths"):
-                _run_prompt_submit(
-                    rid,
-                    sid,
-                    session,
-                    queued["text"],
-                    image_paths=queued["image_paths"],
-                    queued_prompt_generation=queue_generation,
-                )
-            else:
-                _run_prompt_submit(
-                    rid,
-                    sid,
-                    session,
-                    queued["text"],
-                    queued_prompt_generation=queue_generation,
-                )
+            _run_prompt_submit(rid, sid, session, queued["text"], **kwargs)
     except Exception as exc:
-        print(
-            f"[tui_gateway] queued prompt dispatch failed: "
-            f"{type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        with session["history_lock"]:
-            session["running"] = False
+        print(f"[tui_gateway] queued prompt dispatch failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        _ac_release_turn(session)
         dispatch_failed = True
     if dispatch_failed:
         with session["history_lock"]:
-            drain_next = bool(session.get("queued_prompt")) and not session.get(
-                "_turn_cancel_requested"
-            )
+            drain_next = bool(session.get("queued_prompt")) and not session.get("_turn_cancel_requested")
         if drain_next:
             _drain_queued_prompt(rid, sid, session)
     return True
@@ -560,11 +439,7 @@ def _inflight_snapshot(session: dict) -> dict | None:
     error = str(turn.get("error") or "").strip()
     if not user and not assistant and not streaming and not error:
         return None
-    snapshot = {
-        "assistant": assistant,
-        "streaming": streaming,
-        "user": user,
-    }
+    snapshot = {"assistant": assistant, "streaming": streaming, "user": user}
     raw_corrections = turn.get("corrections") or []
     raw_offsets = turn.get("correction_offsets") or []
     correction_pairs = [
@@ -573,19 +448,15 @@ def _inflight_snapshot(session: dict) -> dict | None:
         if str(c).strip()
     ]
     if correction_pairs:
-        # Mid-turn redirects. Carried alongside the original prompt (not over
-        # it) so resume can rebuild every user bubble the turn produced.
+        # Mid-turn redirects alongside (not over) the original prompt so resume can
+        # rebuild every user bubble; offsets only when every correction has one so
+        # clients can trust the pairing.
         snapshot["corrections"] = [c for c, _ in correction_pairs]
-        # Assistant-text lengths at each correction boundary (parallel list).
-        # Only sent when every correction has one, so clients can trust the
-        # pairing; older in-memory turns without offsets omit the field and
-        # clients fall back to placing corrections after the assistant dump.
         if all(isinstance(offset, int) and offset >= 0 for _, offset in correction_pairs):
             snapshot["correction_offsets"] = [int(offset) for _, offset in correction_pairs]  # type: ignore[arg-type]
     if error:
-        # Retained failed turn (see _fail_inflight_turn): carry the error
-        # semantics so a resuming client can rebuild the failed-turn bubble
-        # instead of rendering the partial text as a healthy reply.
+        # Retained failed turn (_fail_inflight_turn): a resuming client must rebuild
+        # the failed bubble, not render the partial text as a healthy reply.
         snapshot["error"] = error
         snapshot["status"] = str(turn.get("status") or "error")
         snapshot["recoverable"] = bool(turn.get("recoverable"))
@@ -596,29 +467,17 @@ def _inflight_snapshot(session: dict) -> dict | None:
 
 
 def _emit_terminal_turn_error(
-    sid: str,
-    session: dict,
-    error: Any,
-    error_surface: Optional[dict] = None,
-    *,
-    retire_marker: bool = True,
+    sid: str, session: dict, error: Any, error_surface: Optional[dict] = None, *, retire_marker: bool = True
 ) -> None:
-    """Close a failed turn with a terminal ``message.complete`` frame.
-
-    Emits the same ``status: "error"`` frame shape the returned-error path in
-    ``_run_prompt_submit`` already produces (so TUI/desktop handling is
-    uniform), and retains the failed turn via ``_fail_inflight_turn`` so a
-    client that missed this frame (disconnect window) can recover it from
-    ``session.resume``'s ``inflight`` payload.
-
-    ``error_surface`` lets callers that already know the failing layer (e.g.
-    agent-init failures = local runtime) pass it explicitly; exception
-    callers leave it None and the classifier derives it here.
+    """Close a failed turn with the same ``status: "error"`` ``message.complete``
+    frame as ``_run_prompt_submit``'s returned-error path, retaining the turn via
+    ``_fail_inflight_turn`` so a client that missed the frame recovers it from
+    ``session.resume``'s ``inflight``. Callers that know the failing layer pass
+    ``error_surface``; exception callers leave it None and it is classified here.
     """
     agent = session.get("agent")
-    # Classify the failure into a {layer, code, retryable} descriptor so the
-    # desktop can say "Provider error" / "Gateway error" with matching
-    # recovery actions instead of a generic toast. Never raises (advisory).
+    # {layer, code, retryable} descriptor so the desktop can say "Provider error" /
+    # "Gateway error" with matching recovery actions. Advisory: never raises.
     if error_surface is None and isinstance(error, BaseException):
         try:
             from agent.error_surface import build_error_surface_from_exception
@@ -660,12 +519,9 @@ def _emit_terminal_turn_error(
 
 
 def _restore_agent_history_after_turn_error(session: dict, agent) -> bool:
-    """Keep a failed turn's working transcript in the gateway session.
-
-    ``AIAgent`` persists its working messages independently of the gateway's
-    history snapshot. If the turn raises after that persistence, the next
-    prompt must see the working transcript instead of the pre-turn snapshot.
-    """
+    """Keep a failed turn's working transcript: ``AIAgent`` persists its messages
+    independently, so after a raise the next prompt must see them, not the
+    pre-turn snapshot."""
     agent_messages = getattr(agent, "_session_messages", None)
     if not isinstance(agent_messages, list):
         return False
@@ -676,13 +532,8 @@ def _restore_agent_history_after_turn_error(session: dict, agent) -> bool:
 
 
 def _queued_prompt_snapshot(session: dict) -> dict | None:
-    """Return the accepted next-turn prompt without its transport handle.
-
-    A busy ``prompt.submit`` lives only in ``session["queued_prompt"]`` until
-    the current turn winds down. Desktop may reconnect or restart during that
-    window, so the live-session projection must carry the user-visible text;
-    otherwise the accepted prompt disappears until it finally drains.
-    """
+    """The accepted next-turn prompt without its transport handle, for the
+    live-session projection (Desktop may reconnect while it is still queued)."""
     queued = session.get("queued_prompt")
     if not isinstance(queued, dict):
         return None

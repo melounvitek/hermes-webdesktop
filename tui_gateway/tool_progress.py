@@ -12,12 +12,14 @@ from .method_ctx import HandlerRegistry, bind_module
 _registry = HandlerRegistry()
 
 
-# waste AND feeds the Ink render-tree blowup that silently OOM-killed the TUI
-# parent (#34095). Cap here to match the render budget (a hair more, so the
-# "[omitted …]" label is still informative when output is genuinely large).
-# Full output stays in the agent context and the SQLite session, untouched.
+# Verbose tool text is capped to the Ink render budget (a hair more, so the
+# "[omitted …]" label stays informative): unbounded output fed a render-tree
+# blowup that OOM-killed the TUI parent. Full output stays in the agent context
+# and the SQLite session, untouched.
 _TUI_VERBOSE_TEXT_MAX_CHARS = 1_000
 _TUI_VERBOSE_TEXT_MAX_LINES = 16
+
+_TODO_TOOL_NAMES = ("todo_list", "todo")  # legacy alias: pre-rename replays
 
 
 def _cap_tui_verbose_text(text: str) -> str:
@@ -48,8 +50,7 @@ def _cap_tui_verbose_text(text: str) -> str:
     omitted_lines = text[:start].count("\n")
     if omitted_lines:
         label = (
-            "[showing verbose tail; omitted "
-            f"{omitted_lines} lines / {omitted_chars} chars]\n"
+            "[showing verbose tail; omitted " f"{omitted_lines} lines / {omitted_chars} chars]\n"
         )
     else:
         label = f"[showing verbose tail; omitted {omitted_chars} chars]\n"
@@ -141,12 +142,21 @@ def _normalize_todo_state(value: object) -> dict | None:
     except (TypeError, ValueError):
         return None
     todos = list(value["todos"])
-    # Unused TodoStore snapshot() is {todos: [], revision: 0}. Attaching
-    # that on resume stamps a client watermark and blocks unversioned
-    # tool.start merges. An empty list at revision >= 1 is a real clear.
+    # Unused TodoStore snapshot() is {todos: [], revision: 0}: attaching it on
+    # resume stamps a client watermark and blocks unversioned tool.start merges.
+    # An empty list at revision >= 1 is a real clear.
     if not todos and revision == 0:
         return None
     return {"todos": todos, "revision": revision}
+
+
+def _cache_todo_state(session: dict, state: dict | None) -> None:
+    """Keep the newest snapshot on the session (revision-monotonic)."""
+    if state is None:
+        return
+    cached = _normalize_todo_state(session.get("todo_state"))
+    if cached is None or state["revision"] >= cached["revision"]:
+        session["todo_state"] = state
 
 
 def _session_todo_state(session: dict) -> dict | None:
@@ -180,15 +190,9 @@ def _attach_todo_state(payload: dict, session: dict) -> dict:
 
 
 def _todo_state_from_history(history) -> dict | None:
-    """Derive the latest todo snapshot from an already-loaded transcript.
-
-    Used by resume paths that answer before an AIAgent (and its live
-    TodoStore) exists. The canonical todo tool results already persist in
-    conversation history as ordinary tool messages, so the latest one paired
-    with an assistant ``todo`` tool call IS the durable snapshot — no side
-    table and no extra transcript read (each resume path passes the history
-    it already loaded).
-    """
+    """Latest todo snapshot from an already-loaded transcript, for resume paths
+    that answer before an AIAgent (and its live TodoStore) exists: the newest
+    tool result paired with an assistant ``todo`` call IS the durable snapshot."""
     if not isinstance(history, list) or not history:
         return None
     try:
@@ -199,7 +203,7 @@ def _todo_state_from_history(history) -> dict | None:
             if not isinstance(msg, dict):
                 continue
             for call in msg.get("tool_calls") or []:
-                if (call.get("function") or {}).get("name") in ("todo_list", "todo"):
+                if (call.get("function") or {}).get("name") in _TODO_TOOL_NAMES:
                     cid = call.get("id")
                     if cid:
                         todo_call_ids.add(cid)
@@ -245,19 +249,16 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
             "name": name,
             "context": _tool_ctx(name, args),
         }
-        # The desktop renders the expanded tool row (the `$` transcript) from
-        # the args of the part, and `context` is an 80-char display preview.
-        # tool.complete already ships full args to every client. When
-        # tool.start ships them too, the expanded row is complete while the
-        # tool runs, at the cost of one duplicate transient payload per call.
+        # Full args here (not just the 80-char `context` preview) so the desktop's
+        # expanded tool row is complete while the tool runs; tool.complete ships
+        # them again. args.todos may be a partial merge — tool.complete is the
+        # source of truth for todos.
         if args:
             payload["args"] = args
         if _session_verbose(sid):
             args_text = _tool_args_text(args)
             if args_text:
                 payload["args_text"] = args_text
-        # tool.complete is the source of truth for todos (full list from the
-        # tool result). args.todos here may be a partial merge update.
         _emit("tool.start", sid, payload)
 
 
@@ -284,14 +285,12 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         if result_text:
             payload["result_text"] = result_text
     todo_state = None
-    if name in ("todo_list", "todo"):  # legacy alias: pre-rename replays
+    if name in _TODO_TOOL_NAMES:
         todo_state = _normalize_todo_state(payload.get("result"))
         if todo_state is not None:
             payload.update(todo_state)
             if session is not None:
-                cached = _normalize_todo_state(session.get("todo_state"))
-                if cached is None or todo_state["revision"] >= cached["revision"]:
-                    session["todo_state"] = todo_state
+                _cache_todo_state(session, todo_state)
     try:
         from agent.display import render_edit_diff_with_delta
 
@@ -310,14 +309,152 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         _tool_progress_enabled(sid)
         or payload.get("inline_diff")
         or _tool_lifecycle_required_for_ui(name)
-        or name in ("todo_list", "todo")
+        or name in _TODO_TOOL_NAMES
     ):
         _emit("tool.complete", sid, payload)
-    # Task state is application data, not optional tool-progress chrome. A
-    # dedicated full-snapshot event lets every client reconcile immediately
-    # without interpreting provider text or partial merge arguments.
+    # Task state is application data, not tool-progress chrome: a dedicated
+    # full-snapshot event lets every client reconcile without parsing tool args.
     if todo_state is not None:
         _emit("todo.updated", sid, todo_state)
+
+
+# ── _on_tool_progress dispatch ─────────────────────────────────────────────
+# Each handler takes (sid, name, preview, kw). `tool.started` is dropped on
+# purpose: _on_tool_start already emits the authoritative tool.start with the
+# stable id and args; an id-less duplicate row makes the desktop live view
+# diverge from hydrated history.
+
+
+def _progress_output_risk(sid, name, preview, kw):
+    metadata = kw.get("risk_metadata")
+    if not isinstance(metadata, dict):
+        return
+    _emit("tool.output_risk", sid, {
+        "tool_id": str(kw.get("tool_call_id") or ""), "name": str(name),
+        "risk": str(metadata.get("risk") or "low"),
+        "findings": [str(item) for item in metadata.get("findings", [])],
+        "redacted": bool(metadata.get("redacted", False)),
+    })
+
+
+def _progress_reasoning(sid, name, preview, kw):
+    payload: dict[str, object] = {"text": str(preview)}
+    if _session_verbose(sid):
+        payload["verbose"] = True
+    _emit("reasoning.available", sid, payload)
+
+
+def _progress_moa_reference(sid, name, preview, kw):
+    # MoA reference-model output, rendered as a labelled block before the
+    # aggregator's response. `name` is the slot label, `preview` the text.
+    ref_payload: dict[str, object] = {
+        "label": str(name),
+        "text": str(preview or ""),
+    }
+    if kw.get("moa_index") is not None:
+        ref_payload["index"] = kw.get("moa_index")
+    if kw.get("moa_count") is not None:
+        ref_payload["count"] = kw.get("moa_count")
+    _emit("moa.reference", sid, ref_payload)
+
+
+def _progress_moa_aggregating(sid, name, preview, kw):
+    _emit("moa.aggregating", sid, {"aggregator": str(name or "")})
+
+
+def _progress_moa_progress(sid, name, preview, kw):
+    # Drives the status-bar `MOA: 2/3 refs done`; both counters required so the
+    # client renders deterministically.
+    refs_done = kw.get("moa_refs_done")
+    refs_total = kw.get("moa_refs_total")
+    if refs_done is None or refs_total is None:
+        return
+    _emit("moa.progress", sid, {
+        "label": str(name or ""), "refs_done": int(refs_done), "refs_total": int(refs_total),
+    })
+
+
+def _progress_moa_phase(sid, name, preview, kw):
+    # Currently only phase="aggregator" fires, once fan-out completes.
+    phase = kw.get("moa_phase")
+    if not phase:
+        return
+    phase_payload: dict[str, object] = {"phase": str(phase)}
+    refs_done = kw.get("moa_refs_done")
+    refs_total = kw.get("moa_refs_total")
+    if refs_done is not None:
+        phase_payload["refs_done"] = int(refs_done)
+    if refs_total is not None:
+        phase_payload["refs_total"] = int(refs_total)
+    if name:
+        phase_payload["aggregator"] = str(name)
+    _emit("moa.phase", sid, phase_payload)
+
+
+# Per-branch rollups emitted on subagent.complete.
+_SUBAGENT_INT_FIELDS = ("input_tokens", "output_tokens", "reasoning_tokens", "api_calls")
+
+
+def _progress_subagent(sid, name, preview, kw, event_type):
+    # Identity fields are all optional: older emitters omit them and the TUI
+    # spawn tree falls back to flat rendering.
+    payload = {
+        "goal": str(kw.get("goal") or ""), "task_count": int(kw.get("task_count") or 1),
+        "task_index": int(kw.get("task_index") or 0),
+    }
+    for key in ("subagent_id", "parent_id", "child_session_id", "delegation_id"):
+        if kw.get(key):
+            payload[key] = str(kw[key])
+    if kw.get("depth") is not None:
+        payload["depth"] = int(kw["depth"])
+    if kw.get("model"):
+        payload["model"] = str(kw["model"])
+    if kw.get("tool_count") is not None:
+        payload["tool_count"] = int(kw["tool_count"])
+    if kw.get("toolsets"):
+        payload["toolsets"] = [str(t) for t in kw["toolsets"]]
+    for int_key in _SUBAGENT_INT_FIELDS:
+        val = kw.get(int_key)
+        if val is not None:
+            try:
+                payload[int_key] = int(val)
+            except (TypeError, ValueError):
+                pass
+    for key in ("files_read", "files_written"):
+        if kw.get(key):
+            payload[key] = [str(p) for p in kw[key]]
+    if kw.get("output_tail"):
+        payload["output_tail"] = list(kw["output_tail"])  # list of dicts
+    if name:
+        payload["tool_name"] = str(name)
+    if preview:
+        payload["text"] = str(preview)
+    if kw.get("status"):
+        payload["status"] = str(kw["status"])
+    if kw.get("summary"):
+        payload["summary"] = str(kw["summary"])
+    if kw.get("duration_seconds") is not None:
+        payload["duration_seconds"] = float(kw["duration_seconds"])
+    if preview and event_type == "subagent.tool":
+        payload["tool_preview"] = str(preview)
+        payload["text"] = str(preview)
+    # subagent.text is the child's per-token reply, relayed solely to feed a
+    # watch window's live mirror (keyed off the child sid); on the parent it's
+    # hundreds of ignored frames, so skip that emit.
+    if event_type != "subagent.text":
+        _emit(event_type, sid, payload)
+    _mirror_subagent_to_child(event_type, payload)
+
+
+# event_type -> (handler, requires) where `requires` names the arg that must be
+# truthy for the row to be emitted at all ("name" / "preview" / None).
+_PROGRESS_HANDLERS = {
+    "tool.output_risk": (_progress_output_risk, "name"),
+    "reasoning.available": (_progress_reasoning, "preview"),
+    "moa.reference": (_progress_moa_reference, "name"),
+    "moa.aggregating": (_progress_moa_aggregating, None),
+    "moa.progress": (_progress_moa_progress, None), "moa.phase": (_progress_moa_phase, None),
+}
 
 
 def _on_tool_progress(
@@ -331,149 +468,15 @@ def _on_tool_progress(
     if not _tool_progress_enabled(sid):
         return
     if event_type == "tool.started" and name:
-        # `_on_tool_start` already emits the authoritative `tool.start` with
-        # the stable tool id and args. Emitting another id-less progress row
-        # here makes the desktop live view diverge from hydrated history.
         return
-    if event_type == "tool.output_risk" and name:
-        metadata = _kwargs.get("risk_metadata")
-        if not isinstance(metadata, dict):
-            return
-        payload: dict[str, object] = {
-            "tool_id": str(_kwargs.get("tool_call_id") or ""),
-            "name": str(name),
-            "risk": str(metadata.get("risk") or "low"),
-            "findings": [str(item) for item in metadata.get("findings", [])],
-            "redacted": bool(metadata.get("redacted", False)),
-        }
-        _emit("tool.output_risk", sid, payload)
-        return
-    if event_type == "reasoning.available" and preview:
-        payload: dict[str, object] = {"text": str(preview)}
-        if _session_verbose(sid):
-            payload["verbose"] = True
-        _emit("reasoning.available", sid, payload)
-        return
-    if event_type == "moa.reference" and name:
-        # MoA reference-model output — relay as a labelled block the Ink/desktop
-        # client renders before the aggregator's response (like a thinking
-        # block, tagged with the source model). `name` is the slot label,
-        # `preview` is the reference text.
-        ref_payload: dict[str, object] = {
-            "label": str(name),
-            "text": str(preview or ""),
-        }
-        if _kwargs.get("moa_index") is not None:
-            ref_payload["index"] = _kwargs.get("moa_index")
-        if _kwargs.get("moa_count") is not None:
-            ref_payload["count"] = _kwargs.get("moa_count")
-        _emit("moa.reference", sid, ref_payload)
-        return
-    if event_type == "moa.aggregating":
-        _emit("moa.aggregating", sid, {"aggregator": str(name or "")})
-        return
-    if event_type == "moa.progress":
-        # Per-reference completion — drives the status-bar progress indicator
-        # (`MOA: 2/3 refs done`) requested in issue #59546. Only emitted when
-        # both counters are present so the client can render deterministically.
-        refs_done = _kwargs.get("moa_refs_done")
-        refs_total = _kwargs.get("moa_refs_total")
-        if refs_done is None or refs_total is None:
-            return
-        _emit(
-            "moa.progress",
-            sid,
-            {
-                "label": str(name or ""),
-                "refs_done": int(refs_done),
-                "refs_total": int(refs_total),
-            },
-        )
-        return
-    if event_type == "moa.phase":
-        # Phase transition — currently only ``phase="aggregator"`` fires once
-        # the fan-out completes and the aggregator is about to act. Tells the
-        # client which phase of the MoA pipeline is currently running so it
-        # can swap status-bar copy accordingly.
-        phase = _kwargs.get("moa_phase")
-        if not phase:
-            return
-        phase_payload: dict[str, object] = {"phase": str(phase)}
-        refs_done = _kwargs.get("moa_refs_done")
-        refs_total = _kwargs.get("moa_refs_total")
-        if refs_done is not None:
-            phase_payload["refs_done"] = int(refs_done)
-        if refs_total is not None:
-            phase_payload["refs_total"] = int(refs_total)
-        if name:
-            phase_payload["aggregator"] = str(name)
-        _emit("moa.phase", sid, phase_payload)
+    entry = _PROGRESS_HANDLERS.get(event_type)
+    if entry is not None:
+        handler, requires = entry
+        if requires is None or {"name": name, "preview": preview}[requires]:
+            handler(sid, name, preview, _kwargs)
         return
     if event_type.startswith("subagent."):
-        payload = {
-            "goal": str(_kwargs.get("goal") or ""),
-            "task_count": int(_kwargs.get("task_count") or 1),
-            "task_index": int(_kwargs.get("task_index") or 0),
-        }
-        # Identity fields for the TUI spawn tree.  All optional — older
-        # emitters that omit them fall back to flat rendering client-side.
-        if _kwargs.get("subagent_id"):
-            payload["subagent_id"] = str(_kwargs["subagent_id"])
-        if _kwargs.get("parent_id"):
-            payload["parent_id"] = str(_kwargs["parent_id"])
-        if _kwargs.get("child_session_id"):
-            payload["child_session_id"] = str(_kwargs["child_session_id"])
-        if _kwargs.get("delegation_id"):
-            payload["delegation_id"] = str(_kwargs["delegation_id"])
-        if _kwargs.get("depth") is not None:
-            payload["depth"] = int(_kwargs["depth"])
-        if _kwargs.get("model"):
-            payload["model"] = str(_kwargs["model"])
-        if _kwargs.get("tool_count") is not None:
-            payload["tool_count"] = int(_kwargs["tool_count"])
-        if _kwargs.get("toolsets"):
-            payload["toolsets"] = [str(t) for t in _kwargs["toolsets"]]
-        # Per-branch rollups emitted on subagent.complete (features 1+2+4).
-        for int_key in (
-            "input_tokens",
-            "output_tokens",
-            "reasoning_tokens",
-            "api_calls",
-        ):
-            val = _kwargs.get(int_key)
-            if val is not None:
-                try:
-                    payload[int_key] = int(val)
-                except (TypeError, ValueError):
-                    pass
-        if _kwargs.get("files_read"):
-            payload["files_read"] = [str(p) for p in _kwargs["files_read"]]
-        if _kwargs.get("files_written"):
-            payload["files_written"] = [str(p) for p in _kwargs["files_written"]]
-        if _kwargs.get("output_tail"):
-            payload["output_tail"] = list(_kwargs["output_tail"])  # list of dicts
-        if name:
-            payload["tool_name"] = str(name)
-        if preview:
-            payload["text"] = str(preview)
-        if _kwargs.get("status"):
-            payload["status"] = str(_kwargs["status"])
-        if _kwargs.get("summary"):
-            payload["summary"] = str(_kwargs["summary"])
-        if _kwargs.get("duration_seconds") is not None:
-            payload["duration_seconds"] = float(_kwargs["duration_seconds"])
-        if preview and event_type == "subagent.tool":
-            payload["tool_preview"] = str(preview)
-            payload["text"] = str(preview)
-        # subagent.text is the child's per-token reply, relayed solely to feed a
-        # watch window's live mirror. It is meaningless on the parent session
-        # (which shows the child via the spawn tree, not its reply body), so
-        # skip the parent emit — sending hundreds of ignored token frames there
-        # is wasted traffic and a trap for any future parent-side subagent
-        # catch-all. The mirror keys off the child sid and is unaffected.
-        if event_type != "subagent.text":
-            _emit(event_type, sid, payload)
-        _mirror_subagent_to_child(event_type, payload)
+        _progress_subagent(sid, name, preview, _kwargs, event_type)
 
 
 def register(server) -> None:

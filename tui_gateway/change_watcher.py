@@ -21,8 +21,7 @@ def resolve_skin() -> dict:
         return {
             "name": skin.name,
             "colors": skin.colors,
-            # Paired palettes: the TUI detects the terminal's polarity and
-            # prefers the matching hand-tuned block over adapting `colors`.
+            # Paired palettes: the TUI prefers the block matching terminal polarity.
             "light_colors": skin.light_colors,
             "dark_colors": skin.dark_colors,
             "branding": skin.branding,
@@ -35,28 +34,39 @@ def resolve_skin() -> dict:
         return {}
 
 
-# Signature of the last skin broadcast: (name, active user-file mtime). Lets the
-# per-tool reconcile fire ``skin.changed`` on any real move — a name switch OR a
-# live color edit to the active skin — and nothing else.
+# (name, user-file mtime) of the last skin broadcast: ``skin.changed`` fires on a
+# name switch OR a live color edit of the active skin, and nothing else.
 _last_skin_sig: tuple[str, float | None] | None = None
+
+
+def _watcher_home() -> Path:
+    """Active profile home for the change watcher's signature probes."""
+    override = get_hermes_home_override()
+    return Path(override if isinstance(override, str) and override else _hermes_home)
+
+
+def _watcher_mtime_ns(path: Path):
+    """``st_mtime_ns`` of ``path``, or None when it cannot be stat'ed."""
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
 
 
 def _skin_sig() -> tuple[str, float | None]:
     """(active skin name, its user-file mtime). Built-ins have no file, so only
     their name moves; a user skin's mtime lets an in-place color edit repaint too."""
     name = str((_load_cfg().get("display") or {}).get("skin") or "default")
-    override = get_hermes_home_override()
-    home = override if isinstance(override, str) and override else _hermes_home
+    home = _watcher_home()
     try:
-        mtime: float | None = (Path(home) / "skins" / f"{name}.yaml").stat().st_mtime
+        mtime: float | None = (home / "skins" / f"{name}.yaml").stat().st_mtime
     except OSError:
         mtime = None
     return name, mtime
 
 
 def _note_skin_broadcast() -> None:
-    """Sync the reconcile baseline after the /skin RPC emits, so the per-tool
-    check doesn't re-broadcast the skin /skin just applied."""
+    """Sync the baseline after the /skin RPC emits so the watcher doesn't re-broadcast it."""
     global _last_skin_sig
     try:
         _last_skin_sig = _skin_sig()
@@ -65,14 +75,8 @@ def _note_skin_broadcast() -> None:
 
 
 def _broadcast_skin_if_changed() -> None:
-    """Emit ``skin.changed`` when the active skin moved — the agent switched it
-    (``hermes config set display.skin``) OR edited the active skin's colors in
-    place ("I don't like that coral" → tweak the YAML).
-
-    Routes through the SAME live path as ``/skin`` so every surface (TUI + desktop)
-    repaints, no slash command. The signature check is a dict lookup + one stat,
-    so polling it is ~free.
-    """
+    """Emit ``skin.changed`` when the active skin moved, via the SAME live path as
+    ``/skin`` so every surface repaints. The check is a dict lookup + one stat."""
     global _last_skin_sig
     try:
         sig = _skin_sig()
@@ -87,18 +91,8 @@ def _broadcast_skin_if_changed() -> None:
         pass
 
 
-def _watcher_home() -> Path:
-    """Active profile home for the change watcher's signature probes."""
-    override = get_hermes_home_override()
-    return Path(override if isinstance(override, str) and override else _hermes_home)
-
-
 def _pet_sig() -> tuple:
-    """(slug, spritesheet revision, scale) of the active pet — ("off",) when none.
-
-    Cheap by construction: config comes from the mtime-cached ``_load_cfg`` and
-    the sheet revision is one stat. Moves when ``/pet`` (de)activates a pet, the
-    hatch flow rebuilds a sheet, or the scale changes."""
+    """(slug, spritesheet revision, scale) of the active pet — ("off",) when none."""
     display = _load_cfg().get("display") or {}
     pet_cfg = display.get("pet") if isinstance(display.get("pet"), dict) else {}
     if not pet_cfg or not is_truthy_value(pet_cfg.get("enabled"), default=False):
@@ -113,8 +107,7 @@ def _pet_sig() -> tuple:
 
 
 def _pet_changed_payload() -> dict:
-    """``pet.info.meta``-shaped payload for ``pet.changed`` — enough for the
-    renderer to decide whether the heavy sprite payload needs a refetch."""
+    """``pet.info.meta``-shaped payload so the renderer can decide whether to refetch sprites."""
     try:
         enabled, pet, scale = _pet_active_selection()
         if not enabled or pet is None or not pet.exists:
@@ -131,56 +124,33 @@ def _pet_changed_payload() -> dict:
 
 
 def _cron_sig():
-    """mtime of the profile's cron/jobs.json — moves on create/edit/pause/
-    remove AND on scheduler tick bookkeeping (last_run/next_run)."""
-    try:
-        return (_watcher_home() / "cron" / "jobs.json").stat().st_mtime_ns
-    except OSError:
-        return None
+    """mtime of cron/jobs.json — moves on edits AND scheduler tick bookkeeping."""
+    return _watcher_mtime_ns(_watcher_home() / "cron" / "jobs.json")
 
 
 def _sessions_sig():
-    """Newest mtime across state.db and its WAL — the cross-process change
-    signal. Messaging-gateway turns and cron runs are written by OTHER
-    processes that never touch this gateway's transports; the shared SQLite
-    file is the one thing they all move (#58671). A backend serving several
-    profiles owns one store per profile, so every served sibling home is
-    probed too — otherwise a routed profile's Bot Chat never refreshes."""
-    sig = None
-    for root in (_watcher_home(), *_served_profile_homes):
-        for name in ("state.db", "state.db-wal"):
-            try:
-                mtime = (root / name).stat().st_mtime_ns
-            except OSError:
-                continue
-            sig = mtime if sig is None else max(sig, mtime)
-    return sig
+    """Newest mtime across state.db + WAL: the one thing messaging-gateway turns and
+    cron runs (which never touch this gateway's transports) all move. Served sibling
+    profile homes are probed too, else a routed profile's Bot Chat never refreshes."""
+    mtimes = [
+        _watcher_mtime_ns(root / name)
+        for root in (_watcher_home(), *_served_profile_homes)
+        for name in ("state.db", "state.db-wal")
+    ]
+    return max((m for m in mtimes if m is not None), default=None)
 
 
 def _platforms_sig():
-    """mtime of gateway_state.json — the messaging gateway process persists
-    platform connect/disconnect/health there, so its movement is the
-    "connection status changed" signal for the Messaging page."""
-    try:
-        return (_watcher_home() / "gateway_state.json").stat().st_mtime_ns
-    except OSError:
-        return None
+    """mtime of gateway_state.json — where the messaging gateway persists platform
+    connect/disconnect/health, i.e. the Messaging page's status-changed signal."""
+    return _watcher_mtime_ns(_watcher_home() / "gateway_state.json")
 
 
 def _pairing_sig():
-    """Newest mtime across every profile's pairing store.
-
-    An unknown DMer's pending code is written by the messaging gateway — a
-    DIFFERENT process that never touches this gateway's transports — so the
-    files are the only shared signal. ``platforms.changed`` cannot stand in
-    for this: it tracks connect/disconnect/health, and a pairing request
-    moves nothing in gateway_state.json.
-    """
+    """Newest mtime across every profile's pairing store (legacy ``pairing/`` and
+    ``platforms/pairing/``). Pending codes are written by the gateway process, so the
+    files are the only shared signal; a pairing request moves nothing in gateway_state.json."""
     home = _watcher_home()
-    sig = None
-    # Global store (legacy `pairing/` and consolidated `platforms/pairing/`)
-    # plus every named profile's own — the Messaging page can be scoped to any
-    # of them, and a request landing in a profile store must still tick.
     roots = [home / "pairing", home / "platforms" / "pairing"]
     try:
         for profile_dir in (home / "profiles").iterdir():
@@ -189,53 +159,39 @@ def _pairing_sig():
     except OSError:
         pass
 
+    sig = None
     for root in roots:
         try:
             entries = list(root.iterdir())
         except OSError:
             continue
         for entry in entries:
-            # Only the pending/approved ledgers — _rate_limits.json moves on
-            # every unauthorized DM, including ones that produce no new row.
+            # Only the ledgers: _rate_limits.json moves on every unauthorized DM.
             if not entry.name.endswith(("-pending.json", "-approved.json")):
                 continue
-            try:
-                mtime = entry.stat().st_mtime_ns
-            except OSError:
-                continue
-            sig = mtime if sig is None else max(sig, mtime)
+            mtime = _watcher_mtime_ns(entry)
+            if mtime is not None:
+                sig = mtime if sig is None else max(sig, mtime)
     return sig
 
 
-# Newest outbox-envelope mtime the watcher has EVER seen (monotone). A drain
-# empties the outbox (rename → claimed/), and letting the signature fall back
-# to None on empty would fire a spurious pending event right after every
-# drain — so the signature only moves forward, on genuinely new envelopes.
+# Newest outbox-envelope mtime EVER seen (monotone): a drain empties the outbox,
+# and falling back to None would fire a spurious pending event after every drain.
 _bot_relay_outbox_seen = 0
 
 
 def _bot_relay_outbox_sig():
-    """Newest mtime across pending bot-relay outbox envelopes (monotone).
-
-    Envelopes are written by the AGENT process (``message_agent`` →
-    ``tools.bot_relay.enqueue_envelope``) — a different process that never
-    touches this gateway's transports — so the files are the only shared
-    signal, exactly like the pairing store. The Desktop reacts to
-    ``bot_relay.outbox.pending`` with an immediate (debounced) drain instead
-    of waiting out its poll interval (#93091, motivated by #92760).
-    """
+    """Newest mtime across pending bot-relay outbox envelopes (monotone). Written by
+    the AGENT process, so the files are the only shared signal; the Desktop reacts
+    to ``bot_relay.outbox.pending`` with an immediate debounced drain."""
     global _bot_relay_outbox_seen
     home = _watcher_home()
     root = home.parent.parent if home.parent.name == "profiles" else home
     newest = 0
     try:
         for entry in (root / "bot_relay" / "outbox").iterdir():
-            if not entry.name.endswith(".json"):
-                continue
-            try:
-                newest = max(newest, entry.stat().st_mtime_ns)
-            except OSError:
-                continue
+            if entry.name.endswith(".json"):
+                newest = max(newest, _watcher_mtime_ns(entry) or 0)
     except OSError:
         pass
     if newest > _bot_relay_outbox_seen:
@@ -243,25 +199,21 @@ def _bot_relay_outbox_sig():
     return _bot_relay_outbox_seen or None
 
 
-# Watched change signals: event → (check interval, signature fn, payload fn).
-# Signatures are stat/dict-lookup cheap, same bar as the skin watcher; the
-# check interval keeps the pricier probes (pet resolves the active sheet off
-# disk) off the 0.5s tick.
+# event → (check interval, signature fn, payload fn). Signatures are stat-cheap;
+# the interval keeps pricier probes (pet resolves the sheet off disk) off the 0.5s tick.
 _CHANGE_WATCHES: dict[str, tuple[float, Any, Any]] = {
     "pet.changed": (2.0, _pet_sig, _pet_changed_payload),
     "cron.changed": (1.0, _cron_sig, lambda: {}),
     "sessions.changed": (0.5, _sessions_sig, lambda: {}),
     "platforms.changed": (2.0, _platforms_sig, lambda: {}),
     "pairing.changed": (2.0, _pairing_sig, lambda: {}),
-    # Cross-connection DM latency: 1s check so a queued envelope reaches the
-    # Desktop's push-triggered drain fast; the Desktop's poll stays backstop.
+    # 1s so a queued DM envelope reaches the Desktop's push-triggered drain fast.
     "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, lambda: {}),
 }
 
-# state.db moves on every message append during a streaming turn, and the
-# gateway rewrites gateway_state.json for in-flight-count bookkeeping; the
-# floor coalesces those bursts to one broadcast per window (trailing edge
-# included — a floored change keeps its old signature and re-fires next tick).
+# state.db moves on every append of a streaming turn and gateway_state.json on
+# in-flight bookkeeping; the floor coalesces bursts to one broadcast per window,
+# trailing edge included (a floored change keeps its old signature, re-fires later).
 _CHANGE_BROADCAST_FLOOR_S = {"sessions.changed": 2.0, "platforms.changed": 5.0}
 
 _change_sigs: dict[str, Any] = {}
@@ -270,9 +222,8 @@ _change_broadcast_at: dict[str, float] = {}
 
 
 def _broadcast_watched_changes(now: float | None = None) -> None:
-    """One pass over ``_CHANGE_WATCHES``: recompute due signatures, broadcast
-    the events whose signature moved. First sighting seeds silently so a
-    gateway boot never fires a spurious refresh storm."""
+    """One pass: recompute due signatures, broadcast events whose signature moved.
+    First sighting seeds silently so a gateway boot never fires a refresh storm."""
     now = time.monotonic() if now is None else now
     for event, (interval, sig_fn, payload_fn) in _CHANGE_WATCHES.items():
         if now - _change_checked_at.get(event, -interval) < interval:
@@ -289,9 +240,7 @@ def _broadcast_watched_changes(now: float | None = None) -> None:
             continue
         floor = _CHANGE_BROADCAST_FLOOR_S.get(event, 0.0)
         if floor and now - _change_broadcast_at.get(event, -floor) < floor:
-            # Floored: leave the old signature in place so the change re-fires
-            # once the window opens (the trailing edge of the burst).
-            continue
+            continue  # floored: old signature stays so it re-fires when the window opens
         _change_sigs[event] = sig
         _change_broadcast_at[event] = now
         try:
@@ -304,12 +253,9 @@ _skin_watcher_started = False
 
 
 def _ensure_skin_watcher() -> None:
-    """Watch cheap on-disk signatures and broadcast change events — so a skin
-    Hermes activates, a pet ``/pet`` adopts, a cron the scheduler fires, or a
-    messaging turn another process writes goes live on every surface within a
-    couple seconds, on its own, with no client-side poll in the loop.
-    Idempotent; started at gateway.ready. (Named for its original skin-only
-    duty; it is the process's one change watcher.)"""
+    """Start the process's one change watcher (named for its original skin-only
+    duty): cheap on-disk signatures → broadcast events, so skin/pet/cron/cross-process
+    changes go live everywhere within seconds without client polling. Idempotent."""
     global _skin_watcher_started
     if _skin_watcher_started:
         return

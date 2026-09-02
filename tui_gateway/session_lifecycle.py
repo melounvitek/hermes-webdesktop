@@ -13,47 +13,26 @@ from .method_ctx import HandlerRegistry, bind_module
 _registry = HandlerRegistry()
 
 
-def _notify_session_boundary(
-    event_type: str, session_id: str | None, platform: str | None = None
-) -> None:
+def _notify_session_boundary(event_type: str, session_id: str | None, platform: str | None = None) -> None:
     """Fire session lifecycle hooks with CLI parity."""
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.lifecycle import finalize_session, invoke_hook
 
         if event_type == "on_session_finalize":
-            finalize_session(
-                session_id=session_id,
-                platform=_resolve_agent_platform(platform),
-            )
+            finalize_session(session_id=session_id, platform=_resolve_agent_platform(platform))
         else:
-            invoke_hook(
-                event_type,
-                session_id=session_id,
-                platform=_resolve_agent_platform(platform),
-            )
-    except Exception:
-        pass
+            invoke_hook(event_type, session_id=session_id, platform=_resolve_agent_platform(platform))
 
 
-_SESSION_OWNERSHIP_UNAVAILABLE = (
-    "Hermes could not safely reserve this session. Try again."
-)
+_SESSION_OWNERSHIP_UNAVAILABLE = "Hermes could not safely reserve this session. Try again."
 
 _AUTOMATIC_SESSION_END_REASONS = frozenset({
-    "ws_orphan_reap",
-    "ws_disconnect",
-    "idle_timeout",
-    "lru_evict",
-    "tui_shutdown",
+    "ws_orphan_reap", "ws_disconnect", "idle_timeout", "lru_evict", "tui_shutdown",
 })
 
 
 def _claim_active_session_slot(
-    session_key: str,
-    *,
-    live_session_id: str,
-    surface: str = "tui",
-    profile_home: str | Path | None = None,
+    session_key: str, *, live_session_id: str, surface: str = "tui", profile_home: str | Path | None = None
 ) -> tuple[Any, str | None]:
     track_liveness = str(surface or "").strip().lower() == "desktop"
     try:
@@ -69,27 +48,17 @@ def _claim_active_session_slot(
         )
     except Exception as exc:
         logger.warning("Failed to claim active session slot: %s", exc)
-        # Fail CLOSED regardless of surface: per-session exclusivity is a
-        # correctness guarantee (see PER_SESSION_EXCLUSIVE_SUBMIT), and a
-        # claim that errors out has NOT proven the session is unowned.
-        # Proceeding without a lease here is the silent double-writer hole
-        # flagged in the #94595 review (blocker 2).
+        # Fail CLOSED regardless of surface: an errored claim has NOT proven the session
+        # unowned, and proceeding lease-less is a silent double-writer hole.
         return (None, _SESSION_OWNERSHIP_UNAVAILABLE)
 
 
 def _ensure_active_session_slot(sid: str, session: dict) -> str | None:
     """Claim this session's cap slot on its first real turn; None when ok.
 
-    session.create / session.resume deliberately do NOT claim one. Every
-    desktop tile paint, background reconnect-resume and abandoned draft opens a
-    session just to paint a composer, and a slot held by one of those is
-    invisible everywhere: an unprompted draft has no DB row, and the sidebar
-    filters it out with min_messages=1. Idle desktop tabs therefore silently
-    starved the messaging gateway, which shares this cap — five parked tabs on
-    a websocket-flappy host locked a Discord bot out of a 5-slot cap while
-    running no agents at all. Claiming on the first turn mirrors the lazy
-    contract _ensure_session_db_row already uses for the row itself, and keeps
-    the invariant that anything holding a slot is something the user can see.
+    session.create/resume deliberately do NOT claim: tile paints, reconnect-resumes and
+    abandoned drafts would hold invisible slots (no DB row) that starve the messaging
+    gateway sharing the cap. Anything holding a slot must be user-visible.
     """
     if session.get("active_session_lease") is not None:
         return None
@@ -118,9 +87,7 @@ def _release_active_session_lease(lease) -> bool:
                 logger.warning("Failed to release active session slot", exc_info=True)
                 return False
             time.sleep(0.05 * (attempt + 1))
-    released = getattr(lease, "released", True)
-    enabled = getattr(lease, "enabled", True)
-    return bool(released or not enabled)
+    return bool(getattr(lease, "released", True) or not getattr(lease, "enabled", True))
 
 
 def _release_active_session_slot(session: dict | None) -> bool:
@@ -145,9 +112,7 @@ def _other_runtime_lease_guard(session_id: str, session: dict):
         )
     except Exception as exc:
         logger.warning(
-            "Failed to load active session ownership guard; preserving session %s: %s",
-            session_id,
-            exc,
+            "Failed to load active session ownership guard; preserving session %s: %s", session_id, exc
         )
         yield True
         return
@@ -159,9 +124,7 @@ def _other_runtime_lease_guard(session_id: str, session: dict):
             if lease is not None and getattr(lease, "enabled", False):
                 guard = release_active_session_liveness_guard(lease, session_id)
             else:
-                guard = active_session_liveness_guard(
-                    session_id, registry_home=session.get("profile_home")
-                )
+                guard = active_session_liveness_guard(session_id, registry_home=session.get("profile_home"))
             active = stack.enter_context(guard)
             break
         except Exception as exc:
@@ -172,9 +135,7 @@ def _other_runtime_lease_guard(session_id: str, session: dict):
                 time.sleep(0.05 * (attempt + 1))
     else:
         logger.warning(
-            "Failed to inspect active session leases; preserving session %s: %s",
-            session_id,
-            last_error,
+            "Failed to inspect active session leases; preserving session %s: %s", session_id, last_error
         )
         yield True
         return
@@ -190,12 +151,7 @@ def _other_runtime_lease_guard(session_id: str, session: dict):
             session.pop("active_session_lease", None)
 
 
-def _transfer_active_session_slot(
-    sid: str,
-    session: dict,
-    *,
-    new_session_id: str,
-) -> bool:
+def _transfer_active_session_slot(sid: str, session: dict, *, new_session_id: str) -> bool:
     if not new_session_id:
         return False
     lease = session.get("active_session_lease")
@@ -204,11 +160,7 @@ def _transfer_active_session_slot(
     try:
         from hermes_cli.active_sessions import transfer_active_session
 
-        if transfer_active_session(
-            lease,
-            session_id=new_session_id,
-            metadata={"live_session_id": sid},
-        ):
+        if transfer_active_session(lease, session_id=new_session_id, metadata={"live_session_id": sid}):
             return True
     except Exception:
         logger.debug("Failed to transfer active session slot", exc_info=True)
@@ -216,11 +168,9 @@ def _transfer_active_session_slot(
     if getattr(lease, "track_liveness", False):
         return False
 
-    # Fallback: the in-place transfer could not move the lease (entry pruned /
-    # pid-check transiently failed). Reserve the new slot BEFORE releasing the
-    # old one, so a concurrent gateway at the session cap cannot grab the freed
-    # slot in a release-then-reacquire window and leave this session with no
-    # lease at all (#49041 review). If the reserve fails, KEEP the old lease.
+    # Fallback (entry pruned / pid-check transiently failed): reserve the new slot BEFORE
+    # releasing the old one so a gateway at the cap can't grab the freed slot and leave
+    # this session lease-less. On reserve failure KEEP the old lease.
     new_lease, limit_message = _claim_active_session_slot(
         new_session_id,
         live_session_id=sid,
@@ -236,24 +186,18 @@ def _transfer_active_session_slot(
                 logger.debug("Failed to release stale active session slot", exc_info=True)
         session["active_session_lease"] = new_lease
         return True
-    # Reserve failed — retain the existing lease rather than dropping it.
     if limit_message:
         logger.warning(
             "Compression session lease re-anchor failed (kept old lease): "
             "sid=%s new_session_id=%s reason=%s",
-            sid,
-            new_session_id,
-            limit_message,
+            sid, new_session_id, limit_message,
         )
     return False
 
 
-# Session sources the TUI/desktop backend must never end in state.db: the
-# messaging gateway owns those sessions' lifecycle — the TUI is only a viewer
-# (a resume of a Telegram/Discord/... session).  Ending one creates the
-# #60609 Groundhog Day routing loop (see _finalize_session).  Sources the
-# TUI backend itself creates ("tui", plus whatever a client passes as its
-# own ``source``) and the CLI's own sessions are NOT gateway-owned.
+# Sources this backend must never end in state.db: the messaging gateway owns those
+# sessions and the TUI is only a viewer (ending one causes the Groundhog Day routing
+# loop, see _finalize_session). Self-created and CLI sources are NOT gateway-owned.
 _NON_GATEWAY_SOURCES = frozenset({
     "", "tui", "cli", "webui", "desktop", "cron", "kanban", "subagent", "test",
     "local", "acp", "webhook", "api_server", "msgraph_webhook",
@@ -261,16 +205,11 @@ _NON_GATEWAY_SOURCES = frozenset({
 
 
 def _is_gateway_owned_source(source: str) -> bool:
-    """True when ``source`` names a messaging-gateway platform whose session
-    lifecycle belongs to the gateway, not to this TUI backend.
+    """True when ``source`` is a messaging-gateway platform owning its session lifecycle.
 
-    Structural rather than a hardcoded platform list: any source that
-    resolves to a known gateway ``Platform`` (built-in enum member OR a
-    registered platform plugin, via ``Platform._missing_``) counts, so new
-    platforms are covered automatically.  Local/self-owned sources are
-    excluded explicitly — ``local``/``webhook``/``api_server`` are Platform
-    members but their sessions are not owned by a remote chat surface that
-    routes by session_key, so reaping them is safe and keeps /resume clean.
+    Structural: any source resolving to a gateway ``Platform`` (enum member or plugin via
+    ``Platform._missing_``) counts, so new platforms are covered automatically. Self-owned
+    sources (``local``/``webhook``/``api_server`` are Platform members) are excluded explicitly.
     """
     src = (source or "").strip().lower()
     if src in _NON_GATEWAY_SOURCES:
@@ -284,15 +223,24 @@ def _is_gateway_owned_source(source: str) -> bool:
         return False
 
 
-def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
-    """Best-effort finalize hook + memory commit for a session.
+def _lifecycle_own_sid(session: dict, sid_hint: str = "") -> str:
+    """Live UI sid for ``session``: hint, stamped ``_sid``, else registry scan."""
+    own_sid = str(sid_hint or session.get("_sid") or "")
+    if not own_sid:
+        try:
+            with _sessions_lock:
+                for _cand_sid, _cand in _sessions.items():
+                    if _cand is session:
+                        own_sid = _cand_sid
+                        break
+        except Exception:
+            own_sid = ""
+    return own_sid
 
-    Fires ``on_session_end`` plugin hook and attempts to persist any
-    unflushed messages before closing the session.  This mirrors the
-    CLI's exit-path behaviour and prevents data loss when the TUI is
-    force-quit (double Ctrl‑C, terminal‑close, SIGHUP) while the agent
-    is mid‑turn.
-    """
+
+def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
+    """Best-effort finalize hook + memory commit; mirrors the CLI exit path so a
+    force-quit mid-turn (double Ctrl-C, terminal close, SIGHUP) loses nothing."""
     if not session or session.get("_finalized"):
         return
     session["_finalized"] = True
@@ -300,12 +248,12 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     if history_ready is not None and not history_ready.is_set():
         session["resume_history_error"] = "session resume cancelled"
         history_ready.set()
-    _desktop_automatic_cleanup = bool(
+    _desktop_automatic_cleanup = (
         end_reason in _AUTOMATIC_SESSION_END_REASONS
         and _session_source(session).strip().lower() == "desktop"
     )
-    # Automatic Desktop cleanup removes its lease inside the lock-held lifecycle
-    # guard below. Explicit close and non-Desktop paths keep force/end semantics.
+    # Automatic Desktop cleanup releases its lease inside the lock-held lifecycle guard
+    # below; explicit close and non-Desktop paths keep force/end semantics.
     if not _desktop_automatic_cleanup:
         _release_active_session_slot(session)
     stop_event = session.get("_notif_stop")
@@ -314,67 +262,45 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
 
     agent = session.get("agent")
     lock = session.get("history_lock")
-    if lock is not None:
-        with lock:
-            history = list(session.get("history", []))
-    else:
+    with (lock if lock is not None else contextlib.nullcontext()):
         history = list(session.get("history", []))
 
-    # ── Persist unflushed messages to SQLite ──────────────────────────
-    # Flush ``agent._session_messages`` via ``_persist_session``'s marker-based
-    # dedup (same contract as the gateway-shutdown flush, #13121). Do NOT pass
-    # ``conversation_history``: ``session["history"]`` and ``_session_messages``
-    # alias the SAME list once a turn completes, so passing it made
-    # ``_flush_messages_to_session_db`` treat every message as already-durable
-    # and skip it — a data-loss bug when finalize is the sole persist path after
-    # a WS disconnect/restart (e.g. the in-turn flush hit a transient SQLite
-    # failure). Markers persist the genuinely-unflushed tail without duplicating
-    # durable rows (including a resumed-but-not-run session's already-in-DB
-    # transcript, which stays in ``session["history"]`` only).
+    # Persist via ``_persist_session``'s marker-based dedup (same contract as the
+    # gateway-shutdown flush). Do NOT pass ``conversation_history``: ``session["history"]``
+    # and ``_session_messages`` alias the SAME list after a turn, so the flush would treat
+    # every message as durable and skip it — data loss when finalize is the sole persist
+    # path after a WS disconnect/restart.
     if agent is not None and hasattr(agent, "_persist_session"):
         snapshot = getattr(agent, "_session_messages", None)
         if snapshot:
-            try:
+            with contextlib.suppress(Exception):
                 agent._persist_session(snapshot)
-            except Exception:
-                pass
 
-    # ── Plugin hook: on_session_end ────────────────────────────────────
-    # Signals every plugin that the session is closing, with
-    # interrupted=True so crash‑recovery plugins can flush buffers,
-    # persist state, or close connections before the gateway exits.
-    # Mirrors cli.py's atexit handler that fires the same hook when
-    # the user Ctrl‑C's mid‑turn.
+    # interrupted=True so crash-recovery plugins can flush state (mirrors cli.py atexit).
     if agent is not None:
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.lifecycle import invoke_hook
 
             invoke_hook(
                 "on_session_end",
-                session_id=getattr(agent, "session_id", None)
-                or session.get("session_key", ""),
+                session_id=getattr(agent, "session_id", None) or session.get("session_key", ""),
                 completed=False,
                 interrupted=True,
                 model=getattr(agent, "model", "unknown"),
                 platform=getattr(agent, "platform", None) or "tui",
             )
-        except Exception:
-            pass
 
     if agent is not None and history and hasattr(agent, "commit_memory_session"):
-        try:
+        with contextlib.suppress(Exception):
             agent.commit_memory_session(history)
-        except Exception:
-            pass
 
     session_key = session.get("session_key")
     session_id = getattr(agent, "session_id", None) or session_key
     _notify_session_boundary("on_session_finalize", session_id, _session_source(session))
 
-    # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
-    # Use session_id (from agent.session_id) not session_key — after compression,
-    # session_key may be stale (the ended parent) while session_id is the live
-    # continuation. Fix for #20001.
+    # End the state.db row so it doesn't linger as a ghost in /resume. Use session_id
+    # (agent.session_id), not session_key: after compression the key may be the stale
+    # ended parent while session_id is the live continuation.
     if _desktop_automatic_cleanup and not session_id:
         _release_active_session_slot(session)
     _lifecycle_guard = (
@@ -387,92 +313,55 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         if _other_runtime_owns_lifecycle:
             logger.info(
                 "Preserving session %s during %s: another backend owns an active lease",
-                session_id,
-                end_reason,
+                session_id, end_reason,
             )
         if session_id:
-            try:
-                # End the row in the *session's* profile state.db (app-global
-                # remote mode), not the launch profile's shared handle.
+            with contextlib.suppress(Exception):
+                # The *session's* profile state.db (app-global remote mode), not the launch profile's.
                 with _session_db(session) as db:
                     if db is not None:
-                        # Don't end gateway-originated sessions — the gateway owns
-                        # their lifecycle.  The TUI is a viewer, not the owner.
-                        # Ending a gateway session in state.db triggers a Groundhog
-                        # Day routing loop: the gateway's #54878 self-heal detects
-                        # the stale entry, recovers to the parent session, context
-                        # compression splits back to the reaped child, and the cycle
-                        # repeats on every inbound message.  (#60609)
+                        # Never end gateway-originated sessions (Groundhog Day loop: the
+                        # gateway's self-heal recovers to the parent, compression splits back
+                        # to the reaped child, repeat on every message).
                         row = db.get_session(session_id)
                         source = (row or {}).get("source", "")
                         if _is_gateway_owned_source(source):
                             _tui_owns_lifecycle = False
                         elif _tui_owns_lifecycle:
                             db.end_session(session_id, end_reason)
-            except Exception:
-                pass
 
-    # A session's in-flight async delegations end WITH the session (#55578):
-    # once nobody owns the return address, a still-running background subagent
-    # can only burn tokens and park an orphaned completion on the shared
-    # queue. Always interrupt delegations commissioned by THIS live UI session
-    # (its sid); additionally interrupt by durable session_key, but only when
-    # the TUI owns the lifecycle — closing a viewer tab on a live gateway
-    # session must not kill the gateway's own background work.
-    try:
+    # In-flight async delegations end WITH the session (no return address left). Always
+    # interrupt by THIS live UI sid; by durable session_key only when the TUI owns the
+    # lifecycle — closing a viewer tab must not kill the gateway's own background work.
+    with contextlib.suppress(Exception):
         from tools.async_delegation import interrupt_for_session
 
-        _own_sid = str(session.get("_sid") or "")
-        if not _own_sid:
-            try:
-                with _sessions_lock:
-                    for _cand_sid, _cand in _sessions.items():
-                        if _cand is session:
-                            _own_sid = _cand_sid
-                            break
-            except Exception:
-                _own_sid = ""
         interrupt_for_session(
             session_key=str(session_key or "") if _tui_owns_lifecycle else "",
-            origin_ui_session_id=_own_sid,
+            origin_ui_session_id=_lifecycle_own_sid(session),
             reason=end_reason,
         )
-    except Exception:
-        pass
 
-    # Close the slash-worker subprocess as part of finalize itself, not just
-    # in the callers. Defense-in-depth: every session-end path goes through
-    # _finalize_session (it's the single ``_finalized``-guarded chokepoint), so
-    # folding worker cleanup in here means a future code path that calls
-    # _finalize_session directly — without the surrounding _teardown_session /
-    # _shutdown_sessions worker.close() — can't reintroduce the #38095 leak.
-    # Idempotent: _SlashWorker.close() is poll()-guarded, so the explicit
-    # close() still in those callers is harmless.
-    try:
+    # Close the slash-worker in this single ``_finalized``-guarded chokepoint so a direct
+    # _finalize_session caller can't leak it. Idempotent: close() is poll()-guarded.
+    with contextlib.suppress(Exception):
         worker = session.get("slash_worker")
         if worker:
             worker.close()
-    except Exception:
-        pass
 
 
-# End reasons where the BACKEND reclaimed a session the client never asked to
-# close: the idle-TTL reaper, the LRU cap, and the WS-orphan reap. A client
-# holding that live session id gets no signal today — its next prompt fails
-# against an id the backend has already forgotten, which reads as the session
-# silently vanishing rather than being reclaimed. ``tui_close`` and friends are
-# deliberately absent: the client initiated those and already knows.
+# End reasons where the BACKEND reclaimed a session the client never asked to close;
+# without a signal the client's next prompt fails against a forgotten id. Client-initiated
+# reasons (``tui_close`` etc.) are deliberately absent.
 _RECLAIM_END_REASONS = frozenset({"idle_timeout", "lru_evict", "ws_orphan_reap"})
 
 
 def _announce_session_reclaimed(session: dict, end_reason: str) -> None:
     """Tell connected clients a session was reclaimed out from under them.
 
-    Broadcast rather than session-targeted: the reap paths run on background
-    timer threads with no contextvar binding, and the WS-orphan case has by
-    definition lost its own transport — ``_emit`` would bottom out on stdio and
-    the peer that owns the session would never see it. Best-effort; a failed
-    notify must never break teardown.
+    Broadcast, not session-targeted: reap paths run on timer threads with no contextvar
+    binding and the WS-orphan case has lost its transport, so ``_emit`` would bottom out
+    on stdio. Best-effort; never breaks teardown.
     """
     if end_reason not in _RECLAIM_END_REASONS:
         return
@@ -490,42 +379,29 @@ def _announce_session_reclaimed(session: dict, end_reason: str) -> None:
 
 
 def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") -> None:
-    """Fully tear down a session: finalize, unregister, close agent + worker.
+    """Fully tear down a session: finalize, unregister notifier, close agent.
 
-    Shared by ``session.close`` and the orphaned-WS-session reaper. The
-    slash-worker subprocess is closed inside ``_finalize_session`` (the single
-    finalize chokepoint); this still unregisters the approval notifier and
-    closes the in-process agent. Idempotent: the ``_finalized`` guard in
-    ``_finalize_session`` and the ``poll()`` guard in ``_SlashWorker.close``
-    make repeat calls harmless.
+    Shared by ``session.close`` and the orphaned-WS reaper. The slash-worker is closed in
+    ``_finalize_session`` (the single chokepoint), NOT here. Idempotent via ``_finalized``.
     """
     if not session:
         return
     _finalize_session(session, end_reason=end_reason)
     _announce_session_reclaimed(session, end_reason)
-    try:
+    with contextlib.suppress(Exception):
         from tools.approval import unregister_gateway_notify
 
         if key := session.get("session_key"):
             unregister_gateway_notify(key)
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         agent = session.get("agent")
         if agent is not None and hasattr(agent, "close"):
             agent.close()
-    except Exception:
-        pass
-    # NOTE: the slash-worker is closed inside _finalize_session (the single
-    # _finalized-guarded chokepoint that main folded it into), exactly once.
-    # We deliberately do NOT re-close it here — _teardown_session's job beyond
-    # finalize is unregistering the notifier and closing the in-process agent.
 
 
 def _attach_worker(sid: str, session: dict, worker) -> None:
     """Store worker on session iff sid still maps to it, else close it — a
-    concurrent teardown already popped the session and would orphan the
-    worker. Closes the create/close race at every slash-worker spawn site."""
+    concurrent teardown already popped the session and would orphan the worker."""
     with _sessions_lock:
         if _sessions.get(sid) is session:
             session["slash_worker"] = worker
@@ -534,15 +410,10 @@ def _attach_worker(sid: str, session: dict, worker) -> None:
 
 
 def _pop_session_by_id(sid: str) -> dict | None:
-    """Atomically detach one live session from the registry.
-
-    Detaching is the ownership claim for teardown: once the record is no
-    longer in ``_sessions``, a concurrent close/reaper becomes a no-op.  Keep
-    this operation separate from ``_teardown_session`` because finalization can
-    flush SQLite state, invoke plugins, commit memory, interrupt delegations,
-    and close agents/workers.  None of that slow external work belongs under
-    the global ``_session_resume_lock``.
-    """
+    """Atomically detach one live session from the registry — the ownership claim for
+    teardown (a concurrent close/reaper then no-ops). Separate from ``_teardown_session``
+    because finalization does slow external work that must not run under
+    ``_session_resume_lock``."""
     with _sessions_lock:
         session = _sessions.get(sid)
         if session is not None:
@@ -550,25 +421,17 @@ def _pop_session_by_id(sid: str) -> dict | None:
             _sessions.pop(sid, None)
     if session is None:
         return None
-    # The session is already out of _sessions here, so downstream teardown
-    # (e.g. _finalize_session's per-session async-delegation interrupt) can't
-    # recover its live id by scanning the dict — stamp it on the record.
+    # Out of _sessions now, so teardown can't recover the live id by scanning — stamp it.
     session["_sid"] = sid
     return session
 
 
-def _teardown_popped_session(
-    session: dict | None, *, end_reason: str = "tui_close"
-) -> bool:
+def _teardown_popped_session(session: dict | None, *, end_reason: str = "tui_close") -> bool:
     """Finish a close after the caller has atomically detached the session."""
     if session is None:
         return False
     run_thread = session.get("_run_thread")
-    if (
-        end_reason != "tui_shutdown"
-        and run_thread is not None
-        and run_thread is not threading.current_thread()
-    ):
+    if end_reason != "tui_shutdown" and run_thread is not None and run_thread is not threading.current_thread():
         try:
             if run_thread.is_alive():
                 run_thread.join(timeout=_TURN_SETTLE_BEFORE_CLOSE_SECONDS)
@@ -584,23 +447,12 @@ def _teardown_popped_session(
 
 
 def _close_session_by_id(
-    sid: str,
-    *,
-    end_reason: str = "tui_close",
-    predicate: Callable[[dict], bool] | None = None,
+    sid: str, *, end_reason: str = "tui_close", predicate: Callable[[dict], bool] | None = None
 ) -> bool:
-    """Single idempotent teardown funnel for callers needing no resume race.
-
-    Resume-sensitive callers first pop under ``_session_resume_lock`` and then
-    call ``_teardown_popped_session`` after releasing it.  Other reapers can use
-    this convenience wrapper directly.  The pop remains the single atomic
-    ownership claim, so concurrent/repeat close attempts stay harmless.
-
-    Automatic reapers can pass ``predicate`` to revalidate under
-    ``_sessions_lock`` immediately before the ownership claim. This prevents a
-    stale scan result from closing a session that reattached or gained active
-    delegated work before teardown.
-    """
+    """Idempotent teardown funnel for callers with no resume race (resume-sensitive callers
+    pop under ``_session_resume_lock`` and call ``_teardown_popped_session`` after releasing
+    it). Automatic reapers pass ``predicate`` to revalidate under ``_sessions_lock`` right
+    before the claim, so a stale scan can't close a session that reattached."""
     if predicate is None:
         session = _pop_session_by_id(sid)
     else:
@@ -615,50 +467,28 @@ def _close_session_by_id(
 def _ws_session_is_detached(session: dict | None) -> bool:
     """True if a live session is still bound to the disconnected-WS sentinel."""
     return bool(
-        session
-        and not session.get("_finalized")
-        and session.get("transport") is _detached_ws_transport
+        session and not session.get("_finalized") and session.get("transport") is _detached_ws_transport
     )
 
 
 def _ws_session_is_orphaned(session: dict | None) -> bool:
-    """True if a WS session has no live transport and no in-flight turn.
-
-    After ``handle_ws`` detaches a disconnected client it points the session at
-    ``_detached_ws_transport``. A session left on that transport (and not
-    mid-turn) is genuinely orphaned and safe to reap.
-    """
-    return bool(
-        _ws_session_is_detached(session)
-        and session is not None
-        and not session.get("running")
-    )
+    """True if a WS session sits on ``_detached_ws_transport`` (where
+    ``handle_ws`` parks disconnected clients) with no in-flight turn."""
+    return bool(_ws_session_is_detached(session) and not session.get("running"))
 
 
-def _interrupt_session_turn(
-    sid: str, session: dict, *, request_id: str | None = None
-) -> bool:
-    """Apply the shared ``session.interrupt`` contract to one claimed session.
-
-    Returns whether the interrupt used the compute-host control channel. The WS
-    orphan reaper calls this same helper after its reconnect grace expires, so a
-    dead client gets the same partial-history and queued-prompt semantics as an
-    explicit user interrupt.
-    """
+def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None = None) -> bool:
+    """Apply the shared ``session.interrupt`` contract to one claimed session; returns
+    whether the compute-host control channel was used. The WS orphan reaper reuses this so
+    a dead client gets the same partial-history and queued-prompt semantics."""
     use_compute_host = _session_uses_compute_host(session)
     should_interrupt = bool(session.get("running"))
     run_thread_alive = False
 
     if use_compute_host:
-        # The host owns the live turn. Parent `running` is only a mirror and
-        # can lag behind a blocked interactive tool (a clarify parked on its
-        # Event keeps the host turn alive after the parent flag went stale),
-        # so let the host decide whether there is work to interrupt.
-        # Gate on `_compute_host_active` too: `_session_uses_compute_host`
-        # is also true for lazy sessions that never ran a hosted turn, and
-        # `HostSupervisor.interrupt()` calls `start()` — forwarding
-        # unconditionally would spawn a compute-host child just to deliver
-        # an interrupt no session ever submitted work to.
+        # The host owns the live turn (parent `running` can lag a blocked tool), so let it
+        # decide. Gate on `_compute_host_active`: HostSupervisor.interrupt() calls start(),
+        # so forwarding blindly for a lazy session would spawn a child just to interrupt.
         if should_interrupt or session.get("_compute_host_active"):
             _get_compute_host_supervisor().interrupt(sid, request_id=request_id)
     else:
@@ -669,9 +499,7 @@ def _interrupt_session_turn(
         session["_turn_cancel_requested"] = True
         session["queued_prompt"] = None
         session.pop("queued_prompts", None)
-        session["_queued_prompt_generation"] = int(
-            session.get("_queued_prompt_generation", 0)
-        ) + 1
+        session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
 
     if not use_compute_host:
         if should_interrupt:
@@ -685,48 +513,33 @@ def _interrupt_session_turn(
                     _clear_inflight_turn(session)
 
     _clear_pending(sid)
-    try:
+    with contextlib.suppress(Exception):
         from tools.approval import resolve_gateway_approval
 
         resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
-    except Exception:
-        pass
     return use_compute_host
 
 
 def _session_owns_durable_lifecycle(session_id: str | None) -> bool:
-    """Whether this TUI/desktop session may end its durable DB row by key."""
+    """Whether this TUI/desktop session may end its durable DB row by key
+    (never for gateway-originated sessions — the TUI is only a viewer there)."""
     if not session_id:
         return True
     try:
         db = _get_db()
         if db is None:
             return True
-        # Don't end gateway-originated sessions — the gateway owns their
-        # lifecycle. The TUI is only a viewer there (#60609).
         row = db.get_session(session_id)
-        source = (row or {}).get("source", "")
-        return not _is_gateway_owned_source(source)
+        return not _is_gateway_owned_source((row or {}).get("source", ""))
     except Exception:
         return True
 
 
-def _session_async_delegation_selectors(
-    session: dict | None, *, sid_hint: str = ""
-) -> tuple[str, str]:
+def _session_async_delegation_selectors(session: dict | None, *, sid_hint: str = "") -> tuple[str, str]:
     """Ownership selectors for async background work tied to one UI session."""
     if not session:
         return "", ""
-    own_sid = str(sid_hint or session.get("_sid") or "")
-    if not own_sid:
-        try:
-            with _sessions_lock:
-                for _cand_sid, _cand in _sessions.items():
-                    if _cand is session:
-                        own_sid = _cand_sid
-                        break
-        except Exception:
-            own_sid = ""
+    own_sid = _lifecycle_own_sid(session, sid_hint)
     agent = session.get("agent")
     session_key = str(session.get("session_key") or "")
     session_id = getattr(agent, "session_id", None) or session_key
@@ -735,83 +548,48 @@ def _session_async_delegation_selectors(
 
 
 def _session_has_active_delegations(sid: str, session: dict | None = None) -> bool:
-    """True when UI session ``sid`` still owns live background work.
-
-    Matches by the live UI sid AND — when the TUI owns the durable lifecycle
-    (never for gateway-viewer tabs, #60609) — by the durable session_key, so a
-    delegation dispatched from an earlier tab of the same resumed session still
-    keeps it alive.
-    """
+    """True when UI session ``sid`` still owns live background work — by live UI sid AND,
+    when the TUI owns the durable lifecycle (never for gateway-viewer tabs), by durable
+    session_key so a delegation from an earlier tab of the same session keeps it alive."""
     if session is None:
         with _sessions_lock:
             session = _sessions.get(sid)
-    own_sid, owned_session_key = _session_async_delegation_selectors(
-        session, sid_hint=sid
-    )
+    own_sid, owned_session_key = _session_async_delegation_selectors(session, sid_hint=sid)
     if not own_sid and not owned_session_key:
         return False
     try:
         from tools.async_delegation import has_live_for_session
 
-        return has_live_for_session(
-            session_key=owned_session_key,
-            origin_ui_session_id=own_sid,
-        )
+        return has_live_for_session(session_key=owned_session_key, origin_ui_session_id=own_sid)
     except Exception:
-        logger.debug(
-            "Failed to query active delegations for UI session %s",
-            sid,
-            exc_info=True,
-        )
-        # A transient registry/import failure must not turn into destructive
-        # cleanup. Conservatively keep the detached session and let the next
-        # orphan timer retry the lookup.
+        logger.debug("Failed to query active delegations for UI session %s", sid, exc_info=True)
+        # A transient registry/import failure must not become destructive cleanup.
         return True
 
 
-# One pending WS-orphan reap Timer per live sid. Registered by
-# _schedule_ws_orphan_reap, popped when its _reap fires, and cancelled by
-# _cancel_ws_orphan_reap from every resume/reuse/transport-rebind path. Without
-# this cancellation the reap could fire against an already-reattached session,
-# broadcast session.reclaimed, and trigger the client's auto-re-resume — a
-# reap->broadcast->resume feedback storm. Guarded by _sessions_lock.
+# One pending WS-orphan reap Timer per live sid; guarded by _sessions_lock. Cancelled by
+# _cancel_ws_orphan_reap from every resume/reuse/transport-rebind path — otherwise a reap
+# could fire on a reattached session and trigger a reap->broadcast->resume storm.
 _pending_ws_reaps: dict[str, threading.Timer] = {}
 
 
 def _cancel_ws_orphan_reap(sid: str) -> None:
-    """Cancel a pending WS-orphan reap for ``sid`` (client came back).
-
-    Called from every path that re-binds a live transport onto the session:
-    the session.resume fast-path reuse, _claim_or_reuse_live winners, and the
-    _live_session_payload transport rebind. Cancelling here (rather than
-    relying on the reap's own orphan re-check) removes the window where a
-    fired-but-not-yet-run Timer races the resume, and stops dead Timers from
-    accumulating for sessions that reconnect frequently.
-    """
+    """Cancel a pending WS-orphan reap for ``sid`` (client came back). Called from every
+    path that re-binds a live transport; closes the fired-but-not-run Timer race and stops
+    dead Timers accumulating on flappy clients."""
     with _sessions_lock:
         timer = _pending_ws_reaps.pop(sid, None)
     if timer is not None:
-        try:
+        with contextlib.suppress(Exception):
             timer.cancel()
-        except Exception:
-            pass
 
 
 def _ws_orphan_turn_activity_is_fresh(session: dict) -> bool:
-    """Whether a detached RUNNING turn's activity clock is still fresh.
-
-    Reuses the agent's existing activity summary (``_touch_activity`` is
-    stamped by API waits, stream tokens, and tool heartbeats — the same
-    clock the turn-liveness watchdog samples; see agent/turn_liveness.py).
-    Fresh means the WS-orphan reaper must NOT interrupt the turn yet
-    (#98028/#100325): deliberate client absence (closed laptop, backgrounded
-    mobile app, desktop update/relaunch) keeps healthy work running detached.
-
-    Conservative fallbacks preserve the wedged-turn safety net: a disabled
-    threshold (<= 0), a missing/opaque agent, an unreadable summary, or a
-    never-stamped clock all report NOT fresh, i.e. eligible for the
-    interrupt-at-grace path exactly as before.
-    """
+    """Whether a detached RUNNING turn's activity clock (``_touch_activity``, the watchdog's
+    clock) is still fresh — the reaper must NOT interrupt healthy detached work (closed
+    laptop, backgrounded app). Conservative fallbacks keep the wedged-turn safety net:
+    disabled threshold, missing/opaque agent, unreadable summary or never-stamped clock all
+    report NOT fresh, i.e. eligible for interrupt-at-grace."""
     if _WS_ORPHAN_ACTIVITY_STALE_S <= 0:
         return False
     agent = session.get("agent")
@@ -826,33 +604,22 @@ def _ws_orphan_turn_activity_is_fresh(session: dict) -> bool:
 
 
 def _schedule_ws_orphan_reap(sid: str, *, delay_s: float | None = None) -> None:
-    """After a grace window, reap session ``sid`` iff it's still orphaned.
-
-    Called from the WS-disconnect path. The grace window lets a transient
-    reconnect (or a ``session.resume`` that reattaches the transport) cancel
-    the reap by re-binding a live transport. Disabled when the grace is 0.
-    """
+    """After a grace window, reap session ``sid`` iff it's still orphaned. Called from the
+    WS-disconnect path; a reconnect or ``session.resume`` cancels the reap by re-binding a
+    live transport. Disabled when the grace is 0."""
     if _WS_ORPHAN_REAP_GRACE_S <= 0:
         return
 
     def _reap() -> None:
-        # Serialize the orphan re-check against session.resume (which re-binds a
-        # live transport under _session_resume_lock and would make this session
-        # non-orphaned). Claim teardown by popping under both lifecycle locks,
-        # then release the global resume lock before the slow finalization work.
-        # The dict mutation still happens under _sessions_lock — consistent
-        # with every other _sessions mutator
-        # (#39591: _reap previously popped under _session_resume_lock, giving no
-        # mutual exclusion against _init_session / _close_session_by_id, which
-        # guard with _sessions_lock). _sessions_lock is an RLock and the global
-        # ordering is always resume_lock -> sessions_lock, so nesting is safe.
+        # Serialize the re-check against session.resume (rebinds under _session_resume_lock).
+        # Claim teardown by popping under both locks, then release the resume lock before
+        # slow finalization. Ordering is always resume_lock -> sessions_lock (RLock).
         reschedule_delay = None
         interrupt_session = None
         session = None
         with _session_resume_lock:
-            # This Timer is running: drop its registration so a concurrent
-            # _cancel_ws_orphan_reap doesn't cancel a dead Timer object while
-            # a rescheduled one (registered below) is the live owner.
+            # Drop this Timer's registration so a concurrent _cancel_ws_orphan_reap can't
+            # cancel a dead Timer while a rescheduled one (registered below) is the owner.
             with _sessions_lock:
                 _pending_ws_reaps.pop(sid, None)
             current = _sessions.get(sid)
@@ -861,40 +628,27 @@ def _schedule_ws_orphan_reap(sid: str, *, delay_s: float | None = None) -> None:
             if _session_has_active_delegations(sid, current):
                 reschedule_delay = _WS_ORPHAN_REAP_GRACE_S
             elif current.get("running"):
-                if not current.get(
-                    "_client_gone_interrupt_requested"
-                ) and _ws_orphan_turn_activity_is_fresh(current):
-                    # Client-absent but actively producing (#98028/#100325):
-                    # the turn keeps running detached (the sentinel transport
-                    # already buffers emits) and the reaper re-checks each
-                    # grace interval. Only a turn whose activity clock has
-                    # gone stale — genuinely wedged, the case the interrupt
-                    # was added for — falls through to the interrupt below.
+                if not current.get("_client_gone_interrupt_requested") and (
+                    _ws_orphan_turn_activity_is_fresh(current)
+                ):
+                    # Client-absent but producing: keep running detached (the sentinel
+                    # buffers emits) and re-check each grace interval.
                     logger.debug(
-                        "client_gone sid=%s action=defer (turn activity "
-                        "fresh; stale threshold %.0fs)",
-                        sid,
-                        _WS_ORPHAN_ACTIVITY_STALE_S,
+                        "client_gone sid=%s action=defer (turn activity fresh; stale threshold %.0fs)",
+                        sid, _WS_ORPHAN_ACTIVITY_STALE_S,
                     )
                     reschedule_delay = _WS_ORPHAN_REAP_GRACE_S
                 else:
-                    # Mid-turn detached sessions must never drop the single
-                    # Timer (#85578): after the reconnect grace the turn is
-                    # interrupted once, then the reap keeps polling until the
-                    # normal turn-finalization path settles.
+                    # Mid-turn detached sessions must never drop the single Timer: interrupt
+                    # once after grace, then poll until turn-finalization settles.
                     polls = int(current.get("_client_gone_interrupt_polls") or 0) + 1
                     current["_client_gone_interrupt_polls"] = polls
                     if polls > _WS_ORPHAN_INTERRUPT_REAP_MAX_POLLS:
-                        # The interrupted turn never settled inside the budget
-                        # — force-reap rather than parking the session + a
-                        # timer chain forever. Loud by design: this only fires
-                        # when a turn is genuinely stuck past interrupt.
+                        # Never settled inside the budget — force-reap rather than park forever.
                         logger.error(
                             "client_gone sid=%s: turn did not settle after %d "
-                            "interrupt polls (%.0fs) — force-reaping detached "
-                            "session",
-                            sid, polls - 1,
-                            (polls - 1) * _WS_ORPHAN_INTERRUPT_REAP_POLL_S,
+                            "interrupt polls (%.0fs) — force-reaping detached session",
+                            sid, polls - 1, (polls - 1) * _WS_ORPHAN_INTERRUPT_REAP_POLL_S,
                         )
                         session = _pop_session_by_id(sid)
                     else:
@@ -907,64 +661,37 @@ def _schedule_ws_orphan_reap(sid: str, *, delay_s: float | None = None) -> None:
 
         if interrupt_session is not None:
             try:
-                isolated = _interrupt_session_turn(
-                    sid,
-                    interrupt_session,
-                    request_id=f"client-gone-{sid}",
-                )
-                logger.info(
-                    "client_gone sid=%s action=interrupt turn_isolation=%s",
-                    sid,
-                    isolated,
-                )
+                isolated = _interrupt_session_turn(sid, interrupt_session, request_id=f"client-gone-{sid}")
+                logger.info("client_gone sid=%s action=interrupt turn_isolation=%s", sid, isolated)
             except Exception:
                 logger.exception("client_gone interrupt failed sid=%s", sid)
                 with _sessions_lock:
                     if _sessions.get(sid) is interrupt_session:
-                        interrupt_session.pop(
-                            "_client_gone_interrupt_requested", None
-                        )
+                        interrupt_session.pop("_client_gone_interrupt_requested", None)
 
         if reschedule_delay is not None:
             _schedule_ws_orphan_reap(sid, delay_s=reschedule_delay)
             return
-        if session is not None and session.get(
-            "_client_gone_interrupt_requested"
-        ):
+        if session is not None and session.get("_client_gone_interrupt_requested"):
             logger.info("client_gone sid=%s action=reap", sid)
         _teardown_popped_session(session, end_reason="ws_orphan_reap")
 
-    timer = threading.Timer(
-        _WS_ORPHAN_REAP_GRACE_S if delay_s is None else max(0.0, delay_s),
-        _reap,
-    )
+    timer = threading.Timer(_WS_ORPHAN_REAP_GRACE_S if delay_s is None else max(0.0, delay_s), _reap)
     timer.daemon = True
     with _sessions_lock:
         prior = _pending_ws_reaps.pop(sid, None)
         _pending_ws_reaps[sid] = timer
     if prior is not None:
-        try:
+        with contextlib.suppress(Exception):
             prior.cancel()
-        except Exception:
-            pass
     timer.start()
 
 
-def _close_sessions_for_transport(
-    transport, *, end_reason: str = "ws_disconnect"
-) -> tuple[int, int]:
-    """On transport disconnect, reap the sessions that opted into
-    close_on_disconnect (sidecar/dashboard) immediately and re-point the rest
-    at the detached transport so later emits don't hit a dead socket.
-
-    Non-flagged detached sessions are handed to the grace-windowed WS-orphan
-    reaper (``_schedule_ws_orphan_reap``): a quick reconnect / session.resume
-    that re-binds a live transport cancels the reap, otherwise the orphan is
-    torn down through the same idempotent ``_teardown_session`` path. This is
-    the single WS-disconnect teardown entry point — there is no second
-    independent reap loop in ``handle_ws``.
-
-    Returns ``(reaped, detached)`` counts for disconnect-path observability."""
+def _close_sessions_for_transport(transport, *, end_reason: str = "ws_disconnect") -> tuple[int, int]:
+    """Single WS-disconnect teardown entry point: reap close_on_disconnect sessions
+    (sidecar/dashboard) immediately and re-point the rest at the detached transport so
+    later emits don't hit a dead socket; those go to the grace-windowed WS-orphan reaper.
+    Returns ``(reaped, detached)`` counts."""
     with _sessions_lock:
         owned = [(sid, s) for sid, s in _sessions.items() if s.get("transport") is transport]
     reaped = 0
@@ -972,43 +699,29 @@ def _close_sessions_for_transport(
     for sid, session in owned:
         claimed_for_teardown = None
         should_schedule_reap = False
-        # A session.resume fast-path rebinds its live session while holding
-        # _session_resume_lock. Take that lock before re-checking the snapshot
-        # so a reconnect cannot move the transport between this check and the
-        # close/detach ownership claim. Keep the slow teardown below both locks.
+        # session.resume fast-path rebinds under _session_resume_lock: take it before
+        # re-checking so a reconnect can't move the transport between check and claim.
         with _session_resume_lock:
             with _sessions_lock:
                 current = _sessions.get(sid)
                 if current is not session:
                     continue
                 if current.get("transport") is not transport:
-                    # The reconnect owns this session now. Drop only the old
-                    # viewer registration; it must not affect the new owner.
-                    viewers = current.get("viewers")
-                    if viewers:
-                        viewers.pop(transport, None)
+                    # The reconnect owns this session now; drop only the old viewer registration.
+                    (current.get("viewers") or {}).pop(transport, None)
                     continue
                 if current.get("close_on_disconnect"):
                     claimed_for_teardown = _pop_session_by_id(sid)
                 else:
-                    # Point detached sessions at the drop sentinel (NOT real
-                    # stdio) so _ws_session_is_orphaned recognizes them and
-                    # the grace-reap can actually fire; a standalone
-                    # `hermes --tui` keeps real _stdio. UNLESS another window
-                    # still shows the session: multi-window pop-outs all
-                    # register as viewers, so on disconnect re-bind the
-                    # session to the most recent surviving viewer instead of
-                    # stranding the original window on the sentinel (#83716).
-                    viewers = current.get("viewers")
-                    if viewers:
-                        viewers.pop(transport, None)
+                    # Point at the drop sentinel (NOT real stdio) so _ws_session_is_orphaned
+                    # recognizes it; standalone `hermes --tui` keeps real _stdio. UNLESS
+                    # another window (multi-window pop-out viewer) still shows the session:
+                    # re-bind to the most recent surviving viewer instead of stranding it.
+                    viewers = current.get("viewers") or {}
+                    viewers.pop(transport, None)
                     remaining = [
-                        (ts, viewer_transport)
-                        for viewer_transport, ts in (viewers or {}).items()
-                        if (
-                            viewer_transport is not transport
-                            and not _transport_is_dead(viewer_transport)
-                        )
+                        (ts, vt) for vt, ts in viewers.items()
+                        if vt is not transport and not _transport_is_dead(vt)
                     ]
                     if remaining:
                         remaining.sort(key=lambda item: item[0])
@@ -1022,10 +735,8 @@ def _close_sessions_for_transport(
                 reaped += 1
         elif should_schedule_reap:
             detached += 1
-            try:
+            with contextlib.suppress(Exception):
                 _schedule_ws_orphan_reap(sid)
-            except Exception:
-                pass
     return reaped, detached
 
 
