@@ -23,13 +23,17 @@ Output: Opus (.ogg) for voice-bubble platforms (Telegram etc.), MP3 elsewhere.
 Configuration lives under the ``tts:`` key; the user chooses provider/voice,
 the model just sends text.
 
-Module layout: this file owns config resolution, the command/plugin provider
-layers, the OpenAI/DeepInfra backends (managed-gateway aware), provider
-dispatch, the lifecycle leases and the tool registration. Sibling modules:
-``tts_tool_providers`` (cloud backends), ``tts_tool_local`` (on-device engines
-+ model caches), ``tts_tool_delivery`` (chunking / ffmpeg / packing),
-``tts_tool_speaker`` (streaming speaker pipeline). Their names are re-imported
-here so ``tools.tts_tool.<name>`` keeps resolving.
+Module layout: this file owns config resolution, lazy SDK importers,
+built-in provider dispatch, output-path policy, the long-form tool entry point,
+the ``check_fn`` and the tool registration. Sibling modules: ``tts_command_provider``
+(``type: command`` providers), ``tts_tool_plugins`` (plugin-registered providers),
+``tts_tool_openai`` (OpenAI/DeepInfra + managed gateway), ``tts_tool_providers``
+(other cloud backends), ``tts_tool_local`` (on-device engines + model caches),
+``tts_tool_lifecycle`` (warm/release leases), ``tts_tool_delivery`` (caps /
+chunking / ffmpeg / packing), ``tts_tool_speaker`` (streaming speaker pipeline).
+Their names are re-imported here so ``tools.tts_tool.<name>`` keeps resolving
+and tests patching ``tools.tts_tool.<seam>`` still take effect (siblings
+resolve those seams through ``_origin()`` at call time).
 
 Usage:
     from tools.tts_tool import text_to_speech_tool, check_tts_requirements
@@ -309,13 +313,7 @@ def _get_provider(tts_config: Dict[str, Any]) -> str:
 
 # Platforms whose native voice-bubble delivery requires Ogg/Opus audio
 # (MP3 renders as a broken attachment there).
-OPUS_VOICE_PLATFORMS = frozenset({
-    "telegram",
-    "matrix",
-    "feishu",
-    "whatsapp",
-    "signal",
-})
+OPUS_VOICE_PLATFORMS = frozenset({"telegram", "matrix", "feishu", "whatsapp", "signal"})
 
 # Built-ins that emit Opus natively when asked for .ogg (no ffmpeg needed).
 _NATIVE_OPUS_PROVIDERS = frozenset({"openai", "elevenlabs", "mistral", "gemini"})
