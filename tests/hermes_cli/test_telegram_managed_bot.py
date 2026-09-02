@@ -200,11 +200,6 @@ class TestPollForToken:
 
 
 class TestSetupTelegramAuto:
-    def test_setup_helper_exists(self):
-        from hermes_cli.setup import _setup_telegram_auto
-
-        assert callable(_setup_telegram_auto)
-
     def test_setup_result_passes_profile_name_for_profile_home(self, monkeypatch, tmp_path):
         from hermes_cli import setup
 
