@@ -45,6 +45,7 @@ from agent.turn_context import (
 from agent.turn_retry_state import TurnRetryState
 from agent.turn_usage import record_response_usage
 from agent.turn_recovery import (
+    log_api_error_attempt,
     max_retries_exhausted_result,
     nonretryable_client_error_result,
     recover_after_classification,
@@ -3850,70 +3851,16 @@ def run_conversation(
                     f"API error recovery (attempt {retry_count}/{max_retries})"
                 )
                 
-                error_type = type(api_error).__name__
-                error_msg = str(api_error).lower()
-                _error_summary = agent._summarize_api_error(api_error)
-                logger.warning(
-                    "API call failed (attempt %s/%s) error_type=%s %s summary=%s",
-                    retry_count,
-                    max_retries,
-                    error_type,
-                    agent._client_log_context(),
-                    _error_summary,
+                error_type, error_msg, _provider, _base, _model = log_api_error_attempt(
+                    agent,
+                    api_error,
+                    retry_count=retry_count,
+                    max_retries=max_retries,
+                    status_code=status_code,
+                    elapsed_time=elapsed_time,
+                    api_messages=api_messages,
+                    approx_tokens=approx_tokens,
                 )
-
-                _provider = getattr(agent, "provider", "unknown")
-                _base = getattr(agent, "base_url", "unknown")
-                _model = getattr(agent, "model", "unknown")
-                _status_code_str = f" [HTTP {status_code}]" if status_code else ""
-                agent._buffer_vprint(f"⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}")
-                agent._buffer_vprint(f"   🔌 Provider: {_provider}  Model: {_model}")
-                agent._buffer_vprint(f"   🌐 Endpoint: {_base}")
-                agent._buffer_vprint(f"   📝 Error: {_error_summary}")
-                if status_code and status_code < 500:
-                    _err_body = getattr(api_error, "body", None)
-                    _err_body_str = str(_err_body)[:300] if _err_body else None
-                    if _err_body_str:
-                        agent._buffer_vprint(f"   📋 Details: {_err_body_str}")
-                agent._buffer_vprint(f"   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
-
-                # OpenRouter "no tool endpoints" hint, buffered with the retry trace
-                # so it only surfaces if every retry+fallback exhausts.
-                if (
-                    agent._is_openrouter_url()
-                    and "support tool use" in error_msg
-                ):
-                    agent._buffer_vprint(
-                        f"   💡 No OpenRouter providers for {_model} support tool calling with your current settings."
-                    )
-                    if agent.providers_allowed:
-                        agent._buffer_vprint(
-                            "      Your provider_routing.only restriction is filtering out tool-capable providers."
-                        )
-                        agent._buffer_vprint(
-                            "      Try removing the restriction or adding providers that support tools for this model."
-                        )
-                    agent._buffer_vprint(
-                        f"      Check which providers support tools: https://openrouter.ai/models/{_model}"
-                    )
-
-                # Bare 404 on a ``vendor/model`` catalogue usually means the id lost its
-                # prefix; the provider never names the model, so we do (#78796).
-                if getattr(api_error, "status_code", None) == 404:
-                    try:
-                        from hermes_cli.model_normalize import suggest_prefixed_model_id
-
-                        _suggestion = suggest_prefixed_model_id(_provider, _model)
-                    except Exception:
-                        _suggestion = None
-                    if _suggestion:
-                        agent._buffer_vprint(
-                            f"   💡 Model '{_model}' is not a valid id for provider {_provider} — "
-                            f"it is missing its vendor prefix."
-                        )
-                        agent._buffer_vprint(
-                            f"      Did you mean '{_suggestion}'?  Re-pick it with `hermes model`."
-                        )
 
                 # Check for interrupt before deciding to retry
                 if agent._interrupt_requested:

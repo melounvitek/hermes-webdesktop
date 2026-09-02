@@ -1063,3 +1063,88 @@ def max_retries_exhausted_result(
         # descriptor (provider, billing_url, is_nous, message).
         "billing_block": _billing_block,
     }
+
+
+def log_api_error_attempt(
+    agent: Any,
+    api_error: Exception,
+    *,
+    retry_count: int,
+    max_retries: int,
+    status_code: Optional[int],
+    elapsed_time: float,
+    api_messages: Any,
+    approx_tokens: int,
+) -> Tuple[str, str, Any, Any, Any]:
+    """Log one failed API attempt: the ``API call failed`` warning plus the buffered
+    retry trace (provider/endpoint/error/4xx body/elapsed), the OpenRouter
+    "no tool endpoints" hint and the bare-404 missing-vendor-prefix hint (#78796).
+    The buffer only surfaces if every retry+fallback exhausts.
+
+    Returns ``(error_type, error_msg, provider, base_url, model)`` — the loop's
+    ``error_type`` / ``error_msg`` / ``_provider`` / ``_base`` / ``_model`` locals."""
+    error_type = type(api_error).__name__
+    error_msg = str(api_error).lower()
+    _error_summary = agent._summarize_api_error(api_error)
+    logger.warning(
+        "API call failed (attempt %s/%s) error_type=%s %s summary=%s",
+        retry_count,
+        max_retries,
+        error_type,
+        agent._client_log_context(),
+        _error_summary,
+    )
+
+    _provider = getattr(agent, "provider", "unknown")
+    _base = getattr(agent, "base_url", "unknown")
+    _model = getattr(agent, "model", "unknown")
+    _status_code_str = f" [HTTP {status_code}]" if status_code else ""
+    agent._buffer_vprint(f"⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}")
+    agent._buffer_vprint(f"   🔌 Provider: {_provider}  Model: {_model}")
+    agent._buffer_vprint(f"   🌐 Endpoint: {_base}")
+    agent._buffer_vprint(f"   📝 Error: {_error_summary}")
+    if status_code and status_code < 500:
+        _err_body = getattr(api_error, "body", None)
+        _err_body_str = str(_err_body)[:300] if _err_body else None
+        if _err_body_str:
+            agent._buffer_vprint(f"   📋 Details: {_err_body_str}")
+    agent._buffer_vprint(f"   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
+
+    # OpenRouter "no tool endpoints" hint, buffered with the retry trace
+    # so it only surfaces if every retry+fallback exhausts.
+    if (
+        agent._is_openrouter_url()
+        and "support tool use" in error_msg
+    ):
+        agent._buffer_vprint(
+            f"   💡 No OpenRouter providers for {_model} support tool calling with your current settings."
+        )
+        if agent.providers_allowed:
+            agent._buffer_vprint(
+                "      Your provider_routing.only restriction is filtering out tool-capable providers."
+            )
+            agent._buffer_vprint(
+                "      Try removing the restriction or adding providers that support tools for this model."
+            )
+        agent._buffer_vprint(
+            f"      Check which providers support tools: https://openrouter.ai/models/{_model}"
+        )
+
+    # Bare 404 on a ``vendor/model`` catalogue usually means the id lost its
+    # prefix; the provider never names the model, so we do (#78796).
+    if getattr(api_error, "status_code", None) == 404:
+        try:
+            from hermes_cli.model_normalize import suggest_prefixed_model_id
+
+            _suggestion = suggest_prefixed_model_id(_provider, _model)
+        except Exception:
+            _suggestion = None
+        if _suggestion:
+            agent._buffer_vprint(
+                f"   💡 Model '{_model}' is not a valid id for provider {_provider} — "
+                f"it is missing its vendor prefix."
+            )
+            agent._buffer_vprint(
+                f"      Did you mean '{_suggestion}'?  Re-pick it with `hermes model`."
+            )
+    return error_type, error_msg, _provider, _base, _model
