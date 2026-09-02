@@ -8765,109 +8765,121 @@ def _install_single_query_signal_handlers(cli):
         pass  # signal handler may fail in restricted environments
 
 
-def main(
-    query: str = None,
-    q: str = None,
-    oneshot: bool = False,
-    image: str = None,
-    toolsets: str = None,
-    skills: str | list[str] | tuple[str, ...] = None,
-    model: str = None,
-    provider: str = None,
-    reasoning: str = None,
-    api_key: str = None,
-    base_url: str = None,
-    max_turns: int = None,
-    run_budget: float = None,
-    verbose: Optional[bool] = None,
-    quiet: bool = False,
-    compact: bool = False,
-    list_tools: bool = False,
-    list_toolsets: bool = False,
-    gateway: bool = False,
-    resume: str = None,
-    worktree: bool = False,
-    w: bool = False,
-    checkpoints: bool = False,
-    pass_session_id: bool = False,
-    ignore_user_config: bool = False,
-    ignore_rules: bool = False,
-):
-    """
-    Hermes Agent CLI - Interactive AI Assistant
-    
-    Args:
-        query: Query to run. On a real TTY this seeds an interactive session
-            (submitted literally as the first turn); with --oneshot/-Q or a
-            non-TTY it answers and exits. Alias: -q
-        q: Shorthand for --query
-        oneshot: With -q: force the legacy answer-and-exit single-query mode
-            even on a TTY.
-        image: Optional local image path to attach to a single query
-        toolsets: Comma-separated list of toolsets to enable (e.g., "web,terminal")
-        skills: Comma-separated or repeated list of skills to preload for the session
-        model: Model to use (default: anthropic/claude-opus-4-20250514)
-        provider: Inference provider ("auto", "openrouter", "nous", "openai-codex", "zai", "kimi-coding", "minimax", "minimax-cn")
-        reasoning: Reasoning effort for this run (none|minimal|low|medium|high|xhigh|max|ultra). Overrides agent.reasoning_effort.
-        api_key: API key for authentication
-        base_url: Base URL for the API
-        max_turns: Maximum tool-calling iterations (default: 60)
-        verbose: Enable verbose logging
-        compact: Use compact display mode
-        list_tools: List available tools and exit
-        list_toolsets: List available toolsets and exit
-        resume: Resume a previous session by its ID (e.g., 20260225_143052_a1b2c3)
-        worktree: Run in an isolated git worktree (for parallel agents). Alias: -w
-        w: Shorthand for --worktree
-    
-    Examples:
-        python cli.py                            # Start interactive mode
-        python cli.py --toolsets web,terminal    # Use specific toolsets
-        python cli.py --skills hermes-agent-dev,github-auth
-        python cli.py -q "What is Python?"       # Single query mode
-        python cli.py -q "Describe this" --image ~/storage/shared/Pictures/cat.png
-        python cli.py --list-tools               # List tools and exit
-        python cli.py --resume 20260225_143052_a1b2c3  # Resume session
-        python cli.py -w                         # Start in isolated git worktree
-        python cli.py -w -q "Fix issue #123"     # Single query in worktree
-    """
-    global _active_worktree
+def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills):
+    """Resolve the toolset list (explicit / coding posture / platform default), construct HermesCLI, and start the background skills preload."""
+    # Parse toolsets - handle both string and tuple/list inputs
+    # Default to hermes-cli toolset which includes cronjob management tools
+    toolsets_list = None
+    if toolsets:
+        if isinstance(toolsets, str):
+            toolsets_list = [t.strip() for t in toolsets.split(",")]
+        elif isinstance(toolsets, (list, tuple)):
+            # Fire may pass multiple --toolsets as a tuple
+            toolsets_list = []
+            for t in toolsets:
+                if isinstance(t, str):
+                    toolsets_list.extend([x.strip() for x in t.split(",")])
+                else:
+                    toolsets_list.append(str(t))
+    else:
+        # Coding posture (base Hermes): with no explicit --toolsets, collapse
+        # to the coding toolset (+ enabled MCP servers) when sitting in a code
+        # workspace. See agent/coding_context.py.
+        _coding = None
+        try:
+            from agent.coding_context import coding_selection
+            _coding = coding_selection(platform="cli", config=CLI_CONFIG)
+        except Exception:
+            _coding = None
+        if _coding is not None:
+            toolsets_list = _coding
+        else:
+            # Use the shared resolver so MCP servers are included at runtime
+            from hermes_cli.tools_config import _get_platform_tools
+            toolsets_list = sorted(_get_platform_tools(CLI_CONFIG, "cli"))
 
-    # Force UTF-8 stdio on Windows before any banner/print() runs — the
-    # Rich console prints Unicode box-drawing characters that would
-    # UnicodeEncodeError on cp1252.  No-op on Linux/macOS.
+    parsed_skills = _parse_skills_argument(skills)
+
+    # Create CLI instance
     try:
-        from hermes_cli.stdio import configure_windows_stdio
-        configure_windows_stdio()
+        cli = HermesCLI(
+            model=model,
+            toolsets=toolsets_list,
+            provider=provider,
+            reasoning=reasoning,
+            api_key=api_key,
+            base_url=base_url,
+            max_turns=max_turns,
+            run_budget=run_budget,
+            verbose=verbose,
+            compact=compact,
+            resume=resume,
+            checkpoints=checkpoints,
+            pass_session_id=pass_session_id,
+            ignore_rules=ignore_rules,
+        )
+    except ImportError as e:
+        # Direct `python cli.py` / `python -m cli` bypasses cmd_chat's
+        # ImportError handler. Same mixed-tree class as #96900.
+        from hermes_constants import emit_partial_update_hint
+
+        if emit_partial_update_hint(e):
+            sys.exit(1)
+        raise
+
+    if parsed_skills:
+        # Load the skill payloads in the background: skill_view walks the
+        # full skills tree per skill (~0.5s for a large library) and the
+        # result is only consumed at agent init (first message / first
+        # agent-touching command), not by the banner. cmd_chat joins the
+        # thread via cli.finalize_preloaded_skills() before any consumer
+        # reads cli.system_prompt — HermesCLI._create_agent calls it too,
+        # so no agent can be built with the skills missing.
+        def _load_preloaded_skills() -> None:
+            try:
+                cli._preload_skills_result = build_preloaded_skills_prompt(
+                    parsed_skills,
+                    task_id=cli.session_id,
+                )
+            except Exception as exc:  # surfaced by finalize below
+                cli._preload_skills_error = exc
+
+        cli._preload_skills_requested = parsed_skills
+        cli._preload_skills_thread = threading.Thread(
+            target=_load_preloaded_skills, name="skills-preload", daemon=True
+        )
+        cli._preload_skills_thread.start()
+    return cli
+
+
+def _run_legacy_gateway():
+    """Legacy `cli.py --gateway` entry: arm the startup watchdog, then run the gateway event loop."""
+    import asyncio
+    # Startup-liveness watchdog (OOF-298): this legacy entry point must
+    # be covered too — arm before importing the gateway graph.
+    try:
+        from hermes_startup_watchdog import arm_startup_watchdog
+        arm_startup_watchdog()
     except Exception:
         pass
+    from gateway.run import start_gateway
+    print("Starting Hermes Gateway (messaging platforms)...")
+    asyncio.run(start_gateway())
 
-    # Signal to terminal_tool that we're in interactive mode
-    # This enables interactive sudo password prompts with timeout
-    os.environ["HERMES_INTERACTIVE"] = "1"
-    
-    # Handle gateway mode (messaging + cron)
-    if gateway:
-        import asyncio
-        # Startup-liveness watchdog (OOF-298): this legacy entry point must
-        # be covered too — arm before importing the gateway graph.
-        try:
-            from hermes_startup_watchdog import arm_startup_watchdog
-            arm_startup_watchdog()
-        except Exception:
-            pass
-        from gateway.run import start_gateway
-        print("Starting Hermes Gateway (messaging platforms)...")
-        asyncio.run(start_gateway())
-        return
 
+def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
+    """Kick off isolated-worktree creation (+ tool prewarm) in the background.
+
+    Returns the ``_join_worktree`` callable that waits for the setup, publishes
+    ``_active_worktree``/TERMINAL_CWD and schedules stale-worktree GC — or None when
+    no worktree is wanted (list commands, or -w not requested).
+    """
     # Skip worktree for list commands (they exit immediately)
     if not list_tools and not list_toolsets:
         # ── Git worktree isolation (#652) ──
         # Create an isolated worktree so this agent instance doesn't collide
         # with other agents working on the same repo.
         use_worktree = worktree or w or CLI_CONFIG.get("worktree", False)
-        wt_info = None
         if use_worktree:
             # Overlap tool discovery with the network/subprocess-bound
             # worktree setup (base fetch + parallel `git worktree add`
@@ -8939,93 +8951,101 @@ def main(
             _join_worktree = None
     else:
         _join_worktree = None
+    return _join_worktree
+
+
+def main(
+    query: str = None,
+    q: str = None,
+    oneshot: bool = False,
+    image: str = None,
+    toolsets: str = None,
+    skills: str | list[str] | tuple[str, ...] = None,
+    model: str = None,
+    provider: str = None,
+    reasoning: str = None,
+    api_key: str = None,
+    base_url: str = None,
+    max_turns: int = None,
+    run_budget: float = None,
+    verbose: Optional[bool] = None,
+    quiet: bool = False,
+    compact: bool = False,
+    list_tools: bool = False,
+    list_toolsets: bool = False,
+    gateway: bool = False,
+    resume: str = None,
+    worktree: bool = False,
+    w: bool = False,
+    checkpoints: bool = False,
+    pass_session_id: bool = False,
+    ignore_user_config: bool = False,
+    ignore_rules: bool = False,
+):
+    """
+    Hermes Agent CLI - Interactive AI Assistant
+    
+    Args:
+        query: Query to run. On a real TTY this seeds an interactive session
+            (submitted literally as the first turn); with --oneshot/-Q or a
+            non-TTY it answers and exits. Alias: -q
+        q: Shorthand for --query
+        oneshot: With -q: force the legacy answer-and-exit single-query mode
+            even on a TTY.
+        image: Optional local image path to attach to a single query
+        toolsets: Comma-separated list of toolsets to enable (e.g., "web,terminal")
+        skills: Comma-separated or repeated list of skills to preload for the session
+        model: Model to use (default: anthropic/claude-opus-4-20250514)
+        provider: Inference provider ("auto", "openrouter", "nous", "openai-codex", "zai", "kimi-coding", "minimax", "minimax-cn")
+        reasoning: Reasoning effort for this run (none|minimal|low|medium|high|xhigh|max|ultra). Overrides agent.reasoning_effort.
+        api_key: API key for authentication
+        base_url: Base URL for the API
+        max_turns: Maximum tool-calling iterations (default: 60)
+        verbose: Enable verbose logging
+        compact: Use compact display mode
+        list_tools: List available tools and exit
+        list_toolsets: List available toolsets and exit
+        resume: Resume a previous session by its ID (e.g., 20260225_143052_a1b2c3)
+        worktree: Run in an isolated git worktree (for parallel agents). Alias: -w
+        w: Shorthand for --worktree
+    
+    Examples:
+        python cli.py                            # Start interactive mode
+        python cli.py --toolsets web,terminal    # Use specific toolsets
+        python cli.py --skills hermes-agent-dev,github-auth
+        python cli.py -q "What is Python?"       # Single query mode
+        python cli.py -q "Describe this" --image ~/storage/shared/Pictures/cat.png
+        python cli.py --list-tools               # List tools and exit
+        python cli.py --resume 20260225_143052_a1b2c3  # Resume session
+        python cli.py -w                         # Start in isolated git worktree
+        python cli.py -w -q "Fix issue #123"     # Single query in worktree
+    """
+    # Force UTF-8 stdio on Windows before any banner/print() runs — the
+    # Rich console prints Unicode box-drawing characters that would
+    # UnicodeEncodeError on cp1252.  No-op on Linux/macOS.
+    try:
+        from hermes_cli.stdio import configure_windows_stdio
+        configure_windows_stdio()
+    except Exception:
+        pass
+
+    # Signal to terminal_tool that we're in interactive mode
+    # This enables interactive sudo password prompts with timeout
+    os.environ["HERMES_INTERACTIVE"] = "1"
+    
+    # Handle gateway mode (messaging + cron)
+    if gateway:
+        _run_legacy_gateway()
+        return
+
+    _join_worktree = _start_worktree_setup(list_tools, list_toolsets, worktree, w)
     wt_info = None
     
     # Handle query shorthand
     query = query or q
     
-    # Parse toolsets - handle both string and tuple/list inputs
-    # Default to hermes-cli toolset which includes cronjob management tools
-    toolsets_list = None
-    if toolsets:
-        if isinstance(toolsets, str):
-            toolsets_list = [t.strip() for t in toolsets.split(",")]
-        elif isinstance(toolsets, (list, tuple)):
-            # Fire may pass multiple --toolsets as a tuple
-            toolsets_list = []
-            for t in toolsets:
-                if isinstance(t, str):
-                    toolsets_list.extend([x.strip() for x in t.split(",")])
-                else:
-                    toolsets_list.append(str(t))
-    else:
-        # Coding posture (base Hermes): with no explicit --toolsets, collapse
-        # to the coding toolset (+ enabled MCP servers) when sitting in a code
-        # workspace. See agent/coding_context.py.
-        _coding = None
-        try:
-            from agent.coding_context import coding_selection
-            _coding = coding_selection(platform="cli", config=CLI_CONFIG)
-        except Exception:
-            _coding = None
-        if _coding is not None:
-            toolsets_list = _coding
-        else:
-            # Use the shared resolver so MCP servers are included at runtime
-            from hermes_cli.tools_config import _get_platform_tools
-            toolsets_list = sorted(_get_platform_tools(CLI_CONFIG, "cli"))
-    
-    parsed_skills = _parse_skills_argument(skills)
-
-    # Create CLI instance
-    try:
-        cli = HermesCLI(
-            model=model,
-            toolsets=toolsets_list,
-            provider=provider,
-            reasoning=reasoning,
-            api_key=api_key,
-            base_url=base_url,
-            max_turns=max_turns,
-            run_budget=run_budget,
-            verbose=verbose,
-            compact=compact,
-            resume=resume,
-            checkpoints=checkpoints,
-            pass_session_id=pass_session_id,
-            ignore_rules=ignore_rules,
-        )
-    except ImportError as e:
-        # Direct `python cli.py` / `python -m cli` bypasses cmd_chat's
-        # ImportError handler. Same mixed-tree class as #96900.
-        from hermes_constants import emit_partial_update_hint
-
-        if emit_partial_update_hint(e):
-            sys.exit(1)
-        raise
-
-    if parsed_skills:
-        # Load the skill payloads in the background: skill_view walks the
-        # full skills tree per skill (~0.5s for a large library) and the
-        # result is only consumed at agent init (first message / first
-        # agent-touching command), not by the banner. cmd_chat joins the
-        # thread via cli.finalize_preloaded_skills() before any consumer
-        # reads cli.system_prompt — HermesCLI._create_agent calls it too,
-        # so no agent can be built with the skills missing.
-        def _load_preloaded_skills() -> None:
-            try:
-                cli._preload_skills_result = build_preloaded_skills_prompt(
-                    parsed_skills,
-                    task_id=cli.session_id,
-                )
-            except Exception as exc:  # surfaced by finalize below
-                cli._preload_skills_error = exc
-
-        cli._preload_skills_requested = parsed_skills
-        cli._preload_skills_thread = threading.Thread(
-            target=_load_preloaded_skills, name="skills-preload", daemon=True
-        )
-        cli._preload_skills_thread.start()
+    cli = _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
+                               verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills)
 
     # Join the background worktree creation (started above) before anything
     # consumes TERMINAL_CWD / wt_info — the HermesCLI construction it
