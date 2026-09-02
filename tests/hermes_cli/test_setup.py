@@ -146,7 +146,6 @@ def test_modal_setup_persists_direct_mode_when_user_chooses_their_own_account(tm
 
     monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
     monkeypatch.setattr("hermes_cli.setup.prompt", lambda *args, **kwargs: next(prompt_values))
-    monkeypatch.setattr("hermes_cli.setup._prompt_container_resources", lambda config: None)
     monkeypatch.setattr(
         "hermes_cli.setup.get_nous_subscription_features",
         lambda config: type("Features", (), {"nous_auth_present": True})(),
