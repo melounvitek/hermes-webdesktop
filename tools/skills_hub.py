@@ -2,10 +2,12 @@
 """
 Skills Hub — hub state management and the public facade for the source adapters.
 
-Library module (not an agent tool). Owns the hub paths, index cache, lock file,
-taps, audit log, quarantine/install/uninstall, update checks, and the source
-router; the adapters live in the ``tools.skills_hub_*`` siblings and are
-re-exported here so ``from tools.skills_hub import X`` keeps working.
+Library module (not an agent tool). Owns the hub paths, guarded HTTP, index
+cache, lock file, taps and audit log. Install/uninstall/update live in
+``skills_hub_install``, the index fetch/source router/search in
+``skills_hub_search``, and the adapters in the other ``tools.skills_hub_*``
+siblings; all are re-exported here so ``from tools.skills_hub import X`` keeps
+working (and stays the test patch target).
 
 Used by hermes_cli/skills_hub.py for CLI commands and the /skills slash command.
 """
@@ -368,9 +370,9 @@ def ensure_hub_dirs() -> None:
     _quarantine_dir().mkdir(exist_ok=True)
     _index_cache_dir().mkdir(exist_ok=True)
     for path, initial in (
-        (_lock_file(), '{"version": 1, "installed": {}}\n'),
+        (_lock_file(), json.dumps(HubLockFile.EMPTY) + "\n"),
         (_audit_log(), ""),
-        (_taps_file(), '{"taps": []}\n'),
+        (_taps_file(), json.dumps(TapsManager.EMPTY) + "\n"),
     ):
         if not path.exists():
             path.write_text(initial, encoding="utf-8")

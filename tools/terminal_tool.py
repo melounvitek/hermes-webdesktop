@@ -9,9 +9,13 @@ Cloud-sandbox persistent filesystems preserve working state across sandbox
 recreation but do NOT guarantee the same live sandbox or long-running
 processes survive cleanup, idle reaping, or Hermes exit.
 
-Companion modules: ``terminal_tool_guards`` (pre-exec blocks),
-``terminal_tool_background`` (background spawn), ``terminal_tool_result``
-(foreground result post-processing).
+Companion modules (all re-exported here, so ``tools.terminal_tool.<name>``
+stays the import/patch target): ``terminal_tool_config`` (TERMINAL_* reads),
+``terminal_tool_backends`` (env builders + requirement checkers),
+``terminal_tool_lifecycle`` (reaper/teardown/ensure_task_env),
+``terminal_tool_sudo`` (sudo password + shell rewrites), ``terminal_tool_guards``
+(pre-exec blocks), ``terminal_tool_background`` (background spawn),
+``terminal_tool_result`` (foreground result post-processing).
 """
 
 import json
