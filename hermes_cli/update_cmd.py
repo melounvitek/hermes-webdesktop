@@ -388,7 +388,7 @@ def _gateway_prompt(prompt_text: str, default: str = "", timeout: float = 300.0)
     """
     import json as _json
     import uuid as _uuid
-    from hermes_constants import get_hermes_home
+    from hermes_constants import get_hermes_home  # noqa: F811  (deliberate: constants variant)
 
     home = get_hermes_home()
     prompt_path = home / ".update_prompt.json"
@@ -1416,9 +1416,22 @@ def _prepare_checkout_for_update(
     )
 
 
-def _cmd_update_impl(args, gateway_mode: bool):
-    """Body of ``cmd_update`` — kept separate so the wrapper can always
-    restore stdio even on ``sys.exit``."""
+@dataclass
+class _UpdateOptions:
+    """Resolved ``hermes update`` inputs (flags, config, pre-update snapshots)."""
+
+    active_lazy_features: object
+    active_tool_dependencies: object
+    pre_update_version: object
+    gw_input_fn: object
+    assume_yes: bool
+    keep_stash: bool
+    switch_branch: bool
+    discard_local_changes: bool
+
+
+def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
+    """Snapshot pre-update state and resolve the flags/config ``_cmd_update_impl`` runs on."""
     # A managed-runtime refresh can replace site-packages before the normal
     # ``.[all]`` install runs. Snapshot while the old environment can still
     # prove which optional backends the user had activated.
@@ -1469,10 +1482,24 @@ def _cmd_update_impl(args, gateway_mode: bool):
             # Never let a config read failure change the safe default.
             logger.debug("Could not read updates.non_interactive_local_changes: %s", exc)
             discard_local_changes = False
+    return _UpdateOptions(
+        active_lazy_features=active_lazy_features,
+        active_tool_dependencies=active_tool_dependencies,
+        pre_update_version=pre_update_version,
+        gw_input_fn=gw_input_fn,
+        assume_yes=assume_yes,
+        keep_stash=keep_stash,
+        switch_branch=switch_branch,
+        discard_local_changes=discard_local_changes,
+    )
 
-    print("⚕ Updating Hermes Agent...")
-    print()
 
+def _begin_update_receipt_and_plan(args):
+    """Open the update receipt, snapshot the running fleet, refuse on Windows shim holders.
+
+    Returns the pre-update runtime plan (or None when the probe failed);
+    ``sys.exit(2)`` when a non-gateway hermes.exe still holds the venv shim.
+    """
     # Phase 1 (#91277): structured update receipt — record what this run
     # discovers, does, and skips, so silent-failure classes (#88848,
     # #74973, #85753, #81193) become diagnosable from disk.
@@ -1526,53 +1553,15 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         )
                     )
                     sys.exit(2)
+    return _pre_update_plan
 
-    # Pre-update backup — runs before any git/file mutation so users can
-    # always roll back to the exact state they had before this update.
-    # Returns the quick-snapshot id (or None when disabled/failed); the
-    # post-update cron-jobs safety net uses it to detect job loss.
-    pre_update_snapshot_id = _m()._run_pre_update_backup(args)
-    _record_update_step(
-        "pre_update_backup",
-        pre_update_snapshot_id is not None,
-        f"snapshot={pre_update_snapshot_id}" if pre_update_snapshot_id else "disabled or failed",
-    )
 
-    _windows_gateway_resume = _m()._pause_windows_gateways_for_update()
-    if _windows_gateway_resume:
-        import atexit as _atexit
+def _prepare_git_command() -> tuple[bool, list, bool]:
+    """Decide git-vs-ZIP, build the git argv and detect a fork origin.
 
-        _atexit.register(
-            _m()._resume_windows_gateways_after_update,
-            _windows_gateway_resume,
-        )
-
-    # With gateways paused, any venv python still running (typically the
-    # Desktop `hermes serve` backend) keeps .pyd files locked and would
-    # corrupt the sync; refuse rather than race (the app respawns a killed
-    # backend). NOT bypassed by --force: the desktop updater passes it to
-    # skip the shim guard but only probes the shim and app.asar.
-    # --force-venv is the explicit escape hatch.
-    if _m()._is_windows() and not getattr(args, "force_venv", False):
-        _clear_windows_venv_holders_or_exit(args, gateway_mode, _windows_gateway_resume)
-
-    # Self-lock deferral moved: the venv-holder sweep above excludes this
-    # process by design (a CLI `hermes update` IS the venv python), and an
-    # updater that has imported a native venv extension cannot rewrite its
-    # own mapped .pyd (#83569). That check used to run HERE — before the
-    # fetch — but firing pre-fetch meant a deferral stranded the user on the
-    # OLD checkout, and any startup path that eagerly loaded cryptography
-    # turned every Windows update into an exit-2 loop (#86735/#86780/#86781).
-    # It now runs via _abort_dependency_sync_if_self_locked() after the code
-    # swap, immediately before the dependency sync — the only phase the lock
-    # can actually break — and only when the sync would truly rewrite the
-    # loaded distribution.
-
-    # Capture this after every fail-closed venv guard, but before either
-    # update path can remove the ignored release tree.
-    desktop_dir = _m().PROJECT_ROOT / "apps" / "desktop"
-    had_desktop_app_before_update = _desktop_app_present(desktop_dir)
-
+    Returns ``(use_zip_update, git_cmd, is_fork)``; ``sys.exit(1)`` when the
+    checkout is not a git repo on a non-Windows host.
+    """
     # Try git-based update first, fall back to ZIP download on Windows
     # when git file I/O is broken (antivirus, NTFS filter drivers, etc.)
     use_zip_update = False
@@ -1632,6 +1621,160 @@ def _cmd_update_impl(args, gateway_mode: bool):
         print("⚠ Updating from fork:")
         print(f"  {origin_url}")
         print()
+    return use_zip_update, git_cmd, is_fork
+
+
+def _verify_head_after_pull(
+    git_cmd, branch: str, pre_pull_sha, *, in_place_update: bool, _windows_gateway_resume
+) -> str | None:
+    """Return the post-pull HEAD SHA; ``sys.exit(1)`` if the pull was a no-op or landed off-branch."""
+    # Verify HEAD moved (#79678): a detached checkout pinned to a SHA can
+    # report "N new commit(s)" and a successful ``merge --ff-only`` yet
+    # stay on the old commit, so the old code reinstalled deps and
+    # claimed "✓ Code updated!". Surface the no-op instead.
+    post_pull_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
+    if pre_pull_sha and post_pull_sha == pre_pull_sha:
+        print()
+        print("✗ Code did not move — update was a no-op.")
+        print(
+            f"  HEAD is pinned to {pre_pull_sha[:10]} (detached checkout); "
+            f"origin/{branch} advanced but the working tree stayed put."
+        )
+        print(
+            "  Reattach to the branch and retry: "
+            f"git -C {_m().PROJECT_ROOT} checkout {branch} && hermes update"
+        )
+        _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
+        sys.exit(1)
+
+    # Verify HEAD is on the target branch; otherwise "✓ Code updated!"
+    # would be a lie. An IN-PLACE update is the one legitimate way to end
+    # elsewhere: origin/<target> was merged INTO the checked-out branch,
+    # so the running code *is* current.
+    post_pull_branch = _git_run(git_cmd, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+    if (
+        not in_place_update
+        and post_pull_branch
+        and post_pull_branch not in {branch, "HEAD"}
+    ):
+        print()
+        print(
+            f"✗ Update pulled origin/{branch}, but the checkout is on "
+            f"'{post_pull_branch}' — not claiming success."
+        )
+        print(
+            "  Switch to the target branch and retry: "
+            f"git -C {_m().PROJECT_ROOT} checkout {branch} && hermes update"
+        )
+        _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
+        sys.exit(1)
+    return post_pull_sha
+
+
+def _handle_update_called_process_error(
+    e, args, gateway_mode: bool, had_desktop_app_before_update: bool
+) -> None:
+    """Git/installer failure: ZIP-fallback when safe, else report and ``sys.exit(1)``."""
+    stage = _format_update_failure_stage(e)
+    if _should_zip_fallback_on_update_error(e):
+        print(f"⚠ {stage}: {e}")
+        print("→ Falling back to ZIP download...")
+        print()
+        desktop_build_ok = _update_via_zip(
+            args,
+            had_desktop_app_before_update=had_desktop_app_before_update,
+        )
+        if gateway_mode:
+            _write_gateway_update_exit_code(desktop_build_ok)
+    else:
+        print(f"✗ {stage}: {e}")
+        _print_called_process_error_tail(e)
+        if _called_process_error_is_python_dep_install(e):
+            print(
+                "  The git update already finished. Re-downloading the source "
+                "ZIP cannot fix a dependency install error and would overwrite "
+                "local files."
+            )
+            if _m()._is_windows():
+                print("  Retry through the venv interpreter:")
+                print(
+                    '    venv\\Scripts\\python.exe -c '
+                    '"from hermes_cli.main import main; main()" update --yes'
+                )
+        try:
+            from hermes_cli.update_receipt import finalize_update_receipt
+
+            finalize_update_receipt("failed")
+        except Exception:
+            pass
+        sys.exit(1)
+
+
+def _cmd_update_impl(args, gateway_mode: bool):
+    """Body of ``cmd_update`` — kept separate so the wrapper can always
+    restore stdio even on ``sys.exit``."""
+    opts = _resolve_update_options(args, gateway_mode)
+    active_lazy_features = opts.active_lazy_features
+    active_tool_dependencies = opts.active_tool_dependencies
+    pre_update_version = opts.pre_update_version
+    gw_input_fn = opts.gw_input_fn
+    assume_yes = opts.assume_yes
+    keep_stash = opts.keep_stash
+    switch_branch = opts.switch_branch
+    discard_local_changes = opts.discard_local_changes
+
+    print("⚕ Updating Hermes Agent...")
+    print()
+
+    _pre_update_plan = _begin_update_receipt_and_plan(args)
+
+    # Pre-update backup — runs before any git/file mutation so users can
+    # always roll back to the exact state they had before this update.
+    # Returns the quick-snapshot id (or None when disabled/failed); the
+    # post-update cron-jobs safety net uses it to detect job loss.
+    pre_update_snapshot_id = _m()._run_pre_update_backup(args)
+    _record_update_step(
+        "pre_update_backup",
+        pre_update_snapshot_id is not None,
+        f"snapshot={pre_update_snapshot_id}" if pre_update_snapshot_id else "disabled or failed",
+    )
+
+    _windows_gateway_resume = _m()._pause_windows_gateways_for_update()
+    if _windows_gateway_resume:
+        import atexit as _atexit
+
+        _atexit.register(
+            _m()._resume_windows_gateways_after_update,
+            _windows_gateway_resume,
+        )
+
+    # With gateways paused, any venv python still running (typically the
+    # Desktop `hermes serve` backend) keeps .pyd files locked and would
+    # corrupt the sync; refuse rather than race (the app respawns a killed
+    # backend). NOT bypassed by --force: the desktop updater passes it to
+    # skip the shim guard but only probes the shim and app.asar.
+    # --force-venv is the explicit escape hatch.
+    if _m()._is_windows() and not getattr(args, "force_venv", False):
+        _clear_windows_venv_holders_or_exit(args, gateway_mode, _windows_gateway_resume)
+
+    # Self-lock deferral moved: the venv-holder sweep above excludes this
+    # process by design (a CLI `hermes update` IS the venv python), and an
+    # updater that has imported a native venv extension cannot rewrite its
+    # own mapped .pyd (#83569). That check used to run HERE — before the
+    # fetch — but firing pre-fetch meant a deferral stranded the user on the
+    # OLD checkout, and any startup path that eagerly loaded cryptography
+    # turned every Windows update into an exit-2 loop (#86735/#86780/#86781).
+    # It now runs via _abort_dependency_sync_if_self_locked() after the code
+    # swap, immediately before the dependency sync — the only phase the lock
+    # can actually break — and only when the sync would truly rewrite the
+    # loaded distribution.
+
+    # Capture this after every fail-closed venv guard, but before either
+    # update path can remove the ignored release tree.
+    desktop_dir = _m().PROJECT_ROOT / "apps" / "desktop"
+    had_desktop_app_before_update = _desktop_app_present(desktop_dir)
+
+    use_zip_update, git_cmd, is_fork = _prepare_git_command()
 
     if use_zip_update:
         # ZIP-based update for Windows when git is broken
@@ -1783,46 +1926,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         _invalidate_update_cache()
 
-        # Verify HEAD moved (#79678): a detached checkout pinned to a SHA can
-        # report "N new commit(s)" and a successful ``merge --ff-only`` yet
-        # stay on the old commit, so the old code reinstalled deps and
-        # claimed "✓ Code updated!". Surface the no-op instead.
-        post_pull_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
-        if pre_pull_sha and post_pull_sha == pre_pull_sha:
-            print()
-            print("✗ Code did not move — update was a no-op.")
-            print(
-                f"  HEAD is pinned to {pre_pull_sha[:10]} (detached checkout); "
-                f"origin/{branch} advanced but the working tree stayed put."
-            )
-            print(
-                "  Reattach to the branch and retry: "
-                f"git -C {_m().PROJECT_ROOT} checkout {branch} && hermes update"
-            )
-            _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
-            sys.exit(1)
-
-        # Verify HEAD is on the target branch; otherwise "✓ Code updated!"
-        # would be a lie. An IN-PLACE update is the one legitimate way to end
-        # elsewhere: origin/<target> was merged INTO the checked-out branch,
-        # so the running code *is* current.
-        post_pull_branch = _git_run(git_cmd, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
-        if (
-            not in_place_update
-            and post_pull_branch
-            and post_pull_branch not in {branch, "HEAD"}
-        ):
-            print()
-            print(
-                f"✗ Update pulled origin/{branch}, but the checkout is on "
-                f"'{post_pull_branch}' — not claiming success."
-            )
-            print(
-                "  Switch to the target branch and retry: "
-                f"git -C {_m().PROJECT_ROOT} checkout {branch} && hermes update"
-            )
-            _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
-            sys.exit(1)
+        post_pull_sha = _verify_head_after_pull(
+            git_cmd,
+            branch,
+            pre_pull_sha,
+            in_place_update=in_place_update,
+            _windows_gateway_resume=_windows_gateway_resume,
+        )
 
         # #95294: HEAD advanced; running gateways still serve pre-pull
         # modules until the restart phase below. Any interrupt between here
@@ -1904,39 +2014,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # BEFORE any installer ran — defer via marker, exit 2, no ZIP.
         _refuse_update_for_contended_shims(e)
     except subprocess.CalledProcessError as e:
-        stage = _format_update_failure_stage(e)
-        if _should_zip_fallback_on_update_error(e):
-            print(f"⚠ {stage}: {e}")
-            print("→ Falling back to ZIP download...")
-            print()
-            desktop_build_ok = _update_via_zip(
-                args,
-                had_desktop_app_before_update=had_desktop_app_before_update,
-            )
-            if gateway_mode:
-                _write_gateway_update_exit_code(desktop_build_ok)
-        else:
-            print(f"✗ {stage}: {e}")
-            _print_called_process_error_tail(e)
-            if _called_process_error_is_python_dep_install(e):
-                print(
-                    "  The git update already finished. Re-downloading the source "
-                    "ZIP cannot fix a dependency install error and would overwrite "
-                    "local files."
-                )
-                if _m()._is_windows():
-                    print("  Retry through the venv interpreter:")
-                    print(
-                        '    venv\\Scripts\\python.exe -c '
-                        '"from hermes_cli.main import main; main()" update --yes'
-                    )
-            try:
-                from hermes_cli.update_receipt import finalize_update_receipt
-
-                finalize_update_receipt("failed")
-            except Exception:
-                pass
-            sys.exit(1)
+        _handle_update_called_process_error(e, args, gateway_mode, had_desktop_app_before_update)
 
 # --- Hoisted from the body of _cmd_update_impl (self-contained, no closure state) ---
 
