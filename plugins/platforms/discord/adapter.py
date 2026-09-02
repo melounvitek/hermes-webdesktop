@@ -142,6 +142,47 @@ import sys
 from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
+
+def _is_discord_transport_error(exc: BaseException) -> bool:
+    """Return True for connection-shaped send failures (dead/dropping WS).
+
+    These are the failures where the message demonstrably did NOT reach
+    Discord because the transport itself was down — the delivery-obligation
+    ledger can safely replay them after reconnect (#95382). HTTP-level
+    rejections (permissions, formatting, 4xx) are NOT transport errors and
+    must keep their original error string. Timeouts are excluded: a timed-out
+    send may have reached Discord, so replaying it risks a duplicate.
+    """
+    if isinstance(exc, asyncio.TimeoutError):
+        return False
+    if isinstance(exc, (ConnectionError, OSError)):
+        return True
+    if DISCORD_AVAILABLE and discord is not None:
+        _transport_types = tuple(
+            t
+            for t in (
+                getattr(discord, "ConnectionClosed", None),
+                getattr(discord, "GatewayNotFound", None),
+                getattr(discord, "DiscordServerError", None),
+            )
+            if isinstance(t, type)
+        )
+        if _transport_types and isinstance(exc, _transport_types):
+            return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "websocket closed",
+            "connection reset",
+            "connection closed",
+            "session is closed",
+            "cannot write to closing transport",
+            "not connected",
+        )
+    )
+
+
 try:
     from .ffmpeg_utils import resolve_ffmpeg_executable
 except ImportError:
@@ -3451,7 +3492,15 @@ class DiscordAdapter(BasePlatformAdapter):
         created automatically.
         """
         if not self._client:
-            return SendResult(success=False, error="Not connected")
+            # Dead transport (client gone / gateway reconnecting): classify as
+            # send_path_degraded so the delivery-obligation ledger's reconnect
+            # sweep (_redeliver_failed_obligations_for_platform) can replay
+            # this final response once the adapter is live again — a generic
+            # "Not connected" error is not runtime-retryable and left the
+            # turn's output stranded until a full process restart (#95382).
+            return SendResult(
+                success=False, error="send_path_degraded", retryable=True
+            )
         if not (content or "").strip():
             logger.warning(
                 "[%s] Dropped empty message to chat=%s (caller bug). Call site:\n%s",
@@ -3582,7 +3631,16 @@ class DiscordAdapter(BasePlatformAdapter):
 
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error("[%s] Failed to send Discord message: %s", self.name, e, exc_info=True)
-            result = SendResult(success=False, error=str(e))
+            if _is_discord_transport_error(e):
+                # Connection-shaped failure (WS drop / closed session): use
+                # the ledger's runtime-retryable marker so the reconnect
+                # sweep can replay this final response instead of stranding
+                # it until a process restart (#95382 silent partial loss).
+                result = SendResult(
+                    success=False, error="send_path_degraded", retryable=True
+                )
+            else:
+                result = SendResult(success=False, error=str(e))
             await asyncio.to_thread(
                 self._record_discord_response,
                 reply_to=reply_to,
@@ -6398,6 +6456,14 @@ class DiscordAdapter(BasePlatformAdapter):
         )
         return (len(self._skill_entries), self._skill_group_hidden_count)
 
+    def _interaction_guild_id(self, interaction: discord.Interaction) -> Optional[str]:
+        """Resolve the guild id of a slash interaction (mirrors the message path)."""
+        guild_id = getattr(interaction, "guild_id", None)
+        if guild_id is None:
+            guild = getattr(getattr(interaction, "channel", None), "guild", None)
+            guild_id = getattr(guild, "id", None)
+        return str(guild_id) if guild_id else None
+
     def _build_slash_event(self, interaction: discord.Interaction, text: str) -> MessageEvent:
         """Build a MessageEvent from a Discord slash command interaction."""
         is_dm = isinstance(interaction.channel, discord.DMChannel)
@@ -6422,6 +6488,12 @@ class DiscordAdapter(BasePlatformAdapter):
         # For forum threads, inherit the parent forum's topic.
         chat_topic = self._get_effective_topic(interaction.channel, is_thread=is_thread)
 
+        # guild_id/parent_chat_id feed profile_routes matching in build_source,
+        # exactly as on_message passes them — without them a guild- or
+        # channel-routed profile never matches a native slash command (#69178).
+        parent_id = (
+            self._get_parent_channel_id(interaction.channel) if is_thread else None
+        ) or ""
         source = self.build_source(
             chat_id=str(interaction.channel_id),
             chat_name=chat_name,
@@ -6430,11 +6502,12 @@ class DiscordAdapter(BasePlatformAdapter):
             user_name=interaction.user.display_name,
             thread_id=thread_id,
             chat_topic=chat_topic,
+            guild_id=self._interaction_guild_id(interaction),
+            parent_chat_id=parent_id or None,
         )
 
         msg_type = MessageType.COMMAND if text.startswith("/") else MessageType.TEXT
         channel_id = str(interaction.channel_id)
-        parent_id = str(getattr(getattr(interaction, "channel", None), "parent_id", "") or "")
         return MessageEvent(
             text=text,
             message_type=msg_type,
@@ -6516,6 +6589,8 @@ class DiscordAdapter(BasePlatformAdapter):
         _chan = getattr(interaction, "channel", None)
         chat_topic = self._get_effective_topic(_chan, is_thread=True) if _chan else None
 
+        _parent_channel = self._thread_parent_channel(getattr(interaction, "channel", None))
+        _parent_id = str(getattr(_parent_channel, "id", "") or "")
         source = self.build_source(
             chat_id=thread_id,
             chat_name=chat_name,
@@ -6524,10 +6599,10 @@ class DiscordAdapter(BasePlatformAdapter):
             user_name=interaction.user.display_name,
             thread_id=thread_id,
             chat_topic=chat_topic,
+            guild_id=self._interaction_guild_id(interaction),
+            parent_chat_id=_parent_id or None,
         )
 
-        _parent_channel = self._thread_parent_channel(getattr(interaction, "channel", None))
-        _parent_id = str(getattr(_parent_channel, "id", "") or "")
         _skills = self._resolve_channel_skills(thread_id, _parent_id or None)
         _channel_prompt = self._resolve_channel_prompt(thread_id, _parent_id or None)
         event = MessageEvent(
