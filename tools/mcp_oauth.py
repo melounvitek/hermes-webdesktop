@@ -73,33 +73,24 @@ _SDK_LOAD_FAILED = False
 
 def _ensure_sdk_loaded() -> bool:
     """Bind the SDK OAuth classes into module globals; True when available.
-
-    Only names currently ``None`` are (re)bound, so test patches stay intact.
-    """
+    Only names currently ``None`` are (re)bound, so test patches stay intact."""
     global _SDK_LOAD_FAILED, _OAUTH_AVAILABLE
     if _SDK_LOAD_FAILED:
         return False
     if not _SDK_CLASSES:
         try:
-            from mcp.client.auth import OAuthClientProvider as _Provider
-            from mcp.shared.auth import (
-                OAuthClientInformationFull as _InfoFull,
-                OAuthClientMetadata as _ClientMeta,
-                OAuthMetadata as _Meta,
-                OAuthToken as _Token,
-            )
-        except ImportError:
+            from mcp.client import auth as _client_auth
+            from mcp.shared import auth as _shared_auth
+
+            _SDK_CLASSES["OAuthClientProvider"] = _client_auth.OAuthClientProvider
+            for _name in ("OAuthClientInformationFull", "OAuthClientMetadata", "OAuthMetadata", "OAuthToken"):
+                _SDK_CLASSES[_name] = getattr(_shared_auth, _name)
+        except (ImportError, AttributeError):
+            _SDK_CLASSES.clear()
             _SDK_LOAD_FAILED = True
             _OAUTH_AVAILABLE = False
             logger.debug("MCP OAuth types not available -- OAuth MCP auth disabled")
             return False
-        _SDK_CLASSES.update(
-            OAuthClientProvider=_Provider,
-            OAuthClientInformationFull=_InfoFull,
-            OAuthClientMetadata=_ClientMeta,
-            OAuthMetadata=_Meta,
-            OAuthToken=_Token,
-        )
     g = globals()
     for _name, _cls in _SDK_CLASSES.items():
         if g.get(_name) is None:
@@ -487,7 +478,7 @@ class HermesTokenStorage:
     # browser re-authorization.
 
     def save_oauth_metadata(self, metadata: "OAuthMetadata") -> None:
-        _write_json(self._meta_path(), metadata.model_dump(exclude_none=True, mode="json"))
+        _write_json(self._meta_path(), metadata.model_dump(mode="json", exclude_none=True))
         logger.debug("OAuth metadata saved for %s", self._server_name)
 
     def load_oauth_metadata(self) -> "OAuthMetadata | None":
@@ -534,10 +525,7 @@ class HermesTokenStorage:
     def restore(self, snapshot: dict[str, bytes], *, only_if_absent: bool = False) -> None:
         """Revert to a snapshot without overwriting a concurrent successful write."""
         if only_if_absent and any(path.exists() for path in self._state_paths()):
-            logger.info(
-                "Skipping OAuth rollback for %s because newer state exists",
-                self._server_name,
-            )
+            logger.info("Skipping OAuth rollback for %s because newer state exists", self._server_name)
             return
         self.remove()
         if not snapshot:
@@ -545,9 +533,8 @@ class HermesTokenStorage:
         token_dir = _get_token_dir(self._hermes_home)
         token_dir.mkdir(parents=True, exist_ok=True)
         for fname, data in snapshot.items():
-            path = token_dir / fname
             try:
-                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+                fd = os.open(str(token_dir / fname), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
                 with os.fdopen(fd, "wb") as fh:
                     fh.write(data)
             except OSError as exc:
@@ -627,17 +614,14 @@ def _make_callback_handler() -> tuple[type, dict]:
         def do_GET(self) -> None:  # noqa: N802
             parsed = _parse_redirect_query(urlparse(self.path).query)
             _fill_result(result, parsed)
-            body = (
-                "<html><body><h2>Authorization Successful</h2>"
-                "<p>You can close this tab and return to Hermes.</p></body></html>"
-            ) if parsed["code"] else (
-                "<html><body><h2>Authorization Failed</h2>"
-                f"<p>Error: {parsed['error'] or 'unknown'}</p></body></html>"
-            )
+            if parsed["code"]:
+                body = "<h2>Authorization Successful</h2><p>You can close this tab and return to Hermes.</p>"
+            else:
+                body = f"<h2>Authorization Failed</h2><p>Error: {parsed['error'] or 'unknown'}</p>"
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(body.encode())
+            self.wfile.write(f"<html><body>{body}</body></html>".encode())
 
         def log_message(self, fmt: str, *args: Any) -> None:
             logger.debug("OAuth callback: %s", fmt % args)
@@ -674,10 +658,8 @@ def _paste_callback_reader(result: dict) -> None:
 
     # Full URL or "?code=...": take everything after the first "?".
     query = line.split("?", 1)[1] if "?" in line else line
-    if query.startswith("?"):
-        query = query[1:]
     try:
-        parsed = _parse_redirect_query(query)
+        parsed = _parse_redirect_query(query.removeprefix("?"))
     except (ValueError, TypeError):
         print("  Could not parse pasted input as an OAuth redirect — ignoring.", file=sys.stderr)
         return
@@ -693,6 +675,28 @@ def _paste_callback_reader(result: dict) -> None:
 
 # -- Async redirect + callback handlers for OAuthClientProvider --------------
 
+_SSH_HINT_PROXY = (
+    "  Remote session detected. After you authorize, the provider redirects to\n"
+    "    {redirect_uri}\n"
+    "  which forwards to the callback listener on this machine — no SSH tunnel needed.\n"
+)
+_SSH_HINT_LOOPBACK = (
+    "  Remote session detected. After you authorize, the provider redirects to\n"
+    "    http://127.0.0.1:{port}/callback\n"
+    "  which only the listener on THIS machine can receive. Two options:\n"
+    "\n"
+    "    1. Easiest — when your browser shows a connection error after\n"
+    "       authorizing, copy the full URL from the address bar and paste\n"
+    "       it at the prompt below. The pasted ``code=...&state=...`` is\n"
+    "       enough to complete the flow.\n"
+    "\n"
+    "    2. Or forward the port first in a separate terminal:\n"
+    "         ssh -N -L {port}:127.0.0.1:{port} <user>@<this-host>\n"
+    "       then open the URL above and let it redirect normally.\n"
+    "\n"
+    "  See: https://hermes-agent.nousresearch.com/docs/guides/oauth-over-ssh\n"
+)
+
 
 def _print_ssh_hint(port: int, redirect_uri: str | None) -> None:
     """Remote-session guidance printed under the authorization URL.
@@ -703,30 +707,9 @@ def _print_ssh_hint(port: int, redirect_uri: str | None) -> None:
     the user must paste the redirect URL back or SSH-forward the port.
     """
     if redirect_uri:
-        print(
-            f"  Remote session detected. After you authorize, the provider redirects to\n"
-            f"    {redirect_uri}\n"
-            f"  which forwards to the callback listener on this machine — no SSH tunnel needed.\n",
-            file=sys.stderr,
-        )
+        print(_SSH_HINT_PROXY.format(redirect_uri=redirect_uri), file=sys.stderr)
     elif port:
-        print(
-            f"  Remote session detected. After you authorize, the provider redirects to\n"
-            f"    http://127.0.0.1:{port}/callback\n"
-            f"  which only the listener on THIS machine can receive. Two options:\n"
-            f"\n"
-            f"    1. Easiest — when your browser shows a connection error after\n"
-            f"       authorizing, copy the full URL from the address bar and paste\n"
-            f"       it at the prompt below. The pasted ``code=...&state=...`` is\n"
-            f"       enough to complete the flow.\n"
-            f"\n"
-            f"    2. Or forward the port first in a separate terminal:\n"
-            f"         ssh -N -L {port}:127.0.0.1:{port} <user>@<this-host>\n"
-            f"       then open the URL above and let it redirect normally.\n"
-            f"\n"
-            f"  See: https://hermes-agent.nousresearch.com/docs/guides/oauth-over-ssh\n",
-            file=sys.stderr,
-        )
+        print(_SSH_HINT_LOOPBACK.format(port=port), file=sys.stderr)
 
 
 def _announce_authorization_url(authorization_url: str, port: int, redirect_uri: str | None) -> None:
@@ -741,16 +724,14 @@ def _announce_authorization_url(authorization_url: str, port: int, redirect_uri:
         _print_ssh_hint(port, redirect_uri)
 
     if not _can_open_browser():
-        print("  (Headless environment detected — open the URL manually.)\n", file=sys.stderr)
-        return
-    try:
-        opened = webbrowser.open(authorization_url)
-    except Exception:
-        opened = False
-    if opened:
-        print("  (Browser opened automatically.)\n", file=sys.stderr)
+        note = "Headless environment detected — open the URL manually."
     else:
-        print("  (Could not open browser — please open the URL manually.)\n", file=sys.stderr)
+        try:
+            opened = webbrowser.open(authorization_url)
+        except Exception:
+            opened = False
+        note = "Browser opened automatically." if opened else "Could not open browser — please open the URL manually."
+    print(f"  ({note})\n", file=sys.stderr)
 
 
 def _make_redirect_handler(port: int, redirect_uri: str | None = None):
@@ -898,21 +879,20 @@ HermesOAuthClientProvider: Any = None
 
 
 def _get_hermes_oauth_provider_class() -> type | None:
+    """Build (once) and cache ``HermesOAuthClientProvider``; None without the SDK."""
     global HermesOAuthClientProvider
-    if HermesOAuthClientProvider is not None:
-        return HermesOAuthClientProvider
-    if not _ensure_sdk_loaded():
-        return None
-    from tools.mcp_oauth_provider import HermesProviderMixin
+    if HermesOAuthClientProvider is None and _ensure_sdk_loaded():
+        from tools.mcp_oauth_provider import HermesProviderMixin
 
-    class _HermesOAuthClientProvider(HermesProviderMixin, OAuthClientProvider):
-        """SDK provider plus Hermes' token-endpoint fixes (see ``HermesProviderMixin``)."""
-
-        _hermes_logger = logger
-
-    _HermesOAuthClientProvider.__name__ = "HermesOAuthClientProvider"
-    _HermesOAuthClientProvider.__qualname__ = "HermesOAuthClientProvider"
-    HermesOAuthClientProvider = _HermesOAuthClientProvider
+        HermesOAuthClientProvider = type(
+            "HermesOAuthClientProvider",
+            (HermesProviderMixin, OAuthClientProvider),
+            {
+                "__doc__": "SDK provider plus Hermes' token-endpoint fixes (see ``HermesProviderMixin``).",
+                "__module__": __name__,
+                "_hermes_logger": logger,
+            },
+        )
     return HermesOAuthClientProvider
 
 
@@ -1018,52 +998,42 @@ def _server_declined_cimd(storage: "HermesTokenStorage | None") -> bool:
         metadata = storage.load_oauth_metadata()
     except (AttributeError, TypeError, ValueError):
         return False
-    if metadata is None:
-        return False
-    return getattr(metadata, "client_id_metadata_document_supported", None) is not True
+    return metadata is not None and getattr(metadata, "client_id_metadata_document_supported", None) is not True
 
 
 def _maybe_use_cimd(cfg: dict, storage: "HermesTokenStorage | None" = None) -> "tuple[str, int] | None":
     """Return ``(client_id URL, pinned callback port)``, or None to use DCR.
 
-    Every early return is a case where the redirect URI Hermes would send is
-    not one the document declares, where the client identity is already
+    Every ineligibility case below is one where the redirect URI Hermes would
+    send is not one the document declares, where the client identity is already
     settled, or where the server is known not to want a document — passing a
     metadata URL anyway would make the authorization server reject the flow.
     """
-    if cfg.get("cimd") is False:
-        return None
     url = cfg.get("client_metadata_url") or _CIMD_CLIENT_METADATA_URL
-    if not _is_valid_cimd_url(url):
-        return None
-    # A pinned client is the user's explicit choice; a secret means a
-    # confidential client, which the document forbids.
-    if cfg.get("client_id") or cfg.get("client_secret"):
-        return None
-    # The document supplies name and auth method; a caller setting either asks
-    # for an identity CIMD cannot present (Figma's DCR name allowlist, e.g.).
-    if cfg.get("client_name") or (cfg.get("token_endpoint_auth_method") or "none") != "none":
-        return None
-    # Dashboard/desktop flows redirect to a deployment-specific server URL
-    # that can never appear in a static document.
-    if get_dashboard_oauth_flow() is not None:
-        return None
-    if cfg.get("redirect_uri") or cfg.get("redirect_port"):
-        return None
-    if (cfg.get("redirect_host") or "127.0.0.1") not in _CIMD_REDIRECT_HOSTS:
-        return None
-    # An existing registration is bound to its redirect URI; swapping in a
-    # CIMD client_id now would invalidate stored tokens.
-    if _cached_client_info(storage) is not None:
-        return None
-    if storage is not None and storage.cimd_rejected():
-        return None
-    if _server_declined_cimd(storage):
+    ineligible = (
+        cfg.get("cimd") is False
+        or not _is_valid_cimd_url(url)
+        # A pinned client is the user's explicit choice; a secret means a
+        # confidential client, which the document forbids.
+        or cfg.get("client_id") or cfg.get("client_secret")
+        # The document supplies name and auth method; a caller setting either
+        # asks for an identity CIMD cannot present (Figma's DCR name allowlist).
+        or cfg.get("client_name") or (cfg.get("token_endpoint_auth_method") or "none") != "none"
+        # Dashboard/desktop flows redirect to a deployment-specific server URL
+        # that can never appear in a static document.
+        or get_dashboard_oauth_flow() is not None
+        or cfg.get("redirect_uri") or cfg.get("redirect_port")
+        or (cfg.get("redirect_host") or "127.0.0.1") not in _CIMD_REDIRECT_HOSTS
+        # An existing registration is bound to its redirect URI; swapping in a
+        # CIMD client_id now would invalidate stored tokens.
+        or _cached_client_info(storage) is not None
+        or (storage is not None and storage.cimd_rejected())
+        or _server_declined_cimd(storage)
+    )
+    if ineligible:
         return None
     port = _pick_cimd_port()
-    if port is None:
-        return None
-    return url, port
+    return None if port is None else (url, port)
 
 
 def cimd_provider_kwargs(cfg: dict) -> dict[str, Any]:
@@ -1231,13 +1201,10 @@ def _invalidate_tokens_on_client_change(
     matching identity is a no-op.
     """
     existing = _read_json(storage._client_info_path())
-    if not isinstance(existing, dict):
-        return
-    old_client_id = existing.get("client_id")
+    old_client_id = existing.get("client_id") if isinstance(existing, dict) else None
     if not old_client_id:
         return
-    old_client_secret = existing.get("client_secret") or None
-    if old_client_id == new_client_id and old_client_secret == (new_client_secret or None):
+    if old_client_id == new_client_id and (existing.get("client_secret") or None) == (new_client_secret or None):
         return
     removed = False
     for path in (storage._tokens_path(), storage._meta_path()):
@@ -1297,9 +1264,7 @@ def humanize_oauth_registration_error(
     if "403" not in msg and "forbidden" not in lowered:
         return None
     looks_like_registration = (
-        "regist" in lowered
-        or "dcr" in lowered
-        or "dynamic client" in lowered
+        any(k in lowered for k in ("regist", "dcr", "dynamic client"))
         or lowered.strip() in {"forbidden", "403 forbidden", "http 403: forbidden"}
         or ("403" in msg and "forbidden" in lowered)
     )
@@ -1334,9 +1299,7 @@ def build_oauth_auth(server_name: str, server_url: str, oauth_config: dict | Non
     config-time, runtime, and reconnect paths. Returns None if the MCP SDK lacks
     OAuth support.
     """
-    if not _OAUTH_AVAILABLE or (
-        OAuthClientProvider is None and not _ensure_sdk_loaded()
-    ):
+    if not _OAUTH_AVAILABLE or (OAuthClientProvider is None and not _ensure_sdk_loaded()):
         logger.warning(
             "MCP OAuth requested for '%s' but SDK auth types are not available. "
             "Install with: pip install 'mcp>=1.26.0'",
@@ -1359,9 +1322,6 @@ def build_oauth_auth(server_name: str, server_url: str, oauth_config: dict | Non
     kwargs = build_provider_kwargs(cfg, storage, ssh_proxy_hint=True)
     provider_class = _get_hermes_oauth_provider_class()
     if provider_class is None:
-        logger.warning(
-            "MCP OAuth requested for '%s' but the provider class is unavailable",
-            server_name,
-        )
+        logger.warning("MCP OAuth requested for '%s' but the provider class is unavailable", server_name)
         return None
     return provider_class(server_url=server_url, **kwargs)
