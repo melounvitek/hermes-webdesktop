@@ -5636,6 +5636,147 @@ def _normalize_resolved_model(model_name: Optional[str], provider: str) -> Optio
         return model_name
 
 
+def _named_custom_api_key(custom_entry: Dict[str, Any], provider: str, custom_base: str) -> Any:
+    """Credential for a named custom provider: inline api_key → key_env → key_cmd → credential pool → placeholder.
+
+    Aux resolves named custom providers here, not via _resolve_named_custom_runtime,
+    so key_cmd must be honoured at the same precedence or every aux call 401s.
+    """
+    custom_key: Any = (custom_entry.get("api_key") or "").strip()
+    custom_key_env = (custom_entry.get("key_env") or custom_entry.get("api_key_env") or "").strip()
+    if not custom_key and custom_key_env:
+        custom_key = _scoped_key_env(custom_key_env)
+    custom_key_cmd = str(custom_entry.get("key_cmd", "") or "").strip()
+    if custom_key_cmd:
+        from agent.command_token_source import build_command_token_provider
+        custom_key = build_command_token_provider(
+            custom_key_cmd, custom_entry.get("name") or provider
+        ) or custom_key
+    if not custom_key:
+        try:
+            from agent.credential_pool import custom_provider_pool_key_candidates
+
+            pool_name = custom_entry.get("provider_key") or custom_entry.get("name") or provider
+            for pool_key in custom_provider_pool_key_candidates(custom_base, pool_name):
+                try:
+                    pool = load_pool(pool_key)
+                except Exception:
+                    continue
+                if not pool.has_credentials():
+                    continue
+                pool_entry = pool.select()
+                if pool_entry is None:
+                    continue
+                pool_api_key = (
+                    getattr(pool_entry, "runtime_api_key", None)
+                    or getattr(pool_entry, "access_token", "")
+                    or ""
+                )
+                if str(pool_api_key).strip():
+                    custom_key = str(pool_api_key).strip()
+                    break
+        except Exception:
+            pass
+    return custom_key or "no-key-required"
+
+
+def _build_bedrock_client(provider: str, model: Optional[str], *, raw_codex: bool) -> Tuple[Optional[Any], Optional[str]]:
+    """AWS Bedrock: Claude → Anthropic Bedrock SDK (prompt caching, thinking); OpenAI models
+    (GPT-5.5/5.6) → Bedrock Mantle's OpenAI Responses endpoint; everything else → Converse API."""
+    try:
+        from agent.bedrock_adapter import (
+            has_aws_credentials,
+            is_anthropic_bedrock_model,
+            resolve_bedrock_runtime_region,
+            is_openai_bedrock_model,
+            bedrock_openai_base_url,
+            resolve_bedrock_bearer_token,
+            configure_bedrock_openai_client_kwargs,
+        )
+        from agent.anthropic_adapter import build_anthropic_bedrock_client
+    except ImportError:
+        logger.warning("resolve_provider_client: bedrock requested but "
+                       "boto3, httpx/openai, or anthropic SDK not installed")
+        return None, None
+
+    if not has_aws_credentials():
+        logger.debug("resolve_provider_client: bedrock requested but "
+                     "no AWS credentials found")
+        return None, None
+
+    # Region must match the main runtime's resolution (bedrock.region in config first, then
+    # env/profile) so aux calls never leave the primary runtime's configured region.
+    region = resolve_bedrock_runtime_region()
+    default_model = "anthropic.claude-haiku-4-5-20251001-v1:0"
+    final_model = _normalize_resolved_model(model or default_model, provider) or default_model
+
+    if is_openai_bedrock_model(final_model):
+        # Module-level lazy ``OpenAI`` proxy on purpose so tests can patch("agent.auxiliary_client.OpenAI").
+        client_kwargs: Dict[str, Any] = {
+            "api_key": resolve_bedrock_bearer_token() or "aws-sdk",
+            "base_url": bedrock_openai_base_url(region),
+        }
+        configure_bedrock_openai_client_kwargs(client_kwargs)
+        client = OpenAI(**client_kwargs)
+        logger.debug("resolve_provider_client: bedrock-openai (%s, %s)", final_model, region)
+        if raw_codex:
+            return client, final_model
+        return CodexAuxiliaryClient(client, final_model), final_model
+
+    base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
+    if is_anthropic_bedrock_model(final_model):
+        try:
+            real_client = build_anthropic_bedrock_client(region)
+        except ImportError as exc:
+            logger.warning("resolve_provider_client: cannot create Bedrock "
+                           "client: %s", exc)
+            return None, None
+        client = AnthropicAuxiliaryClient(
+            real_client, final_model, api_key="aws-sdk",
+            base_url=base_url,
+        )
+        logger.debug("resolve_provider_client: bedrock anthropic (%s, %s)",
+                     final_model, region)
+    else:
+        client = BedrockAuxiliaryClient(region, final_model)
+        logger.debug("resolve_provider_client: bedrock converse (%s, %s)",
+                     final_model, region)
+    return client, final_model
+
+
+def _build_vertex_client(provider: str, model: Optional[str]) -> Tuple[Optional[Any], Optional[str]]:
+    """Google Vertex AI: Gemini via the OpenAI-compatible endpoint with an OAuth2 bearer (standard OpenAI client)."""
+    try:
+        from agent.vertex_adapter import get_vertex_config, has_vertex_credentials
+    except ImportError:
+        logger.warning("resolve_provider_client: vertex requested but "
+                       "google-auth not installed")
+        return None, None
+
+    if not has_vertex_credentials():
+        logger.debug("resolve_provider_client: vertex requested but "
+                     "no GCP credentials found")
+        return None, None
+
+    token, base_url = get_vertex_config()
+    if not token or not base_url:
+        logger.warning("resolve_provider_client: vertex requested but "
+                       "could not mint token / resolve project")
+        return None, None
+
+    final_model = _normalize_resolved_model(model or "google/gemini-3-flash-preview", provider)
+    try:
+        # Aliased import: a bare `from openai import OpenAI` would shadow the module-level lazy proxy.
+        from openai import OpenAI as _VertexOpenAI
+        client = _VertexOpenAI(api_key=token, base_url=base_url)
+    except Exception as exc:
+        logger.warning("resolve_provider_client: cannot create Vertex "
+                       "client: %s", exc)
+        return None, None
+    logger.debug("resolve_provider_client: vertex (%s)", final_model)
+    return client, final_model
+
+
 def resolve_provider_client(
     provider: str,
     model: str = None,
@@ -5919,53 +6060,7 @@ def resolve_provider_client(
             custom_entry = _get_named_custom_provider(provider)
         if custom_entry:
             custom_base = (custom_entry.get("base_url") or "").strip()
-            custom_key = (custom_entry.get("api_key") or "").strip()
-            custom_key_env = (custom_entry.get("key_env") or custom_entry.get("api_key_env") or "").strip()
-            if not custom_key and custom_key_env:
-                custom_key = _scoped_key_env(custom_key_env)
-            # Aux resolves named custom providers here, not via _resolve_named_custom_runtime,
-            # so key_cmd must be honoured at the same precedence or every aux call 401s.
-            custom_key_cmd = str(custom_entry.get("key_cmd", "") or "").strip()
-            if custom_key_cmd:
-                from agent.command_token_source import build_command_token_provider
-                custom_key = build_command_token_provider(
-                    custom_key_cmd, custom_entry.get("name") or provider
-                ) or custom_key
-            if not custom_key:
-                try:
-                    from agent.credential_pool import (
-                        custom_provider_pool_key_candidates,
-                        load_pool,
-                    )
-
-                    pool_name = (
-                        custom_entry.get("provider_key")
-                        or custom_entry.get("name")
-                        or provider
-                    )
-                    for pool_key in custom_provider_pool_key_candidates(
-                        custom_base, pool_name
-                    ):
-                        try:
-                            pool = load_pool(pool_key)
-                        except Exception:
-                            continue
-                        if not pool.has_credentials():
-                            continue
-                        pool_entry = pool.select()
-                        if pool_entry is None:
-                            continue
-                        pool_api_key = (
-                            getattr(pool_entry, "runtime_api_key", None)
-                            or getattr(pool_entry, "access_token", "")
-                            or ""
-                        )
-                        if str(pool_api_key).strip():
-                            custom_key = str(pool_api_key).strip()
-                            break
-                except Exception:
-                    pass
-            custom_key = custom_key or "no-key-required"
+            custom_key = _named_custom_api_key(custom_entry, provider, custom_base)
             if custom_key == "no-key-required":
                 logger.warning(
                     "resolve_provider_client: named custom provider %r has no resolvable "
@@ -6225,109 +6320,15 @@ def resolve_provider_client(
         return None, None
 
     elif pconfig.auth_type == "vertex":
-        # Google Vertex AI: Gemini via the OpenAI-compatible endpoint with an OAuth2 bearer
-        # token (not a static key) — a standard OpenAI client, no message translation needed.
-        try:
-            from agent.vertex_adapter import get_vertex_config, has_vertex_credentials
-        except ImportError:
-            logger.warning("resolve_provider_client: vertex requested but "
-                           "google-auth not installed")
+        client, final_model = _build_vertex_client(provider, model)
+        if client is None:
             return None, None
-
-        if not has_vertex_credentials():
-            logger.debug("resolve_provider_client: vertex requested but "
-                         "no GCP credentials found")
-            return None, None
-
-        token, base_url = get_vertex_config()
-        if not token or not base_url:
-            logger.warning("resolve_provider_client: vertex requested but "
-                           "could not mint token / resolve project")
-            return None, None
-
-        default_model = "google/gemini-3-flash-preview"
-        final_model = _normalize_resolved_model(model or default_model, provider)
-        try:
-            # Alias the import: a bare `from openai import OpenAI` would make `OpenAI` function-local,
-            # shadowing the module-level lazy proxy for every other branch (Bedrock, test patches).
-            from openai import OpenAI as _VertexOpenAI
-            client = _VertexOpenAI(api_key=token, base_url=base_url)
-        except Exception as exc:
-            logger.warning("resolve_provider_client: cannot create Vertex "
-                           "client: %s", exc)
-            return None, None
-        logger.debug("resolve_provider_client: vertex (%s)", final_model)
         return _route(client, final_model)
 
     elif pconfig.auth_type == "aws_sdk":
-        # AWS SDK providers (Bedrock) — Claude models use the Anthropic Bedrock
-        # SDK (prompt caching, thinking); OpenAI models (GPT-5.5/5.6) use
-        # Bedrock Mantle's OpenAI Responses endpoint; all other models use the
-        # Converse API.
-        try:
-            from agent.bedrock_adapter import (
-                has_aws_credentials,
-                is_anthropic_bedrock_model,
-                resolve_bedrock_runtime_region,
-                is_openai_bedrock_model,
-                bedrock_openai_base_url,
-                resolve_bedrock_bearer_token,
-                configure_bedrock_openai_client_kwargs,
-            )
-            from agent.anthropic_adapter import build_anthropic_bedrock_client
-        except ImportError:
-            logger.warning("resolve_provider_client: bedrock requested but "
-                           "boto3, httpx/openai, or anthropic SDK not installed")
+        client, final_model = _build_bedrock_client(provider, model, raw_codex=raw_codex)
+        if client is None:
             return None, None
-
-        if not has_aws_credentials():
-            logger.debug("resolve_provider_client: bedrock requested but "
-                         "no AWS credentials found")
-            return None, None
-
-        # Region must match the main runtime's resolution (bedrock.region in config first, then
-        # env/profile) so aux calls never leave the primary runtime's configured region.
-        region = resolve_bedrock_runtime_region()
-        default_model = "anthropic.claude-haiku-4-5-20251001-v1:0"
-        final_model = _normalize_resolved_model(model or default_model, provider) or default_model
-
-        if is_openai_bedrock_model(final_model):
-            # No local `from openai import OpenAI` here — the module-level lazy proxy must stay
-            # visible so tests can patch("agent.auxiliary_client.OpenAI", ...).
-            bearer = resolve_bedrock_bearer_token()
-            mantle_base_url = bedrock_openai_base_url(region)
-            client_kwargs: Dict[str, Any] = {
-                "api_key": bearer or "aws-sdk",
-                "base_url": mantle_base_url,
-            }
-            configure_bedrock_openai_client_kwargs(client_kwargs)
-            client = OpenAI(**client_kwargs)
-            logger.debug("resolve_provider_client: bedrock-openai (%s, %s)", final_model, region)
-            if raw_codex:
-                return _route(client, final_model)
-            wrapped = CodexAuxiliaryClient(client, final_model)
-            return _route(wrapped, final_model)
-
-        base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
-
-        if is_anthropic_bedrock_model(final_model):
-            try:
-                real_client = build_anthropic_bedrock_client(region)
-            except ImportError as exc:
-                logger.warning("resolve_provider_client: cannot create Bedrock "
-                               "client: %s", exc)
-                return None, None
-            client = AnthropicAuxiliaryClient(
-                real_client, final_model, api_key="aws-sdk",
-                base_url=base_url,
-            )
-            logger.debug("resolve_provider_client: bedrock anthropic (%s, %s)",
-                         final_model, region)
-        else:
-            client = BedrockAuxiliaryClient(region, final_model)
-            logger.debug("resolve_provider_client: bedrock converse (%s, %s)",
-                         final_model, region)
-
         return _route(client, final_model)
 
     elif pconfig.auth_type in {"oauth_device_code", "oauth_external"}:
