@@ -15,6 +15,9 @@ from fastapi import HTTPException, Request
 from hermes_cli import __version__
 from hermes_cli.config import format_docker_update_message, recommended_update_command_for_method
 from typing import Any, Dict, List, Optional
+from pathlib import Path
+import re
+import time
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
@@ -22,13 +25,125 @@ status_router = APIRouter()
 
 # web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
 _dashboard_local_update_managed_externally = late("_dashboard_local_update_managed_externally")
-_durable_completed_update_action_id = late("_durable_completed_update_action_id")
-_record_completed_action = late("_record_completed_action")
 _spawn_gateway_restart = late("_spawn_gateway_restart")
 _spawn_hermes_action = late("_spawn_hermes_action")
-_tail_lines = late("_tail_lines")
 detect_install_method = late("detect_install_method")
 get_hermes_home = late("get_hermes_home")
+
+
+_ACTION_LOG_TAIL_MAX_BYTES = 256 * 1024
+
+
+_ACTION_LOG_TAIL_INITIAL_CHUNK_BYTES = 8 * 1024
+
+
+_ACTION_LOG_TAIL_MAX_CHUNK_BYTES = 64 * 1024
+
+
+_UPDATE_ACTION_COMPLETED_RE = re.compile(
+    r"^=== hermes-update completed ([0-9a-f]{32}) ===$"
+)
+
+
+def _record_completed_action(name: str, message: str, exit_code: int = 1) -> None:
+    """Record a non-spawned action result and write it to the action log."""
+    from hermes_cli.web_server import (
+        _ACTION_COMMANDS,
+        _ACTION_IDS,
+        _ACTION_LOG_DIR,
+        _ACTION_LOG_FILES,
+        _ACTION_PROCS,
+        _ACTION_RESULTS,
+    )
+    log_file_name = _ACTION_LOG_FILES[name]
+    _ACTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _ACTION_LOG_DIR / log_file_name
+    with open(log_path, "ab", buffering=0) as log_file:
+        log_file.write(
+            f"\n=== {name} completed {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode()
+        )
+        log_file.write(message.encode("utf-8", errors="replace"))
+        if not message.endswith("\n"):
+            log_file.write(b"\n")
+    _ACTION_PROCS.pop(name, None)
+    _ACTION_COMMANDS.pop(name, None)
+    _ACTION_IDS.pop(name, None)
+    _ACTION_RESULTS[name] = {"exit_code": exit_code, "pid": None}
+
+
+def _tail_lines(path: Path, n: int) -> List[str]:
+    """Return the last ``n`` lines of ``path`` without loading huge logs."""
+    if n <= 0 or not path.exists():
+        return []
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    if size <= 0:
+        return []
+
+    min_offset = max(0, size - _ACTION_LOG_TAIL_MAX_BYTES)
+    offset = size
+    chunk_size = _ACTION_LOG_TAIL_INITIAL_CHUNK_BYTES
+    newline_count = 0
+    chunks: List[bytes] = []
+    drop_partial_first_line = False
+
+    try:
+        with path.open("rb") as handle:
+            while offset > min_offset and newline_count <= n:
+                read_size = min(chunk_size, offset - min_offset)
+                offset -= read_size
+                handle.seek(offset)
+                chunk = handle.read(read_size)
+                chunks.append(chunk)
+                newline_count += chunk.count(b"\n")
+                chunk_size = min(
+                    chunk_size * 2,
+                    _ACTION_LOG_TAIL_MAX_CHUNK_BYTES,
+                )
+            if offset > 0:
+                handle.seek(offset - 1)
+                drop_partial_first_line = handle.read(1) != b"\n"
+    except OSError:
+        return []
+
+    lines = (
+        b"".join(reversed(chunks))
+        .decode("utf-8", errors="replace")
+        .splitlines()
+    )
+    if drop_partial_first_line and lines:
+        lines = lines[1:]
+    return lines[-n:]
+
+
+def _durable_completed_update_action_id(lines: List[str]) -> Optional[str]:
+    """Recover the latest successful update identity from ``update.log``.
+
+    The dashboard action process can restart the dashboard that spawned it.
+    That loses the in-memory ``Popen``/result registries while the durable
+    update log survives.  Only accept a completion marker that occurs after
+    the latest update-start marker, so a stale success cannot mask a newer
+    failed attempt.
+    """
+    last_start = -1
+    last_completed = -1
+    completed_action_id: Optional[str] = None
+
+    for index, line in enumerate(lines):
+        if line.startswith("=== hermes update started "):
+            last_start = index
+
+        match = _UPDATE_ACTION_COMPLETED_RE.fullmatch(line.strip())
+        if match:
+            last_completed = index
+            completed_action_id = match.group(1)
+
+    if completed_action_id and last_completed > last_start:
+        return completed_action_id
+
+    return None
 
 
 @router.post("/api/gateway/restart")

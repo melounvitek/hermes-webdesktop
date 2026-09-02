@@ -1,6 +1,7 @@
 """Git dashboard routes — thin executor-offloaded wrappers over ``web_git``
 (``_git_op`` / ``_git_path`` live in web_server, reached via the late seam)."""
 
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter
@@ -16,11 +17,36 @@ from hermes_cli.web_models import (
     GitWorktreeRemoveBody,
     GitBranchSwitchBody,
 )
+from fastapi import HTTPException
 
 router = APIRouter()
 
-_git_op = late("_git_op")
-_git_path = late("_git_path")
+# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+_fs_path = late("_fs_path")
+
+
+# ---------------------------------------------------------------------------
+# Git ops — the remote half of the desktop coding rail + review pane.
+#
+# The desktop runs these as Electron-local git on the user's machine; over a
+# remote gateway that's the wrong filesystem, so we mirror them here (same auth
+# gate + path hardening as /api/fs). Logic lives in ``hermes_cli.web_git``;
+# these are thin, executor-offloaded wrappers (git/gh can block).
+# ---------------------------------------------------------------------------
+
+
+async def _git_op(fn, *args):
+    """Run a (blocking) git op off the event loop; map a failed mutation to 400."""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, fn, *args)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "git operation failed")
+
+
+def _git_path(path: str) -> str:
+    return str(_fs_path(path))
+
 
 
 @router.get("/api/git/status")

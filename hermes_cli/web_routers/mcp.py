@@ -29,13 +29,13 @@ from hermes_cli.web_routers._common import (
     log as _log,
     scoped_to_thread,
 )
+import hashlib
+import re
+import time
 
 router = APIRouter()
 
 _config_profile_scope = late("_config_profile_scope")
-_gc_mcp_oauth_flows = late("_gc_mcp_oauth_flows")
-_mcp_install_action_name = late("_mcp_install_action_name")
-_mcp_oauth_callback_url = late("_mcp_oauth_callback_url")
 _mcp_server_summary = late("_mcp_server_summary")
 _normalize_mcp_server_create = late("_normalize_mcp_server_create")
 _require_token = late("_require_token")
@@ -45,8 +45,56 @@ save_config = late("save_config")
 save_env_value = late("save_env_value")
 
 _mcp_oauth_flows = LateState("_mcp_oauth_flows")
-_mcp_oauth_flows_lock = LateState("_mcp_oauth_flows_lock")
-_MAX_PENDING_MCP_OAUTH_FLOWS = LateState("_MAX_PENDING_MCP_OAUTH_FLOWS")
+
+
+_MCP_DASHBOARD_OAUTH_TTL = 15 * 60
+
+
+_mcp_oauth_flows_lock = threading.Lock()
+
+
+_MAX_PENDING_MCP_OAUTH_FLOWS = 8
+
+
+def _gc_mcp_oauth_flows() -> None:
+    cutoff = time.time() - _MCP_DASHBOARD_OAUTH_TTL
+    with _mcp_oauth_flows_lock:
+        stale = [
+            flow_id
+            for flow_id, flow in _mcp_oauth_flows.items()
+            if getattr(flow, "created_at", 0) < cutoff
+        ]
+        for flow_id in stale:
+            _mcp_oauth_flows.pop(flow_id, None)
+
+
+def _mcp_oauth_callback_url(request: Request, server_name: str) -> str:
+    """Build the externally reachable callback URL for a dashboard flow."""
+    from urllib.parse import urlparse, urlunparse
+
+    from hermes_cli.dashboard_auth.prefix import prefix_from_request, resolve_public_url
+
+    from urllib.parse import quote
+
+    suffix = f"/api/mcp/oauth/callback/{quote(server_name, safe='')}"
+    public_url = resolve_public_url()
+    if public_url:
+        return f"{public_url}{suffix}"
+    base = urlparse(str(request.base_url))
+    prefix = prefix_from_request(request)
+    return urlunparse(base._replace(path=f"{prefix}{suffix}", params="", query="", fragment=""))
+
+
+def _mcp_install_action_name(name: str) -> str:
+    """Unique per-entry mcp-install action name (+ registered log file), so a
+    re-click or a second catalog install doesn't overwrite the first's tracked
+    process/log while its git clone is still running."""
+    from hermes_cli.web_server import _ACTION_LOG_FILES
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48] or "server"
+    digest = hashlib.sha1(name.encode()).hexdigest()[:8]
+    action = f"mcp-install-{slug}-{digest}"
+    _ACTION_LOG_FILES.setdefault(action, f"action-{action}.log")
+    return action
 
 
 @router.get("/api/mcp/servers")

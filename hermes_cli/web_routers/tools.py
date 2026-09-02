@@ -6,12 +6,14 @@ monkeypatching on web_server stays authoritative.
 """
 
 import asyncio
+import shutil
+import subprocess
 import sys
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 
-from hermes_cli.web_deps import late, LateState
+from hermes_cli.web_deps import late
 from hermes_cli.web_models import (
     TerminalBackendSelect,
     ToolsetEnvUpdate,
@@ -33,18 +35,209 @@ from hermes_cli.web_routers._common import (
 
 router = APIRouter()
 
-_find_toolset_provider_row = late("_find_toolset_provider_row")
-_probe_terminal_backend = late("_probe_terminal_backend")
-_resolve_toolset_model_plugin = late("_resolve_toolset_model_plugin")
-_toolset_model_catalog = late("_toolset_model_catalog")
 load_config = late("load_config")
 save_config = late("save_config")
 run_in_threadpool = late("run_in_threadpool")
-_MODEL_CATALOG_TOOLSETS = LateState("_MODEL_CATALOG_TOOLSETS")
+_plugin_terminal_backend_rows = late("_plugin_terminal_backend_rows")
+
+
+def _terminal_cfg_value(terminal_cfg: dict, key: str, env_var: str) -> str:
+    """Read a terminal.* setting from config.yaml, falling back to its env var."""
+    value = terminal_cfg.get(key)
+    if value is not None and str(value).strip():
+        return str(value).strip()
+    try:
+        from hermes_cli.config import get_env_value
+
+        return (get_env_value(env_var) or "").strip()
+    except Exception:
+        return ""
+
+
+def _terminal_backend_rows() -> List[Dict[str, str]]:
+    """Built-in picker rows plus plugin-registered backends (request time).
+
+    Computed per request (mirrors ``_schema_with_dynamic_provider_options``)
+    so a plugin installed after server start still shows up.
+    """
+    from hermes_cli.web_server import _TERMINAL_BACKENDS
+    return [*_TERMINAL_BACKENDS, *_plugin_terminal_backend_rows()]
+
+
+def _probe_docker_backend() -> tuple:
+    if not shutil.which("docker"):
+        return (
+            "needs_setup",
+            "Docker CLI not found — install Docker Desktop or docker-ce.",
+        )
+    try:
+        proc = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2,
+        )
+        if proc.returncode == 0:
+            return ("ready", "")
+        return (
+            "needs_setup",
+            "Docker daemon not reachable — start Docker and retry.",
+        )
+    except subprocess.TimeoutExpired:
+        return ("needs_setup", "Docker daemon not responding (timed out).")
+    except Exception as exc:
+        return ("unavailable", f"Docker probe failed: {exc}")
+
+
+def _probe_singularity_backend() -> tuple:
+    if shutil.which("singularity") or shutil.which("apptainer"):
+        return ("ready", "")
+    return (
+        "needs_setup",
+        "Neither singularity nor apptainer found on PATH.",
+    )
+
+
+def _probe_ssh_backend(terminal_cfg: dict) -> tuple:
+    host = _terminal_cfg_value(terminal_cfg, "ssh_host", "TERMINAL_SSH_HOST")
+    user = _terminal_cfg_value(terminal_cfg, "ssh_user", "TERMINAL_SSH_USER")
+    missing = []
+    if not host:
+        missing.append("terminal.ssh_host")
+    if not user:
+        missing.append("terminal.ssh_user")
+    if missing:
+        return (
+            "needs_setup",
+            f"Set {' and '.join(missing)} in config.yaml (or the matching TERMINAL_SSH_* env vars).",
+        )
+    return ("ready", f"{user}@{host}")
+
+
+def _probe_modal_backend() -> tuple:
+    try:
+        from tools.tool_backend_helpers import has_direct_modal_credentials
+
+        if has_direct_modal_credentials():
+            return ("ready", "")
+    except Exception:
+        pass
+    try:
+        from hermes_cli.config import get_env_value
+
+        if get_env_value("MODAL_TOKEN_ID") and get_env_value("MODAL_TOKEN_SECRET"):
+            return ("ready", "")
+    except Exception:
+        pass
+    return (
+        "needs_setup",
+        "Modal credentials not found — set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET (or run `modal setup`).",
+    )
+
+
+def _probe_daytona_backend() -> tuple:
+    try:
+        from hermes_cli.config import get_env_value
+
+        if get_env_value("DAYTONA_API_KEY"):
+            return ("ready", "")
+    except Exception:
+        pass
+    return ("needs_setup", "Set DAYTONA_API_KEY to use the Daytona backend.")
 # Built-ins + plugin-registered backends, computed per request so a plugin
 # installed after server start still shows up.
-_terminal_backend_rows = late("_terminal_backend_rows")
-_terminal_backend_names = late("_terminal_backend_names")
+
+
+# Toolsets whose backends carry a selectable model catalog, mapped to the
+# config.yaml section their `model` key lives in. Mirrors the CLI's
+# post-selection model pickers (`_configure_imagegen_model_for_plugin` /
+# `_configure_videogen_model_for_plugin` in tools_config.py).
+_MODEL_CATALOG_TOOLSETS = {
+    "image_gen": "image_gen",
+    "video_gen": "video_gen",
+}
+
+
+def _resolve_toolset_model_plugin(ts_key: str, provider_row: dict) -> Optional[str]:
+    """Map a provider picker row to its model-catalog plugin name.
+
+    Plugin-backed rows carry ``image_gen_plugin_name`` / ``video_gen_plugin_name``;
+    the managed "Nous Subscription" image row instead carries the legacy
+    ``imagegen_backend: "fal"`` marker (same underlying FAL catalog).
+    """
+    if ts_key == "image_gen":
+        return provider_row.get("image_gen_plugin_name") or (
+            "fal" if provider_row.get("imagegen_backend") else None
+        )
+    if ts_key == "video_gen":
+        return provider_row.get("video_gen_plugin_name")
+    return None
+
+
+def _toolset_model_catalog(ts_key: str, plugin_name: str):
+    """Return ``(catalog_dict, default_model)`` for a toolset's plugin backend."""
+    from hermes_cli.tools_config import (
+        _plugin_image_gen_catalog,
+        _plugin_video_gen_catalog,
+    )
+
+    if ts_key == "image_gen":
+        return _plugin_image_gen_catalog(plugin_name)
+    return _plugin_video_gen_catalog(plugin_name)
+
+
+def _find_toolset_provider_row(ts_key: str, config: dict, provider: Optional[str]) -> Optional[dict]:
+    """Resolve a provider picker row by name, or the active row when omitted."""
+    from hermes_cli.tools_config import (
+        TOOL_CATEGORIES,
+        _is_provider_active,
+        _visible_providers,
+    )
+
+    cat = TOOL_CATEGORIES.get(ts_key)
+    if cat is None:
+        return None
+    rows = _visible_providers(cat, config, force_fresh=True)
+    if provider:
+        return next((p for p in rows if p.get("name") == provider), None)
+    return next(
+        (p for p in rows if _is_provider_active(p, config, force_fresh=True)), None
+    )
+
+
+def _terminal_backend_names() -> set:
+    """Valid ``terminal.backend`` values, including plugin backends."""
+    return {row["name"] for row in _terminal_backend_rows()}
+
+
+def _probe_terminal_backend(name: str, terminal_cfg: dict) -> tuple:
+    """Return ``(status, detail)`` for one backend. Never raises."""
+    try:
+        if name == "local":
+            return ("ready", "")
+        if name == "docker":
+            return _probe_docker_backend()
+        if name == "singularity":
+            return _probe_singularity_backend()
+        if name == "ssh":
+            return _probe_ssh_backend(terminal_cfg)
+        if name == "modal":
+            return _probe_modal_backend()
+        if name == "daytona":
+            return _probe_daytona_backend()
+        try:
+            from agent.terminal_env_registry import get_provider
+
+            provider = get_provider(name)
+            if provider is not None:
+                return provider.probe()
+        except Exception:
+            pass
+        return ("unavailable", f"Unknown backend: {name}")
+    except Exception as exc:  # pragma: no cover — belt-and-braces guard
+        return ("unavailable", f"Probe failed: {exc}")
 
 
 def _require_known_toolset(name: str) -> None:

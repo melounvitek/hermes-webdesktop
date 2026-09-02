@@ -7,6 +7,7 @@ late-binding seam so ``monkeypatch.setattr(web_server, ...)`` keeps working.
 
 import asyncio
 import functools
+import time
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -19,19 +20,13 @@ from hermes_cli.web_models import (
     AutomationBlueprintInstantiate,
 )
 from hermes_cli.web_routers._common import log as _log
+from typing import Any, Dict, List
+from pathlib import Path
 
 router = APIRouter()
 
 _run_cron_dashboard_io = late("_run_cron_dashboard_io")
-_list_cron_jobs_sync = late("_list_cron_jobs_sync")
-_get_cron_job_sync = late("_get_cron_job_sync")
-_list_cron_job_runs_sync = late("_list_cron_job_runs_sync")
 _create_cron_job_sync = late("_create_cron_job_sync")
-_update_cron_job_sync = late("_update_cron_job_sync")
-_pause_cron_job_sync = late("_pause_cron_job_sync")
-_resume_cron_job_sync = late("_resume_cron_job_sync")
-_trigger_cron_job_sync = late("_trigger_cron_job_sync")
-_delete_cron_job_sync = late("_delete_cron_job_sync")
 _find_cron_job_profile = late("_find_cron_job_profile")
 _fire_cron_job_for_profile = late("_fire_cron_job_for_profile")
 _forward_cron_fire_to_gateway = late("_forward_cron_fire_to_gateway")
@@ -41,6 +36,228 @@ _call_cron_for_profile = late("_call_cron_for_profile")
 _raise_if_cron_registration_error = late("_raise_if_cron_registration_error")
 load_config = late("load_config")
 cfg_get = late("cfg_get")
+_cron_profile_dicts = late("_cron_profile_dicts")
+_cron_profile_home = late("_cron_profile_home")
+_mutate_cron_for_profile = late("_mutate_cron_for_profile")
+_open_session_db_for_profile = late("_open_session_db_for_profile")
+_validate_dashboard_cron_context_from = late("_validate_dashboard_cron_context_from")
+_validate_dashboard_cron_effective_job = late("_validate_dashboard_cron_effective_job")
+_cron_optional_text = late("_cron_optional_text")
+_cron_string_list = late("_cron_string_list")
+_normalize_dashboard_cron_script = late("_normalize_dashboard_cron_script")
+
+
+def _normalize_dashboard_cron_updates(
+    updates: Dict[str, Any],
+    profile_home: Path,
+) -> Dict[str, Any]:
+    """Normalize dashboard JSON into cron.jobs.update_job's storage shape.
+
+    This intentionally stays in the dashboard adapter layer: cron/jobs.py is the
+    source of truth for scheduling behaviour; the dashboard only translates form
+    payloads into the shapes that existing core functions already accept.
+    """
+    normalized = dict(updates or {})
+
+    for key in ("model", "provider", "workdir"):
+        if key in normalized:
+            normalized[key] = _cron_optional_text(normalized[key])
+    if "script" in normalized:
+        normalized["script"] = _normalize_dashboard_cron_script(
+            normalized["script"],
+            profile_home,
+        )
+    if "base_url" in normalized:
+        normalized["base_url"] = _cron_optional_text(
+            normalized["base_url"], strip_trailing_slash=True
+        )
+    if "deliver" in normalized:
+        normalized["deliver"] = _cron_optional_text(normalized["deliver"]) or "local"
+    if "failure_deliver" in normalized:
+        # Same text normalization as deliver, but empty CLEARS the override
+        # (failures fall back to deliver) rather than coalescing to a target
+        # — the field is optional by design (NS-788).
+        normalized["failure_deliver"] = _cron_optional_text(
+            normalized["failure_deliver"]
+        )
+    if "context_from" in normalized:
+        normalized["context_from"] = _cron_string_list(normalized["context_from"])
+    if "enabled_toolsets" in normalized:
+        normalized["enabled_toolsets"] = _cron_string_list(normalized["enabled_toolsets"])
+    return normalized
+
+
+def _list_cron_jobs_sync(profile: str = "all"):
+    requested = (profile or "all").strip()
+    if requested.lower() != "all":
+        return _call_cron_for_profile(requested, "list_jobs", True)
+
+    jobs: List[Dict[str, Any]] = []
+    for item in _cron_profile_dicts():
+        name = str(item.get("name") or "")
+        if not name:
+            continue
+        try:
+            jobs.extend(_call_cron_for_profile(name, "list_jobs", True))
+        except Exception:
+            _log.exception("Failed to list cron jobs for profile %s", name)
+    return jobs
+
+
+def _get_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _call_cron_for_profile(selected, "get_job", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _list_cron_job_runs_sync(job_id: str, profile: Optional[str] = None, limit: int = 20):
+    """Run sessions produced by a cron job, newest first.
+
+    Cron runs are stored as ordinary sessions whose id is
+    ``cron_{job_id}_{timestamp}`` (see cron/scheduler.run_job). A job's history
+    is therefore every session whose id carries that prefix; ``source='cron'``
+    narrows it and the id prefix binds it to this job. Powers the run-history
+    list under each job in the desktop cron detail. Same row shape as
+    ``/api/sessions`` so the frontend can reuse SessionInfo.
+
+    Backed by ``SessionDB.list_cron_job_runs`` — a bounded ``[prefix, hi)``
+    id-range scan, not the compression-chain CTE used for the recents list,
+    so the cost scales with the requested window and not the (unbounded) total
+    cron history.
+    """
+    selected = profile or _find_cron_job_profile(job_id)
+    # job_id may be a human name; resolve to the canonical id used in run-session ids.
+    canonical = job_id
+    if selected:
+        job = _call_cron_for_profile(selected, "get_job", job_id)
+        if job and job.get("id"):
+            canonical = str(job["id"])
+
+    try:
+        limit_n = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        limit_n = 20
+
+    db = _open_session_db_for_profile(selected, read_only=True)
+    try:
+        runs = db.list_cron_job_runs(canonical, limit=limit_n, offset=0)
+        now = time.time()
+        for s in runs:
+            s["is_active"] = (
+                s.get("ended_at") is None
+                and (now - s.get("last_active", s.get("started_at", 0))) < 300
+            )
+            s["archived"] = bool(s.get("archived"))
+            if selected:
+                s["profile"] = selected
+        return {"runs": runs, "limit": limit_n}
+    finally:
+        db.close()
+
+
+def _update_cron_job_sync(job_id: str, body: CronJobUpdate, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        profile_name, profile_home = _cron_profile_home(selected)
+        existing = _call_cron_for_profile(profile_name, "get_job", job_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Job not found")
+        updates = _normalize_dashboard_cron_updates(
+            body.updates,
+            profile_home,
+        )
+        if "context_from" in updates:
+            _validate_dashboard_cron_context_from(
+                updates.get("context_from"),
+                profile_name,
+            )
+        execution_fields = {"prompt", "skill", "skills", "script", "no_agent"}
+        if execution_fields.intersection(updates):
+            effective = {**existing, **updates}
+            if "skills" in updates and "skill" not in updates:
+                effective["skill"] = None
+            _validate_dashboard_cron_effective_job(effective)
+        job = _mutate_cron_for_profile(profile_name, "update_job", job_id, updates)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _pause_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _mutate_cron_for_profile(selected, "pause_job", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _resume_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _mutate_cron_for_profile(selected, "resume_job", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _trigger_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _call_cron_for_profile(selected, "resolve_job_ref", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Do not expose the job as due before claiming it: the built-in ticker and
+    # external/manual fire paths share the same durable claim, so only one can
+    # execute this selected run even if they race across processes. Active jobs
+    # keep the legacy provider call shape; paused jobs need the explicit force
+    # flag to resume and claim atomically.
+    force = not job.get("enabled", True) or job.get("state") == "paused"
+    ran = _fire_cron_job_for_profile(selected, job["id"], force=force)
+    refreshed = _call_cron_for_profile(selected, "get_job", job["id"])
+    if refreshed and refreshed.get("last_run_at") != job.get("last_run_at"):
+        return refreshed
+    if not ran:
+        raise HTTPException(
+            status_code=409,
+            detail="Job is already running or was claimed by another scheduler",
+        )
+    if refreshed:
+        return refreshed
+    # A one-shot may remove itself after exhausting repeat=1. Keep the response
+    # shape compatible without inventing an outcome that is no longer present
+    # in the job store; authoritative list refresh removes the completed row.
+    return {
+        **job,
+        "enabled": False,
+        "state": "completed",
+    }
+
+
+def _delete_cron_job_sync(job_id: str, profile: Optional[str] = None):
+    selected = profile or _find_cron_job_profile(job_id)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        removed = _mutate_cron_for_profile(selected, "remove_job", job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"ok": True}
 
 # Retry-After hint (seconds) on retryable cron-fire 503s: sized to clear a
 # scale-to-zero wake or gateway restart so a scheduler that honors it spaces

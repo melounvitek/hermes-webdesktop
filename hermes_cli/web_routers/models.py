@@ -26,6 +26,16 @@ run_in_threadpool = late("run_in_threadpool")
 save_config = late("save_config")
 
 
+_EMPTY_MODEL_INFO: dict = {
+    "model": "",
+    "provider": "",
+    "auto_context_length": 0,
+    "config_context_length": 0,
+    "effective_context_length": 0,
+    "capabilities": {},
+}
+
+
 @router.get("/api/model/info")
 def get_model_info(profile: Optional[str] = None):
     """Return resolved model metadata for the currently configured model.
@@ -34,7 +44,6 @@ def get_model_info(profile: Optional[str] = None):
     frontend can display "Auto-detected: 200K" alongside the override field.
     Also returns model capabilities (vision, reasoning, tools) when available.
     """
-    from hermes_cli.web_server import _EMPTY_MODEL_INFO
     try:
         with _profile_scope(profile):
             cfg = load_config()

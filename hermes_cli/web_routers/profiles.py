@@ -70,18 +70,113 @@ router = APIRouter()
 # Late-bound web_server helpers (resolved at call time; cycle-safe,
 # monkeypatch-transparent).
 _cron_profile_home = late("_cron_profile_home")
-_disable_unselected_skills = late("_disable_unselected_skills")
 _fallback_profile_dicts = late("_fallback_profile_dicts")
 _hub_action_name = late("_hub_action_name")
 _open_session_db_at_path = late("_open_session_db_at_path")
-_profile_setup_command = late("_profile_setup_command")
-_profile_to_dict = late("_profile_to_dict")
 _resolve_profile_dir = late("_resolve_profile_dir")
 _spawn_hermes_action = late("_spawn_hermes_action")
 run_in_threadpool = late("run_in_threadpool")
 _strip_session_list_rows = late("_strip_session_list_rows")
 _write_profile_mcp_servers = late("_write_profile_mcp_servers")
-_write_profile_model = late("_write_profile_model")
+_apply_main_model_assignment = late("_apply_main_model_assignment")
+_normalize_main_model_assignment = late("_normalize_main_model_assignment")
+
+
+# ---------------------------------------------------------------------------
+# Profile management endpoints (minimal — list/create/rename/delete + SOUL.md)
+# ---------------------------------------------------------------------------
+
+
+def _profile_attr(info, name: str, default: Any = None) -> Any:
+    try:
+        return getattr(info, name)
+    except Exception:
+        return default
+
+
+def _profile_to_dict(info) -> Dict[str, Any]:
+    return {
+        "name": _profile_attr(info, "name", ""),
+        "path": str(_profile_attr(info, "path", "")),
+        "is_default": bool(_profile_attr(info, "is_default", False)),
+        "model": _profile_attr(info, "model"),
+        "provider": _profile_attr(info, "provider"),
+        "has_env": bool(_profile_attr(info, "has_env", False)),
+        "skill_count": int(_profile_attr(info, "skill_count", 0) or 0),
+        "gateway_running": bool(_profile_attr(info, "gateway_running", False)),
+        "description": _profile_attr(info, "description", "") or "",
+        "description_auto": bool(_profile_attr(info, "description_auto", False)),
+        "display_name": _profile_attr(info, "display_name", "") or "",
+        "distribution_name": _profile_attr(info, "distribution_name"),
+        "distribution_version": _profile_attr(info, "distribution_version"),
+        "distribution_source": _profile_attr(info, "distribution_source"),
+        "has_alias": _profile_attr(info, "alias_path") is not None,
+    }
+
+
+def _profile_setup_command(name: str) -> str:
+    """Return the shell command used to configure a profile in the CLI."""
+    _resolve_profile_dir(name)
+    return "hermes setup" if name == "default" else f"{name} setup"
+
+
+def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
+    """Write the main model assignment into a specific profile's config.yaml.
+
+    Scopes ``load_config``/``save_config`` to ``profile_dir`` via the
+    context-local HERMES_HOME override so the write lands in the target
+    profile's config rather than the dashboard process's active profile.
+    Clears any stale ``base_url`` / ``context_length`` the same way
+    ``POST /api/model/set`` does, since the new model may differ.
+    """
+    from hermes_cli.web_server import load_config, save_config
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+    token = set_hermes_home_override(str(profile_dir))
+    try:
+        provider, model = _normalize_main_model_assignment(provider, model)
+        cfg = load_config()
+        cfg["model"] = _apply_main_model_assignment(cfg.get("model", {}), provider, model)
+        save_config(cfg)
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _disable_unselected_skills(profile_dir: Path, keep: List[str]) -> int:
+    """Disable every installed skill in ``profile_dir`` not in ``keep``.
+
+    Profiles manage skill activation via a *disabled* list — all installed
+    skills are active by default and users opt out. The builder's skill step
+    uses "replace" semantics: the user picks exactly which seeded built-in /
+    optional skills stay active, and everything else gets added to the disabled
+    list. (Hub skills are installed separately via subprocess and are active on
+    install.) Scoped to the profile via the HERMES_HOME override. Returns the
+    number of skills newly disabled.
+    """
+    from hermes_cli.web_server import load_config
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from hermes_cli.skills_config import get_disabled_skills, save_disabled_skills
+
+    keep_set = {s.strip() for s in keep if s and s.strip()}
+    disabled_count = 0
+    token = set_hermes_home_override(str(profile_dir))
+    try:
+        installed: List[str] = []
+        skills_root = profile_dir / "skills"
+        if skills_root.is_dir():
+            for md in skills_root.rglob("SKILL.md"):
+                installed.append(md.parent.name)
+        cfg = load_config()
+        disabled = get_disabled_skills(cfg)
+        for name in installed:
+            if name not in keep_set and name not in disabled:
+                disabled.add(name)
+                disabled_count += 1
+        if disabled_count:
+            save_disabled_skills(cfg, disabled)
+    finally:
+        reset_hermes_home_override(token)
+    return disabled_count
 
 # Returned by the offloaded file readers below to mean "the file is not there",
 # which a plain ``None`` cannot express: ``desktop.json`` may legitimately hold

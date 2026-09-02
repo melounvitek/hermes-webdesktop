@@ -27,7 +27,6 @@ _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
 # web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_audio_extension_for_mime = late("_audio_extension_for_mime")
 _config_profile_scope = late("_config_profile_scope")
 _split_text_for_speak_stream = late("_split_text_for_speak_stream")
 _voice_list_error_logged_once = late("_voice_list_error_logged_once")
@@ -36,11 +35,35 @@ _ws_request_is_allowed = late("_ws_request_is_allowed")
 load_env = late("load_env")
 
 
+_AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+    "audio/m4a": ".m4a",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".mp4",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/webm": ".webm",
+    "audio/x-m4a": ".m4a",
+    "audio/x-wav": ".wav",
+    "video/webm": ".webm",
+}
+
+
+_MAX_TRANSCRIPTION_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+def _audio_extension_for_mime(mime_type: str) -> str:
+    normalized = (mime_type or "").split(";", 1)[0].strip().lower()
+    return _AUDIO_MIME_EXTENSIONS.get(normalized, ".webm")
+
+
 @router.post("/api/audio/transcribe")
 async def transcribe_audio_upload(
     payload: AudioTranscriptionRequest, profile: Optional[str] = None
 ):
-    from hermes_cli.web_server import _MAX_TRANSCRIPTION_UPLOAD_BYTES
     data_url = (payload.data_url or "").strip()
     if not data_url.startswith("data:") or "," not in data_url:
         raise HTTPException(status_code=400, detail="Invalid audio payload")

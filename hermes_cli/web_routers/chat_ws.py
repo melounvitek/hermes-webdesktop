@@ -14,30 +14,108 @@ from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from hermes_cli.pty_session import RegistryFull
 from pathlib import Path
 from typing import Any, Dict, Optional
+import re
+from fastapi import FastAPI
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
 # web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
 _active_session_file_for_channel = late("_active_session_file_for_channel")
-_broadcast_event = late("_broadcast_event")
 _build_sidecar_url = late("_build_sidecar_url")
-_channel_or_close_code = late("_channel_or_close_code")
-_forget_active_session_file = late("_forget_active_session_file")
 _get_console_executor = late("_get_console_executor")
-_get_event_state = late("_get_event_state")
 _legacy_pump = late("_legacy_pump")
 _profile_scope = late("_profile_scope")
-_read_active_session_file = late("_read_active_session_file")
 _resolve_chat_argv_async = late("_resolve_chat_argv_async")
 _resolve_profile_dir = late("_resolve_profile_dir")
-_ws_auth_mode = late("_ws_auth_mode")
 _ws_auth_ok = late("_ws_auth_ok")
 _ws_auth_reason = late("_ws_auth_reason")
 _ws_client_reason = late("_ws_client_reason")
-_ws_close_reason = late("_ws_close_reason")
 _ws_host_origin_reason = late("_ws_host_origin_reason")
 _ws_request_is_allowed = late("_ws_request_is_allowed")
+
+
+def _get_event_state(app: "FastAPI"):
+    """Return (event_channels, event_lock) from app.state.
+
+    Lazily initialises the state if the lifespan hasn't run (e.g. when
+    TestClient is constructed without a ``with`` block).  The lifespan
+    path is preferred because it guarantees the Lock is created on the
+    correct event loop, but the lazy path lets existing non-``with``
+    TestClient usages keep working.
+    """
+    try:
+        return app.state.event_channels, app.state.event_lock
+    except AttributeError:
+        app.state.event_channels = {}
+        app.state.event_lock = asyncio.Lock()
+        return app.state.event_channels, app.state.event_lock
+
+
+_VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _ws_auth_mode() -> str:
+    """Short label for the active WS auth mode — logged on every connection."""
+    from hermes_cli.web_server import _LOOPBACK_HOSTS, app
+    if getattr(app.state, "auth_required", False):
+        return "gated"
+    bound_host = (getattr(app.state, "bound_host", "") or "").strip().lower()
+    if bound_host and bound_host not in _LOOPBACK_HOSTS:
+        return "insecure"
+    return "loopback"
+
+
+async def _broadcast_event(app: Any, channel: str, payload: str) -> None:
+    """Fan out one publisher frame to every subscriber on `channel`."""
+    event_channels, event_lock = _get_event_state(app)
+    async with event_lock:
+        subs = list(event_channels.get(channel, ()))
+
+    for sub in subs:
+        try:
+            await sub.send_text(payload)
+        except Exception:
+            # Subscriber went away mid-send; the /api/events finally clause
+            # will remove it from the registry on its next iteration.
+            _log.warning("broadcast send failed for subscriber on %s", channel, exc_info=True)
+
+
+def _channel_or_close_code(ws: WebSocket) -> Optional[str]:
+    """Return the channel id from the query string or None if invalid."""
+    channel = ws.query_params.get("channel", "")
+
+    return channel if _VALID_CHANNEL_RE.match(channel) else None
+
+
+def _read_active_session_file(path: Path) -> Optional[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    session_id = str(data.get("session_id") or "").strip()
+    return session_id or None
+
+
+def _forget_active_session_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _ws_close_reason(text: str) -> str:
+    """Clamp a WS close reason to the protocol's 123-byte UTF-8 limit.
+
+    RFC 6455 caps the close-frame reason at 123 bytes; uvicorn raises if a
+    longer string is passed. Our reasons embed an attacker-controlled origin,
+    so truncate defensively rather than crash the close handler.
+    """
+    encoded = text.encode("utf-8", "replace")
+    if len(encoded) <= 123:
+        return text
+    return encoded[:120].decode("utf-8", "ignore") + "..."
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +309,7 @@ def _console_json_payload(msg: Any) -> tuple[Optional[dict[str, Any]], Optional[
 
 @router.websocket("/api/console")
 async def console_ws(ws: WebSocket) -> None:
-    from hermes_cli.web_server import _DASHBOARD_EMBEDDED_CHAT_ENABLED, asyncio
+    from hermes_cli.web_server import _DASHBOARD_EMBEDDED_CHAT_ENABLED
     peer = ws.client.host if ws.client else "?"
 
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:

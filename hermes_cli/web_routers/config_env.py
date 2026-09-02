@@ -41,6 +41,24 @@ save_config = late("save_config")
 save_env_value = late("save_env_value")
 
 
+# Simple rate limiter for the reveal endpoint
+_reveal_timestamps: List[float] = []
+
+
+_REVEAL_MAX_PER_WINDOW = 5
+
+
+_REVEAL_WINDOW_SECONDS = 30
+
+
+# Display order for tabs — unlisted categories sort alphabetically after these.
+_CATEGORY_ORDER = [
+    "general", "agent", "terminal", "display", "delegation",
+    "memory", "compression", "security", "browser", "voice",
+    "tts", "stt", "logging", "discord", "auxiliary",
+]
+
+
 @config_router.get("/api/config")
 async def get_config(profile: Optional[str] = None):
     # _profile_scope blocks on the process-wide _SKILLS_PROFILE_LOCK and
@@ -67,7 +85,6 @@ async def get_schema(profile: Optional[str] = None):
     # Discovery-driven provider options (voice command providers + memory
     # provider plugins) are merged per-request so providers added after server
     # start still show up, scoped to the requested profile's config.
-    from hermes_cli.web_server import _CATEGORY_ORDER
     with _config_profile_scope(profile):
         fields = _schema_with_dynamic_provider_options()
     return {"fields": fields, "category_order": _CATEGORY_ORDER}
@@ -800,11 +817,6 @@ async def reveal_env_var(
     - Rate limiting (max 5 reveals per 30s window)
     - Audit logging
     """
-    from hermes_cli.web_server import (
-        _REVEAL_MAX_PER_WINDOW,
-        _REVEAL_WINDOW_SECONDS,
-        _reveal_timestamps,
-    )
     # --- Token check ---
     _require_token(request)
 

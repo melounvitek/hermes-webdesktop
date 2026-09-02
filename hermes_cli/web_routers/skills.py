@@ -12,7 +12,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
-from hermes_cli.web_deps import late, LateState
+from hermes_cli.web_deps import late
 from hermes_cli.web_models import (
     SkillContentUpdate,
     SkillCreate,
@@ -34,13 +34,50 @@ from hermes_cli.web_routers._common import (
 hub_router = APIRouter()
 router = APIRouter()
 
-_clear_skills_prompt_cache = late("_clear_skills_prompt_cache")
 _config_profile_scope = late("_config_profile_scope")
 _hub_action_name = late("_hub_action_name")
 _installed_hub_identifiers = late("_installed_hub_identifiers")
-_skill_meta_to_payload = late("_skill_meta_to_payload")
 load_config = late("load_config")
-_SKILL_HUB_SOURCE_LABELS = LateState("_SKILL_HUB_SOURCE_LABELS")
+
+
+# Human-readable labels for each hub source id (matches `hermes skills search`
+# provenance).  Keep in sync with create_source_router()'s source list.
+_SKILL_HUB_SOURCE_LABELS = {
+    "official": "Official (Nous)",
+    "hermes-index": "Hermes Index",
+    "skills-sh": "skills.sh",
+    "well-known": "Well-Known",
+    "url": "Direct URL",
+    "github": "GitHub",
+    "clawhub": "ClawHub",
+    "lobehub": "LobeHub",
+    "browse-sh": "browse.sh",
+}
+
+
+def _skill_meta_to_payload(m) -> dict:
+    return {
+        "name": m.name,
+        "description": m.description,
+        "source": m.source,
+        "identifier": m.identifier,
+        "trust_level": m.trust_level,
+        "repo": m.repo,
+        "tags": list(m.tags or []),
+    }
+
+
+def _clear_skills_prompt_cache() -> None:
+    """Best-effort: invalidate the skills system-prompt snapshot after a write.
+
+    Mirrors what ``skill_manage`` does so a dashboard-authored skill is picked
+    up by the next session without a manual cache reset.
+    """
+    try:
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+        clear_skills_system_prompt_cache(clear_snapshot=True)
+    except Exception:
+        pass
 
 
 @hub_router.post("/api/skills/hub/install")

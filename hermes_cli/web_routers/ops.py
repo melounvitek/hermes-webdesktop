@@ -32,12 +32,16 @@ _normalize_memory_provider_name = late("_normalize_memory_provider_name")
 _path_is_under = late("_path_is_under")
 _require_memory_provider_ready = late("_require_memory_provider_ready")
 _resolve_profile_dir = late("_resolve_profile_dir")
-_restart_gateway_after_webhook_enable = late("_restart_gateway_after_webhook_enable")
 _spawn_hermes_action = late("_spawn_hermes_action")
 _write_platform_enabled = late("_write_platform_enabled")
 get_hermes_home = late("get_hermes_home")
 load_config = late("load_config")
 save_config = late("save_config")
+_restart_gateway_after = late("_restart_gateway_after")
+
+
+def _restart_gateway_after_webhook_enable(profile: Optional[str] = None) -> dict[str, Any]:
+    return _restart_gateway_after(profile, what="enabling webhooks", label="Webhook enable")
 
 
 # ---------------------------------------------------------------------------

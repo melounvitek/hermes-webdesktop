@@ -13,6 +13,7 @@ import json
 import secrets
 import time
 import urllib.parse
+import os
 from datetime import datetime, timezone
 from fastapi import APIRouter
 from hermes_cli.web_deps import late
@@ -22,23 +23,22 @@ from hermes_cli.config import get_env_path
 from hermes_cli.web_models import MessagingPlatformUpdate, TelegramOnboardingStart, TelegramOnboardingApply, WhatsAppOnboardingStart, WhatsAppOnboardingApply
 from pathlib import Path
 from typing import Any, Optional
+from hermes_cli.config import redact_key
+from gateway.status import resolve_gateway_liveness
+from hermes_cli.config import OPTIONAL_ENV_VARS
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
 # web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_catalog_lookup = late("_catalog_lookup")
 _config_profile_scope = late("_config_profile_scope")
-_gateway_display_command = late("_gateway_display_command")
 _messaging_platform_catalog = late("_messaging_platform_catalog")
-_messaging_platform_payload = late("_messaging_platform_payload")
 _profile_scope = late("_profile_scope")
 _resolve_profile_dir = late("_resolve_profile_dir")
 _restart_gateway_after_whatsapp_onboarding = late("_restart_gateway_after_whatsapp_onboarding")
 _restart_gateway_after = late("_restart_gateway_after")
 _telegram_onboarding_error_message = late("_telegram_onboarding_error_message")
 _telegram_onboarding_request_sync = late("_telegram_onboarding_request_sync")
-_validate_messaging_env_value = late("_validate_messaging_env_value")
 _whatsapp_onboarding_payload = late("_whatsapp_onboarding_payload")
 _whatsapp_session_path = late("_whatsapp_session_path")
 _write_platform_enabled = late("_write_platform_enabled")
@@ -46,6 +46,417 @@ load_env = late("load_env")
 read_runtime_status = late("read_runtime_status")
 remove_env_value = late("remove_env_value")
 save_env_value = late("save_env_value")
+_gateway_subcommand = late("_gateway_subcommand")
+_probe_gateway_health = late("_probe_gateway_health")
+
+
+# Display labels for env vars not in OPTIONAL_ENV_VARS (HOME_CHANNEL_*, bridge
+# toggles, Twilio, HASS, Email, etc.). Anything missing from OPTIONAL_ENV_VARS
+# falls back here so the UI can still render a friendly label.
+_MESSAGING_ENV_FALLBACKS: dict[str, dict[str, Any]] = {
+    "SIGNAL_HTTP_URL": {
+        "description": "signal-cli REST API base URL, e.g. http://127.0.0.1:8080",
+        "prompt": "Signal bridge URL",
+        "url": "https://github.com/bbernhard/signal-cli-rest-api",
+    },
+    "SIGNAL_ACCOUNT": {
+        "description": "Signal account phone number registered with the bridge",
+        "prompt": "Signal account",
+    },
+    "SIGNAL_ALLOWED_USERS": {
+        "description": "Comma-separated Signal users allowed to use the bot",
+        "prompt": "Allowed Signal users",
+    },
+    "WHATSAPP_ENABLED": {
+        "description": "Enable the WhatsApp gateway adapter",
+        "prompt": "Enable WhatsApp",
+        "advanced": True,
+    },
+    "WHATSAPP_MODE": {
+        "description": "WhatsApp bridge mode",
+        "prompt": "WhatsApp mode",
+        "advanced": True,
+    },
+    "WHATSAPP_DM_POLICY": {
+        "description": "How WhatsApp direct messages are authorized",
+        "prompt": "WhatsApp DM policy",
+        "advanced": True,
+    },
+    "WHATSAPP_ALLOWED_USERS": {
+        "description": "Comma-separated WhatsApp users allowed to use the bot",
+        "prompt": "Allowed WhatsApp users",
+    },
+    "HASS_URL": {
+        "description": "Home Assistant base URL, e.g. https://homeassistant.local:8123",
+        "prompt": "Home Assistant URL",
+    },
+    "HASS_TOKEN": {
+        "description": "Long-lived access token from Home Assistant (Profile → Security)",
+        "prompt": "Home Assistant access token",
+        "password": True,
+    },
+    "EMAIL_ADDRESS": {
+        "description": "Email address to send and receive from",
+        "prompt": "Email address",
+    },
+    "EMAIL_PASSWORD": {
+        "description": "Email account password or app password",
+        "prompt": "Email password",
+        "password": True,
+    },
+    "EMAIL_IMAP_HOST": {
+        "description": "IMAP server host (e.g. imap.gmail.com)",
+        "prompt": "IMAP host",
+    },
+    "EMAIL_SMTP_HOST": {
+        "description": "SMTP server host (e.g. smtp.gmail.com)",
+        "prompt": "SMTP host",
+    },
+    "TWILIO_ACCOUNT_SID": {
+        "description": "Twilio Account SID",
+        "prompt": "Twilio Account SID",
+        "url": "https://www.twilio.com/console",
+    },
+    "TWILIO_AUTH_TOKEN": {
+        "description": "Twilio Auth Token",
+        "prompt": "Twilio Auth Token",
+        "password": True,
+    },
+    "WECOM_BOT_ID": {"description": "WeCom group bot ID", "prompt": "WeCom Bot ID"},
+    "WECOM_SECRET": {
+        "description": "WeCom group bot secret",
+        "prompt": "WeCom Secret",
+        "password": True,
+    },
+    "WECOM_CALLBACK_CORP_ID": {
+        "description": "WeCom corp ID",
+        "prompt": "WeCom Corp ID",
+    },
+    "WECOM_CALLBACK_CORP_SECRET": {
+        "description": "WeCom app corp secret",
+        "prompt": "WeCom Corp Secret",
+        "password": True,
+    },
+    "WECOM_CALLBACK_AGENT_ID": {
+        "description": "WeCom app agent ID",
+        "prompt": "WeCom Agent ID",
+    },
+    "WECOM_CALLBACK_TOKEN": {
+        "description": "WeCom callback verification token",
+        "prompt": "WeCom Token",
+    },
+    "WECOM_CALLBACK_ENCODING_AES_KEY": {
+        "description": "WeCom callback AES encoding key",
+        "prompt": "WeCom AES Key",
+        "password": True,
+    },
+    "WEIXIN_ACCOUNT_ID": {
+        "description": "iLink Bot account ID obtained through QR login in hermes gateway setup",
+        "prompt": "iLink Bot account ID",
+    },
+    "WEIXIN_TOKEN": {
+        "description": "iLink Bot token obtained through QR login in hermes gateway setup",
+        "prompt": "iLink Bot token",
+        "password": True,
+    },
+    "WEIXIN_BASE_URL": {
+        "description": "iLink API base URL saved by QR login (default: https://ilinkai.weixin.qq.com)",
+        "prompt": "iLink API base URL",
+    },
+    "FEISHU_APP_ID": {"description": "Feishu / Lark app ID", "prompt": "App ID"},
+    "FEISHU_APP_SECRET": {
+        "description": "Feishu / Lark app secret",
+        "prompt": "App secret",
+        "password": True,
+    },
+    "FEISHU_ENCRYPT_KEY": {
+        "description": "Feishu / Lark encrypt key",
+        "prompt": "Encrypt key",
+        "password": True,
+    },
+    "FEISHU_VERIFICATION_TOKEN": {
+        "description": "Feishu / Lark verification token",
+        "prompt": "Verification token",
+        "password": True,
+    },
+    "DINGTALK_CLIENT_ID": {
+        "description": "DingTalk client ID (App key)",
+        "prompt": "Client ID",
+    },
+    "DINGTALK_CLIENT_SECRET": {
+        "description": "DingTalk client secret (App secret)",
+        "prompt": "Client secret",
+        "password": True,
+    },
+}
+
+
+# Kept in sync with the corresponding frontend validation in ChannelsPage.tsx.
+_TELEGRAM_BOT_TOKEN_RE = re.compile(r"\d+:[A-Za-z0-9_-]{30,}")
+
+
+_TELEGRAM_USER_ID_RE = re.compile(r"\d+")
+
+
+_SLACK_MEMBER_ID_RE = re.compile(r"[UW][A-Z0-9]{2,}")
+
+
+def _messaging_env_info(key: str) -> dict[str, Any]:
+    info = OPTIONAL_ENV_VARS.get(key) or _MESSAGING_ENV_FALLBACKS.get(key) or {}
+    return {
+        "description": info.get("description", ""),
+        "prompt": info.get("prompt", key),
+        "help": info.get("help", ""),
+        "url": info.get("url"),
+        "is_password": info.get("password", False),
+        "advanced": info.get("advanced", False),
+    }
+
+
+def _gateway_platform_config(platform_id: str):
+    from gateway.config import Platform, load_gateway_config
+
+    config = load_gateway_config()
+    platform = Platform(platform_id)
+    platform_config = config.platforms.get(platform)
+    return config, platform, platform_config
+
+
+def _gateway_display_command(profile: Optional[str], verb: str) -> str:
+    return " ".join(["hermes", *_gateway_subcommand(profile, verb)])
+
+
+def _validate_messaging_env_value(platform_id: str, key: str, value: str) -> None:
+    """Reject platform credentials that are clearly in the wrong field."""
+    if not value:
+        return
+
+    if platform_id == "telegram":
+        if key == "TELEGRAM_BOT_TOKEN" and not _TELEGRAM_BOT_TOKEN_RE.fullmatch(value):
+            raise HTTPException(
+                status_code=400,
+                detail="Telegram bot token must be the complete token from @BotFather, such as 123456789:ABC…",
+            )
+        if key == "TELEGRAM_ALLOWED_USERS":
+            user_ids = [part.strip() for part in value.split(",") if part.strip()]
+            if any(not _TELEGRAM_USER_ID_RE.fullmatch(user_id) for user_id in user_ids):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Telegram allowed users must be comma-separated numeric user IDs.",
+                )
+        return
+
+    if platform_id != "slack":
+        return
+
+    if key == "SLACK_BOT_TOKEN" and not value.startswith("xoxb-"):
+        raise HTTPException(
+            status_code=400,
+            detail="Slack Bot Token must start with xoxb-. Paste the bot token from OAuth & Permissions.",
+        )
+    if key == "SLACK_APP_TOKEN" and not value.startswith("xapp-"):
+        raise HTTPException(
+            status_code=400,
+            detail="Slack App Token must start with xapp-. Paste the app-level token from Basic Information > App-Level Tokens.",
+        )
+    if key == "SLACK_ALLOWED_USERS":
+        # Mirror the gateway's parse (gateway/platforms/slack.py): split on comma,
+        # strip, and drop empty entries so a trailing/interior comma isn't rejected
+        # here when the runtime would accept it. "*" is the allow-all wildcard.
+        user_ids = [part.strip() for part in value.split(",") if part.strip()]
+        invalid = [
+            user_id
+            for user_id in user_ids
+            if user_id != "*" and not _SLACK_MEMBER_ID_RE.fullmatch(user_id)
+        ]
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail="Slack allowed user IDs must be comma-separated member IDs like U01ABC2DEF3.",
+            )
+
+
+def _catalog_lookup(platform_id: str) -> dict[str, Any] | None:
+    for entry in _messaging_platform_catalog():
+        if entry["id"] == platform_id:
+            return entry
+    return None
+
+
+def _messaging_platform_payload(
+    entry: dict[str, Any],
+    env_on_disk: dict[str, str],
+    runtime: dict | None,
+    scoped: bool = False,
+    profile_home: Optional[Path] = None,
+) -> dict[str, Any]:
+    from hermes_cli.web_server import (
+        _GATEWAY_HEALTH_URL,
+        get_running_pid_cached,
+        get_runtime_status_running_pid,
+        load_config,
+    )
+    platform_id = entry["id"]
+    runtime_platforms = runtime.get("platforms") if runtime else {}
+    runtime_platform = (
+        runtime_platforms.get(platform_id, {})
+        if isinstance(runtime_platforms, dict)
+        else {}
+    )
+    # Same shared ladder /api/status uses. Before this was unified, the two
+    # endpoints disagreed on the same page load — the sidebar strip read
+    # "running" (it probed GATEWAY_HEALTH_URL and scoped to the requested
+    # profile) while the Channels page rendered "The gateway is not running"
+    # (it did neither). Cross-container, profile-scoped, and
+    # launch-service-managed deployments each hit that split.
+    #
+    # profile_home is passed when the request was scoped to a named profile:
+    # gateway/status readers resolve process-level paths and do NOT follow the
+    # HERMES_HOME contextvar override (#56986 / #69143), so the profile's
+    # directory has to be handed over explicitly or messaging silently reports
+    # another profile's gateway (#71211).
+    liveness = resolve_gateway_liveness(
+        profile_dir=profile_home,
+        runtime=runtime,
+        health_probe=(
+            _probe_gateway_health if _GATEWAY_HEALTH_URL else None
+        ),
+        pid_probe=get_running_pid_cached,
+        runtime_reader=read_runtime_status,
+        runtime_pid_probe=get_runtime_status_running_pid,
+    )
+    gateway_running = liveness.running
+    env_vars = []
+
+    for key in entry["env_vars"]:
+        # When profile-scoped, judge only the profile's own .env — the
+        # dashboard process's os.environ carries the ROOT install's .env
+        # (loaded at startup) and would falsely report the root credentials
+        # as the profile's.
+        value = env_on_disk.get(key) or ("" if scoped else os.getenv(key, ""))
+        env_vars.append(
+            {
+                "key": key,
+                "required": key in entry["required_env"],
+                "is_set": bool(value),
+                "redacted_value": redact_key(value) if value else None,
+                **_messaging_env_info(key),
+            }
+        )
+
+    if scoped:
+        # Profile-scoped view: derive enablement/configuration from the
+        # profile's config.yaml + .env only. load_gateway_config()'s
+        # env-override layer reads os.environ and would leak the root
+        # install's tokens into the profile's reported state.
+        try:
+            cfg = load_config()
+            platforms_cfg = cfg.get("platforms") or {}
+            plat_cfg = platforms_cfg.get(platform_id)
+            if not isinstance(plat_cfg, dict):
+                plat_cfg = {}
+            enabled = bool(plat_cfg.get("enabled"))
+            hc = plat_cfg.get("home_channel")
+            home_channel = hc if isinstance(hc, dict) else None
+        except Exception:
+            enabled = False
+            home_channel = None
+        configured = all(env_on_disk.get(key) for key in entry["required_env"])
+    else:
+        try:
+            gateway_config, platform, platform_config = _gateway_platform_config(
+                platform_id
+            )
+            enabled = bool(platform_config and platform_config.enabled)
+            configured = bool(
+                platform_config
+                and gateway_config._is_platform_connected(platform, platform_config)
+            )
+            home_channel = (
+                platform_config.home_channel.to_dict()
+                if platform_config and platform_config.home_channel
+                else None
+            )
+        except Exception:
+            enabled = False
+            configured = all(
+                env_on_disk.get(key) or os.getenv(key, "")
+                for key in entry["required_env"]
+            )
+            home_channel = None
+
+    state = (
+        runtime_platform.get("state") if isinstance(runtime_platform, dict) else None
+    )
+    runtime_gateway_state = runtime.get("gateway_state") if isinstance(runtime, dict) else None
+    runtime_gateway_error = runtime.get("exit_reason") if isinstance(runtime, dict) else None
+    if not enabled:
+        state = "disabled"
+    elif not configured:
+        state = "not_configured"
+    elif gateway_running and not state:
+        state = "pending_restart"
+    elif (
+        not gateway_running
+        and not state
+        and runtime_gateway_state == "startup_failed"
+    ):
+        state = "startup_failed"
+    elif not gateway_running and not state:
+        state = "gateway_stopped"
+
+    error_code = (
+        runtime_platform.get("error_code")
+        if isinstance(runtime_platform, dict)
+        else None
+    )
+    error_message = (
+        runtime_platform.get("error_message")
+        if isinstance(runtime_platform, dict)
+        else None
+    )
+    if state == "startup_failed":
+        error_code = error_code or "startup_failed"
+        error_message = error_message or runtime_gateway_error
+
+    whatsapp_setup = None
+    if platform_id == "whatsapp":
+        whatsapp_mode = (
+            env_on_disk.get("WHATSAPP_MODE")
+            or ("" if scoped else os.getenv("WHATSAPP_MODE", ""))
+        ).strip()
+        allowed_users_value = (
+            env_on_disk.get("WHATSAPP_ALLOWED_USERS")
+            or ("" if scoped else os.getenv("WHATSAPP_ALLOWED_USERS", ""))
+        ).strip()
+        whatsapp_setup = {
+            "mode": whatsapp_mode if whatsapp_mode in {"bot", "self-chat"} else "",
+            "allowed_users_set": bool(allowed_users_value),
+            "home_channel_set": bool(home_channel),
+        }
+
+    payload = {
+        "id": platform_id,
+        "name": entry["name"],
+        "description": entry["description"],
+        "docs_url": entry["docs_url"],
+        "enabled": enabled,
+        "configured": configured,
+        "gateway_running": gateway_running,
+        "state": state,
+        "error_code": error_code,
+        "error_message": error_message,
+        "updated_at": (
+            runtime_platform.get("updated_at")
+            if isinstance(runtime_platform, dict)
+            else None
+        ),
+        "home_channel": home_channel,
+        "env_vars": env_vars,
+    }
+    if whatsapp_setup is not None:
+        payload["whatsapp_setup"] = whatsapp_setup
+    return payload
 
 
 _WHATSAPP_ONBOARDING_TTL_SECONDS = 600
@@ -516,7 +927,6 @@ def _prune_telegram_onboarding_pairings() -> None:
 
 
 def _normalize_telegram_user_id(value: Any) -> str | None:
-    from hermes_cli.web_server import _TELEGRAM_USER_ID_RE
     normalized = str(value or "").strip()
     if _TELEGRAM_USER_ID_RE.fullmatch(normalized):
         return normalized

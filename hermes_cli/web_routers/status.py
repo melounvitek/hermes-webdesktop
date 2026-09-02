@@ -39,7 +39,6 @@ _resolve_profile_dir = late("_resolve_profile_dir")
 _resolve_restart_drain_timeout = late("_resolve_restart_drain_timeout")
 _spawn_hermes_action = late("_spawn_hermes_action")
 _ssh_runtime_intact = late("_ssh_runtime_intact")
-_status_active_sessions = late("_status_active_sessions")
 app = LateState("app")  # the FastAPI instance (app.state.*)
 check_config_version = late("check_config_version")
 get_hermes_home = late("get_hermes_home")
@@ -49,6 +48,58 @@ get_runtime_status_running_pid = late("get_runtime_status_running_pid")
 load_config = late("load_config")
 read_runtime_status = late("read_runtime_status")
 run_in_threadpool = late("run_in_threadpool")
+_open_session_db_for_profile = late("_open_session_db_for_profile")
+
+
+_STATUS_ACTIVE_SESSIONS_TIMEOUT = 0.75
+
+
+def _count_status_active_sessions() -> int:
+    """Return the dashboard status active-session count.
+
+    This is best-effort status garnish, not a critical path.  Opens read-only
+    (via the shared stale-schema heal, same as every other dashboard read
+    path) so /api/status never routinely writes to state.db while another
+    Hermes process is using it.
+    """
+    from hermes_state import _default_db_path
+
+    # The heal helper bootstraps a missing store; this garnish must not — on
+    # a fresh install /api/status polls would otherwise create state.db
+    # before the user's first session.
+    if not Path(_default_db_path()).exists():
+        return 0
+
+    db = _open_session_db_for_profile(None, read_only=True)
+    try:
+        sessions = db.list_sessions_rich(limit=50, compact_rows=True)
+        now = time.time()
+        return sum(
+            1 for s in sessions
+            if s.get("ended_at") is None
+            and (now - s.get("last_active", s.get("started_at", 0))) < 300
+        )
+    finally:
+        db.close()
+
+
+_GATEWAY_HEALTH_ROUTE_TIMEOUT = 1.0
+
+
+async def _status_active_sessions() -> int:
+    try:
+        return await asyncio.wait_for(
+            run_in_threadpool(_count_status_active_sessions),
+            timeout=_STATUS_ACTIVE_SESSIONS_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        _log.debug(
+            "/api/status active session count exceeded %.2fs; returning 0",
+            _STATUS_ACTIVE_SESSIONS_TIMEOUT,
+        )
+    except Exception as exc:
+        _log.debug("/api/status active session count unavailable: %s", exc)
+    return 0
 
 
 @router.get("/api/ssh/ownership")
@@ -158,11 +209,7 @@ def _merge_profile_gateway_platforms(
 
 @router.get("/api/status")
 async def get_status(profile: Optional[str] = None):
-    from hermes_cli.web_server import (
-        DASHBOARD_HEALTH,
-        _GATEWAY_HEALTH_ROUTE_TIMEOUT,
-        _GATEWAY_HEALTH_URL,
-    )
+    from hermes_cli.web_server import DASHBOARD_HEALTH, _GATEWAY_HEALTH_URL
     status_scope = None
     requested_profile = (profile or "").strip()
     # Plain /api/status stays the machine-level public liveness probe. The

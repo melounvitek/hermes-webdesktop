@@ -38,6 +38,84 @@ get_hermes_home = late("get_hermes_home")
 load_config = late("load_config")
 
 
+# Image MIME types this endpoint will serve. Extension-allowlisted so an
+# authenticated caller can't pull non-image files through it.
+_MEDIA_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".bmp": "image/bmp",
+    ".ico": "image/x-icon",
+}
+
+
+_MEDIA_MAX_BYTES = 25 * 1024 * 1024
+
+
+_STREAMABLE_MEDIA_EXTENSIONS = frozenset(
+    {
+        ".avi",
+        ".flac",
+        ".m4a",
+        ".mkv",
+        ".mov",
+        ".mp3",
+        ".mp4",
+        ".ogg",
+        ".opus",
+        ".wav",
+        ".webm",
+    }
+)
+
+
+_FS_READDIR_HIDDEN = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".cache",
+    ".next",
+    ".turbo",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "venv",
+}
+
+
+# Filenames that must never be listed, read, or downloaded through the
+# managed-files API.  These typically contain credentials (API keys, tokens)
+# and exposing them through the dashboard file browser is a security leak —
+# see issue #57505. The set mirrors the credential-file basenames of the two
+# canonical credential guards elsewhere in the codebase
+# (agent.file_safety.get_read_block_error and
+# gateway.platforms.base._ROOT_CREDENTIAL_FILES) so the dashboard Files tab
+# doesn't lag behind them — an operator can point the managed root at
+# HERMES_HOME itself, at which point every one of these basenames is a live
+# secret store sitting in the browsable tree.
+_SENSITIVE_MANAGED_FILE_BASENAMES = frozenset({
+    "auth.json",
+    "auth.lock",
+    "credentials",
+    "config.yaml",
+    ".anthropic_oauth.json",
+    "google_token.json",
+    "google_oauth_pending.json",
+    "google_oauth.json",
+    "webhook_subscriptions.json",
+    "bws_cache.json",
+    "bws_cache.enc.json",
+    # git's credential-store helper cache (agent.file_safety blocks this too).
+    ".git-credentials",
+})
+
+
 # Directory names whose entire subtree is credential material. Both canonical
 # guards deny these as directory trees, not basenames:
 #   * gateway.platforms.base._ROOT_CREDENTIAL_DIRS = {"pairing", "mcp-tokens"}
@@ -68,7 +146,6 @@ def _is_sensitive_filename(name: str) -> bool:
     (``mcp-tokens/``, ``pairing/``) that the canonical guards also deny,
     use :func:`_is_sensitive_path`, which the API call sites route through.
     """
-    from hermes_cli.web_server import _SENSITIVE_MANAGED_FILE_BASENAMES
     lowered = name.lower()
     if lowered == ".env" or lowered.startswith(".env.") or lowered == ".envrc":
         return True
@@ -282,7 +359,6 @@ async def get_media(path: str):
     an image-extension allowlist, a size cap, AND the gateway's own media roots
     (resolved, symlink-safe) so it can't be used to read arbitrary files.
     """
-    from hermes_cli.web_server import _MEDIA_CONTENT_TYPES, _MEDIA_MAX_BYTES
     try:
         target = Path(path).expanduser().resolve()
     except (OSError, RuntimeError):
@@ -503,7 +579,7 @@ def _managed_file_response(
     media_only: bool = False,
 ) -> FileResponse:
     """Build a range-aware response after applying managed-file policy."""
-    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES, _STREAMABLE_MEDIA_EXTENSIONS
+    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES
     policy, target, _display_path = _resolve_managed_path(path, request)
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -714,7 +790,6 @@ async def delete_managed_file(payload: ManagedFileDelete, request: Request):
 
 @router.get("/api/fs/list")
 async def fs_list(path: str):
-    from hermes_cli.web_server import _FS_READDIR_HIDDEN
     target = _fs_path(path)
     try:
         entries = []

@@ -29,6 +29,7 @@ from hermes_cli.web_models import (
 )
 from hermes_cli.web_routers._common import log as _log, http_failure
 from hermes_state import is_malformed_db_error, is_transient_sqlite_error
+from typing import Any, Dict
 
 list_router = APIRouter()
 search_router = APIRouter()
@@ -36,13 +37,135 @@ manage_router = APIRouter()
 
 _cron_default_profile = late("_cron_default_profile")
 _cron_profile_home = late("_cron_profile_home")
-_import_sessions_for_profile = late("_import_sessions_for_profile")
 _maybe_auto_archive_for_profile = late("_maybe_auto_archive_for_profile")
 _open_session_db_for_profile = late("_open_session_db_for_profile")
-_prune_sessions = late("_prune_sessions")
-_read_session_import_body = late("_read_session_import_body")
 _session_latest_descendant = late("_session_latest_descendant")
 _strip_session_list_rows = late("_strip_session_list_rows")
+
+
+# CRITICAL — every literal-path route below MUST be declared BEFORE the
+# templated ``/api/sessions/{session_id}`` family that follows. FastAPI/
+# Starlette match routes in registration order, and the ``{session_id}``
+# pattern is unconstrained — it would otherwise swallow e.g.
+# ``DELETE /api/sessions/empty``, ``POST /api/sessions/bulk-delete``, or
+# ``GET /api/sessions/stats`` as "operate on the session with id
+# 'empty'" / "'bulk-delete'" / "'stats'", which would 404 (or worse,
+# succeed and delete the wrong row). Same story as the older
+# ``/api/sessions/search`` endpoint up at line ~1191. If you split or
+# reorder this block, move every route in it together.
+# Keep the dashboard import endpoint stream-safe: FastAPI otherwise parses and
+# buffers an arbitrarily large JSON body before SessionDB can enforce its own
+# per-session and transaction-work limits.
+_SESSION_IMPORT_MAX_BYTES = 25 * 1024 * 1024
+
+
+async def _read_session_import_body(request: Request) -> bytes:
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > _SESSION_IMPORT_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Session import payload is too large")
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _import_sessions_for_profile(profile: Optional[str], sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    db = _open_session_db_for_profile(profile, read_only=False)
+    try:
+        return db.import_sessions(sessions)
+    finally:
+        db.close()
+
+
+def _prune_sessions(body: SessionPrune):
+    """Delete ended sessions matching filters (mirrors `hermes sessions prune`)."""
+    from hermes_cli.web_server import get_hermes_home
+    has_window = (
+        body.started_before is not None or body.started_after is not None
+    )
+    if body.older_than_days is not None and body.older_than_days < 1 and not has_window:
+        raise HTTPException(status_code=400, detail="older_than_days must be >= 1")
+    # Mirror the CLI: the implicit 90-day cutoff only applies to a truly bare
+    # prune. Any attribute filter (source, title, model, ...) suppresses it
+    # unless the caller explicitly sent older_than_days.
+    _attr_filters_set = any(
+        getattr(body, f) is not None
+        for f in (
+            "source", "title_like", "end_reason", "cwd_prefix",
+            "min_messages", "max_messages", "model_like", "provider",
+            "user_id", "chat_id", "chat_type", "branch_like",
+            "min_tokens", "max_tokens", "min_cost", "max_cost",
+            "min_tool_calls", "max_tool_calls",
+        )
+    )
+    _older_than_explicit = "older_than_days" in body.model_fields_set
+    _effective_older_than = body.older_than_days
+    if has_window or (_attr_filters_set and not _older_than_explicit):
+        _effective_older_than = None
+    profile_home = _cron_profile_home(body.profile)[1] if body.profile else get_hermes_home()
+    db = _open_session_db_for_profile(body.profile, read_only=False)
+    try:
+        filters = dict(
+            older_than_days=_effective_older_than,
+            source=(body.source or None),
+            started_before=body.started_before,
+            started_after=body.started_after,
+            title_like=(body.title_like or None),
+            end_reason=(body.end_reason or None),
+            cwd_prefix=(body.cwd_prefix or None),
+            min_messages=body.min_messages,
+            max_messages=body.max_messages,
+            model_like=(body.model_like or None),
+            provider=(body.provider or None),
+            user_id=(body.user_id or None),
+            chat_id=(body.chat_id or None),
+            chat_type=(body.chat_type or None),
+            branch_like=(body.branch_like or None),
+            min_tokens=body.min_tokens,
+            max_tokens=body.max_tokens,
+            min_cost=body.min_cost,
+            max_cost=body.max_cost,
+            min_tool_calls=body.min_tool_calls,
+            max_tool_calls=body.max_tool_calls,
+            archived=None if body.include_archived else False,
+        )
+        skipped_open = db.count_open_prune_matches(**filters)
+        if body.dry_run:
+            rows = db.list_prune_candidates(**filters)
+            return {
+                "ok": True,
+                "removed": 0,
+                "matched": len(rows),
+                "skipped_open": skipped_open,
+                # Rows are ordered by last activity, not creation time.
+                "oldest_last_active": rows[0]["last_active"] if rows else None,
+                "newest_last_active": rows[-1]["last_active"] if rows else None,
+                "oldest_started_at": (
+                    min(r["started_at"] for r in rows) if rows else None
+                ),
+                "newest_started_at": (
+                    max(r["started_at"] for r in rows) if rows else None
+                ),
+                "sessions": [
+                    {
+                        "id": r["id"],
+                        "source": r["source"],
+                        "title": r.get("title"),
+                        "model": r.get("model"),
+                        "started_at": r["started_at"],
+                        "last_active": r["last_active"],
+                        "message_count": r["message_count"],
+                    }
+                    for r in rows
+                ],
+            }
+        sessions_dir = profile_home / "sessions"
+        removed = db.prune_sessions(
+            sessions_dir=sessions_dir if sessions_dir.exists() else None,
+            **filters,
+        )
+        return {"ok": True, "removed": removed, "skipped_open": skipped_open}
+    finally:
+        db.close()
 
 _ACTIVE_WINDOW_S = 300
 
