@@ -1,16 +1,6 @@
-"""``hermes lsp`` CLI subcommand.
+"""``hermes lsp`` CLI subcommand: status / list / install / install-all / restart / which.
 
-Subcommands:
-
-- ``status`` — show service state, configured servers, install status.
-- ``install <server_id>`` — eagerly install one server's binary.
-- ``install-all`` — try to install every server with a known recipe.
-- ``restart`` — tear down running clients so the next edit re-spawns.
-- ``which <server_id>`` — print the resolved binary path for one server.
-- ``list`` — print the registry of supported servers.
-
-The handlers are kept here (rather than in
-``hermes_cli/main.py``) so the LSP module ships self-contained.
+Handlers live here (not in ``hermes_cli/main.py``) so the LSP module ships self-contained.
 """
 from __future__ import annotations
 
@@ -66,24 +56,25 @@ def register_subparser(subparsers: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=run_lsp_command)
 
 
+_COMMANDS = {
+    "status": lambda a: _cmd_status(getattr(a, "json", False)),
+    "list": lambda a: _cmd_list(getattr(a, "installed_only", False)),
+    "install": lambda a: _cmd_install(a.server),
+    "install-all": lambda a: _cmd_install_all(getattr(a, "include_manual", False)),
+    "restart": lambda a: _cmd_restart(),
+    "which": lambda a: _cmd_which(a.server),
+}
+
+
 def run_lsp_command(args: argparse.Namespace) -> int:
     """Top-level dispatcher for ``hermes lsp <subcommand>``."""
     sub = getattr(args, "lsp_command", None) or "status"
     try:
-        if sub == "status":
-            return _cmd_status(getattr(args, "json", False))
-        if sub == "list":
-            return _cmd_list(getattr(args, "installed_only", False))
-        if sub == "install":
-            return _cmd_install(args.server)
-        if sub == "install-all":
-            return _cmd_install_all(getattr(args, "include_manual", False))
-        if sub == "restart":
-            return _cmd_restart()
-        if sub == "which":
-            return _cmd_which(args.server)
-        sys.stderr.write(f"unknown lsp subcommand: {sub}\n")
-        return 2
+        handler = _COMMANDS.get(sub)
+        if handler is None:
+            sys.stderr.write(f"unknown lsp subcommand: {sub}\n")
+            return 2
+        return handler(args)
     except KeyboardInterrupt:
         return 130
 
@@ -140,9 +131,7 @@ def _cmd_status(emit_json: bool) -> int:
         if disabled:
             out.append(f"  disabled in cfg: {', '.join(disabled)}")
 
-    # Surface backend-tool gaps that aren't visible in the registry table:
-    # some servers spawn fine but emit no diagnostics without a sidecar
-    # binary (bash-language-server -> shellcheck).
+    # Sidecar gaps the registry table can't show (bash-language-server -> shellcheck).
     backend_warnings = _backend_warnings()
     if backend_warnings:
         out.append("")
@@ -259,33 +248,22 @@ def _cmd_which(server_id: str) -> int:
     return 1
 
 
+# server_id → install-recipe key, where the two differ.
+_RECIPE_ALIASES = {
+    "vue-language-server": "@vue/language-server",
+    "astro-language-server": "@astrojs/language-server",
+    "dockerfile-ls": "dockerfile-language-server-nodejs",
+    "typescript": "typescript-language-server",
+}
+
+
 def _recipe_pkg_for(server_id: str) -> str:
     """Map a registry ``server_id`` to its install-recipe package key."""
-    # The mapping lives here (not in install.py) because it's a CLI
-    # convenience layer.  Most server_ids are also their own recipe
-    # key, but a few differ (e.g. ``vue-language-server`` →
-    # ``@vue/language-server``).
-    aliases = {
-        "vue-language-server": "@vue/language-server",
-        "astro-language-server": "@astrojs/language-server",
-        "dockerfile-ls": "dockerfile-language-server-nodejs",
-        "typescript": "typescript-language-server",
-    }
-    return aliases.get(server_id, server_id)
+    return _RECIPE_ALIASES.get(server_id, server_id)
 
 
 def _backend_warnings() -> list:
-    """Return human-readable notes about LSP backend tools that are missing
-    in a way that won't surface elsewhere.
-
-    Some language servers ship as thin wrappers around an external CLI for
-    actual diagnostics — they spawn cleanly but never emit any errors when
-    the sidecar binary isn't on PATH.  bash-language-server / shellcheck
-    is the load-bearing example.
-
-    Returned strings are short, actionable, and include the install
-    suggestion across common platforms.
-    """
+    """Notes about missing sidecar tools that make a server spawn fine but emit nothing (e.g. shellcheck)."""
     import shutil as _shutil
     from agent.lsp.install import _existing_binary
     notes: list = []
