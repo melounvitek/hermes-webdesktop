@@ -7,7 +7,10 @@ Helpers that tests patch on ``web_server`` are reached lazily through it.
 
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only
+    from tools.mcp_dashboard_oauth import DashboardOAuthFlow
 from hermes_cli.config import redact_key
 from hermes_cli.web_models import MCPServerCreate
 

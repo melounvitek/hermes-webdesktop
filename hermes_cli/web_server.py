@@ -13,7 +13,6 @@ from contextlib import asynccontextmanager
 
 import asyncio
 from collections import deque
-import hashlib
 import hmac
 import logging
 import os
@@ -30,7 +29,7 @@ import urllib.parse
 from hermes_cli.install_identity import get_install_id as _shared_get_install_id
 from hermes_cli.pty_session import run_reaper
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
@@ -57,11 +56,10 @@ from gateway.status import (  # noqa: F401 — late-bound by web_routers/status 
 )
 
 try:
-    from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, HTTPException, Request
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
-    from fastapi.staticfiles import StaticFiles
-    from starlette.concurrency import run_in_threadpool
+    from fastapi.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool  # noqa: F401 — late-bound by web_server_cron/routers; tests patch web_server.run_in_threadpool
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually
     # running `hermes dashboard` needs fastapi+uvicorn; lazy install keeps
@@ -69,11 +67,10 @@ except ImportError:
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("tool.dashboard", prompt=False)
-        from fastapi import (
-            FastAPI, HTTPException, Request,
-        )
+        from fastapi import FastAPI, HTTPException, Request
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import JSONResponse
+        from starlette.concurrency import run_in_threadpool  # noqa: F401
     except Exception:
         raise SystemExit(
             "Web UI requires fastapi and uvicorn.\n"
@@ -460,6 +457,7 @@ def _ssh_runtime_intact() -> bool:
     except OSError:
         return False
     return (st.st_dev, st.st_ino) == (device, inode)
+
 
 # In-browser Chat tab (/chat, /api/pty, /api/ws, …).  Always enabled: the
 # desktop app and the dashboard's own Chat tab both drive the agent over the
@@ -1496,6 +1494,9 @@ app.include_router(_config_env_routes.router)
 
 
 from hermes_cli.web_server_profiles import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
+    _profile_cli_args,
+    _hub_action_name,
+    _installed_hub_identifiers,
     _SKILLS_PROFILE_LOCK,
     _TERMINAL_BACKENDS,
     _approval_mode_of,
@@ -1703,38 +1704,6 @@ from hermes_cli.web_routers.ops import (  # noqa: E402,F401 — legacy re-export
 # ---------------------------------------------------------------------------
 
 
-def _profile_cli_args(profile: Optional[str]) -> List[str]:
-    """Return ``["-p", <name>]`` for a validated non-default profile.
-
-    Hub install/uninstall/update run in a fresh ``hermes`` subprocess, and
-    ``_apply_profile_override()`` reads ``-p`` from argv in the child — the
-    only mechanism that reaches import-time-bound globals like
-    ``skills_hub.SKILLS_DIR``. Empty/"current" means the dashboard's own
-    profile (no args, legacy behavior).
-    """
-    requested = (profile or "").strip()
-    if not requested or requested.lower() in {"current", "default"}:
-        return []
-    from hermes_cli import profiles as profiles_mod
-    _resolve_profile_dir(requested)
-    return ["-p", profiles_mod.normalize_profile_name(requested)]
-
-
-def _hub_action_name(verb: str, key: str) -> str:
-    """Unique per-skill hub action name (+ registered log file).
-
-    ``_spawn_hermes_action`` tracks one process/log per name, so a shared
-    "skills-install"/"skills-uninstall" would make concurrent row-level actions
-    overwrite each other's status/log while the UI polls per identifier. Slug
-    (readable) + hash (collision-proof) keys each action to its own row.
-    """
-    slug = re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-")[:48] or "skill"
-    digest = hashlib.sha1(key.encode()).hexdigest()[:8]
-    name = f"skills-{verb}-{slug}-{digest}"
-    _ACTION_LOG_FILES.setdefault(name, f"action-{name}.log")
-    return name
-
-
 from hermes_cli.web_routers import skills as _skills_routes  # noqa: E402
 
 app.include_router(_skills_routes.hub_router)
@@ -1747,37 +1716,6 @@ from hermes_cli.web_routers.skills import (  # noqa: E402,F401 — legacy re-exp
     preview_skill_hub,
     scan_skill_hub,
 )
-
-
-def _installed_hub_identifiers(profile: Optional[str] = None) -> dict:
-    """Map identifier -> installed lock entry for hub-installed skills.
-
-    Lets the UI mark search results that are already installed.  Scoped to
-    ``profile``'s skills/.hub/lock.json when provided (HubLockFile takes an
-    explicit path, sidestepping the import-time LOCK_FILE binding).
-    Best-effort: returns an empty dict if the lock file can't be read.
-    """
-    try:
-        from tools.skills_hub import HubLockFile
-
-        requested = (profile or "").strip()
-        if requested and requested.lower() != "current":
-            profile_dir = _resolve_profile_dir(requested)
-            lock = HubLockFile(profile_dir / "skills" / ".hub" / "lock.json")
-        else:
-            lock = HubLockFile()
-        out = {}
-        for entry in lock.list_installed():
-            ident = entry.get("identifier")
-            if ident:
-                out[ident] = {
-                    "name": entry.get("name"),
-                    "trust_level": entry.get("trust_level"),
-                    "scan_verdict": entry.get("scan_verdict"),
-                }
-        return out
-    except Exception:
-        return {}
 
 
 app.include_router(_profiles_routes.router)

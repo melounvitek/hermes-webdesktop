@@ -6,7 +6,9 @@ Helpers that tests patch on ``web_server`` are reached lazily through it.
 """
 
 import logging
+import hashlib
 import os
+import re
 import sys
 import threading
 from contextlib import contextmanager
@@ -15,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from hermes_cli.config import DEFAULT_CONFIG, get_process_hermes_home
 from hermes_cli.web_models import MCPServerCreate
+from hermes_cli.web_server_gateway import _ACTION_LOG_FILES
 from hermes_cli.web_server_mcp import _normalize_mcp_server_create
 
 # Same logger the code used before extraction (record parity).
@@ -521,3 +524,66 @@ def _aux_task_summary(aux_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         reverse=True,
     )
     return result
+
+
+def _profile_cli_args(profile: Optional[str]) -> List[str]:
+    """Return ``["-p", <name>]`` for a validated non-default profile.
+
+    Hub install/uninstall/update run in a fresh ``hermes`` subprocess, and
+    ``_apply_profile_override()`` reads ``-p`` from argv in the child — the
+    only mechanism that reaches import-time-bound globals like
+    ``skills_hub.SKILLS_DIR``. Empty/"current" means the dashboard's own
+    profile (no args, legacy behavior).
+    """
+    requested = (profile or "").strip()
+    if not requested or requested.lower() in {"current", "default"}:
+        return []
+    from hermes_cli import profiles as profiles_mod
+    _resolve_profile_dir(requested)
+    return ["-p", profiles_mod.normalize_profile_name(requested)]
+
+
+def _hub_action_name(verb: str, key: str) -> str:
+    """Unique per-skill hub action name (+ registered log file).
+
+    ``_spawn_hermes_action`` tracks one process/log per name, so a shared
+    "skills-install"/"skills-uninstall" would make concurrent row-level actions
+    overwrite each other's status/log while the UI polls per identifier. Slug
+    (readable) + hash (collision-proof) keys each action to its own row.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-")[:48] or "skill"
+    digest = hashlib.sha1(key.encode()).hexdigest()[:8]
+    name = f"skills-{verb}-{slug}-{digest}"
+    _ACTION_LOG_FILES.setdefault(name, f"action-{name}.log")
+    return name
+
+
+def _installed_hub_identifiers(profile: Optional[str] = None) -> dict:
+    """Map identifier -> installed lock entry for hub-installed skills.
+
+    Lets the UI mark search results that are already installed.  Scoped to
+    ``profile``'s skills/.hub/lock.json when provided (HubLockFile takes an
+    explicit path, sidestepping the import-time LOCK_FILE binding).
+    Best-effort: returns an empty dict if the lock file can't be read.
+    """
+    try:
+        from tools.skills_hub import HubLockFile
+
+        requested = (profile or "").strip()
+        if requested and requested.lower() != "current":
+            profile_dir = _resolve_profile_dir(requested)
+            lock = HubLockFile(profile_dir / "skills" / ".hub" / "lock.json")
+        else:
+            lock = HubLockFile()
+        out = {}
+        for entry in lock.list_installed():
+            ident = entry.get("identifier")
+            if ident:
+                out[ident] = {
+                    "name": entry.get("name"),
+                    "trust_level": entry.get("trust_level"),
+                    "scan_verdict": entry.get("scan_verdict"),
+                }
+        return out
+    except Exception:
+        return {}
