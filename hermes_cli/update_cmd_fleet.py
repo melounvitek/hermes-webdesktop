@@ -1079,20 +1079,302 @@ class _GatewayRestartOutcome:
     killed_pids: set
 
 
+def _restart_manual_gateways(
+    _drain_budget,
+    *,
+    restarted_services,
+    killed_pids,
+    relaunched_profiles,
+    externally_supervised_profiles,
+    find_gateway_pids,
+    find_profile_gateway_processes,
+    _prepare_profile_gateway_update_restart,
+    _get_service_pids,
+    _wait_for_gateway_exit,
+):
+    """Drain/stop every manual (non-service) gateway and print the restart summary.
+
+    Mutates ``killed_pids`` / ``relaunched_profiles`` /
+    ``externally_supervised_profiles`` in place; raises like the inline
+    code did so the caller's phase-abort recovery still fires.
+    """
+    import signal as _signal
+
+    # --- Manual (non-service) gateways --- excluding PIDs of
+    # just-restarted services so we don't kill what systemd/launchd spawned.
+    service_pids = _get_service_pids(all_profiles=True)
+    manual_pids = find_gateway_pids(
+        exclude_pids=service_pids, all_profiles=True
+    )
+    profile_processes = {
+        proc.pid: proc
+        for proc in find_profile_gateway_processes(exclude_pids=service_pids)
+        if proc.pid in manual_pids
+    }
+    # Profile gateways we could not arm a relaunch for must NOT keep
+    # running on pre-update modules (#88654): hand them to the unmapped
+    # sweep below, which stops them and lists them under "Restart manually".
+    unrestartable_pids = set()
+    for pid, proc in profile_processes.items():
+        restart_mode = _prepare_profile_gateway_update_restart(
+            proc.profile, pid
+        )
+        if restart_mode is None:
+            # Previously a bare ``continue``: the gateway was neither
+            # relaunched nor stopped nor mentioned, so it kept serving
+            # from stale modules with no operator signal at all.
+            print(
+                f"  ⚠ {proc.profile}: could not arm an automatic "
+                f"gateway restart for PID {pid} — stopping it instead "
+                "so it cannot keep running pre-update code"
+            )
+            unrestartable_pids.add(pid)
+            continue
+        # Graceful SIGUSR1 drain first (in-flight runs finish), SIGTERM
+        # fallback if unsupported or over budget — the watcher relaunches
+        # either way. Three-way triage (ancestor fire-and-forget #100179 /
+        # wedged escalation #81642 / normal drain) shared with the systemd
+        # path; the helper announces its choice first because a silent
+        # full-budget wait reads as a hung update (#44515).
+        drained = _drain_or_signal_gateway_for_update(
+            pid, _drain_budget, proc.profile
+        )
+        if not drained:
+            try:
+                os.kill(pid, _signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        # Wait up to 5s for the old process to exit before the watcher
+        # respawns. Telegram keeps the old getUpdates session alive ~30s;
+        # a new gateway connecting inside that window gets a 409 that
+        # _handle_polling_conflict() retries through, but a brief wait
+        # avoids that path on fast machines (watcher restarts in <1s).
+        _wait_for_gateway_exit(timeout=5.0, force_after=None)
+        killed_pids.add(pid)
+        if restart_mode == "external-supervisor":
+            externally_supervised_profiles.append(proc.profile)
+        else:
+            relaunched_profiles.append(proc.profile)
+
+    for pid in manual_pids:
+        if pid in profile_processes and pid not in unrestartable_pids:
+            continue
+        try:
+            os.kill(pid, _signal.SIGTERM)
+            killed_pids.add(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    if restarted_services or killed_pids:
+        print()
+        for svc in restarted_services:
+            print(f"  ✓ Restarted {svc}")
+        if relaunched_profiles:
+            names = ", ".join(relaunched_profiles)
+            print(f"  ✓ Restarting manual gateway profile(s): {names}")
+        if externally_supervised_profiles:
+            names = ", ".join(externally_supervised_profiles)
+            print(
+                "  ✓ Handed gateway profile(s) back to their external "
+                f"supervisor: {names}"
+            )
+        unmapped_count = (
+            len(killed_pids)
+            - len(relaunched_profiles)
+            - len(externally_supervised_profiles)
+        )
+        if unmapped_count:
+            print(f"  → Stopped {unmapped_count} manual gateway process(es)")
+            print("    Restart manually: hermes gateway run")
+            if unmapped_count > 1:
+                print(
+                    "    (or: hermes -p <profile> gateway run  for each profile)"
+                )
+
+
+def _force_kill_stuck_gateways(killed_pids, *, find_gateway_pids, _get_service_pids):
+    # --- Post-restart survivor sweep (#17648) ---------------------
+    # Gateways that ignore SIGTERM (stuck drain, blocked I/O, zombie)
+    # never exit, so the 120s profile watcher never respawns and the
+    # user keeps hitting ImportError on stale sys.modules. Give graceful
+    # paths a moment, then SIGKILL remaining pre-update PIDs.
+    try:
+        _time.sleep(3.0)
+        _service_pids_after = _get_service_pids(all_profiles=True)
+        _surviving = find_gateway_pids(
+            exclude_pids=_service_pids_after,
+            all_profiles=True,
+        )
+        # Only PIDs we already tried to kill; anything newer started
+        # AFTER our restart attempt and is left alone.
+        _stuck = [pid for pid in _surviving if pid in killed_pids]
+        if _stuck:
+            print()
+            print(
+                f"  ⚠ {len(_stuck)} gateway process(es) ignored SIGTERM — force-killing"
+            )
+            from gateway.status import (
+                get_process_start_time as _get_process_start_time,
+                terminate_pid as _terminate_pid,
+            )
+            for pid in _stuck:
+                try:
+                    # taskkill /T /F on Windows, SIGKILL on POSIX —
+                    # _signal.SIGKILL doesn't exist on Windows.
+                    _terminate_pid(
+                        pid,
+                        force=True,
+                        expected_start_time=_get_process_start_time(pid),
+                    )
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            # Give the OS a beat to reap the processes so the
+            # watchers see them exit and respawn.
+            _time.sleep(1.5)
+    except Exception as _sweep_exc:
+        logger.debug("Post-restart survivor sweep failed: %s", _sweep_exc)
+
+
+def _recover_after_restart_phase_abort(
+    e,
+    _pre_update_plan,
+    *,
+    gateway_mode,
+    gateway_fleet_restart_incomplete,
+    gateway_restart_phase_errors,
+    _pre_restart_gateway_pids,
+    restarted_services,
+    restarted_scoped_units,
+    failed_or_stale_units,
+    relaunched_profiles,
+    externally_supervised_profiles,
+    killed_pids,
+) -> bool:
+    """Phase-abort recovery: fresh-child restart + fail-closed verdict.
+
+    Returns the new ``incomplete`` flag; extends ``relaunched_profiles`` and
+    ``gateway_restart_phase_errors`` in place.
+    """
+    from hermes_cli.update_cmd import (
+        _abort_recovery_is_complete,
+        _recover_gateway_restart_after_abort,
+        _surviving_pre_update_serve_runtimes,
+        _warn_stale_serve_runtimes,
+        _write_gateway_update_exit_code,
+    )
+
+    logger.debug("Gateway restart during update failed: %s", e)
+    gateway_restart_phase_errors.append(str(e))
+    # An escaped exception means the restart output never printed. Treat
+    # the fleet as stale unless we can positively prove no gateway runs
+    # (#78574). An empty ``_surviving`` proves safety only if nothing was
+    # running beforehand; a pre-restart gateway that is gone now was
+    # stopped without a verified replacement, so ``[]`` still fails closed.
+    _surviving = _surviving_gateway_pids_after_failed_restart()
+    _already_restarted_profiles = set(relaunched_profiles)
+    _already_restarted_profiles.update(externally_supervised_profiles)
+    for runtime in getattr(_pre_update_plan, "runtimes", ()) or ():
+        if getattr(runtime, "kind", None) != "gateway":
+            continue
+        profile = getattr(runtime, "profile", None)
+        if not isinstance(profile, str):
+            continue
+        if any(
+            _gateway_service_matches_profile(profile, service)
+            for service in restarted_services
+        ):
+            _already_restarted_profiles.add(profile)
+    _recovery_result = _recover_gateway_restart_after_abort(
+        _pre_update_plan,
+        gateway_mode=gateway_mode,
+        skip_profiles=_already_restarted_profiles,
+        skip_units=set(restarted_scoped_units),
+    )
+    _recovery_serve_units = _recovery_result.get("serve_units") or {}
+    _serve_units_failed = list(_recovery_serve_units.get("failed") or [])
+    # Deliberately NOT merged into ``restarted_services`` (gateway-phase
+    # vocabulary feeding the fleet-probe expectation); serve coverage
+    # lives in the recovery result and receipt. A serve/dashboard runtime
+    # that is still the SAME pre-update process is live on old code
+    # (#92145, e.g. tui_gateway under `hermes serve`, unreachable by any
+    # `gateway restart`). Recovery may not claim success while one
+    # remains, and must never kill one: manual/Desktop-owned serves have
+    # no relaunch authority.
+    _stale_runtime_rows = _surviving_pre_update_serve_runtimes(
+        _pre_update_plan
+    )
+    _recovery_result["stale_runtimes"] = _stale_runtime_rows
+    # Only systemd-VERIFIED outcomes may claim supervisor coverage.
+    # A relaunch that merely exited 0 ("relaunch_attempted") was never
+    # observed by the code and must not clear the incomplete flag.
+    _recovery_verified = set(_recovery_result.get("verified") or [])
+    if _recovery_verified:
+        relaunched_profiles.extend(
+            profile
+            for profile in sorted(_recovery_verified)
+            if profile not in relaunched_profiles
+        )
+    _planned_gateway_runtimes = [
+        runtime
+        for runtime in getattr(_pre_update_plan, "runtimes", ()) or ()
+        if getattr(runtime, "kind", None) == "gateway"
+        and isinstance(getattr(runtime, "profile", None), str)
+    ]
+    _planned_gateway_profiles = {
+        runtime.profile for runtime in _planned_gateway_runtimes
+    }
+    _covered_gateway_profiles = (
+        _already_restarted_profiles | _recovery_verified
+    )
+    _recovery_complete = _abort_recovery_is_complete(
+        planned_gateway_profiles=_planned_gateway_profiles,
+        covered_gateway_profiles=_covered_gateway_profiles,
+        recovery_result=_recovery_result,
+        stale_runtime_rows=_stale_runtime_rows,
+    )
+    if _recovery_complete:
+        # The fresh child is the recovery terminal result. Leave the
+        # final fleet-version matrix below as the authoritative
+        # read-back before the update is declared successful.
+        gateway_fleet_restart_incomplete = False
+    elif (
+        _restart_phase_failure_is_incomplete(
+            _surviving, _pre_restart_gateway_pids
+        )
+        or _stale_runtime_rows
+        or _serve_units_failed
+    ):
+        gateway_fleet_restart_incomplete = True
+        _warn_gateway_restart_phase_aborted(e, _surviving)
+        _warn_stale_serve_runtimes(_stale_runtime_rows)
+        if gateway_mode:
+            _write_gateway_update_exit_code(False)
+    try:
+        from hermes_cli.update_receipt import record_gateway_restart
+
+        record_gateway_restart(
+            restarted_services=restarted_services,
+            relaunched_profiles=relaunched_profiles,
+            externally_supervised_profiles=externally_supervised_profiles,
+            killed_pids=sorted(killed_pids),
+            failed_units=failed_or_stale_units,
+            incomplete=gateway_fleet_restart_incomplete,
+            phase_error=str(e),
+            fresh_recovery=_recovery_result,
+        )
+    except Exception:
+        pass
+    return gateway_fleet_restart_incomplete
+
+
 def _restart_gateway_fleet_after_update(_pre_update_plan, gateway_mode: bool):
     """Restart every running gateway (systemd, launchd, manual) so it picks up the pulled code.
 
     Never raises: a phase abort runs the fresh-child recovery and fails closed
     (``incomplete=True``) unless every planned gateway is verifiably covered.
     """
-    from hermes_cli.update_cmd import (
-        _abort_recovery_is_complete,
-        _m,
-        _recover_gateway_restart_after_abort,
-        _surviving_pre_update_serve_runtimes,
-        _warn_stale_serve_runtimes,
-        _write_gateway_update_exit_code,
-    )
+    from hermes_cli.update_cmd import _m, _write_gateway_update_exit_code
+
     gateway_fleet_restart_incomplete = False
     gateway_restart_phase_errors: list[str] = []
     # Gateways running before we touch anything. Stays empty until the probe
@@ -1133,7 +1415,6 @@ def _restart_gateway_fleet_after_update(_pre_update_plan, gateway_mode: bool):
             _get_service_pids,
             _wait_for_gateway_exit,
         )
-        import signal as _signal
 
         # Wait budget for graceful SIGUSR1 restarts: covers both the
         # ``restart_after_turn_timeout`` deferral (#77184) and the
@@ -1176,96 +1457,18 @@ def _restart_gateway_fleet_after_update(_pre_update_plan, gateway_mode: bool):
             except (FileNotFoundError, ImportError):
                 pass
 
-        # --- Manual (non-service) gateways --- excluding PIDs of
-        # just-restarted services so we don't kill what systemd/launchd spawned.
-        service_pids = _get_service_pids(all_profiles=True)
-        manual_pids = find_gateway_pids(
-            exclude_pids=service_pids, all_profiles=True
+        _restart_manual_gateways(
+            _drain_budget,
+            restarted_services=restarted_services,
+            killed_pids=killed_pids,
+            relaunched_profiles=relaunched_profiles,
+            externally_supervised_profiles=externally_supervised_profiles,
+            find_gateway_pids=find_gateway_pids,
+            find_profile_gateway_processes=find_profile_gateway_processes,
+            _prepare_profile_gateway_update_restart=_prepare_profile_gateway_update_restart,
+            _get_service_pids=_get_service_pids,
+            _wait_for_gateway_exit=_wait_for_gateway_exit,
         )
-        profile_processes = {
-            proc.pid: proc
-            for proc in find_profile_gateway_processes(exclude_pids=service_pids)
-            if proc.pid in manual_pids
-        }
-        # Profile gateways we could not arm a relaunch for must NOT keep
-        # running on pre-update modules (#88654): hand them to the unmapped
-        # sweep below, which stops them and lists them under "Restart manually".
-        unrestartable_pids = set()
-        for pid, proc in profile_processes.items():
-            restart_mode = _prepare_profile_gateway_update_restart(
-                proc.profile, pid
-            )
-            if restart_mode is None:
-                # Previously a bare ``continue``: the gateway was neither
-                # relaunched nor stopped nor mentioned, so it kept serving
-                # from stale modules with no operator signal at all.
-                print(
-                    f"  ⚠ {proc.profile}: could not arm an automatic "
-                    f"gateway restart for PID {pid} — stopping it instead "
-                    "so it cannot keep running pre-update code"
-                )
-                unrestartable_pids.add(pid)
-                continue
-            # Graceful SIGUSR1 drain first (in-flight runs finish), SIGTERM
-            # fallback if unsupported or over budget — the watcher relaunches
-            # either way. Three-way triage (ancestor fire-and-forget #100179 /
-            # wedged escalation #81642 / normal drain) shared with the systemd
-            # path; the helper announces its choice first because a silent
-            # full-budget wait reads as a hung update (#44515).
-            drained = _drain_or_signal_gateway_for_update(
-                pid, _drain_budget, proc.profile
-            )
-            if not drained:
-                try:
-                    os.kill(pid, _signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            # Wait up to 5s for the old process to exit before the watcher
-            # respawns. Telegram keeps the old getUpdates session alive ~30s;
-            # a new gateway connecting inside that window gets a 409 that
-            # _handle_polling_conflict() retries through, but a brief wait
-            # avoids that path on fast machines (watcher restarts in <1s).
-            _wait_for_gateway_exit(timeout=5.0, force_after=None)
-            killed_pids.add(pid)
-            if restart_mode == "external-supervisor":
-                externally_supervised_profiles.append(proc.profile)
-            else:
-                relaunched_profiles.append(proc.profile)
-
-        for pid in manual_pids:
-            if pid in profile_processes and pid not in unrestartable_pids:
-                continue
-            try:
-                os.kill(pid, _signal.SIGTERM)
-                killed_pids.add(pid)
-            except (ProcessLookupError, PermissionError):
-                pass
-
-        if restarted_services or killed_pids:
-            print()
-            for svc in restarted_services:
-                print(f"  ✓ Restarted {svc}")
-            if relaunched_profiles:
-                names = ", ".join(relaunched_profiles)
-                print(f"  ✓ Restarting manual gateway profile(s): {names}")
-            if externally_supervised_profiles:
-                names = ", ".join(externally_supervised_profiles)
-                print(
-                    "  ✓ Handed gateway profile(s) back to their external "
-                    f"supervisor: {names}"
-                )
-            unmapped_count = (
-                len(killed_pids)
-                - len(relaunched_profiles)
-                - len(externally_supervised_profiles)
-            )
-            if unmapped_count:
-                print(f"  → Stopped {unmapped_count} manual gateway process(es)")
-                print("    Restart manually: hermes gateway run")
-                if unmapped_count > 1:
-                    print(
-                        "    (or: hermes -p <profile> gateway run  for each profile)"
-                    )
 
         if failed_or_stale_units:
             gateway_fleet_restart_incomplete = True
@@ -1287,149 +1490,25 @@ def _restart_gateway_fleet_after_update(_pre_update_plan, gateway_mode: bool):
         except Exception:
             pass
 
-        # --- Post-restart survivor sweep (#17648) ---------------------
-        # Gateways that ignore SIGTERM (stuck drain, blocked I/O, zombie)
-        # never exit, so the 120s profile watcher never respawns and the
-        # user keeps hitting ImportError on stale sys.modules. Give graceful
-        # paths a moment, then SIGKILL remaining pre-update PIDs.
-        try:
-            _time.sleep(3.0)
-            _service_pids_after = _get_service_pids(all_profiles=True)
-            _surviving = find_gateway_pids(
-                exclude_pids=_service_pids_after,
-                all_profiles=True,
-            )
-            # Only PIDs we already tried to kill; anything newer started
-            # AFTER our restart attempt and is left alone.
-            _stuck = [pid for pid in _surviving if pid in killed_pids]
-            if _stuck:
-                print()
-                print(
-                    f"  ⚠ {len(_stuck)} gateway process(es) ignored SIGTERM — force-killing"
-                )
-                from gateway.status import (
-                    get_process_start_time as _get_process_start_time,
-                    terminate_pid as _terminate_pid,
-                )
-                for pid in _stuck:
-                    try:
-                        # taskkill /T /F on Windows, SIGKILL on POSIX —
-                        # _signal.SIGKILL doesn't exist on Windows.
-                        _terminate_pid(
-                            pid,
-                            force=True,
-                            expected_start_time=_get_process_start_time(pid),
-                        )
-                    except (ProcessLookupError, PermissionError, OSError):
-                        pass
-                # Give the OS a beat to reap the processes so the
-                # watchers see them exit and respawn.
-                _time.sleep(1.5)
-        except Exception as _sweep_exc:
-            logger.debug("Post-restart survivor sweep failed: %s", _sweep_exc)
+        _force_kill_stuck_gateways(
+            killed_pids, find_gateway_pids=find_gateway_pids, _get_service_pids=_get_service_pids
+        )
 
     except Exception as e:
-        logger.debug("Gateway restart during update failed: %s", e)
-        gateway_restart_phase_errors.append(str(e))
-        # An escaped exception means the restart output never printed. Treat
-        # the fleet as stale unless we can positively prove no gateway runs
-        # (#78574). An empty ``_surviving`` proves safety only if nothing was
-        # running beforehand; a pre-restart gateway that is gone now was
-        # stopped without a verified replacement, so ``[]`` still fails closed.
-        _surviving = _surviving_gateway_pids_after_failed_restart()
-        _already_restarted_profiles = set(relaunched_profiles)
-        _already_restarted_profiles.update(externally_supervised_profiles)
-        for runtime in getattr(_pre_update_plan, "runtimes", ()) or ():
-            if getattr(runtime, "kind", None) != "gateway":
-                continue
-            profile = getattr(runtime, "profile", None)
-            if not isinstance(profile, str):
-                continue
-            if any(
-                _gateway_service_matches_profile(profile, service)
-                for service in restarted_services
-            ):
-                _already_restarted_profiles.add(profile)
-        _recovery_result = _recover_gateway_restart_after_abort(
+        gateway_fleet_restart_incomplete = _recover_after_restart_phase_abort(
+            e,
             _pre_update_plan,
             gateway_mode=gateway_mode,
-            skip_profiles=_already_restarted_profiles,
-            skip_units=set(restarted_scoped_units),
+            gateway_fleet_restart_incomplete=gateway_fleet_restart_incomplete,
+            gateway_restart_phase_errors=gateway_restart_phase_errors,
+            _pre_restart_gateway_pids=_pre_restart_gateway_pids,
+            restarted_services=restarted_services,
+            restarted_scoped_units=restarted_scoped_units,
+            failed_or_stale_units=failed_or_stale_units,
+            relaunched_profiles=relaunched_profiles,
+            externally_supervised_profiles=externally_supervised_profiles,
+            killed_pids=killed_pids,
         )
-        _recovery_serve_units = _recovery_result.get("serve_units") or {}
-        _serve_units_failed = list(_recovery_serve_units.get("failed") or [])
-        # Deliberately NOT merged into ``restarted_services`` (gateway-phase
-        # vocabulary feeding the fleet-probe expectation); serve coverage
-        # lives in the recovery result and receipt. A serve/dashboard runtime
-        # that is still the SAME pre-update process is live on old code
-        # (#92145, e.g. tui_gateway under `hermes serve`, unreachable by any
-        # `gateway restart`). Recovery may not claim success while one
-        # remains, and must never kill one: manual/Desktop-owned serves have
-        # no relaunch authority.
-        _stale_runtime_rows = _surviving_pre_update_serve_runtimes(
-            _pre_update_plan
-        )
-        _recovery_result["stale_runtimes"] = _stale_runtime_rows
-        # Only systemd-VERIFIED outcomes may claim supervisor coverage.
-        # A relaunch that merely exited 0 ("relaunch_attempted") was never
-        # observed by the code and must not clear the incomplete flag.
-        _recovery_verified = set(_recovery_result.get("verified") or [])
-        if _recovery_verified:
-            relaunched_profiles.extend(
-                profile
-                for profile in sorted(_recovery_verified)
-                if profile not in relaunched_profiles
-            )
-        _planned_gateway_runtimes = [
-            runtime
-            for runtime in getattr(_pre_update_plan, "runtimes", ()) or ()
-            if getattr(runtime, "kind", None) == "gateway"
-            and isinstance(getattr(runtime, "profile", None), str)
-        ]
-        _planned_gateway_profiles = {
-            runtime.profile for runtime in _planned_gateway_runtimes
-        }
-        _covered_gateway_profiles = (
-            _already_restarted_profiles | _recovery_verified
-        )
-        _recovery_complete = _abort_recovery_is_complete(
-            planned_gateway_profiles=_planned_gateway_profiles,
-            covered_gateway_profiles=_covered_gateway_profiles,
-            recovery_result=_recovery_result,
-            stale_runtime_rows=_stale_runtime_rows,
-        )
-        if _recovery_complete:
-            # The fresh child is the recovery terminal result. Leave the
-            # final fleet-version matrix below as the authoritative
-            # read-back before the update is declared successful.
-            gateway_fleet_restart_incomplete = False
-        elif (
-            _restart_phase_failure_is_incomplete(
-                _surviving, _pre_restart_gateway_pids
-            )
-            or _stale_runtime_rows
-            or _serve_units_failed
-        ):
-            gateway_fleet_restart_incomplete = True
-            _warn_gateway_restart_phase_aborted(e, _surviving)
-            _warn_stale_serve_runtimes(_stale_runtime_rows)
-            if gateway_mode:
-                _write_gateway_update_exit_code(False)
-        try:
-            from hermes_cli.update_receipt import record_gateway_restart
-
-            record_gateway_restart(
-                restarted_services=restarted_services,
-                relaunched_profiles=relaunched_profiles,
-                externally_supervised_profiles=externally_supervised_profiles,
-                killed_pids=sorted(killed_pids),
-                failed_units=failed_or_stale_units,
-                incomplete=gateway_fleet_restart_incomplete,
-                phase_error=str(e),
-                fresh_recovery=_recovery_result,
-            )
-        except Exception:
-            pass
 
     return _GatewayRestartOutcome(
         incomplete=gateway_fleet_restart_incomplete,
