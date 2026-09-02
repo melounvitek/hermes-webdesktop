@@ -4,16 +4,12 @@ JSON-safe coercion, secret-key redaction, size caps, and the ``api_request_error
 Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s MRO unchanged.
 """
 import json
-import logging
 import os
 import time
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from agent.usage_pricing import normalize_usage
-
-# Same logger name as the origin module so log records / caplog filters are unchanged.
-logger = logging.getLogger("run_agent")
 
 
 class ApiRequestHooksMixin:
