@@ -2746,163 +2746,123 @@ def select_provider_and_model(args=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-# Lazy-export the model catalog at module level. Tests and a handful of
-# downstream call sites read `hermes_cli.main._PROVIDER_MODELS` directly,
-# so the symbol needs to be reachable as a module attribute. But importing
-# the catalog eagerly costs ~55ms on every `hermes` invocation — including
-# fast paths like `hermes --version` and slash-command dispatch that never
-# touch the catalog. PEP 562 module-level __getattr__ defers the import
-# until first attribute access, so the cost is only paid by callers that
-# actually look up the catalog. Termux already defers via the same
-# mechanism (its model-selection handlers do their own function-local
-# imports), so the explicit termux branch from before is no longer needed.
-_LAZY_MODEL_EXPORTS = ("_PROVIDER_MODELS",)
-
-
-# The main.py decomposition moved the sessions/update/dashboard command
-# implementations into their own modules, but main.py still re-exports their
-# surface so argparse wiring and test monkeypatches on hermes_cli.main.<name>
-# keep resolving unchanged. Importing those modules eagerly costs ~50ms on
-# every `hermes` invocation, including fast paths like `hermes --version`
-# that never run a subcommand. Resolve the re-exports through the module
-# __getattr__ below instead, so each module is only imported when one of its
-# names is actually touched. Monkeypatching keeps working: patch.object sets
-# a real module attribute, which shadows __getattr__.
+# Lazy re-exports (PEP 562 ``__getattr__`` below). Tests and downstream call
+# sites read ``hermes_cli.main.<name>`` for the model catalog and for the
+# sessions/update/dashboard command surface that was split out of this file.
+# Importing those modules eagerly costs ~50-100ms on every ``hermes``
+# invocation, including ``hermes --version``; resolving on first attribute
+# access confines the cost to callers that touch them. Monkeypatching keeps
+# working: patch.object sets a real module attribute, which shadows __getattr__.
 _LAZY_COMMAND_EXPORTS = {
     "hermes_cli.sessions_cmd": (
-        "cmd_sessions",
         "_annotate_session_statuses",
         "_relative_time",
         "_session_browse_picker",
         "_session_status_tag",
         "_size_delta_label",
+        "cmd_sessions",
     ),
     "hermes_cli.dashboard_procs": (
         "_detect_concurrent_hermes_instances",
-        "_filter_dashboard_respawn_candidates",
         "_kill_stale_dashboard_processes",
         "_scan_dashboard_processes",
     ),
     "hermes_cli.update_cmd": (
+        "_web_toolchain_roots",
+        "_web_build_toolchain_ready",
+        "_warn_incomplete_gateway_fleet_restart",
+        "_warn_gateway_restart_phase_aborted",
+        "_surviving_gateway_pids_after_failed_restart",
+        "_service_unit_supports_graceful_sigusr1_restart",
+        "_restart_phase_failure_is_incomplete",
+        "_print_update_completion",
+        "_log_only_write",
+        "_for_each_systemd_gateway_unit",
+        "_print_curator_recent_run_notice",
+        "_ORPHAN_RESCUE_REFS_TO_KEEP",
+        "_ORPHAN_RESCUE_REF_MAX_AGE_DAYS",
+        "_UPDATE_CRITICAL_FILES",
         "_abort_dependency_sync_if_self_locked",
-        "_add_upstream_remote",
+        "_assess_parked_branch_switch",
         "_atomic_replace_dir",
         "_capture_active_lazy_features",
         "_capture_active_tool_dependencies",
         "_capture_head_sha",
         "_classify_concurrent_instance",
-        "_clear_fleet_restart_pending_marker",
-        "_assess_parked_branch_switch",
-        "_branch_head_label",
-        "_branch_head_suffix",
         "_cmd_update_check",
         "_cmd_update_impl",
         "_cold_start_windows_gateway_after_update",
-        "_count_commits_between",
+        "_defer_update_for_self_lock",
         "_dependency_sync_would_rewrite",
         "_detect_self_loaded_native_modules",
         "_detect_venv_python_processes",
-        "_desktop_owns_gateway_lifecycle",
-        "_defer_update_for_self_lock",
         "_discard_lockfile_churn",
         "_discard_stashed_changes",
-        "_park_stashed_changes",
         "_ensure_acp_launcher",
         "_ensure_uv_for_termux",
+        "_filter_non_gateway_concurrent_instances",
         "_finish_dashboard_update_cleanup",
         "_fleet_probe_expected_runtimes",
-        "_fleet_restart_pending_marker_path",
-        "_filter_non_gateway_concurrent_instances",
-        "_for_each_systemd_gateway_unit",
-        "_format_concurrent_instances_message",
         "_format_time_ago",
-        "_gateway_service_matches_profile",
-        "_gateway_recovery_partition",
-        "_handoff_reapable_backend_pids",
-        "_ledger_reapable_backend_pids",
-        "_purge_stale_hermes_modules",
-        "_format_venv_python_holders_message",
         "_gateway_prompt",
         "_get_origin_url",
-        "_has_upstream_remote",
+        "_handoff_reapable_backend_pids",
         "_install_psutil_android_compat",
-        "_invalidate_update_cache",
         "_is_fork",
-        "_leftover_pausable_gateway_pids",
         "_ledger_manual_serve_holders",
-        "_relaunch_stopped_serves",
-        "_serve_relaunch_commands",
-        "_log_only_write",
-        "_mark_skip_upstream_prompt",
+        "_ledger_reapable_backend_pids",
+        "_leftover_pausable_gateway_pids",
         "_npm_lockfile_changed",
         "_npm_manifests_digest",
-        "_ORPHAN_RESCUE_REF_MAX_AGE_DAYS",
-        "_ORPHAN_RESCUE_REFS_TO_KEEP",
         "_orphaned_desktop_backend_pids",
-        "_pending_fleet_restart_needed",
+        "_park_stashed_changes",
         "_pause_windows_gateways_for_update",
-        "_print_curator_first_run_notice",
-        "_prune_orphan_rescue_refs",
-        "_print_curator_recent_run_notice",
         "_print_parked_branch_kept_notice",
         "_print_parked_branch_skip_warning",
-        "_print_update_completion",
+        "_prune_orphan_rescue_refs",
+        "_purge_stale_hermes_modules",
         "_record_npm_lockfile_hash",
         "_refresh_active_lazy_features",
         "_refresh_active_memory_provider_dependencies",
         "_refresh_bootstrap_cache_scripts",
         "_refresh_windows_gateway_launchers",
-        "_recover_gateway_restart_after_abort",
+        "_relaunch_stopped_serves",
         "_reload_updated_runtime_modules",
-        "_restart_phase_failure_is_incomplete",
         "_restore_active_tool_dependencies",
         "_restore_stashed_changes",
         "_resume_windows_gateways_after_update",
-        "_run_pending_fleet_restart",
         "_run_logged_subprocess",
         "_run_pre_update_backup",
-        "_service_unit_supports_graceful_sigusr1_restart",
-        "_should_skip_upstream_prompt",
         "_stash_local_changes_if_needed",
         "_stop_process_trees",
-        "_surviving_gateway_pids_after_failed_restart",
         "_sync_with_upstream_if_needed",
         "_update_node_dependencies",
         "_update_via_zip",
-        "_warn_orphaned_update_autostashes",
         "_upgrade_pip_before_lazy_refresh",
         "_validate_critical_files_syntax",
         "_validate_critical_modules_import",
-        "_venv_core_imports_healthy",
         "_venv_launcher_ancestors",
         "_wait_for_windows_update_gateway_exit",
-        "_warn_gateway_restart_phase_aborted",
-        "_warn_incomplete_gateway_fleet_restart",
+        "_warn_orphaned_update_autostashes",
         "_warn_pending_fleet_restart_on_startup",
-        "_web_build_toolchain_ready",
-        "_web_toolchain_roots",
-        "_write_fleet_restart_pending_marker",
         "_write_marker_file",
         "_write_update_incomplete_marker",
-        "_UPDATE_RUNTIME_RELOAD_MODULES",
-        "_UPDATE_CRITICAL_FILES",
-        "_UPDATE_CRITICAL_MODULES",
-        "_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE",
     ),
 }
 
-_LAZY_COMMAND_ATTR_TO_MODULE = {
-    attr: module for module, attrs in _LAZY_COMMAND_EXPORTS.items() for attr in attrs
+# name -> (module, attr). Includes the model-catalog export and one back-compat
+# alias: the warn-only ``_warn_stale_dashboard_processes`` was replaced by the
+# kill helper; external callers importing the old name get the new one.
+_LAZY_ATTR_SOURCES: dict[str, tuple[str, str]] = {
+    attr: (module, attr) for module, attrs in _LAZY_COMMAND_EXPORTS.items() for attr in attrs
 }
-
-# Back-compat alias: some tests and external callers import the old warn-only
-# name. The kill behaviour replaced it; resolve to the new name lazily.
-_LAZY_COMMAND_ALIASES = {
+_LAZY_ATTR_SOURCES.update({
+    "_PROVIDER_MODELS": ("hermes_cli.models", "_PROVIDER_MODELS"),
     "_warn_stale_dashboard_processes": (
         "hermes_cli.dashboard_procs",
         "_kill_stale_dashboard_processes",
     ),
-}
+})
 
 
 def _self():
@@ -2922,27 +2882,15 @@ def _self():
 
 def __getattr__(name):
     """Defer the model-catalog and command-module imports until first read."""
-    if name in _LAZY_MODEL_EXPORTS:
-        from hermes_cli.models import _PROVIDER_MODELS
-        # Cache on the module so subsequent accesses skip the import machinery.
-        globals()[name] = _PROVIDER_MODELS
-        return _PROVIDER_MODELS
-    module = _LAZY_COMMAND_ATTR_TO_MODULE.get(name)
-    if module is not None:
-        import importlib
+    source = _LAZY_ATTR_SOURCES.get(name)
+    if source is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
 
-        value = getattr(importlib.import_module(module), name)
-        globals()[name] = value
-        return value
-    alias = _LAZY_COMMAND_ALIASES.get(name)
-    if alias is not None:
-        import importlib
-
-        module_name, attr = alias
-        value = getattr(importlib.import_module(module_name), attr)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(source[0]), source[1])
+    # Cache on the module so subsequent accesses skip the import machinery.
+    globals()[name] = value
+    return value
 
 
 def cmd_sync(args):
@@ -3367,7 +3315,7 @@ def _clear_bytecode_cache(root: Path) -> int:
 
 # Back-compat alias: some tests and any external callers may import the old
 # warn-only name.  The new behaviour (kill stale processes) replaces it.
-# Resolved lazily via _LAZY_COMMAND_ALIASES near the module __getattr__.
+# Resolved lazily via _LAZY_ATTR_SOURCES near the module __getattr__.
 
 
 # =========================================================================
