@@ -63,16 +63,12 @@ logger = logging.getLogger(__name__)
 # and ``mock.patch("tools.mcp_tool.X")`` keep working; the siblings read origin
 # state back through ``tools.mcp_tool`` at call time (never by value).
 from tools.mcp_tool_common import (  # noqa: F401
-    _BACKOFF_JITTER,
-    _CREDENTIAL_PATTERN,
     _DEFAULT_TOOL_TIMEOUT,
-    _MISSING,
     _env_ref_name,
     _exc_str,
     _get_lifecycle_seconds,
     _jittered,
     _parse_boolish,
-    _prepend_path,
     _resolve_tool_timeout,
     _safe_numeric,
     _sanitize_error,
@@ -80,14 +76,9 @@ from tools.mcp_tool_common import (  # noqa: F401
 )
 from tools.mcp_tool_schema import (  # noqa: F401
     MCP_TOOL_NAME_PREFIX,
-    _MCP_INJECTION_PATTERNS,
-    _MCP_NAME_DELIM,
-    _UTILITY_CAPABILITY_ATTRS,
-    _UTILITY_CAPABILITY_METHODS,
     _build_utility_schemas,
     _convert_mcp_schema,
     _normalize_mcp_input_schema,
-    _normalize_name_filter,
     _scan_mcp_description,
     matches_name_filter,
     mcp_prefixed_tool_name,
@@ -103,24 +94,16 @@ from tools.mcp_tool_content import (  # noqa: F401
     _mcp_image_extension_for_mime_type,
     _mcp_resource_filename,
     _render_mcp_resource_block,
-    _strip_reserved_meta_keys,
     _truncate_mcp_text_result,
 )
 from tools.mcp_tool_errors import (  # noqa: F401
     InvalidMcpUrlError,
     NonMcpEndpointError,
-    _AUTH_ERROR_TYPES,
     _EXC_TRAVERSAL_MAX_NODES,
-    _HTTP_STATUS_ERROR_TYPES,
     _JSONRPC_UNSUPPORTED_PROTOCOL_VERSION,
-    _SESSION_EXPIRED_MARKERS,
-    _apply_identity_header,
     _classify_mcp_failure,
-    _contains_only_cancellation,
     _format_connect_error,
-    _get_auth_error_types,
     _handshake_rejected_as_modern,
-    _http_status_error_types,
     _is_auth_error,
     _is_method_not_found_error,
     _is_session_expired_error,
@@ -132,16 +115,11 @@ from tools.mcp_tool_errors import (  # noqa: F401
 )
 from tools.mcp_tool_config import (  # noqa: F401
     _ENV_VAR_PATTERN,
-    _SAFE_ENV_KEYS,
-    _SAFE_ENV_KEYS_CASE_INSENSITIVE,
     _build_safe_env,
-    _context_var_value,
     _filter_suspicious_mcp_servers,
     _get_mcp_stderr_log,
     _interpolate_env_vars,
     _load_mcp_config,
-    _mcp_stderr_log_fh,
-    _mcp_stderr_log_lock,
     _resolve_stdio_command,
     _warn_hidden_whitespace,
     _whitespace_warned,
@@ -155,35 +133,26 @@ from tools.mcp_tool_sampling import (  # noqa: F401
     _format_elicitation_schema_summary,
 )
 from tools.mcp_tool_handlers import (  # noqa: F401
-    _StdioChildExited,
     _handle_auth_error_and_retry,
     _handle_session_expired_and_retry,
-    _handle_stdio_child_exited_and_retry,
-    _interrupted_call_result,
     _make_check_fn,
     _make_get_prompt_handler,
     _make_list_prompts_handler,
     _make_list_resources_handler,
     _make_read_resource_handler,
     _make_tool_handler,
-    _mark_server_call_started,
-    _track_inflight_rpc,
-    _trust_gate_check,
 )
 from tools.mcp_tool_registration import (  # noqa: F401
-    _CachedMCPTool,
     _annotation_read_only_hint,
     _existing_tool_names,
     _forget_mcp_tool_server,
     _normalize_server_trust,
-    _record_tool_trust_metadata,
     _register_from_cache_sync,
     _register_server_tools,
     _select_utility_schemas,
     _track_mcp_tool_server,
 )
 from tools.mcp_tool_lifecycle import (  # noqa: F401
-    _NON_MCP_CHILD_CMDLINE_MARKERS,
     _drain_and_stop_mcp_loop,
     _drain_mcp_loop_tasks,
     _filter_mcp_children,
@@ -197,8 +166,6 @@ from tools.mcp_tool_lifecycle import (  # noqa: F401
     shutdown_mcp_servers,
 )
 from tools.mcp_tool_agent import (  # noqa: F401
-    _agent_tools_lock,
-    _merge_preserving_prefix,
     _reinject_post_build_tools,
     persist_agent_tool_names,
     refresh_agent_mcp_tools,
