@@ -419,6 +419,17 @@ _fd_usage_lock = threading.Lock()
 _fd_usage_cache: "tuple[float, Optional[int]]" = (0.0, None)
 
 
+def _proc_fd_targets(pid: int) -> Iterator[str]:
+    """readlink() of every entry in /proc/<pid>/fd (unreadable links skipped).
+    Raises OSError when the fd directory itself cannot be listed."""
+    fd_dir = f"/proc/{pid}/fd"
+    for fd in os.listdir(fd_dir):
+        try:
+            yield os.readlink(f"{fd_dir}/{fd}")
+        except OSError:
+            continue
+
+
 def _open_fd_count() -> Optional[int]:
     """Open descriptors in THIS process; None when unmeasurable (Windows: no fd
     dir and no RLIMIT_NOFILE, correctly inert — its limit is thousands); -1 when
@@ -1602,11 +1613,10 @@ class SessionDB(
         except OSError:
             zsize = -1
         qpath = quarantine_zeroed_state_db(self.db_path, already_locked=already_locked)
-        snaps = self.db_path.parent / "state-snapshots"
         msg = (
             f"state.db looks ZEROED ({zsize} bytes, no SQLite header). "
             f"Preserved at {qpath or '(quarantine failed — file left in place)'}. "
-            f"Restore from {snaps} via `hermes snapshot list` / "
+            f"Restore from {self.db_path.parent / 'state-snapshots'} via `hermes snapshot list` / "
             f"`hermes snapshot restore <id>` if available. "
             "Opening a fresh empty database so the agent can start."
         )
@@ -1969,13 +1979,11 @@ class SessionDB(
             ).fetchone())
             if not self._fts_cjk_loaded:
                 if cjk_present:
-                    live = [
-                        r[0] for r in cursor.execute(
-                            "SELECT name FROM sqlite_master WHERE type = 'trigger' "
-                            f"AND name IN ({','.join('?' for _ in _FTS_CJK_TRIGGERS)})",
-                            _FTS_CJK_TRIGGERS,
-                        ).fetchall()
-                    ]
+                    live = [r[0] for r in cursor.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                        f"AND name IN ({','.join('?' for _ in _FTS_CJK_TRIGGERS)})",
+                        _FTS_CJK_TRIGGERS,
+                    ).fetchall()]
                     if live:
                         # Breadcrumb FIRST (a crash between the two statements
                         # is merely conservative), then drop.
@@ -2009,10 +2017,7 @@ class SessionDB(
             if not cjk_present:
                 # Any old stale breadcrumb refers to a table that no longer exists.
                 cursor.execute("DELETE FROM state_meta WHERE key = ?", (FTS_CJK_STALE_KEY,))
-                n_msgs = cursor.execute(
-                    "SELECT COUNT(*) FROM messages WHERE role <> 'tool'"
-                ).fetchone()[0]
-                if n_msgs > 0:
+                if cursor.execute("SELECT COUNT(*) FROM messages WHERE role <> 'tool'").fetchone()[0] > 0:
                     hw = cursor.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
                     for k, v in (
                         ("fts_cjk_rebuild_high_water", str(hw)), ("fts_cjk_rebuild_progress", "0"),
@@ -2022,10 +2027,7 @@ class SessionDB(
                             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                             (k, v),
                         )
-            stale = cursor.execute(
-                "SELECT 1 FROM state_meta WHERE key = ?", (FTS_CJK_STALE_KEY,),
-            ).fetchone()
-            if stale:
+            if cursor.execute("SELECT 1 FROM state_meta WHERE key = ?", (FTS_CJK_STALE_KEY,)).fetchone():
                 # Gap of unknown extent: do NOT reinstall triggers (an
                 # external-content 'delete' for an unindexed rowid corrupts the
                 # index); the next optimize-storage rebuilds from scratch.
@@ -2296,22 +2298,15 @@ class SessionDB(
         recorded = self._db_sidecar_identity or {}
         base = os.fspath(self.db_path)
         if recorded:
-            for suffix, recorded_ident in recorded.items():
-                current = _stat_db_file_identity(Path(base + suffix))
-                if current is None or current != recorded_ident:
-                    return True
-            return False
+            return any(
+                _stat_db_file_identity(Path(base + suffix)) != ident for suffix, ident in recorded.items()
+            )
         if not self._wal_active:  # no sidecar generation to lose; keep /proc off the hot path
             return False
         if sys.platform.startswith("linux"):
             watched = _watched_sqlite_sidecar_paths(self.db_path)
-            fd_dir = f"/proc/{os.getpid()}/fd"
             try:
-                for fd in os.listdir(fd_dir):
-                    try:
-                        target = os.readlink(f"{fd_dir}/{fd}")
-                    except OSError:
-                        continue
+                for target in _proc_fd_targets(os.getpid()):
                     if " (deleted)" in target and _canonical_sqlite_path(target) in watched:
                         return True
             except OSError:
@@ -2385,11 +2380,9 @@ class SessionDB(
         internal last-connection checkpoint that wrote the incident's 15 pages
         under wrong page numbers. See StateDbCorruptError."""
         flag = getattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE", None)
-        if flag is None:
-            return
         conn = self._conn
         setconfig = getattr(conn, "setconfig", None)
-        if conn is None or setconfig is None:
+        if flag is None or conn is None or setconfig is None:
             return
         try:
             setconfig(flag, True)
@@ -2410,11 +2403,11 @@ class SessionDB(
         now = time.monotonic()
         if now >= deadline:
             return False
-        elapsed = now - (deadline - patience_s)
-        if elapsed >= self._WRITE_RETRY_SLOW_AFTER_S:
-            jitter = random.uniform(self._WRITE_RETRY_SLOW_MIN_S, self._WRITE_RETRY_SLOW_MAX_S)
-        else:
-            jitter = random.uniform(self._WRITE_RETRY_MIN_S, self._WRITE_RETRY_MAX_S)
+        slow = now - (deadline - patience_s) >= self._WRITE_RETRY_SLOW_AFTER_S
+        jitter = (
+            random.uniform(self._WRITE_RETRY_SLOW_MIN_S, self._WRITE_RETRY_SLOW_MAX_S) if slow
+            else random.uniform(self._WRITE_RETRY_MIN_S, self._WRITE_RETRY_MAX_S)
+        )
         time.sleep(min(jitter, max(deadline - now, 0.001)))
         return True
 
@@ -2423,10 +2416,9 @@ class SessionDB(
         """Corruption SQLite identifies as FTS-scoped: SQLITE_CORRUPT_VTAB, or
         (older builds) an ``fts5:`` message. A bare malformed-image error is
         structural and must not trigger live FTS maintenance."""
-        corrupt_vtab = getattr(sqlite3, "SQLITE_CORRUPT_VTAB", 267)
         error_code = getattr(exc, "sqlite_errorcode", None)
         if error_code is not None:
-            return error_code == corrupt_vtab
+            return error_code == getattr(sqlite3, "SQLITE_CORRUPT_VTAB", 267)
         msg = str(exc).lower()
         return msg.startswith("fts5:") and "corrupt structure" in msg
 
@@ -2461,9 +2453,8 @@ class SessionDB(
                     pid = int(pid_str)
                     if pid == own_pid:
                         continue
-                    fd_dir = f"/proc/{pid}/fd"
                     try:
-                        fds = os.listdir(fd_dir)
+                        targets = list(_proc_fd_targets(pid))
                     except OSError:
                         # Unreadable fd table (other user: root gateway vs user
                         # desktop). cmdline is world-readable: flag only
@@ -2472,13 +2463,7 @@ class SessionDB(
                         if cmdline is not None and _looks_like_hermes(cmdline):
                             holders.append((pid, f"uninspectable holder: {cmdline[:80]}"))
                         continue
-                    for fd in fds:
-                        try:
-                            target = os.readlink(f"{fd_dir}/{fd}")
-                        except OSError:
-                            continue
-                        if _canonical_sqlite_path(target) in watched:
-                            holders.append((pid, target))
+                    holders.extend((pid, t) for t in targets if _canonical_sqlite_path(t) in watched)
             except Exception as exc:
                 return self._foreign_holder_scan_failed(holders, exc)
             return holders
@@ -2488,11 +2473,10 @@ class SessionDB(
         # on macOS (the root-gateway/user-desktop topology is Linux-specific).
         try:
             for process in psutil.process_iter(["pid", "open_files"]):
-                info = process.info
-                pid = int(info["pid"])
+                pid = int(process.info["pid"])
                 if pid == os.getpid():
                     continue
-                for opened in info.get("open_files") or ():
+                for opened in process.info.get("open_files") or ():
                     path = getattr(opened, "path", "")
                     if path and _canonical_sqlite_path(path) in watched:
                         holders.append((pid, path))
@@ -2610,12 +2594,8 @@ class SessionDB(
         # own connection instead of re-populating the drained pool.
         with self._read_conns_lock:
             self._read_conns_closed = True
-        while True:
-            try:
-                conn = self._read_pool.get_nowait()
-            except queue.Empty:
-                break
-            self._close_read_conn(conn)
+        while self._evict_one_idle_read_conn():
+            pass
         with self._lock:
             if self._conn:
                 if self._db_corrupt:  # quarantined: no checkpoint over a damaged image
