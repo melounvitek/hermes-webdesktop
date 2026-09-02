@@ -976,6 +976,59 @@ def _emit_post_tool_call_hook(
         logger.debug("post_tool_call hook error: %s", _hook_err)
 
 
+def _dispatch_bridge_tool(
+    function_name: str,
+    function_args: Dict[str, Any],
+    enabled_toolsets: Optional[List[str]],
+    disabled_toolsets: Optional[List[str]],
+):
+    """Handle a Tool Search bridge call (tool_search / tool_describe / tool_call).
+
+    Returns None when *function_name* is not a bridge tool. Otherwise returns
+    ``(result, None)`` for a finished catalog read or error, or
+    ``(None, (underlying_name, underlying_args))`` when a validated tool_call
+    should be re-dispatched as the real tool.
+    """
+    try:
+        from tools import tool_search as ts
+    except Exception:
+        return None
+    if not ts.is_bridge_tool(function_name):
+        return None
+    # Read the un-collapsed catalog, scoped to the session's toolsets so a
+    # restricted session (subagent, kanban worker) cannot see or invoke the
+    # whole process registry through the bridge.
+    try:
+        current_defs = get_tool_definitions(
+            enabled_toolsets=enabled_toolsets,
+            disabled_toolsets=disabled_toolsets,
+            quiet_mode=True, skip_tool_search_assembly=True,
+        ) or []
+    except Exception:
+        current_defs = []
+    args = function_args or {}
+    if function_name == ts.TOOL_SEARCH_NAME:
+        return ts.dispatch_tool_search(args, current_tool_defs=current_defs), None
+    if function_name == ts.TOOL_DESCRIBE_NAME:
+        return ts.dispatch_tool_describe(args, current_tool_defs=current_defs), None
+    underlying_name, underlying_args, err = ts.resolve_underlying_call(args)
+    if err or not underlying_name:
+        return tool_error(err or "tool_call could not be resolved"), None
+    # Defense in depth: resolve_underlying_call only checks the global
+    # registry; also require membership in the session-scoped catalog.
+    if underlying_name not in ts.scoped_deferrable_names(current_defs):
+        return tool_error(
+            f"'{underlying_name}' is not available in this session. "
+            "Use tool_search to find tools you can call."
+        ), None
+    # Validate against the deferred tool's concrete schema — the generic
+    # ``arguments: object`` bridge schema can't enforce it.
+    probe_err = ts.validate_deferred_call_args(underlying_name, underlying_args)
+    if probe_err is not None:
+        return probe_err, None
+    return None, (underlying_name, underlying_args)
+
+
 def handle_function_call(
     function_name: str,
     function_args: Dict[str, Any],
@@ -1032,69 +1085,29 @@ def handle_function_call(
     # Tool Search bridge: tool_search / tool_describe are catalog reads handled
     # inline; tool_call is unwrapped so every downstream hook (pre/post, edit
     # approval, guardrails) sees the real tool name, never the bridge.
-    try:
-        from tools import tool_search as _ts_mod
-    except Exception:
-        _ts_mod = None
-
-    if _ts_mod is not None and _ts_mod.is_bridge_tool(function_name):
-        # Read the un-collapsed catalog, scoped to the session's toolsets so a
-        # restricted session (subagent, kanban worker) cannot see or invoke the
-        # whole process registry through the bridge.
-        try:
-            current_defs = get_tool_definitions(
-                enabled_toolsets=enabled_toolsets,
-                disabled_toolsets=disabled_toolsets,
-                quiet_mode=True, skip_tool_search_assembly=True,
-            ) or []
-        except Exception:
-            current_defs = []
-
-        def _elapsed() -> int:
-            return int((time.monotonic() - _dispatch_start) * 1000)
-
-        if function_name == _ts_mod.TOOL_SEARCH_NAME:
-            return _emit(_ts_mod.dispatch_tool_search(function_args or {}, current_tool_defs=current_defs),
-                         duration_ms=_elapsed())
-        if function_name == _ts_mod.TOOL_DESCRIBE_NAME:
-            return _emit(_ts_mod.dispatch_tool_describe(function_args or {}, current_tool_defs=current_defs),
-                         duration_ms=_elapsed())
-        if function_name == _ts_mod.TOOL_CALL_NAME:
-            underlying_name, underlying_args, err = _ts_mod.resolve_underlying_call(function_args or {})
-            if err or not underlying_name:
-                return _emit(tool_error(err or "tool_call could not be resolved"), duration_ms=_elapsed())
-            # Defense in depth: resolve_underlying_call only checks the global
-            # registry; also require membership in the session-scoped catalog.
-            if underlying_name not in _ts_mod.scoped_deferrable_names(current_defs):
-                return _emit(
-                    tool_error(
-                        f"'{underlying_name}' is not available in this session. "
-                        "Use tool_search to find tools you can call."
-                    ),
-                    duration_ms=_elapsed(),
-                )
-            # Validate against the deferred tool's concrete schema — the generic
-            # ``arguments: object`` bridge schema can't enforce it.
-            _probe_err = _ts_mod.validate_deferred_call_args(underlying_name, underlying_args)
-            if _probe_err is not None:
-                return _emit(_probe_err, duration_ms=_elapsed())
-            return handle_function_call(
-                function_name=underlying_name,
-                function_args=underlying_args,
-                task_id=task_id,
-                tool_call_id=tool_call_id,
-                session_id=session_id,
-                turn_id=turn_id,
-                api_request_id=api_request_id,
-                user_task=user_task,
-                enabled_tools=enabled_tools,
-                skip_pre_tool_call_hook=skip_pre_tool_call_hook,
-                skip_tool_request_middleware=skip_tool_request_middleware,
-                skip_tool_execution_middleware=skip_tool_execution_middleware,
-                tool_request_middleware_trace=list(_tool_middleware_trace),
-                enabled_toolsets=enabled_toolsets,
-                disabled_toolsets=disabled_toolsets,
-            )
+    bridged = _dispatch_bridge_tool(function_name, function_args, enabled_toolsets, disabled_toolsets)
+    if bridged is not None:
+        result, underlying = bridged
+        if underlying is None:
+            return _emit(result, duration_ms=int((time.monotonic() - _dispatch_start) * 1000))
+        underlying_name, underlying_args = underlying
+        return handle_function_call(
+            function_name=underlying_name,
+            function_args=underlying_args,
+            task_id=task_id,
+            tool_call_id=tool_call_id,
+            session_id=session_id,
+            turn_id=turn_id,
+            api_request_id=api_request_id,
+            user_task=user_task,
+            enabled_tools=enabled_tools,
+            skip_pre_tool_call_hook=skip_pre_tool_call_hook,
+            skip_tool_request_middleware=skip_tool_request_middleware,
+            skip_tool_execution_middleware=skip_tool_execution_middleware,
+            tool_request_middleware_trace=list(_tool_middleware_trace),
+            enabled_toolsets=enabled_toolsets,
+            disabled_toolsets=disabled_toolsets,
+        )
 
     _tool_original_args = dict(function_args)
     if not skip_tool_request_middleware:
