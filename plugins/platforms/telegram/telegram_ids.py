@@ -35,11 +35,6 @@ def normalize_telegram_chat_id(chat_id: Any) -> Union[int, str]:
         return chat_id_str
 
 
-def telegram_chat_id_key(chat_id: Any) -> str:
-    """Stable string key for a chat_id (for dict keys / persisted state)."""
-    return str(normalize_telegram_chat_id(chat_id))
-
-
 def looks_like_telegram_username(chat_id: Any) -> bool:
     """True when the value is an ``@username``-format Telegram chat identifier."""
     return bool(_TELEGRAM_USERNAME_RE.fullmatch(str(chat_id).strip()))
