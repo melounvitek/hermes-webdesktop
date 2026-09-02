@@ -131,9 +131,7 @@ def _session_owner_scope(task_id: str):
         return
 
     from agent.secret_scope import (
-        build_profile_secret_scope,
-        reset_secret_scope,
-        set_secret_scope,
+        build_profile_secret_scope, reset_secret_scope, set_secret_scope
     )
     from hermes_cli.env_loader import hydrate_profile_secret_sources
 
@@ -487,9 +485,7 @@ def _start_browser_cleanup_thread():
         if _bt._cleanup_thread is None or not _bt._cleanup_thread.is_alive():
             _bt._cleanup_running = True
             _bt._cleanup_thread = threading.Thread(
-                target=_bt._browser_cleanup_thread_worker,
-                daemon=True,
-                name="browser-cleanup"
+                target=_bt._browser_cleanup_thread_worker, daemon=True, name="browser-cleanup"
             )
             _bt._cleanup_thread.start()
             _bt.logger.info("Started inactivity cleanup thread (timeout: %ss)", _bt.BROWSER_SESSION_INACTIVITY_TIMEOUT)
@@ -815,15 +811,13 @@ def _cleanup_single_browser_session(task_id: str) -> None:
                 _bt.logger.warning("lightpanda stop failed for task %s: %s", task_id, e)
         elif _bt._session_has_expired(session_info):
             _bt.logger.debug(
-                "Skipping agent-browser close for expired session %s",
-                task_id,
+                "Skipping agent-browser close for expired session %s", task_id
             )
         else:
             try:
                 _bt._run_browser_command(task_id, "close", [], timeout=10)
                 _bt.logger.debug(
-                    "agent-browser close command completed for task %s",
-                    task_id,
+                    "agent-browser close command completed for task %s", task_id
                 )
             except Exception as e:
                 _bt.logger.warning("agent-browser close failed for task %s: %s", task_id, e)

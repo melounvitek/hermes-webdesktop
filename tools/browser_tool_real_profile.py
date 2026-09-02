@@ -332,10 +332,7 @@ def _real_profile_cdp() -> tuple:
         )
 
     from hermes_cli.browser_connect import (
-        chromium_executable,
-        detect_default_chromium,
-        real_profile_copy_dir,
-        snapshot_real_profile,
+        chromium_executable, detect_default_chromium, real_profile_copy_dir, snapshot_real_profile
     )
 
     with _bt._real_profile_cdp_lock:

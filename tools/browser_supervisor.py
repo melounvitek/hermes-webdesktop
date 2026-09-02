@@ -555,8 +555,7 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
     # CDP event → handler(self, params, session_id). Async handlers return an
     # awaitable that ``_read_loop`` awaits; sync handlers return None.
     _EVENT_HANDLERS: Dict[str, Callable[..., Any]] = {
-        **DialogSupervisionMixin.EVENT_HANDLERS,
-        **FrameTrackingMixin.EVENT_HANDLERS,
+        **DialogSupervisionMixin.EVENT_HANDLERS, **FrameTrackingMixin.EVENT_HANDLERS
     }
 
 

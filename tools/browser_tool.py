@@ -722,8 +722,7 @@ class _BrowserSessionBackend:
         if reason is None:
             return True
         logger.info(
-            "Recycling suspect browser session %s before reuse (%s)",
-            self._session_key, reason,
+            "Recycling suspect browser session %s before reuse (%s)", self._session_key, reason
         )
         try:
             _cleanup_single_browser_session(self._session_key)
@@ -852,8 +851,7 @@ BROWSER_TOOL_SCHEMAS = [
                     "description": "The element reference from the snapshot (e.g., '@e3')"
                 },
                 "text": {
-                    "type": "string",
-                    "description": "The text to type into the field"
+                    "type": "string", "description": "The text to type into the field"
                 }
             },
             "required": ["ref", "text"]
@@ -866,9 +864,7 @@ BROWSER_TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "direction": {
-                    "type": "string",
-                    "enum": ["up", "down"],
-                    "description": "Direction to scroll"
+                    "type": "string", "enum": ["up", "down"], "description": "Direction to scroll"
                 }
             },
             "required": ["direction"]
@@ -878,9 +874,7 @@ BROWSER_TOOL_SCHEMAS = [
         "name": "browser_back",
         "description": "Navigate back to the previous page in browser history. Requires browser_navigate to be called first.",
         "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": []
+            "type": "object", "properties": {}, "required": []
         }
     },
     {
@@ -901,9 +895,7 @@ BROWSER_TOOL_SCHEMAS = [
         "name": "browser_get_images",
         "description": "Get a list of all images on the current page with their URLs and alt text. Useful for finding images to analyze with the vision tool. Requires browser_navigate to be called first.",
         "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": []
+            "type": "object", "properties": {}, "required": []
         }
     },
     {
@@ -1043,8 +1035,7 @@ def _post_redirect_block(nav_session_key: str, url: str, final_url: str, auto_lo
     if _is_always_blocked_url(final_url):
         _run_browser_command(nav_session_key, "open", ["about:blank"], timeout=10)
         return json.dumps({
-            "success": False,
-            "error": "Blocked: redirect landed on a cloud metadata endpoint",
+            "success": False, "error": "Blocked: redirect landed on a cloud metadata endpoint"
         })
     if (
         not _is_local_backend()
@@ -1054,8 +1045,7 @@ def _post_redirect_block(nav_session_key: str, url: str, final_url: str, auto_lo
     ):
         _run_browser_command(nav_session_key, "open", ["about:blank"], timeout=10)
         return json.dumps({
-            "success": False,
-            "error": "Blocked: redirect landed on a private/internal address",
+            "success": False, "error": "Blocked: redirect landed on a private/internal address"
         })
     return None
 
@@ -1125,16 +1115,12 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         _maybe_start_recording(nav_session_key)
 
     result = _run_browser_command(
-        nav_session_key,
-        "open",
-        [url],
-        timeout=_get_open_command_timeout(first_open=is_first_nav),
+        nav_session_key, "open", [url], timeout=_get_open_command_timeout(first_open=is_first_nav)
     )
 
     if not result.get("success"):
         return json.dumps({
-            "success": False,
-            "error": result.get("error", "Navigation failed")
+            "success": False, "error": result.get("error", "Navigation failed")
         }, ensure_ascii=False)
 
     data = result.get("data", {})
@@ -1146,9 +1132,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         return blocked
 
     response = {
-        "success": True,
-        "url": final_url,
-        "title": title
+        "success": True, "url": final_url, "title": title
     }
     # Auditability: stamp navigations that ran on the user's real-profile
     # copy-browser so usage is visible in the tool result.
@@ -1188,9 +1172,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
 
 
 def browser_snapshot(
-    full: bool = False,
-    task_id: Optional[str] = None,
-    user_task: Optional[str] = None
+    full: bool = False, task_id: Optional[str] = None, user_task: Optional[str] = None
 ) -> str:
     """Text snapshot of the page's accessibility tree (compact unless ``full``).
 
@@ -1252,8 +1234,7 @@ def browser_snapshot(
         return json.dumps(response, ensure_ascii=False)
     else:
         response = {
-            "success": False,
-            "error": result.get("error", "Failed to get snapshot")
+            "success": False, "error": result.get("error", "Failed to get snapshot")
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
@@ -1306,8 +1287,7 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     result = _run_browser_command(effective_task_id, "fill", [ref, text])
 
     from agent.display import (
-        redact_browser_typed_text_for_display,
-        redact_tool_args_for_display,
+        redact_browser_typed_text_for_display, redact_tool_args_for_display
     )
 
     # Typed text goes through the secret-pattern redactor so API keys / tokens
@@ -1327,8 +1307,7 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     """Scroll the page ``direction`` ("up"/"down") by about half a viewport."""
     if direction not in {"up", "down"}:
         return json.dumps({
-            "success": False,
-            "error": f"Invalid direction '{direction}'. Use 'up' or 'down'."
+            "success": False, "error": f"Invalid direction '{direction}'. Use 'up' or 'down'."
         }, ensure_ascii=False)
 
     # Single scroll with a pixel amount (~half a viewport) instead of 5x subprocess calls.
@@ -1472,8 +1451,7 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     if errors_result.get("success"):
         for err in errors_result.get("data", {}).get("errors", []):
             errors.append({
-                "message": _redact_browser_output(err.get("message", "")),
-                "source": "exception",
+                "message": _redact_browser_output(err.get("message", "")), "source": "exception"
             })
 
     response = {
@@ -1552,8 +1530,7 @@ def _eval_supervisor_fast_path(effective_task_id: str, expression: str) -> Optio
         if "supervisor" not in err.lower():
             return json.dumps({"success": False, "error": err}, ensure_ascii=False)
         logger.debug(
-            "browser_eval: supervisor path unavailable (%s), falling back to subprocess",
-            err,
+            "browser_eval: supervisor path unavailable (%s), falling back to subprocess", err
         )
     except ImportError:
         pass
@@ -1758,23 +1735,17 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
                 images = raw_result
 
             response = {
-                "success": True,
-                "images": _redact_browser_output(images),
-                "count": len(images)
+                "success": True, "images": _redact_browser_output(images), "count": len(images)
             }
             return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
         except json.JSONDecodeError:
             response = {
-                "success": True,
-                "images": [],
-                "count": 0,
-                "warning": "Could not parse image data"
+                "success": True, "images": [], "count": 0, "warning": "Could not parse image data"
             }
             return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
     else:
         response = {
-            "success": False,
-            "error": result.get("error", "Failed to get images")
+            "success": False, "error": result.get("error", "Failed to get images")
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
@@ -1976,8 +1947,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 from tools.registry import registry, tool_error
 from tools.browser_extension_router import (
-    extension_controller_available,
-    routed_browser_handler,
+    extension_controller_available, routed_browser_handler
 )
 
 _BROWSER_SCHEMA_MAP = {s["name"]: s for s in BROWSER_TOOL_SCHEMAS}
@@ -1986,8 +1956,7 @@ _BROWSER_SCHEMA_MAP = {s["name"]: s for s in BROWSER_TOOL_SCHEMAS}
 def _browser_router_kw(kw: dict) -> dict:
     """Identity kwargs forwarded to the extension router wrapper."""
     return {
-        "task_id": kw.get("task_id"),
-        "session_id": kw.get("session_id"),
+        "task_id": kw.get("task_id"), "session_id": kw.get("session_id")
     }
 
 
@@ -1996,163 +1965,65 @@ def check_browser_routed_requirements(action: str = "browser_snapshot") -> bool:
     return check_browser_requirements() or extension_controller_available(action)
 
 
-def check_browser_navigate_requirements() -> bool:
-    return check_browser_routed_requirements("browser_navigate")
-
-
-def check_browser_snapshot_requirements() -> bool:
-    return check_browser_routed_requirements("browser_snapshot")
-
-
-def check_browser_click_requirements() -> bool:
-    return check_browser_routed_requirements("browser_click")
-
-
-def check_browser_type_requirements() -> bool:
-    return check_browser_routed_requirements("browser_type")
-
-
-def check_browser_scroll_requirements() -> bool:
-    return check_browser_routed_requirements("browser_scroll")
-
-
-def check_browser_back_requirements() -> bool:
-    return check_browser_routed_requirements("browser_back")
-
-
-def check_browser_press_requirements() -> bool:
-    return check_browser_routed_requirements("browser_press")
-
-
-registry.register(
-    name="browser_navigate",
-    toolset="browser",
-    schema=_BROWSER_SCHEMA_MAP["browser_navigate"],
-    handler=lambda args, **kw: routed_browser_handler(
-        "browser_navigate",
-        args,
-        fallback=lambda: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id")),
-        **_browser_router_kw(kw),
-    ),
-    check_fn=check_browser_navigate_requirements,
-    emoji="🌐",
-)
-registry.register(
-    name="browser_snapshot",
-    toolset="browser",
-    schema=_BROWSER_SCHEMA_MAP["browser_snapshot"],
-    handler=lambda args, **kw: routed_browser_handler(
-        "browser_snapshot",
-        args,
-        fallback=lambda: browser_snapshot(
-            full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task")),
-        **_browser_router_kw(kw),
-    ),
-    check_fn=check_browser_snapshot_requirements,
-    emoji="📸",
-)
-registry.register(
-    name="browser_click",
-    toolset="browser",
-    schema=_BROWSER_SCHEMA_MAP["browser_click"],
-    handler=lambda args, **kw: routed_browser_handler(
-        "browser_click",
-        args,
-        fallback=lambda: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id")),
-        **_browser_router_kw(kw),
-    ),
-    check_fn=check_browser_click_requirements,
-    emoji="👆",
-)
-registry.register(
-    name="browser_type",
-    toolset="browser",
-    schema=_BROWSER_SCHEMA_MAP["browser_type"],
-    handler=lambda args, **kw: routed_browser_handler(
-        "browser_type",
-        args,
-        fallback=lambda: browser_type(ref=args.get("ref", ""), text=args.get("text", ""), task_id=kw.get("task_id")),
-        **_browser_router_kw(kw),
-    ),
-    check_fn=check_browser_type_requirements,
-    emoji="⌨️",
-)
-registry.register(
-    name="browser_scroll",
-    toolset="browser",
-    schema=_BROWSER_SCHEMA_MAP["browser_scroll"],
-    handler=lambda args, **kw: routed_browser_handler(
-        "browser_scroll",
-        args,
-        fallback=lambda: browser_scroll(direction=args.get("direction", "down"), task_id=kw.get("task_id")),
-        **_browser_router_kw(kw),
-    ),
-    check_fn=check_browser_scroll_requirements,
-    emoji="📜",
-)
-registry.register(
-    name="browser_back",
-    toolset="browser",
-    schema=_BROWSER_SCHEMA_MAP["browser_back"],
-    handler=lambda args, **kw: routed_browser_handler(
-        "browser_back",
-        args,
-        fallback=lambda: browser_back(task_id=kw.get("task_id")),
-        **_browser_router_kw(kw),
-    ),
-    check_fn=check_browser_back_requirements,
-    emoji="◀️",
-)
-registry.register(
-    name="browser_press",
-    toolset="browser",
-    schema=_BROWSER_SCHEMA_MAP["browser_press"],
-    handler=lambda args, **kw: routed_browser_handler(
-        "browser_press",
-        args,
-        fallback=lambda: browser_press(key=args.get("key", ""), task_id=kw.get("task_id")),
-        **_browser_router_kw(kw),
-    ),
-    check_fn=check_browser_press_requirements,
-    emoji="⌨️",
+# (tool name, emoji, availability gate, fallback call) — the routed-through-
+# extension tools use the per-action gate; get_images/console/vision keep the
+# plain requirement checks.  ``_fallback`` receives (args, kw).
+_BROWSER_TOOL_TABLE = (
+    ("browser_navigate", "🌐", None,
+     lambda args, kw: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id"))),
+    ("browser_snapshot", "📸", None,
+     lambda args, kw: browser_snapshot(
+         full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task"))),
+    ("browser_click", "👆", None,
+     lambda args, kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id"))),
+    ("browser_type", "⌨️", None,
+     lambda args, kw: browser_type(ref=args.get("ref", ""), text=args.get("text", ""), task_id=kw.get("task_id"))),
+    ("browser_scroll", "📜", None,
+     lambda args, kw: browser_scroll(direction=args.get("direction", "down"), task_id=kw.get("task_id"))),
+    ("browser_back", "◀️", None,
+     lambda args, kw: browser_back(task_id=kw.get("task_id"))),
+    ("browser_press", "⌨️", None,
+     lambda args, kw: browser_press(key=args.get("key", ""), task_id=kw.get("task_id"))),
+    ("browser_get_images", "🖼️", check_browser_requirements,
+     lambda args, kw: browser_get_images(task_id=kw.get("task_id"))),
+    ("browser_vision", "👁️", check_browser_vision_requirements,
+     lambda args, kw: browser_vision(
+         question=args.get("question", ""), annotate=args.get("annotate", False), task_id=kw.get("task_id"))),
+    ("browser_console", "🖥️", check_browser_requirements,
+     lambda args, kw: browser_console(
+         clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id"))),
 )
 
-registry.register(
-    name="browser_get_images",
-    toolset="browser",
-    schema=_BROWSER_SCHEMA_MAP["browser_get_images"],
-    handler=lambda args, **kw: routed_browser_handler(
-        "browser_get_images",
-        args,
-        fallback=lambda: browser_get_images(task_id=kw.get("task_id")),
-        **_browser_router_kw(kw),
-    ),
-    check_fn=check_browser_requirements,
-    emoji="🖼️",
-)
-registry.register(
-    name="browser_vision",
-    toolset="browser",
-    schema=_BROWSER_SCHEMA_MAP["browser_vision"],
-    handler=lambda args, **kw: routed_browser_handler(
-        "browser_vision",
-        args,
-        fallback=lambda: browser_vision(question=args.get("question", ""), annotate=args.get("annotate", False), task_id=kw.get("task_id")),
-        **_browser_router_kw(kw),
-    ),
-    check_fn=check_browser_vision_requirements,
-    emoji="👁️",
-)
-registry.register(
-    name="browser_console",
-    toolset="browser",
-    schema=_BROWSER_SCHEMA_MAP["browser_console"],
-    handler=lambda args, **kw: routed_browser_handler(
-        "browser_console",
-        args,
-        fallback=lambda: browser_console(clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id")),
-        **_browser_router_kw(kw),
-    ),
-    check_fn=check_browser_requirements,
-    emoji="🖥️",
-)
+
+def _routed_check_fn(name: str):
+    """Per-action availability gate (a named function, as the registry expects)."""
+    def check() -> bool:
+        return check_browser_routed_requirements(name)
+    check.__name__ = check.__qualname__ = f"check_{name}_requirements"
+    return check
+
+
+def _routed_handler(name: str, fallback):
+    def handler(args, **kw):
+        return routed_browser_handler(name, args, fallback=lambda: fallback(args, kw), **_browser_router_kw(kw))
+    return handler
+
+
+# Legacy per-tool gate names (tests + external callers).
+check_browser_navigate_requirements = _routed_check_fn("browser_navigate")
+check_browser_snapshot_requirements = _routed_check_fn("browser_snapshot")
+check_browser_click_requirements = _routed_check_fn("browser_click")
+check_browser_type_requirements = _routed_check_fn("browser_type")
+check_browser_scroll_requirements = _routed_check_fn("browser_scroll")
+check_browser_back_requirements = _routed_check_fn("browser_back")
+check_browser_press_requirements = _routed_check_fn("browser_press")
+
+for _name, _emoji, _check_fn, _fallback in _BROWSER_TOOL_TABLE:
+    registry.register(
+        name=_name,
+        toolset="browser",
+        schema=_BROWSER_SCHEMA_MAP[_name],
+        handler=_routed_handler(_name, _fallback),
+        check_fn=_check_fn or globals()[f"check_{_name}_requirements"],
+        emoji=_emoji,
+    )

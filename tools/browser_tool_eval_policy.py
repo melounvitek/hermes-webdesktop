@@ -65,13 +65,11 @@ def _current_page_private_url(effective_task_id: str) -> Optional[str]:
     _bt = _origin()
     try:
         url_result = _bt._run_browser_command(
-            effective_task_id, "eval", ["window.location.href"],
-            timeout=5, _engine_override="auto",
+            effective_task_id, "eval", ["window.location.href"], timeout=5, _engine_override="auto"
         )
         if url_result.get("success"):
             current_url = (
-                url_result.get("data", {}).get("result", "")
-                .strip().strip('"').strip("'")
+                url_result.get("data", {}).get("result", "") .strip().strip('"').strip("'")
             )
             if current_url and (
                 _bt._is_always_blocked_url(current_url) or not _bt._is_safe_url(current_url)
@@ -96,8 +94,7 @@ _RISKY_BROWSER_EVAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 
 
 _JS_STRING_LITERAL_RE = re.compile(
-    r"""'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`""",
-    re.S,
+    r"""'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`""", re.S
 )
 
 

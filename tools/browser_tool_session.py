@@ -75,10 +75,7 @@ def _unlink_command_output_files(*paths: str) -> None:
 
 
 def _format_browser_timeout_error(
-    command: str,
-    timeout: int,
-    stdout: str,
-    stderr: str,
+    command: str, timeout: int, stdout: str, stderr: str
 ) -> str:
     """Build an actionable timeout message from captured daemon output."""
     _bt = _origin()
@@ -260,8 +257,7 @@ def _create_lightpanda_session(task_id: str) -> Dict[str, Any]:
     if err:
         raise RuntimeError(err)
     _bt.logger.info(
-        "Created Lightpanda session %s (port %s) for task %s",
-        session_name, server.port, task_id,
+        "Created Lightpanda session %s (port %s) for task %s", session_name, server.port, task_id
     )
     return {
         "session_name": session_name,
@@ -402,8 +398,7 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
             return existing_session
 
         _bt.logger.info(
-            "Replacing expired or dead browser session for task %s",
-            task_id,
+            "Replacing expired or dead browser session for task %s", task_id
         )
         _bt._cleanup_single_browser_session(task_id)
         # Cleanup removes the activity entry. The replacement session must be
@@ -454,9 +449,7 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
 
 
 def _discard_timed_out_browser_session(
-    task_id: str,
-    session_info: Dict[str, Any],
-    task_socket_dir: str,
+    task_id: str, session_info: Dict[str, Any], task_socket_dir: str
 ) -> None:
     """Drop a stuck client generation without losing cloud cleanup state."""
     _bt = _origin()
@@ -540,9 +533,7 @@ def _browser_daemon_responsive(task_socket_dir: str, probe_timeout_s: float = 1.
 
 
 def _handle_browser_command_timeout(
-    task_id: str,
-    session_info: Dict[str, Any],
-    task_socket_dir: str,
+    task_id: str, session_info: Dict[str, Any], task_socket_dir: str
 ) -> None:
     """Recover session state after a browser command timeout.
 
@@ -631,8 +622,7 @@ def _interpret_browser_command_output(command: str, stdout: str, stderr: str, re
             recovered_path = _bt._extract_screenshot_path_from_text(combined_text)
             if recovered_path and Path(recovered_path).exists():
                 _bt.logger.info(
-                    "browser 'screenshot' recovered file from non-JSON output: %s",
-                    recovered_path,
+                    "browser 'screenshot' recovered file from non-JSON output: %s", recovered_path
                 )
                 return {"success": True, "data": {"path": recovered_path, "raw": raw}}
         return {"success": False, "error": f"Non-JSON output from agent-browser for '{command}': {raw}"}
@@ -776,9 +766,7 @@ def _run_browser_command(
             _bt._handle_browser_command_timeout(task_id, session_info, task_socket_dir)
             if stderr and stderr.strip():
                 _bt.logger.warning(
-                    "browser '%s' stderr after timeout: %s",
-                    command,
-                    stderr.strip()[:500],
+                    "browser '%s' stderr after timeout: %s", command, stderr.strip()[:500]
                 )
             _bt.logger.warning("browser '%s' timed out after %ds (task=%s, socket_dir=%s)",
                            command, timeout, task_id, task_socket_dir)

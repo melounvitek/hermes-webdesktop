@@ -116,9 +116,7 @@ def _get_dialog_policy_config() -> Tuple[str, float]:
     # Defer imports so browser_tool can be imported in minimal environments.
     _bt = _origin()
     from tools.browser_supervisor import (
-        DEFAULT_DIALOG_POLICY,
-        DEFAULT_DIALOG_TIMEOUT_S,
-        _VALID_POLICIES,
+        DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S, _VALID_POLICIES
     )
 
     try:
@@ -171,16 +169,11 @@ def _ensure_cdp_supervisor(task_id: str) -> None:
 
         policy, timeout_s = _bt._get_dialog_policy_config()
         SUPERVISOR_REGISTRY.get_or_start(
-            task_id=task_id,
-            cdp_url=cdp_url,
-            dialog_policy=policy,
-            dialog_timeout_s=timeout_s,
+            task_id=task_id, cdp_url=cdp_url, dialog_policy=policy, dialog_timeout_s=timeout_s
         )
     except Exception as exc:
         _bt.logger.debug(
-            "CDP supervisor attach for task=%s failed (non-fatal): %s",
-            task_id,
-            exc,
+            "CDP supervisor attach for task=%s failed (non-fatal): %s", task_id, exc
         )
 
 
