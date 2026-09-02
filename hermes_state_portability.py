@@ -224,10 +224,8 @@ class SessionPortabilityMixin:
             return None
         messages = [msg for seg in segments for msg in (seg.get("messages") or [])]
         return {
-            **segments[-1],
-            "segments": segments,
-            "lineage_session_ids": [seg["id"] for seg in segments],
-            "message_count": len(messages),
+            **segments[-1], "segments": segments,
+            "lineage_session_ids": [seg["id"] for seg in segments], "message_count": len(messages),
             "messages": messages,
         }
 
@@ -236,7 +234,7 @@ class SessionPortabilityMixin:
         return [self._with_messages(s) for s in self.search_sessions(source=source, limit=100000)]
 
     def adopt_session_lineage_from(
-        self, donor_db: Any, session_id: str, *, retire_donor: bool = True,
+        self, donor_db: Any, session_id: str, *, retire_donor: bool = True
     ) -> Dict[str, Any]:
         """Adopt *session_id*'s full compression lineage from *donor_db* (a
         full SessionDB — the mixin cannot import it).
@@ -486,8 +484,7 @@ class SessionPortabilityMixin:
         """INSERT one normalized session + its messages; counts fixed up after."""
         started_at = self._float_or_none(raw.get("started_at"))
         params = {
-            "id": session_id,
-            "source": str(raw.get("source") or "import"),
+            "id": session_id, "source": str(raw.get("source") or "import"),
             "system_prompt_hash": self._store_system_prompt(conn, raw.get("system_prompt")),
             "started_at": time.time() if started_at is None else started_at,
             "archived": 1 if raw.get("archived") else 0,
@@ -581,12 +578,8 @@ class SessionPortabilityMixin:
                 imported_ids.append(session_id)
             detached = self._attach_import_parents(conn, parent_updates)
             return {
-                "ok": True,
-                "imported": len(imported_ids),
-                "skipped": len(skipped_ids),
-                "detached": detached,
-                "imported_ids": imported_ids,
-                "skipped_ids": skipped_ids,
+                "ok": True, "imported": len(imported_ids), "skipped": len(skipped_ids),
+                "detached": detached, "imported_ids": imported_ids, "skipped_ids": skipped_ids,
                 "errors": [],
             }
 

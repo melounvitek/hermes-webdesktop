@@ -532,7 +532,7 @@ class SessionSearchMixin:
             self._conn.commit()
 
     def optimize_fts_storage(
-        self, *, progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None, vacuum: bool = True,
+        self, *, progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None, vacuum: bool = True
     ) -> Dict[str, Any]:
         """Migrate a legacy v22 inline-FTS DB to the v23 external-content
         schema, foreground and to completion; re-running resumes an
@@ -722,15 +722,14 @@ class SessionSearchMixin:
             return msg
 
         return {
-            "window": filtered_window,
-            "messages_before": primitive["messages_before"],
+            "window": filtered_window, "messages_before": primitive["messages_before"],
             "messages_after": primitive["messages_after"],
             "bookend_start": [_hydrate(r) for r in bookend_start_rows],
             "bookend_end": [_hydrate(r) for r in bookend_end_rows],
         }
 
     def list_recent_user_messages(
-        self, session_id: str, limit: int = 20, include_inactive: bool = False,
+        self, session_id: str, limit: int = 20, include_inactive: bool = False
     ) -> List[Dict[str, Any]]:
         """The *limit* most-recent real user turns, newest first, as
         ``{id, timestamp, preview}`` (preview = first 80 chars, whitespace
@@ -1020,7 +1019,7 @@ class SessionSearchMixin:
         return " OR ".join(compiled_groups), params, snippet_term
 
     def _search_messages_like_fallback(
-        self, query: str, *, limit: int, offset: int, sort: Optional[str], **filters,
+        self, query: str, *, limit: int, offset: int, sort: Optional[str], **filters
     ) -> List[Dict[str, Any]]:
         """Search canonical messages while derived FTS state is stale."""
         predicate, params, snippet_term = self._compile_like_boolean_query(query)
@@ -1049,7 +1048,7 @@ class SessionSearchMixin:
             self._fts_cjk_available = False
 
     def _finalize_search_matches(
-        self, matches: List[Dict[str, Any]], result_fields: Optional[Collection[str]] = None,
+        self, matches: List[Dict[str, Any]], result_fields: Optional[Collection[str]] = None
     ) -> List[Dict[str, Any]]:
         """Attach neighboring messages (1 before + after, only when the
         projection consumes ``context``) and trim full content. Each context

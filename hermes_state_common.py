@@ -309,12 +309,8 @@ def stat_db_file_identity(path) -> "tuple[int, int] | None":
 
 
 _FTS_TRIGGERS = (
-    "messages_fts_insert",
-    "messages_fts_delete",
-    "messages_fts_update",
-    "messages_fts_trigram_insert",
-    "messages_fts_trigram_delete",
-    "messages_fts_trigram_update",
+    "messages_fts_insert", "messages_fts_delete", "messages_fts_update",
+    "messages_fts_trigram_insert", "messages_fts_trigram_delete", "messages_fts_trigram_update",
 )
 
 
@@ -706,9 +702,7 @@ END;
 
 
 _FTS_CJK_TRIGGERS = (
-    "messages_fts_cjk_insert",
-    "messages_fts_cjk_delete",
-    "messages_fts_cjk_update",
+    "messages_fts_cjk_insert", "messages_fts_cjk_delete", "messages_fts_cjk_update",
 )
 
 

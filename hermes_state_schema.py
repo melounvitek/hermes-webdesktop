@@ -61,11 +61,6 @@ _SESSION_MODEL_USAGE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_session_model_usage_session ON session_model_usage(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_session_model_usage_model ON session_model_usage(model)",
 )
-_SESSION_MODEL_USAGE_COLS = """session_id, model, billing_provider, billing_base_url,
-                           billing_mode, task, api_call_count, input_tokens,
-                           output_tokens, cache_read_tokens, cache_write_tokens,
-                           reasoning_tokens, estimated_cost_usd, actual_cost_usd,
-                           cost_status, cost_source, first_seen, last_seen"""
 _SESSION_MODEL_USAGE_HEAL_DDL = """CREATE TABLE session_model_usage (
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     model TEXT NOT NULL,
@@ -87,28 +82,13 @@ _SESSION_MODEL_USAGE_HEAL_DDL = """CREATE TABLE session_model_usage (
     last_seen REAL,
     PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
 )"""
-# Same table, v22-migration indentation (statement text is pinned by the SQL trace harness).
-_SESSION_MODEL_USAGE_V22_DDL = """CREATE TABLE session_model_usage (
-                                   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                                   model TEXT NOT NULL,
-                                   billing_provider TEXT NOT NULL DEFAULT '',
-                                   billing_base_url TEXT NOT NULL DEFAULT '',
-                                   billing_mode TEXT NOT NULL DEFAULT '',
-                                   task TEXT NOT NULL DEFAULT '',
-                                   api_call_count INTEGER NOT NULL DEFAULT 0,
-                                   input_tokens INTEGER NOT NULL DEFAULT 0,
-                                   output_tokens INTEGER NOT NULL DEFAULT 0,
-                                   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-                                   cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-                                   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-                                   estimated_cost_usd REAL NOT NULL DEFAULT 0,
-                                   actual_cost_usd REAL NOT NULL DEFAULT 0,
-                                   cost_status TEXT,
-                                   cost_source TEXT,
-                                   first_seen REAL,
-                                   last_seen REAL,
-                                   PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
-                               )"""
+# Same table as emitted by the v22 migration: column lines at 35 spaces, closing
+# paren at 31 (statement text is pinned by the SQL trace harness).
+_SESSION_MODEL_USAGE_V22_DDL = "\n".join(
+    [_SESSION_MODEL_USAGE_HEAL_DDL.splitlines()[0]]
+    + [" " * 35 + ln.strip() for ln in _SESSION_MODEL_USAGE_HEAL_DDL.splitlines()[1:-1]]
+    + [" " * 31 + ")"]
+)
 # Statement text pinned by the SQL trace harness (whitespace included).
 _SESSION_MODEL_USAGE_V20_SEED_SQL = """INSERT OR IGNORE INTO session_model_usage (
                                session_id, model, billing_provider,
@@ -309,8 +289,7 @@ class SessionSchemaMixin:
                         "UPDATE OF migration; marked stale and unavailable"
                     )
         logger.info(
-            "Migrated %d broad FTS UPDATE trigger(s) to AFTER UPDATE OF "
-            "(no rebuild required)",
+            "Migrated %d broad FTS UPDATE trigger(s) to AFTER UPDATE OF " "(no rebuild required)",
             len(to_drop),
         )
         return len(to_drop)
@@ -429,9 +408,7 @@ class SessionSchemaMixin:
         if first_seen > now or first_seen < 0:
             first_seen = now
         diagnostic = {
-            "first_seen": first_seen,
-            "last_seen": now,
-            "attempts": attempts,
+            "first_seen": first_seen, "last_seen": now, "attempts": attempts,
             "holder_pids": sorted({pid for pid, _path in foreign_holders if pid > 0}),
         }
         cursor.execute(
