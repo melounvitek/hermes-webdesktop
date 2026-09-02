@@ -13,13 +13,11 @@ logger = logging.getLogger("tools.mcp_tool")
 
 
 class _OriginProxy:
-    """Attribute proxy for ``tools.mcp_tool`` resolved at access time.
-
-    The split modules read origin state (``_servers``, ``_lock``, SDK symbols,
-    patchable helpers) through this so ``mock.patch("tools.mcp_tool.X")`` and
-    origin-side rebinds stay effective, and so no split module needs the origin
-    imported first (the origin imports them while it is still initialising).
-    """
+    """Attribute proxy for ``tools.mcp_tool`` resolved at access time. The split
+    modules read origin state (``_servers``, ``_lock``, SDK symbols, patchable
+    helpers) through this so ``mock.patch("tools.mcp_tool.X")`` and origin-side
+    rebinds stay effective, and so no split module needs the origin imported
+    first (the origin imports them while it is still initialising)."""
 
     __slots__ = ()
 
@@ -30,19 +28,15 @@ class _OriginProxy:
 
 
 _core = _OriginProxy()
-
-
 _MISSING = object()
 
 
 def mcp_field(obj, snake: str, camel: str, default=None):
     """Read an MCP model field across the 1.x -> 2.x rename to snake_case.
-
     Pydantic aliases don't apply to attribute access, so ``getattr(result,
     "isError", False)`` silently returns the default on 2.x — failed calls read
     as successful, schemas as empty. Trying both spellings stays correct on
-    either SDK generation (``mcp`` is an optional extra at the user's version).
-    """
+    either SDK generation (``mcp`` is an optional extra at the user's version)."""
     value = getattr(obj, snake, _MISSING)
     if value is _MISSING:
         value = getattr(obj, camel, _MISSING)

@@ -65,10 +65,7 @@ def _convert_sampling_message(msg) -> List[dict]:
     tool_uses = [b for b in blocks if _is_tool_use(b) and _tool_use_id(b) is _MISSING]
     content_blocks = [b for b in blocks if _tool_use_id(b) is _MISSING and not _is_tool_use(b)]
 
-    out = [
-        {"role": "tool", "tool_call_id": _tool_use_id(tr), "content": _tool_result_text(tr)}
-        for tr in tool_results
-    ]
+    out = [{"role": "tool", "tool_call_id": _tool_use_id(tr), "content": _tool_result_text(tr)} for tr in tool_results]
     if tool_uses:
         msg_dict: dict = {"role": msg.role, "tool_calls": [_tool_call_dict(tu, i) for i, tu in enumerate(tool_uses)]}
         text_parts = [b.text for b in content_blocks if hasattr(b, "text")]

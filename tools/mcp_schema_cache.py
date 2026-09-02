@@ -58,23 +58,17 @@ def _load_all() -> Dict[str, Any]:
 def _save_all(data: Dict[str, Any]) -> None:
     from utils import atomic_json_write
 
-    # Cache dir + 0o600: sibling precedent in tools/registry.py
-    # _save_discovery_cache; the cache file is trusted input on the lazy
-    # registration path, so keep it user-only.
+    # 0o600 (as tools/registry.py _save_discovery_cache): the cache file is
+    # trusted input on the lazy registration path, so keep it user-only.
     atomic_json_write(_cache_path(), data, mode=0o600)
 
 
 def get_cached_entry(server_name: str, fingerprint: str) -> Optional[dict]:
     """Return cached entry when fingerprint matches (and TTL holds), else None.
-
-    MCP 2026-07-28 (SEP-2549): ``tools/list`` results carry ``ttlMs`` as a
-    freshness hint. When the live discovery path recorded one, an entry
-    older than its TTL is treated as a miss so the next startup re-probes
-    the server instead of serving a stale manifest forever. Entries without
-    a recorded TTL (pre-2026 servers) keep the old never-expires behavior.
-    ``cacheScope`` is irrelevant here: this cache is per-user local disk,
-    which satisfies even ``private``.
-    """
+    ``tools/list`` results may carry ``ttlMs`` (SEP-2549); an entry older than a
+    recorded TTL is a miss so the next startup re-probes instead of serving a
+    stale manifest forever. Entries without a TTL never expire. ``cacheScope``
+    is irrelevant: this cache is per-user local disk, satisfying even ``private``."""
     with _cache_lock:
         entry = _load_all().get(server_name)
     if not isinstance(entry, dict) or entry.get("fingerprint") != fingerprint:
@@ -98,12 +92,9 @@ def write_cache_entry(
     ttl_ms: Optional[float] = None,
     cache_scope: Optional[str] = None,
 ) -> None:
-    """Persist tool schemas after a successful live connect.
-
-    ``ttl_ms``/``cache_scope`` are the SEP-2549 hints from the server's
-    ``tools/list`` result (2026-07-28 servers). ``written_at`` anchors TTL
-    expiry in :func:`get_cached_entry`.
-    """
+    """Persist tool schemas after a successful live connect. ``ttl_ms`` /
+    ``cache_scope`` are the server's ``tools/list`` SEP-2549 hints;
+    ``written_at`` anchors TTL expiry in :func:`get_cached_entry`."""
     entry = {"fingerprint": fingerprint, "tools": tools, "utility_tools": utility_tools or []}
     if isinstance(ttl_ms, (int, float)):
         entry["ttl_ms"] = ttl_ms
@@ -112,12 +103,10 @@ def write_cache_entry(
         entry["cache_scope"] = cache_scope
     with _cache_lock:
         data = _load_all()
-        # Write-through fires on every registration (reconnects,
-        # list_changed refreshes); skip the load-all+rewrite churn when the
-        # entry is byte-identical to what is already on disk. TTL'd entries
-        # always rewrite: written_at must advance or the entry would expire
-        # at its ORIGINAL write time no matter how many live reconnects
-        # confirmed it since.
+        # Write-through fires on every registration (reconnects, list_changed);
+        # skip the load-all+rewrite churn when the entry is byte-identical on
+        # disk. TTL'd entries always rewrite: written_at must advance or the
+        # entry would expire at its ORIGINAL write time regardless of reconnects.
         if "written_at" not in entry and data.get(server_name) == entry:
             return
         data[server_name] = entry

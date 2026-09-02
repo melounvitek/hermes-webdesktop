@@ -50,12 +50,10 @@ _EMPTY_OBJECT_SCHEMA = {"type": "object", "properties": {}}
 
 def _rewrite_local_refs(node):
     """Promote legacy ``definitions`` to ``$defs`` (Moonshot rejects the draft-07
-    form) — but ONLY where it is a JSON Schema meta-keyword, never as a property
-    NAME inside ``properties``/``patternProperties``. A tool parameter
-    legitimately named ``definitions`` rewritten to ``$defs`` would 400 the whole
-    tool array (Anthropic/OpenAI forbid ``$`` in property names). Property names
-    are kept verbatim and recursion resumes ordinary semantics inside each
-    property's schema."""
+    form) — ONLY where it is a JSON Schema meta-keyword, never as a property NAME
+    inside ``properties``/``patternProperties``: a parameter legitimately named
+    ``definitions`` rewritten to ``$defs`` would 400 the whole tool array
+    (Anthropic/OpenAI forbid ``$`` in property names)."""
     if isinstance(node, list):
         return [_rewrite_local_refs(item) for item in node]
     if not isinstance(node, dict):
@@ -100,15 +98,12 @@ def _repair_object_shape(node):
 
 def _normalize_mcp_input_schema(schema: dict | None) -> dict:
     """Normalize MCP input schemas so one form is valid on OpenAI, Anthropic,
-    Gemini and Moonshot.
-
-    Order matters: ``definitions`` -> ``$defs`` rewrite; nullable ``anyOf``
-    unions collapsed to the non-null branch (Anthropic rejects nullable
-    branches; optionality lives solely in the parent's ``required``, the
-    ``nullable: true`` hint is kept so runtime coercion can still map a
-    model-emitted ``"null"`` string to ``None``); same-typed const unions ->
-    enum (must run AFTER the nullable strip); then object-shape repair.
-    """
+    Gemini and Moonshot. Order matters: ``definitions`` -> ``$defs``; nullable
+    ``anyOf`` unions collapsed to the non-null branch (Anthropic rejects nullable
+    branches; optionality lives in the parent's ``required``; the ``nullable:
+    true`` hint is kept so runtime coercion can map a model-emitted ``"null"``
+    string to ``None``); same-typed const unions -> enum (AFTER the nullable
+    strip); then object-shape repair."""
     if not schema:
         return dict(_EMPTY_OBJECT_SCHEMA)
     from tools.schema_sanitizer import collapse_const_unions, strip_nullable_unions

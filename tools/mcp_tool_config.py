@@ -20,11 +20,9 @@ _mcp_stderr_log_lock = threading.Lock()
 
 
 def _get_mcp_stderr_log() -> Any:
-    """Shared append-mode handle for MCP subprocess stderr, opened once per process.
-
-    Must expose a real fd (``fileno()``) because asyncio wires the child's stderr
-    directly to it. Falls back to ``/dev/null``, then the real stderr.
-    """
+    """Shared append-mode handle for MCP subprocess stderr, opened once per
+    process. Must expose a real fd (``fileno()``) because asyncio wires the
+    child's stderr directly to it. Falls back to ``/dev/null``, then real stderr."""
     global _mcp_stderr_log_fh
     with _mcp_stderr_log_lock:
         if _mcp_stderr_log_fh is not None:
@@ -114,12 +112,10 @@ def _context_var_value(ref: str) -> Optional[str]:
 
 
 def _build_safe_env(user_env: Optional[dict]) -> dict:
-    """Filtered env for stdio subprocesses so API keys/tokens don't leak.
-
-    Passes only the safe baseline keys, ``XDG_*``, vars injected by an external
-    secret source (users configured that backend precisely so subprocesses can
-    consume them), plus the server config's own ``env``.
-    """
+    """Filtered env for stdio subprocesses so API keys/tokens don't leak: only
+    the safe baseline keys, ``XDG_*``, vars injected by an external secret
+    source (users configured that backend precisely so subprocesses can consume
+    them), plus the server config's own ``env``."""
     try:
         from hermes_cli.env_loader import get_secret_source
     except Exception:  # pragma: no cover — early bootstrap/import fallback
@@ -140,10 +136,7 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
 def _which_with_config_pathext(command: str, path_arg, env: dict):
     """``shutil.which`` retried under the config env's PATHEXT (Windows only):
     ``which(path=...)`` uses the PARENT's PATHEXT, not the config env's."""
-    cfg_pathext = next(
-        (v for k, v in env.items() if k.upper() == "PATHEXT" and isinstance(v, str) and v.strip()),
-        None,
-    )
+    cfg_pathext = next((v for k, v in env.items() if k.upper() == "PATHEXT" and isinstance(v, str) and v.strip()), None)
     if not cfg_pathext or cfg_pathext == os.environ.get("PATHEXT"):
         return None
     saved = os.environ.get("PATHEXT")
@@ -215,13 +208,11 @@ def _wrap_command_with_watchdog(command: str, args: list) -> tuple[str, list]:
 
 
 def _interpolate_env_vars(value):
-    """Recursively resolve ``${VAR}`` / Cursor ``${env:VAR}`` placeholders plus the
-    Cursor context vars (see ``_context_var_value``).
-
-    Env refs resolve from the active profile's secret scope when multiplexing
-    (so ``${API_KEY}`` picks up the routed profile's value, not another
-    profile's in ``os.environ``). Unset vars keep the literal placeholder.
-    """
+    """Recursively resolve ``${VAR}`` / Cursor ``${env:VAR}`` placeholders plus
+    the Cursor context vars (``_context_var_value``). Env refs resolve from the
+    active profile's secret scope when multiplexing (so ``${API_KEY}`` picks up
+    the routed profile's value, not another profile's in ``os.environ``). Unset
+    vars keep the literal placeholder."""
     from agent.secret_scope import get_secret as _get_secret
 
     if isinstance(value, str):
@@ -245,12 +236,10 @@ _whitespace_warned: Set[Tuple[str, str]] = set()
 
 def _warn_hidden_whitespace(server_name: str, config: dict) -> List[str]:
     """Warn once per (server, key path) about string values with leading/trailing
-    whitespace — a pasted trailing newline or leading space causes opaque
-    auth/connect failures and is invisible in config.yaml.
-
-    Advisory only: values are never mutated (whitespace could be intentional)
-    and never logged (often secrets). Returns the flagged key paths.
-    """
+    whitespace — a pasted newline or leading space causes opaque auth/connect
+    failures and is invisible in config.yaml. Advisory only: values are never
+    mutated (whitespace could be intentional) and never logged (often secrets).
+    Returns the flagged key paths."""
     flagged: List[str] = []
 
     def _walk(value: Any, path: str) -> None:
