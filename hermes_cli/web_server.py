@@ -6425,6 +6425,7 @@ app.include_router(_ops_routes.router)
 from hermes_cli.web_routers.ops import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
     delete_webhook,
     list_checkpoints,
+    list_credential_pool,
     prune_checkpoints,
     run_backup,
     run_doctor,
