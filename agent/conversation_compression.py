@@ -3192,6 +3192,241 @@ def _adopt_if_parent_rotated(
     return messages, _existing_sp
 
 
+def _adopt_grown_durable_parent(
+    agent: Any, lease: _CompressionLease, messages: list
+) -> Optional[list]:
+    """Return the durable parent transcript when it outgrew the in-memory snapshot.
+
+    Rotation only (in-place never loses rows). The snapshot predates the lease: if
+    durable grew, a writer committed a turn — ADOPT it (aborting wedged busy
+    sessions forever). Length check only: in-memory edits of past turns are legal.
+    """
+    if lease.db is None or not lease.sid:
+        return None
+    durable_loader = getattr(type(lease.db), "get_messages_as_conversation", None)
+    if not callable(durable_loader):
+        return None
+    durable_parent = durable_loader(lease.db, lease.sid)
+    if not (isinstance(durable_parent, list) and len(durable_parent) > len(messages)):
+        return None
+    # In-memory carries this turn's un-persisted user tail; flush it via the normal
+    # rotation-boundary path before adopting, else skip adoption (would drop input).
+    _preflush_idx = getattr(agent, "_persist_user_message_idx", None)
+    _preflush_ok = False
+    if isinstance(_preflush_idx, int) and 0 <= _preflush_idx < len(messages):
+        try:
+            _preflush_ok = agent._flush_messages_to_session_db(
+                messages,
+                conversation_history=messages[:_preflush_idx],
+            )
+        except Exception:
+            _preflush_ok = False
+    else:
+        # No un-persisted tail: transcript is fully durable, so adopting the longer
+        # parent cannot drop live input — adopt directly.
+        _preflush_ok = True
+    if not _preflush_ok:
+        logger.warning(
+            "compression: session=%s grew before lease "
+            "(%d → %d msgs) but the pre-adoption flush of the "
+            "live tail failed; skipping durable-snapshot "
+            "adoption so un-persisted user input is kept",
+            lease.sid,
+            len(messages),
+            len(durable_parent),
+        )
+        return None
+    # Re-read after the flush so the adopted snapshot carries the just-persisted tail.
+    durable_parent = durable_loader(lease.db, lease.sid)
+    if not (isinstance(durable_parent, list) and len(durable_parent) > len(messages)):
+        return None
+    logger.info(
+        "compression: session=%s grew before lease "
+        "(%d → %d msgs); adopting durable snapshot",
+        lease.sid,
+        len(messages),
+        len(durable_parent),
+    )
+    return durable_parent
+
+def _pre_compress_memory_context(
+    agent: Any, messages: list, checkpoint_required: bool
+) -> str:
+    """Provider ``on_pre_compress()`` insights to surface in the summary ("" if none).
+
+    Raw messages stay the API v1 provider contract; normalized evidence goes only
+    to API v2+ checkpoint providers inside MemoryManager.on_pre_compress().
+    Raises :class:`CompressionCheckpointUnavailable` when a required checkpoint
+    cannot be taken.
+    """
+    memory_context = ""
+    memory_manager = getattr(agent, "_memory_manager", None)
+    evidence_messages = _direct_messages_for_pre_compress_memory(messages)
+    if checkpoint_required:
+        supports_checkpoint = getattr(
+            memory_manager, "supports_pre_compress_checkpoint", None
+        )
+        if memory_manager is None or not callable(supports_checkpoint):
+            raise _checkpoint_blocked(
+                f"no active provider implements checkpoint API "
+                f"v{PRE_COMPRESS_CHECKPOINT_API_VERSION}"
+            )
+        try:
+            compatible = bool(
+                supports_checkpoint(PRE_COMPRESS_CHECKPOINT_API_VERSION)
+            )
+        except Exception as exc:
+            raise _checkpoint_blocked("provider capability probe failed") from exc
+        if not compatible:
+            raise _checkpoint_blocked(
+                f"active provider does not implement checkpoint API "
+                f"v{PRE_COMPRESS_CHECKPOINT_API_VERSION}"
+            )
+        try:
+            _maybe_ctx = memory_manager.on_pre_compress(
+                messages,
+                evidence_messages=evidence_messages,
+                require_checkpoint=True,
+                checkpoint_api_version=PRE_COMPRESS_CHECKPOINT_API_VERSION,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Required pre-compress checkpoint failed (%s)",
+                type(exc).__name__,
+            )
+            raise _checkpoint_blocked(
+                f"provider checkpoint API v{PRE_COMPRESS_CHECKPOINT_API_VERSION} failed"
+            ) from exc
+        if isinstance(_maybe_ctx, str):
+            memory_context = sanitize_memory_context(_maybe_ctx)
+    elif memory_manager:
+        try:
+            _maybe_ctx = memory_manager.on_pre_compress(
+                messages, evidence_messages=evidence_messages
+            )
+            if isinstance(_maybe_ctx, str):
+                memory_context = sanitize_memory_context(_maybe_ctx)
+        except Exception:
+            pass
+    return memory_context
+
+def _resolve_compress_call(
+    agent: Any,
+    *,
+    approx_tokens: Optional[int],
+    focus_topic: Optional[str],
+    force: bool,
+    memory_context: str,
+    bypass_cooldown: bool,
+) -> Tuple[Callable[..., Any], dict[str, Any]]:
+    """Bind ``compress()`` and only the kwargs its signature accepts."""
+    compress_fn = agent.context_compressor.compress
+    compress_kwargs = _supported_compression_kwargs(
+        compress_fn,
+        current_tokens=approx_tokens,
+        focus_topic=focus_topic,
+        force=force,
+        memory_context=memory_context,
+        bypass_cooldown=bypass_cooldown,
+    )
+    if memory_context.strip() and "memory_context" not in compress_kwargs:
+        engine_name = getattr(
+            agent.context_compressor,
+            "name",
+            type(agent.context_compressor).__name__,
+        )
+        if (
+            getattr(agent, "_last_memory_context_unsupported_engine", None)
+            != engine_name
+        ):
+            agent._last_memory_context_unsupported_engine = engine_name
+            logger.warning(
+                "context engine %s does not accept memory_context; continuing "
+                "without provider-supplied summary context",
+                engine_name,
+            )
+    return compress_fn, compress_kwargs
+
+def _run_summary_dispatch(
+    agent: Any,
+    messages: list,
+    compress_fn: Callable[..., Any],
+    compress_kwargs: dict[str, Any],
+    *,
+    commit_fence: Optional[CompressionCommitFence],
+    attempt_generation: Any,
+    hard_cancel_event: Any,
+) -> list:
+    """Run the compressor under the fence's progress hook, deadline and interrupt guard."""
+    # Publish progress to the commit fence so hosts extend deadlines while tokens
+    # flow. Any active hook (even no-op) selects the streamed path: the timeout is
+    # inactivity-based and a byte-trickling provider hits the stream total ceiling.
+    from agent.auxiliary_client import (
+        aux_interrupt_protection,
+        aux_progress_hook,
+        aux_stream_deadline,
+    )
+    _progress_hook = (
+        commit_fence.touch_progress if commit_fence is not None
+        else (lambda: None)
+    )
+    # Return leg: cancel frees the owner but the provider daemon streams on to its
+    # own larger ceiling; share the host deadline so orphan streams stop with it.
+    _host_stream_deadline = (
+        commit_fence.deadline_monotonic if commit_fence is not None else None
+    )
+    # A LATE successful summary must not undo the host's timeout cooldown: the
+    # compressor checks cancellation before clearing; removed in finally (no leak).
+    if commit_fence is not None:
+        _install_compression_cancelled_check(
+            agent.context_compressor,
+            lambda: commit_fence.is_cancelled,
+            attempt_generation,
+        )
+
+    def _compression_cancel_requested() -> bool:
+        return bool(
+            (
+                hard_cancel_event is not None
+                and hard_cancel_event.is_set()
+            )
+            or (
+                commit_fence is not None
+                and commit_fence.is_cancelled
+            )
+        )
+
+    try:
+        # F6: never start expensive summary work for an already-cancelled
+        # fence (a stale queued job admitted after host departure).
+        if commit_fence is not None and commit_fence.is_cancelled:
+            logger.info(
+                "Compression cancelled before summary dispatch "
+                "(session=%s) — skipping summary work.",
+                agent.session_id or "none",
+            )
+            compressed = messages
+        else:
+            with aux_progress_hook(_progress_hook), aux_stream_deadline(
+                _host_stream_deadline
+            ), aux_interrupt_protection(
+                cancel_check=_compression_cancel_requested
+            ):
+                compressed = compress_fn(messages, **compress_kwargs)
+                # Freeze a hard stop that arrived after the last provider attempt but before
+                # session state rotates.
+                if (
+                    hard_cancel_event is not None
+                    and hard_cancel_event.is_set()
+                ):
+                    raise AuxiliaryExplicitCancellation()
+    finally:
+        if commit_fence is not None:
+            _clear_compression_cancelled_check_if_owner(
+                agent.context_compressor, attempt_generation
+            )
+    return compressed
+
 def compress_context(
     agent: Any,
     messages: list,
@@ -3400,222 +3635,44 @@ def compress_context(
     try:
         lease.start_refresher()
 
-        # Rotation only (in-place never loses rows). The snapshot predates the lease: if
-        # durable grew, a writer committed a turn — ADOPT it (aborting wedged busy
-        # sessions forever). Length check only: in-memory edits of past turns are legal.
-        if not in_place and lease.db is not None and lease.sid:
-            durable_loader = getattr(
-                type(lease.db), "get_messages_as_conversation", None
-            )
-            if callable(durable_loader):
-                durable_parent = durable_loader(lease.db, lease.sid)
-                if isinstance(durable_parent, list) and len(durable_parent) > len(messages):
-                    # In-memory carries this turn's un-persisted user tail; flush it via the normal
-                    # rotation-boundary path before adopting, else skip adoption (would drop input).
-                    _preflush_idx = getattr(agent, "_persist_user_message_idx", None)
-                    _preflush_ok = False
-                    if (
-                        isinstance(_preflush_idx, int)
-                        and 0 <= _preflush_idx < len(messages)
-                    ):
-                        try:
-                            _preflush_ok = agent._flush_messages_to_session_db(
-                                messages,
-                                conversation_history=messages[:_preflush_idx],
-                            )
-                        except Exception:
-                            _preflush_ok = False
-                    else:
-                        # No un-persisted tail: transcript is fully durable, so adopting the longer
-                        # parent cannot drop live input — adopt directly.
-                        _preflush_ok = True
-                    if not _preflush_ok:
-                        logger.warning(
-                            "compression: session=%s grew before lease "
-                            "(%d → %d msgs) but the pre-adoption flush of the "
-                            "live tail failed; skipping durable-snapshot "
-                            "adoption so un-persisted user input is kept",
-                            lease.sid,
-                            len(messages),
-                            len(durable_parent),
-                        )
-                    else:
-                        # Re-read after the flush so the adopted snapshot
-                        # carries the just-persisted tail.
-                        durable_parent = durable_loader(lease.db, lease.sid)
-                    if (
-                        _preflush_ok
-                        and isinstance(durable_parent, list)
-                        and len(durable_parent) > len(messages)
-                    ):
-                        logger.info(
-                            "compression: session=%s grew before lease "
-                            "(%d → %d msgs); adopting durable snapshot",
-                            lease.sid,
-                            len(messages),
-                            len(durable_parent),
-                        )
-                        messages = durable_parent
-                        _pre_msg_count = len(messages)
-                        # Estimate was for the stale snapshot; force re-derivation from adopted rows.
-                        approx_tokens = 0
-                        # Adopted list is fully durable: re-anchor persist idx at the end so the post-
-                        # compression flush skips it; run_agent marker sync realigns _session_messages.
-                        agent._persist_user_message_idx = len(messages)
+        if not in_place:
+            _adopted_parent = _adopt_grown_durable_parent(agent, lease, messages)
+            if _adopted_parent is not None:
+                messages = _adopted_parent
+                _pre_msg_count = len(messages)
+                # Estimate was for the stale snapshot; force re-derivation from adopted rows.
+                approx_tokens = 0
+                # Adopted list is fully durable: re-anchor persist idx at the end so the post-
+                # compression flush skips it; run_agent marker sync realigns _session_messages.
+                agent._persist_user_message_idx = len(messages)
 
-        # Provider's on_pre_compress() may return insights to surface in the summary.
-        memory_context = ""
-        memory_manager = getattr(agent, "_memory_manager", None)
-        # Raw messages stay the API v1 provider contract; normalized evidence goes only
-        # to API v2+ checkpoint providers inside MemoryManager.on_pre_compress().
-        evidence_messages = _direct_messages_for_pre_compress_memory(messages)
-        if checkpoint_required:
-            supports_checkpoint = getattr(
-                memory_manager, "supports_pre_compress_checkpoint", None
-            )
-            if memory_manager is None or not callable(supports_checkpoint):
-                raise _checkpoint_blocked(
-                    f"no active provider implements checkpoint API "
-                    f"v{PRE_COMPRESS_CHECKPOINT_API_VERSION}"
-                )
-            try:
-                compatible = bool(
-                    supports_checkpoint(PRE_COMPRESS_CHECKPOINT_API_VERSION)
-                )
-            except Exception as exc:
-                raise _checkpoint_blocked("provider capability probe failed") from exc
-            if not compatible:
-                raise _checkpoint_blocked(
-                    f"active provider does not implement checkpoint API "
-                    f"v{PRE_COMPRESS_CHECKPOINT_API_VERSION}"
-                )
-            try:
-                _maybe_ctx = memory_manager.on_pre_compress(
-                    messages,
-                    evidence_messages=evidence_messages,
-                    require_checkpoint=True,
-                    checkpoint_api_version=PRE_COMPRESS_CHECKPOINT_API_VERSION,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Required pre-compress checkpoint failed (%s)",
-                    type(exc).__name__,
-                )
-                raise _checkpoint_blocked(
-                    f"provider checkpoint API v{PRE_COMPRESS_CHECKPOINT_API_VERSION} failed"
-                ) from exc
-            if isinstance(_maybe_ctx, str):
-                memory_context = sanitize_memory_context(_maybe_ctx)
-        elif memory_manager:
-            try:
-                _maybe_ctx = memory_manager.on_pre_compress(
-                    messages, evidence_messages=evidence_messages
-                )
-                if isinstance(_maybe_ctx, str):
-                    memory_context = sanitize_memory_context(_maybe_ctx)
-            except Exception:
-                pass
+        memory_context = _pre_compress_memory_context(agent, messages, checkpoint_required)
 
-        compress_fn = agent.context_compressor.compress
-        compress_kwargs = _supported_compression_kwargs(
-            compress_fn,
-            current_tokens=approx_tokens,
+        compress_fn, compress_kwargs = _resolve_compress_call(
+            agent,
+            approx_tokens=approx_tokens,
             focus_topic=focus_topic,
             force=force,
             memory_context=memory_context,
             bypass_cooldown=bypass_cooldown,
         )
-        if memory_context.strip() and "memory_context" not in compress_kwargs:
-            engine_name = getattr(
-                agent.context_compressor,
-                "name",
-                type(agent.context_compressor).__name__,
-            )
-            if (
-                getattr(agent, "_last_memory_context_unsupported_engine", None)
-                != engine_name
-            ):
-                agent._last_memory_context_unsupported_engine = engine_name
-                logger.warning(
-                    "context engine %s does not accept memory_context; continuing "
-                    "without provider-supplied summary context",
-                    engine_name,
-                )
 
         messages_before_compression = copy.deepcopy(messages)
         _activity_heartbeat = _CompressionActivityHeartbeat(
             agent, commit_fence=commit_fence
         ).start()
-        # Publish progress to the commit fence so hosts extend deadlines while tokens
-        # flow. Any active hook (even no-op) selects the streamed path: the timeout is
-        # inactivity-based and a byte-trickling provider hits the stream total ceiling.
-        from agent.auxiliary_client import (
-            aux_interrupt_protection,
-            aux_progress_hook,
-            aux_stream_deadline,
-        )
-        _progress_hook = (
-            commit_fence.touch_progress if commit_fence is not None
-            else (lambda: None)
-        )
-        # Return leg: cancel frees the owner but the provider daemon streams on to its
-        # own larger ceiling; share the host deadline so orphan streams stop with it.
-        _host_stream_deadline = (
-            commit_fence.deadline_monotonic if commit_fence is not None else None
-        )
-        # A LATE successful summary must not undo the host's timeout cooldown: the
-        # compressor checks cancellation before clearing; removed in finally (no leak).
-        if commit_fence is not None:
-            _install_compression_cancelled_check(
-                agent.context_compressor,
-                lambda: commit_fence.is_cancelled,
-                _attempt_generation,
-            )
         # Interrupts/redirects must not tear a summary in half. Use the explicit stop
         # Event (message fields race) + fence timeout so pool slots free promptly.
         _hard_cancel_event = getattr(agent, "_hard_interrupt_requested", None)
-
-        def _compression_cancel_requested() -> bool:
-            return bool(
-                (
-                    _hard_cancel_event is not None
-                    and _hard_cancel_event.is_set()
-                )
-                or (
-                    commit_fence is not None
-                    and commit_fence.is_cancelled
-                )
-            )
-
-        try:
-            # F6: never start expensive summary work for an already-cancelled
-            # fence (a stale queued job admitted after host departure).
-            if commit_fence is not None and commit_fence.is_cancelled:
-                logger.info(
-                    "Compression cancelled before summary dispatch "
-                    "(session=%s) — skipping summary work.",
-                    agent.session_id or "none",
-                )
-                compressed = messages
-            else:
-                with aux_progress_hook(_progress_hook), aux_stream_deadline(
-                    _host_stream_deadline
-                ), aux_interrupt_protection(
-                    cancel_check=_compression_cancel_requested
-                ):
-                    compressed = compress_fn(messages, **compress_kwargs)
-                    # Freeze a hard stop that arrived after the last provider attempt but before
-                    # session state rotates.
-                    if (
-                        _hard_cancel_event is not None
-                        and _hard_cancel_event.is_set()
-                    ):
-                        raise AuxiliaryExplicitCancellation()
-        finally:
-            if commit_fence is not None:
-                _clear_compression_cancelled_check_if_owner(
-                    agent.context_compressor, _attempt_generation
-                )
+        compressed = _run_summary_dispatch(
+            agent,
+            messages,
+            compress_fn,
+            compress_kwargs,
+            commit_fence=commit_fence,
+            attempt_generation=_attempt_generation,
+            hard_cancel_event=_hard_cancel_event,
+        )
     except AuxiliaryExplicitCancellation:
         try:
             _restore_compressor_attempt_state(
