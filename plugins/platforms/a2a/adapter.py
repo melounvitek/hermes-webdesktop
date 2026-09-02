@@ -624,8 +624,8 @@ class A2AAdapter(BasePlatformAdapter):
             env["HERMES_A2A_PEER"] = peer
             start = time.time()
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                                      env=env, check=False, stdin=subprocess.DEVNULL)
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                      timeout=timeout, env=env, check=False, stdin=subprocess.DEVNULL)
             except subprocess.TimeoutExpired:
                 return "[profile did not reply in time]", protocol.STATE_FAILED
             except Exception as e:

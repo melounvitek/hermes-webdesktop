@@ -1392,7 +1392,7 @@ def _setup_backend_vercel(config: dict) -> None:
             if uv_bin
             else [sys.executable, "-m", "pip", "install", "vercel"]
         )
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode == 0:
             print_success("vercel SDK installed")
         else:

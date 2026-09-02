@@ -1065,7 +1065,7 @@ class PhotonAdapter(BasePlatformAdapter):
             await asyncio.sleep(0.1)
         for pid in stale:
             if self._pid_alive(pid):
-                _kill(pid, signal.SIGKILL)
+                _kill(pid, signal.SIGKILL)  # windows-footgun: ok — unreachable on win32 (early return above)
         await asyncio.sleep(0.2)  # let the OS release the listening socket
         if foreign:
             raise RuntimeError(

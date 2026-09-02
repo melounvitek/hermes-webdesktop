@@ -84,6 +84,35 @@ SKIP_DIRS = {
 }
 
 
+_SPLAT_RE = re.compile(r"\*\*\s*([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _splat_carries_stdin(call_text: str, content: str) -> bool:
+    """True when the call splats ``**name`` / ``**name(...)`` and ``name`` is defined in
+    the same file (assignment or ``def``) with an explicit ``stdin=`` in its body.
+
+    Shared kwargs helpers (``_RUN_KW = dict(..., stdin=DEVNULL)``, ``def _run_kwargs(): return
+    dict(..., stdin=DEVNULL)``) legitimately carry the guard; we only accept them when the
+    definition provably sets stdin= — never on the helper's name alone.
+    """
+    names = set(_SPLAT_RE.findall(call_text))
+    if not names:
+        return False
+    for name in names:
+        defn = re.compile(
+            rf"^[ \t]*(?:def[ \t]+{re.escape(name)}[ \t]*\(|{re.escape(name)}[ \t]*(?::[^=\n]*)?=(?!=))",
+            re.MULTILINE,
+        )
+        m = defn.search(content)
+        if m is None:
+            return False
+        body = content[m.start():]
+        body = "\n".join(body.split("\n")[:30])
+        if "stdin=" not in body:
+            return False
+    return True
+
+
 def find_subprocess_calls(content: str, filepath: str) -> list[dict]:
     """Find all subprocess/os/asyncio calls missing stdin= in content."""
     violations = []
@@ -129,6 +158,11 @@ def find_subprocess_calls(content: str, filepath: str) -> list[dict]:
 
                         # Has input= → creates a pipe, safe.
                         if "input=" in call_text:
+                            break
+
+                        # Splats a same-file kwargs helper whose definition
+                        # sets stdin= → the guard travels with the helper.
+                        if _splat_carries_stdin(call_text, content):
                             break
 
                         # Inline exemption marker on the call itself or within

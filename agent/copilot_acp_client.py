@@ -82,7 +82,10 @@ def _acp_supported(command: str, args: list[str]) -> bool | None:
     if cached is not None:
         return cached
     try:
-        probe = subprocess.run([command, "--help"], capture_output=True, text=True, timeout=5)
+        probe = subprocess.run(
+            [command, "--help"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5, stdin=subprocess.DEVNULL,
+        )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
     if probe.returncode != 0:

@@ -391,7 +391,7 @@ def _run(argv: List[str], *, timeout: int, text: bool = False, **kwargs) -> "sub
     """``subprocess.run`` with captured output; argv[0] is always a trusted PATH/system binary."""
     if text:
         kwargs.update(text=True, encoding="utf-8", errors="replace")
-    return subprocess.run(argv, capture_output=True, timeout=timeout, **kwargs)  # noqa: S603
+    return subprocess.run(argv, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL, **kwargs)  # noqa: S603
 
 
 def iron_proxy_version(binary: Path) -> str:

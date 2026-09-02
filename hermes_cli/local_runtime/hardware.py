@@ -66,7 +66,9 @@ _DEVICE_LINE_RE = re.compile(r"CUDA\d+:.*\((\d+)\s*MiB,\s*\d+\s*MiB free\)\s*$")
 
 
 def _stdout(*argv: str) -> str:
-    return subprocess.run(list(argv), capture_output=True, text=True, timeout=5).stdout
+    return subprocess.run(
+        list(argv), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5
+    ).stdout
 
 
 def _ram_bytes() -> tuple[int, int]:

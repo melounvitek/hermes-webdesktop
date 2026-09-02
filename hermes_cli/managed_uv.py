@@ -145,7 +145,9 @@ def _macos_sign_managed_python(python: Path) -> bool:
             ),
         )
         for cmd, warning, fallback in steps:
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            result = subprocess.run(
+                cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
             if result.returncode != 0:
                 logger.warning(
                     warning, python, (result.stderr or result.stdout or fallback).strip()

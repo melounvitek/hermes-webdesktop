@@ -725,7 +725,7 @@ class SimplexAdapter(BasePlatformAdapter):
                 if needs_png:
                     png_path = str(p.with_suffix(".png"))
                     subprocess.run(["convert", file_path, png_path],
-                                   check=True, capture_output=True, timeout=30)
+                                   check=True, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
                 with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
                     tmp_path = tmp.name
                 subprocess.run(

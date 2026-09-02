@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # transcripts stay disambiguated even if downstream plugins fail before silent_ingest.
 _OWNER_REPLY_PREFIX = "[owner reply] "
 
-_RUN_TEXT = dict(capture_output=True, text=True, encoding='utf-8', errors='replace')
+_RUN_TEXT = dict(capture_output=True, text=True, encoding='utf-8', errors='replace', stdin=subprocess.DEVNULL)
 
 
 def _listener_pids_on_port(port: int) -> list:

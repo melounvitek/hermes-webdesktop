@@ -433,7 +433,9 @@ def _ensure_ollama(models: list[str]) -> bool:
             return False
         print("  Ollama installed but not running. Starting...")
         try:
-            subprocess.Popen([ollama_bin, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                [ollama_bin, "serve"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
             _wait_for_port("localhost", 11434, timeout=10)
             ok = _check_ollama(url)[0]
             if ok:

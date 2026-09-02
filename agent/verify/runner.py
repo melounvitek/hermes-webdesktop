@@ -29,7 +29,8 @@ _TAIL_CHARS = 2000
 PHASE_ORDER = ("bootstrap", "build", "test")
 # Project-authored shell commands; see module docstring.
 _SUBPROCESS_KW: dict[str, Any] = dict(
-    shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace"
+    shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    text=True, errors="replace",
 )
 
 
@@ -164,7 +165,7 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         try:
-            stop(signal.SIGKILL, proc.kill)
+            stop(getattr(signal, "SIGKILL", signal.SIGTERM), proc.kill)
         except (ProcessLookupError, PermissionError):
             pass
         try:
