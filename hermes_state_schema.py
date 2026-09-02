@@ -379,8 +379,7 @@ class SessionSchemaMixin:
         record = None
         try:
             row = cursor.execute(
-                "SELECT value FROM state_meta WHERE key = ? LIMIT 1",
-                (FTS_REBUILD_DEFERRAL_KEY,),
+                "SELECT value FROM state_meta WHERE key = ? LIMIT 1", (FTS_REBUILD_DEFERRAL_KEY,),
             ).fetchone()
             if row:
                 parsed = json.loads(row[0])

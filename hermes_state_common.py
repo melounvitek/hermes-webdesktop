@@ -139,7 +139,6 @@ _PREVIEW_RAW_SUBQUERY_SQL = (
     f" ORDER BY m.timestamp, m.id LIMIT 1), '') AS _preview_raw"
 )
 
-
 # ── Session lineage predicates ({a} = sessions alias) ───────────────────────
 
 # A /branch child (kept visible, never cascade-deleted): stable marker OR the
@@ -280,7 +279,6 @@ SCHEMA_VERSION = 28
 # freelist; below it a full rewrite costs more I/O than it returns.
 AUTO_VACUUM_MIN_FREELIST_RATIO = 0.25
 
-
 # FTS storage layout, tracked INDEPENDENTLY of SCHEMA_VERSION (state_meta
 # ``fts_storage_version``): the schema version advances freely on open, but
 # the FTS layout only changes when a DB is born fresh or explicitly optimized
@@ -288,10 +286,8 @@ AUTO_VACUUM_MIN_FREELIST_RATIO = 0.25
 # absent) with a working inline index.  1 = v23 external-content layout.
 FTS_STORAGE_VERSION = 1
 
-
 # Cap on user-controlled FTS5 query input before sanitizer processing.
 MAX_FTS5_QUERY_CHARS = 2_048
-
 
 # ── Helpers shared by SessionDB, its mixins and the registry ──────────────
 
@@ -556,7 +552,6 @@ CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
     ON async_delegations(delivery_state, completed_at);
 """
 
-
 # Indexes on columns added in later schema versions must run AFTER
 # _reconcile_columns() adds them, or executescript fails on legacy DBs.
 DEFERRED_INDEX_SQL = """
@@ -573,7 +568,6 @@ CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
 CREATE INDEX IF NOT EXISTS idx_sessions_system_prompt_hash
     ON sessions(system_prompt_hash);
 """
-
 
 # ── Deferred FTS rebuild bookkeeping ──
 # While a background rebuild is pending, two state_meta keys define which rows
@@ -634,7 +628,6 @@ BEGIN
     VALUES (new.id, new.content, new.tool_name, new.tool_calls);
 END;
 """
-
 
 # Trigram FTS5 table for CJK substring search (unicode61 splits CJK into single
 # tokens, breaking phrase matching).  The trigram index is ~2.6x the text it
@@ -703,12 +696,10 @@ _FTS_CJK_TRIGGERS = (
     "messages_fts_cjk_insert", "messages_fts_cjk_delete", "messages_fts_cjk_update",
 )
 
-
 # Set when a tokenizer-less process dropped the cjk triggers to keep writes
 # alive: the cjk index is missing rows and must not serve reads until
 # `hermes sessions optimize-storage` rebuilds it on a capable host.
 FTS_CJK_STALE_KEY = "fts_cjk_stale"
-
 
 # Set when a base/trigram FTS index was detached after runtime corruption.
 # While present, startup must rebuild the complete index before reinstalling
@@ -717,7 +708,6 @@ FTS_STALE_KEY = "fts_stale"
 
 # Durable diagnostic for stale FTS recovery blocked across process restarts.
 FTS_REBUILD_DEFERRAL_KEY = "fts_rebuild_deferral"
-
 
 # ── Legacy (v22 / inline-content) FTS DDL ──────────────────────────────
 # Used ONLY to keep a pre-v23 install's search working and its triggers
@@ -777,7 +767,6 @@ AFTER UPDATE OF content, tool_name, tool_calls ON messages BEGIN
     );
 END;
 """
-
 
 # ── Cross-process full-FTS-rebuild admission (single authority) ──────────────
 #
