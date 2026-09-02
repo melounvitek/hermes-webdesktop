@@ -347,3 +347,82 @@ def _transport_choice(attempt: dict, *, pattern_key: str, description: str):
             pattern_key=pattern_key, description=description, failure=failure,
         )
     return attempt.get("choice"), None
+
+
+def request_elicitation_consent(
+    message: str,
+    description: str,
+    *,
+    timeout_seconds: int | None = None,
+    surface: str = "mcp-elicitation",
+) -> str:
+    """Route an MCP elicitation request to the surface owning the active session.
+
+    Gateway sessions go through ``_await_gateway_decision``; CLI/TUI through
+    ``prompt_dangerous_approval``. Always fails closed: a missing notify_cb in
+    a gateway session, timeouts, and exceptions map to ``"decline"`` so a server
+    treats them as "user did not approve" rather than retrying or hanging.
+    Returns ``"accept" | "decline" | "cancel"``.
+    """
+    from tools import approval as _a
+    try:
+        session_key = _a.get_current_session_key()
+    except Exception as exc:  # pragma: no cover -- defensive
+        logger.warning("Elicitation consent: session lookup failed: %s", exc)
+        return "decline"
+
+    if _a._is_gateway_approval_context():
+        notify_cb = _a._gateway_notify_cb(session_key)
+        if notify_cb is None:
+            logger.warning(
+                "Elicitation requested in gateway session %s but no "
+                "notify_cb is registered — failing closed",
+                session_key,
+            )
+            return "decline"
+
+        approval_data = {
+            "command": message,
+            "description": description,
+            "pattern_key": "mcp_elicitation",
+            "pattern_keys": ["mcp_elicitation"],
+        }
+        try:
+            decision = _a._await_gateway_decision(
+                session_key, notify_cb, approval_data, surface=surface,
+            )
+        except Exception as exc:
+            logger.error(
+                "Elicitation gateway dispatch failed: %s", exc, exc_info=True,
+            )
+            return "decline"
+
+        if decision.get("notify_failed"):
+            return "decline"
+        if not decision.get("resolved"):
+            return "cancel"
+        choice = decision.get("choice")
+        if choice in ("once", "session", "always"):
+            return "accept"
+        return "decline"
+
+    # allow_permanent=False: elicitation is a per-call confirmation — there
+    # is no pattern to remember.
+    try:
+        choice = _a.prompt_dangerous_approval(
+            message,
+            description,
+            timeout_seconds=timeout_seconds,
+            allow_permanent=False,
+        )
+    except Exception as exc:
+        logger.error(
+            "Elicitation CLI prompt failed: %s", exc, exc_info=True,
+        )
+        return "decline"
+
+    if choice in ("once", "session", "always"):
+        return "accept"
+    if choice == "timeout":
+        return "cancel"  # mirror the gateway's unresolved outcome
+    return "decline"

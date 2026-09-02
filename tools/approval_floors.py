@@ -13,7 +13,7 @@ import re
 import time
 import uuid
 from typing import Optional
-from tools.approval_detection import _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION, _command_detection_variants
+from tools.approval_detection import _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION
 
 logger = logging.getLogger("tools.approval")
 
@@ -36,7 +36,7 @@ def _match_user_deny_rule(command: str) -> str | None:
              if isinstance(p, str) and p.strip()]
     if not globs:
         return None
-    for command_variant in _command_detection_variants(command):
+    for command_variant in _a._command_detection_variants(command):
         candidate = command_variant.lower().strip()
         for pattern in globs:
             if fnmatch.fnmatchcase(candidate, pattern.lower()):

@@ -18,98 +18,6 @@ import threading
 from typing import Optional
 
 from utils import env_var_enabled, is_truthy_value
-
-logger = logging.getLogger(__name__)
-
-# Frozen at import: reading os.environ per call would let any skill running in
-# the process set this and bypass every approval check (prompt-injection
-# escalation path).
-_YOLO_MODE_FROZEN: bool = is_truthy_value(os.getenv("HERMES_YOLO_MODE", ""))
-
-
-
-
-
-
-
-
-
-
-
-
-def _prepare_smart_approval_observer(
-    *,
-    command: str,
-    description: str,
-    pattern_key: str,
-    pattern_keys: list[str],
-    session_key: str,
-) -> dict | None:
-    """Redact and emit the pre-decision smart approval observer hook.
-
-    Redaction is observer-payload preparation, not approval policy: if it fails,
-    skip observability rather than leak raw data or block the LLM decision.
-    """
-    try:
-        from agent.redact import redact_sensitive_text
-
-        hook_command = redact_sensitive_text(command, force=True)
-        hook_description = redact_sensitive_text(description, force=True)
-    except Exception as exc:
-        logger.debug("Smart approval hook redaction failed: %s", exc)
-        return None
-
-    payload = {
-        "command": hook_command,
-        "description": hook_description,
-        "pattern_key": pattern_key,
-        "pattern_keys": list(pattern_keys),
-        "session_key": session_key,
-        "surface": "smart",
-    }
-    _fire_approval_hook("pre_approval_request", **payload)
-    return payload
-
-
-def _observe_smart_approval_verdict(payload: dict | None, verdict: str) -> None:
-    """Emit a smart verdict after the auxiliary LLM decision, if safe."""
-    if payload is None or verdict not in {"approve", "deny"}:
-        return
-    _fire_approval_hook(
-        "post_approval_response",
-        **payload,
-        choice=f"smart_{verdict}",
-        decided_by="aux_llm",
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 from tools.approval_context import (  # noqa: F401 -- re-exported for callers/tests
     _approval_session_key,
     _approval_turn_id,
@@ -154,6 +62,7 @@ from tools.approval_prompt import (  # noqa: F401 -- re-exported for callers/tes
     _present_with_selected_transport,
     _transport_denied_result,
     _transport_choice,
+    request_elicitation_consent,
 )
 from tools.approval_floors import (  # noqa: F401 -- re-exported for callers/tests
     _match_user_deny_rule,
@@ -205,6 +114,9 @@ from tools.approval_smart import (  # noqa: F401 -- re-exported for callers/test
     _strip_line_comment,
     _get_smart_policy,
     _smart_approve,
+    _prepare_smart_approval_observer,
+    _observe_smart_approval_verdict,
+    _smart_verdict,
 )
 from tools.approval_gateway_wait import (  # noqa: F401 -- re-exported for callers/tests
     _ApprovalEntry,
@@ -212,15 +124,12 @@ from tools.approval_gateway_wait import (  # noqa: F401 -- re-exported for calle
     _await_gateway_decision,
 )
 
+logger = logging.getLogger(__name__)
 
-
-
-
-
-
-
-
-
+# Frozen at import: reading os.environ per call would let any skill running in
+# the process set this and bypass every approval check (prompt-injection
+# escalation path).
+_YOLO_MODE_FROZEN: bool = is_truthy_value(os.getenv("HERMES_YOLO_MODE", ""))
 
 
 # =========================================================================
@@ -533,12 +442,6 @@ def _persist_choice(session_key: str, choice: str, warnings: list[tuple]) -> Non
             save_permanent_allowlist(_permanent_approved)
 
 
-
-
-
-
-
-
 # =========================================================================
 # Config persistence for permanent allowlist
 # =========================================================================
@@ -574,19 +477,9 @@ def save_permanent_allowlist(patterns: set):
 # =========================================================================
 
 
-
-
-
-
-
 # =========================================================================
 # Config readers
 # =========================================================================
-
-
-
-
-
 
 
 def is_approval_bypass_active_for_session(session_key: str) -> bool:
@@ -608,18 +501,6 @@ def is_approval_bypass_active() -> bool:
     return is_approval_bypass_active_for_session(
         get_current_session_key(default="")
     )
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # =========================================================================
@@ -778,19 +659,6 @@ def _prompt_cli_with_hooks(command: str, description: str, pattern_key: str,
     _fire_approval_hook("post_approval_response", **hook_kwargs, choice=choice)
     return choice
 
-def _smart_verdict(command: str, description: str, pattern_key: str,
-                   pattern_keys: list[str], session_key: str) -> str:
-    """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'."""
-    observer_payload = _prepare_smart_approval_observer(
-        command=command,
-        description=description,
-        pattern_key=pattern_key,
-        pattern_keys=pattern_keys,
-        session_key=session_key,
-    )
-    verdict = _smart_approve(command, description)
-    _observe_smart_approval_verdict(observer_payload, verdict)
-    return verdict
 
 # =========================================================================
 # Unattended contexts (nobody present to answer a prompt)
@@ -1388,10 +1256,6 @@ def _format_tirith_description(tirith_result: dict) -> str:
     return "Security scan — " + "; ".join(parts)
 
 
-
-
-
-
 def _tirith_scan(command: str) -> dict:
     """Tirith result for the interactive flow; an un-importable scanner allows
     (default) or, under fail-closed, synthesizes a HIGH warn finding that goes
@@ -1609,83 +1473,6 @@ def check_execute_code_guard(code: str, env_type: str,
 # =========================================================================
 # MCP elicitation entry point
 # =========================================================================
-
-def request_elicitation_consent(
-    message: str,
-    description: str,
-    *,
-    timeout_seconds: int | None = None,
-    surface: str = "mcp-elicitation",
-) -> str:
-    """Route an MCP elicitation request to the surface owning the active session.
-
-    Gateway sessions go through ``_await_gateway_decision``; CLI/TUI through
-    ``prompt_dangerous_approval``. Always fails closed: a missing notify_cb in
-    a gateway session, timeouts, and exceptions map to ``"decline"`` so a server
-    treats them as "user did not approve" rather than retrying or hanging.
-    Returns ``"accept" | "decline" | "cancel"``.
-    """
-    try:
-        session_key = get_current_session_key()
-    except Exception as exc:  # pragma: no cover -- defensive
-        logger.warning("Elicitation consent: session lookup failed: %s", exc)
-        return "decline"
-
-    if _is_gateway_approval_context():
-        notify_cb = _gateway_notify_cb(session_key)
-        if notify_cb is None:
-            logger.warning(
-                "Elicitation requested in gateway session %s but no "
-                "notify_cb is registered — failing closed",
-                session_key,
-            )
-            return "decline"
-
-        approval_data = {
-            "command": message,
-            "description": description,
-            "pattern_key": "mcp_elicitation",
-            "pattern_keys": ["mcp_elicitation"],
-        }
-        try:
-            decision = _await_gateway_decision(
-                session_key, notify_cb, approval_data, surface=surface,
-            )
-        except Exception as exc:
-            logger.error(
-                "Elicitation gateway dispatch failed: %s", exc, exc_info=True,
-            )
-            return "decline"
-
-        if decision.get("notify_failed"):
-            return "decline"
-        if not decision.get("resolved"):
-            return "cancel"
-        choice = decision.get("choice")
-        if choice in ("once", "session", "always"):
-            return "accept"
-        return "decline"
-
-    # allow_permanent=False: elicitation is a per-call confirmation — there
-    # is no pattern to remember.
-    try:
-        choice = prompt_dangerous_approval(
-            message,
-            description,
-            timeout_seconds=timeout_seconds,
-            allow_permanent=False,
-        )
-    except Exception as exc:
-        logger.error(
-            "Elicitation CLI prompt failed: %s", exc, exc_info=True,
-        )
-        return "decline"
-
-    if choice in ("once", "session", "always"):
-        return "accept"
-    if choice == "timeout":
-        return "cancel"  # mirror the gateway's unresolved outcome
-    return "decline"
 
 
 # Load permanent allowlist from config on module import
