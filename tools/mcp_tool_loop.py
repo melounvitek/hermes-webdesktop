@@ -30,28 +30,24 @@ class _LockCookie:
         self._fh = fh
 
     def release(self) -> None:
-        if self._fh is not None:
-            try:
-                fd = self._fh.fileno()
-                if os.name == "posix":
-                    import fcntl
-                    try:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                    except Exception:
-                        pass
-                else:
-                    import portalocker
-                    try:
-                        portalocker.unlock(self._fh)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                self._fh.close()
-            except Exception:
-                pass
-            self._fh = None
+        if self._fh is None:
+            return
+        # Best effort on every step: an unlock/close failure must never
+        # propagate out of discovery.
+        try:
+            if os.name == "posix":
+                import fcntl
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            else:
+                import portalocker
+                portalocker.unlock(self._fh)
+        except Exception:
+            pass
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+        self._fh = None
 
 
 def _acquire_lock_on_fh(fh: Any) -> bool:
