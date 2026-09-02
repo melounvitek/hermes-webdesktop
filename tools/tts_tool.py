@@ -43,7 +43,6 @@ import importlib.util
 import json
 import logging
 import os
-import re
 import tempfile  # noqa: F401 — tests/gateway patch ``tts_tool.tempfile.NamedTemporaryFile``
 from pathlib import Path
 from typing import Callable, Dict, Any, List, Optional
@@ -112,6 +111,10 @@ from tools.tool_backend_helpers import (  # noqa: F401 — seams patched by test
 )
 from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-exported
     FALLBACK_MAX_TEXT_LENGTH,
+    ELEVENLABS_MODEL_MAX_TEXT_LENGTH,
+    PROVIDER_MAX_TEXT_LENGTH,
+    _positive_int_override,
+    _resolve_max_text_length,
     AudioDeliveryProfile,
     _build_audio_delivery_files,
     _concat_audio_files,
@@ -169,6 +172,7 @@ from tools.tts_tool_local import (  # noqa: F401 — historical names re-exporte
 from tools.tts_tool_speaker import (  # noqa: F401 — historical names re-exported
     stream_tts_to_speaker,
 )
+from tools.tts_text_normalize import _strip_markdown_for_tts  # noqa: F401 — historical name re-exported
 from tools.tts_tool_openai import (  # noqa: F401 — historical names re-exported
     DEFAULT_DEEPINFRA_TTS_VOICE,
     DEFAULT_OPENAI_BASE_URL,
@@ -200,61 +204,35 @@ from tools.tts_tool_lifecycle import (  # noqa: F401 — historical names re-exp
 # crashing in headless environments (SSH, Docker, WSL, no PortAudio).
 # ---------------------------------------------------------------------------
 
-def _lazy_ensure(feature: str) -> None:
-    """Best-effort ``tools.lazy_deps.ensure`` so an SDK installs on first use.
+def _sdk_importer(module: str, attr: Optional[str] = None, feature: Optional[str] = None) -> Callable[[], Any]:
+    """Lazy SDK importer: returns ``module`` (or ``module.attr``), raising ImportError when absent.
 
-    Users who enabled a provider by editing config.yaml never ran the
-    post-setup hook. Any failure (lazy_deps missing, install refused) falls
-    through so the raw import below still raises a clean ImportError.
+    ``feature`` names a ``tools.lazy_deps`` feature to best-effort install
+    first (users who enabled a provider by editing config.yaml never ran the
+    post-setup hook); any failure there falls through so the raw import still
+    raises a clean ImportError. sounddevice additionally raises OSError when
+    PortAudio is unavailable.
     """
-    try:
-        from tools.lazy_deps import ensure
-        ensure(feature, prompt=False)
-    except Exception:
-        pass
+    def _import():
+        if feature:
+            try:
+                from tools.lazy_deps import ensure
+                ensure(feature, prompt=False)
+            except Exception:
+                pass
+        mod = importlib.import_module(module)
+        return getattr(mod, attr) if attr else mod
+    _import.__name__ = f"_import_{module.split('.')[0]}"
+    return _import
 
 
-def _import_edge_tts():
-    """Lazy import edge_tts. Returns the module or raises ImportError."""
-    _lazy_ensure("tts.edge")
-    import edge_tts
-    return edge_tts
-
-
-def _import_elevenlabs():
-    """Lazy import the ElevenLabs client class or raise ImportError."""
-    _lazy_ensure("tts.elevenlabs")
-    from elevenlabs.client import ElevenLabs
-    return ElevenLabs
-
-
-def _import_openai_client():
-    from openai import OpenAI as OpenAIClient
-    return OpenAIClient
-
-
-def _import_mistral_client():
-    """Lazy import the Mistral client class or raise ImportError."""
-    _lazy_ensure("tts.mistral")
-    from mistralai.client import Mistral
-    return Mistral
-
-
-def _import_sounddevice():
-    """Raises ImportError/OSError when PortAudio is unavailable."""
-    import sounddevice as sd
-    return sd
-
-
-def _import_kittentts():
-    from kittentts import KittenTTS
-    return KittenTTS
-
-
-def _import_piper():
-    """``pip install piper-tts`` ships cross-platform wheels with embedded espeak-ng."""
-    from piper import PiperVoice
-    return PiperVoice
+_import_edge_tts = _sdk_importer("edge_tts", feature="tts.edge")
+_import_elevenlabs = _sdk_importer("elevenlabs.client", "ElevenLabs", feature="tts.elevenlabs")
+_import_openai_client = _sdk_importer("openai", "OpenAI")
+_import_mistral_client = _sdk_importer("mistralai.client", "Mistral", feature="tts.mistral")
+_import_sounddevice = _sdk_importer("sounddevice")
+_import_kittentts = _sdk_importer("kittentts", "KittenTTS")
+_import_piper = _sdk_importer("piper", "PiperVoice")  # piper-tts wheels embed espeak-ng
 
 
 def _package_installed(name: str) -> bool:
@@ -306,81 +284,8 @@ def _default_output_dir() -> str:
     return _get_default_output_dir()
 
 
-# Per-provider input-character caps (from official provider docs); override
-# via ``tts.<provider>.max_text_length``.
-PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
-    "edge": 5000,         # edge-tts practical sync limit
-    "openai": 4096,       # https://platform.openai.com/docs/guides/text-to-speech
-    "xai": 15000,         # https://docs.x.ai/developers/model-capabilities/audio/text-to-speech
-    "minimax": 10000,     # https://platform.minimax.io/docs/api-reference/speech-t2a-http (sync)
-    "mistral": 4000,      # conservative; no published per-request cap
-    "gemini": 32000,      # 32k-token context window; char cap is conservative
-    "elevenlabs": 10000,  # fallback when model-aware lookup can't resolve (multilingual_v2)
-    "neutts": 2000,       # local model, quality falls off on long text
-    "kittentts": 2000,    # local 25MB model
-    "piper": 5000,        # local VITS model, phoneme-based; practical cap
-}
-
-# ElevenLabs caps vary by model_id. https://elevenlabs.io/docs/overview/models
-ELEVENLABS_MODEL_MAX_TEXT_LENGTH: Dict[str, int] = {
-    "eleven_v3": 5000,
-    "eleven_ttv_v3": 5000,
-    "eleven_multilingual_v2": 10000,
-    "eleven_multilingual_v1": 10000,
-    "eleven_english_sts_v2": 10000,
-    "eleven_english_sts_v1": 10000,
-    "eleven_flash_v2": 30000,
-    "eleven_flash_v2_5": 40000,
-}
-
 # Back-compat alias. Prefer ``_resolve_max_text_length()`` for new code.
 MAX_TEXT_LENGTH = FALLBACK_MAX_TEXT_LENGTH
-
-
-def _positive_int_override(value: Any) -> Optional[int]:
-    """A user ``max_text_length`` override, or None when absent/bool/non-positive."""
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return None
-    return value
-
-
-def _resolve_max_text_length(
-    provider: Optional[str],
-    tts_config: Optional[Dict[str, Any]] = None,
-) -> int:
-    """Return the input-character cap for *provider*.
-
-    Order: ``tts.<provider>.max_text_length`` > ElevenLabs model table >
-    ``PROVIDER_MAX_TEXT_LENGTH`` > command provider's own ``max_text_length``
-    (else ``DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH``) > ``FALLBACK_MAX_TEXT_LENGTH``.
-    Non-positive / non-int overrides fall through so a broken config can't
-    disable truncation.
-    """
-    if not provider:
-        return FALLBACK_MAX_TEXT_LENGTH
-    key = provider.lower().strip()
-    cfg = tts_config or {}
-
-    prov_cfg = cfg.get(key) if isinstance(cfg.get(key), dict) else {}
-    override = _positive_int_override(prov_cfg.get("max_text_length") if prov_cfg else None)
-    if override:
-        return override
-
-    if key == "elevenlabs":
-        model_id = (prov_cfg or {}).get("model_id") or DEFAULT_ELEVENLABS_MODEL_ID
-        mapped = ELEVENLABS_MODEL_MAX_TEXT_LENGTH.get(str(model_id).strip())
-        if mapped:
-            return mapped
-
-    if key in PROVIDER_MAX_TEXT_LENGTH:
-        return PROVIDER_MAX_TEXT_LENGTH[key]
-
-    if key not in BUILTIN_TTS_PROVIDERS:
-        named = _get_named_provider_config(cfg, key)
-        if _is_command_provider_config(named):
-            return _positive_int_override(named.get("max_text_length")) or DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH
-
-    return FALLBACK_MAX_TEXT_LENGTH
 
 
 # ===========================================================================
@@ -748,50 +653,37 @@ def _resolve_output_base(
     return file_path, None
 
 
+def _tool_failure(prefix: str, provider: str, exc: BaseException) -> str:
+    """Log and wrap a synthesis failure as the standard error envelope (traceback except for config errors)."""
+    error_msg = f"{prefix} ({provider}): {exc}"
+    logger.error("%s", error_msg, exc_info=not isinstance(exc, ValueError))
+    return tool_error(error_msg, success=False)
+
+
 def _text_to_speech_single(
     text: str,
-    output_path: Optional[str] = None,
+    file_str: str,
     *,
-    speed: Optional[float] = None,
-    instructions: Optional[str] = None,
-    provider: Optional[str] = None,
-    tts_config_override: Optional[Dict[str, Any]] = None,
+    provider: str,
+    tts_config: Dict[str, Any],
+    command_provider_config: Optional[Dict[str, Any]],
+    want_opus: bool,
+    instructions: Optional[str],
 ) -> str:
-    """Synthesize one provider-safe text chunk and return one final-encoded file.
+    """Synthesize one provider-safe text chunk into *file_str* and return one final-encoded file.
 
-    Text arrives already normalized; :func:`text_to_speech_tool` owns
-    long-form splitting, delivery packing and size enforcement.
+    Text arrives already normalized and the output path already validated;
+    :func:`text_to_speech_tool` owns long-form splitting, delivery packing and
+    size enforcement. Command providers resolve BEFORE built-in dispatch;
+    built-in names short-circuit so ``tts.providers.openai.command`` can't
+    shadow OpenAI. Plugin providers fire only for names that are neither
+    built-in nor command; a None return falls through to built-in dispatch
+    (unknown -> Edge default).
     """
-    if not text or not text.strip():
-        return tool_error("Text is required", success=False)
-
-    tts_config = tts_config_override if tts_config_override is not None else _load_tts_config()
-    tts_config, provider = _apply_call_overrides(tts_config, speed, provider)
-
-    # Command providers resolve BEFORE built-in dispatch; built-in names
-    # short-circuit so ``tts.providers.openai.command`` can't shadow OpenAI.
-    command_provider_config = _resolve_command_provider_config(provider, tts_config)
-
-    max_len = _resolve_max_text_length(provider, tts_config)
-    if len(text) > max_len:
-        logger.warning(
-            "TTS text exceeds provider %s cap (%d > %d chars) — "
-            "use text_to_speech_tool() for automatic chunking",
-            provider, len(text), max_len,
-        )
-
-    _platform, want_opus = _session_platform()
-    file_path, error = _resolve_output_base(output_path, provider, command_provider_config, want_opus)
-    if error:
-        return error
-    file_str = str(file_path)
-
     try:
         if command_provider_config is not None:
             logger.info("Generating speech with command TTS provider '%s'...", provider)
             file_str = _generate_command_tts(text, file_str, provider, command_provider_config, tts_config)
-        # Plugin provider: only for names that are neither built-in nor command;
-        # a None return falls through to built-in dispatch (unknown -> Edge default).
         elif provider not in BUILTIN_TTS_PROVIDERS and (
             _plugin_path := _dispatch_to_plugin_provider(text, file_str, provider, tts_config)
         ) is not None:
@@ -828,17 +720,11 @@ def _text_to_speech_single(
         }, ensure_ascii=False)
 
     except ValueError as e:
-        error_msg = f"TTS configuration error ({provider}): {e}"
-        logger.error("%s", error_msg)
-        return tool_error(error_msg, success=False)
+        return _tool_failure("TTS configuration error", provider, e)
     except FileNotFoundError as e:
-        error_msg = f"TTS dependency missing ({provider}): {e}"
-        logger.error("%s", error_msg, exc_info=True)
-        return tool_error(error_msg, success=False)
+        return _tool_failure("TTS dependency missing", provider, e)
     except Exception as e:
-        error_msg = f"TTS generation failed ({provider}): {e}"
-        logger.error("%s", error_msg, exc_info=True)
-        return tool_error(error_msg, success=False)
+        return _tool_failure("TTS generation failed", provider, e)
 
 
 def text_to_speech_tool(
@@ -917,12 +803,13 @@ def text_to_speech_tool(
                 )
             generated_artifacts.add(str(chunk_path))
             raw_result = _text_to_speech_single(
-                text=chunk,
-                output_path=str(chunk_path),
-                speed=speed,
-                instructions=instructions,
+                chunk,
+                str(chunk_path),
                 provider=provider,
-                tts_config_override=tts_config,
+                tts_config=tts_config,
+                command_provider_config=command_provider_config,
+                want_opus=want_opus,
+                instructions=instructions,
             )
             try:
                 chunk_result = json.loads(raw_result)
@@ -984,13 +871,9 @@ def text_to_speech_tool(
             },
         }, ensure_ascii=False)
     except ValueError as exc:
-        error_msg = f"TTS delivery error ({provider}): {exc}"
-        logger.error("%s", error_msg)
-        return tool_error(error_msg, success=False)
+        return _tool_failure("TTS delivery error", provider, exc)
     except Exception as exc:
-        error_msg = f"TTS long-form generation failed ({provider}): {exc}"
-        logger.error("%s", error_msg, exc_info=True)
-        return tool_error(error_msg, success=False)
+        return _tool_failure("TTS long-form generation failed", provider, exc)
     finally:
         final_absolute = {os.path.abspath(path) for path in final_paths}
         for artifact in generated_artifacts:
@@ -1002,34 +885,12 @@ def text_to_speech_tool(
                 pass
 
 
-# ===========================================================================
-# Requirements check
-# ===========================================================================
-
 def _importable(importer: Callable[[], Any]) -> bool:
     try:
         importer()
         return True
     except ImportError:
         return False
-
-
-def _edge_requirements() -> bool:
-    return _importable(_import_edge_tts) or _check_neutts_available()
-
-
-def _elevenlabs_requirements() -> bool:
-    return _importable(_import_elevenlabs) and bool(_resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs"))
-
-
-def _openai_requirements() -> bool:
-    return importlib.util.find_spec("openai") is not None and _has_openai_audio_backend()
-
-
-def _deepinfra_requirements() -> bool:
-    return importlib.util.find_spec("openai") is not None and bool(
-        _resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
-    )
 
 
 def _minimax_requirements() -> bool:
@@ -1049,28 +910,17 @@ def _xai_requirements() -> bool:
         return False
 
 
-def _gemini_requirements() -> bool:
-    return bool(
-        _resolve_provider_key("GEMINI_API_KEY", "gemini")
-        or _resolve_provider_key("GOOGLE_API_KEY", "gemini")
-    )
-
-
-def _mistral_requirements() -> bool:
-    return _importable(_import_mistral_client) and bool(_resolve_provider_key("MISTRAL_API_KEY", "mistral"))
-
-
 # Must mirror text_to_speech_tool dispatch: unrelated cloud credentials never
 # make the Edge default usable, and an explicit provider is checked on its own.
 _BUILTIN_REQUIREMENTS: Dict[str, Callable[[], bool]] = {
-    "edge": _edge_requirements,
-    "elevenlabs": _elevenlabs_requirements,
-    "openai": _openai_requirements,
-    "deepinfra": _deepinfra_requirements,
+    "edge": lambda: _importable(_import_edge_tts) or _check_neutts_available(),
+    "elevenlabs": lambda: _importable(_import_elevenlabs) and bool(_resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs")),
+    "openai": lambda: _package_installed("openai") and _has_openai_audio_backend(),
+    "deepinfra": lambda: _package_installed("openai") and bool(_resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")),
     "minimax": _minimax_requirements,
     "xai": _xai_requirements,
-    "gemini": _gemini_requirements,
-    "mistral": _mistral_requirements,
+    "gemini": lambda: bool(_resolve_provider_key("GEMINI_API_KEY", "gemini") or _resolve_provider_key("GOOGLE_API_KEY", "gemini")),
+    "mistral": lambda: _importable(_import_mistral_client) and bool(_resolve_provider_key("MISTRAL_API_KEY", "mistral")),
     "neutts": lambda: _check_neutts_available(),
     "kittentts": lambda: _check_kittentts_available(),
     "piper": lambda: _check_piper_available(),
@@ -1097,80 +947,6 @@ def check_tts_requirements() -> bool:
         return bool(plugin and plugin.is_available())
     except Exception:
         return False
-
-
-# ===========================================================================
-# Speech text cleanup (shared by voice-mode streaming and gateway auto-TTS)
-# ===========================================================================
-# Legacy regex fallback, only used if the shared normalizer raises.
-_LEGACY_TTS_STRIP_STEPS = (
-    (re.compile(r'<think[\s>].*?</think>', flags=re.DOTALL), ' '),
-    (re.compile(r'```[\s\S]*?```'), ' '),
-    (re.compile(r'\[([^\]]+)\]\([^)]+\)'), r'\1'),
-    (re.compile(r'https?://\S+'), ''),
-    (re.compile(r'\*\*(.+?)\*\*'), r'\1'),
-    (re.compile(r'\*(.+?)\*'), r'\1'),
-    (re.compile(r'`(.+?)`'), r'\1'),
-    (re.compile(r'^#+\s*', flags=re.MULTILINE), ''),
-    (re.compile(r'^\s*[-*]\s+', flags=re.MULTILINE), ''),
-    (re.compile(r'---+'), ''),
-    # Emoji + variation selectors/ZWJ: providers speak them as awkward labels.
-    (re.compile('[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D\U000E0020-\U000E007F]+'), ' '),
-    (re.compile(r'\n{3,}'), '\n\n'),
-)
-
-
-def _strip_markdown_for_tts(text: str) -> str:
-    """Prepare text for speech via the shared cleaner in tts_text_normalize.
-
-    One cleaner for every TTS path (tool, gateway auto-TTS, voice-mode
-    streaming, web dashboard): strips <think> blocks, the verifier footer,
-    markdown and emoji; expands units; flattens newlines so newline-sensitive
-    providers (Kokoro) speak the whole script. Falls back to the legacy regex
-    pipeline if the normalizer ever fails.
-    """
-    try:
-        from tools.tts_text_normalize import prepare_spoken_text
-        return prepare_spoken_text(text, max_chars=None)
-    except Exception:
-        pass
-    for pattern, repl in _LEGACY_TTS_STRIP_STEPS:
-        text = pattern.sub(repl, text)
-    return text.strip()
-
-
-# ===========================================================================
-# Main -- quick diagnostics
-# ===========================================================================
-if __name__ == "__main__":
-    print("🔊 Text-to-Speech Tool Module")
-    print("=" * 50)
-
-    print("\nProvider availability:")
-    print(f"  Edge TTS:   {'installed' if _importable(_import_edge_tts) else 'not installed (pip install edge-tts)'}")
-    print(f"  ElevenLabs: {'installed' if _importable(_import_elevenlabs) else 'not installed (pip install elevenlabs)'}")
-    print(f"    API Key:  {'set' if _resolve_provider_key('ELEVENLABS_API_KEY', 'elevenlabs') else 'not set'}")
-    print(f"  OpenAI:     {'installed' if _importable(_import_openai_client) else 'not installed'}")
-    print(
-        "    API Key:  "
-        f"{'set' if resolve_openai_audio_api_key() else 'not set (VOICE_TOOLS_OPENAI_KEY or OPENAI_API_KEY)'}"
-    )
-    config = _load_tts_config()
-    try:
-        minimax_runtime = _resolve_minimax_tts_runtime(config)
-        minimax_status = (
-            f"API key set ({minimax_runtime.region}, "
-            f"{minimax_runtime.credential_source})"
-        )
-    except ValueError as exc:
-        minimax_status = f"unavailable ({exc})"
-    print(f"  MiniMax:    {minimax_status}")
-    print(f"  Piper:      {'installed' if _check_piper_available() else 'not installed (pip install piper-tts)'}")
-    print(f"  ffmpeg:     {'✅ found' if _has_ffmpeg() else '❌ not found (needed for Telegram Opus)'}")
-    print(f"\n  Output dir: {_default_output_dir()}")
-
-    provider = _get_provider(config)
-    print(f"  Configured provider: {provider}")
 
 
 # ---------------------------------------------------------------------------
