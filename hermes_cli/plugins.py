@@ -106,11 +106,8 @@ from hermes_cli.plugins_state import (  # noqa: F401 — re-exported
 
 
 def get_bundled_plugins_dir() -> Path:
-    """Locate the bundled ``plugins/`` directory.
-
-    Honours ``HERMES_BUNDLED_PLUGINS`` (set by the Nix wrapper / packaged installs) so read-only
-    store paths are consulted first. Falls back to the in-repo path used during development.
-    """
+    """Bundled ``plugins/`` dir: ``HERMES_BUNDLED_PLUGINS`` (Nix wrapper / packaged installs, read-only
+    store paths) first, else the in-repo path."""
     env_override = os.getenv("HERMES_BUNDLED_PLUGINS")
     if env_override:
         return Path(env_override)
@@ -134,9 +131,7 @@ def _install_plugin_debug_handler(force: bool = False) -> None:
     """When HERMES_PLUGINS_DEBUG is on, tee plugin logs to stderr at DEBUG (once per process)."""
     global _DEBUG_HANDLER_INSTALLED, _PLUGINS_DEBUG
     if force:
-        _PLUGINS_DEBUG = os.getenv("HERMES_PLUGINS_DEBUG", "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
+        _PLUGINS_DEBUG = os.getenv("HERMES_PLUGINS_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
     if not _PLUGINS_DEBUG or _DEBUG_HANDLER_INSTALLED:
         return
     handler = logging.StreamHandler(sys.stderr)
@@ -150,10 +145,6 @@ def _install_plugin_debug_handler(force: bool = False) -> None:
 
 
 _install_plugin_debug_handler()
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 VALID_HOOKS: Set[str] = {
     "pre_tool_call", "post_tool_call", "transform_terminal_output", "transform_tool_result",
@@ -232,11 +223,6 @@ SHELL_UNSUPPORTED_HOOKS: Set[str] = {"transform_api_error_classification"}
 _env_enabled = env_var_enabled  # imported by plugins/memory
 
 
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class LoadedPlugin:
     """Runtime state for a single loaded plugin."""
@@ -251,11 +237,6 @@ class LoadedPlugin:
     error: Optional[str] = None
     # Bundled platform recorded as a not-yet-imported loader (see _register_deferred_platform).
     deferred: bool = False
-
-
-# ---------------------------------------------------------------------------
-# PluginContext  – handed to each plugin's ``register()`` function
-# ---------------------------------------------------------------------------
 
 
 class PluginContext:
@@ -318,16 +299,8 @@ class PluginContext:
         dotted_path = ".".join(("plugins", "entries", self.plugin_id, "settings", *segments))
         if managed_scope.is_key_managed(dotted_path):
             raise PermissionError(f"Plugin setting {dotted_path!r} is administrator-managed")
-        partial = {
-            "plugins": {
-                "entries": {
-                    self.plugin_id: {
-                        "settings": _nested_plugin_mapping(segments, value),
-                    }
-                }
-            }
-        }
         full_path = ("plugins", "entries", self.plugin_id, "settings", *segments)
+        partial = _nested_plugin_mapping(full_path[:4], _nested_plugin_mapping(segments, value))
         # The lock covers merge-read plus atomic save so sibling plugin writes (threads or
         # processes) cannot race between the two steps.
         with _locked_plugin_state(config_mod.get_config_path()):
@@ -346,12 +319,10 @@ class PluginContext:
 
     @property
     def platform_actions(self):
-        """Capability-gated platform action facade (``add_reaction``, ``set_thread_title``).
-
-        Every call re-checks ``gateway.platform_actions`` (legacy gate
-        ``plugins.entries.<id>.allow_platform_actions``, default OFF) and returns ``{"ok": bool,
-        ...}`` — verbs never raise into hook dispatch; no adapter handles or raw SDK objects.
-        """
+        """Capability-gated platform action facade (``add_reaction``, ``set_thread_title``). Every call
+        re-checks ``gateway.platform_actions`` (legacy ``plugins.entries.<id>.allow_platform_actions``,
+        default OFF) and returns ``{"ok": bool, ...}`` — verbs never raise into hook dispatch; no adapter
+        handles or raw SDK objects."""
         if self._platform_actions is None:
             from hermes_cli.platform_actions import PlatformActions
 
@@ -394,10 +365,8 @@ class PluginContext:
     def _track_mapping_entry(
         self, kind: str, key: str, mapping: Dict[str, Any], entry: Any, previous: Any
     ) -> PluginRegistration:
-        """Store ``entry`` under ``key`` in a manager-local mapping and lease the slot.
-
-        Unload restores ``previous`` (or removes the key) only while ``entry`` is still current.
-        """
+        """Store ``entry`` under ``key`` in a manager-local mapping and lease the slot; unload restores
+        ``previous`` (or removes the key) only while ``entry`` is still current."""
         mapping[key] = entry
         return self._track_replacement(
             kind, key, slot=("manager_mapping", builtins.id(mapping), key),
@@ -412,12 +381,10 @@ class PluginContext:
         article: str = "a", normalize: Optional[Callable[[str], str]] = lambda n: n.strip(),
         register: Optional[Callable[..., Any]] = None, reject_message: Optional[str] = None,
     ) -> Optional[PluginRegistration]:
-        """Shared body of the ``register_<category>_provider`` methods.
-
-        Type-check (warn + ignore on mismatch), register in the scope-keyed ``registry``, lease the
-        slot so unload restores the displaced entry. Returns ``None`` when the registry refused or
-        replaced the provider (``ValueError`` with ``reject_message`` set, or a falsy ``register``).
-        """
+        """Shared body of the ``register_<category>_provider`` methods: type-check (warn + ignore),
+        register in the scope-keyed ``registry``, lease the slot so unload restores the displaced entry.
+        ``None`` when the registry refused/replaced the provider (``ValueError`` with ``reject_message``
+        set, or a falsy ``register``)."""
         if self._wrong_type(provider, base_class, label, article):
             return None
         registry_name = provider.name if normalize is None else normalize(provider.name)
@@ -464,11 +431,9 @@ class PluginContext:
 
     @property
     def profile_name(self) -> str:
-        """Active profile name: ``"default"``, the ``~/.hermes/profiles/<name>`` id, or ``"custom"``.
-
-        Derived from ``HERMES_HOME`` (not ``_cli_ref``, which is None outside interactive CLI) so it
-        works in the gateway and kanban workers too.
-        """
+        """Active profile name (``"default"``, the ``~/.hermes/profiles/<name>`` id, or ``"custom"``),
+        derived from ``HERMES_HOME`` — not ``_cli_ref``, which is None outside the interactive CLI —
+        so gateway and kanban workers get it too."""
         try:
             from hermes_cli.profiles import get_active_profile_name
             return get_active_profile_name()
@@ -521,13 +486,10 @@ class PluginContext:
         check_fn: Callable | None = None, requires_env: list | None = None, is_async: bool = False,
         description: str = "", emoji: str = "", override: bool = False,
     ) -> Optional[PluginRegistration]:
-        """Register a tool in the global registry and track it as plugin-provided.
-
-        ``override=True`` replaces a same-named built-in; without it a name already claimed by
-        another toolset is rejected. Overriding requires operator opt-in via
-        ``plugins.entries.<plugin_id>.allow_tool_override: true`` — otherwise any enabled plugin
-        could silently replace a privileged built-in like ``write_file``.
-        """
+        """Register a tool in the global registry and track it as plugin-provided. ``override=True``
+        replaces a same-named built-in (without it a name claimed by another toolset is rejected) and
+        needs operator opt-in via ``plugins.entries.<plugin_id>.allow_tool_override: true`` — otherwise
+        any enabled plugin could silently replace a privileged built-in like ``write_file``."""
         if override and not self._tool_override_allowed(name):
             raise PluginToolOverrideError(
                 f"Plugin {self.manifest.name!r} cannot override built-in tool " f"{name!r}. Set "
@@ -568,11 +530,9 @@ class PluginContext:
         return handle
 
     def has_capability(self, capability: str) -> bool:
-        """Return True when *capability* is live for this plugin (probe, then degrade gracefully).
-
-        Bundled plugins are trusted for ``tools.override``; otherwise the granted-capability set or
-        the legacy ``allow_*`` key decides. Unknown ids / unreadable consent -> False (fail closed).
-        """
+        """True when *capability* is live for this plugin (probe, then degrade gracefully). Bundled
+        plugins are trusted for ``tools.override``; otherwise granted_capabilities or the legacy
+        ``allow_*`` key decides. Unknown ids / unreadable consent -> False (fail closed)."""
         source = getattr(self.manifest, "source", "") or ""
         if source == "bundled" and capability == "tools.override":
             return True
@@ -582,13 +542,11 @@ class PluginContext:
         self, server: str, tool: str, arguments: Optional[Dict[str, Any]] = None,
         timeout: float = 30,
     ) -> Dict[str, Any]:
-        """Call ``tool`` on MCP ``server`` synchronously through the native client in
-        :mod:`tools.mcp_tool` (same trust gates, breaker, reconnect) — never a parallel connection.
-
-        Default-off, per-server grant: unlisted servers (``plugins.entries.<plugin_id>.mcp_allowlist``)
-        raise ``PermissionError``. ``timeout`` clamps to 1–600s. Returns ``{"ok": True, "result"}`` or
-        ``{"ok": False, "error"}``; results over ~64KB are truncated with a marker.
-        """
+        """Call ``tool`` on MCP ``server`` synchronously through :mod:`tools.mcp_tool`'s native client
+        (same trust gates, breaker, reconnect — never a parallel connection). Default-off per-server
+        grant: servers not in ``plugins.entries.<plugin_id>.mcp_allowlist`` raise ``PermissionError``.
+        ``timeout`` clamps to 1–600s. Returns ``{"ok": True, "result"}`` / ``{"ok": False, "error"}``;
+        results over ~64KB are truncated with a marker."""
         allowlist = self._mcp_allowlist(self.plugin_id)
         if server not in allowlist:
             raise PermissionError(
@@ -659,12 +617,9 @@ class PluginContext:
         return [str(item) for item in allowlist]
 
     def _tool_override_allowed(self, tool_name: str) -> bool:
-        """Return True if this plugin may override built-in tools.
-
-        Bundled plugins are trusted (a maintainer choice, not privilege escalation). Others need the
-        ``tools.override`` capability via :func:`plugin_capability_granted` — granted_capabilities OR
-        the legacy ``allow_tool_override: true`` key.
-        """
+        """Whether this plugin may override built-in tools: bundled plugins are trusted (a maintainer
+        choice, not privilege escalation); others need ``tools.override`` via
+        :func:`plugin_capability_granted` (granted_capabilities OR legacy ``allow_tool_override: true``)."""
         source = getattr(self.manifest, "source", "") or ""
         if source == "bundled":
             return True
@@ -682,13 +637,10 @@ class PluginContext:
     def inject_message(
         self, content: str, role: str = "user", *, session_key: str | None = None,
     ) -> bool:
-        """Inject a message into a CLI or gateway conversation (new turn if idle, interrupt if
-        running).
-
-        Gateway injection requires an existing ``session_key`` and
-        ``plugins.entries.<plugin_id>.allow_gateway_injection``. ``True`` means the gateway accepted
-        the request for async dispatch, not that delivery completed.
-        """
+        """Inject a message into a CLI or gateway conversation (new turn if idle, interrupt if running).
+        Gateway injection needs an existing ``session_key`` plus
+        ``plugins.entries.<plugin_id>.allow_gateway_injection``; ``True`` means the gateway accepted the
+        request for async dispatch, not that delivery completed."""
         cli = self._manager._cli_ref
         msg = content if role == "user" else f"[{role}] {content}"
 
@@ -763,12 +715,10 @@ class PluginContext:
         self, name: str, handler: Callable, description: str = "", args_hint: str = "",
         argument_mode: str | None = None,
     ) -> Optional[PluginRegistration]:
-        """Register an in-session slash command (``/name``) for CLI and gateway sessions.
-
-        Handler: ``fn(raw_args: str) -> str | None`` (sync or async). ``args_hint`` (e.g.
-        ``"<file>"``) lets adapters like Discord surface an argument field; without it the command
-        registers parameterless there but still accepts trailing text as free-form chat.
-        """
+        """Register an in-session slash command (``/name``) for CLI and gateway sessions. Handler:
+        ``fn(raw_args: str) -> str | None`` (sync or async). ``args_hint`` (e.g. ``"<file>"``) lets
+        adapters like Discord surface an argument field; without it the command registers parameterless
+        there but still accepts trailing text as free-form chat."""
         clean = name.lower().strip().lstrip("/").replace(" ", "-")
         if not clean:
             logger.warning(
@@ -916,15 +866,12 @@ class PluginContext:
         validate_config: Callable | None = None, required_env: list | None = None,
         install_hint: str = "", **entry_kwargs: Any,
     ) -> Optional[PluginRegistration]:
-        """Register a gateway platform adapter (``adapter_factory(PlatformConfig) ->
-        BasePlatformAdapter``).
-
-        ``check_fn`` is a PASSIVE "deps importable?" probe that must never install — status displays
-        call it freely; pass an ACTIVE installer as ``ensure_deps_fn`` (the gateway calls it from
+        """Register a gateway platform adapter (``adapter_factory(PlatformConfig) -> BasePlatformAdapter``).
+        ``check_fn`` is a PASSIVE "deps importable?" probe that must never install (status displays call
+        it freely); pass an ACTIVE installer as ``ensure_deps_fn`` (the gateway calls it from
         ``create_adapter()`` when ``check_fn`` is False). Extra kwargs (``setup_fn``, ``emoji``,
         ``allowed_users_env``, ``platform_hint``, ``ensure_deps_fn``) forward to ``PlatformEntry``;
-        unknown keys raise TypeError.
-        """
+        unknown keys raise TypeError."""
         from gateway.platform_registry import platform_registry, PlatformEntry
         entry_kwargs.setdefault("plugin_name", self.manifest.name)
         entry = PlatformEntry(
@@ -950,11 +897,9 @@ class PluginContext:
         self, action_id: Any, callback: Callable,
     ) -> PluginRegistration:
         """Register a Slack Block Kit action handler, wired into ``slack_bolt.AsyncApp`` at connect.
-
         ``action_id`` is anything ``slack_bolt.App.action()`` accepts; ``callback`` is
-        ``async def handler(ack, body, action)`` (``await ack()`` within 3s). Raises ``ValueError``
-        for a non-callable callback or empty ``action_id``.
-        """
+        ``async def handler(ack, body, action)`` (``await ack()`` within 3s). Raises ``ValueError`` for
+        a non-callable callback or empty ``action_id``."""
         if not callable(callback):
             raise self._refuse("a Slack action handler with a non-callable callback")
         if action_id is None or (isinstance(action_id, str) and not action_id.strip()):
@@ -971,16 +916,13 @@ class PluginContext:
         return handle
 
     def register_platform_handler(self, platform: str, factory: Callable) -> None:
-        """Register a native-client handler factory for a gateway platform, invoked at ``connect()``
-        as ``factory(native, adapter)`` before/as the core handlers register (``adapter`` read-only).
-
-        ``native``: telegram PTB ``Application``, discord ``commands.Bot``, slack ``AsyncApp``,
-        matrix client, teams ``App``, dingtalk ``DingTalkStreamClient``, line aiohttp
-        ``web.Application``, others ``None``. Keep SDK imports inside the factory; exceptions are
-        logged and the platform still connects. Always scope handlers hooked into first-match
-        dispatch tables so core flows keep working. Raises ``ValueError`` for a non-callable factory
-        or empty platform.
-        """
+        """Register a native-client handler factory for a gateway platform, invoked at ``connect()`` as
+        ``factory(native, adapter)`` before/as the core handlers register (``adapter`` read-only).
+        ``native``: telegram PTB ``Application``, discord ``commands.Bot``, slack ``AsyncApp``, matrix
+        client, teams ``App``, dingtalk ``DingTalkStreamClient``, line aiohttp ``web.Application``,
+        others ``None``. Keep SDK imports inside the factory; exceptions are logged and the platform
+        still connects. Always scope handlers hooked into first-match dispatch tables so core flows
+        keep working. Raises ``ValueError`` for a non-callable factory or empty platform."""
         if not callable(factory):
             raise self._refuse("a platform handler factory with a non-callable factory")
         key = (platform or "").strip().lower()
@@ -1006,13 +948,11 @@ class PluginContext:
         self, key: str, *, display_name: str, description: str,
         defaults: Optional[Dict[str, Any]] = None,
     ) -> PluginRegistration:
-        """Register an auxiliary LLM task with its own ``auxiliary.<key>`` config block (picker
-        entry, ``AUXILIARY_<KEY>_*`` env bridge, defaults merged into loaded configs).
-
-        ``key`` is snake_case and must not shadow a built-in task. ``defaults`` may override
-        provider/model/base_url/api_key/timeout/extra_body; unknown keys are preserved verbatim.
-        Raises ``ValueError`` for an empty/invalid key, a built-in key, or another plugin's key.
-        """
+        """Register an auxiliary LLM task with its own ``auxiliary.<key>`` config block (picker entry,
+        ``AUXILIARY_<KEY>_*`` env bridge, defaults merged into loaded configs). ``key`` is snake_case
+        and must not shadow a built-in task; ``defaults`` may override
+        provider/model/base_url/api_key/timeout/extra_body (unknown keys preserved verbatim). Raises
+        ``ValueError`` for an empty/invalid key, a built-in key, or another plugin's key."""
         if not key or not isinstance(key, str):
             raise ValueError(
                 f"Plugin '{self.manifest.name}' tried to register auxiliary task with invalid key {key!r}"
@@ -1062,13 +1002,10 @@ class PluginContext:
         return handle
 
     def register_redaction_patterns(self, patterns) -> int:
-        """Additively register secret-token regexes with :mod:`agent.redact`; returns the count
-        accepted.
-
-        Additive-only: plugins can over-redact, never weaken built-ins; ``security.redact_secrets:
-        false`` applies equally. Each pattern must compile and start with >= 2 literal characters;
-        invalid entries warn and are skipped.
-        """
+        """Additively register secret-token regexes with :mod:`agent.redact`; returns the count accepted.
+        Plugins can over-redact, never weaken built-ins; ``security.redact_secrets: false`` applies
+        equally. Each pattern must compile and start with >= 2 literal characters; invalid entries warn
+        and are skipped."""
         from agent.redact import register_redaction_patterns as _register
         try:
             count = _register(patterns, source=f"plugin:{self.manifest.name}")
@@ -1143,13 +1080,10 @@ class PluginContext:
         return handle
 
     def emit(self, event: str, payload: Optional[dict] = None) -> int:
-        """Publish bare *event* as ``<plugin_key>:<event>`` (namespace FORCED to this plugin);
-        return the subscriber count scheduled.
-
-        Any ``':'`` in the name (``hermes:x`` is reserved for core, foreign namespaces forbidden)
-        raises ``ValueError``. Delivery is fire-and-forget via a single-worker queue: order
-        preserved, a blocking subscriber cannot stall the emitter.
-        """
+        """Publish bare *event* as ``<plugin_key>:<event>`` (namespace FORCED to this plugin); return
+        the subscriber count scheduled. Any ``':'`` in the name (``hermes:x`` is reserved for core,
+        foreign namespaces forbidden) raises ``ValueError``. Delivery is fire-and-forget via a
+        single-worker queue: order preserved, a blocking subscriber cannot stall the emitter."""
         plugin_key = self.plugin_id
         if not event or not isinstance(event, str):
             logger.warning("Plugin '%s' tried to emit an invalid event name %r", plugin_key, event)
@@ -2191,12 +2125,10 @@ def get_plugin_error_classification(
     num_messages: int = 0,
 ) -> Optional[Dict[str, Any]]:
     """Consult ``transform_api_error_classification`` hooks BEFORE the built-in classifier.
-
     Run-all-then-pick-first: every callback runs isolated, the first valid result in registration
-    order wins, losing valid results warn (conflicts visible, not shadowed). Returns a sanitized
-    dict (``reason`` -> ``FailoverReason``, hint flags -> bool, ``message`` capped at 500) or
-    ``None``. Privacy: ``error_message``/``error_body`` may be unredacted.
-    """
+    order wins, losing valid results warn (conflicts visible, not shadowed). Returns a sanitized dict
+    (``reason`` -> ``FailoverReason``, hint flags -> bool, ``message`` capped at 500) or ``None``.
+    Privacy: ``error_message``/``error_body`` may be unredacted."""
     from agent.error_classifier import FailoverReason
     hook_results = invoke_hook(
         "transform_api_error_classification", provider=provider, model=model,
