@@ -4403,11 +4403,6 @@ class AIAgent:
 
 
 
-    def _build_system_prompt_parts(self, system_message: str = None) -> Dict[str, str]:
-        """Forwarder — see ``agent.system_prompt.build_system_prompt_parts``."""
-        from agent.system_prompt import build_system_prompt_parts
-        return build_system_prompt_parts(self, system_message=system_message)
-
     def _build_system_prompt(self, system_message: str = None) -> str:
         """Forwarder — see ``agent.system_prompt.build_system_prompt``."""
         from agent.system_prompt import build_system_prompt
@@ -5888,13 +5883,6 @@ class AIAgent:
         from agent.agent_runtime_helpers import recover_with_credential_pool
         return recover_with_credential_pool(self, status_code=status_code, has_retried_429=has_retried_429, classified_reason=classified_reason, error_context=error_context, billing_unverified=billing_unverified)
 
-    def _credential_pool_may_recover_rate_limit(self) -> bool:
-        """Whether a rate-limit retry should wait for same-provider credentials."""
-        pool = self._credential_pool
-        if pool is None:
-            return False
-        return pool.has_available()
-
     def _anthropic_messages_create(self, api_kwargs: dict, *, client: Any = None):
         # A supplied request-local client was already refreshed in _create_request_anthropic_client.
         if client is None and self.api_mode == "anthropic_messages":
@@ -6601,35 +6589,11 @@ class AIAgent:
             cache[mode] = t
         return t
 
-    def _prepare_anthropic_messages_for_api(self, api_messages: list) -> list:
-        # Fast exit when no message carries image content at all.
-        if not any(
-            isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
-            for msg in api_messages
-        ):
-            return api_messages
-
-        # The Anthropic adapter already converts image parts to native blocks; skip the legacy text
-        # fallback when the model supports vision.
-        if self._model_supports_vision():
-            return api_messages
-
-        # Non-vision Anthropic model (rare today, but keep the fallback for
-        # compat): replace each image part with a vision_analyze text note.
-        transformed = copy.deepcopy(api_messages)
-        for msg in transformed:
-            if not isinstance(msg, dict):
-                continue
-            msg["content"] = self._preprocess_anthropic_content(
-                msg.get("content"),
-                str(msg.get("role", "user") or "user"),
-            )
-        return transformed
-
     def _prepare_messages_for_non_vision_model(self, api_messages: list) -> list:
         """Replace native image parts with cached vision_analyze text when the active model lacks vision.
 
-        Vision-capable models pass through unchanged (the provider adapter handles image parts natively).
+        Vision-capable models pass through unchanged (the provider adapter — including the Anthropic one —
+        handles image parts natively). The text fallback is the historically Anthropic-named preprocessor.
         """
         if not any(
             isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
@@ -6644,12 +6608,14 @@ class AIAgent:
         for msg in transformed:
             if not isinstance(msg, dict):
                 continue
-            # Reuse the Anthropic text-fallback preprocessor — identical behaviour; naming is historical.
             msg["content"] = self._preprocess_anthropic_content(
                 msg.get("content"),
                 str(msg.get("role", "user") or "user"),
             )
         return transformed
+
+    # Same transform for the Anthropic route (callers/tests patch this name independently).
+    _prepare_anthropic_messages_for_api = _prepare_messages_for_non_vision_model
 
     def _tool_result_content_for_active_model(self, tool_name: str, result: Any) -> Any:
         """Return the tool message content that is safe for the active model.
