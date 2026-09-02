@@ -28,9 +28,8 @@ logger = logging.getLogger(__name__)
 # (e.g. claude-opus-4.6-1m) and enterprise endpoints.
 # Tested on Individual and Enterprise accounts.
 COPILOT_OAUTH_CLIENT_ID = "Iv1.b507a08c87ecfe98"
-# Token type prefixes
+# ghp_ classic PATs are rejected by the Copilot API (gho_ / github_pat_ / ghu_ work).
 _CLASSIC_PAT_PREFIX = "ghp_"
-_SUPPORTED_PREFIXES = ("gho_", "github_pat_", "ghu_")
 
 # Env var search order (matches Copilot CLI)
 COPILOT_ENV_VARS = ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")

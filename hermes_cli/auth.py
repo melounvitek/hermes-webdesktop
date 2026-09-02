@@ -1134,29 +1134,22 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
     except Exception as exc:
         # Genuine corruption: unparseable JSON, or bytes that are not UTF-8.
         corrupt_path = auth_file.with_suffix(".json.corrupt")
-        preserved = False
         try:
-            import shutil
             shutil.copy2(auth_file, corrupt_path)
             preserved = True
         except Exception:
+            preserved = False
             logger.debug(
                 "auth: could not preserve a copy of the corrupt store at %s",
                 corrupt_path, exc_info=True,
             )
-        if preserved:
-            logger.warning(
-                "auth: failed to parse %s (%s), starting with empty store. "
-                "Corrupt file preserved at %s",
-                auth_file, exc, corrupt_path,
-            )
-        else:
-            # Do not advertise a backup that was never written.
-            logger.warning(
-                "auth: failed to parse %s (%s), starting with empty store. "
-                "A copy could NOT be preserved at %s",
-                auth_file, exc, corrupt_path,
-            )
+        # Never advertise a backup that was not written.
+        logger.warning(
+            "auth: failed to parse %s (%s), starting with empty store. %s %s",
+            auth_file, exc,
+            "Corrupt file preserved at" if preserved else "A copy could NOT be preserved at",
+            corrupt_path,
+        )
         return {"version": AUTH_STORE_VERSION, "providers": {}}
 
     if isinstance(raw, dict) and (
@@ -2403,9 +2396,7 @@ def _auth_file_cache_key() -> Tuple[str, Optional[float]]:
         auth_file_key = str(auth_file)
     try:
         return auth_file_key, auth_file.stat().st_mtime
-    except FileNotFoundError:
-        return auth_file_key, None
-    except Exception:
+    except Exception:  # missing file included: key without an mtime
         return auth_file_key, None
 
 
