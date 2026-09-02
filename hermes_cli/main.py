@@ -402,50 +402,9 @@ def _suppress_mouse_residue_early() -> None:
 _suppress_mouse_residue_early()
 
 
-def _is_termux_startup_environment_fast() -> bool:
-    """Tiny Termux check for pre-import startup shortcuts."""
-    return _startup_fast.is_termux_env()
-
-
-def _is_termux_fast_version_argv(argv: list[str]) -> bool:
-    return _startup_fast.is_termux_fast_version_argv(argv)
-
-
-def _is_global_fast_version_argv(argv: list[str]) -> bool:
-    return _startup_fast.is_global_fast_version_argv(argv)
-
-
-def _is_container_startup_environment_fast() -> bool:
-    return _startup_fast.is_container_startup_environment()
-
-
-def _active_profile_may_override_home_fast(hermes_root: str) -> bool:
-    return _startup_fast.active_profile_may_override_home(hermes_root)
-
-
-def _container_mode_may_be_active_fast() -> bool:
-    return _startup_fast.container_mode_may_be_active()
-
-
-def _read_openai_version_fast() -> str | None:
-    """Read OpenAI SDK version without importing ``importlib.metadata``."""
-    return _startup_fast.read_openai_version()
-
-
-def _print_fast_version_info() -> None:
-    _startup_fast.print_fast_version_info()
-
-
 def _try_ultrafast_version() -> bool:
     """Handle ``hermes --version`` before config/logging imports."""
     return _startup_fast.try_fast_version()
-
-
-def _try_termux_ultrafast_version() -> bool:
-    """Backward-compatible test hook for the Termux startup fast path."""
-    if not _is_termux_startup_environment_fast():
-        return False
-    return _try_ultrafast_version()
 
 
 _ensure_project_root_on_path_fast()
@@ -12643,22 +12602,6 @@ def cmd_console(args):
     return run_console_repl()
 
 
-def _build_provider_choices() -> list[str]:
-    """Build the --provider choices list from CANONICAL_PROVIDERS + 'auto'."""
-    try:
-        from hermes_cli.models import CANONICAL_PROVIDERS as _cp
-        return ["auto"] + [p.slug for p in _cp]
-    except Exception:
-        # Fallback: static list guarantees the CLI always works
-        return [
-            "auto", "openrouter", "nous", "openai-codex", "xai-oauth", "copilot-acp", "copilot",
-            "anthropic", "gemini", "vertex", "xai", "bedrock", "azure-foundry",
-            "ollama-cloud", "huggingface", "zai", "kimi-coding", "kimi-coding-cn",
-            "stepfun", "minimax", "minimax-cn", "kilocode", "novita", "xiaomi", "arcee",
-            "nvidia", "deepseek", "alibaba", "qwen-oauth", "opencode-zen", "opencode-go",
-        ]
-
-
 # Top-level subcommands that argparse knows about WITHOUT running plugin
 # discovery.  Used to short-circuit eager plugin imports (which can take
 # 500ms+ pulling in google.cloud.pubsub_v1, aiohttp, grpc, etc.) when the
@@ -13099,7 +13042,7 @@ def _try_termux_fast_cli_launch() -> bool:
     if _wants_tui_early(argv):
         return False
 
-    if _is_termux_fast_version_argv(argv):
+    if _startup_fast.is_termux_fast_version_argv(argv):
         _print_version_info(check_updates=True)
         return True
 
