@@ -184,42 +184,26 @@ _install_plugin_debug_handler()
 # ---------------------------------------------------------------------------
 
 VALID_HOOKS: Set[str] = {
-    "pre_tool_call",
-    "post_tool_call",
-    "transform_terminal_output",
-    "transform_tool_result",
+    "pre_tool_call", "post_tool_call", "transform_terminal_output", "transform_tool_result",
     # Return a string to replace the response text (first non-None wins) or None to leave it.
-    "transform_llm_output",
-    "pre_llm_call",
-    "post_llm_call",
+    "transform_llm_output", "pre_llm_call", "post_llm_call",
     # Streaming observers fired off the token path by agent.plugin_stream_hooks; payloads are
     # immutable normalized text/lifecycle and cannot transform the stream.
-    "on_stream_start",
-    "on_stream_delta",
-    "on_stream_end",
-    "on_interim_message",
+    "on_stream_start", "on_stream_delta", "on_stream_end", "on_interim_message",
     # Fired once per turn when the agent edited code and is about to verify/finish. Return
     # {"action": "continue", "message"} (or Claude-Code Stop shape {"decision": "block", "reason"})
     # to keep going; anything else finishes. Bounded by agent.max_verify_nudges.
-    "pre_verify",
-    "pre_api_request",
-    "post_api_request",
-    "api_request_error",
+    "pre_verify", "pre_api_request", "post_api_request", "api_request_error",
     # Fired once per failed API call BEFORE agent/error_classifier.classify_api_error(). Kwargs:
     # provider, model, status_code, error_type, error_code, error_message, error_body, error,
     # approx_tokens, context_length, num_messages. Return None, or {"reason": <FailoverReason name>
     # (required), "retryable"/"should_compress"/"should_rotate_credential"/"should_fallback": bool,
     # "message": str, "error_context": dict}. Run-all-then-pick-first (see
     # get_plugin_error_classification). Privacy: error_message/error_body may be unredacted.
-    "transform_api_error_classification",
-    "on_session_start",
-    "on_session_end",
-    "on_session_finalize",
-    "on_session_reset",
+    "transform_api_error_classification", "on_session_start", "on_session_end",
+    "on_session_finalize", "on_session_reset",
     # Successful skill lifecycle facts (local skill name visible to plugins).
-    "on_skill_lifecycle",
-    "subagent_start",
-    "subagent_stop",
+    "on_skill_lifecycle", "subagent_start", "subagent_stop",
     # Once per incoming MessageEvent, after the internal-event guard, BEFORE auth/pairing and
     # dispatch. Kwargs: event, gateway, session_store. Return {"action": "skip", "reason"} -> drop;
     # {"action": "rewrite", "text"} -> replace event.text; {"action": "allow"} / None -> normal.
@@ -228,8 +212,7 @@ VALID_HOOKS: Set[str] = {
     # pre-answer (use pre_tool_call). Kwargs: command, description, pattern_key, pattern_keys,
     # session_key, surface: "cli" | "gateway" | "smart"; post_approval_response adds choice
     # ("once"|"session"|"always"|"deny"|"timeout"|"smart_approve"|"smart_deny") and decided_by.
-    "pre_approval_request",
-    "post_approval_response",
+    "pre_approval_request", "post_approval_response",
     # Fired by transcribe_audio after provider resolution, BEFORE any backend runs. Kwargs:
     # file_path, provider, model, language, prompt, source. Return None or a dict mutating
     # prompt/language/model (registration order, last-writer-wins; file_path is read-only).
@@ -239,9 +222,7 @@ VALID_HOOKS: Set[str] = {
     # DISPATCHER right before spawn; completed/blocked fire in the WORKER (or whichever process
     # drove it). Kwargs: task_id, board, assignee, run_id, profile_name; completed adds summary,
     # blocked adds reason.
-    "kanban_task_claimed",
-    "kanban_task_completed",
-    "kanban_task_blocked",
+    "kanban_task_claimed", "kanban_task_completed", "kanban_task_blocked",
     # Kanban worker/mutation/tick observers; return values ignored; fire sites short-circuit on
     # has_hook(). Kwargs: task_id, profile_name, board, assignee, run_id plus:
     # worker_spawned (DISPATCHER, after PID persisted, inside the dispatch lock — stay fast):
@@ -2333,42 +2314,28 @@ def _get_pre_tool_call_directive_details(
 
 
 def get_pre_tool_call_directive(
-    tool_name: str, args: Optional[Dict[str, Any]], task_id: str = "", session_id: str = "",
-    tool_call_id: str = "", turn_id: str = "", api_request_id: str = "",
-    middleware_trace: Optional[List[Dict[str, Any]]] = None,
+    tool_name: str, args: Optional[Dict[str, Any]], **hook_kwargs: Any
 ) -> tuple[Optional[str], Optional[str]]:
-    """Back-compat: ``(directive, message)`` with directive ``"block"`` / ``"approve"`` / ``None``."""
-    details = _get_pre_tool_call_directive_details(
-        tool_name, args, task_id=task_id, session_id=session_id, tool_call_id=tool_call_id,
-        turn_id=turn_id, api_request_id=api_request_id, middleware_trace=middleware_trace,
-    )
+    """Back-compat: ``(directive, message)`` with directive ``"block"`` / ``"approve"`` / ``None``.
+    ``hook_kwargs`` are the observability ids of :func:`_get_pre_tool_call_directive_details`."""
+    details = _get_pre_tool_call_directive_details(tool_name, args, **hook_kwargs)
     return (details.action, details.message)
 
 
 def get_pre_tool_call_block_message(
-    tool_name: str, args: Optional[Dict[str, Any]], task_id: str = "", session_id: str = "",
-    tool_call_id: str = "", turn_id: str = "", api_request_id: str = "",
-    middleware_trace: Optional[List[Dict[str, Any]]] = None,
+    tool_name: str, args: Optional[Dict[str, Any]], **hook_kwargs: Any
 ) -> Optional[str]:
     """Deprecated shim: only the ``block`` message (or ``None``); ``approve`` is invisible here."""
-    directive, message = get_pre_tool_call_directive(
-        tool_name, args, task_id=task_id, session_id=session_id, tool_call_id=tool_call_id,
-        turn_id=turn_id, api_request_id=api_request_id, middleware_trace=middleware_trace,
-    )
+    directive, message = get_pre_tool_call_directive(tool_name, args, **hook_kwargs)
     return message if directive == "block" else None
 
 
 def resolve_pre_tool_block(
-    tool_name: str, args: Optional[Dict[str, Any]], task_id: str = "", session_id: str = "",
-    tool_call_id: str = "", turn_id: str = "", api_request_id: str = "",
-    middleware_trace: Optional[List[Dict[str, Any]]] = None,
+    tool_name: str, args: Optional[Dict[str, Any]], **hook_kwargs: Any
 ) -> Optional[str]:
     """Resolve the pre_tool_call directive to a final block message (or ``None`` to proceed),
     running the human-approval gate for ``approve``. See :func:`_resolve_block_from_details`."""
-    return _dispatch_pre_tool_call_hooks(
-        tool_name, args, task_id=task_id, session_id=session_id, tool_call_id=tool_call_id,
-        turn_id=turn_id, api_request_id=api_request_id, middleware_trace=middleware_trace,
-    )[0]
+    return _dispatch_pre_tool_call_hooks(tool_name, args, **hook_kwargs)[0]
 
 
 def _resolve_block_from_details(
@@ -2415,19 +2382,15 @@ def _resolve_block_from_details(
 
 
 def _dispatch_pre_tool_call_hooks(
-    tool_name: str, args: Optional[Dict[str, Any]], task_id: str = "", session_id: str = "",
-    tool_call_id: str = "", turn_id: str = "", api_request_id: str = "",
-    middleware_trace: Optional[List[Dict[str, Any]]] = None,
+    tool_name: str, args: Optional[Dict[str, Any]], **hook_kwargs: Any
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Invoke ``pre_tool_call`` hooks once; return ``(block_message, modified_args)`` — the resolved
     block/approve message (``None`` to proceed) and merged ``modify`` args (``None`` if none)."""
-    details = _get_pre_tool_call_directive_details(
-        tool_name, args, task_id=task_id, session_id=session_id, tool_call_id=tool_call_id,
-        turn_id=turn_id, api_request_id=api_request_id, middleware_trace=middleware_trace,
-    )
+    details = _get_pre_tool_call_directive_details(tool_name, args, **hook_kwargs)
     block_msg = _resolve_block_from_details(
         details, tool_name,
-        turn_id=turn_id, tool_call_id=tool_call_id, session_id=session_id,
+        turn_id=hook_kwargs.get("turn_id", ""), tool_call_id=hook_kwargs.get("tool_call_id", ""),
+        session_id=hook_kwargs.get("session_id", ""),
     )
     return (block_msg, details.modified_args)
 
