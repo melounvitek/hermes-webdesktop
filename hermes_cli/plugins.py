@@ -330,8 +330,6 @@ class PluginContext:
             for key, loaded in self._manager._plugins.items()
         )
 
-    # -- namespaced config and durable state --------------------------------
-
     def get_config(self, key: str, default: Any = None) -> Any:
         """Read plugin-relative ``plugins.entries.<plugin_id>.settings.<key>`` (falls back to the
         legacy ``config`` subtree for migration compatibility)."""
@@ -410,6 +408,20 @@ class PluginContext:
             self._platform_actions = PlatformActions(self.plugin_id)
         return self._platform_actions
 
+    def _wrong_type(self, obj: Any, base_class: type, label: str, article: str = "a") -> bool:
+        """Warn-and-ignore gate shared by every registrar that requires a base class."""
+        if isinstance(obj, base_class):
+            return False
+        logger.warning(
+            "Plugin '%s' tried to register %s %s that does not inherit from %s. Ignoring.",
+            self.manifest.name, article, label, base_class.__name__,
+        )
+        return True
+
+    def _refuse(self, what: str) -> ValueError:
+        """``ValueError`` for a malformed registration (``what`` completes "tried to register ...")."""
+        return ValueError(f"Plugin '{self.manifest.name}' tried to register {what}.")
+
     def _track(
         self,
         kind: str,
@@ -470,11 +482,7 @@ class PluginContext:
         slot so unload restores the displaced entry. Returns ``None`` when the registry refused or
         replaced the provider (``ValueError`` with ``reject_message`` set, or a falsy ``register``).
         """
-        if not isinstance(provider, base_class):
-            logger.warning(
-                "Plugin '%s' tried to register %s %s that does not inherit from %s. Ignoring.",
-                self.manifest.name, article, label, base_class.__name__,
-            )
+        if self._wrong_type(provider, base_class, label, article):
             return None
         registry_name = provider.name if normalize is None else normalize(provider.name)
         scope = self._manager.scope_key
@@ -496,8 +504,6 @@ class PluginContext:
         )
         logger.info("Plugin '%s' registered %s: %s", self.manifest.name, label, registry_name)
         return handle
-
-    # -- host-owned LLM access ----------------------------------------------
 
     @property
     def llm(self) -> Any:
@@ -521,8 +527,6 @@ class PluginContext:
             self._subagent_lifecycle = SubagentLifecycleService(get_active_subagent_parent)
         return self._subagent_lifecycle
 
-    # -- profile awareness --------------------------------------------------
-
     @property
     def profile_name(self) -> str:
         """Active profile name: ``"default"``, the ``~/.hermes/profiles/<name>`` id, or ``"custom"``.
@@ -535,8 +539,6 @@ class PluginContext:
             return get_active_profile_name()
         except Exception:
             return "default"
-
-    # -- lifecycle: unload callbacks and supervised tasks --------------------
 
     def on_unload(self, callback: Callable[[], None]) -> PluginRegistration:
         """Register a cleanup callback for unload: runs in reverse acquisition order interleaved
@@ -564,8 +566,6 @@ class PluginContext:
         logger.debug("Plugin %s spawned supervised task: %s", self.manifest.name, task_name)
         return task
 
-    # -- approval transport registration ------------------------------------
-
     def register_approval_transport(self, name: str, present_fn: Callable) -> None:
         """Register a human approval transport, inactive until ``security.approval.transport:
         <name>`` selects it. It receives a redacted ``ApprovalRequest`` and returns only a
@@ -583,8 +583,6 @@ class PluginContext:
             self._track_mapping_entry(
                 "approval_transport", clean, self._manager._approval_transports, entry, None
             )
-
-    # -- tool registration --------------------------------------------------
 
     @_serialized_replacement
     def register_tool(
@@ -659,8 +657,6 @@ class PluginContext:
         )
         return handle
 
-    # -- capability probing (#64228) -----------------------------------------
-
     def has_capability(self, capability: str) -> bool:
         """Return True when *capability* is live for this plugin (probe, then degrade gracefully).
 
@@ -671,8 +667,6 @@ class PluginContext:
         if source == "bundled" and capability == "tools.override":
             return True
         return plugin_capability_granted(self.plugin_id, capability)
-
-    # -- capability-gated MCP access ----------------------------------------
 
     def call_mcp(
         self,
@@ -758,8 +752,6 @@ class PluginContext:
             return []
         return [str(item) for item in allowlist]
 
-    # -- override trust gate ------------------------------------------------
-
     def _tool_override_allowed(self, tool_name: str) -> bool:
         """Return True if this plugin may override built-in tools.
 
@@ -780,8 +772,6 @@ class PluginContext:
         # Pass THIS manager's profile-scoped config so a multi-profile process never consults the
         # active profile's consent state instead.
         return plugin_capability_granted(self.plugin_id, "tools.override", config=cfg)
-
-    # -- message injection --------------------------------------------------
 
     def inject_message(
         self,
@@ -858,8 +848,6 @@ class PluginContext:
             is True
         )
 
-    # -- CLI command registration --------------------------------------------
-
     @_serialized_replacement
     def register_cli_command(
         self,
@@ -886,8 +874,6 @@ class PluginContext:
         )
         logger.debug("Plugin %s registered CLI command: %s", self.manifest.name, name)
         return handle
-
-    # -- slash command registration -------------------------------------------
 
     @_serialized_replacement
     def register_command(
@@ -944,8 +930,6 @@ class PluginContext:
         logger.debug("Plugin %s registered command: /%s", self.manifest.name, clean)
         return handle
 
-    # -- tool dispatch -------------------------------------------------------
-
     def dispatch_tool(self, tool_name: str, args: dict, **kwargs) -> str:
         """Dispatch a tool call through the registry with the parent agent (when available)
         resolved automatically; returns the handler's JSON string. ``kwargs`` forward to dispatch."""
@@ -960,8 +944,6 @@ class PluginContext:
 
         return registry.dispatch(tool_name, args, scope=self._manager.scope_key, **kwargs)
 
-    # -- context engine registration -----------------------------------------
-
     @_serialized_replacement
     def register_context_engine(self, engine) -> Optional[PluginRegistration]:
         """Register the (single) ``agent.context_engine.ContextEngine`` replacing the built-in
@@ -974,12 +956,7 @@ class PluginContext:
             )
             return
         from agent.context_engine import ContextEngine
-        if not isinstance(engine, ContextEngine):
-            logger.warning(
-                "Plugin '%s' tried to register a context engine that does not "
-                "inherit from ContextEngine. Ignoring.",
-                self.manifest.name,
-            )
+        if self._wrong_type(engine, ContextEngine, "context engine"):
             return
         previous = self._manager._context_engine
         self._manager._context_engine = engine
@@ -994,8 +971,6 @@ class PluginContext:
         logger.info("Plugin '%s' registered context engine: %s", self.manifest.name, engine.name)
         return handle
 
-    # -- context reference registration -------------------------------------
-
     def register_context_reference(self, provider) -> None:
         """Register a :class:`agent.context_references.ContextReferenceProvider`; ``provider.prefix``
         defines ``@<prefix>:``. Built-in prefixes (diff, staged, file, folder, git, url) are
@@ -1005,12 +980,7 @@ class PluginContext:
             register_context_reference_provider as _register,
         )
 
-        if not isinstance(provider, _CRP):
-            logger.warning(
-                "Plugin '%s' tried to register a context reference provider "
-                "that does not inherit from ContextReferenceProvider. Ignoring.",
-                self.manifest.name,
-            )
+        if self._wrong_type(provider, _CRP, "context reference provider"):
             return
         try:
             _register(provider)
@@ -1025,28 +995,19 @@ class PluginContext:
             self.manifest.name, provider.prefix,
         )
 
-    # -- memory provider registration ---------------------------------------
-
     def register_memory_provider(self, provider) -> None:
         """Record a memory provider (inert). Activation is owned by ``plugins/memory`` via
         ``memory.provider``; a provider reaching here was loaded by the general manager, and
         without this method its ``register()`` would fail on a missing attribute."""
         from agent.memory_provider import MemoryProvider
 
-        if not isinstance(provider, MemoryProvider):
-            logger.warning(
-                "Plugin '%s' tried to register a memory provider that does not "
-                "inherit from MemoryProvider. Ignoring.",
-                self.manifest.name,
-            )
+        if self._wrong_type(provider, MemoryProvider, "memory provider"):
             return
         self._memory_provider = provider
         logger.debug(
             "Plugin '%s' registered memory provider: %s",
             self.manifest.name, getattr(provider, "name", "?"),
         )
-
-    # -- dashboard auth provider registration --------------------------------
 
     @_serialized_replacement
     def register_dashboard_auth_provider(self, provider) -> Optional[PluginRegistration]:
@@ -1059,12 +1020,7 @@ class PluginContext:
             unregister_global_provider,
         )
 
-        if not isinstance(provider, DashboardAuthProvider):
-            logger.warning(
-                "Plugin '%s' tried to register a dashboard-auth provider "
-                "that does not inherit from DashboardAuthProvider. Ignoring.",
-                self.manifest.name,
-            )
+        if self._wrong_type(provider, DashboardAuthProvider, "dashboard-auth provider"):
             return
         registry_name = provider.name
         # The auth registry is process-global (lifetime = web server). Disposing it on a routine
@@ -1090,8 +1046,6 @@ class PluginContext:
             self.manifest.name, registry_name, provider.display_name,
         )
         return handle
-
-    # -- platform adapter registration ---------------------------------------
 
     @_serialized_replacement
     def register_platform(
@@ -1142,8 +1096,6 @@ class PluginContext:
         logger.debug("Plugin %s registered platform: %s", self.manifest.name, name)
         return handle
 
-    # -- slack action handler registration ----------------------------------
-
     def register_slack_action_handler(
         self,
         action_id: Any,
@@ -1156,15 +1108,9 @@ class PluginContext:
         for a non-callable callback or empty ``action_id``.
         """
         if not callable(callback):
-            raise ValueError(
-                f"Plugin '{self.manifest.name}' tried to register a Slack "
-                f"action handler with a non-callable callback."
-            )
+            raise self._refuse("a Slack action handler with a non-callable callback")
         if action_id is None or (isinstance(action_id, str) and not action_id.strip()):
-            raise ValueError(
-                f"Plugin '{self.manifest.name}' tried to register a Slack "
-                f"action handler with an empty action_id."
-            )
+            raise self._refuse("a Slack action handler with an empty action_id")
         entry = (action_id, callback, self.manifest.name)
         self._manager._slack_action_handlers.append(entry)
         handle = self._track(
@@ -1176,8 +1122,6 @@ class PluginContext:
         )
         logger.debug("Plugin %s registered Slack action handler: %s", self.manifest.name, action_id)
         return handle
-
-    # -- platform handler registration ----------------------------------------
 
     def register_platform_handler(self, platform: str, factory: Callable) -> None:
         """Register a native-client handler factory for a gateway platform, invoked at ``connect()``
@@ -1191,16 +1135,10 @@ class PluginContext:
         or empty platform.
         """
         if not callable(factory):
-            raise ValueError(
-                f"Plugin '{self.manifest.name}' tried to register a platform "
-                f"handler factory with a non-callable factory."
-            )
+            raise self._refuse("a platform handler factory with a non-callable factory")
         key = (platform or "").strip().lower()
         if not key:
-            raise ValueError(
-                f"Plugin '{self.manifest.name}' tried to register a platform "
-                f"handler factory with an empty platform name."
-            )
+            raise self._refuse("a platform handler factory with an empty platform name")
         self._manager._platform_handler_factories.setdefault(key, []).append(
             (factory, self.manifest.name)
         )
@@ -1210,16 +1148,12 @@ class PluginContext:
             getattr(factory, "__name__", repr(factory)),
         )
 
-    # -- telegram handler registration ---------------------------------------
-
     def register_telegram_handler(self, factory: Callable) -> None:
         """Alias of ``register_platform_handler("telegram", factory)``: ``factory(application,
         adapter)`` runs before the core handlers. PTB dispatches only the FIRST matching handler per
         group and core registers a catch-all ``CallbackQueryHandler`` — always scope with
         ``pattern=`` or you swallow the core button flows. Raises ``ValueError`` if not callable."""
         self.register_platform_handler("telegram", factory)
-
-    # -- auxiliary task registration ---------------------------------------
 
     @_serialized_replacement
     def register_auxiliary_task(
@@ -1239,8 +1173,7 @@ class PluginContext:
         """
         if not key or not isinstance(key, str):
             raise ValueError(
-                f"Plugin '{self.manifest.name}' tried to register auxiliary task "
-                f"with invalid key {key!r}"
+                f"Plugin '{self.manifest.name}' tried to register auxiliary task with invalid key {key!r}"
             )
         if not all(c.isalnum() or c == "_" for c in key):
             raise ValueError(
@@ -1294,8 +1227,6 @@ class PluginContext:
             display_name,
         )
         return handle
-
-    # -- redaction pattern registration --------------------------------------
 
     def register_redaction_patterns(self, patterns) -> int:
         """Additively register secret-token regexes with :mod:`agent.redact`; returns the count
@@ -1391,8 +1322,6 @@ class PluginContext:
         logger.debug("Plugin %s registered system prompt section: %s", self.manifest.name, id)
         return handle
 
-    # -- inter-plugin event bus --------------------------------------------
-
     def emit(self, event: str, payload: Optional[dict] = None) -> int:
         """Publish bare *event* as ``<plugin_key>:<event>`` (namespace FORCED to this plugin);
         return the subscriber count scheduled.
@@ -1435,16 +1364,12 @@ class PluginContext:
         self._manager._subscribe_event(plugin_key, event, callback)
         logger.debug("Plugin %s subscribed to event: %s", self.manifest.name, event)
 
-    # -- middleware registration -------------------------------------------
-
     def register_middleware(self, kind: str, callback: Callable) -> PluginRegistration:
         """Register behavior-changing middleware (request kinds rewrite the payload, execution kinds
         wrap the callback). Unknown kinds warn but are stored."""
         return self._track_callback(
             "middleware", kind, callback, self._manager._middleware, VALID_MIDDLEWARE
         )
-
-    # -- skill registration -------------------------------------------------
 
     @_serialized_replacement
     def register_skill(
@@ -1681,9 +1606,6 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         # Native platform handler factories keyed by lowercase platform name.
         self._platform_handler_factories: Dict[str, List[tuple]] = {}
 
-    # -- registration ledger internals ----------------------------------------
-
-    # -- public ----------------------------------------------------------------
 
     @property
     def has_gateway_message_injector(self) -> bool:
@@ -1952,8 +1874,6 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
                 continue  # fail closed on an unreadable package; full discovery reports it
         return False
 
-    # -- directory scanning -----------------------------------------------------
-
     def _scan_directory(
         self,
         path: Path,
@@ -1967,11 +1887,6 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         """Read installed plugin entry points (see :func:`discover_entrypoint_manifests`)."""
         return discover_entrypoint_manifests()
 
-    # -- loading ---------------------------------------------------------------
-
-    # -- hook invocation ----------------------------------------------------------
-
-    # -- adapter accessors / introspection -----------------------------------------
 
     def get_slack_action_handlers(self) -> List[tuple]:
         """``(action_id, callback, plugin_name)`` tuples for the Slack adapter to wire at connect."""
