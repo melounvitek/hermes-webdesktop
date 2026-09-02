@@ -282,404 +282,326 @@ def _check_env_file(should_fix: bool) -> Finding:
     return f
 
 
+def _known_provider_ids(cfg: dict) -> tuple[set, list, object, object, object]:
+    """Return (known ids, custom providers, resolve_auth, normalize, resolve_full).
+
+    Registry lookups are best-effort: any import failure leaves the matching
+    resolver as None so validation degrades to "unavailable" rather than
+    crashing doctor.
+    """
+    known: set = set()
+    resolve_auth = normalize = resolve_full = None
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY, resolve_provider as resolve_auth
+        known = set(PROVIDER_REGISTRY.keys()) | {"openrouter", "custom", "auto", "moa"}
+    except Exception:
+        pass
+    custom_providers: list = []
+    aliases = None
+    try:
+        from hermes_cli.config import get_compatible_custom_providers
+        from hermes_cli.providers import (
+            custom_provider_aliases as aliases,
+            normalize_provider as normalize,
+            resolve_provider_full as resolve_full,
+        )
+        try:
+            custom_providers = get_compatible_custom_providers(cfg)
+        except Exception:
+            custom_providers = []
+    except Exception:
+        pass
+
+    user_providers = cfg.get("providers")
+    if isinstance(user_providers, dict):
+        from hermes_cli.config import is_provider_enabled
+        known.update(
+            str(name).strip().lower()
+            for name, prov_cfg in user_providers.items()
+            if str(name).strip() and is_provider_enabled(prov_cfg)
+        )
+    if aliases is not None:
+        for entry in custom_providers:
+            if isinstance(entry, dict):
+                name = str(entry.get("name") or "").strip()
+                if name:
+                    known.update(aliases(name, str(entry.get("provider_key") or "").strip()))
+    return known, custom_providers, resolve_auth, normalize, resolve_full
+
+
+# Vendor/model slugs are valid on aggregator-style providers and on any custom
+# provider. Fireworks' native IDs are slash-form (accounts/fireworks/models/...);
+# DeepInfra's catalog is exclusively vendor/model slugs.
+_VENDOR_SLUG_PROVIDERS = {
+    "openrouter", "auto", "ai-gateway", "kilocode", "opencode-zen", "huggingface",
+    "lmstudio", "nous", "nvidia", "fireworks", "deepinfra",
+}
+
+
+def _provider_has_credentials(runtime_provider: str) -> bool:
+    """Only API-key providers in PROVIDER_REGISTRY are checked — OAuth/SDK/custom
+    providers have their own env-var checks elsewhere in doctor, and
+    get_auth_status() returns a bare {logged_in: False} for anything it doesn't
+    dispatch, which would false-positive."""
+    if runtime_provider == "openrouter":
+        from hermes_cli.config import get_env_value
+
+        return bool(
+            str(get_env_value("OPENROUTER_API_KEY") or "").strip()
+            or str(get_env_value("OPENAI_API_KEY") or "").strip()
+        )
+    from hermes_cli.auth import PROVIDER_REGISTRY, get_auth_status
+
+    pconfig = PROVIDER_REGISTRY.get(runtime_provider)
+    if pconfig and getattr(pconfig, "auth_type", "") == "api_key":
+        status = get_auth_status(runtime_provider) or {}
+        return bool(status.get("configured") or status.get("logged_in") or status.get("api_key"))
+    return True
+
+
+def _validate_model_config(config_path, issues: list) -> None:
+    """Validate model.provider / model.default against the provider registry (raw file)."""
+    from hermes_cli.config import read_user_config_raw
+    cfg = read_user_config_raw(config_path)
+    model_section = cfg.get("model") or {}
+    provider_raw = (model_section.get("provider") or "").strip()
+    provider = provider_raw.lower()
+    default_model = (model_section.get("default") or model_section.get("model") or "").strip()
+
+    known_providers, custom_providers, resolve_auth, normalize, resolve_full = _known_provider_ids(cfg)
+    valid_provider_ids = set(known_providers)
+    accept = {provider} if provider else set()
+    if normalize is not None:
+        for known_provider in known_providers:
+            try:
+                valid_provider_ids.add(normalize(known_provider))
+            except Exception:
+                continue
+
+    runtime_provider = catalog_provider = provider
+    if provider and provider not in {"auto", "custom"}:
+        if resolve_auth is not None:
+            try:
+                runtime_provider = resolve_auth(provider)
+                accept.add(runtime_provider)
+            except Exception:
+                runtime_provider = provider
+        if resolve_full is not None:
+            provider_def = resolve_full(provider, cfg.get("providers"), custom_providers)
+            catalog_provider = provider_def.id if provider_def is not None else None
+            if catalog_provider is not None:
+                accept.add(catalog_provider)
+
+    if provider and provider != "auto" and (
+        catalog_provider is None or (known_providers and not (accept & valid_provider_ids))
+    ):
+        known_list = ", ".join(sorted(known_providers)) if known_providers else "(unavailable)"
+        _fail_and_issue(
+            f"model.provider '{provider_raw}' is not a recognised provider",
+            f"(known: {known_list})",
+            (
+                f"model.provider '{provider_raw}' is unknown. "
+                f"Valid providers: {known_list}. "
+                f"Fix: run 'hermes config set model.provider <valid_provider>'"
+            ),
+            issues,
+        )
+
+    policy_id = str(runtime_provider or catalog_provider or "").strip().lower()
+    accepts_vendor_slug = (
+        policy_id in _VENDOR_SLUG_PROVIDERS or policy_id == "custom" or policy_id.startswith("custom:")
+    )
+    if default_model and "/" in default_model and policy_id and not accepts_vendor_slug:
+        check_warn(
+            f"model.default '{default_model}' uses a vendor/model slug but provider is '{provider_raw}'",
+            "(vendor-prefixed slugs belong to aggregators like openrouter)",
+        )
+        issues.append(
+            f"model.default '{default_model}' is vendor-prefixed but model.provider is '{provider_raw}'. "
+            "Either set model.provider to 'openrouter', or drop the vendor prefix."
+        )
+
+    if runtime_provider and runtime_provider not in ("auto", "custom"):
+        from hermes_cli.doctor import _DHH
+        try:
+            if not _provider_has_credentials(runtime_provider):
+                _fail_and_issue(
+                    f"model.provider '{runtime_provider}' is set but no API key is configured",
+                    "(check ~/.hermes/.env or run 'hermes setup')",
+                    (
+                        f"No credentials found for provider '{runtime_provider}'. "
+                        f"Run 'hermes setup' or set the provider's API key in {_DHH}/.env, "
+                        f"or switch providers with 'hermes config set model.provider <name>'"
+                    ),
+                    issues,
+                )
+        except Exception:
+            pass
+
+
 def _check_config_file(should_fix: bool) -> Finding:
-    """config.yaml presence; validate model.provider / model.default and credentials."""
+    """config.yaml presence (project cli-config.yaml as fallback); model/provider validation."""
     from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT, _DHH
     f = Finding()
-    issues = f.issues
-    # Check ~/.hermes/config.yaml (primary) or project cli-config.yaml (fallback)
     config_path = HERMES_HOME / 'config.yaml'
     if config_path.exists():
         check_ok(f"{_DHH}/config.yaml exists")
-
-        # Validate model.provider and model.default values
         try:
-            # Raw-file diagnostic: inspects what the user actually wrote.
-            from hermes_cli.config import read_user_config_raw
-            cfg = read_user_config_raw(config_path)
-            model_section = cfg.get("model") or {}
-            provider_raw = (model_section.get("provider") or "").strip()
-            provider = provider_raw.lower()
-            default_model = (model_section.get("default") or model_section.get("model") or "").strip()
-
-            known_providers: set = set()
-            try:
-                from hermes_cli.auth import (
-                    PROVIDER_REGISTRY,
-                    resolve_provider as _resolve_auth_provider,
-                )
-                known_providers = set(PROVIDER_REGISTRY.keys()) | {"openrouter", "custom", "auto", "moa"}
-            except Exception:
-                _resolve_auth_provider = None
-                pass
-            try:
-                from hermes_cli.config import get_compatible_custom_providers as _compatible_custom_providers
-                from hermes_cli.providers import (
-                    custom_provider_aliases as _custom_provider_aliases,
-                    normalize_provider as _normalize_catalog_provider,
-                    resolve_provider_full as _resolve_provider_full,
-                )
-            except Exception:
-                _compatible_custom_providers = None
-                _custom_provider_aliases = None
-                _normalize_catalog_provider = None
-                _resolve_provider_full = None
-
-            custom_providers = []
-            if _compatible_custom_providers is not None:
-                try:
-                    custom_providers = _compatible_custom_providers(cfg)
-                except Exception:
-                    custom_providers = []
-
-            user_providers = cfg.get("providers")
-            if isinstance(user_providers, dict):
-                from hermes_cli.config import is_provider_enabled
-                known_providers.update(
-                    str(name).strip().lower()
-                    for name, prov_cfg in user_providers.items()
-                    if str(name).strip() and is_provider_enabled(prov_cfg)
-                )
-            for entry in custom_providers:
-                if not isinstance(entry, dict):
-                    continue
-                name = str(entry.get("name") or "").strip()
-                provider_key = str(entry.get("provider_key") or "").strip()
-                if name and _custom_provider_aliases is not None:
-                    known_providers.update(
-                        _custom_provider_aliases(name, provider_key)
-                    )
-
-            valid_provider_ids = set(known_providers)
-            provider_ids_to_accept = {provider} if provider else set()
-            if _normalize_catalog_provider is not None:
-                for known_provider in known_providers:
-                    try:
-                        valid_provider_ids.add(_normalize_catalog_provider(known_provider))
-                    except Exception:
-                        continue
-
-            runtime_provider = provider
-            if (
-                provider
-                and _resolve_auth_provider is not None
-                and provider not in {"auto", "custom"}
-            ):
-                try:
-                    runtime_provider = _resolve_auth_provider(provider)
-                    provider_ids_to_accept.add(runtime_provider)
-                except Exception:
-                    runtime_provider = provider
-
-            catalog_provider = provider
-            if (
-                provider
-                and _resolve_provider_full is not None
-                and provider not in {"auto", "custom"}
-            ):
-                provider_def = _resolve_provider_full(provider, user_providers, custom_providers)
-                catalog_provider = provider_def.id if provider_def is not None else None
-                if catalog_provider is not None:
-                    provider_ids_to_accept.add(catalog_provider)
-
-            if provider and provider != "auto":
-                if catalog_provider is None or (
-                    known_providers
-                    and not (provider_ids_to_accept & valid_provider_ids)
-                ):
-                    known_list = ", ".join(sorted(known_providers)) if known_providers else "(unavailable)"
-                    _fail_and_issue(
-                        f"model.provider '{provider_raw}' is not a recognised provider",
-                        f"(known: {known_list})",
-                        (
-                            f"model.provider '{provider_raw}' is unknown. "
-                            f"Valid providers: {known_list}. "
-                            f"Fix: run 'hermes config set model.provider <valid_provider>'"
-                        ),
-                        issues,
-                    )
-
-            # Warn if model is set to a provider-prefixed name on a provider that doesn't use them.
-            # Vendor/model slugs are valid on aggregator-style providers and on any custom
-            # provider — bare "custom" or a named "custom:<name>" that fronts an OpenAI-compatible
-            # aggregator (e.g. custom:hpc-ai serving deepseek/deepseek-v4-flash) requires the prefix.
-            provider_for_policy = runtime_provider or catalog_provider
-            provider_policy_id = str(provider_for_policy or "").strip().lower()
-            providers_accepting_vendor_slugs = {
-                "openrouter",
-                "auto",
-                "ai-gateway",
-                "kilocode",
-                "opencode-zen",
-                "huggingface",
-                "lmstudio",
-                "nous",
-                "nvidia",
-                # Fireworks' native model IDs are slash-form
-                # (accounts/fireworks/models/... and .../routers/...), so a "/"
-                # is expected, not an aggregator vendor prefix.
-                "fireworks",
-                # DeepInfra is an aggregator-style gateway: its catalog
-                # is exclusively ``vendor/model`` slugs (Qwen/Qwen3.5-…,
-                # meta-llama/Llama-3-…, anthropic/claude-opus-4-7, …).
-                "deepinfra",
-            }
-            provider_accepts_vendor_slug = (
-                provider_policy_id in providers_accepting_vendor_slugs
-                or provider_policy_id == "custom"
-                or provider_policy_id.startswith("custom:")
-            )
-            if (
-                default_model
-                and "/" in default_model
-                and provider_policy_id
-                and not provider_accepts_vendor_slug
-            ):
-                check_warn(
-                    f"model.default '{default_model}' uses a vendor/model slug but provider is '{provider_raw}'",
-                    "(vendor-prefixed slugs belong to aggregators like openrouter)",
-                )
-                issues.append(
-                    f"model.default '{default_model}' is vendor-prefixed but model.provider is '{provider_raw}'. "
-                    "Either set model.provider to 'openrouter', or drop the vendor prefix."
-                )
-
-            # Check credentials for the configured provider.
-            # Limit to API-key providers in PROVIDER_REGISTRY — other provider
-            # types (OAuth, SDK, anthropic/custom/auto) have their own env-var
-            # checks elsewhere in doctor, and get_auth_status() returns a bare
-            # {logged_in: False} for anything it doesn't explicitly dispatch,
-            # which would produce false positives.
-            if runtime_provider and runtime_provider not in ("auto", "custom"):
-                try:
-                    if runtime_provider == "openrouter":
-                        from hermes_cli.config import get_env_value
-
-                        configured = bool(
-                            str(get_env_value("OPENROUTER_API_KEY") or "").strip()
-                            or str(get_env_value("OPENAI_API_KEY") or "").strip()
-                        )
-                    else:
-                        from hermes_cli.auth import PROVIDER_REGISTRY, get_auth_status
-
-                        pconfig = PROVIDER_REGISTRY.get(runtime_provider)
-                        configured = True
-                        if pconfig and getattr(pconfig, "auth_type", "") == "api_key":
-                            status = get_auth_status(runtime_provider) or {}
-                            configured = bool(
-                                status.get("configured")
-                                or status.get("logged_in")
-                                or status.get("api_key")
-                            )
-                    if not configured:
-                        _fail_and_issue(
-                            f"model.provider '{runtime_provider}' is set but no API key is configured",
-                            "(check ~/.hermes/.env or run 'hermes setup')",
-                            (
-                                f"No credentials found for provider '{runtime_provider}'. "
-                                f"Run 'hermes setup' or set the provider's API key in {_DHH}/.env, "
-                                f"or switch providers with 'hermes config set model.provider <name>'"
-                            ),
-                            issues,
-                        )
-                except Exception:
-                    pass
-
+            _validate_model_config(config_path, f.issues)
         except Exception as e:
             check_warn("Could not validate model/provider config", f"({e})")
-    else:
-        fallback_config = PROJECT_ROOT / 'cli-config.yaml'
-        if fallback_config.exists():
-            check_ok("cli-config.yaml exists (in project directory)")
+    elif (PROJECT_ROOT / 'cli-config.yaml').exists():
+        check_ok("cli-config.yaml exists (in project directory)")
+    elif should_fix:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        example_config = PROJECT_ROOT / 'cli-config.yaml.example'
+        if example_config.exists():
+            shutil.copy2(str(example_config), str(config_path))
+            check_ok(f"Created {_DHH}/config.yaml from cli-config.yaml.example")
         else:
-            if should_fix:
-                config_path.parent.mkdir(parents=True, exist_ok=True)
-                example_config = PROJECT_ROOT / 'cli-config.yaml.example'
-                if example_config.exists():
-                    shutil.copy2(str(example_config), str(config_path))
-                    check_ok(f"Created {_DHH}/config.yaml from cli-config.yaml.example")
-                else:
-                    from hermes_cli.config import DEFAULT_CONFIG, save_config
-                    save_config(DEFAULT_CONFIG)
-                    check_ok(f"Created {_DHH}/config.yaml from defaults")
-                f.fixed += 1
-            else:
-                check_warn("config.yaml not found", "(using defaults)")
+            from hermes_cli.config import DEFAULT_CONFIG, save_config
+            save_config(DEFAULT_CONFIG)
+            check_ok(f"Created {_DHH}/config.yaml from defaults")
+        f.fixed += 1
+    else:
+        check_warn("config.yaml not found", "(using defaults)")
     return f
 
 
+def _drift_config_version(f: Finding, should_fix: bool, config_path) -> None:
+    from hermes_cli.config import check_config_version, migrate_config
+    current_ver, latest_ver = check_config_version()
+    if current_ver >= latest_ver:
+        check_ok(f"Config version up to date (v{current_ver})")
+        return
+    check_warn(f"Config version outdated (v{current_ver} → v{latest_ver})", "(new settings available)")
+    if not should_fix:
+        f.issues.append("Run 'hermes doctor --fix' or 'hermes setup' to migrate config")
+        return
+    try:
+        migrate_config(interactive=False, quiet=False)
+        check_ok("Config migrated to latest version")
+        f.fixed += 1
+    except Exception as mig_err:
+        check_warn(f"Auto-migration failed: {mig_err}")
+        f.issues.append("Run 'hermes setup' to migrate config")
+
+
+def _drift_stale_root_keys(f: Finding, should_fix: bool, config_path) -> None:
+    """Root-level ``provider``/``base_url`` belong under ``model:`` (raw-file diagnostic)."""
+    from hermes_cli.config import atomic_config_write, read_user_config_raw
+    raw_config = read_user_config_raw(config_path)
+    stale_root_keys = [k for k in ("provider", "base_url") if k in raw_config and isinstance(raw_config[k], str)]
+    if not stale_root_keys:
+        return
+    check_warn(f"Stale root-level config keys: {', '.join(stale_root_keys)}", "(should be under 'model:' section)")
+    if not should_fix:
+        f.issues.append("Stale root-level provider/base_url in config.yaml — run 'hermes doctor --fix'")
+        return
+    # Coerce scalar/None ``model:`` into a dict before mutation — setdefault
+    # would hand back an existing scalar and item-assignment would TypeError.
+    raw_model = raw_config.get("model")
+    if isinstance(raw_model, dict):
+        model_section = raw_model
+    else:
+        model_section = {"default": raw_model.strip()} if isinstance(raw_model, str) and raw_model.strip() else {}
+        raw_config["model"] = model_section
+    for k in stale_root_keys:
+        value = raw_config.pop(k)
+        if not model_section.get(k):
+            model_section[k] = value
+    atomic_config_write(config_path, raw_config)
+    check_ok("Migrated stale root-level keys into model section")
+    f.fixed += 1
+
+
+def _drift_max_iterations_ghost(f: Finding, should_fix: bool, config_path) -> None:
+    """A stale HERMES_MAX_ITERATIONS in .env shadows agent.max_turns in config.yaml.
+
+    The setup wizard used to dual-write the budget to both stores. The gateway
+    bridge normally derives HERMES_MAX_ITERATIONS from agent.max_turns, but if
+    that bridge bails on an earlier config-parse error the .env value silently
+    wins (config says 400, activity line reads N/90). Read the .env FILE
+    (load_env), not get_env_value/os.environ, which the bridge may have
+    overridden already.
+    """
+    from hermes_cli.doctor import _DHH
+    from hermes_cli.config import load_env, read_user_config_raw, remove_env_value
+    raw_config = read_user_config_raw(config_path)
+    agent_cfg = raw_config.get("agent")
+    cfg_max_turns = agent_cfg.get("max_turns") if isinstance(agent_cfg, dict) else None
+    if cfg_max_turns is None:  # legacy root-level key counts too
+        cfg_max_turns = raw_config.get("max_turns")
+    env_ghost = load_env().get("HERMES_MAX_ITERATIONS")
+    if cfg_max_turns is None or env_ghost is None or str(cfg_max_turns).strip() == str(env_ghost).strip():
+        return
+    check_warn(
+        f"HERMES_MAX_ITERATIONS={env_ghost} in .env shadows agent.max_turns={cfg_max_turns} in config.yaml",
+        "(stale ghost from an earlier `hermes setup` run)",
+    )
+    if not should_fix:
+        f.issues.append("Stale HERMES_MAX_ITERATIONS in .env shadows config.yaml — run 'hermes doctor --fix'")
+    elif remove_env_value("HERMES_MAX_ITERATIONS"):
+        check_ok(
+            "Removed stale HERMES_MAX_ITERATIONS from .env "
+            f"(config.yaml agent.max_turns={cfg_max_turns} is now authoritative)"
+        )
+        f.fixed += 1
+    else:
+        check_warn("Could not remove HERMES_MAX_ITERATIONS from .env")
+        f.manual_issues.append(
+            "Manually delete the HERMES_MAX_ITERATIONS line from "
+            f"{_DHH}/.env — config.yaml agent.max_turns is authoritative."
+        )
+
+
+def _drift_deprecations(f: Finding, should_fix: bool, config_path) -> None:
+    """Warn-only deprecation sweep over the raw file + on-disk .env (bridged
+    process env like TERMINAL_CWD would false-positive)."""
+    from hermes_cli.config import load_env, read_user_config_raw
+    raw = read_user_config_raw(config_path) if config_path is not None else {}
+    try:
+        env = load_env()
+    except Exception:
+        env = {}
+    report_deprecated_config_and_env(raw, env)
+
+
+def _drift_structure(f: Finding, should_fix: bool, config_path) -> None:
+    """Structural validation (malformed custom_providers, etc.)."""
+    from hermes_cli.config import validate_config_structure
+    config_issues = validate_config_structure()
+    if not config_issues:
+        return
+    _section("Config Structure")
+    for ci in config_issues:
+        (check_fail if ci.severity == "error" else check_warn)(ci.message)
+        for hint_line in ci.hint.splitlines():
+            check_info(hint_line)
+        f.issues.append(ci.message)
+
+
+_CONFIG_DRIFT_STEPS = (
+    _drift_config_version,
+    _drift_stale_root_keys,
+    _drift_max_iterations_ghost,
+    _drift_deprecations,
+    _drift_structure,
+)
+
+
 def _check_config_drift(should_fix: bool) -> Finding:
-    """Config version, stale root keys, HERMES_MAX_ITERATIONS ghost, deprecations, structure."""
-    from hermes_cli.doctor import HERMES_HOME, _DHH
+    """Config version, stale root keys, HERMES_MAX_ITERATIONS ghost, deprecations, structure.
+
+    Each step is independent and best-effort: a failure in one never hides the next.
+    """
+    from hermes_cli.doctor import HERMES_HOME
     f = Finding()
-    issues, manual_issues = f.issues, f.manual_issues
-    # Check config version and stale keys
     config_path = HERMES_HOME / 'config.yaml'
-    if config_path.exists():
+    steps = _CONFIG_DRIFT_STEPS if config_path.exists() else (_drift_deprecations,)
+    for step in steps:
         try:
-            from hermes_cli.config import check_config_version, migrate_config
-            current_ver, latest_ver = check_config_version()
-            if current_ver < latest_ver:
-                check_warn(
-                    f"Config version outdated (v{current_ver} → v{latest_ver})",
-                    "(new settings available)"
-                )
-                if should_fix:
-                    try:
-                        migrate_config(interactive=False, quiet=False)
-                        check_ok("Config migrated to latest version")
-                        f.fixed += 1
-                    except Exception as mig_err:
-                        check_warn(f"Auto-migration failed: {mig_err}")
-                        issues.append("Run 'hermes setup' to migrate config")
-                else:
-                    issues.append("Run 'hermes doctor --fix' or 'hermes setup' to migrate config")
-            else:
-                check_ok(f"Config version up to date (v{current_ver})")
-        except Exception:
-            pass
-
-        # Detect stale root-level model keys (known bug source — PR #4329)
-        try:
-            # Raw-file diagnostic: stale-key detection must see the raw file.
-            from hermes_cli.config import read_user_config_raw
-            raw_config = read_user_config_raw(config_path)
-            stale_root_keys = [k for k in ("provider", "base_url") if k in raw_config and isinstance(raw_config[k], str)]
-            if stale_root_keys:
-                check_warn(
-                    f"Stale root-level config keys: {', '.join(stale_root_keys)}",
-                    "(should be under 'model:' section)"
-                )
-                if should_fix:
-                    # Coerce scalar/None ``model:`` into a dict before mutation —
-                    # ``setdefault("model", {})`` would return an existing scalar
-                    # and then ``model_section[k] = ...`` would raise TypeError.
-                    raw_model = raw_config.get("model")
-                    if isinstance(raw_model, dict):
-                        model_section = raw_model
-                    elif isinstance(raw_model, str) and raw_model.strip():
-                        model_section = {"default": raw_model.strip()}
-                        raw_config["model"] = model_section
-                    else:
-                        model_section = {}
-                        raw_config["model"] = model_section
-                    for k in stale_root_keys:
-                        if not model_section.get(k):
-                            model_section[k] = raw_config.pop(k)
-                        else:
-                            raw_config.pop(k)
-                    from hermes_cli.config import atomic_config_write
-                    atomic_config_write(config_path, raw_config)
-                    check_ok("Migrated stale root-level keys into model section")
-                    f.fixed += 1
-                else:
-                    issues.append("Stale root-level provider/base_url in config.yaml — run 'hermes doctor --fix'")
-        except Exception:
-            pass
-
-        # Detect stale HERMES_MAX_ITERATIONS ghost in .env shadowing
-        # agent.max_turns in config.yaml (issue #17534). The setup wizard
-        # used to dual-write the iteration budget to both stores; users who
-        # later edit only config.yaml are left with a .env ghost. The gateway
-        # bridge normally derives HERMES_MAX_ITERATIONS from agent.max_turns
-        # at startup, but if that bridge bails (any earlier config-parse
-        # error), the stale .env value silently wins and the agent runs at the
-        # wrong budget — e.g. config says 400 but the activity line reads N/90.
-        # Read the .env FILE directly (load_env), not get_env_value/os.environ,
-        # which the startup bridge may already have overridden.
-        try:
-            from hermes_cli.config import load_env, read_user_config_raw, remove_env_value
-            # Raw-file diagnostic: drift check against the raw file.
-            raw_config = read_user_config_raw(config_path)
-            agent_cfg = raw_config.get("agent")
-            cfg_max_turns = (
-                agent_cfg.get("max_turns")
-                if isinstance(agent_cfg, dict)
-                else None
-            )
-            # Legacy root-level key counts too.
-            if cfg_max_turns is None:
-                cfg_max_turns = raw_config.get("max_turns")
-            env_ghost = load_env().get("HERMES_MAX_ITERATIONS")
-            drift = (
-                cfg_max_turns is not None
-                and env_ghost is not None
-                and str(cfg_max_turns).strip() != str(env_ghost).strip()
-            )
-            if drift:
-                check_warn(
-                    f"HERMES_MAX_ITERATIONS={env_ghost} in .env shadows "
-                    f"agent.max_turns={cfg_max_turns} in config.yaml",
-                    "(stale ghost from an earlier `hermes setup` run)",
-                )
-                if should_fix:
-                    if remove_env_value("HERMES_MAX_ITERATIONS"):
-                        check_ok(
-                            "Removed stale HERMES_MAX_ITERATIONS from .env "
-                            f"(config.yaml agent.max_turns={cfg_max_turns} is now authoritative)"
-                        )
-                        f.fixed += 1
-                    else:
-                        check_warn("Could not remove HERMES_MAX_ITERATIONS from .env")
-                        manual_issues.append(
-                            "Manually delete the HERMES_MAX_ITERATIONS line from "
-                            f"{_DHH}/.env — config.yaml agent.max_turns is authoritative."
-                        )
-                else:
-                    issues.append(
-                        "Stale HERMES_MAX_ITERATIONS in .env shadows config.yaml — "
-                        "run 'hermes doctor --fix'"
-                    )
-        except Exception:
-            pass
-
-        # Surface deprecated/legacy config keys and env vars (warn-only).
-        # Migrations may still live in config.py version steps; doctor does
-        # not auto-delete here — only tells the user the modern replacement.
-        try:
-            from hermes_cli.config import load_env as _load_env_depr
-            from hermes_cli.config import read_user_config_raw as _read_raw_depr
-
-            # Raw-file diagnostic: deprecation sweep inspects the raw file.
-            _raw_for_depr = _read_raw_depr(config_path)
-            # Prefer the on-disk .env so bridged process env (e.g. TERMINAL_CWD
-            # from terminal.cwd) does not false-positive.
-            try:
-                _env_for_depr = _load_env_depr()
-            except Exception:
-                _env_for_depr = {}
-            report_deprecated_config_and_env(_raw_for_depr, _env_for_depr)
-        except Exception:
-            pass
-
-        # Validate config structure (catches malformed custom_providers, etc.)
-        try:
-            from hermes_cli.config import validate_config_structure
-            config_issues = validate_config_structure()
-            if config_issues:
-                _section("Config Structure")
-                for ci in config_issues:
-                    if ci.severity == "error":
-                        check_fail(ci.message)
-                    else:
-                        check_warn(ci.message)
-                    # Show the hint indented
-                    for hint_line in ci.hint.splitlines():
-                        check_info(hint_line)
-                    issues.append(ci.message)
-        except Exception:
-            pass
-
-    if not config_path.exists():
-        # No config.yaml — still surface deprecated env vars from .env.
-        try:
-            from hermes_cli.config import load_env as _load_env_depr
-
-            try:
-                _env_for_depr = _load_env_depr()
-            except Exception:
-                _env_for_depr = {}
-            report_deprecated_config_and_env({}, _env_for_depr)
+            step(f, should_fix, config_path if config_path.exists() else None)
         except Exception:
             pass
     return f
