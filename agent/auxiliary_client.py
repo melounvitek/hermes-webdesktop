@@ -1307,14 +1307,20 @@ def _to_openai_base_url(base_url: str) -> str:
     return url
 
 
-def _select_pool_entry(provider: str) -> Tuple[bool, Optional[Any]]:
-    """Return (pool_exists_for_provider, selected_entry)."""
+def _load_pool_with_credentials(provider: str, note: str = "") -> Optional[Any]:
+    """``load_pool(provider)`` when it has credentials, else None (never raises)."""
     try:
         pool = load_pool(provider)
     except Exception as exc:
-        logger.debug("Auxiliary client: could not load pool for %s: %s", provider, exc)
-        return False, None
-    if not pool or not pool.has_credentials():
+        logger.debug("Auxiliary client: could not load pool for %s%s: %s", provider, note, exc)
+        return None
+    return pool if pool and pool.has_credentials() else None
+
+
+def _select_pool_entry(provider: str) -> Tuple[bool, Optional[Any]]:
+    """Return (pool_exists_for_provider, selected_entry)."""
+    pool = _load_pool_with_credentials(provider)
+    if pool is None:
         return False, None
     try:
         return True, pool.select()
@@ -1325,12 +1331,8 @@ def _select_pool_entry(provider: str) -> Tuple[bool, Optional[Any]]:
 
 def _peek_pool_entry(provider: str) -> Optional[Any]:
     """Best-effort current/next pool entry without mutating selection order."""
-    try:
-        pool = load_pool(provider)
-    except Exception as exc:
-        logger.debug("Auxiliary client: could not load pool for %s (peek): %s", provider, exc)
-        return None
-    if not pool or not pool.has_credentials():
+    pool = _load_pool_with_credentials(provider, " (peek)")
+    if pool is None:
         return None
     try:
         current_fn = getattr(pool, "current", None)
@@ -8436,7 +8438,6 @@ async def _acreate_with_stream(
     )
 
 
-@_relay_auxiliary_call
 # ── Shared request head + recovery ladder for call_llm / async_call_llm ────────
 # The sync and async entry points differ only in how a provider request is
 # awaited. Route resolution (``_resolve_call_client``) and the ordered recovery
@@ -9056,6 +9057,7 @@ async def _drive_ladder_async(ladder, perform: Callable[[_LadderStep], Any]) -> 
         return stop.value
 
 
+@_relay_auxiliary_call
 def call_llm(
     task: str = None,
     *,
