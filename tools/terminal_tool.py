@@ -1224,6 +1224,34 @@ def _run_foreground(
     )
 
 
+def _pre_exec_block(
+    command: str, *, env: Any, env_type: str, cwd: str,
+    workdir: Optional[str], session_key: str,
+) -> Optional[str]:
+    """Finished blocked-result JSON when the command must not run, else None.
+
+    Order matters: gateway lifecycle first (protects the running gateway),
+    then the dangerous-workdir check, then the self-repo guard (local only).
+    """
+    blocked = gateway_lifecycle_block(
+        command=command, env=env, env_type=env_type, cwd=cwd,
+        workdir=workdir, session_key=session_key,
+    )
+    if blocked:
+        return blocked
+    if workdir:
+        workdir_error = _validate_workdir(workdir)
+        if workdir_error:
+            logger.warning("Blocked dangerous workdir: %s (command: %s)",
+                           workdir[:200], _safe_command_preview(command))
+            return _error_json(workdir_error, status="blocked")
+    if env_type == "local":
+        return self_repo_block(
+            command=command, cwd=cwd, workdir=workdir, session_key=session_key,
+        ) or None
+    return None
+
+
 def terminal_tool(
     command: str,
     background: bool = False,
@@ -1269,26 +1297,12 @@ def terminal_tool(
 
         session_key = get_current_session_key(default="") or (task_id or "")
 
-        blocked = gateway_lifecycle_block(
-            command=command, env=env, env_type=env_type, cwd=cwd,
+        blocked = _pre_exec_block(
+            command, env=env, env_type=env_type, cwd=cwd,
             workdir=workdir, session_key=session_key,
         )
         if blocked:
             return blocked
-
-        if workdir:
-            workdir_error = _validate_workdir(workdir)
-            if workdir_error:
-                logger.warning("Blocked dangerous workdir: %s (command: %s)",
-                               workdir[:200], _safe_command_preview(command))
-                return _error_json(workdir_error, status="blocked")
-
-        if env_type == "local":
-            blocked = self_repo_block(
-                command=command, cwd=cwd, workdir=workdir, session_key=session_key,
-            )
-            if blocked:
-                return blocked
 
         # Pre-exec security checks (tirith + dangerous command detection);
         # force=True means the user already confirmed.
