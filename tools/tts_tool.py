@@ -93,7 +93,6 @@ from tools.tts_command_provider import (  # noqa: F401 — historical names re-e
     _get_command_tts_output_format,
     _get_command_tts_timeout,
     _get_named_provider_config,
-    _get_provider_section,
     _is_command_provider_config,
     _is_command_tts_voice_compatible,
     _iter_command_providers,
@@ -111,15 +110,12 @@ from tools.tool_backend_helpers import (  # noqa: F401 — seams patched by test
 )
 from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-exported
     FALLBACK_MAX_TEXT_LENGTH,
-    ELEVENLABS_MODEL_MAX_TEXT_LENGTH,
     PROVIDER_MAX_TEXT_LENGTH,
-    _positive_int_override,
     _resolve_max_text_length,
     AudioDeliveryProfile,
     _build_audio_delivery_files,
     _concat_audio_files,
     _convert_to_opus,
-    _has_ffmpeg,
     _pack_audio_files_for_delivery,
     _repair_ogg_container,
     _resolve_audio_delivery_profile,
@@ -130,15 +126,11 @@ from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-expo
 )
 from tools.tts_tool_providers import (  # noqa: F401 — historical names re-exported
     DEFAULT_ELEVENLABS_MODEL_ID,
-    DEFAULT_ELEVENLABS_STREAMING_MODEL_ID,
     DEFAULT_ELEVENLABS_VOICE_ID,
-    DEFAULT_GEMINI_TTS_BASE_URL,
     DEFAULT_GEMINI_TTS_MODEL,
     DEFAULT_GEMINI_TTS_VOICE,
     DEFAULT_MINIMAX_BASE_URL,
     DEFAULT_MINIMAX_CN_BASE_URL,
-    DEFAULT_XAI_BASE_URL,
-    DEFAULT_XAI_VOICE_ID,
     TTS_RESPONSE_BODY_LIMIT_BYTES,
     _XAI_FIRST_SENTENCE_RE,
     _XAI_INLINE_SPEECH_TAGS,
@@ -151,9 +143,7 @@ from tools.tts_tool_providers import (  # noqa: F401 — historical names re-exp
     _generate_minimax_tts,
     _generate_mistral_tts,
     _generate_xai_tts,
-    _read_tts_response_bytes,
     _resolve_minimax_tts_runtime,
-    _tts_response_format_from_path,
 )
 from tools.tts_tool_local import (  # noqa: F401 — historical names re-exported
     DEFAULT_PIPER_VOICE,
@@ -163,8 +153,6 @@ from tools.tts_tool_local import (  # noqa: F401 — historical names re-exporte
     _generate_neutts,
     _generate_piper_tts,
     _kittentts_model_cache,
-    _load_kittentts_model_for_config,
-    _load_piper_voice_for_config,
     _piper_voice_cache,
     _resolve_piper_voice_path,
     _tts_cache_get_or_load,
@@ -179,7 +167,6 @@ from tools.tts_tool_plugins import (  # noqa: F401 — historical names re-expor
     _plugin_provider_is_voice_compatible,
 )
 from tools.tts_tool_openai import (  # noqa: F401 — historical names re-exported
-    DEFAULT_DEEPINFRA_TTS_VOICE,
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_OPENAI_MODEL,
     DEFAULT_OPENAI_VOICE,
@@ -187,16 +174,11 @@ from tools.tts_tool_openai import (  # noqa: F401 — historical names re-export
     _generate_deepinfra_tts,
     _generate_openai_tts,
     _has_openai_audio_backend,
-    _managed_openai_audio_route,
     _resolve_openai_audio_client_config,
 )
 from tools.tts_tool_lifecycle import (  # noqa: F401 — historical names re-exported
-    _lazy_sdk_feature_for_provider,
     _local_tts_warmers,
     _reset_tts_leases_for_tests,
-    _signal_user_tts_provider,
-    _tts_lease_lock,
-    _tts_leases,
     acquire_tts_lease,
     release_tts_lease,
     release_tts_provider,

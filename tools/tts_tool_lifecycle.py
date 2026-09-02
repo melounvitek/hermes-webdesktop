@@ -30,7 +30,11 @@ from tools.tts_command_provider import (
     command_env_passthrough as _command_provider_env_passthrough,
     render_command_template as _render_command_tts_template,
 )
-from tools.tts_tool_local import _LOCAL_TTS_MODEL_CACHES
+from tools.tts_tool_local import (
+    _LOCAL_TTS_MODEL_CACHES,
+    _load_kittentts_model_for_config,
+    _load_piper_voice_for_config,
+)
 from tools.tts_tool_plugins import _lookup_plugin_provider
 
 logger = logging.getLogger("tools.tts_tool")
@@ -50,8 +54,8 @@ _tts_leases: set = set()
 def _local_tts_warmers() -> Dict[str, Callable[[Dict[str, Any]], Any]]:
     """Provider name → loader populating that engine's cache slot (same key synthesis uses)."""
     return {
-        "piper": lambda cfg: _origin()._load_piper_voice_for_config(cfg)[0],
-        "kittentts": lambda cfg: _origin()._load_kittentts_model_for_config(cfg)[0],
+        "piper": lambda cfg: _load_piper_voice_for_config(cfg)[0],
+        "kittentts": lambda cfg: _load_kittentts_model_for_config(cfg)[0],
     }
 
 

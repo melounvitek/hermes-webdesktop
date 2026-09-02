@@ -227,11 +227,11 @@ class ElevenLabsStreamer(StreamingTTSProvider):
         return bool(_resolve_key("ELEVENLABS_API_KEY", "elevenlabs"))
 
     def stream(self, text: str) -> Iterator[bytes]:
-        from tools.tts_tool import (
+        from tools.tts_tool import _import_elevenlabs
+        from tools.tts_tool_providers import (
             DEFAULT_ELEVENLABS_STREAMING_MODEL_ID,
             DEFAULT_ELEVENLABS_VOICE_ID,
             _elevenlabs_environment_kwargs,
-            _import_elevenlabs,
         )
 
         client = _import_elevenlabs()(
@@ -312,7 +312,7 @@ class GeminiStreamer(StreamingTTSProvider):
 
         import requests
 
-        from tools.tts_tool import (
+        from tools.tts_tool_providers import (
             DEFAULT_GEMINI_TTS_BASE_URL,
             DEFAULT_GEMINI_TTS_MODEL,
             DEFAULT_GEMINI_TTS_VOICE,
@@ -412,7 +412,7 @@ class XAIStreamer(StreamingTTSProvider):
 
         import websockets
 
-        from tools.tts_tool import DEFAULT_XAI_VOICE_ID
+        from tools.tts_tool_providers import DEFAULT_XAI_VOICE_ID
         from tools.xai_http import resolve_xai_http_credentials
 
         creds = resolve_xai_http_credentials()
