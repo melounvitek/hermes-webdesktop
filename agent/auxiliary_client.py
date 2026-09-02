@@ -417,25 +417,27 @@ def _aux_progress_active() -> bool:
     return getattr(_aux_progress, "hook", None) is not None
 
 
-def _event_field(event: Any, name: str) -> Any:
-    if isinstance(event, dict):
-        return event.get(name)
-    return getattr(event, name, None)
+def _field(obj: Any, key: str, default: Any = None) -> Any:
+    """Field access for wire objects that may be dicts or SDK/SimpleNamespace objects."""
+    val = obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+    return default if val is None else val
+
+
 
 
 def _anthropic_event_has_content(event: Any) -> bool:
     """Whether an Anthropic stream event carries a non-empty payload."""
-    event_type = _event_field(event, "type")
+    event_type = _field(event, "type")
     if event_type == "content_block_delta":
-        delta = _event_field(event, "delta")
+        delta = _field(event, "delta")
         return any(
-            bool(_event_field(delta, field))
+            bool(_field(delta, field))
             for field in ("text", "thinking", "partial_json", "signature", "citation")
         )
     if event_type == "content_block_start":
-        block = _event_field(event, "content_block")
-        return _event_field(block, "type") == "tool_use" and any(
-            bool(_event_field(block, field)) for field in ("id", "name")
+        block = _field(event, "content_block")
+        return _field(block, "type") == "tool_use" and any(
+            bool(_field(block, field)) for field in ("id", "name")
         )
     return False
 
@@ -488,13 +490,13 @@ _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS = 60.0
 
 def _codex_event_has_content(event: Any) -> bool:
     """Whether a Codex Responses event carries a non-empty payload."""
-    event_type = _event_field(event, "type")
+    event_type = _field(event, "type")
     if event_type in _CODEX_PROGRESS_DELTA_TYPES:
-        return bool(_event_field(event, "delta"))
+        return bool(_field(event, "delta"))
     if event_type == "response.output_item.added":
-        item = _event_field(event, "item")
-        return "function_call" in str(_event_field(item, "type") or "") and any(
-            bool(_event_field(item, field))
+        item = _field(event, "item")
+        return "function_call" in str(_field(item, "type") or "") and any(
+            bool(_field(item, field))
             for field in ("id", "call_id", "name", "arguments")
         )
     return False
@@ -1441,31 +1443,23 @@ def _scoped_key_env(name: str) -> str:
 # Responses API so auxiliary consumers need no changes.
 
 
-def _item_get(obj: Any, key: str, default: Any = None) -> Any:
-    """Field access for Responses output items, which may be SimpleNamespace (raw-event path) or dicts."""
-    val = getattr(obj, key, None)
-    if val is None and isinstance(obj, dict):
-        val = obj.get(key, default)
-    return val if val is not None else default
-
-
 def _parse_codex_final_response(final: Any) -> Tuple[List[str], List[Any], Any]:
     """Split a completed Responses object into (text_parts, tool_calls, usage) in chat.completions shape."""
     text_parts: List[str] = []
     tool_calls_raw: List[Any] = []
     for item in (getattr(final, "output", None) or []):
-        item_type = _item_get(item, "type")
+        item_type = _field(item, "type")
         if item_type == "message":
-            for part in (_item_get(item, "content") or []):
-                if _item_get(part, "type") in {"output_text", "text"}:
-                    text_parts.append(_item_get(part, "text", ""))
+            for part in (_field(item, "content") or []):
+                if _field(part, "type") in {"output_text", "text"}:
+                    text_parts.append(_field(part, "text", ""))
         elif item_type == "function_call":
             tool_calls_raw.append(SimpleNamespace(
-                id=_item_get(item, "call_id", ""),
+                id=_field(item, "call_id", ""),
                 type="function",
                 function=SimpleNamespace(
-                    name=_item_get(item, "name", ""),
-                    arguments=_item_get(item, "arguments", "{}"),
+                    name=_field(item, "name", ""),
+                    arguments=_field(item, "arguments", "{}"),
                 ),
             ))
     usage = None
@@ -7931,33 +7925,26 @@ def _recover_aux_response_message(response: Any) -> Optional[Any]:
 
 
 def _extract_aux_response_text(response: Any) -> str:
-    output_text = _obj_get(response, "output_text")
+    output_text = _field(response, "output_text")
     if isinstance(output_text, str) and output_text.strip():
         return output_text.strip()
 
-    output = _obj_get(response, "output")
+    output = _field(response, "output")
     if not isinstance(output, list):
         return ""
 
     parts: List[str] = []
     for item in output:
-        item_type = _obj_get(item, "type")
+        item_type = _field(item, "type")
         if item_type and item_type != "message":
             continue
-        for part in (_obj_get(item, "content") or []):
-            part_type = _obj_get(part, "type")
+        for part in (_field(item, "content") or []):
+            part_type = _field(part, "type")
             if part_type in {"output_text", "text", None}:
-                text = _obj_get(part, "text")
+                text = _field(part, "text")
                 if isinstance(text, str) and text.strip():
                     parts.append(text.strip())
     return "\n".join(parts).strip()
-
-
-def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
-    value = getattr(obj, key, default)
-    if value is default and isinstance(obj, dict):
-        value = obj.get(key, default)
-    return value
 
 
 # ── Streamed aggregation for progress-hooked auxiliary calls ─────────────
