@@ -219,6 +219,31 @@ def compute_sale_discount(
     return None
 
 
+def _get_json(url: str, headers: dict[str, str], timeout: float, opener=None) -> Optional[dict]:
+    """GET *url* as JSON via the origin's catalog opener (or *opener*); None on any failure."""
+    from hermes_cli.models import _urlopen_model_catalog_request
+
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with (opener or _urlopen_model_catalog_request)(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def _pricing_entry(pricing: dict, prompt_key: str = "prompt", completion_key: str = "completion") -> dict[str, Any]:
+    """Picker-shape ``{prompt, completion[, input_cache_read, input_cache_write]}`` from a catalog
+    ``pricing`` block whose cache fields already use the hermes names."""
+    entry: dict[str, Any] = {
+        "prompt": str(pricing.get(prompt_key, "")),
+        "completion": str(pricing.get(completion_key, "")),
+    }
+    for key in ("input_cache_read", "input_cache_write"):
+        if pricing.get(key):
+            entry[key] = str(pricing[key])
+    return entry
+
+
 def fetch_models_with_pricing(
     api_key: str | None = None,
     base_url: str = "https://openrouter.ai/api",
@@ -238,7 +263,7 @@ def fetch_models_with_pricing(
     discount under ``pricing.original``, those pre-discount rates are copied through as a nested
     ``original`` dict so pickers can show sale chrome.
     """
-    from hermes_cli.models import _HERMES_USER_AGENT, _urlopen_model_catalog_request
+    from hermes_cli.models import _HERMES_USER_AGENT
     url_root = (base_url or "").rstrip("/")
     cache_key = url_root + _pricing_auth_fingerprint(api_key)
     if not force_refresh:
@@ -247,23 +272,16 @@ def fetch_models_with_pricing(
             return cached
 
     url = url_root + "/v1/models"
-    headers: dict[str, str] = {
-        "Accept": "application/json",
-        "User-Agent": _HERMES_USER_AGENT,
-    }
+    headers = {"Accept": "application/json", "User-Agent": _HERMES_USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
-    except Exception:
+    payload = _get_json(url, headers, timeout)
+    if payload is None:
         return _cache_catalog(cache_key, {})
 
-    # Same document the reasoning-capability fetch would pull, and every
-    # picker/pricing surface goes through here — mirror it so a later hot-path
-    # lookup (and the next process) has an answer without its own round-trip.
+    # Same document the reasoning-capability fetch would pull, and every picker/pricing surface
+    # goes through here — mirror it so a later hot-path lookup (and the next process) has an
+    # answer without its own round-trip.
     _seed_reasoning_caps(url, payload.get("data"))
 
     result: dict[str, dict[str, Any]] = {}
@@ -271,30 +289,17 @@ def fetch_models_with_pricing(
         mid = item.get("id")
         pricing = item.get("pricing")
         if mid and isinstance(pricing, dict):
-            entry: dict[str, Any] = {
-                "prompt": str(pricing.get("prompt", "")),
-                "completion": str(pricing.get("completion", "")),
-            }
-            if pricing.get("input_cache_read"):
-                entry["input_cache_read"] = str(pricing["input_cache_read"])
-            if pricing.get("input_cache_write"):
-                entry["input_cache_write"] = str(pricing["input_cache_write"])
-            # Sale chrome is Nous Portal-only. Never copy pricing.original for
-            # OpenRouter / other OpenAI-compatible catalogs.
-            if include_sale_original:
-                original = pricing.get("original")
-                if isinstance(original, dict):
-                    orig_entry: dict[str, str] = {}
-                    for key in (
-                        "prompt",
-                        "completion",
-                        "input_cache_read",
-                        "input_cache_write",
-                    ):
-                        if original.get(key) not in (None, ""):
-                            orig_entry[key] = str(original[key])
-                    if orig_entry.get("prompt") or orig_entry.get("completion"):
-                        entry["original"] = orig_entry
+            entry = _pricing_entry(pricing)
+            # Sale chrome is Nous Portal-only; never copy pricing.original for other catalogs.
+            original = pricing.get("original") if include_sale_original else None
+            if isinstance(original, dict):
+                orig_entry = {
+                    key: str(original[key])
+                    for key in ("prompt", "completion", "input_cache_read", "input_cache_write")
+                    if original.get(key) not in (None, "")
+                }
+                if orig_entry.get("prompt") or orig_entry.get("completion"):
+                    entry["original"] = orig_entry
             result[mid] = entry
 
     return _cache_catalog(cache_key, result, cache_ttl_seconds)
@@ -318,14 +323,8 @@ def fetch_ai_gateway_pricing(
         if cached is not None:
             return cached
 
-    try:
-        req = urllib.request.Request(
-            f"{cache_key}/models",
-            headers={"Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
-    except Exception:
+    payload = _get_json(f"{cache_key}/models", {"Accept": "application/json"}, timeout, opener=urllib.request.urlopen)
+    if payload is None:
         return _cache_catalog(cache_key, {})
 
     result: dict[str, dict[str, str]] = {}
@@ -334,18 +333,8 @@ def fetch_ai_gateway_pricing(
             continue
         mid = item.get("id")
         pricing = item.get("pricing")
-        if not (mid and isinstance(pricing, dict)):
-            continue
-        entry: dict[str, str] = {
-            "prompt": str(pricing.get("input", "")),
-            "completion": str(pricing.get("output", "")),
-        }
-        if pricing.get("input_cache_read"):
-            entry["input_cache_read"] = str(pricing["input_cache_read"])
-        if pricing.get("input_cache_write"):
-            entry["input_cache_write"] = str(pricing["input_cache_write"])
-        result[mid] = entry
-
+        if mid and isinstance(pricing, dict):
+            result[mid] = _pricing_entry(pricing, "input", "output")
     return _cache_catalog(cache_key, result)
 
 
@@ -366,7 +355,6 @@ def _resolve_nous_pricing_credentials() -> tuple[str, str]:
     Without (1), a staging profile's sale ``pricing.original`` never reaches the pickers — the
     anonymous fallback would hit prod, which has no ``original`` field.
     """
-    env_base = None
     try:
         from hermes_cli.auth import _nous_inference_env_override
 
@@ -562,7 +550,7 @@ def _fetch_novita_pricing(
     per-token strings the shared pricing formatter expects. Results are cached in
     ``_pricing_cache`` keyed on the resolved base URL so menu renders don't re-hit the network.
     """
-    from hermes_cli.models import _HERMES_USER_AGENT, _urlopen_model_catalog_request
+    from hermes_cli.models import _HERMES_USER_AGENT
     api_key = os.getenv("NOVITA_API_KEY", "").strip()
     if not api_key:
         return {}
@@ -574,18 +562,9 @@ def _fetch_novita_pricing(
         if cached is not None:
             return cached
 
-    url = cache_key + "/models"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-        "User-Agent": _HERMES_USER_AGENT,
-    }
-
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
-    except Exception:
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json", "User-Agent": _HERMES_USER_AGENT}
+    payload = _get_json(cache_key + "/models", headers, timeout)
+    if payload is None:
         return _cache_catalog(cache_key, {})
 
     result: dict[str, dict[str, str]] = {}
@@ -619,28 +598,18 @@ def _fetch_deepinfra_pricing(
     (OpenRouter shape). Cached via the catalog helper so repeated picker renders are free.
     """
     from hermes_cli.models import _fetch_deepinfra_models_by_tag
-    items = _fetch_deepinfra_models_by_tag(
-        "chat", timeout=timeout, force_refresh=force_refresh
-    )
-    if not items:
-        return {}
-
+    items = _fetch_deepinfra_models_by_tag("chat", timeout=timeout, force_refresh=force_refresh)
     result: dict[str, dict[str, str]] = {}
-    for item in items:
+    for item in items or []:
         metadata = item.get("metadata") or {}
         pricing = metadata.get("pricing") if isinstance(metadata, dict) else None
         if not isinstance(pricing, dict):
             continue
-        entry: dict[str, str] = {}
-        inp = pricing.get("input_tokens")
-        out = pricing.get("output_tokens")
-        cache_read = pricing.get("cache_read_tokens")
-        if inp is not None:
-            entry["prompt"] = str(float(inp) / 1_000_000)
-        if out is not None:
-            entry["completion"] = str(float(out) / 1_000_000)
-        if cache_read is not None:
-            entry["input_cache_read"] = str(float(cache_read) / 1_000_000)
+        entry = {
+            ours: str(float(pricing[theirs]) / 1_000_000)
+            for theirs, ours in (("input_tokens", "prompt"), ("output_tokens", "completion"), ("cache_read_tokens", "input_cache_read"))
+            if pricing.get(theirs) is not None
+        }
         if entry:
             result[item["id"]] = entry
     return result

@@ -193,9 +193,9 @@ def _ollama_probe_headers(req: _Request) -> dict[str, str]:
     ``api_key`` becomes the Authorization header unless the caller already sent one.
     """
     from hermes_cli import models as _m
+    from hermes_cli.models_local import _configured_ollama_base_url
 
-    cfg = _m._get_provider_config_dict("ollama")
-    configured_base = str(cfg.get("base_url") or cfg.get("api") or cfg.get("url") or "").strip()
+    configured_base = _configured_ollama_base_url()
     configured_allowed = not (
         configured_base and not _m._same_ollama_native_root(req.base_url or "", configured_base)
     )
