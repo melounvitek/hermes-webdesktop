@@ -38,5 +38,4 @@ __all__ = [
     "release_computer_use_session",
     "set_approval_callback",
     "check_computer_use_requirements",
-    "release_computer_use_session",
 ]
