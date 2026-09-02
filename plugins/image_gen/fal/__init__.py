@@ -1,31 +1,20 @@
 """FAL.ai image generation backend.
 
-Wraps the 18-model FAL catalog (FLUX 2, Z-Image, Nano Banana, GPT
-Image 1.5, Recraft, Imagen 4, Qwen, Ideogram, …) as an
-:class:`ImageGenProvider` implementation.
+Wraps the FAL catalog (FLUX 2, Z-Image, Nano Banana, GPT Image 1.5, Recraft,
+Imagen 4, Qwen, Ideogram, …) as an :class:`ImageGenProvider`.
 
-The heavy lifting — model catalog, payload construction, request
-submission, managed-Nous-gateway selection, Clarity Upscaler chaining
-— lives in :mod:`tools.image_generation_tool`. This plugin reaches into
-that module via call-time indirection (``import tools.image_generation_tool as _it``)
-so:
-
-* the existing test suite (``tests/tools/test_image_generation.py``,
-  ``tests/tools/test_managed_media_gateways.py``) keeps patching
-  ``image_tool._submit_fal_request`` / ``image_tool.fal_client`` /
-  ``image_tool._managed_fal_client`` without modification, and
-* there's exactly one canonical FAL code path on disk — the plugin is a
-  registration adapter, not a parallel implementation.
-
-See issue #26241 for the migration plan and the
-``plugin-extraction-test-patch-compatibility.md`` rules this follows.
+The heavy lifting — model catalog, payload construction, request submission,
+managed-Nous-gateway selection, Clarity Upscaler chaining — lives in
+:mod:`tools.image_generation_tool`. This plugin reaches into that module via
+call-time indirection (``import tools.image_generation_tool as _it``) so the
+existing tests keep patching ``image_tool.*`` unchanged, and there is exactly
+one canonical FAL code path on disk — the plugin is a registration adapter.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
 from agent.image_gen_provider import (
@@ -33,19 +22,17 @@ from agent.image_gen_provider import (
     ImageGenProvider,
     resolve_aspect_ratio,
 )
+from plugins.image_gen._common import api_key_setup_schema, catalog_rows
 
 logger = logging.getLogger(__name__)
 
+_PASSTHROUGH_KWARGS = (
+    "num_inference_steps", "guidance_scale", "num_images", "output_format", "seed", "upscale",
+)
+
 
 class FalImageGenProvider(ImageGenProvider):
-    """FAL.ai image generation backend.
-
-    Delegates to ``tools.image_generation_tool.image_generate_tool`` so
-    the in-tree FAL implementation (model catalog, payload builder,
-    managed-gateway selection, Clarity Upscaler chaining) is the single
-    source of truth. Everything is resolved at call time via the
-    ``_it`` indirection so tests can monkey-patch the legacy module.
-    """
+    """FAL.ai backend delegating to ``tools.image_generation_tool`` at call time."""
 
     @property
     def name(self) -> str:
@@ -56,70 +43,46 @@ class FalImageGenProvider(ImageGenProvider):
         return "FAL.ai"
 
     def is_available(self) -> bool:
-        # Available when direct FAL_KEY is set OR the managed Nous
-        # gateway resolves a fal-queue origin. Both checks come from the
-        # legacy module so this provider tracks whatever logic ships
-        # there.
+        # Direct FAL_KEY or a managed Nous fal-queue origin; both checks live in
+        # the legacy module so this provider tracks whatever logic ships there.
         import tools.image_generation_tool as _it
         try:
             return bool(_it.check_fal_api_key())
-        except Exception:  # noqa: BLE001 — defensive; never break the picker
+        except Exception:  # noqa: BLE001 — never break the picker
             return False
 
     def list_models(self) -> List[Dict[str, Any]]:
         import tools.image_generation_tool as _it
-        return [
-            {
-                "id": model_id,
-                "display": meta.get("display", model_id),
-                "speed": meta.get("speed", ""),
-                "strengths": meta.get("strengths", ""),
-                "price": meta.get("price", ""),
-            }
-            for model_id, meta in _it.FAL_MODELS.items()
-        ]
+        return catalog_rows(_it.FAL_MODELS)
 
     def default_model(self) -> Optional[str]:
         import tools.image_generation_tool as _it
         return _it.DEFAULT_MODEL
 
     def get_setup_schema(self) -> Dict[str, Any]:
-        return {
-            "name": "FAL.ai",
-            "badge": "paid",
-            "tag": "Pick from flux-2-klein, flux-2-pro, gpt-image, nano-banana-2, nano-banana-pro, etc. — text-to-image & image editing",
-            "env_vars": [
-                {
-                    "key": "FAL_KEY",
-                    "prompt": "FAL API key",
-                    "url": "https://fal.ai/dashboard/keys",
-                },
-            ],
-        }
+        return api_key_setup_schema(
+            "FAL.ai", "paid",
+            "Pick from flux-2-klein, flux-2-pro, gpt-image, nano-banana-2, nano-banana-pro, etc. — text-to-image & image editing",
+            key="FAL_KEY", prompt="FAL API key", url="https://fal.ai/dashboard/keys",
+        )
 
     def capabilities(self) -> Dict[str, Any]:
-        # Whether image-to-image is available depends on the currently-
-        # selected FAL model (each model entry declares an edit_endpoint or
-        # not). Report the active model's actual surface so the dynamic tool
-        # schema is accurate.
+        # Image-to-image depends on the currently selected FAL model (each entry
+        # declares an edit_endpoint or not); Clarity Upscaler chains on request
+        # for any model.
         import tools.image_generation_tool as _it
 
         try:
             _model_id, meta = _it._resolve_fal_model()
         except Exception:  # noqa: BLE001
             return {"modalities": ["text"], "max_reference_images": 0}
-        # Clarity Upscaler chains on explicit request for any FAL model.
         if meta.get("edit_endpoint"):
             return {
                 "modalities": ["text", "image"],
                 "max_reference_images": int(meta.get("max_reference_images") or 1),
                 "supports_upscale": True,
             }
-        return {
-            "modalities": ["text"],
-            "max_reference_images": 0,
-            "supports_upscale": True,
-        }
+        return {"modalities": ["text"], "max_reference_images": 0, "supports_upscale": True}
 
     def generate(
         self,
@@ -130,43 +93,24 @@ class FalImageGenProvider(ImageGenProvider):
         reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Generate or edit an image via the legacy FAL pipeline.
-
-        Forwards prompt + aspect_ratio + image_url/reference_image_urls (and
-        any forward-compat extras the schema supports) into
-        :func:`tools.image_generation_tool.image_generate_tool`, then reshapes
-        its JSON-string response into the provider-ABC dict format consumed by
-        ``_dispatch_to_plugin_provider``.
-        """
+        """Forward to :func:`tools.image_generation_tool.image_generate_tool` and
+        reshape its JSON-string response into the provider-ABC dict."""
         import tools.image_generation_tool as _it
 
         aspect = resolve_aspect_ratio(aspect_ratio)
         passthrough = {
-            key: kwargs[key]
-            for key in (
-                "num_inference_steps",
-                "guidance_scale",
-                "num_images",
-                "output_format",
-                "seed",
-                "upscale",
-            )
+            key: kwargs[key] for key in _PASSTHROUGH_KWARGS
             if key in kwargs and kwargs[key] is not None
         }
-        # Only forward the image-to-image inputs when actually supplied, so a
-        # plain text-to-image call delegates exactly as it did before (no
-        # noisy None kwargs).
+        # Only forward image-to-image inputs when supplied, so a plain
+        # text-to-image call delegates exactly as before (no noisy None kwargs).
         if image_url is not None:
             passthrough["image_url"] = image_url
         if reference_image_urls is not None:
             passthrough["reference_image_urls"] = reference_image_urls
 
         try:
-            raw = _it.image_generate_tool(
-                prompt=prompt,
-                aspect_ratio=aspect,
-                **passthrough,
-            )
+            raw = _it.image_generate_tool(prompt=prompt, aspect_ratio=aspect, **passthrough)
         except Exception as exc:  # noqa: BLE001 — never raise out of generate
             logger.warning("FAL image_generate_tool raised: %s", exc, exc_info=True)
             return {
@@ -192,25 +136,17 @@ class FalImageGenProvider(ImageGenProvider):
                 "error_type": "provider_contract",
             }
 
-        # Stamp provider/prompt/aspect_ratio so downstream consumers see
-        # the uniform shape declared in ``agent.image_gen_provider``.
+        # Stamp the uniform shape declared in ``agent.image_gen_provider``; the
+        # legacy pipeline resolves the model internally, so query it after the fact.
         response.setdefault("provider", "fal")
         response.setdefault("prompt", prompt)
         response.setdefault("aspect_ratio", aspect)
-        # Annotate model best-effort — the legacy pipeline resolves it
-        # internally, so query it after the fact for the response shape.
         if "model" not in response:
             try:
-                model_id, _meta = _it._resolve_fal_model()
-                response["model"] = model_id
+                response["model"] = _it._resolve_fal_model()[0]
             except Exception:  # noqa: BLE001
                 pass
         return response
-
-
-# ---------------------------------------------------------------------------
-# Plugin entry point
-# ---------------------------------------------------------------------------
 
 
 def register(ctx) -> None:
