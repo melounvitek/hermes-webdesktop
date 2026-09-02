@@ -49,6 +49,10 @@ def _run_cli(binary: str, *args: str, timeout: float) -> subprocess.CompletedPro
 def _combined_output(completed: subprocess.CompletedProcess) -> str:
     return ((completed.stdout or "") + (completed.stderr or "")).strip()
 
+def _first_line(text: str) -> Optional[str]:
+    text = text.strip()
+    return text.splitlines()[0].strip() if text else None
+
 def _read_cli_version(binary: str, *, timeout: float = 5.0) -> Optional[str]:
     """First line of ``cua-driver --version`` or None. health_report's ``driver_version``
     can disagree with the real binary (seen on Windows); doctor surfaces both."""
@@ -56,8 +60,7 @@ def _read_cli_version(binary: str, *, timeout: float = 5.0) -> Optional[str]:
         completed = _run_cli(binary, "--version", timeout=timeout)
     except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
         return None
-    text = (completed.stdout or completed.stderr or "").strip()
-    return text.splitlines()[0].strip() if text else None
+    return _first_line(completed.stdout or completed.stderr or "")
 
 def _cli_driver_version(binary: str, timeout: float = 5.0) -> Tuple[str, Optional[str]]:
     """Return (status, version_or_message) from ``cua-driver --version``."""
@@ -69,7 +72,7 @@ def _cli_driver_version(binary: str, timeout: float = 5.0) -> Tuple[str, Optiona
     if failed and not text:
         return "fail", f"--version exited {completed.returncode}"
     m = re.search(r"(\d+\.\d+\.\d+(?:[-+][\w.]+)?)", text)  # typical: "cua-driver 0.10.0"
-    return ("fail" if failed else "pass"), m.group(1) if m else (text.splitlines()[0] if text else "unknown")
+    return ("fail" if failed else "pass"), m.group(1) if m else (_first_line(text) or "unknown")
 
 def _cli_doctor_snippet(binary: str, timeout: float = 8.0) -> Optional[str]:
     """Optional one-shot ``cua-driver doctor`` text (best-effort, never fatal)."""
@@ -108,12 +111,10 @@ def _first_text(result: Report, default: str) -> str:
     return next((t.strip() for t in _text_items(result) if t.strip()), default)
 
 def _extract_health_report_from_result(result: Report) -> Report:
-    """Pull a schema_version=1 report out of an MCP tools/call result.
-
-    Raises ``HealthReportUnavailable`` when the tool denied the call (isError) or the
-    payload is not a real report (0.10's ``{"exit_code": 1}``); ``RuntimeError`` when
-    the response carries no content at all.
-    """
+    """schema_version=1 report from an MCP tools/call result. Raises
+    ``HealthReportUnavailable`` when the tool denied the call (isError) or the payload
+    is not a real report (0.10's ``{"exit_code": 1}``); ``RuntimeError`` when the
+    response carries no content at all."""
     if result.get("isError") is True:
         raise HealthReportUnavailable(_first_text(result, "health_report returned isError=true"))
     sc = result.get("structuredContent")
@@ -208,6 +209,10 @@ def _probe_tool(proc: subprocess.Popen, msg_id: int, name: str) -> Tuple[Optiona
         return None, _first_text(result, f"{name} isError")
     return result, None
 
+def _structured(result: Report) -> Report:
+    sc = result.get("structuredContent")
+    return sc if isinstance(sc, dict) else {}
+
 def _drive_fallback_probes(binary: str, *, timeout: float = 12.0) -> Report:
     """Call working MCP tools (check_permissions, list_apps) in one session.
 
@@ -225,16 +230,14 @@ def _drive_fallback_probes(binary: str, *, timeout: float = 12.0) -> Report:
         if perms is None:
             out["permissions_error"] = err
         else:
-            sc = perms.get("structuredContent")
-            out["permissions"] = sc if isinstance(sc, dict) else {}
+            out["permissions"] = _structured(perms)
         # list_apps — light AX capability probe; text-only success still counts as AX working
         apps, err = _probe_tool(proc, 3, "list_apps")
         out["list_apps_ok"] = apps is not None
         if apps is None:
             out["list_apps_error"] = err
         else:
-            sc = apps.get("structuredContent") or {}
-            app_list = sc.get("apps") if isinstance(sc, dict) else None
+            app_list = _structured(apps).get("apps")
             out["list_apps_count"] = len(app_list) if isinstance(app_list, list) else None
     return out
 
@@ -306,10 +309,9 @@ def _compose_fallback_report(binary: str, *, reason: str = "", timeout: float = 
     probes = _drive_fallback_probes(binary, timeout=timeout)
     if probes.get("init_version"):  # MCP initialize version beats a messy CLI parse
         ver_status, driver_version = "pass", str(probes["init_version"])
-        ver_msg = f"cua-driver {driver_version}"
     else:
         driver_version = ver_value if ver_status == "pass" else (ver_value or "?")
-        ver_msg = f"cua-driver {ver_value}" if ver_status == "pass" else (ver_value or "version unknown")
+    ver_msg = f"cua-driver {driver_version}" if ver_status == "pass" else (ver_value or "version unknown")
     supported = plat in _SUPPORTED_PLATFORMS
     perms = probes.get("permissions") if isinstance(probes.get("permissions"), dict) else None
     reason_short = (reason or "health_report unavailable").strip()
@@ -339,14 +341,11 @@ def _compose_fallback_report(binary: str, *, reason: str = "", timeout: float = 
             "fallback": True, "fallback_reason": reason or "health_report unavailable"}
 
 def _apply_display_count_guard(report: Report) -> Report:
-    """Downgrade an 'ok' report whose screen capture has zero displays.
-
-    macOS ScreenCaptureKit reports ``display_count=0`` on headless Macs and when the
-    built-in panel is asleep — TCC grants are fine, health_report can still say
-    pass/ok, but every capture comes back 0x0. Failing the check turns a silent
-    failure into an actionable one. Applied at the report seam so both the real and
-    the composed fallback path get it.
-    """
+    """Downgrade an 'ok' report whose screen capture has zero displays: macOS
+    ScreenCaptureKit reports ``display_count=0`` on headless Macs / asleep panels — TCC
+    grants fine, health_report pass/ok, yet every capture comes back 0x0. Failing the
+    check turns a silent failure into an actionable one; applied at the report seam so
+    the real and the composed fallback path both get it."""
     checks = report.get("checks")
     for check in checks if isinstance(checks, list) else ():
         if not isinstance(check, dict) or check.get("name") != "screen_capture_capability":
@@ -404,12 +403,9 @@ def _print_text_report(report: Report, color: bool, *, identity: Optional[Report
 
 def run_doctor(driver_cmd: Optional[str] = None, *, include: Sequence[str] = (), skip: Sequence[str] = (),
                json_output: bool = False, color: Optional[bool] = None) -> int:
-    """Resolve the cua-driver binary, call `health_report`, render the result.
-
-    Honors `HERMES_CUA_DRIVER_CMD` via the shared runtime resolver, so doctor diagnoses
-    what `computer_use` will actually invoke. On 0.10.x (health_report denied) it
-    synthesizes a report from check_permissions / list_apps / CLI probes.
-    """
+    """Resolve the cua-driver binary (via the shared runtime resolver, so doctor
+    diagnoses what `computer_use` will actually invoke), call `health_report`, render.
+    On 0.10.x (health_report denied) a report is synthesized from probes."""
     # Windows' locale codec (cp1252, cp936, ...) cannot encode the ✅ ❌ ⚠️ ⏭️ glyphs — force UTF-8.
     for stream in (sys.stdout, sys.stderr):
         with suppress(AttributeError, OSError):
