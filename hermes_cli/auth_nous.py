@@ -9,7 +9,7 @@ helpers are imported lazily inside each function (no import cycle; patches on
 from __future__ import annotations
 
 import logging
-import base64
+import hashlib
 import json
 import os
 import threading
@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional
 from urllib.parse import urlparse
 from hermes_cli.auth_codex import _pool_entries
 from hermes_cli.auth_constants import (
+    _decode_jwt_claims,
     AUTH_LOCK_TIMEOUT_SECONDS,
     AuthError,
     DEFAULT_NOUS_CLIENT_ID,
@@ -46,6 +47,64 @@ if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
 logger = logging.getLogger("hermes_cli.auth")
 
 
+def _token_fingerprint(token: Any) -> Optional[str]:
+    """Return a short hash fingerprint for telemetry without leaking token bytes."""
+    if not isinstance(token, str):
+        return None
+    cleaned = token.strip()
+    if not cleaned:
+        return None
+    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12]
+
+
+def _oauth_trace_enabled() -> bool:
+    raw = os.getenv("HERMES_OAUTH_TRACE", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _oauth_trace(event: str, *, sequence_id: Optional[str] = None, **fields: Any) -> None:
+    if not _oauth_trace_enabled():
+        return
+    payload: Dict[str, Any] = {"event": event}
+    if sequence_id:
+        payload["sequence_id"] = sequence_id
+    payload.update(fields)
+    logger.info("oauth_trace %s", json.dumps(payload, sort_keys=True, ensure_ascii=False))
+
+
+def _iso_after(now: datetime, ttl_seconds: int) -> str:
+    """ISO timestamp *ttl_seconds* after *now* (UTC)."""
+    return datetime.fromtimestamp(now.timestamp() + ttl_seconds, tz=timezone.utc).isoformat()
+
+
+# Nous agent-key slots; a fresh login persists them as None, quarantine strips them.
+_NOUS_EMPTY_AGENT_KEY_FIELDS: Dict[str, Any] = {
+    "agent_key": None,
+    "agent_key_id": None,
+    "agent_key_expires_at": None,
+    "agent_key_expires_in": None,
+    "agent_key_reused": None,
+    "agent_key_obtained_at": None,
+}
+
+
+_NOUS_STALE_PORTAL_HOSTS: FrozenSet[str] = frozenset({
+    "api.nousresearch.com",
+})
+
+
+def _is_terminal_nous_refresh_error(exc: Exception) -> bool:
+    return _is_terminal_refresh_error(exc, "nous")
+
+
+def _is_terminal_xai_oauth_refresh_error(exc: Exception) -> bool:
+    return _is_terminal_refresh_error(exc, "xai-oauth")
+
+
+def _is_terminal_codex_oauth_refresh_error(exc: Exception) -> bool:
+    return _is_terminal_refresh_error(exc, "openai-codex")
+
+
 def _format_nous_entitlement_auth_error(error: AuthError) -> str:
     try:
         from hermes_cli.nous_account import (
@@ -66,7 +125,6 @@ def _format_nous_entitlement_auth_error(error: AuthError) -> str:
 
 
 def _migrate_stale_nous_portal_url(providers: Dict[str, Any]) -> None:
-    from hermes_cli.auth import _NOUS_STALE_PORTAL_HOSTS
     nous = providers.get("nous")
     if not isinstance(nous, dict):
         return
@@ -149,19 +207,6 @@ def _nous_portal_env_override() -> Optional[str]:
     return _optional_base_url(
         os.getenv("HERMES_PORTAL_BASE_URL") or os.getenv("NOUS_PORTAL_BASE_URL")
     )
-
-
-def _decode_jwt_claims(token: Any) -> Dict[str, Any]:
-    if not isinstance(token, str) or token.count(".") != 2:
-        return {}
-    payload = token.split(".")[1]
-    payload += "=" * ((4 - len(payload) % 4) % 4)
-    try:
-        raw = base64.urlsafe_b64decode(payload.encode("utf-8"))
-        claims = json.loads(raw.decode("utf-8"))
-    except Exception:
-        return {}
-    return claims if isinstance(claims, dict) else {}
 
 
 def _scope_values(raw_scope: Any) -> set[str]:
@@ -255,7 +300,6 @@ def _log_nous_invoke_jwt_selected(
     access_token: Any,
     sequence_id: Optional[str] = None,
 ) -> None:
-    from hermes_cli.auth import _oauth_trace, _token_fingerprint
     logger.debug("Nous inference auth: using NAS invoke JWT")
     _oauth_trace(
         "nous_invoke_jwt_selected",
@@ -477,7 +521,7 @@ def _write_shared_nous_state(state: Dict[str, Any]) -> None:
     Best-effort: any failure is swallowed after logging. The shared store is a convenience layer;
     the per-profile auth.json remains the source of truth.
     """
-    from hermes_cli.auth import _nonempty_str, _oauth_trace, _token_fingerprint, _write_private_file_atomic
+    from hermes_cli.auth import _nonempty_str, _write_private_file_atomic
     refresh_token = state.get("refresh_token")
     access_token = state.get("access_token")
     # No refresh_token = nothing worth sharing across profiles
@@ -532,7 +576,6 @@ def _read_shared_nous_state() -> Optional[Dict[str, Any]]:
 
 def _clear_shared_nous_state(reason: str) -> None:
     """Remove the shared Nous OAuth store after a terminal token failure."""
-    from hermes_cli.auth import _oauth_trace
     try:
         with _nous_shared_store_lock():
             path = _nous_shared_store_path()
@@ -577,7 +620,7 @@ def _quarantine_nous_oauth_state(
     reason: str,
 ) -> None:
     """Keep routing metadata but remove dead OAuth material so it is not replayed."""
-    from hermes_cli.auth import _FLAT_OAUTH_TOKEN_KEYS, _NOUS_EMPTY_AGENT_KEY_FIELDS, _auth_file_path, _last_auth_error_marker, _token_fingerprint, invalidate_nous_auth_status_cache
+    from hermes_cli.auth import _FLAT_OAUTH_TOKEN_KEYS, _auth_file_path, _last_auth_error_marker, invalidate_nous_auth_status_cache
     # Forensic logging BEFORE we clear the token material. A hosted agent
     # can take a terminal invalid_grant and get quarantined here silently: the
     # only downstream signal is a "No access token found" WARNING once the pool
@@ -644,7 +687,6 @@ def _quarantine_nous_pool_entries(
     reason: str,
 ) -> bool:
     """Remove singleton-seeded Nous pool entries that contain dead OAuth state."""
-    from hermes_cli.auth import _oauth_trace
     entries = _pool_entries(auth_store, "nous")
     if entries is None:
         return False
@@ -680,7 +722,7 @@ def _try_import_shared_nous_state(
     Returns ``None`` on any failure (expired token, portal unreachable) so the caller falls
     through to the normal device-code flow.
     """
-    from hermes_cli.auth import _is_terminal_nous_refresh_error, _oauth_trace, _read_shared_nous_state, _write_shared_nous_state, refresh_nous_oauth_from_state
+    from hermes_cli.auth import _read_shared_nous_state, _write_shared_nous_state, refresh_nous_oauth_from_state
     try:
         with _nous_shared_store_lock(timeout_seconds=max(timeout_seconds + 5.0, AUTH_LOCK_TIMEOUT_SECONDS)):
             shared = _read_shared_nous_state()
@@ -796,7 +838,7 @@ def _refresh_nous_or_quarantine(
     persist: Callable[[], None],
 ) -> Dict[str, Any]:
     """Redeem the Nous refresh token; on a terminal failure quarantine state + pool, persist, re-raise."""
-    from hermes_cli.auth import _is_terminal_nous_refresh_error, _refresh_access_token
+    from hermes_cli.auth import _refresh_access_token
     try:
         return _refresh_access_token(
             client=client,
@@ -824,7 +866,7 @@ def _apply_nous_refreshed_tokens(
     *inference_base_url*, when given, is the healed network-provenance URL to persist alongside
     the rotated tokens (key order in auth.json is preserved from the original login shape).
     """
-    from hermes_cli.auth import _coerce_ttl_seconds, _iso_after
+    from hermes_cli.auth import _coerce_ttl_seconds
     now = datetime.now(timezone.utc)
     access_ttl = _coerce_ttl_seconds(refreshed.get("expires_in"))
     state["access_token"] = refreshed["access_token"]
@@ -1106,7 +1148,7 @@ class _NousStatePersister:
         self.persisted_any = False
 
     def persist(self, reason: str) -> None:
-        from hermes_cli.auth import _oauth_trace, _save_provider_state_to_source, _token_fingerprint, _write_shared_nous_state
+        from hermes_cli.auth import _save_provider_state_to_source, _write_shared_nous_state
         state = self._state
         if (
             _nous_effective_provider_state(state)
@@ -1217,7 +1259,7 @@ def resolve_nous_runtime_credentials(
     of rotating the shared grant again (otherwise N concurrent processes at the
     same expiry issue N refreshes, each invalidating a sibling's fresh token).
     """
-    from hermes_cli.auth import _assert_nous_inference_jwt_usable, _auth_file_path, _coerce_ttl_seconds, _nous_invoke_jwt_status, _oauth_trace, _parse_iso_timestamp, _provider_state_transaction, _resolve_verify, _select_nous_invoke_jwt, _sync_nous_pool_from_auth_store, _tls_state_from_verify, _token_fingerprint
+    from hermes_cli.auth import _assert_nous_inference_jwt_usable, _auth_file_path, _coerce_ttl_seconds, _nous_invoke_jwt_status, _parse_iso_timestamp, _provider_state_transaction, _resolve_verify, _select_nous_invoke_jwt, _sync_nous_pool_from_auth_store, _tls_state_from_verify
     sequence_id = uuid.uuid4().hex[:12]
 
     with _provider_state_transaction("nous") as (
@@ -1744,7 +1786,7 @@ def _nous_device_code_login(
     on_verification: Optional[Callable[[str, str], None]] = None,
 ) -> Dict[str, Any]:
     """Run the Nous device-code flow and return full OAuth state without persisting."""
-    from hermes_cli.auth import PROVIDER_REGISTRY, _NOUS_EMPTY_AGENT_KEY_FIELDS, _coerce_ttl_seconds, _is_remote_session, _optional_base_url, _poll_for_token, _print_device_code_instructions, _request_device_code, _tls_state_from_verify, format_auth_error, refresh_nous_oauth_from_state
+    from hermes_cli.auth import PROVIDER_REGISTRY, _coerce_ttl_seconds, _is_remote_session, _optional_base_url, _poll_for_token, _print_device_code_instructions, _request_device_code, _tls_state_from_verify, format_auth_error, refresh_nous_oauth_from_state
     pconfig = PROVIDER_REGISTRY["nous"]
     portal_base_url = (
         portal_base_url

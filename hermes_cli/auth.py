@@ -14,7 +14,6 @@ import os
 import shutil
 import shlex
 import stat
-import hashlib
 import threading
 import time
 import uuid
@@ -52,6 +51,7 @@ from hermes_cli.auth_model_picker import (  # noqa: F401  (re-exported; callers/
     _save_model_choice,
 )
 from hermes_cli.auth_device_flow import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
+    _CONSOLE_BROWSER_NAMES,
     _can_open_graphical_browser,
     _default_verify,
     _is_remote_session,
@@ -92,7 +92,9 @@ from hermes_cli.auth_nous import (  # noqa: F401  (re-exported; callers/tests us
     NOUS_SHARED_STORE_FILENAME,
     _ALLOWED_NOUS_INFERENCE_HOSTS,
     _NOUS_EFFECTIVE_STATE_IGNORED_KEYS,
+    _NOUS_EMPTY_AGENT_KEY_FIELDS,
     _NOUS_SHARED_STATE_KEYS,
+    _NOUS_STALE_PORTAL_HOSTS,
     _NousStatePersister,
     _OAUTH_GRANT_DEAD_CODES,
     _TERMINAL_REFRESH_ERROR_CODES,
@@ -101,11 +103,14 @@ from hermes_cli.auth_nous import (  # noqa: F401  (re-exported; callers/tests us
     _assert_nous_inference_jwt_usable,
     _clear_shared_nous_state,
     _compute_nous_auth_status,
-    _decode_jwt_claims,
     _empty_nous_auth_status,
     _format_nous_entitlement_auth_error,
     _healed_nous_inference_url,
+    _is_terminal_codex_oauth_refresh_error,
+    _is_terminal_nous_refresh_error,
     _is_terminal_refresh_error,
+    _is_terminal_xai_oauth_refresh_error,
+    _iso_after,
     _log_nous_invoke_jwt_selected,
     _login_nous,
     _merge_shared_nous_oauth_state,
@@ -125,6 +130,8 @@ from hermes_cli.auth_nous import (  # noqa: F401  (re-exported; callers/tests us
     _nous_shared_store_lock,
     _nous_shared_store_path,
     _nous_status_from_state,
+    _oauth_trace,
+    _oauth_trace_enabled,
     _offer_shared_nous_import,
     _pick_nous_model_after_login,
     _pool_first_oauth_status,
@@ -138,6 +145,7 @@ from hermes_cli.auth_nous import (  # noqa: F401  (re-exported; callers/tests us
     _set_nous_agent_key_from_invoke_jwt,
     _snapshot_nous_pool_status,
     _sync_nous_pool_from_auth_store,
+    _token_fingerprint,
     _try_import_shared_nous_state,
     _validate_nous_inference_url_from_network,
     _write_shared_nous_state,
@@ -194,6 +202,8 @@ from hermes_cli.auth_xai import (  # noqa: F401  (re-exported; callers/tests use
 )
 from hermes_cli.auth_codex import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
     CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS,
+    _clear_pool_entry_status,
+    _codex_access_token_is_expiring,
     _codex_base_url,
     _codex_device_code_login,
     _codex_exchange_authorization_code,
@@ -212,6 +222,7 @@ from hermes_cli.auth_codex import (  # noqa: F401  (re-exported; callers/tests u
     _is_codex_rate_limit_shaped,
     _load_auth_store_maybe_locked,
     _login_openai_codex,
+    _parse_retry_after_seconds,
     _pool_codex_access_token,
     _pool_entries,
     _probe_codex_quota_restored,
@@ -259,6 +270,7 @@ from hermes_cli.auth_qwen import (  # noqa: F401  (re-exported; callers/tests us
     resolve_qwen_runtime_credentials,
 )
 from hermes_cli.auth_constants import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.auth.<name>)
+    _decode_jwt_claims,
     AUTH_STORE_VERSION,
     AUTH_LOCK_TIMEOUT_SECONDS,
     DEFAULT_NOUS_PORTAL_URL,
@@ -837,14 +849,6 @@ def is_rate_limited_auth_error(error: Exception) -> bool:
     )
 
 
-def _parse_retry_after_seconds(headers: Any) -> Optional[int]:
-    """Best-effort parse of a ``Retry-After`` header into whole seconds."""
-    from agent.retry_utils import parse_retry_after_seconds
-
-    seconds = parse_retry_after_seconds(headers)
-    return None if seconds is None else int(seconds)
-
-
 def format_auth_error(error: Exception) -> str:
     """Map auth failures to concise user-facing guidance."""
     if not isinstance(error, AuthError):
@@ -884,31 +888,6 @@ _ENTITLEMENT_ERROR_CODES = frozenset(_GENERIC_ENTITLEMENT_MESSAGES) | {
 
 def _nonempty_str(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
-
-
-def _token_fingerprint(token: Any) -> Optional[str]:
-    """Return a short hash fingerprint for telemetry without leaking token bytes."""
-    if not isinstance(token, str):
-        return None
-    cleaned = token.strip()
-    if not cleaned:
-        return None
-    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12]
-
-
-def _oauth_trace_enabled() -> bool:
-    raw = os.getenv("HERMES_OAUTH_TRACE", "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
-def _oauth_trace(event: str, *, sequence_id: Optional[str] = None, **fields: Any) -> None:
-    if not _oauth_trace_enabled():
-        return
-    payload: Dict[str, Any] = {"event": event}
-    if sequence_id:
-        payload["sequence_id"] = sequence_id
-    payload.update(fields)
-    logger.info("oauth_trace %s", json.dumps(payload, sort_keys=True, ensure_ascii=False))
 
 
 # =============================================================================
@@ -1530,12 +1509,6 @@ _POOL_STATUS_FIELDS = (
     "last_error_message",
     "last_error_reset_at",
 )
-
-
-def _clear_pool_entry_status(entry: Dict[str, Any]) -> None:
-    """Reset a pool entry's cooldown / last-error metadata to healthy."""
-    for status_field in _POOL_STATUS_FIELDS:
-        entry[status_field] = None
 
 
 def _merge_disk_cooldown_state(
@@ -2266,11 +2239,6 @@ def _is_expiring(expires_at_iso: Any, skew_seconds: int) -> bool:
     return expires_epoch <= (time.time() + skew_seconds)
 
 
-def _iso_after(now: datetime, ttl_seconds: int) -> str:
-    """ISO timestamp *ttl_seconds* after *now* (UTC)."""
-    return datetime.fromtimestamp(now.timestamp() + ttl_seconds, tz=timezone.utc).isoformat()
-
-
 def _tls_state_from_verify(verify: Any) -> Dict[str, Any]:
     """Persistable ``tls`` block derived from an httpx ``verify`` value."""
     return {
@@ -2298,16 +2266,6 @@ def _last_auth_error_marker(
 
 
 _FLAT_OAUTH_TOKEN_KEYS = ("access_token", "refresh_token", "expires_at", "expires_in", "obtained_at")
-# Nous agent-key slots; a fresh login persists them as None, quarantine strips them.
-_NOUS_EMPTY_AGENT_KEY_FIELDS: Dict[str, Any] = {
-    "agent_key": None,
-    "agent_key_id": None,
-    "agent_key_expires_at": None,
-    "agent_key_expires_in": None,
-    "agent_key_reused": None,
-    "agent_key_obtained_at": None,
-}
-
 
 def _quarantine_flat_oauth_state(state: Dict[str, Any], provider: str, exc: "AuthError") -> None:
     """Strip dead tokens from a flat OAuth state after a terminal runtime refresh failure.
@@ -2337,10 +2295,6 @@ def _optional_base_url(value: Any) -> Optional[str]:
     return cleaned if cleaned else None
 
 
-_NOUS_STALE_PORTAL_HOSTS: FrozenSet[str] = frozenset({
-    "api.nousresearch.com",
-})
-
 # Allowlist of valid Nous Portal hosts. A portal_base_url outside this
 # set is treated as a misconfiguration and falls back to the default.
 # "localhost" / "127.0.0.1" are valid for local development and testing.
@@ -2351,14 +2305,6 @@ _NOUS_PORTAL_ALLOWED_HOSTS: FrozenSet[str] = frozenset({
 })
 
 
-def _codex_access_token_is_expiring(access_token: Any, skew_seconds: int) -> bool:
-    claims = _decode_jwt_claims(access_token)
-    exp = claims.get("exp")
-    if not isinstance(exp, (int, float)):
-        return False
-    return float(exp) <= (time.time() + max(0, int(skew_seconds)))
-
-
 # =============================================================================
 # Spotify auth — PKCE tokens stored in ~/.hermes/auth.json
 # =============================================================================
@@ -2367,26 +2313,6 @@ def _codex_access_token_is_expiring(access_token: Any, skew_seconds: int) -> boo
 # =============================================================================
 # SSH / remote session detection
 # =============================================================================
-
-
-# Console/text-mode browsers that ``webbrowser`` will happily launch INSIDE
-# the terminal.  Opening one of these is worse than not opening anything —
-# it hijacks the user's TTY with an unusable text browser (the xAI OAuth
-# "Account Management" page rendered in w3m, reported May 2026) instead of
-# letting them copy the URL to a real browser.  When the resolved browser is
-# one of these we refuse to auto-open and fall back to the print-the-URL
-# path, same as a remote session.
-_CONSOLE_BROWSER_NAMES: FrozenSet[str] = frozenset(
-    {
-        "w3m",
-        "lynx",
-        "links",
-        "links2",
-        "elinks",
-        "www-browser",
-        "browsh",  # TUI browser — still hijacks the terminal
-    }
-)
 
 
 # =============================================================================
@@ -2435,18 +2361,6 @@ _CONSOLE_BROWSER_NAMES: FrozenSet[str] = frozenset(
 # If ever the stored refresh_token does go stale server-side, import fails
 # gracefully and the user falls back to the normal device-code flow.
 # -----------------------------------------------------------------------------
-
-
-def _is_terminal_nous_refresh_error(exc: Exception) -> bool:
-    return _is_terminal_refresh_error(exc, "nous")
-
-
-def _is_terminal_xai_oauth_refresh_error(exc: Exception) -> bool:
-    return _is_terminal_refresh_error(exc, "xai-oauth")
-
-
-def _is_terminal_codex_oauth_refresh_error(exc: Exception) -> bool:
-    return _is_terminal_refresh_error(exc, "openai-codex")
 
 
 # Per-process memo for resolve_nous_access_token. Startup runs

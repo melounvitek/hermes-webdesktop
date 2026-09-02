@@ -9,6 +9,7 @@ helpers are imported lazily inside each function (no import cycle; patches on
 from __future__ import annotations
 
 import logging
+from typing import FrozenSet
 import os
 import ssl
 import sys
@@ -29,6 +30,26 @@ from utils import is_truthy_value
 
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
+
+
+# Console/text-mode browsers that ``webbrowser`` will happily launch INSIDE
+# the terminal.  Opening one of these is worse than not opening anything —
+# it hijacks the user's TTY with an unusable text browser (the xAI OAuth
+# "Account Management" page rendered in w3m, reported May 2026) instead of
+# letting them copy the URL to a real browser.  When the resolved browser is
+# one of these we refuse to auto-open and fall back to the print-the-URL
+# path, same as a remote session.
+_CONSOLE_BROWSER_NAMES: FrozenSet[str] = frozenset(
+    {
+        "w3m",
+        "lynx",
+        "links",
+        "links2",
+        "elinks",
+        "www-browser",
+        "browsh",  # TUI browser — still hijacks the terminal
+    }
+)
 
 
 def _is_remote_session() -> bool:
@@ -66,7 +87,6 @@ def _can_open_graphical_browser() -> bool:
     require a display server (``$DISPLAY`` / ``$WAYLAND_DISPLAY``) unless ``$BROWSER`` points at
     something graphical; no display server almost always means no GUI browser.
     """
-    from hermes_cli.auth import _CONSOLE_BROWSER_NAMES
     import webbrowser as _webbrowser
 
     def _names_console_browser(value: str) -> bool:

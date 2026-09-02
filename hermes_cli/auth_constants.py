@@ -6,7 +6,9 @@ Pure leaf: imports nothing from ``hermes_cli.auth`` so the per-provider modules
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional
+import base64
+import json
+from typing import Any, Callable, Dict, Optional
 
 # httpx is imported lazily: it costs ~30ms at import time and hermes_cli.auth
 # is on the interactive-CLI startup path via credential_pool → auxiliary_client
@@ -181,3 +183,16 @@ _codex_err = _provider_error_factory("openai-codex")
 _spotify_err = _provider_error_factory("spotify")
 _qwen_err = _provider_error_factory("qwen-oauth")
 _minimax_err = _provider_error_factory("minimax-oauth")
+
+
+def _decode_jwt_claims(token: Any) -> Dict[str, Any]:
+    if not isinstance(token, str) or token.count(".") != 2:
+        return {}
+    payload = token.split(".")[1]
+    payload += "=" * ((4 - len(payload) % 4) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload.encode("utf-8"))
+        claims = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {}
+    return claims if isinstance(claims, dict) else {}

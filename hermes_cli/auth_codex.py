@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from hermes_cli.auth_constants import (
+    _decode_jwt_claims,
     AUTH_LOCK_TIMEOUT_SECONDS,
     AuthError,
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
@@ -38,6 +39,29 @@ if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
 
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
+
+
+def _parse_retry_after_seconds(headers: Any) -> Optional[int]:
+    """Best-effort parse of a ``Retry-After`` header into whole seconds."""
+    from agent.retry_utils import parse_retry_after_seconds
+
+    seconds = parse_retry_after_seconds(headers)
+    return None if seconds is None else int(seconds)
+
+
+def _clear_pool_entry_status(entry: Dict[str, Any]) -> None:
+    """Reset a pool entry's cooldown / last-error metadata to healthy."""
+    from hermes_cli.auth import _POOL_STATUS_FIELDS
+    for status_field in _POOL_STATUS_FIELDS:
+        entry[status_field] = None
+
+
+def _codex_access_token_is_expiring(access_token: Any, skew_seconds: int) -> bool:
+    claims = _decode_jwt_claims(access_token)
+    exp = claims.get("exp")
+    if not isinstance(exp, (int, float)):
+        return False
+    return float(exp) <= (time.time() + max(0, int(skew_seconds)))
 
 
 def _codex_base_url() -> str:
@@ -115,7 +139,6 @@ def _sync_codex_pool_entries(
     credentials (an explicit API key, a different ChatGPT account, etc.) and must not be overwritten
     by a single re-auth.
     """
-    from hermes_cli.auth import _clear_pool_entry_status
     access_token = tokens.get("access_token")
     if not access_token:
         return
@@ -345,7 +368,7 @@ def refresh_codex_oauth_pure(
     timeout_seconds: float = 20.0,
 ) -> Dict[str, Any]:
     """Refresh Codex OAuth tokens without mutating Hermes auth state."""
-    from hermes_cli.auth import _nonempty_str, _parse_retry_after_seconds, _utc_now_z
+    from hermes_cli.auth import _nonempty_str, _utc_now_z
     del access_token  # Access token is only used by callers to decide whether to refresh.
     if not _nonempty_str(refresh_token):
         raise _codex_err(
@@ -634,7 +657,7 @@ def _probe_codex_quota_restored(
     Probes are throttled per access token (module-local cache) so the hot selection path can fire
     this freely.
     """
-    from hermes_cli.auth import _codex_quota_probe_cache, _decode_jwt_claims, _nonempty_str
+    from hermes_cli.auth import _codex_quota_probe_cache, _nonempty_str
     token = str(access_token or "").strip()
     if not token:
         return None
@@ -704,7 +727,7 @@ def clear_codex_pool_quota_cooldowns(access_token: Optional[str] = None) -> int:
     entry clears (a redeemed banked reset restores the whole account, and any entry that is
     genuinely still exhausted just re-freezes with fresh metadata on its next 429).
     """
-    from hermes_cli.auth import _auth_store_lock, _clear_pool_entry_status, _load_auth_store, _save_auth_store
+    from hermes_cli.auth import _auth_store_lock, _load_auth_store, _save_auth_store
     cleared = 0
     try:
         with _auth_store_lock():
@@ -894,7 +917,6 @@ def _login_openai_codex(
 
 def _codex_login_rate_limited_error(response: "httpx.Response", *, during: str = "") -> AuthError:
     """AuthError for a 429 from OpenAI's device-auth endpoints (a throttle, not a credential fault)."""
-    from hermes_cli.auth import _parse_retry_after_seconds
     retry_after = _parse_retry_after_seconds(getattr(response, "headers", None))
     wait_hint = (
         f" Try again in about {retry_after}s."
@@ -911,7 +933,6 @@ def _codex_login_rate_limited_error(response: "httpx.Response", *, during: str =
 
 def _codex_request_device_code(issuer: str, client_id: str) -> Dict[str, Any]:
     """Step 1 of the Codex device flow: request a user code, retrying capped on HTTP 429."""
-    from hermes_cli.auth import _parse_retry_after_seconds
     # OpenAI's auth endpoint rate-limits this request (HTTP 429) when login is
     # attempted too often from the same IP/account — retry with capped backoff
     # (honoring ``Retry-After``) before surfacing a clear, actionable message.
