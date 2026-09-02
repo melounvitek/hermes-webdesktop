@@ -1,25 +1,5 @@
-"""Shared debug session infrastructure for Hermes tools.
-
-Replaces the identical DEBUG_MODE / _log_debug_call / _save_debug_log /
-get_debug_session_info boilerplate previously duplicated across web_tools,
-vision_tools, and image_generation_tool.
-
-Usage in a tool module:
-
-    from tools.debug_helpers import DebugSession
-
-    _debug = DebugSession("web_tools", env_var="WEB_TOOLS_DEBUG")
-
-    # Log a call (no-op when debug mode is off)
-    _debug.log_call("web_search", {"query": q, "results": len(r)})
-
-    # Save the debug log (no-op when debug mode is off)
-    _debug.save()
-
-    # Expose debug info to external callers
-    def get_debug_session_info():
-        return _debug.get_session_info()
-"""
+"""Shared per-tool debug session: records tool calls to a JSON log when a
+tool-specific env var (e.g. WEB_TOOLS_DEBUG=true) is set; no-ops otherwise."""
 
 import datetime
 import json
@@ -34,11 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class DebugSession:
-    """Per-tool debug session that records tool calls to a JSON log file.
-
-    Activated by a tool-specific environment variable (e.g. WEB_TOOLS_DEBUG=true).
-    When disabled, all methods are cheap no-ops.
-    """
+    """Per-tool debug session that records tool calls to a JSON log file."""
 
     def __init__(self, tool_name: str, *, env_var: str) -> None:
         self.tool_name = tool_name
@@ -72,8 +48,7 @@ class DebugSession:
         if not self.enabled:
             return
         try:
-            filename = f"{self.tool_name}_debug_{self.session_id}.json"
-            filepath = self.log_dir / filename
+            filepath = self.log_dir / f"{self.tool_name}_debug_{self.session_id}.json"
             payload = {
                 "session_id": self.session_id,
                 "start_time": self._start_time,
@@ -87,19 +62,3 @@ class DebugSession:
             logger.debug("%s debug log saved: %s", self.tool_name, filepath)
         except Exception as e:
             logger.error("Error saving %s debug log: %s", self.tool_name, e)
-
-    def get_session_info(self) -> Dict[str, Any]:
-        """Return a summary dict suitable for returning from get_debug_session_info()."""
-        if not self.enabled:
-            return {
-                "enabled": False,
-                "session_id": None,
-                "log_path": None,
-                "total_calls": 0,
-            }
-        return {
-            "enabled": True,
-            "session_id": self.session_id,
-            "log_path": str(self.log_dir / f"{self.tool_name}_debug_{self.session_id}.json"),
-            "total_calls": len(self._calls),
-        }

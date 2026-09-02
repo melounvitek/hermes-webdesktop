@@ -1,36 +1,19 @@
 """Conservative heredoc masking for shell-command scanners.
 
-Several guards scan raw command text for dangerous shell syntax (the
-foreground background-'&' guard in ``tools/terminal_tool.py``, the
-blocked-command checks, the gateway lifecycle guard in
-``cron/lifecycle_guard.py``). Heredoc *bodies* are usually inline data —
-AppleScript concatenation, Python bitwise-and, literal UI text — and
-scanning them produces false positives.
+Guards that scan raw command text (the foreground background-'&' guard in
+``tools/terminal_tool.py``, blocked-command checks, ``cron/lifecycle_guard``)
+false-positive on heredoc *bodies*, which are usually inline data. Naively
+stripping every body is unsafe the other way (fake ``<<`` in quotes can
+swallow a real operator; unquoted bodies expand; ``bash <<'EOF'`` executes).
 
-Naively stripping every heredoc body is unsafe the other way: fake ``<<``
-markers inside quotes or comments can swallow a *real* background operator
-that follows them, and some heredoc bodies genuinely execute (unquoted
-delimiters allow ``$(...)`` expansion; ``bash <<'EOF'`` runs the body as
-shell). This module therefore masks a body ONLY when all of the following
-hold, and otherwise leaves the command untouched:
-
-- every heredoc delimiter on the opener is quoted (``<<'EOF'`` / ``<<"EOF"``
-  / ``<<E\\OF``), so the body undergoes no shell expansion;
-- every heredoc on the opener is terminated by an exact delimiter line;
-- the opener composes a single command — no ``;``, ``|`` or ``&`` list or
-  pipeline operators, and no nested ``$(...)``, backtick, or process
-  substitution scope;
-- the consuming command is an allowlisted non-shell interpreter (see
-  ``_INERT_HEREDOC_CONSUMER_RE``); consumers that execute their input as
-  shell (``bash``, ``sh``, ``eval``, ``ssh``, unknown commands) keep their
-  bodies visible.
-
-Conservative retention may cause a false positive (a scanner may still flag
-payload text in an unquoted or unknown-consumer body), but it can never hide
-a real background operator or lifecycle command from a guard.
-
-Masked bodies are replaced by an equivalent number of newlines so line
-structure — and any ``re.MULTILINE`` scanning downstream — is preserved.
+A body is masked ONLY when: every delimiter on the opener is quoted (no
+expansion); every heredoc is terminated by an exact delimiter line; the
+opener is a single command (no ``;``/``|``/``&`` and no ``$(...)``, backtick
+or process substitution); and the consumer is an allowlisted non-shell
+interpreter (``_INERT_HEREDOC_CONSUMER_RE``). Otherwise the command is
+returned untouched: a false positive is acceptable, hiding real shell syntax
+from a guard is not. Masked bodies become an equal number of newlines so
+``re.MULTILINE`` scanning keeps its line structure.
 
 Adapted from Wolfram Ravenwolf's security-hardened rework of PR #63788
 (commit 69c7663c6de6b6cb05bf99203fa39673efe01ccf).
@@ -40,11 +23,9 @@ from __future__ import annotations
 
 import re
 
-# Non-shell interpreters whose (quoted, inert) heredoc bodies are safe to
-# mask: the body is program text or plain data for THAT interpreter, not
-# shell syntax executed by this command line. Optional VAR=... assignments,
-# an ``env`` prefix, and a path prefix are allowed. Deliberately narrow:
-# anything not matched keeps its body visible (fail-closed).
+# Non-shell interpreters whose quoted heredoc bodies are program text/data for
+# THAT interpreter. Optional VAR=... assignments, ``env`` and a path prefix are
+# allowed. Deliberately narrow: anything unmatched keeps its body visible.
 _INERT_HEREDOC_CONSUMER_RE = re.compile(
     r"^\s*"
     r"(?:[A-Z_][A-Z0-9_]*=\S+\s+)*"
@@ -55,13 +36,21 @@ _INERT_HEREDOC_CONSUMER_RE = re.compile(
 )
 
 
-def _mask_simple_quotes(command: str) -> str:
-    """Blank inert quoted spans without erasing shell-active substitutions.
+def _span_end(command: str, cursor: int, closer: str) -> int:
+    """Index just past the backslash-aware span opened at ``cursor``."""
+    end = cursor + 1
+    while end < len(command):
+        if command[end] == "\\" and end + 1 < len(command):
+            end += 2
+            continue
+        if command[end] == closer:
+            return end + 1
+        end += 1
+    return end
 
-    Single-quoted spans become ``''``. Double-quoted spans become ``""``
-    UNLESS they contain ``$(`` or a backtick (still executable — keep them
-    visible). Backtick spans are always kept (executable).
-    """
+
+def _mask_simple_quotes(command: str) -> str:
+    """Blank inert quoted spans; keep ``$(``/backtick-bearing ones visible."""
     result = []
     cursor = 0
     while cursor < len(command):
@@ -75,15 +64,7 @@ def _mask_simple_quotes(command: str) -> str:
             cursor = closing + 1
             continue
         if char == '"':
-            end = cursor + 1
-            while end < len(command):
-                if command[end] == "\\" and end + 1 < len(command):
-                    end += 2
-                    continue
-                if command[end] == '"':
-                    end += 1
-                    break
-                end += 1
+            end = _span_end(command, cursor, '"')
             if not command[cursor:end].endswith('"'):
                 result.append(command[cursor:])
                 break
@@ -92,15 +73,7 @@ def _mask_simple_quotes(command: str) -> str:
             cursor = end
             continue
         if char == "`":
-            end = cursor + 1
-            while end < len(command):
-                if command[end] == "\\" and end + 1 < len(command):
-                    end += 2
-                    continue
-                if command[end] == "`":
-                    end += 1
-                    break
-                end += 1
+            end = _span_end(command, cursor, "`")
             result.append(command[cursor:end])
             cursor = end
             continue
@@ -109,18 +82,8 @@ def _mask_simple_quotes(command: str) -> str:
     return "".join(result)
 
 
-def _contains_nested_shell_scope(masked_opener: str) -> bool:
-    """Return whether a quote-masked opener contains nested executable syntax."""
-    return any(marker in masked_opener for marker in ("$(", "`", "<(", ">("))
-
-
 def _parse_heredoc_operator(command: str, index: int):
-    """Parse one active ``<<`` redirection and return its shell delimiter.
-
-    Returns ``(end_index, delimiter, strip_tabs, quoted)`` or ``None`` when
-    the token at ``index`` is not a well-formed heredoc opener (here-strings,
-    trailing ``<<`` at end of line, unterminated quote in the delimiter).
-    """
+    """Parse one ``<<`` opener -> ``(end_index, delimiter, strip_tabs, quoted)`` or None."""
     if not command.startswith("<<", index) or command.startswith("<<<", index):
         return None
 
@@ -160,8 +123,7 @@ def _parse_heredoc_operator(command: str, index: int):
                         delimiter.append(following)
                         cursor += 2
                         continue
-                    # In double quotes, backslash is literal before all other
-                    # characters. Preserve it so the terminator stays exact.
+                    # In double quotes, backslash is literal before other chars.
                     delimiter.append("\\")
                     cursor += 1
                     continue
@@ -182,14 +144,10 @@ def _parse_heredoc_operator(command: str, index: int):
 
 
 def _scan_heredoc_command_unit(command: str, start: int):
-    """Scan one logical shell command, ignoring markers in quotes/comments.
+    """Scan one logical command -> ``(end, specs, unknown_operator, has_list_operator)``.
 
-    Returns ``(end_index, heredoc_specs, unknown_operator, has_list_operator)``
-    where each spec is ``(delimiter, strip_tabs, quoted)``.
-    ``unknown_operator`` reports a ``<<`` token that could not be parsed
-    soundly — the caller must fail closed and leave the command unmodified.
-    ``has_list_operator`` reports an unquoted ``;``, ``|`` or ``&`` on the
-    opener — the unit composes multiple shell commands.
+    ``unknown_operator``: an unparseable ``<<`` (caller must fail closed).
+    ``has_list_operator``: unquoted ``;``/``|``/``&`` on the opener.
     """
     cursor = start
     quote = None
@@ -216,9 +174,7 @@ def _scan_heredoc_command_unit(command: str, start: int):
             continue
 
         if char == "\\" and cursor + 1 < len(command):
-            # Includes line continuations: the logical command keeps going on
-            # the next physical line, so a heredoc opener there still belongs
-            # to this unit.
+            # Includes line continuations: the logical command keeps going.
             cursor += 2
             continue
         if char in "'\"`":
@@ -279,25 +235,14 @@ def _find_heredoc_close(
 
 
 def strip_inert_heredoc_bodies(command: str) -> str:
-    """Mask heredoc bodies that are provably inert data; keep the rest.
-
-    See the module docstring for the qualification rules. Masked bodies are
-    replaced with an equivalent number of newlines so positions of the
-    surrounding real command text keep their line structure. On ANY ambiguity
-    (unparseable ``<<`` token, unterminated heredoc, unquoted delimiter,
-    compound opener, nested shell scope, unknown consumer) the original
-    command is returned unchanged — a scanner false positive is acceptable,
-    hiding real shell syntax is not.
-    """
+    """Mask heredoc bodies that are provably inert data (see module docstring)."""
     ranges: list[tuple[int, int]] = []
     command_start = 0
 
-    # Fast path: no '<<' anywhere means no heredoc can exist — skip the state
-    # machine entirely. This function runs on every terminal tool call.
+    # Runs on every terminal call: skip the state machine when no '<<' exists,
+    # and stop scanning once past the last '<<'.
     if "<<" not in command:
         return command
-    # No heredoc opener can start after the last '<<' occurrence; once the
-    # scan passes it, the rest of the command needs no per-char walk.
     last_opener_index = command.rfind("<<")
 
     while command_start < len(command):
@@ -314,8 +259,7 @@ def strip_inert_heredoc_bodies(command: str) -> str:
             command_start = command_end + 1
             continue
         if command_end >= len(command):
-            # Opener with no following body line: nothing to mask, and the
-            # heredoc is unterminated — leave everything visible.
+            # Opener with no body line: unterminated — leave visible.
             return command
 
         body_cursor = command_end + 1
@@ -338,17 +282,14 @@ def strip_inert_heredoc_bodies(command: str) -> str:
 
         if all(quoted for _delimiter, _strip_tabs, quoted in specs) and not has_list_operator:
             masked_opener = _mask_simple_quotes(command[command_start:command_end])
-            if not _contains_nested_shell_scope(masked_opener) and (
-                _INERT_HEREDOC_CONSUMER_RE.search(masked_opener)
-            ):
+            nested_scope = any(m in masked_opener for m in ("$(", "`", "<(", ">("))
+            if not nested_scope and _INERT_HEREDOC_CONSUMER_RE.search(masked_opener):
                 ranges.extend(body_ranges)
         command_start = body_cursor
 
     if not ranges:
         return command
-    # Single-pass rebuild: ranges are sorted and non-overlapping, so join the
-    # kept segments with newline-preserving replacements (avoids a quadratic
-    # full-string copy per masked range on heredoc-heavy commands).
+    # Single-pass rebuild: ranges are sorted and non-overlapping.
     parts: list[str] = []
     previous = 0
     for start, end in ranges:

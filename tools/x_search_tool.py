@@ -1,46 +1,19 @@
 #!/usr/bin/env python3
 """X Search tool backed by xAI's built-in ``x_search`` Responses API tool.
 
-Authentication
---------------
-The tool registers when **either** xAI credential path is available:
+Registers when either xAI credential path is available (``XAI_API_KEY`` or
+``hermes auth add xai-oauth``). At call time an explicit ``XAI_API_KEY`` wins
+(``prefer_api_key=True``): x_search is API-metered and the subscription OAuth
+bearer answers ``/v1/responses`` in a degraded no-citation mode (#88040).
 
-* ``XAI_API_KEY`` is set in ``~/.hermes/.env`` or the process environment
-  (paid xAI API key), OR
-* The user is signed in via xAI Grok OAuth — SuperGrok subscription —
-  i.e. ``hermes auth add xai-oauth`` has been run and the stored refresh
-  token still works.
+Defensive output: ``from_date``/``to_date`` are validated client-side (strict
+``YYYY-MM-DD``, ``from <= to``, ``from`` not in the future) so malformed windows
+fail fast instead of burning a billable call. Successful responses carry
+``degraded``/``degraded_reason``: True when a narrowing filter was active AND
+xAI returned no citations in either channel, meaning the answer came from the
+model's own knowledge rather than the X index.
 
-Credential preference at call time uses
-:func:`tools.xai_http.resolve_xai_http_credentials` with
-``prefer_api_key=True``: an explicit ``XAI_API_KEY`` wins when configured
-(x_search is API-metered; the subscription OAuth bearer answers
-``/v1/responses`` in a degraded no-citation mode — #88040), with SuperGrok
-OAuth as the fallback. That helper also auto-refreshes the OAuth access
-token when it's within the refresh skew window, so a ``True`` from
-:func:`check_x_search_requirements` means the bearer is fetchable AND
-non-empty.
-
-Defensive output
-----------------
-The tool surfaces two additional signals beyond xAI's raw response so callers
-can tell a real citation-backed answer from an unsourced one:
-
-* ``from_date`` / ``to_date`` are validated client-side before the HTTP call.
-  Malformed (non ``YYYY-MM-DD``), inverted (``from_date > to_date``), and
-  pure-future ranges (``from_date`` later than today UTC) fail fast with a
-  clear error instead of burning an API call. ``to_date`` in the future is
-  still allowed so callers can legitimately request "from yesterday to
-  tomorrow".
-* Successful responses carry ``degraded`` and ``degraded_reason`` fields.
-  ``degraded`` is ``True`` when any narrowing filter (handles or dates) was
-  active AND xAI returned no citations in either the top-level ``citations``
-  array or the inline ``url_citation`` annotations. In that case the
-  ``answer`` came from the model's own knowledge rather than the X index,
-  and the caller should treat the result as unsourced.
-
-Salvaged from PR #10786 (originally by @Jaaneek); credential resolution
-reworked to honor both auth modes per Teknium's design.
+Salvaged from PR #10786 (originally by @Jaaneek).
 """
 
 from __future__ import annotations
@@ -54,11 +27,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from tools.registry import registry, tool_error
-from tools.xai_http import hermes_xai_user_agent, resolve_xai_http_credentials
+from tools.xai_http import DEFAULT_XAI_BASE_URL, hermes_xai_user_agent, resolve_xai_http_credentials
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_X_SEARCH_MODEL = "grok-4.5"
 DEFAULT_X_SEARCH_TIMEOUT_SECONDS = 180
 DEFAULT_X_SEARCH_RETRIES = 2
@@ -80,13 +52,11 @@ def _load_x_search_config() -> Dict[str, Any]:
 
 
 def _get_x_search_model() -> str:
-    cfg = _load_x_search_config()
-    return (str(cfg.get("model") or "").strip() or DEFAULT_X_SEARCH_MODEL)
+    return str(_load_x_search_config().get("model") or "").strip() or DEFAULT_X_SEARCH_MODEL
 
 
 def _get_x_search_reasoning_effort() -> Optional[str]:
-    cfg = _load_x_search_config()
-    raw_value = cfg.get("reasoning_effort")
+    raw_value = _load_x_search_config().get("reasoning_effort")
     if raw_value is None or not str(raw_value).strip():
         return None
 
@@ -100,22 +70,20 @@ def _get_x_search_reasoning_effort() -> Optional[str]:
     return effort
 
 
-def _get_x_search_timeout_seconds() -> int:
-    cfg = _load_x_search_config()
-    raw_value = cfg.get("timeout_seconds", DEFAULT_X_SEARCH_TIMEOUT_SECONDS)
+def _get_x_search_int(key: str, default: int, floor: int) -> int:
+    raw_value = _load_x_search_config().get(key, default)
     try:
-        return max(30, int(raw_value))
+        return max(floor, int(raw_value))
     except Exception:
-        return DEFAULT_X_SEARCH_TIMEOUT_SECONDS
+        return default
+
+
+def _get_x_search_timeout_seconds() -> int:
+    return _get_x_search_int("timeout_seconds", DEFAULT_X_SEARCH_TIMEOUT_SECONDS, 30)
 
 
 def _get_x_search_retries() -> int:
-    cfg = _load_x_search_config()
-    raw_value = cfg.get("retries", DEFAULT_X_SEARCH_RETRIES)
-    try:
-        return max(0, int(raw_value))
-    except Exception:
-        return DEFAULT_X_SEARCH_RETRIES
+    return _get_x_search_int("retries", DEFAULT_X_SEARCH_RETRIES, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -123,22 +91,11 @@ def _get_x_search_retries() -> int:
 # ---------------------------------------------------------------------------
 
 def _resolve_xai_bearer() -> Tuple[str, str, str]:
-    """Return ``(api_key, base_url, source)``.
+    """Return ``(api_key, base_url, source)``; ``source`` is ``"xai-oauth"`` or ``"xai"``.
 
-    ``source`` is one of ``"xai-oauth"`` or ``"xai"`` so callers (and tests)
-    can tell which credential path won. Raises ``RuntimeError`` if no usable
-    credential is available — the registered :func:`check_x_search_requirements`
-    gate makes that case unreachable in normal operation, but the runtime
-    check exists so a credential that expires between registration and
-    invocation produces a clean tool error instead of a 401.
-
-    x_search is API-index access: when a subscription OAuth credential is
-    configured alongside a paid ``XAI_API_KEY``, the OAuth path authorizes
-    but answers ``/v1/responses`` in a degraded Grok explanatory mode with
-    no citations, while the API key returns real posts (#88040). Pass
-    ``prefer_api_key=True`` so the shared resolver checks the explicit API
-    key first — same root cause as the TTS fix for #87045 (#87081) —
-    keeping OAuth as the fallback when no API key is configured.
+    Raises ``RuntimeError`` when no credential is usable so a credential that
+    expires between registration and invocation yields a clean tool error, not
+    a 401. ``prefer_api_key=True``: see module docstring (#88040).
     """
     creds = resolve_xai_http_credentials(prefer_api_key=True)
     api_key = str(creds.get("api_key") or "").strip()
@@ -153,13 +110,7 @@ def _resolve_xai_bearer() -> Tuple[str, str, str]:
 
 
 def check_x_search_requirements() -> bool:
-    """Return True when xAI credentials are available AND valid.
-
-    ``resolve_xai_http_credentials`` calls
-    :func:`hermes_cli.auth.resolve_xai_oauth_runtime_credentials` which
-    auto-refreshes the OAuth access token if it's expiring; a successful
-    return therefore implies a usable bearer.
-    """
+    """True when xAI credentials resolve to a non-empty bearer (OAuth auto-refreshed)."""
     try:
         creds = resolve_xai_http_credentials()
         return bool(str(creds.get("api_key") or "").strip())
@@ -172,26 +123,14 @@ def check_x_search_requirements() -> bool:
 # ---------------------------------------------------------------------------
 
 def _normalize_handles(handles: Optional[List[str]], field_name: str) -> List[str]:
-    cleaned: List[str] = []
-    for handle in handles or []:
-        normalized = str(handle or "").strip().lstrip("@")
-        if normalized:
-            cleaned.append(normalized)
+    cleaned = [h for h in (str(handle or "").strip().lstrip("@") for handle in handles or []) if h]
     if len(cleaned) > MAX_HANDLES:
         raise ValueError(f"{field_name} supports at most {MAX_HANDLES} handles")
     return cleaned
 
 
 def _parse_iso_date(value: str, field_name: str) -> date:
-    """Parse a strict YYYY-MM-DD string into a ``date``.
-
-    xAI accepts any string in the ``from_date``/``to_date`` slots and silently
-    returns an answer with no citations when the value is malformed or refers
-    to a window where no posts can exist. That behavior burns a billable API
-    call and produces a confident-sounding fluff answer that's hard for callers
-    to distinguish from a real result. Validating client-side fails fast and
-    gives the agent a clear error to act on.
-    """
+    """Parse a strict YYYY-MM-DD string (xAI silently accepts malformed dates and returns no citations)."""
     raw = value.strip()
     try:
         return datetime.strptime(raw, "%Y-%m-%d").date()
@@ -202,22 +141,9 @@ def _parse_iso_date(value: str, field_name: str) -> date:
 
 
 def _validate_date_range(from_date: str, to_date: str) -> None:
-    """Validate ``from_date`` / ``to_date`` before they reach xAI.
-
-    Rules:
-      * Either field, if non-empty, must parse as ``YYYY-MM-DD``.
-      * When both are set, ``from_date <= to_date``.
-      * ``from_date`` must not be later than today UTC — no posts can exist
-        in a window that hasn't started yet, so the call would be guaranteed
-        to return zero citations. ``to_date`` in the future is allowed
-        (callers may legitimately set "from yesterday to tomorrow").
-    """
-    parsed_from: Optional[date] = None
-    parsed_to: Optional[date] = None
-    if from_date.strip():
-        parsed_from = _parse_iso_date(from_date, "from_date")
-    if to_date.strip():
-        parsed_to = _parse_iso_date(to_date, "to_date")
+    """Both parse as YYYY-MM-DD; from <= to; from not after today UTC (to may be in the future)."""
+    parsed_from = _parse_iso_date(from_date, "from_date") if from_date.strip() else None
+    parsed_to = _parse_iso_date(to_date, "to_date") if to_date.strip() else None
     if parsed_from and parsed_to and parsed_from > parsed_to:
         raise ValueError(
             f"from_date ({parsed_from.isoformat()}) must be on or before "
@@ -233,42 +159,38 @@ def _validate_date_range(from_date: str, to_date: str) -> None:
             )
 
 
+def _message_contents(payload: Dict[str, Any]):
+    for item in payload.get("output", []) or []:
+        if item.get("type") == "message":
+            yield from item.get("content", []) or []
+
+
 def _extract_response_text(payload: Dict[str, Any]) -> str:
     output_text = str(payload.get("output_text") or "").strip()
     if output_text:
         return output_text
 
     parts: List[str] = []
-    for item in payload.get("output", []) or []:
-        if item.get("type") != "message":
-            continue
-        for content in item.get("content", []) or []:
-            ctype = content.get("type")
-            if ctype in {"output_text", "text"}:
-                text = str(content.get("text") or "").strip()
-                if text:
-                    parts.append(text)
+    for content in _message_contents(payload):
+        if content.get("type") in {"output_text", "text"}:
+            text = str(content.get("text") or "").strip()
+            if text:
+                parts.append(text)
     return "\n\n".join(parts).strip()
 
 
 def _extract_inline_citations(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    citations: List[Dict[str, Any]] = []
-    for item in payload.get("output", []) or []:
-        if item.get("type") != "message":
-            continue
-        for content in item.get("content", []) or []:
-            for annotation in content.get("annotations", []) or []:
-                if annotation.get("type") != "url_citation":
-                    continue
-                citations.append(
-                    {
-                        "url": annotation.get("url", ""),
-                        "title": annotation.get("title", ""),
-                        "start_index": annotation.get("start_index"),
-                        "end_index": annotation.get("end_index"),
-                    }
-                )
-    return citations
+    return [
+        {
+            "url": annotation.get("url", ""),
+            "title": annotation.get("title", ""),
+            "start_index": annotation.get("start_index"),
+            "end_index": annotation.get("end_index"),
+        }
+        for content in _message_contents(payload)
+        for annotation in content.get("annotations", []) or []
+        if annotation.get("type") == "url_citation"
+    ]
 
 
 def _http_error_message(exc: requests.HTTPError) -> str:
@@ -293,6 +215,56 @@ def _http_error_message(exc: requests.HTTPError) -> str:
     if text:
         return text[:500]
     return str(exc)
+
+
+def _error_json(error: str, exc: BaseException) -> str:
+    return json.dumps(
+        {
+            "success": False,
+            "provider": "xai",
+            "tool": "x_search",
+            "error": error,
+            "error_type": type(exc).__name__,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _post_with_retries(url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> requests.Response:
+    """POST with retries on 5xx / timeout / connection errors; re-raises the last failure."""
+    timeout_seconds = _get_x_search_timeout_seconds()
+    max_retries = _get_x_search_retries()
+    response: Optional[requests.Response] = None
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
+            response.raise_for_status()
+            break
+        except requests.HTTPError as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code is None or status_code < 500 or attempt >= max_retries:
+                raise
+            logger.warning(
+                "x_search upstream failure on attempt %s/%s: %s",
+                attempt + 1,
+                max_retries + 1,
+                _http_error_message(e),
+            )
+            time.sleep(min(5.0, 1.5 * (attempt + 1)))
+        except (requests.ReadTimeout, requests.ConnectionError) as e:
+            if attempt >= max_retries:
+                raise
+            logger.warning(
+                "x_search transient failure on attempt %s/%s: %s",
+                attempt + 1,
+                max_retries + 1,
+                e,
+            )
+            time.sleep(min(5.0, 1.5 * (attempt + 1)))
+
+    if response is None:
+        raise RuntimeError("x_search request did not return a response")
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -324,23 +296,22 @@ def x_search_tool(
 
         try:
             _validate_date_range(from_date, to_date)
-        except ValueError as exc:
-            return tool_error(str(exc))
-
-        try:
             reasoning_effort = _get_x_search_reasoning_effort()
         except ValueError as exc:
             return tool_error(str(exc))
 
+        from_date, to_date = from_date.strip(), to_date.strip()
         tool_def: Dict[str, Any] = {"type": "x_search"}
-        if allowed:
-            tool_def["allowed_x_handles"] = allowed
-        if excluded:
-            tool_def["excluded_x_handles"] = excluded
-        if from_date.strip():
-            tool_def["from_date"] = from_date.strip()
-        if to_date.strip():
-            tool_def["to_date"] = to_date.strip()
+        active_filters: List[str] = []
+        for key, value in (
+            ("allowed_x_handles", allowed),
+            ("excluded_x_handles", excluded),
+            ("from_date", from_date),
+            ("to_date", to_date),
+        ):
+            if value:
+                tool_def[key] = value
+                active_filters.append(key)
         if enable_image_understanding:
             tool_def["enable_image_understanding"] = True
         if enable_video_understanding:
@@ -348,91 +319,30 @@ def x_search_tool(
 
         payload = {
             "model": _get_x_search_model(),
-            "input": [
-                {
-                    "role": "user",
-                    "content": query.strip(),
-                }
-            ],
+            "input": [{"role": "user", "content": query.strip()}],
             "tools": [tool_def],
             "store": False,
         }
         if reasoning_effort:
             payload["reasoning"] = {"effort": reasoning_effort}
 
-        timeout_seconds = _get_x_search_timeout_seconds()
-        max_retries = _get_x_search_retries()
-        response: Optional[requests.Response] = None
-        for attempt in range(max_retries + 1):
-            try:
-                response = requests.post(
-                    f"{base_url}/responses",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                        "User-Agent": hermes_xai_user_agent(),
-                    },
-                    json=payload,
-                    timeout=timeout_seconds,
-                )
-                response.raise_for_status()
-                break
-            except requests.HTTPError as e:
-                status_code = getattr(getattr(e, "response", None), "status_code", None)
-                if status_code is None or status_code < 500 or attempt >= max_retries:
-                    raise
-                logger.warning(
-                    "x_search upstream failure on attempt %s/%s: %s",
-                    attempt + 1,
-                    max_retries + 1,
-                    _http_error_message(e),
-                )
-                time.sleep(min(5.0, 1.5 * (attempt + 1)))
-            except (requests.ReadTimeout, requests.ConnectionError) as e:
-                if attempt >= max_retries:
-                    raise
-                logger.warning(
-                    "x_search transient failure on attempt %s/%s: %s",
-                    attempt + 1,
-                    max_retries + 1,
-                    e,
-                )
-                time.sleep(min(5.0, 1.5 * (attempt + 1)))
-
-        if response is None:
-            raise RuntimeError("x_search request did not return a response")
-
+        response = _post_with_retries(
+            f"{base_url}/responses",
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": hermes_xai_user_agent(),
+            },
+            payload,
+        )
         data = response.json()
 
-        answer = _extract_response_text(data)
         citations = list(data.get("citations") or [])
         inline_citations = _extract_inline_citations(data)
-
-        # Degraded-result detection.
-        #
-        # xAI returns 200 OK with a synthesized answer even when its X index
-        # has no posts matching the caller's narrowing filters. The answer
-        # then comes from the model's training data, which is misleading
-        # because it looks identical to a real, citation-backed result. When
-        # any narrowing filter is active AND both citation channels came back
-        # empty, mark the response as degraded so callers can decide to
-        # broaden filters, retry, or fall back to a different source.
-        active_filters: List[str] = []
-        if allowed:
-            active_filters.append("allowed_x_handles")
-        if excluded:
-            active_filters.append("excluded_x_handles")
-        if from_date.strip():
-            active_filters.append("from_date")
-        if to_date.strip():
-            active_filters.append("to_date")
+        # xAI returns 200 with a synthesized answer even when no posts match the
+        # narrowing filters; with both citation channels empty the answer came
+        # from training data, so flag it as degraded.
         degraded = bool(active_filters) and not citations and not inline_citations
-        degraded_reason = (
-            f"no citations returned despite filters: {', '.join(active_filters)}"
-            if degraded
-            else None
-        )
-
         return json.dumps(
             {
                 "success": True,
@@ -441,50 +351,27 @@ def x_search_tool(
                 "tool": "x_search",
                 "model": payload["model"],
                 "query": query.strip(),
-                "answer": answer,
+                "answer": _extract_response_text(data),
                 "citations": citations,
                 "inline_citations": inline_citations,
                 "degraded": degraded,
-                "degraded_reason": degraded_reason,
+                "degraded_reason": (
+                    f"no citations returned despite filters: {', '.join(active_filters)}"
+                    if degraded
+                    else None
+                ),
             },
             ensure_ascii=False,
         )
     except requests.HTTPError as e:
         logger.error("x_search failed: %s", e, exc_info=True)
-        return json.dumps(
-            {
-                "success": False,
-                "provider": "xai",
-                "tool": "x_search",
-                "error": _http_error_message(e),
-                "error_type": type(e).__name__,
-            },
-            ensure_ascii=False,
-        )
+        return _error_json(_http_error_message(e), e)
     except requests.ReadTimeout as e:
         logger.error("x_search timed out: %s", e, exc_info=True)
-        return json.dumps(
-            {
-                "success": False,
-                "provider": "xai",
-                "tool": "x_search",
-                "error": f"xAI x_search timed out after {_get_x_search_timeout_seconds()} seconds",
-                "error_type": type(e).__name__,
-            },
-            ensure_ascii=False,
-        )
+        return _error_json(f"xAI x_search timed out after {_get_x_search_timeout_seconds()} seconds", e)
     except Exception as e:
         logger.error("x_search failed: %s", e, exc_info=True)
-        return json.dumps(
-            {
-                "success": False,
-                "provider": "xai",
-                "tool": "x_search",
-                "error": str(e),
-                "error_type": type(e).__name__,
-            },
-            ensure_ascii=False,
-        )
+        return _error_json(str(e), e)
 
 
 X_SEARCH_SCHEMA = {

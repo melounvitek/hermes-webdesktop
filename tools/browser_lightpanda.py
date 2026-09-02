@@ -1,15 +1,12 @@
 """Lightpanda local engine for Browser Use mode.
 
-With ``browser.engine: lightpanda``, Browser Use mode spawns one
-``lightpanda serve`` per browser session and points ``browser_exec`` at its
-CDP endpoint (``BU_CDP_URL``). The built-in ``browser_*`` tools keep driving
-Lightpanda through ``agent-browser --engine lightpanda``; this module is the
-launcher for the path where no agent-browser daemon is involved.
-
-Lifecycle: ``tools.browser_tool`` owns the session cache, the inactivity
-reaper and the atexit sweep; it calls :func:`launch_lightpanda` /
-:func:`stop_lightpanda` and :func:`reap_orphaned_lightpanda` for processes
-left behind by a crashed Hermes.
+With ``browser.engine: lightpanda``, Browser Use mode spawns one ``lightpanda
+serve`` per browser session and points ``browser_exec`` at its CDP endpoint
+(``BU_CDP_URL``); the built-in ``browser_*`` tools keep going through
+``agent-browser --engine lightpanda``. ``tools.browser_tool`` owns the session
+cache, inactivity reaper and atexit sweep, calling :func:`launch_lightpanda`,
+:func:`stop_lightpanda` and :func:`reap_orphaned_lightpanda` (for processes a
+crashed Hermes left behind).
 """
 
 import json
@@ -50,8 +47,7 @@ class LightpandaServer:
 
     @property
     def cdp_url(self) -> str:
-        # The http discovery URL: the browser-use harness resolves
-        # /json/version itself on every daemon start (BU_CDP_URL).
+        # HTTP discovery URL; the browser-use harness resolves /json/version itself.
         return f"http://127.0.0.1:{self.port}"
 
     def is_alive(self) -> bool:
@@ -171,6 +167,13 @@ def _safe_start_time(pid: int) -> Optional[int]:
         return None
 
 
+def _tree_kill(pid: int, expected_start) -> None:
+    """Tree-kill ``pid`` via ProcessRegistry, verifying its start time first."""
+    from tools.process_registry import ProcessRegistry
+
+    ProcessRegistry._terminate_host_pid(pid, expected_start=expected_start)
+
+
 def _write_record(server: LightpandaServer) -> None:
     record = {
         "pid": server.proc.pid,
@@ -221,10 +224,7 @@ def launch_lightpanda(
         argv.append("--block-private-networks")
     log_path = str(_state_dir() / f"{session_name}.log")
 
-    # No Windows branch here: find_lightpanda_binary() returns None on nt,
-    # so launch always errors out above before reaching the spawn.
-    popen_kwargs = {"start_new_session": True}
-
+    # find_lightpanda_binary() returns None on nt, so no Windows spawn branch is needed.
     try:
         with open(log_path, "wb") as log_file:
             proc = subprocess.Popen(
@@ -233,7 +233,7 @@ def launch_lightpanda(
                 stdout=subprocess.DEVNULL,
                 stderr=log_file,
                 env=_browser_env(),
-                **popen_kwargs,
+                start_new_session=True,
             )
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"Failed to launch lightpanda serve ({binary}): {e}"
@@ -292,11 +292,7 @@ def stop_lightpanda(session_name: str) -> None:
         return
     if server.is_alive():
         try:
-            from tools.process_registry import ProcessRegistry
-
-            ProcessRegistry._terminate_host_pid(
-                server.proc.pid, expected_start=server.start_time
-            )
+            _tree_kill(server.proc.pid, server.start_time)
         except Exception as e:
             logger.debug("lightpanda tree-kill failed for %s: %s", session_name, e)
             _terminate(server.proc)
@@ -380,9 +376,7 @@ def reap_orphaned_lightpanda() -> int:
             record_path.unlink(missing_ok=True)
             continue
         try:
-            from tools.process_registry import ProcessRegistry
-
-            ProcessRegistry._terminate_host_pid(int(pid), expected_start=record.get("start_time"))
+            _tree_kill(int(pid), record.get("start_time"))
             reaped += 1
             logger.info("Reaped orphaned lightpanda serve pid %s (session %s)", pid, session_name)
         except Exception as e:

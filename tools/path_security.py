@@ -1,9 +1,4 @@
-"""Shared path validation helpers for tool implementations.
-
-Extracts the ``resolve() + relative_to()`` and ``..`` traversal check
-patterns previously duplicated across skill_manager_tool, skills_tool,
-skills_hub, cronjob_tools, and credential_files.
-"""
+"""Shared path validation helpers for tool implementations (skills, cron, credential files)."""
 
 import logging
 from pathlib import Path
@@ -13,31 +8,17 @@ logger = logging.getLogger(__name__)
 
 
 def validate_within_dir(path: Path, root: Path) -> Optional[str]:
-    """Ensure *path* resolves to a location within *root*.
+    """Return an error message if *path* does not resolve inside *root*, else None.
 
-    Returns an error message string if validation fails, or ``None`` if the
-    path is safe.  Uses ``Path.resolve()`` to follow symlinks and normalize
-    ``..`` components.
-
-    Usage::
-
-        error = validate_within_dir(user_path, allowed_root)
-        if error:
-            return tool_error(error)
+    ``Path.resolve()`` follows symlinks and normalises ``..`` before the check.
     """
     try:
-        resolved = path.resolve()
-        root_resolved = root.resolve()
-        resolved.relative_to(root_resolved)
+        path.resolve().relative_to(root.resolve())
     except (ValueError, OSError) as exc:
         return f"Path escapes allowed directory: {exc}"
     return None
 
 
 def has_traversal_component(path_str: str) -> bool:
-    """Return True if *path_str* contains ``..`` traversal components.
-
-    Quick check for obvious traversal attempts before doing full resolution.
-    """
-    parts = Path(path_str).parts
-    return ".." in parts
+    """Cheap pre-check for a literal ``..`` component before full resolution."""
+    return ".." in Path(path_str).parts

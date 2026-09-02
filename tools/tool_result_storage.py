@@ -1,45 +1,23 @@
 """Tool result persistence -- preserves large outputs instead of truncating.
 
-Defense against context-window overflow operates at three levels:
+Three layers of defense against context-window overflow:
 
-1. **Per-tool output cap** (inside each tool): Tools like search_files
-   pre-truncate their own output before returning. This is the first line
-   of defense and the only one the tool author controls.
-
-2. **Per-result persistence** (maybe_persist_tool_result): After a tool
-   returns, if its output exceeds the tool's registered threshold
-   (registry.get_max_result_size), the full output is persisted and the
-   in-context content is replaced with a preview + file path reference.
-
-   The canonical home is ALWAYS host-side:
-   ``$HERMES_HOME/cache/spillover/{tool_use_id}.txt`` — alongside the other
-   Hermes-owned caches (images, audio, documents, ...) instead of littering
-   the OS temp dir. This needs no sandbox environment, so it also works for
-   sessions that never ran a terminal command (MCP-only, cron, gateway) —
-   previously those hit the inline-truncate fallback because
-   ``get_active_env()`` returned None until the first terminal call created
-   an environment.
-
-   What the model sees depends on the backend:
-
-   - **Local backend (or no active env):** the host path itself.
-   - **Remote backends (docker/ssh/modal/daytona):** ``cache/spillover`` is
-     in the auto-mounted/synced cache-dir list (tools/credential_files.py),
-     so the reference is the translated in-sandbox path (probed for
-     readability first). When the sandbox can't see it (e.g. a persistent
-     container created before spillover joined the mount list), fall back
-     to writing a copy into the sandbox temp dir via env.execute().
-
-   The spillover dir is pruned two ways: the gateway housekeeping loop
-   sweeps it hourly with the other media caches, and a once-per-process
-   best-effort prune runs on the first spill so CLI-only installs (which
-   never run gateway housekeeping) self-clean too.
-
-3. **Per-turn aggregate budget** (enforce_turn_budget): After all tool
-   results in a single assistant turn are collected, if the total exceeds
-   MAX_TURN_BUDGET_CHARS (200K), the largest non-persisted results are
-   spilled to disk until the aggregate is under budget. This catches cases
-   where many medium-sized results combine to overflow context.
+1. **Per-tool output cap** (inside each tool, e.g. search_files pre-truncates).
+2. **Per-result persistence** (``maybe_persist_tool_result``): output over the
+   tool's registered threshold is persisted and replaced in-context by a
+   preview + file path. The canonical home is ALWAYS host-side,
+   ``$HERMES_HOME/cache/spillover/{tool_use_id}.txt``, so it works for sessions
+   that never ran a terminal (MCP-only, cron, gateway). Local backend / no env:
+   the model sees the host path. Remote backends (docker/ssh/modal/daytona):
+   ``cache/spillover`` is in the auto-mounted/synced cache-dir list
+   (tools/credential_files.py), so the model sees the translated in-sandbox
+   path — probed for readability first, falling back to a copy written into
+   the sandbox temp dir (e.g. a persistent container created before spillover
+   joined the mount list). The dir is pruned hourly by gateway housekeeping
+   and once per process on first spill (CLI-only installs never run housekeeping).
+3. **Per-turn aggregate budget** (``enforce_turn_budget``): if all tool results
+   in one turn exceed the turn budget, the largest non-persisted results are
+   spilled until under budget.
 """
 
 import hashlib
@@ -49,7 +27,6 @@ import re
 import shlex
 import threading
 import time
-import uuid
 
 from tools.budget_config import (
     DEFAULT_PREVIEW_SIZE_CHARS,
@@ -63,7 +40,6 @@ PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
 STORAGE_DIR = "/tmp/hermes-results"
 SPILLOVER_SUBDIR = "cache/spillover"
 SPILLOVER_MAX_AGE_HOURS = 24
-HEREDOC_MARKER = "HERMES_PERSIST_EOF"
 _BUDGET_TOOL_NAME = "__budget_enforcement__"
 _UNSAFE_RESULT_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 _MAX_RESULT_FILENAME_STEM = 120
@@ -80,12 +56,10 @@ def get_spillover_dir():
 
 
 def cleanup_spillover_cache(max_age_hours: int = SPILLOVER_MAX_AGE_HOURS) -> int:
-    """Delete spillover files older than *max_age_hours*.
+    """Delete spillover files older than *max_age_hours*; returns count removed.
 
-    Same contract as the ``cleanup_*_cache`` helpers in
-    ``gateway.platforms.base`` — returns the number of files removed —
-    so the gateway housekeeping loop can prune this dir on the same
-    hourly cadence as the media caches.
+    Same contract as the ``cleanup_*_cache`` helpers in ``gateway.platforms.base``
+    so the gateway housekeeping loop can prune this dir on the hourly cadence.
     """
     cutoff = time.time() - (max_age_hours * 3600)
     removed = 0
@@ -104,12 +78,7 @@ def cleanup_spillover_cache(max_age_hours: int = SPILLOVER_MAX_AGE_HOURS) -> int
 
 
 def _prune_spillover_once() -> None:
-    """Best-effort prune, at most once per process.
-
-    The gateway housekeeping loop prunes hourly, but CLI-only installs
-    never run it — without this, spillover files would accumulate
-    forever on pure-CLI setups.
-    """
+    """Best-effort prune, at most once per process (CLI-only installs never run housekeeping)."""
     global _spillover_pruned_once
     with _spillover_prune_lock:
         if _spillover_pruned_once:
@@ -124,13 +93,10 @@ def _prune_spillover_once() -> None:
 
 
 def _is_host_side_env(env) -> bool:
-    """True when the spill file should be written by this process directly.
+    """True when this process should write the spill file directly.
 
-    Covers ``env=None`` (no sandbox environment active — e.g. a session
-    that has not run a terminal command yet) and the local backend
-    (where env.execute() runs on this same host anyway). Remote backends
-    (docker/ssh/modal/daytona) return False: their read_file resolves
-    inside the sandbox, so the spill must be written there.
+    ``env=None`` (no sandbox yet) and the local backend qualify; remote backends
+    resolve ``read_file`` inside the sandbox, so the spill must be written there.
     """
     if env is None:
         return True
@@ -143,10 +109,7 @@ def _is_host_side_env(env) -> bool:
 
 
 def _write_to_spillover(content: str, filename: str):
-    """Write content host-side to $HERMES_HOME/cache/spillover.
-
-    Returns the absolute path string on success, None on failure.
-    """
+    """Write host-side to $HERMES_HOME/cache/spillover; returns path str or None."""
     try:
         spill_dir = get_spillover_dir()
         spill_dir.mkdir(parents=True, exist_ok=True)
@@ -162,13 +125,10 @@ def _write_to_spillover(content: str, filename: str):
 def _sandbox_visible_spillover_path(host_path: str, env) -> str | None:
     """Return the path where a remote backend can read *host_path*, or None.
 
-    ``cache/spillover`` is one of the auto-mounted/synced cache dirs
-    (tools/credential_files.py), so on docker it is bind-mounted and on
-    modal/ssh/daytona it is file-synced into the sandbox. Translate the
-    host path with the same helper the image tools use, force a sync for
-    synced backends, then PROBE readability — a persistent docker
-    container created before spillover joined the mount list won't have
-    the bind mount, and must fall back to the in-sandbox write.
+    Translates via the same helper the image tools use, forces a sync for synced
+    backends, then PROBES readability — a persistent docker container created
+    before spillover joined the mount list lacks the bind mount and must fall
+    back to the in-sandbox write.
     """
     try:
         from tools.credential_files import to_agent_visible_cache_path
@@ -239,25 +199,12 @@ def generate_preview(content: str, max_chars: int = DEFAULT_PREVIEW_SIZE_CHARS) 
     return truncated, True
 
 
-def _heredoc_marker(content: str) -> str:
-    """Return a heredoc delimiter that doesn't collide with content."""
-    if HEREDOC_MARKER not in content:
-        return HEREDOC_MARKER
-    return f"HERMES_PERSIST_{uuid.uuid4().hex[:8]}"
-
-
 def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
     """Write content into the sandbox via env.execute(). Returns True on success.
 
-    Pushes ``content`` through stdin rather than embedding it in the command
-    string. Linux's ``MAX_ARG_STRLEN`` caps any single argv element at 128 KB
-    (32 * PAGE_SIZE), so the previous heredoc-in-the-command-string approach
-    silently failed with ``OSError: [Errno 7] Argument list too long`` for any
-    tool result over ~128 KB — exactly the case persistence exists to handle.
-    Routing through stdin removes that ceiling on local + ssh (``_stdin_mode
-    == "pipe"``); remote backends with ``_stdin_mode == "heredoc"`` keep their
-    existing API-body sized limit, which is orders of magnitude larger than
-    the exec-arg ceiling.
+    Content goes through stdin, not the command string: Linux ``MAX_ARG_STRLEN``
+    caps a single argv element at 128 KB, so a heredoc-in-command silently failed
+    for exactly the oversized results persistence exists to handle.
     """
     storage_dir = os.path.dirname(remote_path)
     cmd = f"mkdir -p {shlex.quote(storage_dir)} && cat > {shlex.quote(remote_path)}"
@@ -299,11 +246,10 @@ _PERSISTED_PATH_RE = re.compile(r"^Full output saved to: (.+)$", re.MULTILINE)
 
 
 def extract_persisted_path(content: str) -> str | None:
-    """Return the file path from a <persisted-output> replacement block.
+    """Return the file path from a <persisted-output> block, or None.
 
-    Used by the result-reference stubbing guard (agent/tool_guardrails.py) so
-    a stub referencing a persisted first occurrence can carry the spillover
-    path instead of dangling. Returns None for non-persisted content.
+    Lets the result-reference stubbing guard (agent/tool_guardrails.py) carry
+    the spillover path in a stub instead of leaving it dangling.
     """
     if not isinstance(content, str) or PERSISTED_OUTPUT_TAG not in content:
         return None
@@ -319,22 +265,10 @@ def maybe_persist_tool_result(
     config: BudgetConfig = DEFAULT_BUDGET,
     threshold: int | float | None = None,
 ) -> str:
-    """Layer 2: persist oversized result into the sandbox, return preview + path.
+    """Layer 2: persist an oversized result, return preview + path.
 
-    Writes via env.execute() so the file is accessible from any backend
-    (local, Docker, SSH, Modal, Daytona). Falls back to inline truncation
-    if write fails or no env is available.
-
-    Args:
-        content: Raw tool result string.
-        tool_name: Name of the tool (used for threshold lookup).
-        tool_use_id: Unique ID for this tool call (used as filename).
-        env: The active BaseEnvironment instance, or None.
-        config: BudgetConfig controlling thresholds and preview size.
-        threshold: Explicit override; takes precedence over config resolution.
-
-    Returns:
-        Original content if small, or <persisted-output> replacement.
+    ``threshold`` overrides ``config.resolve_threshold(tool_name)``. Falls back
+    to inline truncation when no write location succeeds.
     """
     effective_threshold = threshold if threshold is not None else config.resolve_threshold(tool_name)
 
@@ -347,41 +281,33 @@ def maybe_persist_tool_result(
     filename = _safe_result_filename(tool_use_id)
     preview, has_more = generate_preview(content, max_chars=config.preview_size)
 
-    # Always persist host-side first: $HERMES_HOME/cache/spillover is the
-    # single canonical home for spilled results (with the other Hermes-owned
-    # caches, pruned by gateway housekeeping) regardless of backend.
+    def _persisted(path: str, host_suffix: str = "") -> str:
+        logger.info(
+            "Persisted large tool result: %s (%s, %d chars -> %s%s)",
+            tool_name, tool_use_id, len(content), path, host_suffix,
+        )
+        return _build_persisted_message(preview, has_more, len(content), path)
+
+    # Always persist host-side first: cache/spillover is the single canonical
+    # home for spilled results regardless of backend.
     host_path = _write_to_spillover(content, filename)
 
     if _is_host_side_env(env):
         if host_path is not None:
-            logger.info(
-                "Persisted large tool result: %s (%s, %d chars -> %s)",
-                tool_name, tool_use_id, len(content), host_path,
-            )
-            return _build_persisted_message(preview, has_more, len(content), host_path)
+            return _persisted(host_path)
     elif env is not None:
-        # Remote backend: the spillover dir is auto-mounted (docker) or
-        # file-synced (modal/ssh/daytona) into the sandbox, so reference the
-        # translated path when the sandbox can actually read it.
+        # Remote backend: reference the mounted/synced path when the sandbox
+        # can actually read it ...
         if host_path is not None:
             visible = _sandbox_visible_spillover_path(host_path, env)
             if visible is not None:
-                logger.info(
-                    "Persisted large tool result: %s (%s, %d chars -> %s [host: %s])",
-                    tool_name, tool_use_id, len(content), visible, host_path,
-                )
-                return _build_persisted_message(preview, has_more, len(content), visible)
-        # Fallback: write into the sandbox temp dir (pre-existing containers
+                return _persisted(visible, f" [host: {host_path}]")
+        # ... else write into the sandbox temp dir (pre-existing containers
         # without the spillover mount, translation/probe failures).
-        storage_dir = _resolve_storage_dir(env)
-        remote_path = f"{storage_dir}/{filename}"
+        remote_path = f"{_resolve_storage_dir(env)}/{filename}"
         try:
             if _write_to_sandbox(content, remote_path, env):
-                logger.info(
-                    "Persisted large tool result: %s (%s, %d chars -> %s)",
-                    tool_name, tool_use_id, len(content), remote_path,
-                )
-                return _build_persisted_message(preview, has_more, len(content), remote_path)
+                return _persisted(remote_path)
         except Exception as exc:
             logger.warning("Sandbox write failed for %s: %s", tool_use_id, exc)
 
@@ -401,12 +327,9 @@ def enforce_turn_budget(
     env=None,
     config: BudgetConfig = DEFAULT_BUDGET,
 ) -> list[dict]:
-    """Layer 3: enforce aggregate budget across all tool results in a turn.
+    """Layer 3: enforce the aggregate budget across all tool results in a turn.
 
-    If total chars exceed budget, persist the largest non-persisted results
-    first (via sandbox write) until under budget. Already-persisted results
-    are skipped.
-
+    Persists the largest non-persisted results first until under budget.
     Mutates the list in-place and returns it.
     """
     candidates = []

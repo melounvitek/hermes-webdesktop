@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""Reveal/focus a pane in the Hermes desktop GUI.
+"""Reveal/focus a pane in the Hermes desktop GUI (``pane.reveal`` via ``desktop_ui``).
 
-Lives in the ``desktop_ui`` toolset (like the other GUI affordances), which the
-GUI gateway enables only for desktop-sourced sessions. Emits ``pane.reveal``
-through the shared ``desktop_ui`` bridge; the renderer runs each pane's own
-reveal path and only acts on the active window (a background turn never moves
-the user's focus). To show a URL/file, use ``open_preview``; to close it, use
-``close_preview``.
+The renderer runs each pane's own reveal path and only acts on the active window, so
+a background turn never moves the user's focus. URLs/files go through `desktop_preview`.
 """
-
-import json
 
 from tools import desktop_ui
 from tools.registry import registry, tool_error
@@ -22,15 +16,13 @@ def focus_pane_tool(pane: str) -> str:
     name = (pane or "").strip().lower()
     if name not in PANES:
         return tool_error(f"pane must be one of: {', '.join(PANES)}.")
-
-    try:
-        ok = desktop_ui.emit("pane.reveal", {"pane": name})
-    except Exception as exc:
-        return tool_error(f"Failed to focus the {name} pane: {exc}")
-    if not ok:
-        return tool_error("Pane focus is only available in the Hermes desktop app.")
-
-    return json.dumps({"success": True, "pane": name}, ensure_ascii=False)
+    return desktop_ui.emit_or_error(
+        "pane.reveal",
+        {"pane": name},
+        f"Failed to focus the {name} pane: ",
+        "Pane focus is only available in the Hermes desktop app.",
+        {"success": True, "pane": name},
+    )
 
 
 FOCUS_PANE_SCHEMA = {

@@ -1,22 +1,10 @@
 """Spill oversized hook-injected context to disk with a preview placeholder.
 
-Ported from openai/codex PR #21069 (``Spill large hook outputs from context``).
-
-Background
-----------
-Both shell hooks (``agent/shell_hooks.py``) and Python plugins
-(``pre_llm_call`` hook in ``run_agent.py``) can return ``{"context": "..."}``
-which gets concatenated into the current turn's user message on EVERY
-subsequent API call. If a hook emits a large blob (e.g. a debug dump, a
-full file, or a runaway prompt-engineering script), that blob inflates
-every turn of the session and blows out the prompt cache prefix the
-moment it's appended.
-
-This mirrors what Codex does for its ``PreToolUse``/``Stop``/feedback
-hooks: once the injected text exceeds a configured budget, write the
-full content to a per-session directory on disk and replace the in-prompt
-payload with a head/tail preview plus the saved path. The model can still
-inspect the full content via ``read_file`` or ``terminal`` if it needs to.
+Shell hooks and plugin ``pre_llm_call`` hooks can return ``{"context": ...}``
+that is concatenated into the user message on EVERY subsequent API call, so a
+large blob inflates every turn and breaks the prompt-cache prefix. Above a
+configured budget the full text is written to a per-session directory and the
+in-prompt payload becomes a head/tail preview plus the saved path.
 
 Config (``config.yaml``)::
 
@@ -28,16 +16,8 @@ Config (``config.yaml``)::
         preview_tail: 500      # chars shown at the end of the preview
         directory: null        # default: <HERMES_HOME>/hook_outputs
 
-Design invariants
------------------
-* Behaviour-preserving when ``enabled: false`` or when content is under
-  the cap — return the input string unchanged.
-* Never raises. Any I/O error (disk full, permission denied, missing
-  HERMES_HOME, etc.) falls back to a byte-length truncation with an
-  in-prompt notice — the hook context still reaches the model, just
-  bounded in size.
-* Spill files are grouped by session so a ``/new`` session doesn't grow
-  them forever in one directory.
+Invariants: unchanged input when disabled or under the cap; never raises —
+an I/O failure still returns a bounded preview with an in-prompt notice.
 """
 
 from __future__ import annotations
@@ -48,6 +28,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from tools.tool_output_limits import _coerce_int, _coerce_positive_int
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,25 +39,9 @@ DEFAULT_PREVIEW_TAIL = 500
 DEFAULT_ENABLED = True
 
 
-def _coerce_positive_int(value: Any, default: int) -> int:
-    try:
-        iv = int(value)
-    except (TypeError, ValueError):
-        return default
-    if iv <= 0:
-        return default
-    return iv
-
-
 def _coerce_non_negative_int(value: Any, default: int) -> int:
     """Like ``_coerce_positive_int`` but allows zero (e.g. empty tail)."""
-    try:
-        iv = int(value)
-    except (TypeError, ValueError):
-        return default
-    if iv < 0:
-        return default
-    return iv
+    return _coerce_int(value, default, 0)
 
 
 def get_spill_config() -> Dict[str, Any]:
@@ -113,7 +79,7 @@ def get_spill_config() -> Dict[str, Any]:
 
 
 def _resolve_spill_dir(directory_override: Optional[str], session_id: Optional[str]) -> Path:
-    """Return the directory where spill files for this session live."""
+    """Per-session spill directory; session id is sanitised so it can't escape ``base``."""
     if directory_override:
         base = Path(os.path.expanduser(directory_override))
     else:
@@ -121,10 +87,7 @@ def _resolve_spill_dir(directory_override: Optional[str], session_id: Optional[s
 
         base = Path(get_hermes_home()) / "hook_outputs"
 
-    # Group by session so spills are contained per conversation.
     session_segment = session_id or "no-session"
-    # Defensive: strip path separators so a weird session id can't
-    # escape the directory.
     session_segment = session_segment.replace("/", "_").replace("\\", "_").replace("..", "_")
     return base / session_segment
 
@@ -164,24 +127,9 @@ def spill_if_oversized(
 ) -> str:
     """Spill ``text`` to disk if it exceeds the configured cap.
 
-    Returns either ``text`` unchanged (when under the cap, disabled, or
-    empty) or a preview string with a filesystem path pointing at the
-    full content.
-
-    Parameters
-    ----------
-    text:
-        The raw injected-context string from a hook. Non-string inputs
-        are coerced with ``str()``.
-    session_id:
-        Used to group spill files by conversation. Falls back to
-        ``"no-session"`` if missing.
-    source:
-        Human-readable label used in the preview header (``"hook"``,
-        ``"plugin hook"``, ``"shell hook"``, etc.). Free-form.
-    config:
-        Optional override for tests; normally resolved from
-        ``config.yaml``.
+    Returns ``text`` unchanged (under cap, disabled, or empty) or a preview
+    string pointing at the full content. Non-string input is ``str()``-coerced;
+    ``source`` labels the preview header; ``config`` overrides config.yaml.
     """
     if text is None:
         return ""
@@ -203,21 +151,18 @@ def spill_if_oversized(
     tail = int(cfg.get("preview_tail") or 0)
     directory_override = cfg.get("directory")
 
-    # Try to write the spill file. If that fails we still need to return
-    # something bounded — never let a disk failure blow up the turn.
+    # A disk failure must never blow up the turn — fall through to a preview
+    # without a saved path.
     saved_path: Optional[str] = None
     try:
         spill_dir = _resolve_spill_dir(directory_override, session_id)
         from tools.spill_safety import ensure_spill_dir, write_text_exclusive
 
-        # Hook context may embed raw secrets: private dir/file perms, and an
-        # exclusive symlink-refusing create so a planted link can't redirect
-        # the write (predictable per-session directory).
+        # Hook context may embed raw secrets: private perms + exclusive,
+        # symlink-refusing create (the per-session dir is predictable).
         ensure_spill_dir(spill_dir, private=True)
-        filename = f"{uuid.uuid4().hex}.txt"
-        spill_path = spill_dir / filename
-        # Write the raw text plus a trailing newline so tail readers
-        # (``tail -f``, editors) don't report "missing newline".
+        spill_path = spill_dir / f"{uuid.uuid4().hex}.txt"
+        # Trailing newline so tail readers don't report "missing newline".
         write_text_exclusive(
             spill_path,
             text if text.endswith("\n") else text + "\n",

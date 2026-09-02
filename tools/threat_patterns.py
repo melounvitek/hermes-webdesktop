@@ -1,43 +1,20 @@
 """Shared threat-pattern library for context window security scanning.
 
-This module is the single source of truth for prompt-injection / promptware /
-exfiltration patterns used across the context-assembly scanners
-(``agent/prompt_builder.py``, ``tools/memory_tool.py``) and the tool-result
-delimiter system in ``agent/tool_dispatch_helpers.py``.
+Single source of truth for prompt-injection / promptware / exfiltration
+patterns used by ``agent/prompt_builder.py``, ``tools/memory_tool.py`` and
+``agent/tool_dispatch_helpers.py``.
 
-Pattern philosophy
-------------------
-Patterns are organized by ATTACK CLASS, not by source file.  Each pattern
-is a ``(regex, pattern_id, scope)`` tuple, where ``scope`` controls which
-scanners use it:
+Each pattern is a ``(regex, pattern_id, scope)`` tuple. Scope controls which
+scanners use it: ``"all"`` everywhere; ``"context"`` adds promptware / C2 /
+role hijack for context files, memory and tool results (warn-level, since
+tool results contain content the user did not author); ``"strict"`` adds
+aggressive checks only for user-mediated writes (memory, skill installs)
+where blocking can be resolved interactively.
 
-- ``"all"``  — applied everywhere (classic prompt injection, exfiltration)
-- ``"context"`` — applied to context files + memory + tool results
-  (promptware / C2 / behavioral hijack; broader detection)
-- ``"strict"`` — applied to memory writes + skill installs only
-  (aggressive checks acceptable for user-curated content but too noisy
-  for tool results)
-
-The split exists because tool results contain web pages, GitHub issues,
-and MCP responses — content the user did not author — and we want broad
-detection there, but blocking is reserved for paths where the user can
-intervene (memory writes, skill installs).
-
-Pattern anchoring
------------------
-New patterns anchor on **C2-specific vocabulary or unambiguous attack
-behavior**, NOT on bossy English.  Phrases like "you are obligated to"
-or "you must" alone are too common in legitimate instruction-writing
-(see AGENTS.md, CLAUDE.md, etc.) to flag.  See the pattern comments for
-the rationale on borderline cases.
-
-Multi-word bypass
------------------
-Patterns use bounded ``(?:\\w+\\s+){0,8}`` filler between key tokens to prevent
-attackers from inserting a handful of words (e.g. "ignore all prior
-instructions" instead of "ignore all instructions") without allowing unbounded
-regex backtracking. This mirrors the fix applied to ``skills_guard.py`` in
-commit 4ea29978.
+New patterns must anchor on C2-specific vocabulary or unambiguous attack
+behavior, NOT bossy English ("you must", "you are obligated to" are common in
+legitimate AGENTS.md / CLAUDE.md content). Filler between key tokens is the
+bounded ``_FILLER`` — unbounded ``(?:\\w+\\s+)*`` backtracks badly.
 """
 
 from __future__ import annotations
@@ -46,16 +23,11 @@ import re
 import unicodedata
 from typing import List, Optional, Tuple
 
-# Hard cap on text scanned with regexes.  Context/tool-result strings can be
-# arbitrarily large, and the scanners are advisory guards rather than archival
-# search; bounding input keeps worst-case runtime predictable while preserving
-# detections near the beginning of injected content.
+# Hard cap on scanned text: scanners are advisory guards, and bounding input
+# keeps worst-case runtime predictable while catching injection near the start.
 MAX_SCAN_CHARS = 65_536
 
-# Bounded filler used between key attack words.  Earlier patterns used
-# ``(?:\w+\s+)*`` which is ambiguous and can backtrack heavily on adversarial
-# near-misses.  Eight filler words is enough for the intended obfuscation
-# bypasses without introducing unbounded repetition.
+# Bounded filler between key attack words (up to eight words of obfuscation).
 _FILLER = r"(?:\w+\s+){0,8}"
 
 # Each entry: (regex, pattern_id, scope)
@@ -164,109 +136,55 @@ INVISIBLE_CHARS = frozenset({
 })
 
 
-# Compiled pattern sets, indexed by scope.  Compiled once at import time;
-# scan_for_threats() looks them up.
-_COMPILED: dict[str, List[Tuple[re.Pattern, str]]] = {}
+# Compiled pattern sets by scope, built once at import. Scope inclusion is
+# cumulative: "all" patterns land in every set, "context" in context + strict,
+# "strict" in strict only.
+_SCOPE_SETS = {"all": ("all", "context", "strict"), "context": ("context", "strict"), "strict": ("strict",)}
 
 
-def _compile() -> None:
-    """Compile pattern sets for each scope (all / context / strict).
-
-    A pattern with scope="all" lands in every set.  A pattern with
-    scope="context" lands in context + strict (context implies the
-    strict scanners want it too).  Scope="strict" lands in strict only.
-    """
-    global _COMPILED
-    if _COMPILED:
-        return
-
-    all_patterns: List[Tuple[re.Pattern, str]] = []
-    context_patterns: List[Tuple[re.Pattern, str]] = []
-    strict_patterns: List[Tuple[re.Pattern, str]] = []
-
+def _compile() -> dict[str, List[Tuple[re.Pattern, str]]]:
+    compiled: dict[str, List[Tuple[re.Pattern, str]]] = {"all": [], "context": [], "strict": []}
     for pattern, pid, scope in _PATTERNS:
-        compiled = re.compile(pattern, re.IGNORECASE)
-        entry = (compiled, pid)
-        if scope == "all":
-            all_patterns.append(entry)
-            context_patterns.append(entry)
-            strict_patterns.append(entry)
-        elif scope == "context":
-            context_patterns.append(entry)
-            strict_patterns.append(entry)
-        elif scope == "strict":
-            strict_patterns.append(entry)
-        else:
+        if scope not in _SCOPE_SETS:
             raise ValueError(f"threat_patterns: unknown scope {scope!r} for pattern {pid!r}")
-
-    _COMPILED = {
-        "all": all_patterns,
-        "context": context_patterns,
-        "strict": strict_patterns,
-    }
+        entry = (re.compile(pattern, re.IGNORECASE), pid)
+        for s in _SCOPE_SETS[scope]:
+            compiled[s].append(entry)
+    return compiled
 
 
-_compile()
+_COMPILED = _compile()
 
 
 def scan_for_threats(content: str, scope: str = "context") -> List[str]:
-    """Return a list of matched pattern IDs in ``content`` at the given scope.
+    """Return matched pattern IDs in ``content`` for ``scope`` (see module docstring).
 
-    ``scope`` selects which pattern set to apply:
-
-    - ``"all"`` (narrow): classic injection + exfil only — minimal false
-      positives, suitable for any text.
-    - ``"context"`` (default): adds promptware / C2 / role-play patterns —
-      suitable for context files, memory entries, and tool results.
-    - ``"strict"`` (broad): adds persistence / SSH backdoor / exfil-URL
-      patterns — appropriate for user-mediated writes (memory tool,
-      skills install) where false positives can be resolved interactively.
-
-    Also checks for invisible unicode characters (returned as
-    ``"invisible_unicode_U+XXXX"`` so the caller can surface the offending
-    codepoint in a log line).
+    Invisible unicode characters are reported as ``"invisible_unicode_U+XXXX"``
+    so callers can surface the offending codepoint.
     """
     if not content:
         return []
 
-    findings: List[str] = []
-
     content = content[:MAX_SCAN_CHARS]
 
-    # Invisible unicode — single pass through the content set, not 17
-    # ``in`` lookups.  Run this on the RAW content before NFKC normalisation,
-    # since normalisation can strip some of these codepoints.
-    char_set = set(content)
-    invisible_hits = char_set & INVISIBLE_CHARS
-    for ch in invisible_hits:
-        findings.append(f"invisible_unicode_U+{ord(ch):04X}")
+    # Invisible unicode is checked on the RAW content: NFKC normalisation below
+    # can strip some of these codepoints.
+    findings: List[str] = [f"invisible_unicode_U+{ord(ch):04X}" for ch in set(content) & INVISIBLE_CHARS]
 
-    # Normalise to NFKC so full-width / compatibility Unicode variants
-    # (e.g. ｃａｔ → cat, Ａ → A) are folded to their ASCII counterparts before
-    # the regex engine sees them.  This prevents homograph substitution from
-    # bypassing keyword checks (e.g. ``ｃａｔ ~/.hermes/.env``).  NOTE: this
-    # does NOT defend against cross-script confusables (Cyrillic ``а`` U+0430),
-    # which NFKC leaves untouched — that needs a TR#39 confusable database.
+    # NFKC folds full-width / compatibility variants (ｃａｔ → cat) so homograph
+    # substitution can't bypass keyword checks. It does NOT fold cross-script
+    # confusables (Cyrillic ``а`` U+0430) — that would need a TR#39 database.
     normalised = unicodedata.normalize("NFKC", content)
 
-    # Threat patterns
     patterns = _COMPILED.get(scope)
     if patterns is None:
         raise ValueError(f"scan_for_threats: unknown scope {scope!r}")
-    for compiled, pid in patterns:
-        if compiled.search(normalised):
-            findings.append(pid)
-
+    findings.extend(pid for compiled, pid in patterns if compiled.search(normalised))
     return findings
 
 
 def first_threat_message(content: str, scope: str = "strict") -> Optional[str]:
-    """Return a human-readable error string for the first threat found, or None.
-
-    Convenience wrapper used by paths that block on the first hit
-    (memory tool writes, skills install) where the caller just needs a
-    yes/no + a message.
-    """
+    """Return a user-facing error for the first threat found, or None (block-on-first-hit paths)."""
     findings = scan_for_threats(content, scope=scope)
     if not findings:
         return None

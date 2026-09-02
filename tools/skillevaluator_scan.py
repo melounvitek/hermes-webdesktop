@@ -1,37 +1,27 @@
 #!/usr/bin/env python3
 """Advisory NVIDIA SkillEvaluator Tier 1 scan for skill installs.
 
-Runs alongside (never instead of) the built-in skills guard
-(``tools/skills_guard.py``). The skills guard remains the enforcement
-layer — trust levels, install policy, block verdicts. This module adds a
-second, advisory opinion from NVIDIA's SkillEvaluator: deterministic,
-keyless Tier 1 static checks (PII, unicode smuggling, script lint).
+Runs alongside (never instead of) ``tools/skills_guard.py``, which stays the
+enforcement layer (trust levels, install policy, block verdicts). This adds a
+second, advisory opinion: NVIDIA SkillEvaluator's keyless Tier 1 static checks.
 
-Design contract (deliberate):
+Contract:
+- Warn, don't block: PII-class findings are shown with file/line and the
+  install continues (the upstream PII scanner has known false-positive classes
+  such as ``git@github.com`` and ``op://`` references).
+- Prompt only for secrets-class criticals (private keys, cloud keys, tokens,
+  credentialed connection strings); ``--force`` / non-interactive installs
+  proceed with a loud warning instead of wedging on a prompt.
+- Never break installs: scanner missing, crashing, timing out or emitting
+  unparseable output all degrade to a no-op.
 
-- **Warn, don't block.** PII-class findings (emails, personal paths,
-  connection-string placeholders) are shown to the user with file/line and
-  the install continues. The upstream PII scanner has known false-positive
-  classes (``git@github.com``, documentation example emails, ``op://``
-  secret-manager references), so its findings are surfaced as information,
-  never used to reject a skill outright.
-- **Prompt only for secrets-class criticals.** Findings that look like a
-  real leaked credential (private keys, cloud access keys, tokens,
-  credentialed connection strings) get one confirmation beat in
-  interactive installs. ``--force`` skips the prompt; non-interactive
-  installs (TUI/agent, ``skip_confirm=True``) proceed with a loud warning
-  rather than wedging on a prompt nobody can answer.
-- **Never break installs.** Scanner missing from PATH, crashing, timing
-  out, or emitting unparseable output all degrade to a no-op. The
-  built-in guard has already run by the time this executes.
-
-The scanner binary is optional::
+Optional binary::
 
     uv tool install --python 3.13 \
         "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git@v0.1.0"
 
-Enable/disable via ``skills.tier1_advisory`` in config.yaml (default: on;
-a no-op unless the binary is installed).
+Toggle via ``skills.tier1_advisory`` in config.yaml (default on; a no-op
+unless the binary is installed).
 """
 
 from __future__ import annotations
@@ -48,19 +38,11 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 SCANNER_BIN = "skillevaluator"
-SCANNER_NAME = "skillevaluator-tier1"
 
-# Keyless, deterministic Tier 1 checks. Schema/quality are excluded on
-# purpose: they are hygiene signal for the index pipeline
-# (scripts/scan_skills_index.py), not install-time signal — a missing
-# author field should never make an install noisier.
-#
-# `security` invokes NVIDIA SkillSpector (a second optional binary,
-# pinned separately: uv tool install
-# "git+https://github.com/NVIDIA/SkillSpector.git@v2.9.5") in its static-rules
-# mode — still keyless, no LLM calls. When SkillSpector is absent or its
-# report fails SkillEvaluator's internal consistency checks, the check
-# reports status="incomplete" and is treated as "no opinion" here.
+# Keyless, deterministic Tier 1 checks. Schema/quality are excluded: they are
+# hygiene signal for the index pipeline, not install-time signal. `security`
+# invokes NVIDIA SkillSpector (second optional binary, static-rules mode, no
+# LLM); when absent or inconsistent it reports status="incomplete" = no opinion.
 TIER1_CHECKS = "pii,unicode,lint,license,security"
 SCAN_TIMEOUT_SECONDS = 120
 
@@ -120,12 +102,8 @@ def scanner_available() -> bool:
 
 
 def tier1_advisory_enabled() -> bool:
-    """Read skills.tier1_advisory from config (default True).
-
-    On-by-default is safe: without the optional scanner binary on PATH
-    the scan is a silent no-op, so fresh installs see no behavior change
-    until a user opts in by installing SkillEvaluator.
-    """
+    """Read skills.tier1_advisory from config (default True; safe because the
+    scan is a no-op without the optional binary on PATH)."""
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
@@ -143,12 +121,9 @@ def tier1_advisory_enabled() -> bool:
 def _parse_report(report: dict) -> Tier1Report:
     """Reduce a SkillEvaluator JSON report to install-relevant findings.
 
-    A validator whose ``status`` is ``"incomplete"`` produced partial
-    evidence at best (e.g. SkillSpector missing, or its report failed
-    SkillEvaluator's internal consistency checks). Its findings ARE
-    kept — partial evidence is still evidence — but the validator is
-    excluded from the pass/fail signal, so an evidence-free fail
-    verdict can't render as an unexplained failure.
+    Findings from ``status == "incomplete"`` validators are kept (partial
+    evidence is still evidence) but those validators are excluded from the
+    pass/fail signal so an evidence-free fail can't render as a failure.
     """
     findings: List[Tier1Finding] = []
     incomplete: List[str] = []
@@ -181,12 +156,8 @@ def _parse_report(report: dict) -> Tier1Report:
 
 
 def run_tier1_scan(skill_dir: Path, timeout: int = SCAN_TIMEOUT_SECONDS) -> Tier1Report:
-    """Run SkillEvaluator Tier 1 over one skill directory.
-
-    Returns a report with ``available=False`` (and no findings) on any
-    failure — the caller treats that as "no advisory opinion", never as
-    an error.
-    """
+    """Run SkillEvaluator Tier 1 over one skill directory; any failure returns
+    ``available=False`` (no advisory opinion), never raises."""
     if not scanner_available():
         return Tier1Report(available=False, error="scanner not on PATH")
     with tempfile.TemporaryDirectory(prefix="se-tier1-") as outdir:

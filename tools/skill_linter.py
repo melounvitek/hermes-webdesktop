@@ -1,29 +1,18 @@
 """Structural + convention linter for SKILL.md files.
 
-The hard *validator* in ``tools/skill_manager_tool.py::_validate_frontmatter``
-guards the non-negotiables (fence present, YAML mapping, ``name`` +
-``description`` present, description length, non-empty body, size cap) and is a
-create/edit BLOCKER. This module is the softer, broader companion: it encodes
-the "Skill authoring standards (HARDLINE)" conventions from ``CONTRIBUTING.md``
-that today are only caught by a human reviewer — shell-utility references
-instead of native tools, a missing author/license/metadata block, a
-``name`` that doesn't match its directory, dangling ``references/`` links,
-marketing words in the description, ``platforms:`` gating vs POSIX-only
-primitives, and forbidden scaffolding files.
+The hard *validator* (``tools/skill_manager_tool.py::_validate_frontmatter``)
+blocks the non-negotiables (fence, YAML mapping, name/description, size caps).
+This module is the softer companion encoding the CONTRIBUTING.md "Skill
+authoring standards" that otherwise only a human reviewer catches: shell
+utilities named instead of native tools, missing author/license/metadata,
+``name`` != directory, dangling ``references/`` links, marketing words,
+``platforms:`` gating vs POSIX-only scripts, forbidden scaffolding files.
 
-Design contract (matches the Hermes "no lazy-reading escape hatches / don't
-destroy the feature" posture):
-
-* Findings are **advisory** by default. ``lint_skill`` returns a list of
-  :class:`LintFinding`; the caller decides whether any severity blocks. The
-  create-path surfaces them as guidance, never as a hard reject (the hard
-  rejects already live in the validator).
-* Pure functions, no I/O beyond reading the files it is pointed at, so CI, the
-  ``skill_manage`` create path, and a contributor running it locally all share
-  one implementation.
-* Reuses ``agent.skill_utils`` helpers rather than re-parsing frontmatter, so
-  BOM handling / platform matching / the 60-char prompt budget stay in one
-  place.
+Contract: findings are advisory — ``lint_skill`` returns ``LintFinding`` rows and
+the caller decides what blocks. Pure functions (I/O limited to the files pointed
+at) so CI, the ``skill_manage`` create path and local runs share one impl.
+Frontmatter parsing is delegated to ``agent.skill_utils`` so BOM handling and
+the prompt description budget stay in one place.
 """
 
 from __future__ import annotations
@@ -40,10 +29,8 @@ from agent.skill_utils import (
 
 # ── Rule data ────────────────────────────────────────────────────────────────
 
-# Shell utilities the agent already has wrapped as first-class tools. Naming
-# them in SKILL.md prose steers the model to a raw shell call instead of the
-# native tool. Maps the banned token -> the native tool the prose should name.
-# (CONTRIBUTING.md "Skill authoring standards" rule 2.)
+# Shell utilities already wrapped as native tools; naming them in prose steers
+# the model to a raw shell call. banned token -> native tool to name instead.
 _SHELL_UTIL_TO_TOOL: Dict[str, str] = {
     "grep": "search_files",
     "rg": "search_files",
@@ -56,7 +43,7 @@ _SHELL_UTIL_TO_TOOL: Dict[str, str] = {
     "ls": "search_files (target='files')",
 }
 
-# Marketing words the description must not contain (rule 1).
+# Marketing words the description must not contain.
 _MARKETING_WORDS = (
     "powerful",
     "comprehensive",
@@ -68,8 +55,8 @@ _MARKETING_WORDS = (
     "robust",
 )
 
-# POSIX-only primitives that, if a bundled script uses them, require the skill
-# to declare ``platforms:`` (rule 3). Detected in scripts/, not in prose.
+# POSIX-only primitives that require ``platforms:`` when a bundled script uses
+# them. Detected in scripts/, not in prose.
 _POSIX_PRIMITIVES = (
     "fcntl",
     "termios",
@@ -81,8 +68,7 @@ _POSIX_PRIMITIVES = (
     "systemctl",
 )
 
-# Scaffolding files a skill should not ship (skill-creator anti-pattern; keeps
-# skills dense). These are noise, not skill content.
+# Scaffolding files a skill should not ship (noise, not skill content).
 _FORBIDDEN_FILES = (
     "README.md",
     "CHANGELOG.md",
@@ -92,8 +78,8 @@ _FORBIDDEN_FILES = (
     ".gitignore",
 )
 
-# Recommended modern section order (rule 5). We check presence of the load
-# bearing ones, not exact ordering, to avoid being a change-detector.
+# Presence of the load-bearing section is checked, not exact ordering, so the
+# linter is not a change-detector.
 _EXPECTED_SECTIONS = ("When to Use", "When to use")
 
 ERROR = "error"
@@ -113,6 +99,14 @@ class LintFinding:
         return f"{badge} [{self.rule}] {self.message}"
 
 
+def _err(rule: str, message: str) -> LintFinding:
+    return LintFinding(ERROR, rule, message)
+
+
+def _warn(rule: str, message: str) -> LintFinding:
+    return LintFinding(WARNING, rule, message)
+
+
 # ── Individual checks ────────────────────────────────────────────────────────
 
 
@@ -122,65 +116,48 @@ def _check_name_matches_dir(
     if skill_dir is None:
         return []
     name = str(frontmatter.get("name", "")).strip()
-    if not name:
-        return []
-    if name != skill_dir.name:
-        return [
-            LintFinding(
-                ERROR,
-                "name-dir-mismatch",
-                f"frontmatter name '{name}' does not match directory "
-                f"'{skill_dir.name}'; they must be identical.",
-            )
-        ]
+    if name and name != skill_dir.name:
+        return [_err(
+            "name-dir-mismatch",
+            f"frontmatter name '{name}' does not match directory "
+            f"'{skill_dir.name}'; they must be identical.",
+        )]
     return []
 
 
 def _check_name_format(frontmatter: Dict[str, Any]) -> List[LintFinding]:
     name = str(frontmatter.get("name", "")).strip()
-    if not name:
-        return []
-    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
-        return [
-            LintFinding(
-                ERROR,
-                "name-format",
-                f"name '{name}' must be lowercase letters, digits, hyphens, "
-                f"and underscores only.",
-            )
-        ]
+    if name and not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+        return [_err(
+            "name-format",
+            f"name '{name}' must be lowercase letters, digits, hyphens, "
+            f"and underscores only.",
+        )]
     return []
 
 
 def _check_description(frontmatter: Dict[str, Any]) -> List[LintFinding]:
     findings: List[LintFinding] = []
-    # Raw description as authored — extract_skill_description() applies the
-    # 60-char prompt truncation, so it can never exceed the limit; measure the
-    # raw frontmatter value for the length check.
+    # Measure the raw authored value: extract_skill_description() already
+    # truncates to the prompt budget, so it can never exceed the limit.
     desc = str(frontmatter.get("description", "")).strip().strip("'\"")
     if not desc:
         return findings
     if len(desc) > SKILL_PROMPT_DESC_LIMIT:
-        findings.append(
-            LintFinding(
-                WARNING,
-                "description-length",
-                f"description is {len(desc)} chars; the skill index truncates "
-                f"past {SKILL_PROMPT_DESC_LIMIT} chars + '...', losing routing "
-                f"signal. Keep it to one sentence.",
-            )
-        )
+        findings.append(_warn(
+            "description-length",
+            f"description is {len(desc)} chars; the skill index truncates "
+            f"past {SKILL_PROMPT_DESC_LIMIT} chars + '...', losing routing "
+            f"signal. Keep it to one sentence.",
+        ))
     lower = desc.lower()
     hits = [w for w in _MARKETING_WORDS if re.search(rf"\b{re.escape(w)}\b", lower)]
     if hits:
-        findings.append(
-            LintFinding(
-                WARNING,
-                "description-marketing",
-                f"description contains marketing words {hits}; state the "
-                f"capability, not adjectives.",
-            )
-        )
+        findings.append(_warn(
+            "description-marketing",
+            f"description contains marketing words {hits}; state the "
+            f"capability, not adjectives.",
+        ))
     return findings
 
 
@@ -188,74 +165,53 @@ def _check_metadata_block(frontmatter: Dict[str, Any]) -> List[LintFinding]:
     findings: List[LintFinding] = []
     for key in ("version", "author", "license"):
         if key not in frontmatter:
-            findings.append(
-                LintFinding(
-                    WARNING,
-                    "missing-metadata",
-                    f"frontmatter is missing '{key}'; every peer skill has it.",
-                )
-            )
+            findings.append(_warn(
+                "missing-metadata",
+                f"frontmatter is missing '{key}'; every peer skill has it.",
+            ))
     meta = frontmatter.get("metadata")
     hermes_meta = meta.get("hermes") if isinstance(meta, dict) else None
     if not isinstance(hermes_meta, dict):
-        findings.append(
-            LintFinding(
-                WARNING,
-                "missing-metadata",
-                "frontmatter is missing metadata.hermes.{tags, related_skills}.",
-            )
-        )
-    else:
-        if "tags" not in hermes_meta:
-            findings.append(
-                LintFinding(
-                    WARNING, "missing-metadata", "metadata.hermes.tags is missing."
-                )
-            )
+        findings.append(_warn(
+            "missing-metadata",
+            "frontmatter is missing metadata.hermes.{tags, related_skills}.",
+        ))
+    elif "tags" not in hermes_meta:
+        findings.append(_warn("missing-metadata", "metadata.hermes.tags is missing."))
     author = str(frontmatter.get("author", ""))
     if author and author.strip().lower() in ("hermes", "agent", "hermes agent") and (
         author != "Hermes Agent"
     ):
-        findings.append(
-            LintFinding(
-                WARNING,
-                "author-caps",
-                f"author '{author}' should be 'Hermes Agent' (proper caps) "
-                f"or a real contributor name.",
-            )
-        )
+        findings.append(_warn(
+            "author-caps",
+            f"author '{author}' should be 'Hermes Agent' (proper caps) "
+            f"or a real contributor name.",
+        ))
     return findings
 
 
 def _check_shell_utilities(body: str) -> List[LintFinding]:
     """Flag banned shell utilities named in PROSE (not fenced code blocks)."""
-    findings: List[LintFinding] = []
     prose = _strip_code_blocks(body)
-    for util, tool in _SHELL_UTIL_TO_TOOL.items():
-        # Backtick-wrapped mention in prose, e.g. `grep` — the failure mode
-        # CONTRIBUTING rule 2 targets. Bare words in sentences are too noisy.
-        if re.search(rf"`{re.escape(util)}`", prose):
-            findings.append(
-                LintFinding(
-                    WARNING,
-                    "shell-utility-reference",
-                    f"prose references `{util}`; name the native tool "
-                    f"`{tool}` instead.",
-                )
-            )
-    return findings
+    # Only backtick-wrapped mentions: bare words in sentences are too noisy.
+    return [
+        _warn(
+            "shell-utility-reference",
+            f"prose references `{util}`; name the native tool "
+            f"`{tool}` instead.",
+        )
+        for util, tool in _SHELL_UTIL_TO_TOOL.items()
+        if re.search(rf"`{re.escape(util)}`", prose)
+    ]
 
 
 def _check_sections(body: str) -> List[LintFinding]:
     if not any(re.search(rf"^#+\s+{re.escape(s)}", body, re.M) for s in _EXPECTED_SECTIONS):
-        return [
-            LintFinding(
-                WARNING,
-                "missing-section",
-                "no '## When to Use' section found; skills need explicit "
-                "trigger conditions near the top.",
-            )
-        ]
+        return [_warn(
+            "missing-section",
+            "no '## When to Use' section found; skills need explicit "
+            "trigger conditions near the top.",
+        )]
     return []
 
 
@@ -265,26 +221,21 @@ def _check_reference_links(body: str, skill_dir: Optional[Path]) -> List[LintFin
         return []
     findings: List[LintFinding] = []
     seen: set[str] = set()
-    # Only references/, templates/, assets/ are reliably skill-owned. `scripts/`
-    # is excluded: dev skills routinely mention repo-root scripts like
-    # `scripts/run_tests.sh` that legitimately live outside the skill dir.
+    # Only references/, templates/, assets/ are reliably skill-owned; `scripts/`
+    # is excluded because dev skills legitimately cite repo-root scripts.
     for match in re.finditer(r"(references|templates|assets)/[\w./-]+", body):
         rel = match.group(0)
         if rel in seen:
             continue
         seen.add(rel)
-        # Skip obvious placeholders / globs.
-        if "*" in rel or rel.endswith("/"):
+        if "*" in rel or rel.endswith("/"):  # placeholders / globs
             continue
         if not (skill_dir / rel).exists():
-            findings.append(
-                LintFinding(
-                    WARNING,
-                    "dangling-reference",
-                    f"body references '{rel}' but that file does not exist "
-                    f"in the skill directory.",
-                )
-            )
+            findings.append(_warn(
+                "dangling-reference",
+                f"body references '{rel}' but that file does not exist "
+                f"in the skill directory.",
+            ))
     return findings
 
 
@@ -292,10 +243,8 @@ def _check_platforms_gating(
     frontmatter: Dict[str, Any], skill_dir: Optional[Path]
 ) -> List[LintFinding]:
     """If bundled scripts use POSIX-only primitives, require platforms:."""
-    if skill_dir is None:
+    if skill_dir is None or frontmatter.get("platforms"):
         return []
-    if frontmatter.get("platforms"):
-        return []  # already gated
     scripts_dir = skill_dir / "scripts"
     if not scripts_dir.is_dir():
         return []
@@ -312,33 +261,27 @@ def _check_platforms_gating(
             offenders[script.name] = hit
     if offenders:
         detail = "; ".join(f"{k}: {v}" for k, v in offenders.items())
-        return [
-            LintFinding(
-                WARNING,
-                "platforms-gating",
-                f"scripts use POSIX-only primitives ({detail}) but no "
-                f"'platforms:' frontmatter is declared. Fix cross-platform or "
-                f"gate with platforms: [linux, macos].",
-            )
-        ]
+        return [_warn(
+            "platforms-gating",
+            f"scripts use POSIX-only primitives ({detail}) but no "
+            f"'platforms:' frontmatter is declared. Fix cross-platform or "
+            f"gate with platforms: [linux, macos].",
+        )]
     return []
 
 
 def _check_forbidden_files(skill_dir: Optional[Path]) -> List[LintFinding]:
     if skill_dir is None:
         return []
-    findings: List[LintFinding] = []
-    for fname in _FORBIDDEN_FILES:
-        if (skill_dir / fname).exists():
-            findings.append(
-                LintFinding(
-                    WARNING,
-                    "forbidden-file",
-                    f"skill ships '{fname}'; skills should not include "
-                    f"scaffolding/config files.",
-                )
-            )
-    return findings
+    return [
+        _warn(
+            "forbidden-file",
+            f"skill ships '{fname}'; skills should not include "
+            f"scaffolding/config files.",
+        )
+        for fname in _FORBIDDEN_FILES
+        if (skill_dir / fname).exists()
+    ]
 
 
 def _check_platform_list_valid(frontmatter: Dict[str, Any]) -> List[LintFinding]:
@@ -349,18 +292,12 @@ def _check_platform_list_valid(frontmatter: Dict[str, Any]) -> List[LintFinding]
     items = platforms if isinstance(platforms, list) else [platforms]
     bad = [p for p in items if str(p).lower() not in valid]
     if bad:
-        return [
-            LintFinding(
-                WARNING,
-                "platforms-value",
-                f"platforms contains unrecognized value(s) {bad}; expected a "
-                f"subset of {sorted(valid)}.",
-            )
-        ]
+        return [_warn(
+            "platforms-value",
+            f"platforms contains unrecognized value(s) {bad}; expected a "
+            f"subset of {sorted(valid)}.",
+        )]
     return []
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
 
 
 def _strip_code_blocks(body: str) -> str:
@@ -376,10 +313,9 @@ def lint_content(
 ) -> List[LintFinding]:
     """Lint raw SKILL.md *content*.
 
-    Pass ``skill_dir`` to enable on-disk checks (name/dir match, dangling
-    reference links, POSIX-primitive gating, forbidden files). Without it,
-    only content-only checks run — useful for the create path, where the file
-    is not yet written.
+    ``skill_dir`` enables on-disk checks (name/dir match, dangling links,
+    POSIX gating, forbidden files); without it only content checks run,
+    which is what the create path needs before the file exists.
     """
     frontmatter, body = parse_frontmatter(content)
     findings: List[LintFinding] = []
@@ -413,12 +349,10 @@ def has_errors(findings: List[LintFinding]) -> bool:
 
 
 def _main(argv: Optional[List[str]] = None) -> int:
-    """CLI: ``python -m tools.skill_linter <path-to-SKILL.md-or-dir> ...``
+    """CLI: ``python -m tools.skill_linter <SKILL.md | skill-dir> ...``
 
-    Accepts SKILL.md files or skill directories (recursively linted). Prints
-    findings grouped per skill. Exit code 1 if any ERROR-severity finding is
-    present (WARNING-only is exit 0), so CI can gate on structural breakage
-    without failing on advisory convention nits.
+    Exit 1 only on ERROR-severity findings (WARNING-only exits 0) so CI can
+    gate on structural breakage without failing on advisory nits.
     """
     import sys
 

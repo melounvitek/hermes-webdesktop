@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """Read which OS window sits directly underneath the Hermes desktop window.
 
-The window list lives with the OS, so this tool round-trips through the
-gateway's blocking-prompt bridge — the same one `read_terminal` uses:
-tui_gateway emits ``window.read.request``, the desktop renderer asks its main
-process (which owns native window enumeration) and answers with
-``window.read.respond``. This module is just schema + a thin dispatcher over
-the platform-injected callback.
+The window list lives with the OS, so this round-trips through the gateway's
+blocking-prompt bridge like `read_terminal`: ``window.read.request`` -> the renderer's
+main process (native window enumeration) -> ``window.read.respond``.
 """
 
-import json
 from typing import Callable, Optional
 
+from tools.desktop_ui import passthrough_json
 from tools.registry import registry, tool_error
 
 
@@ -32,12 +29,7 @@ def read_window_below_tool(callback: Optional[Callable] = None) -> str:
             "Could not determine the window underneath (the desktop app did "
             "not answer, or window enumeration is unavailable on this system)."
         )
-
-    # Desktop answers with a JSON object; pass it through, else wrap the raw text.
-    try:
-        return json.dumps(json.loads(raw), ensure_ascii=False)
-    except (TypeError, ValueError):
-        return json.dumps({"text": str(raw)}, ensure_ascii=False)
+    return passthrough_json(raw)
 
 
 READ_WINDOW_BELOW_SCHEMA = {

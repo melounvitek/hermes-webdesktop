@@ -1,30 +1,19 @@
 """Live, tail-able transcripts for delegated subagents.
 
 Every ``delegate_task`` dispatch creates one append-only, human-readable log
-per child under::
+per child under ``<hermes_home>/cache/delegation/live/<delegation_id>/task-<n>.log``.
+Files are pre-created with a header at dispatch (so ``tail -f`` attaches
+immediately) and stream one line per child event; the paths are returned from
+``delegate_task`` so the parent or user can watch a child work.
 
-    <hermes_home>/cache/delegation/live/<delegation_id>/task-<n>.log
+``cache/delegation`` is mounted read-only into remote terminal backends
+(``credential_files._CACHE_DIRS``), so the logs are readable from any backend —
+and every line written here must therefore be credential-redacted.
 
-The files are pre-created with a header at dispatch time (so ``tail -f``
-attaches immediately) and then stream one line per child event: assistant
-text, thinking, tool calls, tool results, and lifecycle markers. The paths
-are returned from ``delegate_task`` so the parent agent (or the user) can
-watch a child work instead of waiting blind for the consolidated summary.
-
-Placement under ``cache/delegation`` is deliberate: that directory is
-mounted read-only into remote terminal backends (Docker/Modal/SSH) via
-``credential_files._CACHE_DIRS``, so the logs are readable from any backend.
-
-Design constraints:
-
-* **Never raise into the agent loop.** Every write is wrapped; the first
-  failure disables the writer and degrades to a debug log.
-* **Survive child crashes.** Files are opened in append mode per write —
-  no long-lived handle to lose, every event is flushed when written.
-* **Side-channel only.** Nothing here touches message content, so prompt
-  caching is unaffected.
-* **No config knobs.** Retention is a module constant (7 days), pruned
-  opportunistically on each new dispatch.
+Design constraints: never raise into the agent loop (first write failure
+disables the writer); open in append mode per write (no handle to lose on a
+child crash); side-channel only (prompt cache unaffected); no config knobs
+(retention is a 7-day module constant pruned on each dispatch).
 """
 
 from __future__ import annotations
@@ -40,12 +29,10 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Live transcript directories older than this are pruned on new dispatches.
 LIVE_RETENTION_DAYS = 7
 
-# Per-line truncation budgets (chars). The .log is a compact operational
-# view, not the full-fidelity record — the child's SessionDB transcript and
-# the summary spill files carry complete text.
+# Per-line truncation budgets (chars). The .log is a compact operational view;
+# the child's SessionDB transcript and summary spill files carry full text.
 _ASSISTANT_MAX = 600
 _THINKING_MAX = 300
 _ARGS_MAX = 220
@@ -53,9 +40,10 @@ _RESULT_MAX = 400
 _KICKOFF_MAX = 500
 
 # Stream deltas are buffered and flushed as one assistant line when another
-# event type arrives (or on completion). Cap the buffer so a huge streamed
-# reply can't hold memory hostage.
+# event type arrives (or on completion); capped so a huge reply can't hold memory.
 _STREAM_BUFFER_FLUSH_CHARS = 4000
+
+_TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
 
 def live_transcript_root() -> Path:
@@ -72,32 +60,19 @@ def new_live_delegation_id() -> str:
 
 def _one_line(text: Any, limit: int) -> str:
     """Collapse to a single line and truncate with an elided-chars note."""
-    s = str(text or "")
-    s = " ".join(s.split())  # collapse newlines/runs of whitespace
+    s = " ".join(str(text or "").split())
     if len(s) > limit:
-        omitted = len(s) - limit
-        s = s[:limit] + f" …(+{omitted} chars)"
+        s = s[:limit] + f" …(+{len(s) - limit} chars)"
     return s
 
 
 def _redact(text: str) -> str:
-    """Mask credentials before anything reaches the transcript file.
+    """Mask credentials before anything reaches the sandbox-readable transcript.
 
-    These logs live under ``cache/delegation``, which ``delegate_tool`` mounts
-    READ-ONLY into remote terminal backends — so every line written here is
-    readable from inside the sandbox. The events rendered here carry exactly
-    the data that tends to hold secrets: tool args (a bearer header on a
-    curl), tool results (a ``.env`` dump, a provider error echoing the key
-    back) and streamed assistant text. Every other sink for that data already
-    routes through this same redactor — search results via
-    ``redact_sensitive_text``, terminal output via ``redact_terminal_output``
-    — so a transcript that skipped it is the one place the operator's keys
-    land in plaintext.
-
-    ``force=True``: this is a safety boundary, so it must redact even when the
-    global toggle is off. Withholds the line rather than emitting raw text if
-    the redactor is somehow unavailable — losing a debug line costs less than
-    writing a live credential into a sandbox-readable file.
+    Tool args, results and streamed text are exactly the data that carries
+    secrets. ``force=True`` because this is a safety boundary (redact even
+    when the global toggle is off); if the redactor is unavailable, withhold
+    the line rather than write a live credential into a mounted file.
     """
     if not text:
         return text
@@ -109,11 +84,15 @@ def _redact(text: str) -> str:
         return "[line withheld: redaction unavailable]"
 
 
+def _dump_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 class LiveTranscriptWriter:
     """Append-only human-readable event log for ONE subagent task.
 
-    All methods are best-effort: the first write failure flips ``_ok`` off
-    and subsequent calls become no-ops (debug-logged). Never raises.
+    Best-effort: the first write failure flips ``_ok`` off and later calls
+    become debug-logged no-ops. Never raises.
     """
 
     def __init__(self, delegation_id: str, task_index: int, goal: str,
@@ -125,17 +104,15 @@ class LiveTranscriptWriter:
         self._stream_buf: List[str] = []
         self._stream_len = 0
         try:
-            base = (root if root is not None else live_transcript_root())
-            d = base / delegation_id
+            d = (root if root is not None else live_transcript_root()) / delegation_id
             d.mkdir(parents=True, exist_ok=True)
             self.path: Optional[Path] = d / f"task-{task_index}.log"
             header = [
                 "=== Hermes subagent live transcript ===",
                 f"delegation: {delegation_id}   task: {task_index}",
-                # Header bypasses event(), so redact here too — a goal string
-                # can carry a key the caller pasted into the task.
+                # Header bypasses event(), so redact here too.
                 f"goal: {_redact(_one_line(goal, _KICKOFF_MAX))}",
-                f"started: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"started: {time.strftime(_TIME_FMT)}",
                 "(append-only; streams while the subagent runs — tail -f me)",
                 "=" * 40,
             ]
@@ -148,21 +125,18 @@ class LiveTranscriptWriter:
             self._ok = False
             self.path = None
 
-    # ── low-level ────────────────────────────────────────────────────────
     def event(self, role: str, text: str) -> None:
-        """Append one ``HH:MM:SS role ⟩ text`` line. Flushed per event."""
+        """Append one ``HH:MM:SS role | text`` line. Flushed per event.
+
+        Single choke point: every typed helper funnels through here, so one
+        redaction covers args, results, thinking and streamed text.
+        """
         if not self._ok or self.path is None:
             return
-        # Single choke point: every typed helper funnels through here, so
-        # redacting once covers args, results, thinking and streamed text —
-        # and a helper added later can't bypass it.
         line = f"{time.strftime('%H:%M:%S')} {role:<9}| {_redact(text)}\n"
         try:
-            with self._lock:
-                # Append mode per write: no held handle, survives child crash,
-                # and the close() acts as the flush.
-                with open(self.path, "a", encoding="utf-8") as fh:
-                    fh.write(line)
+            with self._lock, open(self.path, "a", encoding="utf-8") as fh:
+                fh.write(line)
         except Exception as exc:
             self._ok = False
             logger.debug("Live transcript write failed (%s): %s", self.path, exc)
@@ -180,8 +154,7 @@ class LiveTranscriptWriter:
 
     def tool_start(self, name: str, args_preview: Any = None) -> None:
         self.flush_stream()
-        args = _one_line(args_preview, _ARGS_MAX)
-        self.event("tool", f"-> {name or '?'}({args})")
+        self.event("tool", f"-> {name or '?'}({_one_line(args_preview, _ARGS_MAX)})")
 
     def tool_result(self, name: str, result: Any = None,
                     duration: Any = None, is_error: bool = False) -> None:
@@ -219,53 +192,66 @@ class LiveTranscriptWriter:
         self.assistant_text(text)
 
     # ── event demux (the tool_progress_callback surface) ─────────────────
+    def _on_tool_started(self, tool_name, preview, args, kwargs):
+        self.tool_start(str(tool_name or ""), preview if preview else args)
+
+    def _on_tool_completed(self, tool_name, preview, args, kwargs):
+        self.tool_result(
+            str(tool_name or ""),
+            result=kwargs.get("result"),
+            duration=kwargs.get("duration"),
+            is_error=bool(kwargs.get("is_error")),
+        )
+
+    def _on_thinking(self, tool_name, preview, args, kwargs):
+        # Fired as cb("_thinking", <text>) — text rides in the tool_name slot.
+        self.thinking(str(tool_name or preview or ""))
+
+    def _on_reasoning(self, tool_name, preview, args, kwargs):
+        # cb("reasoning.available", "_thinking", <text>, None)
+        self.thinking(str(preview or ""))
+
+    def _on_text(self, tool_name, preview, args, kwargs):
+        self.add_stream_delta(str(preview or ""))
+
+    def _on_start(self, tool_name, preview, args, kwargs):
+        self.event("start", _one_line(preview, _KICKOFF_MAX))
+
+    def _on_complete(self, tool_name, preview, args, kwargs):
+        self.flush_stream()
+        parts = [f"status={kwargs.get('status', '?')}"]
+        dur = kwargs.get("duration_seconds")
+        if dur is not None:
+            parts.append(f"duration={dur}s")
+        summary = kwargs.get("summary") or preview
+        if summary:
+            parts.append(f"summary: {_one_line(summary, _RESULT_MAX)}")
+        self.marker(" ".join(parts))
+
+    _OBSERVERS = {
+        "tool.started": _on_tool_started,
+        "tool.completed": _on_tool_completed,
+        "_thinking": _on_thinking,
+        "reasoning.available": _on_reasoning,
+        "subagent.text": _on_text,
+        "subagent.start": _on_start,
+        "subagent.complete": _on_complete,
+    }
+
     def observe(self, event_type: Any, tool_name: Any = None,
                 preview: Any = None, args: Any = None, **kwargs: Any) -> None:
         """Map a child tool_progress_callback event onto transcript lines.
 
         Mirrors the shapes emitted by agent/tool_executor.py,
-        agent/conversation_loop.py, and tools/delegate_tool._run_single_child.
+        agent/conversation_loop.py and delegate_tool._run_single_child.
         Unknown events are ignored. Never raises (event() swallows I/O).
         """
-        et = str(event_type or "")
-        if et == "tool.started":
-            self.tool_start(str(tool_name or ""), preview if preview else args)
-        elif et == "tool.completed":
-            self.tool_result(
-                str(tool_name or ""),
-                result=kwargs.get("result"),
-                duration=kwargs.get("duration"),
-                is_error=bool(kwargs.get("is_error")),
-            )
-        elif et == "_thinking":
-            # Fired as cb("_thinking", <text>) — the text rides in the
-            # tool_name positional slot (see conversation_loop.py).
-            self.thinking(str(tool_name or preview or ""))
-        elif et == "reasoning.available":
-            # cb("reasoning.available", "_thinking", <text>, None)
-            self.thinking(str(preview or ""))
-        elif et == "subagent.text":
-            self.add_stream_delta(str(preview or ""))
-        elif et == "subagent.start":
-            self.event("start", _one_line(preview, _KICKOFF_MAX))
-        elif et == "subagent.complete":
-            self.flush_stream()
-            status = kwargs.get("status", "?")
-            dur = kwargs.get("duration_seconds")
-            parts = [f"status={status}"]
-            if dur is not None:
-                parts.append(f"duration={dur}s")
-            summary = kwargs.get("summary") or preview
-            if summary:
-                parts.append(f"summary: {_one_line(summary, _RESULT_MAX)}")
-            self.marker(" ".join(parts))
+        handler = self._OBSERVERS.get(str(event_type or ""))
+        if handler is not None:
+            handler(self, tool_name, preview, args, kwargs)
 
     def finalize(self, entry: Dict[str, Any]) -> None:
-        """Terminal marker from the aggregated result entry.
-
-        Adds exit-reason detail the subagent.complete event doesn't carry
-        (budget exhaustion via exit_reason=max_iterations, errors, etc.).
-        """
+        """Terminal marker with exit-reason detail subagent.complete lacks."""
         parts = [f"end status={entry.get('status', '?')}"]
         exit_reason = entry.get("exit_reason")
         if exit_reason:
@@ -280,10 +266,9 @@ class LiveTranscriptWriter:
 def wrap_progress_callback(inner_cb, writer: LiveTranscriptWriter):
     """Wrap a child's tool_progress_callback so events also land in the log.
 
-    ``inner_cb`` may be None (no parent display) — the wrapper still records.
-    Writer failures never propagate; inner callback behavior is unchanged
-    (its own exceptions are handled by callers exactly as before).
-    Preserves the ``_flush`` attribute contract used by _run_single_child.
+    ``inner_cb`` may be None; writer failures never propagate and the inner
+    callback's behavior is unchanged. Preserves the ``_flush`` attribute
+    contract used by _run_single_child.
     """
 
     def _cb(event_type, tool_name=None, preview=None, args=None, **kwargs):
@@ -318,9 +303,9 @@ def create_live_transcripts(
 ) -> tuple[Optional[str], List[Optional[LiveTranscriptWriter]], List[str]]:
     """Create one pre-headered writer per task + a manifest.json.
 
-    Returns ``(delegation_id, writers, paths)``. On any top-level failure
-    returns ``(None, [None]*n, [])`` so delegation proceeds untouched.
-    Also opportunistically prunes stale live dirs (retention).
+    Returns ``(delegation_id, writers, paths)``; on any top-level failure
+    ``(None, [None]*n, [])`` so delegation proceeds untouched. Also prunes
+    stale live dirs opportunistically.
     """
     n = len(task_list)
     try:
@@ -358,18 +343,15 @@ def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
     try:
         manifest = {
             "delegation_id": delegation_id,
-            "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "started": time.strftime(_TIME_FMT),
             "task_count": len(task_list),
             "model": model,
             "provider": provider,
             "tasks": [
                 {
                     "index": i,
-                    # manifest.json sits in the same mounted
-                    # cache/delegation/live/<id>/ directory as the .log files,
-                    # so it needs the same treatment — redacting the header
-                    # while serialising the goal verbatim here would leave the
-                    # credential exposed one file over.
+                    # Same mounted directory as the .log files, so the goal
+                    # needs the same redaction here.
                     "goal": _redact(str(t.get("goal", ""))[:500]),
                     "log": paths[i] if i < len(paths) else None,
                     "status": "running",
@@ -377,9 +359,7 @@ def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                 for i, t in enumerate(task_list)
             ],
         }
-        _manifest_path(delegation_id).write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        _dump_json(_manifest_path(delegation_id), manifest)
     except Exception as exc:
         logger.debug("Live transcript manifest write failed: %s", exc)
 
@@ -399,18 +379,14 @@ def update_manifest_statuses(delegation_id: Optional[str],
                 task["status"] = r.get("status", task.get("status"))
                 if r.get("exit_reason"):
                     task["exit_reason"] = r["exit_reason"]
-        manifest["completed"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        mp.write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
-                      encoding="utf-8")
+        manifest["completed"] = time.strftime(_TIME_FMT)
+        _dump_json(mp, manifest)
     except Exception as exc:
         logger.debug("Live transcript manifest update failed: %s", exc)
 
 
 def prune_stale_live_dirs(max_age_days: int = LIVE_RETENTION_DAYS) -> int:
-    """Remove live/<delegation_id> dirs older than the retention window.
-
-    Returns how many were removed. Fully best-effort.
-    """
+    """Remove live/<delegation_id> dirs older than the retention window. Best-effort."""
     removed = 0
     try:
         root = live_transcript_root()
