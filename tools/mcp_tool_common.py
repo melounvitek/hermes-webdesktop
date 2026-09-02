@@ -26,6 +26,7 @@ class _OriginProxy:
 
         return getattr(mcp_tool, name)
 
+
 _core = _OriginProxy()
 _MISSING = object()
 
@@ -40,6 +41,7 @@ def mcp_field(obj, snake: str, camel: str, default=None):
     if value is _MISSING:
         value = getattr(obj, camel, _MISSING)
     return default if value is _MISSING else value
+
 
 _DEFAULT_TOOL_TIMEOUT = 300      # seconds for tool calls
 
@@ -61,6 +63,7 @@ def _resolve_tool_timeout(config: dict) -> float:
         logger.debug("mcp.tool_call timeout resolution failed", exc_info=True)
     return _DEFAULT_TOOL_TIMEOUT
 
+
 # Jitter on reconnect backoff so servers that lost the same backend don't
 # retry in lockstep (thundering herd, synchronized log bursts).
 _BACKOFF_JITTER = 0.2            # +/-20%
@@ -69,6 +72,7 @@ _BACKOFF_JITTER = 0.2            # +/-20%
 def _jittered(seconds: float) -> float:
     """``seconds`` with +/-20% uniform jitter, floored at 0."""
     return max(0.0, seconds * random.uniform(1.0 - _BACKOFF_JITTER, 1.0 + _BACKOFF_JITTER))
+
 
 # Credential patterns to strip from error messages.
 _CREDENTIAL_PATTERN = re.compile(
@@ -130,6 +134,7 @@ def _safe_numeric(value, default, coerce=int, minimum=1):
         return max(result, minimum)
     except (TypeError, ValueError, OverflowError):
         return default
+
 
 _TRUE_WORDS = frozenset({"true", "1", "yes", "on"})
 _FALSE_WORDS = frozenset({"false", "0", "no", "off"})

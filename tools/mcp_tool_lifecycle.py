@@ -57,6 +57,7 @@ def _snapshot_child_pids() -> set:
 
     return set()
 
+
 # argv markers of non-MCP gateway children that can race into the snapshot
 # delta during an MCP spawn (defense-in-depth; LSP/slash_worker already use
 # start_new_session). Matched against argv[1:] because Python/Java children

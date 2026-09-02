@@ -55,6 +55,7 @@ def _write_stderr_log_header(server_name: str) -> None:
     except Exception:
         pass
 
+
 # Env vars safe to pass to stdio subprocesses (no secrets).
 _SAFE_ENV_KEYS = frozenset({"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR"})
 
@@ -90,6 +91,7 @@ def _workspace_folder() -> str:
 def _workspace_basename() -> str:
     root = _core._workspace_folder()
     return os.path.basename(root.rstrip("/\\")) or root
+
 
 # Cursor's case-sensitive context vars -> resolver.
 _CONTEXT_VAR_RESOLVERS = {
@@ -224,6 +226,7 @@ def _interpolate_env_vars(value):
     if isinstance(value, list):
         return [_interpolate_env_vars(v) for v in value]
     return value
+
 
 # (server_name, dotted key path) pairs already warned about; config loads
 # happen on every discovery pass, so warn once per process.
