@@ -51,6 +51,9 @@ def _safe_int(value: Any) -> int | None:
 
 # Summary-route pin lives in a ContextVar (not on the shared compressor) so the
 # retry after a stalled summary sees it while the detached stalled worker does not.
+# The stalled call raised nothing, so the aux client's exception-path fallback never fires;
+# the host pins a fallback route for exactly ONE retry. Covers only the summary LLM call
+# (the sole aux call per compaction); the main-model retry must NOT re-issue the pin.
 _SUMMARY_ROUTE_PIN: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
     contextvars.ContextVar("hermes_summary_route_pin", default=None)
 )
@@ -297,7 +300,10 @@ def _template_visible_role(message: Any) -> Optional[str]:
 def _strip_persistence_markers(messages: List[Dict[str, Any]]) -> None:
     """Enforce the invariant: no assembled message carries a persistence marker.
 
-    Run once on the fully assembled list; mutates in place (compaction-local copies).
+    A leaked ``_db_persisted`` makes the child-session rotation flush skip the row, losing it
+    from state.db. Per-copy-site strips are positional and re-leak when a copy site is added;
+    this terminal sweep makes the guarantee structural. Run once on the fully assembled list;
+    mutates in place (compaction-local copies).
     """
     for msg in messages:
         if isinstance(msg, dict):
@@ -308,7 +314,9 @@ def stamp_db_persisted_markers(messages: List[Dict[str, Any]]) -> None:
     """Fulfil the post-commit contract of ``SessionDB.archive_and_compact()``.
 
     Single stamp site for all callers. Call ONLY after the commit succeeded, on the
-    dict instances the caller keeps live; otherwise the flush re-INSERTs the transcript.
+    dict instances the caller keeps live. Needed because compress() output is marker-swept
+    for the ROTATION flush; an in-place commit returned unstamped is re-INSERTed as new by
+    the next persist walk and the transcript doubles on every compaction.
     """
     for msg in messages:
         if isinstance(msg, dict):
@@ -318,8 +326,11 @@ def stamp_db_persisted_markers(messages: List[Dict[str, Any]]) -> None:
 def _prune_stale_reasoning_replay(messages: List[Dict[str, Any]]) -> int:
     """Strip stale ``codex_reasoning_items`` from assistant turns older than the active one.
 
-    Boundary is the last USER message (a turn spans several assistant rows).
-    ``type: "compaction"`` items are exempt. In place; returns pruned message count.
+    Boundary is the last USER message (a turn spans several assistant rows): the Responses
+    API replays a turn's bridging reasoning items together, so cutting at the last ASSISTANT
+    would strip mid-chain. ``type: "compaction"`` items are cumulative context carriers that
+    must survive on every retained message — filter items, never pop the key. In place;
+    returns pruned message count.
     """
     # Active turn = everything after the last real user message; synthetic
     # continuation rows and tool results never mark a turn boundary.
@@ -701,7 +712,9 @@ _CLARIFY_NON_RESPONSE_PREFIXES = (
 def _is_clarify_non_response_sentinel(response: Any) -> bool:
     """Return True when a clarify ``user_response`` is runtime sentinel prose, not an answer.
 
-    For lists, ANY sentinel item poisons the whole response.
+    For lists, ANY sentinel item poisons the whole response: real producers only emit scalar
+    sentinels, so a mixed list is forged/corrupt content — fall back to the generic path (may
+    lose info, never misattributes a user answer).
     """
     if isinstance(response, str):
         return response.lstrip().startswith(_CLARIFY_NON_RESPONSE_PREFIXES)
@@ -1178,8 +1191,10 @@ _REPLAY_BUDGET_KEYS = (
     "codex_message_items",
 )
 
-# Keys replayed on EVERY retained assistant turn. Generic thinking keys are
-# newest-turn-only on non-Codex transports; charging them everywhere overcut the tail.
+# Keys replayed on EVERY retained assistant turn: Codex items ride every request and message
+# items are required for prefix-cache continuity. Generic thinking keys ship for the newest turn
+# only elsewhere (Anthropic strips older, Bedrock never replays, strict chat-completions reject
+# or pad the field); charging them everywhere overcut the tail.
 _ALWAYS_REPLAYED_BUDGET_KEYS = (
     "codex_reasoning_items",
     "codex_message_items",
@@ -1223,9 +1238,11 @@ def _reasoning_details_text_chars(value: Any) -> int:
 def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -> int:
     """Token estimate for one message in the tail-protection budget walks.
 
-    Counts content, the full ``tool_call`` envelope, and always-replayed provider
-    fields. ``charge_stale_thinking=False`` skips newest-turn-only thinking keys.
-    Accounting only; never mutates.
+    Counts content, the full ``tool_call`` envelope (arguments-only undercounted parallel-call
+    turns by 2-15x), and always-replayed provider fields. Always-replayed fields are charged
+    because the preflight estimator sees the full shape; a mismatched size class protects
+    blob-heavy rows as "small" and compaction re-fires. ``charge_stale_thinking=False`` skips
+    newest-turn-only thinking keys. Accounting only; never mutates.
     """
     content = msg.get("content") or ""
     if isinstance(content, str):
@@ -2496,8 +2513,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             int(context_length * 0.05), _SUMMARY_TOKENS_CEILING,
         )
 
-        # Calibration state is only valid for the model that produced it. 0 (not the -1 sentinel) means
-        # "no real usage yet -> use the rough estimate" so post-response should_compress still fires.
+        # Calibration state is only valid for the model that produced it: carried across a switch to a
+        # smaller window it would let should_defer_preflight_to_real_usage() suppress a compaction the
+        # new model needs (oversized send after switch). 0 (not the -1 sentinel) means "no real usage
+        # yet -> use the rough estimate" so post-response should_compress still fires.
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
@@ -2582,6 +2601,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         pct_value = int(effective_window * threshold_percent)
         floored = max(pct_value, MINIMUM_CONTEXT_LENGTH)
         # The floor must not consume output headroom: cap at 85% when it is the binding term.
+        # Near-minimum windows otherwise trigger at ~98%; providers that silently clip over-window
+        # prompts (ollama) never raise the overflow backstop, so the session wedges at the ceiling.
+        # An explicit threshold_percent above 85% is user intent and is not capped.
         trigger_cap = int(effective_window * ContextCompressor._MIN_CTX_TRIGGER_RATIO)
         if effective_window > 0 and floored > pct_value and floored > trigger_cap:
             floored = max(pct_value, trigger_cap)
@@ -2750,6 +2772,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 elif self._pending_request_rough_tokens > 0:
                     # Pair the real prompt count with the rough estimate of the same request so the defer
                     # baseline stays synchronized on EVERY fitting response, not only after compaction.
+                    # Without this a never-compressed session has no baseline and preflight fires on the
+                    # raw rough estimate, which overcounts CJK / replay blobs severalfold.
                     self.last_rough_tokens_when_real_prompt_fit = self._pending_request_rough_tokens
                 # Any real reading below the trigger proves the prompt fits: clear the latch. The fallback streak survives.
                 self._record_ineffective_compression_verdict(0)
@@ -2810,7 +2834,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         """Return True when a high rough preflight estimate is known-noisy.
 
         Projects real usage as ``last_real + (rough_now - rough_at_last_real)`` and fires only when the
-        projection, not the raw estimate, crosses the threshold.
+        projection, not the raw estimate, crosses the threshold. Not a strict upper bound for
+        chars/4-underestimated scripts (Cyrillic, Thai, Arabic); bounded by two backstops: a real
+        reading at/over threshold clears the baseline, and the overflow handler compacts reactively.
+        Callers with a smaller (raw-messages) basis can only over-defer; the pre-API pressure check
+        re-runs with the aligned basis.
         """
         if rough_tokens < self.threshold_tokens:
             return False
@@ -4893,8 +4921,10 @@ This compaction should PRIORITISE preserving all information related to the focu
     ) -> int:
         """Guarantee the most recent user message is in the protected tail.
 
-        If the head_end clamp would strand the user without its reply, the cut is pushed
-        forward past the whole turn-pair instead so it is summarised as completed.
+        Tool-group alignment can pull the cut past the last user message; once summarized, the
+        prefix tells the model to answer only messages AFTER the summary, so the active ask
+        silently vanishes. If the head_end clamp would strand the user without its reply, the
+        cut is pushed forward past the whole turn-pair instead so it is summarised as completed.
         """
         last_user_idx = self._find_last_user_message_idx(messages, head_end)
         if last_user_idx < 0:
@@ -4941,7 +4971,9 @@ This compaction should PRIORITISE preserving all information related to the focu
         if n <= 1:
             return self._ensure_last_user_message_in_tail(messages, cut_idx, head_end)
 
-        # Same real-user filters as _find_last_user_message_idx.
+        # Same real-user filters as _find_last_user_message_idx. A user message is already a clean
+        # boundary: deliberately NO _align_boundary_backward here, it would pull the cut into the
+        # preceding tool group and split it.
         user_indices = []
         for i in range(len(messages) - 1, head_end - 1, -1):
             msg = messages[i]
@@ -5070,8 +5102,10 @@ This compaction should PRIORITISE preserving all information related to the focu
         # monotonic.
         cut_idx = self._ensure_last_assistant_message_in_tail(messages, cut_idx, head_end)
 
-        # Optional multi-user anchor; gated at the call site so the default path stays byte-
-        # identical. getattr: bare __new__ test doubles / plugin engines skip __init__.
+        # Optional multi-user anchor; n<=1 is gated here (not delegated) so the default path stays
+        # byte-identical: re-running the single-user anchor after the assistant anchor could re-trigger
+        # its forward turn-pair push and move the cut. getattr: bare __new__ test doubles / plugin
+        # engines skip __init__.
         _min_tail_users = getattr(self, "min_tail_user_messages", 1)
         if isinstance(_min_tail_users, int) and not isinstance(_min_tail_users, bool) and _min_tail_users > 1:
             cut_idx = self._ensure_last_n_user_messages_in_tail(
