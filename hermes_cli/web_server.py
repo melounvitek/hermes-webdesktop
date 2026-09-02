@@ -9,17 +9,15 @@ Usage:
     python -m hermes_cli.main web --port 8080
 """
 
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 
 import asyncio
 from collections import deque
-from dataclasses import dataclass
 import hashlib
 import hmac
 import ipaddress
 import json
 import logging
-import mimetypes
 import os
 import re
 import secrets
@@ -34,7 +32,6 @@ import urllib.parse
 
 from hermes_cli.install_identity import get_install_id as _shared_get_install_id
 from hermes_cli.pty_session import run_reaper
-import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,20 +41,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from hermes_cli import __version__
-from hermes_cli.config import (
-    DEFAULT_CONFIG,
-    get_process_hermes_home,
+from hermes_cli.config import (  # noqa: F401 — late-bound by extracted routers/modules; tests monkeypatch web_server.<name>
+    cfg_get,
+    check_config_version,
+    detect_install_method,
+    get_hermes_home,
     load_config,
+    load_env,
+    remove_env_value,
     save_config,
-    redact_key,
-    # Late-bound by extracted routers/modules; tests monkeypatch web_server.<name>.
-    cfg_get,  # noqa: F401
-    check_config_version,  # noqa: F401
-    detect_install_method,  # noqa: F401
-    get_hermes_home,  # noqa: F401
-    load_env,  # noqa: F401
-    remove_env_value,  # noqa: F401
-    save_env_value,  # noqa: F401
+    save_env_value,
 )
 from gateway.status import (  # noqa: F401 — late-bound by web_routers/status + tests monkeypatch web_server.<name>
     get_running_pid,
@@ -1363,16 +1356,18 @@ from hermes_cli.web_server_gateway import (  # noqa: E402,F401 — re-exported; 
 )
 
 
-_MANAGED_FILES_ROOT_ENV = "HERMES_DASHBOARD_FILES_ROOT"
+from hermes_cli.web_server_files import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
+    _canonical_path,
+    _dashboard_local_update_managed_externally,
+    _fs_path,
+    _managed_file_entry,
+    _managed_response_meta,
+    _path_is_under,
+    _resolve_managed_path,
+)
+
+
 _MANAGED_FILE_MAX_BYTES = 100 * 1024 * 1024
-_HOSTED_MANAGED_FILES_ROOT = Path("/opt/data")
-
-
-@dataclass(frozen=True)
-class ManagedFilesPolicy:
-    default_path: Path
-    locked_root: Path | None
-    can_change_path: bool
 
 
 from hermes_cli.web_routers import files as _files_routes  # noqa: E402
@@ -1385,202 +1380,6 @@ from hermes_cli.web_routers.files import (  # noqa: E402,F401 — legacy re-expo
 
 
 _FS_DATA_URL_MAX_BYTES = 16 * 1024 * 1024
-
-
-def _fs_path(raw_path: str) -> Path:
-    raw = str(raw_path or "").strip()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Path is required")
-    if "\0" in raw:
-        raise HTTPException(status_code=400, detail="Invalid path")
-    try:
-        if raw.lower().startswith("file:"):
-            parsed = urllib.parse.urlparse(raw)
-            if parsed.netloc and parsed.netloc not in {"", "localhost"}:
-                raise ValueError
-            raw = urllib.request.url2pathname(parsed.path)
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            candidate = Path.cwd() / candidate
-        return candidate.resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        raise HTTPException(status_code=400, detail="Invalid path")
-
-
-def _canonical_path(path: Path, *, require_exists: bool = False) -> Path:
-    try:
-        return path.expanduser().resolve(strict=require_exists)
-    except FileNotFoundError:
-        if require_exists:
-            raise HTTPException(status_code=404, detail="Path not found")
-        raise
-    except (OSError, RuntimeError):
-        raise HTTPException(status_code=400, detail="Invalid path")
-
-
-def _ensure_managed_root(raw_path: str | Path) -> Path:
-    root = Path(raw_path).expanduser()
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-        resolved = root.resolve()
-    except (OSError, RuntimeError) as exc:
-        raise HTTPException(status_code=500, detail=f"Managed files root is unavailable: {exc}")
-    if not resolved.is_dir():
-        raise HTTPException(status_code=500, detail="Managed files root is not a directory")
-    return resolved
-
-
-def _path_is_under(root: Path, target: Path) -> bool:
-    return target == root or root in target.parents
-
-
-def _path_text(raw_path: str | None) -> str:
-    text = str(raw_path or "").strip()
-    if "\x00" in text:
-        raise HTTPException(status_code=400, detail="Invalid path")
-    return text
-
-
-def _default_hermes_root_is_opt_data() -> bool:
-    raw = os.environ.get("HERMES_HOME", "").strip()
-    if not raw:
-        return False
-    try:
-        from hermes_constants import get_default_hermes_root
-
-        root = get_default_hermes_root().expanduser().resolve(strict=False)
-    except (OSError, RuntimeError):
-        root = Path(raw).expanduser().resolve(strict=False)
-    return root == _HOSTED_MANAGED_FILES_ROOT
-
-
-def _dashboard_local_update_managed_externally() -> bool:
-    """Return true when the dashboard should not offer ``hermes update``.
-
-    Containerized dashboards are updated by the outer launcher/image, not by an
-    in-browser local update action. Keep this dashboard capability separate
-    from install-method detection: manual git/pip installs inside containers can
-    still behave like their actual install method in the CLI.
-
-    However, when the install method is ``git`` (a bind-mounted checkout inside
-    a container — e.g. the hermes-webui image sharing the Hermes source tree),
-    the dashboard's ``hermes update`` button is the correct update path and
-    should not be suppressed. Other containerized install methods remain
-    externally managed unless their apply path is proven safe inside the
-    running container filesystem.
-    """
-    if _default_hermes_root_is_opt_data():
-        return True
-    try:
-        from hermes_constants import is_container
-
-        if not is_container():
-            return False
-    except Exception:
-        return False
-    # We are inside a container, but the install may still be self-managed.
-    # If the install method is git, the dashboard update button works against
-    # the mounted checkout and should be offered. Keep pip blocked inside
-    # containers: its apply path mutates the running container filesystem and
-    # is not the bind-mounted checkout case this gate is meant to recover.
-    try:
-        method = detect_install_method(PROJECT_ROOT)
-        if method == "git":
-            return False
-    except Exception:
-        pass
-    return True
-
-
-def _managed_files_policy(request: Request, *, create_root: bool = True) -> ManagedFilesPolicy:
-    raw_forced_root = os.environ.get(_MANAGED_FILES_ROOT_ENV, "").strip()
-    if raw_forced_root:
-        root = _ensure_managed_root(raw_forced_root) if create_root else _canonical_path(Path(raw_forced_root))
-        return ManagedFilesPolicy(default_path=root, locked_root=root, can_change_path=False)
-
-    # Remote/OAuth access does not imply a hosted container. Users can expose a
-    # local dashboard through the auth gate (for example a macOS launchd install)
-    # and still expect the Files page to browse their local home directory. Lock
-    # to /opt/data only when the installation's Hermes root is actually /opt/data
-    # (the container/hosted layout) or when HERMES_DASHBOARD_FILES_ROOT is set.
-    if _default_hermes_root_is_opt_data():
-        root = _ensure_managed_root(_HOSTED_MANAGED_FILES_ROOT) if create_root else _HOSTED_MANAGED_FILES_ROOT
-        return ManagedFilesPolicy(default_path=root, locked_root=root, can_change_path=False)
-
-    home = _canonical_path(Path.home())
-    return ManagedFilesPolicy(default_path=home, locked_root=None, can_change_path=True)
-
-
-def _resolve_managed_path(
-    raw_path: str | None,
-    request: Request,
-    *,
-    for_write: bool = False,
-) -> tuple[ManagedFilesPolicy, Path, str]:
-    policy = _managed_files_policy(request)
-    text = _path_text(raw_path)
-    root = policy.locked_root
-
-    if root is not None and (not text or text in {".", "/"}):
-        candidate = root
-    elif not text:
-        candidate = policy.default_path
-    else:
-        candidate = Path(text).expanduser()
-        if root is not None and not candidate.is_absolute():
-            if any(part == ".." for part in candidate.parts):
-                raise HTTPException(status_code=400, detail="Path cannot contain '..'")
-            candidate = root / candidate
-        elif not candidate.is_absolute():
-            raise HTTPException(status_code=400, detail="Path must be absolute")
-
-    if ".." in candidate.parts:
-        raise HTTPException(status_code=400, detail="Path cannot contain '..'")
-
-    if for_write and not candidate.exists():
-        parent = _canonical_path(candidate.parent)
-        resolved = parent / candidate.name
-    else:
-        resolved = _canonical_path(candidate, require_exists=not for_write)
-
-    if root is not None and not _path_is_under(root, resolved):
-        raise HTTPException(status_code=403, detail="Path outside managed files root")
-
-    return policy, resolved, str(resolved)
-
-
-def _managed_response_meta(policy: ManagedFilesPolicy) -> Dict[str, Any]:
-    locked_root = str(policy.locked_root) if policy.locked_root is not None else None
-    return {
-        "root": locked_root,
-        "locked_root": locked_root,
-        "can_change_path": policy.can_change_path,
-    }
-
-
-def _managed_file_entry(policy: ManagedFilesPolicy, target: Path) -> Dict[str, Any]:
-    try:
-        resolved = target.resolve()
-    except (OSError, RuntimeError):
-        raise HTTPException(status_code=400, detail="Invalid path")
-    if policy.locked_root is not None and not _path_is_under(policy.locked_root, resolved):
-        raise HTTPException(status_code=403, detail="Path outside managed files root")
-
-    try:
-        st = resolved.stat()
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not stat path: {exc}")
-
-    is_dir = resolved.is_dir()
-    mime_type = None if is_dir else (mimetypes.guess_type(resolved.name)[0] or "application/octet-stream")
-    return {
-        "name": target.name or resolved.name or str(resolved),
-        "path": str(resolved),
-        "is_directory": is_dir,
-        "size": None if is_dir else st.st_size,
-        "mtime": st.st_mtime,
-        "mime_type": mime_type,
-    }
 
 
 # Stream uploads to disk in fixed-size chunks. The legacy JSON endpoint above
@@ -1857,76 +1656,23 @@ from hermes_cli.web_routers.models import (  # noqa: E402,F401 — legacy re-exp
 app.include_router(_config_env_routes.router)
 
 
-def _is_other_profile(profile: Optional[str]) -> bool:
-    """True when ``profile`` names a profile other than this process's own."""
-    requested = (profile or "").strip()
-    if not requested or requested.lower() == "current":
-        return False
-    try:
-        target = _resolve_profile_dir(requested)
-    except HTTPException:
-        return True
-    return target.resolve() != get_process_hermes_home().resolve()
-
-
-def _approval_mode_of(config: Dict[str, Any]) -> str:
-    """Normalize approvals.mode from an in-memory config document.
-
-    Both sides of the broadcast comparison use in-memory documents (the raw
-    on-disk dict and the about-to-be-saved dict): re-reading through the
-    config cache after a save can serve the pre-save document when the
-    replacement file collides on the (mtime_ns, size) cache key, which would
-    suppress the broadcast exactly when the mode changed. Absent block or
-    key normalizes to the same default the approval gate uses.
-    """
-    from tools.approval import _normalize_approval_mode
-
-    approvals = config.get("approvals")
-    default_mode = (DEFAULT_CONFIG.get("approvals") or {}).get("mode", "manual")
-    mode = approvals.get("mode", default_mode) if isinstance(approvals, dict) else default_mode
-    return _normalize_approval_mode(mode)
-
-
-def _broadcast_gateway_session_info() -> None:
-    """Broadcast session.info on the in-process gateway when it's loaded.
-
-    ``sys.modules`` guard, not an import: gateway never imported means no
-    live sessions in this process to notify.
-    """
-    server = sys.modules.get("tui_gateway.server")
-    if server is None:
-        return
-    try:
-        server.broadcast_session_info()
-    except Exception:
-        _log.exception("session.info broadcast after config save failed")
-
-
-def _parse_model_ids(resp: "Any") -> List[str]:
-    """Extract model ids from an OpenAI-compatible ``/v1/models`` response.
-
-    Tolerant of the common shapes: ``{"data": [{"id": ...}]}`` (OpenAI / vLLM /
-    llama.cpp) and a bare ``{"data": ["id", ...]}``. Returns ``[]`` on any
-    parse/HTTP error so a slightly non-standard endpoint never hard-blocks.
-    """
-    try:
-        if not resp.is_success:
-            return []
-        payload = resp.json()
-    except Exception:
-        return []
-    data = payload.get("data") if isinstance(payload, dict) else payload
-    if not isinstance(data, list):
-        return []
-    ids: List[str] = []
-    for item in data:
-        if isinstance(item, dict):
-            mid = str(item.get("id") or "").strip()
-        else:
-            mid = str(item or "").strip()
-        if mid:
-            ids.append(mid)
-    return ids
+from hermes_cli.web_server_profiles import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
+    _SKILLS_PROFILE_LOCK,
+    _TERMINAL_BACKENDS,
+    _approval_mode_of,
+    _aux_task_summary,
+    _aux_usage_rows,
+    _broadcast_gateway_session_info,
+    _config_profile_scope,
+    _fallback_profile_dicts,
+    _is_other_profile,
+    _merge_aux_into_by_model,
+    _parse_model_ids,
+    _plugin_terminal_backend_rows,
+    _profile_scope,
+    _resolve_profile_dir,
+    _write_profile_mcp_servers,
+)
 
 
 from hermes_cli.web_server_messaging import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
@@ -2063,125 +1809,12 @@ from hermes_cli.web_routers.cron import (  # noqa: E402,F401 — legacy re-expor
 )
 
 
-# ---------------------------------------------------------------------------
-# Automation Blueprints — parameterized automation blueprints. The dashboard renders the
-# slot schema as a form; submitting instantiates a real cron job via the same
-# create_job path. See cron/blueprint_catalog.py for the single source of truth.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# MCP server endpoints — list / add / remove / test.
-#
-# Wraps the same config data layer the CLI uses (hermes_cli.mcp_config), so
-# servers managed here show up under `hermes mcp list` and vice versa.  Secrets
-# in stdio `env` blocks are redacted on read; the agent picks them up from
-# config.yaml at session start exactly as with CLI-added servers.
-# ---------------------------------------------------------------------------
-
-
-def _normalize_mcp_server_create(
-    body: MCPServerCreate,
-) -> tuple[str, Dict[str, Any], Optional[str]]:
-    """Validate a Dashboard MCP create request and build its safe config.
-
-    The returned config never contains the submitted Bearer token. Callers
-    persist the token with the shared Bearer helper only after they enter the
-    intended profile scope. Keeping this conversion shared makes the
-    standalone MCP page and the Profile Builder enforce the same
-    transport/auth contract.
-    """
-    from hermes_cli.mcp_config import (
-        _bearer_auth_headers,
-        _strip_bearer_prefix,
-    )
-    from hermes_cli.mcp_security import validate_mcp_server_entry
-
-    name = (body.name or "").strip()
-    if not name:
-        raise ValueError("Server name is required")
-
-    url = (body.url or "").strip()
-    command = (body.command or "").strip()
-    auth = (body.auth or "none").strip().lower()
-    bearer_token = (
-        body.bearer_token.get_secret_value()
-        if body.bearer_token is not None
-        else None
-    )
-
-    if bool(url) == bool(command):
-        raise ValueError("Provide exactly one of URL (HTTP/SSE) or command (stdio)")
-    if auth not in {"none", "header", "oauth"}:
-        raise ValueError(f"Unsupported auth mode: {auth}")
-
-    server_config: Dict[str, Any] = {}
-    if url:
-        if body.args:
-            raise ValueError("Arguments are only supported for stdio MCP servers")
-        if body.env:
-            raise ValueError(
-                "Environment variables are only supported for stdio MCP servers"
-            )
-        if auth == "header":
-            normalized = _strip_bearer_prefix(bearer_token) if bearer_token else ""
-            if not normalized or normalized.lower() == "bearer":
-                raise ValueError("Bearer token is required")
-            server_config["headers"] = _bearer_auth_headers(name)
-        elif body.bearer_token is not None:
-            raise ValueError("Bearer token requires header authentication")
-
-        server_config["url"] = url
-        if auth == "oauth":
-            server_config["auth"] = "oauth"
-    else:
-        if auth != "none" or body.bearer_token is not None:
-            raise ValueError(
-                "HTTP authentication is not supported for stdio MCP servers"
-            )
-        server_config["command"] = command
-        if body.args:
-            server_config["args"] = list(body.args)
-        if body.env:
-            server_config["env"] = dict(body.env)
-
-    issues = validate_mcp_server_entry(name, server_config)
-    if issues:
-        raise ValueError(f"Server '{name}' rejected: {'; '.join(issues)}")
-    return name, server_config, bearer_token
-
-
-def _redact_mcp_env(env: Dict[str, Any]) -> Dict[str, str]:
-    """Mask secret-shaped MCP env values for read responses."""
-    out: Dict[str, str] = {}
-    for k, v in (env or {}).items():
-        try:
-            out[str(k)] = redact_key(str(v)) if v else ""
-        except Exception:
-            out[str(k)] = "***"
-    return out
-
-
-def _mcp_server_summary(name: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
-    transport = "http" if cfg.get("url") else ("stdio" if cfg.get("command") else "unknown")
-    auth = cfg.get("auth")
-    headers = cfg.get("headers") or {}
-    if not auth and isinstance(headers, dict) and any(
-        str(key).lower() == "authorization" for key in headers
-    ):
-        auth = "header"
-    return {
-        "name": name,
-        "transport": transport,
-        "url": cfg.get("url"),
-        "command": cfg.get("command"),
-        "args": list(cfg.get("args") or []),
-        "env": _redact_mcp_env(cfg.get("env") or {}),
-        "auth": auth,
-        "enabled": cfg.get("enabled", True) is not False,
-        # Tool selection: list of enabled tool names, or None = all.
-        "tools": cfg.get("tools"),
-    }
+from hermes_cli.web_server_mcp import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
+    _mcp_oauth_flows,
+    _mcp_server_summary,
+    _normalize_mcp_server_create,
+    _run_dashboard_mcp_oauth,
+)
 
 
 from hermes_cli.web_routers import mcp as _mcp_routes  # noqa: E402
@@ -2200,100 +1833,6 @@ from hermes_cli.web_routers.mcp import (  # noqa: E402,F401 — legacy re-export
     list_mcp_catalog,
     install_mcp_catalog_entry,
 )
-
-
-_mcp_oauth_flows: dict[str, "DashboardOAuthFlow"] = {}
-_mcp_oauth_transactions: dict[tuple[str, str], threading.Lock] = {}
-_mcp_oauth_transactions_lock = threading.Lock()
-
-
-def _mcp_oauth_transaction(flow) -> threading.Lock:
-    key = (flow.hermes_home, flow.server_name)
-    with _mcp_oauth_transactions_lock:
-        return _mcp_oauth_transactions.setdefault(key, threading.Lock())
-
-
-def _run_dashboard_mcp_oauth(flow, cfg: dict) -> None:
-    """Run the normal MCP probe with dashboard redirect/callback handlers."""
-    from hermes_cli.mcp_config import (
-        _oauth_tokens_present,
-        _probe_single_server,
-        _save_mcp_server,
-    )
-    try:
-        from agent.secret_scope import (
-            build_profile_secret_scope,
-            reset_secret_scope,
-            set_secret_scope,
-        )
-        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-        from tools.mcp_dashboard_oauth import dashboard_oauth_flow
-        from tools.mcp_oauth import HermesTokenStorage, force_interactive_oauth
-        from tools.mcp_oauth_manager import get_manager
-
-        home_token = set_hermes_home_override(flow.hermes_home)
-        secret_token = set_secret_scope(build_profile_secret_scope(Path(flow.hermes_home)))
-        try:
-            transaction = _mcp_oauth_transaction(flow)
-            with transaction, force_interactive_oauth(), dashboard_oauth_flow(flow):
-                manager = get_manager()
-                storage = HermesTokenStorage(flow.server_name)
-                backup = storage.snapshot()
-                previous_entry = None
-                try:
-                    previous_entry = manager.remove(
-                        flow.server_name,
-                        hermes_home=flow.hermes_home,
-                    )
-                    tools = _probe_single_server(
-                        flow.server_name,
-                        cfg,
-                        connect_timeout=max(float(cfg.get("connect_timeout", 0) or 0), 315),
-                    )
-                    if not _oauth_tokens_present(flow.server_name):
-                        raise RuntimeError(
-                            "The server responded, but no OAuth token was obtained — "
-                            "this provider may require a manually-registered OAuth client."
-                        )
-                    _save_mcp_server(flow.server_name, cfg)
-                    flow.tools = [{"name": t, "description": d} for t, d in tools]
-                    flow.mark_approved()
-                    if flow.reconnect_live:
-                        from tools.mcp_tool import reconnect_mcp_server
-
-                        reconnect_mcp_server(flow.server_name)
-                except Exception:
-                    storage.restore(backup, only_if_absent=True)
-                    manager.restore_entry(
-                        flow.server_name,
-                        previous_entry,
-                        hermes_home=flow.hermes_home,
-                    )
-                    raise
-        finally:
-            reset_secret_scope(secret_token)
-            reset_hermes_home_override(home_token)
-    except Exception as exc:
-        msg = str(exc)
-        # Providers that gate RFC 7591 registration to pre-approved clients
-        # (Figma's MCP catalog, etc.) 403 the register call before any
-        # authorization URL exists — surface what's actually happening
-        # instead of a bare "403 Forbidden".
-        try:
-            from tools.mcp_oauth import humanize_oauth_registration_error
-
-            humanized = humanize_oauth_registration_error(
-                flow.server_name,
-                exc,
-                server_url=cfg.get("url") if isinstance(cfg, dict) else None,
-            )
-            if humanized:
-                msg = humanized
-        except Exception:
-            pass
-        flow.mark_error(msg)
-    finally:
-        flow.mark_worker_done()
 
 
 _ACTION_LOG_FILES.setdefault("computer-use-grant", "action-computer-use-grant.log")
@@ -2402,132 +1941,6 @@ def _installed_hub_identifiers(profile: Optional[str] = None) -> dict:
         return {}
 
 
-def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
-    def _safe(callable_, default):
-        try:
-            return callable_()
-        except Exception:
-            return default
-
-    profiles: List[Dict[str, Any]] = []
-    default_home = profiles_mod._get_default_hermes_home()
-    if default_home.is_dir():
-        model, provider = _safe(lambda: profiles_mod._read_config_model(default_home), (None, None))
-        profiles.append({
-            "name": "default",
-            "path": str(default_home),
-            "is_default": True,
-            "model": model,
-            "provider": provider,
-            "has_env": (default_home / ".env").exists(),
-            "skill_count": _safe(lambda: profiles_mod._count_skills(default_home), 0),
-            "gateway_running": _safe(lambda: profiles_mod._check_gateway_running(default_home), False),
-            "description": _safe(lambda: profiles_mod.read_profile_meta(default_home).get("description", ""), ""),
-            "description_auto": _safe(lambda: profiles_mod.read_profile_meta(default_home).get("description_auto", False), False),
-            "distribution_name": None,
-            "distribution_version": None,
-            "distribution_source": None,
-            "has_alias": False,
-        })
-
-    profiles_root = profiles_mod._get_profiles_root()
-    if profiles_root.is_dir():
-        # Use os.scandir (context-managed) instead of Path.iterdir to avoid
-        # leaking directory fds when an exception interrupts iteration — the
-        # sidebar polls every few seconds so an fd leak exhausts RLIMIT_NOFILE
-        # within days (#81547).
-        with os.scandir(profiles_root) as scan:
-            entries = sorted(scan, key=lambda e: e.name)
-        for entry in entries:
-            entry_path = Path(entry.path)
-            if not entry.is_dir() or not profiles_mod._PROFILE_ID_RE.match(entry.name):
-                continue
-            model, provider = _safe(lambda entry=entry_path: profiles_mod._read_config_model(entry), (None, None))
-            profiles.append({
-                "name": entry.name,
-                "path": str(entry_path),
-                "is_default": False,
-                "model": model,
-                "provider": provider,
-                "has_env": _safe(lambda entry=entry_path: (entry / ".env").exists(), False),
-                "skill_count": _safe(lambda entry=entry_path: profiles_mod._count_skills(entry), 0),
-                "gateway_running": _safe(
-                    lambda entry=entry_path, name=entry.name: (
-                        profiles_mod._check_gateway_running(entry)
-                        or profiles_mod._served_by_running_multiplexer(name)
-                    ),
-                    False,
-                ),
-                "description": _safe(lambda entry=entry_path: profiles_mod.read_profile_meta(entry).get("description", ""), ""),
-                "description_auto": _safe(lambda entry=entry_path: profiles_mod.read_profile_meta(entry).get("description_auto", False), False),
-                "distribution_name": None,
-                "distribution_version": None,
-                "distribution_source": None,
-                "has_alias": False,
-            })
-
-    return profiles
-
-
-def _resolve_profile_dir(name: str) -> Path:
-    """Validate ``name`` and resolve to its directory or raise an HTTPException."""
-    from hermes_cli import profiles as profiles_mod
-    try:
-        profiles_mod.validate_profile_name(name)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    if not profiles_mod.profile_exists(name):
-        raise HTTPException(status_code=404, detail=f"Profile '{name}' does not exist.")
-    return profiles_mod.get_profile_dir(name)
-
-
-def _write_profile_mcp_servers(profile_dir: Path, servers: List["MCPServerCreate"]) -> int:
-    """Write MCP server entries into a specific profile's config.yaml.
-
-    Scopes ``load_config``/``save_config`` to ``profile_dir`` via the
-    context-local HERMES_HOME override (same mechanism as
-    ``_write_profile_model``) so the entries land in the target profile's
-    config rather than the dashboard process's active profile.
-
-    Mirrors the per-server shape the ``POST /api/mcp/servers`` endpoint builds,
-    but batched so the whole profile-create write is a single config save.
-    Returns the number of servers written.
-    """
-    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-    from hermes_cli.mcp_config import _save_bearer_auth_token
-
-    written = 0
-    token = set_hermes_home_override(str(profile_dir))
-    try:
-        cfg = load_config()
-        mcp = cfg.setdefault("mcp_servers", {})
-        for server in servers:
-            try:
-                name, entry, bearer_token = _normalize_mcp_server_create(server)
-            except ValueError as exc:
-                display_name = (server.name or "").strip() or "<unnamed>"
-                _log.warning(
-                    "Profile-create: skipping MCP server '%s': %s",
-                    display_name,
-                    exc,
-                )
-                continue
-            if bearer_token is not None:
-                entry["headers"] = _save_bearer_auth_token(name, bearer_token)
-            mcp[name] = entry
-            written += 1
-        if written:
-            save_config(cfg)
-        elif not mcp:
-            # We created an empty mcp_servers dict but wrote nothing — don't
-            # leave a stray empty key in the new profile's config.
-            cfg.pop("mcp_servers", None)
-            save_config(cfg)
-    finally:
-        reset_hermes_home_override(token)
-    return written
-
-
 app.include_router(_profiles_routes.router)
 from hermes_cli.web_routers.profiles import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
     list_profiles_endpoint,
@@ -2544,120 +1957,6 @@ from hermes_cli.web_routers.profiles import (  # noqa: E402,F401 — legacy re-e
     update_profile_model_endpoint,
     describe_profile_auto_endpoint,
 )
-
-
-# ---------------------------------------------------------------------------
-# Skills & Tools endpoints
-#
-# Every read/write below accepts an optional ``profile`` query param so the
-# dashboard can manage ANY profile's skills/toolsets, not just the profile
-# the dashboard process happens to be running under. Without this, "Set as
-# active" on the Profiles page (which only flips the sticky ``active_profile``
-# file for FUTURE CLI/gateway invocations) misled users into thinking skill
-# toggles would land in the activated profile — they silently wrote into the
-# dashboard's own config instead. See _profile_scope() for the mechanism.
-# ---------------------------------------------------------------------------
-
-
-_SKILLS_PROFILE_LOCK = threading.RLock()
-
-
-@contextmanager
-def _profile_scope(profile: Optional[str]):
-    """Scope config + skill-directory resolution to ``profile`` for one request.
-
-    Two seams must be redirected for skills/toolsets endpoints:
-
-    1. ``load_config``/``save_config`` resolve ``get_hermes_home()`` at call
-       time — the context-local override from ``set_hermes_home_override``
-       reaches them (same pattern as ``_write_profile_model``).
-    2. ``tools.skills_tool`` and ``tools.skill_manager_tool`` bind
-       ``SKILLS_DIR`` at import time, so the override CANNOT reach them.
-       Like ``_call_cron_for_profile`` does for cron's module globals,
-       temporarily retarget both under a lock and restore them
-       immediately after.
-
-    ``tools.skills_sync`` (reset/diff/list-modified/opt-in/opt-out/
-    repair-official) needs NO retargeting: since #65828 its directory
-    lookups resolve at call time through the same contextvar override
-    set in step 1.
-
-    ``profile`` of None/""/"current" means "the dashboard's own profile" —
-    config resolution is untouched, but the skill-module globals are still
-    retargeted to the *current* ``get_hermes_home()`` so writes land in the
-    live home even when the import-time binding is stale (e.g. the process
-    imported the modules before a HERMES_HOME override, or under test
-    isolation).
-    """
-    requested = (profile or "").strip()
-
-    from hermes_constants import (
-        get_hermes_home,
-        set_hermes_home_override,
-        reset_hermes_home_override,
-    )
-    from tools import skills_tool as _skills_tool
-    from tools import skill_manager_tool as _skill_mgr
-
-    token = None
-    if not requested or requested.lower() == "current":
-        profile_dir = get_hermes_home()
-    else:
-        profile_dir = _resolve_profile_dir(requested)
-        token = set_hermes_home_override(str(profile_dir))
-
-    with _SKILLS_PROFILE_LOCK:
-        old_home = _skills_tool.HERMES_HOME
-        old_skills_dir = _skills_tool.SKILLS_DIR
-        old_mgr_home = _skill_mgr.HERMES_HOME
-        old_mgr_skills_dir = _skill_mgr.SKILLS_DIR
-        _skills_tool.HERMES_HOME = profile_dir
-        _skills_tool.SKILLS_DIR = profile_dir / "skills"
-        _skill_mgr.HERMES_HOME = profile_dir
-        _skill_mgr.SKILLS_DIR = profile_dir / "skills"
-        try:
-            yield profile_dir if token is not None else None
-        finally:
-            _skills_tool.HERMES_HOME = old_home
-            _skills_tool.SKILLS_DIR = old_skills_dir
-            _skill_mgr.HERMES_HOME = old_mgr_home
-            _skill_mgr.SKILLS_DIR = old_mgr_skills_dir
-            if token is not None:
-                reset_hermes_home_override(token)
-
-
-@contextmanager
-def _config_profile_scope(profile: Optional[str]):
-    """Await-safe, config-only profile scope for handlers that ``await``.
-
-    Unlike ``_profile_scope`` this touches ONLY the context-local
-    ``set_hermes_home_override`` contextvar — it does NOT swap the
-    process-global ``skills_tool``/``skill_manager`` module attributes.
-    Those globals are shared across all event-loop tasks, so holding them
-    across an ``await`` lets a concurrent skills request restore THIS
-    request's profile dir on its ``finally`` (cross-contamination). The
-    contextvar override is task-local and survives an ``await`` cleanly,
-    which is all endpoints that resolve ``get_hermes_home()`` at call time
-    (config, env, gateway status) actually need.
-
-    None/""/"current" means the dashboard's own profile — no override.
-    """
-    requested = (profile or "").strip()
-    if not requested or requested.lower() == "current":
-        yield None
-        return
-
-    from hermes_constants import (
-        set_hermes_home_override,
-        reset_hermes_home_override,
-    )
-
-    profile_dir = _resolve_profile_dir(requested)
-    token = set_hermes_home_override(str(profile_dir))
-    try:
-        yield profile_dir
-    finally:
-        reset_hermes_home_override(token)
 
 
 app.include_router(_skills_routes.router)
@@ -2689,78 +1988,6 @@ from hermes_cli.web_routers.tools import (  # noqa: E402,F401 — legacy re-expo
 )
 
 
-# ---------------------------------------------------------------------------
-# Terminal execution backend picker — the GUI counterpart of terminal.backend
-# in config.yaml. Each row carries a fast, defensive health probe (Docker
-# daemon reachable, SSH host configured, Modal/Daytona credentials present) so
-# the Capabilities panel can render Ready / Needs setup guidance instead of a
-# bare enum (issues #57738 / #63783). Probes must never raise — a probe
-# failure renders as a status, not a 500.
-# ---------------------------------------------------------------------------
-
-# Table-driven backend metadata — kept in sync with the dispatch ladder in
-# tools/terminal_tool.py::_create_environment and the terminal.backend enum
-# surfaced in the desktop raw-config settings.
-_TERMINAL_BACKENDS: List[Dict[str, str]] = [
-    {
-        "name": "local",
-        "label": "Local",
-        "description": "Run commands directly on this machine. No isolation.",
-    },
-    {
-        "name": "docker",
-        "label": "Docker",
-        "description": "Run commands in an isolated Docker container with a persistent workspace.",
-    },
-    {
-        "name": "singularity",
-        "label": "Singularity / Apptainer",
-        "description": "Run commands in a Singularity/Apptainer container (HPC-friendly, rootless).",
-    },
-    {
-        "name": "modal",
-        "label": "Modal",
-        "description": "Run commands in a Modal cloud sandbox.",
-    },
-    {
-        "name": "daytona",
-        "label": "Daytona",
-        "description": "Run commands in a Daytona cloud sandbox.",
-    },
-    {
-        "name": "ssh",
-        "label": "SSH",
-        "description": "Run commands on a remote host over SSH.",
-    },
-]
-
-
-def _plugin_terminal_backend_rows() -> List[Dict[str, str]]:
-    """Picker rows for plugin-registered terminal backends (fail-soft)."""
-    rows: List[Dict[str, str]] = []
-    try:
-        from hermes_cli.plugins import discover_plugins
-
-        discover_plugins()  # idempotent — plugin state may not be loaded yet
-    except Exception:
-        pass
-    try:
-        from agent.terminal_env_registry import list_providers
-
-        for provider in list_providers():
-            try:
-                rows.append({
-                    "name": provider.name.strip().lower(),
-                    "label": provider.display_name,
-                    "description": provider.description,
-                })
-            except Exception:
-                continue
-    except Exception:
-        return rows
-    return rows
-
-
 from hermes_cli.web_routers import analytics as _analytics_routes  # noqa: E402
 
 app.include_router(_analytics_routes.router)
@@ -2768,120 +1995,6 @@ from hermes_cli.web_routers.analytics import (  # noqa: E402,F401 — legacy re-
     get_models_analytics,
     get_usage_analytics,
 )
-
-
-# ---------------------------------------------------------------------------
-# Token / cost analytics endpoint
-# ---------------------------------------------------------------------------
-
-
-def _aux_usage_rows(db, cutoff: float) -> List[Dict[str, Any]]:
-    """Per-(model, task) auxiliary usage within the window (issue #23270).
-
-    Reads the task-dimension rows (task != '') that record_auxiliary_usage
-    writes into session_model_usage. Returns [] when the table predates the
-    task column (older DB opened read-only by newer code).
-    """
-    try:
-        cur = db._conn.execute("""
-            SELECT u.model,
-                   u.task,
-                   u.billing_provider,
-                   SUM(u.input_tokens) as input_tokens,
-                   SUM(u.output_tokens) as output_tokens,
-                   SUM(u.cache_read_tokens) as cache_read_tokens,
-                   SUM(u.reasoning_tokens) as reasoning_tokens,
-                   COALESCE(SUM(u.estimated_cost_usd), 0) as estimated_cost,
-                   COUNT(DISTINCT u.session_id) as sessions,
-                   SUM(COALESCE(u.api_call_count, 0)) as api_calls,
-                   MAX(u.last_seen) as last_used_at
-            FROM session_model_usage u
-            JOIN sessions s ON s.id = u.session_id
-            WHERE s.started_at > ? AND u.task != ''
-            GROUP BY u.model, u.task, u.billing_provider
-            ORDER BY SUM(u.input_tokens) + SUM(u.output_tokens) DESC
-        """, (cutoff,))
-        return [dict(r) for r in cur.fetchall()]
-    except Exception:
-        # Table predates the task column (older DB opened by newer code) —
-        # aux breakdown is simply unavailable.
-        return []
-
-
-def _merge_aux_into_by_model(
-    by_model: List[Dict[str, Any]], aux_rows: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """Fold aux usage rows into the sessions-derived per-model list.
-
-    Aux usage lives only in session_model_usage (never in the sessions
-    counters), so adding it here cannot double-count. Models that ONLY
-    appear via aux calls (e.g. a dedicated vision model) get their own
-    entry — previously they were entirely invisible.
-    """
-    if not aux_rows:
-        return by_model
-    merged: Dict[str, Dict[str, Any]] = {}
-    for row in by_model:
-        merged[row.get("model") or "unknown"] = row
-    for aux in aux_rows:
-        model = aux.get("model") or "unknown"
-        target = merged.get(model)
-        if target is None:
-            target = {
-                "model": model,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "estimated_cost": 0,
-                "sessions": 0,
-                "api_calls": 0,
-            }
-            merged[model] = target
-        target["input_tokens"] = (target.get("input_tokens") or 0) + (aux.get("input_tokens") or 0)
-        target["output_tokens"] = (target.get("output_tokens") or 0) + (aux.get("output_tokens") or 0)
-        target["estimated_cost"] = (target.get("estimated_cost") or 0) + (aux.get("estimated_cost") or 0)
-        target["api_calls"] = (target.get("api_calls") or 0) + (aux.get("api_calls") or 0)
-        tasks = target.setdefault("aux_tasks", [])
-        tasks.append({
-            "task": aux.get("task") or "",
-            "input_tokens": aux.get("input_tokens") or 0,
-            "output_tokens": aux.get("output_tokens") or 0,
-            "estimated_cost": aux.get("estimated_cost") or 0,
-            "api_calls": aux.get("api_calls") or 0,
-        })
-    result = list(merged.values())
-    result.sort(
-        key=lambda r: (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0),
-        reverse=True,
-    )
-    return result
-
-
-def _aux_task_summary(aux_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Aggregate aux usage rows across models into a per-task summary."""
-    by_task: Dict[str, Dict[str, Any]] = {}
-    for aux in aux_rows:
-        task = aux.get("task") or ""
-        d = by_task.setdefault(task, {
-            "task": task,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "estimated_cost": 0,
-            "api_calls": 0,
-            "models": [],
-        })
-        d["input_tokens"] += aux.get("input_tokens") or 0
-        d["output_tokens"] += aux.get("output_tokens") or 0
-        d["estimated_cost"] += aux.get("estimated_cost") or 0
-        d["api_calls"] += aux.get("api_calls") or 0
-        model = aux.get("model") or "unknown"
-        if model not in d["models"]:
-            d["models"].append(model)
-    result = list(by_task.values())
-    result.sort(
-        key=lambda r: (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0),
-        reverse=True,
-    )
-    return result
 
 
 from hermes_cli.web_server_chat import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
