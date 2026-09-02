@@ -97,13 +97,13 @@ jobs:
       - id: pick
         env:
           # Dispatch inputs never touch shell syntax directly: TAG_COUNT
-          # arrives via the environment, is validated here, and is capped
-          # below the 256-job matrix limit (14 tags ~= 252 windows entries).
+          # arrives via the environment, is validated decimal-only (bash
+          # arithmetic reads a leading zero as octal), and is capped below
+          # the 256-job matrix limit (15 tags = 270 windows entries).
           TAG_COUNT: ${{ inputs.tag-count || 2 }}
         run: |
           set -euo pipefail
-          [[ "$TAG_COUNT" =~ ^[0-9]+$ ]] || { echo "tag-count must be a positive integer, got: $TAG_COUNT" >&2; exit 1; }
-          (( TAG_COUNT >= 1 && TAG_COUNT <= 10 )) || { echo "tag-count must be 1-10, got: $TAG_COUNT" >&2; exit 1; }
+          [[ "$TAG_COUNT" =~ ^(10|[1-9])$ ]] || { echo "tag-count must be 1-10, got: $TAG_COUNT" >&2; exit 1; }
           tags="$(scripts/sandbox/pick-release-tags.sh --count "$TAG_COUNT")"
           echo "Testing updates from: $tags"
           # Annotate each tag with what its own tree supports, so run
