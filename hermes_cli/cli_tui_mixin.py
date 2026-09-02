@@ -1861,148 +1861,7 @@ class CLITuiMixin:
             _is_backslash_line_continuation,
             _looks_like_slash_command,
         )
-        # --- Sudo password prompt: submit the typed password ---
-        if self._sudo_state:
-            text = event.app.current_buffer.text
-            self._sudo_state["response_queue"].put(text)
-            self._sudo_state = None
-            event.app.invalidate()
-            return
-
-        # --- Secret prompt: submit the typed secret ---
-        if self._secret_state:
-            text = event.app.current_buffer.text
-            self._submit_secret_response(text)
-            event.app.current_buffer.reset()
-            event.app.invalidate()
-            return
-
-        # --- Approval selection: confirm the highlighted choice ---
-        if self._approval_state:
-            self._handle_approval_selection()
-            event.app.invalidate()
-            return
-
-        # --- Slash-command confirmation: submit typed or highlighted choice ---
-        if self._slash_confirm_state:
-            text = event.app.current_buffer.text.strip()
-            choices = self._slash_confirm_state.get("choices") or []
-            choice = self._normalize_slash_confirm_choice(text, choices) if text else None
-            if choice is None:
-                selected = self._slash_confirm_state.get("selected", 0)
-                if 0 <= selected < len(choices):
-                    choice = choices[selected][0]
-            self._submit_slash_confirm_response(choice or "cancel")
-            event.app.current_buffer.reset()
-            event.app.invalidate()
-            return
-
-        # --- /model picker modal ---
-        if self._model_picker_state:
-            try:
-                # Picker selections follow the same session-scoped default
-                # as /model <name>; honour model.persist_switch_by_default.
-                from hermes_cli.model_switch import resolve_persist_behavior
-
-                self._handle_model_picker_selection(
-                    persist_global=resolve_persist_behavior(False, False)
-                )
-            except Exception as _exc:
-                _cprint(f"  ✗ Model selection failed: {_exc}")
-                self._close_model_picker()
-            event.app.current_buffer.reset()
-            event.app.invalidate()
-            return
-
-        # --- Clarify freetext mode: user typed their own answer ---
-        if self._clarify_freetext and self._clarify_state:
-            text = event.app.current_buffer.text.strip()
-            if text:
-                state = self._clarify_state
-                # Batch mode: lock the typed answer for the active question
-                if state.get("questions"):
-                    base = getattr(self, '_clarify_multi_base', None)
-                    if base is not None:
-                        # Multi-select "Other": append the typed answer to
-                        # the checked labels as a JSON array string.
-                        answer = json.dumps(base + [text], ensure_ascii=False)
-                        meta = {"kind": "multi", "choices": list(base), "other_text": text}
-                        self._clarify_multi_base = None
-                    else:
-                        answer = text
-                        meta = {"kind": "other", "other_text": text}
-                    self._clarify_freetext = False
-                    self._clarify_prefill = ""
-                    self._clarify_batch_lock(state, answer, meta=meta)
-                    event.app.current_buffer.reset()
-                    event.app.invalidate()
-                    return
-                # multi-select: prepend previously checked real choices
-                base = getattr(self, '_clarify_multi_base', None)
-                if base:
-                    text = ", ".join(base) + ", " + text
-                    self._clarify_multi_base = None
-                self._clarify_state["response_queue"].put(text)
-                self._clarify_state = None
-                self._clarify_freetext = False
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-            return
-
-        # --- Clarify choice mode: confirm the highlighted selection ---
-        if self._clarify_state and not self._clarify_freetext:
-            state = self._clarify_state
-            # Batch mode: Enter locks the active question's answer and
-            # advances to the next unanswered question.
-            if state.get("questions"):
-                self._clarify_batch_enter(state)
-                # Editing an earlier "Other" answer: prefill the composer
-                # with the previously typed text.
-                if self._clarify_freetext and self._clarify_prefill:
-                    event.app.current_buffer.text = self._clarify_prefill
-                    event.app.current_buffer.cursor_position = len(self._clarify_prefill)
-                    self._clarify_prefill = ""
-                event.app.invalidate()
-                return
-            selected = state["selected"]
-            choices = state.get("choices") or []
-            # multi-select support: submit comma-joined list of checked choices
-            if state.get("multi_select"):
-                indices = state.get("selected_indices")
-                if not indices:
-                    # Nothing checked → submit empty string (parses to [])
-                    state["response_queue"].put("")
-                    self._clarify_state = None
-                    event.app.invalidate()
-                    return
-                sorted_idx = sorted(indices)
-                selected_choices = [choices[i] for i in sorted_idx if i < len(choices)]
-                other_checked = len(choices) in sorted_idx
-                if other_checked and selected_choices:
-                    # "Other" + real choices: store base choices, switch to freetext
-                    # so the user can type a custom answer that gets appended
-                    self._clarify_multi_base = selected_choices
-                    self._clarify_freetext = True
-                    event.app.invalidate()
-                    return
-                if selected_choices:
-                    state["response_queue"].put(", ".join(selected_choices))
-                    self._clarify_state = None
-                    event.app.invalidate()
-                    return
-                # Only "Other" was checked → switch to freetext
-                self._clarify_freetext = True
-                event.app.invalidate()
-                return
-            # Original single-select behavior: submit the highlighted choice
-            if selected < len(choices):
-                state["response_queue"].put(choices[selected])
-                self._clarify_state = None
-                event.app.invalidate()
-            else:
-                # "Other" selected → switch to freetext
-                self._clarify_freetext = True
-                event.app.invalidate()
+        if self._tui_enter_overlay(event):
             return
 
         # --- Normal input routing ---
@@ -2170,6 +2029,154 @@ class CLITuiMixin:
             # up-arrow recall restores the actual text.
             self._inline_pastes(event.app.current_buffer)
             event.app.current_buffer.reset(append_to_history=True)
+
+    def _tui_enter_overlay(self, event) -> bool:
+        """Enter while a modal overlay (sudo/secret/approval/slash-confirm/model picker/clarify) is up: submit it. True when handled."""
+        from cli import _cprint
+        # --- Sudo password prompt: submit the typed password ---
+        if self._sudo_state:
+            text = event.app.current_buffer.text
+            self._sudo_state["response_queue"].put(text)
+            self._sudo_state = None
+            event.app.invalidate()
+            return True
+
+        # --- Secret prompt: submit the typed secret ---
+        if self._secret_state:
+            text = event.app.current_buffer.text
+            self._submit_secret_response(text)
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return True
+
+        # --- Approval selection: confirm the highlighted choice ---
+        if self._approval_state:
+            self._handle_approval_selection()
+            event.app.invalidate()
+            return True
+
+        # --- Slash-command confirmation: submit typed or highlighted choice ---
+        if self._slash_confirm_state:
+            text = event.app.current_buffer.text.strip()
+            choices = self._slash_confirm_state.get("choices") or []
+            choice = self._normalize_slash_confirm_choice(text, choices) if text else None
+            if choice is None:
+                selected = self._slash_confirm_state.get("selected", 0)
+                if 0 <= selected < len(choices):
+                    choice = choices[selected][0]
+            self._submit_slash_confirm_response(choice or "cancel")
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return True
+
+        # --- /model picker modal ---
+        if self._model_picker_state:
+            try:
+                # Picker selections follow the same session-scoped default
+                # as /model <name>; honour model.persist_switch_by_default.
+                from hermes_cli.model_switch import resolve_persist_behavior
+
+                self._handle_model_picker_selection(
+                    persist_global=resolve_persist_behavior(False, False)
+                )
+            except Exception as _exc:
+                _cprint(f"  ✗ Model selection failed: {_exc}")
+                self._close_model_picker()
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return True
+
+        # --- Clarify freetext mode: user typed their own answer ---
+        if self._clarify_freetext and self._clarify_state:
+            text = event.app.current_buffer.text.strip()
+            if text:
+                state = self._clarify_state
+                # Batch mode: lock the typed answer for the active question
+                if state.get("questions"):
+                    base = getattr(self, '_clarify_multi_base', None)
+                    if base is not None:
+                        # Multi-select "Other": append the typed answer to
+                        # the checked labels as a JSON array string.
+                        answer = json.dumps(base + [text], ensure_ascii=False)
+                        meta = {"kind": "multi", "choices": list(base), "other_text": text}
+                        self._clarify_multi_base = None
+                    else:
+                        answer = text
+                        meta = {"kind": "other", "other_text": text}
+                    self._clarify_freetext = False
+                    self._clarify_prefill = ""
+                    self._clarify_batch_lock(state, answer, meta=meta)
+                    event.app.current_buffer.reset()
+                    event.app.invalidate()
+                    return True
+                # multi-select: prepend previously checked real choices
+                base = getattr(self, '_clarify_multi_base', None)
+                if base:
+                    text = ", ".join(base) + ", " + text
+                    self._clarify_multi_base = None
+                self._clarify_state["response_queue"].put(text)
+                self._clarify_state = None
+                self._clarify_freetext = False
+                event.app.current_buffer.reset()
+                event.app.invalidate()
+            return True
+
+        # --- Clarify choice mode: confirm the highlighted selection ---
+        if self._clarify_state and not self._clarify_freetext:
+            state = self._clarify_state
+            # Batch mode: Enter locks the active question's answer and
+            # advances to the next unanswered question.
+            if state.get("questions"):
+                self._clarify_batch_enter(state)
+                # Editing an earlier "Other" answer: prefill the composer
+                # with the previously typed text.
+                if self._clarify_freetext and self._clarify_prefill:
+                    event.app.current_buffer.text = self._clarify_prefill
+                    event.app.current_buffer.cursor_position = len(self._clarify_prefill)
+                    self._clarify_prefill = ""
+                event.app.invalidate()
+                return True
+            selected = state["selected"]
+            choices = state.get("choices") or []
+            # multi-select support: submit comma-joined list of checked choices
+            if state.get("multi_select"):
+                indices = state.get("selected_indices")
+                if not indices:
+                    # Nothing checked → submit empty string (parses to [])
+                    state["response_queue"].put("")
+                    self._clarify_state = None
+                    event.app.invalidate()
+                    return True
+                sorted_idx = sorted(indices)
+                selected_choices = [choices[i] for i in sorted_idx if i < len(choices)]
+                other_checked = len(choices) in sorted_idx
+                if other_checked and selected_choices:
+                    # "Other" + real choices: store base choices, switch to freetext
+                    # so the user can type a custom answer that gets appended
+                    self._clarify_multi_base = selected_choices
+                    self._clarify_freetext = True
+                    event.app.invalidate()
+                    return True
+                if selected_choices:
+                    state["response_queue"].put(", ".join(selected_choices))
+                    self._clarify_state = None
+                    event.app.invalidate()
+                    return True
+                # Only "Other" was checked → switch to freetext
+                self._clarify_freetext = True
+                event.app.invalidate()
+                return True
+            # Original single-select behavior: submit the highlighted choice
+            if selected < len(choices):
+                state["response_queue"].put(choices[selected])
+                self._clarify_state = None
+                event.app.invalidate()
+            else:
+                # "Other" selected → switch to freetext
+                self._clarify_freetext = True
+                event.app.invalidate()
+            return True
+        return False
 
     def _tui_handle_paste(self, event):
         """Handle terminal paste — detect clipboard images.
@@ -2728,107 +2735,8 @@ class CLITuiMixin:
 
     def _tui_build_layout(self, kb):
         """Build the TUI widgets, Layout and Style; registers wrapper keybindings on ``kb``."""
-        from cli import _estimate_tui_input_height, get_skill_bundles, get_skill_commands
-        # Dynamic prompt: shows Hermes symbol when agent is working,
-        # or answer prompt when clarify freetext mode is active.
         cli_ref = self
-
-        def get_prompt():
-            return cli_ref._get_tui_prompt_fragments()
-
-        # Create the input area with multiline (Alt+Enter), autocomplete, and paste handling
-        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-        from prompt_toolkit.completion import ThreadedCompleter
-
-
-        _completer = SlashCommandCompleter(
-            skill_commands_provider=lambda: get_skill_commands(),
-            command_filter=cli_ref._command_available,
-            skill_bundles_provider=lambda: get_skill_bundles(),
-        )
-        input_area = TextArea(
-            height=Dimension(min=1, max=8, preferred=1),
-            prompt=get_prompt,
-            style='class:input-area',
-            multiline=True,
-            wrap_lines=True,
-            read_only=Condition(lambda: bool(cli_ref._command_blocks_input)),
-            history=FileHistory(str(self._history_file)),
-            # complete_while_typing fires the completer on every keystroke. The
-            # completer does blocking work — fuzzy @-file indexing shells out to
-            # rg/fd (up to a 2s timeout) and path completion hits os.listdir/stat
-            # — so running it inline would stall the render loop on each key (very
-            # noticeable on WSL2/slow filesystems). ThreadedCompleter moves it off
-            # the UI event loop, keeping typing responsive.
-            completer=ThreadedCompleter(_completer),
-            complete_while_typing=True,
-            auto_suggest=SlashCommandAutoSuggest(
-                history_suggest=AutoSuggestFromHistory(),
-                completer=_completer,
-            ),
-        )
-        # Keep prompt_toolkit on its simple tempfile path. Setting
-        # buffer.tempfile = "prompt.md" triggers its complex-tempfile branch,
-        # which tries to mkdir() the mkdtemp() directory again and raises
-        # EEXIST. The suffix keeps markdown highlighting without that bug.
-        input_area.buffer.tempfile_suffix = '.md'
-
-        # Dynamic height: accounts for both explicit newlines AND visual
-        # wrapping of long lines so the input area always fits its content.
-        def _input_height():
-            try:
-                from prompt_toolkit.application import get_app
-
-                doc = input_area.buffer.document
-                try:
-                    terminal_columns = get_app().output.get_size().columns
-                except Exception:
-                    terminal_columns = shutil.get_terminal_size((80, 24)).columns
-                return _estimate_tui_input_height(
-                    doc.lines,
-                    self._get_tui_prompt_text(),
-                    terminal_columns,
-                )
-            except Exception:
-                return 1
-
-        input_area.window.height = _input_height
-
-        # Paste collapsing: detect large pastes and save to temp file
-        self._tui_paste_counter = [0]
-        self._tui_prev_text_len = [0]
-        self._tui_prev_newline_count = [0]
-        self._tui_paste_just_collapsed = [False]
-        self._skip_paste_collapse = False
-
-        input_area.buffer.on_text_changed += self._tui_on_text_changed
-
-        # --- Input processors for password masking and inline placeholder ---
-
-        # Mask input with '*' when the sudo password prompt is active
-        input_area.control.input_processors.append(
-            ConditionalProcessor(
-                PasswordProcessor(),
-                filter=Condition(
-                    lambda: bool(cli_ref._sudo_state) or bool(cli_ref._secret_state)
-                ),
-            )
-        )
-
-        class _PlaceholderProcessor(Processor):
-            """Render grayed-out placeholder text inside the input when empty."""
-            def __init__(self, get_text):
-                self._get_text = get_text
-
-            def apply_transformation(self, ti):
-                if not ti.document.text and ti.lineno == 0:
-                    text = self._get_text()
-                    if text:
-                        # Append after existing fragments (preserves the ❯ prompt)
-                        return Transformation(fragments=ti.fragments + [('class:placeholder', text)])
-                return Transformation(fragments=ti.fragments)
-
-        input_area.control.input_processors.append(_PlaceholderProcessor(self._tui_placeholder_text))
+        input_area = self._tui_build_input_area()
 
         # Hint line above input: shown only for interactive prompts that need
         # extra instructions (sudo countdown, approval navigation, clarify).
@@ -3018,6 +2926,117 @@ class CLITuiMixin:
             )
         )
 
+        self._tui_set_base_style()
+        style = PTStyle.from_dict(self._build_tui_style_dict())
+        return (layout, style)
+
+    def _tui_build_input_area(self):
+        """Build the multi-line prompt TextArea with slash completion, paste-collapse tracking, and placeholder processors."""
+        from cli import _estimate_tui_input_height, get_skill_bundles, get_skill_commands
+        # Dynamic prompt: shows Hermes symbol when agent is working,
+        # or answer prompt when clarify freetext mode is active.
+        cli_ref = self
+
+        def get_prompt():
+            return cli_ref._get_tui_prompt_fragments()
+
+        # Create the input area with multiline (Alt+Enter), autocomplete, and paste handling
+        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+        from prompt_toolkit.completion import ThreadedCompleter
+
+
+        _completer = SlashCommandCompleter(
+            skill_commands_provider=lambda: get_skill_commands(),
+            command_filter=cli_ref._command_available,
+            skill_bundles_provider=lambda: get_skill_bundles(),
+        )
+        input_area = TextArea(
+            height=Dimension(min=1, max=8, preferred=1),
+            prompt=get_prompt,
+            style='class:input-area',
+            multiline=True,
+            wrap_lines=True,
+            read_only=Condition(lambda: bool(cli_ref._command_blocks_input)),
+            history=FileHistory(str(self._history_file)),
+            # complete_while_typing fires the completer on every keystroke. The
+            # completer does blocking work — fuzzy @-file indexing shells out to
+            # rg/fd (up to a 2s timeout) and path completion hits os.listdir/stat
+            # — so running it inline would stall the render loop on each key (very
+            # noticeable on WSL2/slow filesystems). ThreadedCompleter moves it off
+            # the UI event loop, keeping typing responsive.
+            completer=ThreadedCompleter(_completer),
+            complete_while_typing=True,
+            auto_suggest=SlashCommandAutoSuggest(
+                history_suggest=AutoSuggestFromHistory(),
+                completer=_completer,
+            ),
+        )
+        # Keep prompt_toolkit on its simple tempfile path. Setting
+        # buffer.tempfile = "prompt.md" triggers its complex-tempfile branch,
+        # which tries to mkdir() the mkdtemp() directory again and raises
+        # EEXIST. The suffix keeps markdown highlighting without that bug.
+        input_area.buffer.tempfile_suffix = '.md'
+
+        # Dynamic height: accounts for both explicit newlines AND visual
+        # wrapping of long lines so the input area always fits its content.
+        def _input_height():
+            try:
+                from prompt_toolkit.application import get_app
+
+                doc = input_area.buffer.document
+                try:
+                    terminal_columns = get_app().output.get_size().columns
+                except Exception:
+                    terminal_columns = shutil.get_terminal_size((80, 24)).columns
+                return _estimate_tui_input_height(
+                    doc.lines,
+                    self._get_tui_prompt_text(),
+                    terminal_columns,
+                )
+            except Exception:
+                return 1
+
+        input_area.window.height = _input_height
+
+        # Paste collapsing: detect large pastes and save to temp file
+        self._tui_paste_counter = [0]
+        self._tui_prev_text_len = [0]
+        self._tui_prev_newline_count = [0]
+        self._tui_paste_just_collapsed = [False]
+        self._skip_paste_collapse = False
+
+        input_area.buffer.on_text_changed += self._tui_on_text_changed
+
+        # --- Input processors for password masking and inline placeholder ---
+
+        # Mask input with '*' when the sudo password prompt is active
+        input_area.control.input_processors.append(
+            ConditionalProcessor(
+                PasswordProcessor(),
+                filter=Condition(
+                    lambda: bool(cli_ref._sudo_state) or bool(cli_ref._secret_state)
+                ),
+            )
+        )
+
+        class _PlaceholderProcessor(Processor):
+            """Render grayed-out placeholder text inside the input when empty."""
+            def __init__(self, get_text):
+                self._get_text = get_text
+
+            def apply_transformation(self, ti):
+                if not ti.document.text and ti.lineno == 0:
+                    text = self._get_text()
+                    if text:
+                        # Append after existing fragments (preserves the ❯ prompt)
+                        return Transformation(fragments=ti.fragments + [('class:placeholder', text)])
+                return Transformation(fragments=ti.fragments)
+
+        input_area.control.input_processors.append(_PlaceholderProcessor(self._tui_placeholder_text))
+        return input_area
+
+    def _tui_set_base_style(self):
+        """Populate ``self._tui_style_base`` (skin-aware defaults the style dict is built from)."""
         # Style for the application
         self._tui_style_base = {
             # Input area / prompt: empty style strings inherit the
@@ -3076,5 +3095,3 @@ class CLITuiMixin:
             'voice-status': 'bg:#1a1a2e #87CEEB',
             'voice-status-recording': 'bg:#1a1a2e #FF4444 bold',
         }
-        style = PTStyle.from_dict(self._build_tui_style_dict())
-        return (layout, style)

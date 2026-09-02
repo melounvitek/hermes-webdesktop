@@ -407,37 +407,160 @@ def _parse_service_tier_config(raw: str) -> str | None:
     logger.warning("Unknown service_tier '%s', ignoring", raw)
     return None
 
-def load_cli_config() -> Dict[str, Any]:
-    """
-    Load CLI configuration from config files.
-    
-    Config lookup order:
-    1. ~/.hermes/config.yaml (user config - preferred)
-    2. ./cli-config.yaml (project config - fallback)
-    
-    Environment variables take precedence over config file values.
-    Returns default values if no config file exists.
+def _mirror_config_to_env(defaults, _file_has_terminal_config):
+    """Project config.yaml values into the env vars the tool modules read (terminal/browser/auxiliary/security/sessions). Env always wins when already set."""
+    # Apply terminal config to environment variables (so terminal_tool picks them up)
+    terminal_config = defaults.get("terminal", {})
 
-    If HERMES_IGNORE_USER_CONFIG=1 is set (via ``hermes chat --ignore-user-config``),
-    the user config at ``~/.hermes/config.yaml`` is skipped entirely and only the
-    built-in defaults plus the project-level ``cli-config.yaml`` (if any) are used.
-    Credentials in ``.env`` are still loaded — this flag only suppresses
-    behavioral/config settings.
-    """
-    # Check user config first ({HERMES_HOME}/config.yaml)
-    user_config_path = _hermes_home / 'config.yaml'
-    project_config_path = Path(__file__).parent / 'cli-config.yaml'
+    # Normalize config key: the new config system (hermes_cli/config.py) and all
+    # documentation use "backend", the legacy cli-config.yaml uses "env_type".
+    # Accept both, with "backend" taking precedence (it's the documented key).
+    if "backend" in terminal_config:
+        terminal_config["env_type"] = terminal_config["backend"]
 
-    # --ignore-user-config: force-skip the user config.yaml (still honor project
-    # config as a fallback so defaults stay sensible).
-    ignore_user_config = os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1"
+    # CWD resolution for CLI/TUI. The gateway has its own config bridge in
+    # gateway/run.py but may lazily import cli.py (triggering this code).
+    # Local backend: always os.getcwd(). Use `cd /dir && hermes` to control it.
+    # Non-local with placeholder: pop so terminal_tool uses its per-backend default.
+    # Non-local with explicit path: keep as-is.
+    _CWD_PLACEHOLDERS = (".", "auto", "cwd")
+    effective_backend = terminal_config.get("env_type", "local")
 
-    # Use user config if it exists, otherwise project config
-    if user_config_path.exists() and not ignore_user_config:
-        config_path = user_config_path
-    else:
-        config_path = project_config_path
+    if effective_backend == "local":
+        terminal_config["cwd"] = os.getcwd()
+        defaults["terminal"]["cwd"] = terminal_config["cwd"]
+    elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
+        terminal_config.pop("cwd", None)
 
+    env_mappings = {
+        "env_type": "TERMINAL_ENV",
+        "degraded_mode": "TERMINAL_DEGRADED_MODE",
+        "cwd": "TERMINAL_CWD",
+        "timeout": "TERMINAL_TIMEOUT",
+        "home_mode": "TERMINAL_HOME_MODE",
+        "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
+        "docker_image": "TERMINAL_DOCKER_IMAGE",
+        "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
+        "singularity_image": "TERMINAL_SINGULARITY_IMAGE",
+        "modal_image": "TERMINAL_MODAL_IMAGE",
+        "daytona_image": "TERMINAL_DAYTONA_IMAGE",
+        "vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
+        # SSH config
+        "ssh_host": "TERMINAL_SSH_HOST",
+        "ssh_user": "TERMINAL_SSH_USER",
+        "ssh_port": "TERMINAL_SSH_PORT",
+        "ssh_key": "TERMINAL_SSH_KEY",
+        # Container resource config (docker, singularity, modal, daytona, vercel_sandbox -- ignored for local/ssh)
+        "container_cpu": "TERMINAL_CONTAINER_CPU",
+        "container_memory": "TERMINAL_CONTAINER_MEMORY",
+        "container_disk": "TERMINAL_CONTAINER_DISK",
+        "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
+        "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
+        "docker_env": "TERMINAL_DOCKER_ENV",
+        "docker_extra_args": "TERMINAL_DOCKER_EXTRA_ARGS",
+        "docker_shm_size": "TERMINAL_DOCKER_SHM_SIZE",
+        "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
+        "docker_network": "TERMINAL_DOCKER_NETWORK",
+        "docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
+        "docker_persist_across_processes": "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
+        "docker_shared_container_key": "TERMINAL_DOCKER_SHARED_CONTAINER_KEY",
+        "docker_orphan_reaper": "TERMINAL_DOCKER_ORPHAN_REAPER",
+        "sandbox_dir": "TERMINAL_SANDBOX_DIR",
+        # Persistent shell (non-local backends)
+        "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
+        # Sudo support (works with all backends)
+        "sudo_password": "SUDO_PASSWORD",
+    }
+
+    # Bridge config → env vars for terminal_tool. TERMINAL_CWD is force-exported
+    # UNLESS we're inside a gateway process (detected by _HERMES_GATEWAY marker)
+    # where it was already set correctly by gateway/run.py's config bridge.
+    _is_gateway = os.environ.get("_HERMES_GATEWAY") == "1"
+    for config_key, env_var in env_mappings.items():
+        if config_key in terminal_config:
+            if env_var == "TERMINAL_CWD":
+                if _is_gateway:
+                    continue
+                # CLI: always export (overrides stale .env or inherited values)
+                os.environ[env_var] = str(terminal_config[config_key])
+                continue
+            if _file_has_terminal_config or env_var not in os.environ:
+                val = terminal_config[config_key]
+                if isinstance(val, (list, dict)):
+                    os.environ[env_var] = json.dumps(val)
+                else:
+                    os.environ[env_var] = str(val)
+
+    # Apply browser config to environment variables
+    browser_config = defaults.get("browser", {})
+    browser_env_mappings = {
+        "inactivity_timeout": "BROWSER_INACTIVITY_TIMEOUT",
+    }
+
+    for config_key, env_var in browser_env_mappings.items():
+        if config_key in browser_config:
+            os.environ[env_var] = str(browser_config[config_key])
+
+    # Apply auxiliary model/direct-endpoint overrides to environment variables.
+    # Vision and web_extract each have their own provider/model/base_url/api_key tuple.
+    # Compression config is read directly from config.yaml by run_agent.py and
+    # auxiliary_client.py — no env var bridging needed.
+    # Only set env vars for non-empty / non-default values so auto-detection
+    # still works.
+    auxiliary_config = defaults.get("auxiliary", {})
+    auxiliary_task_env = {
+        # config key → env var mapping
+        "vision": {
+            "provider": "AUXILIARY_VISION_PROVIDER",
+            "model": "AUXILIARY_VISION_MODEL",
+            "base_url": "AUXILIARY_VISION_BASE_URL",
+            "api_key": "AUXILIARY_VISION_API_KEY",
+        },
+        "approval": {
+            "provider": "AUXILIARY_APPROVAL_PROVIDER",
+            "model": "AUXILIARY_APPROVAL_MODEL",
+            "base_url": "AUXILIARY_APPROVAL_BASE_URL",
+            "api_key": "AUXILIARY_APPROVAL_API_KEY",
+        },
+    }
+
+    for task_key, env_map in auxiliary_task_env.items():
+        task_cfg = auxiliary_config.get(task_key, {})
+        if not isinstance(task_cfg, dict):
+            continue
+        prov = str(task_cfg.get("provider", "")).strip()
+        model = str(task_cfg.get("model", "")).strip()
+        base_url = str(task_cfg.get("base_url", "")).strip()
+        api_key = str(task_cfg.get("api_key", "")).strip()
+        if prov and prov != "auto":
+            os.environ[env_map["provider"]] = prov
+        if model:
+            os.environ[env_map["model"]] = model
+        if base_url:
+            os.environ[env_map["base_url"]] = base_url
+        if api_key:
+            os.environ[env_map["api_key"]] = api_key
+
+    # Security settings
+    security_config = defaults.get("security", {})
+    if isinstance(security_config, dict):
+        redact = security_config.get("redact_secrets")
+        if redact is not None:
+            os.environ["HERMES_REDACT_SECRETS"] = str(redact).lower()
+
+    # Session-search index knobs (hermes_state reads the env carriers).
+    sessions_config = defaults.get("sessions", {})
+    if isinstance(sessions_config, dict):
+        if "cjk_fts" in sessions_config:
+            os.environ["HERMES_CJK_FTS"] = str(sessions_config["cjk_fts"])
+        if "search_slow_ms" in sessions_config:
+            os.environ["HERMES_SEARCH_SLOW_MS"] = str(
+                sessions_config["search_slow_ms"]
+            )
+
+
+def _cli_config_defaults():
+    """Built-in defaults for every config key the CLI reads (the file overlays these)."""
     # Default configuration
     defaults = {
         "model": {
@@ -543,6 +666,41 @@ def load_cli_config() -> Dict[str, Any]:
             "seen": {},
         },
     }
+    return defaults
+
+
+def load_cli_config() -> Dict[str, Any]:
+    """
+    Load CLI configuration from config files.
+    
+    Config lookup order:
+    1. ~/.hermes/config.yaml (user config - preferred)
+    2. ./cli-config.yaml (project config - fallback)
+    
+    Environment variables take precedence over config file values.
+    Returns default values if no config file exists.
+
+    If HERMES_IGNORE_USER_CONFIG=1 is set (via ``hermes chat --ignore-user-config``),
+    the user config at ``~/.hermes/config.yaml`` is skipped entirely and only the
+    built-in defaults plus the project-level ``cli-config.yaml`` (if any) are used.
+    Credentials in ``.env`` are still loaded — this flag only suppresses
+    behavioral/config settings.
+    """
+    # Check user config first ({HERMES_HOME}/config.yaml)
+    user_config_path = _hermes_home / 'config.yaml'
+    project_config_path = Path(__file__).parent / 'cli-config.yaml'
+
+    # --ignore-user-config: force-skip the user config.yaml (still honor project
+    # config as a fallback so defaults stay sensible).
+    ignore_user_config = os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1"
+
+    # Use user config if it exists, otherwise project config
+    if user_config_path.exists() and not ignore_user_config:
+        config_path = user_config_path
+    else:
+        config_path = project_config_path
+
+    defaults = _cli_config_defaults()
     
     # Track whether the config file explicitly set terminal config.
     # When using defaults (no config file / no terminal section), we should NOT
@@ -623,154 +781,7 @@ def load_cli_config() -> Dict[str, Any]:
 
     defaults = managed_scope.apply_managed_overlay(defaults)
 
-    # Apply terminal config to environment variables (so terminal_tool picks them up)
-    terminal_config = defaults.get("terminal", {})
-    
-    # Normalize config key: the new config system (hermes_cli/config.py) and all
-    # documentation use "backend", the legacy cli-config.yaml uses "env_type".
-    # Accept both, with "backend" taking precedence (it's the documented key).
-    if "backend" in terminal_config:
-        terminal_config["env_type"] = terminal_config["backend"]
-    
-    # CWD resolution for CLI/TUI. The gateway has its own config bridge in
-    # gateway/run.py but may lazily import cli.py (triggering this code).
-    # Local backend: always os.getcwd(). Use `cd /dir && hermes` to control it.
-    # Non-local with placeholder: pop so terminal_tool uses its per-backend default.
-    # Non-local with explicit path: keep as-is.
-    _CWD_PLACEHOLDERS = (".", "auto", "cwd")
-    effective_backend = terminal_config.get("env_type", "local")
-
-    if effective_backend == "local":
-        terminal_config["cwd"] = os.getcwd()
-        defaults["terminal"]["cwd"] = terminal_config["cwd"]
-    elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
-        terminal_config.pop("cwd", None)
-    
-    env_mappings = {
-        "env_type": "TERMINAL_ENV",
-        "degraded_mode": "TERMINAL_DEGRADED_MODE",
-        "cwd": "TERMINAL_CWD",
-        "timeout": "TERMINAL_TIMEOUT",
-        "home_mode": "TERMINAL_HOME_MODE",
-        "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
-        "docker_image": "TERMINAL_DOCKER_IMAGE",
-        "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
-        "singularity_image": "TERMINAL_SINGULARITY_IMAGE",
-        "modal_image": "TERMINAL_MODAL_IMAGE",
-        "daytona_image": "TERMINAL_DAYTONA_IMAGE",
-        "vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
-        # SSH config
-        "ssh_host": "TERMINAL_SSH_HOST",
-        "ssh_user": "TERMINAL_SSH_USER",
-        "ssh_port": "TERMINAL_SSH_PORT",
-        "ssh_key": "TERMINAL_SSH_KEY",
-        # Container resource config (docker, singularity, modal, daytona, vercel_sandbox -- ignored for local/ssh)
-        "container_cpu": "TERMINAL_CONTAINER_CPU",
-        "container_memory": "TERMINAL_CONTAINER_MEMORY",
-        "container_disk": "TERMINAL_CONTAINER_DISK",
-        "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
-        "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
-        "docker_env": "TERMINAL_DOCKER_ENV",
-        "docker_extra_args": "TERMINAL_DOCKER_EXTRA_ARGS",
-        "docker_shm_size": "TERMINAL_DOCKER_SHM_SIZE",
-        "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
-        "docker_network": "TERMINAL_DOCKER_NETWORK",
-        "docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
-        "docker_persist_across_processes": "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
-        "docker_shared_container_key": "TERMINAL_DOCKER_SHARED_CONTAINER_KEY",
-        "docker_orphan_reaper": "TERMINAL_DOCKER_ORPHAN_REAPER",
-        "sandbox_dir": "TERMINAL_SANDBOX_DIR",
-        # Persistent shell (non-local backends)
-        "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
-        # Sudo support (works with all backends)
-        "sudo_password": "SUDO_PASSWORD",
-    }
-    
-    # Bridge config → env vars for terminal_tool. TERMINAL_CWD is force-exported
-    # UNLESS we're inside a gateway process (detected by _HERMES_GATEWAY marker)
-    # where it was already set correctly by gateway/run.py's config bridge.
-    _is_gateway = os.environ.get("_HERMES_GATEWAY") == "1"
-    for config_key, env_var in env_mappings.items():
-        if config_key in terminal_config:
-            if env_var == "TERMINAL_CWD":
-                if _is_gateway:
-                    continue
-                # CLI: always export (overrides stale .env or inherited values)
-                os.environ[env_var] = str(terminal_config[config_key])
-                continue
-            if _file_has_terminal_config or env_var not in os.environ:
-                val = terminal_config[config_key]
-                if isinstance(val, (list, dict)):
-                    os.environ[env_var] = json.dumps(val)
-                else:
-                    os.environ[env_var] = str(val)
-    
-    # Apply browser config to environment variables
-    browser_config = defaults.get("browser", {})
-    browser_env_mappings = {
-        "inactivity_timeout": "BROWSER_INACTIVITY_TIMEOUT",
-    }
-    
-    for config_key, env_var in browser_env_mappings.items():
-        if config_key in browser_config:
-            os.environ[env_var] = str(browser_config[config_key])
-    
-    # Apply auxiliary model/direct-endpoint overrides to environment variables.
-    # Vision and web_extract each have their own provider/model/base_url/api_key tuple.
-    # Compression config is read directly from config.yaml by run_agent.py and
-    # auxiliary_client.py — no env var bridging needed.
-    # Only set env vars for non-empty / non-default values so auto-detection
-    # still works.
-    auxiliary_config = defaults.get("auxiliary", {})
-    auxiliary_task_env = {
-        # config key → env var mapping
-        "vision": {
-            "provider": "AUXILIARY_VISION_PROVIDER",
-            "model": "AUXILIARY_VISION_MODEL",
-            "base_url": "AUXILIARY_VISION_BASE_URL",
-            "api_key": "AUXILIARY_VISION_API_KEY",
-        },
-        "approval": {
-            "provider": "AUXILIARY_APPROVAL_PROVIDER",
-            "model": "AUXILIARY_APPROVAL_MODEL",
-            "base_url": "AUXILIARY_APPROVAL_BASE_URL",
-            "api_key": "AUXILIARY_APPROVAL_API_KEY",
-        },
-    }
-    
-    for task_key, env_map in auxiliary_task_env.items():
-        task_cfg = auxiliary_config.get(task_key, {})
-        if not isinstance(task_cfg, dict):
-            continue
-        prov = str(task_cfg.get("provider", "")).strip()
-        model = str(task_cfg.get("model", "")).strip()
-        base_url = str(task_cfg.get("base_url", "")).strip()
-        api_key = str(task_cfg.get("api_key", "")).strip()
-        if prov and prov != "auto":
-            os.environ[env_map["provider"]] = prov
-        if model:
-            os.environ[env_map["model"]] = model
-        if base_url:
-            os.environ[env_map["base_url"]] = base_url
-        if api_key:
-            os.environ[env_map["api_key"]] = api_key
-    
-    # Security settings
-    security_config = defaults.get("security", {})
-    if isinstance(security_config, dict):
-        redact = security_config.get("redact_secrets")
-        if redact is not None:
-            os.environ["HERMES_REDACT_SECRETS"] = str(redact).lower()
-
-    # Session-search index knobs (hermes_state reads the env carriers).
-    sessions_config = defaults.get("sessions", {})
-    if isinstance(sessions_config, dict):
-        if "cjk_fts" in sessions_config:
-            os.environ["HERMES_CJK_FTS"] = str(sessions_config["cjk_fts"])
-        if "search_slow_ms" in sessions_config:
-            os.environ["HERMES_SEARCH_SLOW_MS"] = str(
-                sessions_config["search_slow_ms"]
-            )
+    _mirror_config_to_env(defaults, _file_has_terminal_config)
 
     return defaults
 
@@ -5274,6 +5285,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             resume: Session ID to resume (restores conversation history from SQLite)
             pass_session_id: Include the session ID in the agent's system prompt
         """
+        self._init_display_options(verbose, compact)
+        
+        self._init_model_routing(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
+                                 checkpoints, pass_session_id, ignore_rules)
+
+        self._init_runtime_state(resume)
+
+    def _init_display_options(self, verbose, compact):
+        """Display-related config: compact/tool-progress/focus view, bells, streaming, previews, stream buffers."""
         # Initialize Rich console
         self.console = Console()
         self.config = CLI_CONFIG
@@ -5334,7 +5354,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # Coupling the two (PR #6a1aa420e) caused all module DEBUG logs to spew
         # to console whenever a user set tool_progress: verbose in config.
         self.verbose = bool(verbose) if verbose is not None else False
-        
+
         # streaming: stream tokens to the terminal as they arrive (display.streaming in config.yaml)
         self.streaming_enabled = CLI_CONFIG["display"].get("streaming", False)
         # show_timestamps: prefix user and assistant labels with timestamps
@@ -5396,7 +5416,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._input_mode_recovery_notice_shown = False
         self._last_termios_drift_check = 0.0
         self._termios_drift_notice_shown = False
-        
+
+    def _init_model_routing(self, model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, checkpoints, pass_session_id, ignore_rules):
+        """Resolve model/provider/base_url, turn limits, toolsets, checkpoints, prompt/personality, reasoning + routing config."""
         # Configuration - priority: CLI args > env vars > config file
         # Model comes from: CLI arg or config.yaml (single source of truth).
         # LLM_MODEL/OPENAI_MODEL env vars are NOT checked — config.yaml is
@@ -5572,7 +5594,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             invalid = [t for t in toolsets if not validate_toolset(t) and t not in mcp_names]
             if invalid:
                 self._console_print(f"[bold red]Warning: Unknown toolsets: {', '.join(invalid)}[/]")
-        
+
         # Filesystem checkpoints: CLI flag > config
         cp_cfg = CLI_CONFIG.get("checkpoints", {})
         if isinstance(cp_cfg, bool):
@@ -5587,7 +5609,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # pass skip_context_files=True and skip_memory=True to AIAgent so
         # AGENTS.md/SOUL.md/.cursorrules and persistent memory are not loaded.
         self.ignore_rules = ignore_rules or os.environ.get("HERMES_IGNORE_RULES") == "1"
-        
+
         # Ephemeral system prompt: env var takes precedence, then
         # display.personality / agent.system_prompt from config.
         # hermes_cli.personality is the single owner of overlay resolution.
@@ -5601,12 +5623,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             or resolve_ephemeral_system_prompt(CLI_CONFIG)
         )
         self.personalities = available_personalities(CLI_CONFIG)
-        
+
         # Ephemeral prefill messages (few-shot priming, never persisted)
         self.prefill_messages = _load_prefill_messages(
             _resolve_prefill_messages_file(CLI_CONFIG)
         )
-        
+
         # Reasoning config (OpenRouter reasoning effort level)
         # Per-model override > global reasoning_effort — resolved through the
         # shared chokepoint in hermes_constants (Closes #21256).
@@ -5629,7 +5651,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self.service_tier = _parse_service_tier_config(
             CLI_CONFIG["agent"].get("service_tier", "")
         )
-        
+
         # OpenRouter provider routing preferences
         pr = CLI_CONFIG.get("provider_routing", {}) or {}
         self._provider_sort = pr.get("sort")
@@ -5652,12 +5674,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     self._openrouter_min_coding_score = _f
             except (TypeError, ValueError):
                 pass
-        
+
         # Fallback provider chain — tried in order when primary fails after retries.
         # Merge new ``fallback_providers`` entries with any legacy
         # ``fallback_model`` entries so old configs still participate.
         self._fallback_model = get_fallback_chain(CLI_CONFIG)
 
+    def _init_runtime_state(self, resume):
+        """Session store + all per-run mutable state (queues, overlays, pet/voice/status-bar fields)."""
         # Signature of the currently-initialised agent's runtime.  Used to
         # rebuild the agent when provider / model / base_url changes across
         # turns (e.g. after /model or credential rotation).
@@ -5668,7 +5692,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._tool_callbacks_installed = False
         self._tirith_security_checked = False
         self._app = None  # prompt_toolkit Application (set in run())
-        
+
         # Conversation state
         self.conversation_history: List[Dict[str, Any]] = []
         self.session_start = datetime.now()
@@ -5724,7 +5748,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
         # Deferred title: stored in memory until the session is created in the DB
         self._pending_title: Optional[str] = None
-        
+
         # Session ID: reuse existing one when resuming, otherwise generate fresh
         if resume:
             self.session_id = resume
@@ -5734,7 +5758,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
-        
+
         # History file for persistent input recall across sessions
         self._history_file = _hermes_home / ".hermes_history"
         self._last_invalidate: float = 0.0  # throttle UI repaints
@@ -8313,98 +8337,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             else:
                 raise
         finally:
-            self._should_exit = True
-            self._pet_stop_anim()
-            # Immediate feedback: prompt_toolkit has just torn down the input
-            # box + status bar, so without a line here the terminal sits
-            # silent for the whole cleanup window (session flush, memory
-            # shutdown, MCP/browser/terminal teardown) and the exit looks
-            # hung. Print before any potentially-slow step.
-            try:
-                print(f"{_DIM}Shutting down… (finalizing session){_RST}", flush=True)
-            except Exception:
-                pass
-            # Interrupt the agent immediately so its daemon thread stops making
-            # API calls and exits promptly (agent_thread is daemon, so the
-            # process will exit once the main thread finishes, but interrupting
-            # avoids wasted API calls and lets run_conversation clean up).
-            if self.agent and getattr(self, '_agent_running', False):
-                try:
-                    request_hard_interrupt(self.agent)
-                except Exception:
-                    pass
-            # Shut down voice recorder (release persistent audio stream)
-            if hasattr(self, '_voice_recorder') and self._voice_recorder:
-                try:
-                    self._voice_recorder.shutdown()
-                except Exception:
-                    pass
-                self._voice_recorder = None
-            # Clean up old temp voice recordings
-            try:
-                from tools.voice_mode import cleanup_temp_recordings
-                cleanup_temp_recordings()
-            except Exception:
-                pass
-            # Unregister callbacks to avoid dangling references
-            set_sudo_password_callback(None)
-            set_approval_callback(None)
-            set_secret_capture_callback(None)
-            # Flush any in-memory turn transcript before marking the session
-            # closed.  On SIGHUP/SIGTERM/window close the agent thread may not
-            # reach its normal run_conversation() persistence path before the
-            # daemon thread is reaped.
-            self._persist_active_session_before_close()
-
-            # Close session in SQLite
-            if hasattr(self, '_session_db') and self._session_db and self.agent:
-                try:
-                    self._session_db.end_session(self.agent.session_id, "cli_close")
-                except (Exception, KeyboardInterrupt) as e:
-                    logger.debug("Could not close session in DB: %s", e)
-                # Started-and-immediately-quit sessions never gained content;
-                # drop the empty row so /resume and `hermes sessions list`
-                # stay clean (gemini-cli#27770 port). No-op for resumed or
-                # titled sessions and anything with messages or children.
-                if not getattr(self, '_delete_session_on_exit', False):
-                    try:
-                        self._discard_session_if_empty(self.agent.session_id)
-                    except (Exception, KeyboardInterrupt) as e:
-                        logger.debug("Could not prune empty session: %s", e)
-                # /exit --delete: also remove the current session's transcripts
-                # and SQLite history. Ported from google-gemini/gemini-cli#19332.
-                if getattr(self, '_delete_session_on_exit', False):
-                    try:
-                        from hermes_constants import get_hermes_home as _ghh
-                        _sessions_dir = _ghh() / "sessions"
-                        _sid = self.agent.session_id
-                        if self._session_db.delete_session(_sid, sessions_dir=_sessions_dir):
-                            _cprint(f"  {_DIM}✓ Session {_escape(_sid)} deleted{_RST}")
-                        else:
-                            _cprint(f"  {_DIM}✗ Session {_escape(_sid)} not found for deletion{_RST}")
-                    except (Exception, KeyboardInterrupt) as e:
-                        logger.debug("Could not delete session on exit: %s", e)
-            # Plugin hook: on_session_end — safety net for interrupted exits.
-            # run_conversation() already fires this per-turn on normal completion,
-            # so only fire here if the agent was mid-turn (_agent_running) when
-            # the exit occurred, meaning run_conversation's hook didn't fire.
-            if self.agent and getattr(self, '_agent_running', False):
-                try:
-                    from hermes_cli.lifecycle import invoke_hook as _invoke_hook
-                    _invoke_hook(
-                        "on_session_end",
-                        session_id=self.agent.session_id,
-                        completed=False,
-                        interrupted=True,
-                        model=getattr(self.agent, 'model', None),
-                        platform=getattr(self.agent, 'platform', None) or "cli",
-                        reason="shutdown",
-                    )
-                except Exception:
-                    pass
-            _run_cleanup()
-            self._print_exit_summary()
-            self._release_active_session()
+            self._tui_shutdown()
 
         # Deferred relaunch: /update sets _pending_relaunch so the exec
         # happens here — after prompt_toolkit has exited and fully restored
@@ -8414,6 +8347,101 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         if getattr(self, '_pending_relaunch', None):
             from hermes_cli.relaunch import relaunch
             relaunch(self._pending_relaunch, preserve_inherited=False)
+
+    def _tui_shutdown(self):
+        """Teardown after the prompt_toolkit app exits: interrupt the agent, stop voice/pet, persist + close the session, run cleanup, print the exit summary."""
+        self._should_exit = True
+        self._pet_stop_anim()
+        # Immediate feedback: prompt_toolkit has just torn down the input
+        # box + status bar, so without a line here the terminal sits
+        # silent for the whole cleanup window (session flush, memory
+        # shutdown, MCP/browser/terminal teardown) and the exit looks
+        # hung. Print before any potentially-slow step.
+        try:
+            print(f"{_DIM}Shutting down… (finalizing session){_RST}", flush=True)
+        except Exception:
+            pass
+        # Interrupt the agent immediately so its daemon thread stops making
+        # API calls and exits promptly (agent_thread is daemon, so the
+        # process will exit once the main thread finishes, but interrupting
+        # avoids wasted API calls and lets run_conversation clean up).
+        if self.agent and getattr(self, '_agent_running', False):
+            try:
+                request_hard_interrupt(self.agent)
+            except Exception:
+                pass
+        # Shut down voice recorder (release persistent audio stream)
+        if hasattr(self, '_voice_recorder') and self._voice_recorder:
+            try:
+                self._voice_recorder.shutdown()
+            except Exception:
+                pass
+            self._voice_recorder = None
+        # Clean up old temp voice recordings
+        try:
+            from tools.voice_mode import cleanup_temp_recordings
+            cleanup_temp_recordings()
+        except Exception:
+            pass
+        # Unregister callbacks to avoid dangling references
+        set_sudo_password_callback(None)
+        set_approval_callback(None)
+        set_secret_capture_callback(None)
+        # Flush any in-memory turn transcript before marking the session
+        # closed.  On SIGHUP/SIGTERM/window close the agent thread may not
+        # reach its normal run_conversation() persistence path before the
+        # daemon thread is reaped.
+        self._persist_active_session_before_close()
+
+        # Close session in SQLite
+        if hasattr(self, '_session_db') and self._session_db and self.agent:
+            try:
+                self._session_db.end_session(self.agent.session_id, "cli_close")
+            except (Exception, KeyboardInterrupt) as e:
+                logger.debug("Could not close session in DB: %s", e)
+            # Started-and-immediately-quit sessions never gained content;
+            # drop the empty row so /resume and `hermes sessions list`
+            # stay clean (gemini-cli#27770 port). No-op for resumed or
+            # titled sessions and anything with messages or children.
+            if not getattr(self, '_delete_session_on_exit', False):
+                try:
+                    self._discard_session_if_empty(self.agent.session_id)
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.debug("Could not prune empty session: %s", e)
+            # /exit --delete: also remove the current session's transcripts
+            # and SQLite history. Ported from google-gemini/gemini-cli#19332.
+            if getattr(self, '_delete_session_on_exit', False):
+                try:
+                    from hermes_constants import get_hermes_home as _ghh
+                    _sessions_dir = _ghh() / "sessions"
+                    _sid = self.agent.session_id
+                    if self._session_db.delete_session(_sid, sessions_dir=_sessions_dir):
+                        _cprint(f"  {_DIM}✓ Session {_escape(_sid)} deleted{_RST}")
+                    else:
+                        _cprint(f"  {_DIM}✗ Session {_escape(_sid)} not found for deletion{_RST}")
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.debug("Could not delete session on exit: %s", e)
+        # Plugin hook: on_session_end — safety net for interrupted exits.
+        # run_conversation() already fires this per-turn on normal completion,
+        # so only fire here if the agent was mid-turn (_agent_running) when
+        # the exit occurred, meaning run_conversation's hook didn't fire.
+        if self.agent and getattr(self, '_agent_running', False):
+            try:
+                from hermes_cli.lifecycle import invoke_hook as _invoke_hook
+                _invoke_hook(
+                    "on_session_end",
+                    session_id=self.agent.session_id,
+                    completed=False,
+                    interrupted=True,
+                    model=getattr(self.agent, 'model', None),
+                    platform=getattr(self.agent, 'platform', None) or "cli",
+                    reason="shutdown",
+                )
+            except Exception:
+                pass
+        _run_cleanup()
+        self._print_exit_summary()
+        self._release_active_session()
 
 
 # ============================================================================
@@ -8519,6 +8547,276 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         first_response=first_response or "",
         log=lambda m: logger.info("%s", m),
     )
+
+
+def _run_quiet_single_query(cli, effective_query):
+    """Quiet (-Q) one-shot turn: run, print the response (stderr for errors/session_id), then sys.exit with the automation exit code."""
+    try:
+        result = cli.agent.run_conversation(
+            user_message=effective_query,
+            conversation_history=cli.conversation_history,
+        )
+    except KeyboardInterrupt:
+        _emit_interrupted_session_end(cli, reason="keyboard_interrupt")
+        print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
+        sys.exit(130)
+    # Sync session_id if mid-run compression created a
+    # continuation session. The exit line below reports
+    # session_id to stderr for automation wrappers; without
+    # this sync it would point at the ended parent.
+    if (
+        getattr(cli.agent, "session_id", None)
+        and cli.agent.session_id != cli.session_id
+    ):
+        cli.session_id = cli.agent.session_id
+    response = result.get("final_response", "") if isinstance(result, dict) else str(result)
+    # Surface backend errors that produced no visible output
+    # (e.g. invalid model slug → provider 4xx). Mirrors the
+    # interactive CLI path. Write to stderr so piped stdout
+    # stays clean for automation wrappers.
+    if (
+        not response
+        and isinstance(result, dict)
+        and result.get("error")
+        and (result.get("failed") or result.get("partial"))
+    ):
+        print(f"Error: {result['error']}", file=sys.stderr)
+    elif response:
+        print(response)
+
+    # Kanban goal-loop mode: a worker spawned for a
+    # goal_mode card keeps working in THIS session until an
+    # auxiliary judge agrees the card is done, the worker
+    # terminates the task itself, or the turn budget runs
+    # out (→ sticky block). Gated on the env vars the
+    # dispatcher sets in `_default_spawn`; a no-op for every
+    # normal worker and every non-kanban `-q` run.
+    if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1":
+        try:
+            _run_kanban_goal_loop_q(cli, response)
+        except Exception as _goal_exc:
+            logger.debug("kanban goal loop failed: %s", _goal_exc)
+
+    # Session ID goes to stderr so piped stdout is clean.
+    print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
+
+    # Ensure proper exit code for automation wrappers.
+    #
+    # Kanban workers get a special case: when the run failed
+    # purely because the provider rate-limited / exhausted
+    # quota (not because the task itself is broken), exit with
+    # the EX_TEMPFAIL sentinel instead of the generic 1. The
+    # dispatcher's reap classifier maps that code to a
+    # ``rate_limited`` exit and releases the task back to
+    # ``ready`` WITHOUT incrementing the failure counter, so a
+    # 5-hour quota window can't trip the circuit breaker and
+    # permanently block the card. Non-kanban runs keep the
+    # plain 0/1 contract automation wrappers expect.
+    _exit_code = 0
+    if isinstance(result, dict) and result.get("failed"):
+        _exit_code = 1
+        if os.environ.get("HERMES_KANBAN_TASK") and result.get(
+            "failure_reason"
+        ) in ("rate_limit", "billing"):
+            try:
+                from hermes_cli.kanban_db import (
+                    KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,
+                )
+                _exit_code = _RL_CODE
+            except Exception:
+                _exit_code = 1
+    sys.exit(_exit_code)
+
+
+def _route_single_query_images(cli, query, effective_query, single_query_images, single_query_image_urls):
+    """Attach one-shot images natively when the model supports vision, else pre-describe them as text."""
+    if single_query_images or single_query_image_urls:
+        # Honour the same image-routing decision used by the
+        # interactive path. With a vision-capable model (incl.
+        # custom-provider models declared via
+        # `model.supports_vision: true`), attach images natively
+        # as image_url content parts. Otherwise fall back to the
+        # text-pipeline (vision_analyze pre-description).
+        _img_mode = "text"
+        _build_parts = None
+        try:
+            from agent.image_routing import (
+                build_native_content_parts as _build_parts,  # noqa: F811
+            )
+            from agent.image_routing import decide_image_input_mode
+            from hermes_cli.config import load_config
+
+            _img_mode = decide_image_input_mode(
+                (cli.provider or "").strip(),
+                (cli.model or "").strip(),
+                load_config(),
+                requested_provider=(
+                    cli.requested_provider or ""
+                ).strip(),
+            )
+        except Exception:
+            _img_mode = "text"
+
+        if _img_mode == "native" and _build_parts is not None:
+            try:
+                _parts, _skipped = _build_parts(
+                    query if isinstance(query, str) else "",
+                    [str(p) for p in single_query_images],
+                    image_urls=list(single_query_image_urls) or None,
+                )
+                if any(p.get("type") == "image_url" for p in _parts):
+                    effective_query = _parts
+                else:
+                    # All images unreadable — text fallback.
+                    # ``_preprocess_images_with_vision`` only knows
+                    # about local files; URLs would be lost there,
+                    # so keep the original query text intact when
+                    # only URLs were supplied.
+                    if single_query_images:
+                        effective_query = cli._preprocess_images_with_vision(
+                            query, single_query_images, announce=False,
+                        )
+            except Exception:
+                if single_query_images:
+                    effective_query = cli._preprocess_images_with_vision(
+                        query, single_query_images, announce=False,
+                    )
+        elif single_query_images:
+            effective_query = cli._preprocess_images_with_vision(
+                query,
+                single_query_images,
+                announce=False,
+            )
+    return effective_query
+
+
+def _collect_kanban_task_images(single_query_images):
+    """Kanban workers: scan the task body for image paths/URLs and add them to the first turn's attachments."""
+    # Kanban workers spawn with ``hermes chat -q "work kanban task <id>"``;
+    # the actual task description lives in the task body. Mirror the
+    # gateway/CLI behaviour for inbound images by scanning the body for
+    # local image paths and http(s) image URLs and attaching them to the
+    # worker's first turn. Without this, users who paste a screenshot
+    # path or URL into a kanban task body never get it routed to the
+    # model's vision input.
+    single_query_image_urls: list[str] = []
+    _kanban_task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    if _kanban_task_id:
+        try:
+            from hermes_cli import kanban_db as _kb
+            from agent.image_routing import extract_image_refs as _extract_refs
+
+            _conn = _kb.connect()
+            try:
+                _task = _kb.get_task(_conn, _kanban_task_id)
+            finally:
+                try:
+                    _conn.close()
+                except Exception:
+                    pass
+            _body = getattr(_task, "body", "") if _task is not None else ""
+            if _body:
+                _kb_paths, _kb_urls = _extract_refs(_body)
+                if _kb_paths:
+                    # Dedupe against any --image the user already passed.
+                    _seen = {str(p) for p in single_query_images}
+                    for _p in _kb_paths:
+                        if _p not in _seen:
+                            _seen.add(_p)
+                            single_query_images.append(Path(_p))
+                if _kb_urls:
+                    single_query_image_urls.extend(_kb_urls)
+        except Exception as _exc:
+            # Best-effort enrichment; never block worker startup on it.
+            logger.debug("kanban image-ref extraction failed: %s", _exc)
+    return single_query_image_urls
+
+
+def _install_single_query_signal_handlers(cli):
+    """Route SIGINT/SIGTERM/SIGHUP through agent.interrupt() (worker threads see it) before unwinding; kanban workers hard-exit."""
+    # Also install signal handlers in single-query / `-q` mode.  Interactive
+    # mode registers its own inside HermesCLI.run(), but `-q` runs
+    # cli.agent.run_conversation() below and AIAgent spawns worker threads
+    # for tools — so when SIGTERM arrives on the main thread, raising
+    # KeyboardInterrupt only unwinds the main thread, not the worker
+    # running _wait_for_process.  Python then exits, the child subprocess
+    # (spawned with os.setsid, its own process group) is reparented to
+    # init and keeps running as an orphan.
+    #
+    # Fix: route SIGTERM/SIGHUP through agent.interrupt() which sets the
+    # per-thread interrupt flag the worker's poll loop checks every 200 ms.
+    # Give the worker a grace window to call _kill_process (SIGTERM to the
+    # process group, then SIGKILL after 1 s), then raise KeyboardInterrupt
+    # so main unwinds normally.  HERMES_SIGTERM_GRACE overrides the 1.5 s
+    # default for debugging.
+    def _signal_handler_q(signum, frame):
+        logger.debug("Received signal %s in single-query mode", signum)
+        # Arm the exit backstop now that shutdown intent is unambiguous —
+        # covers wedges in the unwind below that would otherwise leave the
+        # process alive with no watchdog (#65998 class). Never raises.
+        _arm_exit_watchdog_on_shutdown_signal()
+        try:
+            _agent = getattr(cli, "agent", None)
+            if _agent is not None:
+                request_hard_interrupt(_agent, f"received signal {signum}")
+                try:
+                    _grace = float(os.getenv("HERMES_SIGTERM_GRACE", "1.5"))
+                except (TypeError, ValueError):
+                    _grace = 1.5
+                if _grace > 0:
+                    time.sleep(_grace)
+        except Exception:
+            pass  # never block signal handling
+        # Kanban worker exit path (#28181): SIGTERM hits a dispatcher-spawned
+        # worker that's likely in a non-daemon thread waiting on a child
+        # subprocess in _wait_for_process. Raising KeyboardInterrupt only
+        # unwinds the main thread; the worker thread keeps running, the
+        # process gets reparented to init, and the dispatcher's _pid_alive
+        # check returns True forever — task stuck in 'running' indefinitely.
+        # Skip the controlled-unwind dance and call os._exit(0) so the kernel
+        # reclaims the PID immediately and detect_crashed_workers can reclaim
+        # the stale claim on the next tick. Flush logging + stdout/stderr
+        # first so the final debug trace isn't lost; SIGALRM deadman guards
+        # the flush against any rare blocking-I/O case (the reporter measured
+        # flush in <1ms; the alarm is a failsafe, not the common path).
+        if os.environ.get("HERMES_KANBAN_TASK"):
+            try:
+                import signal as _sig_mod
+                if hasattr(_sig_mod, "SIGALRM"):
+                    # Cancel any pre-existing alarm to avoid colliding with
+                    # caller-installed timers.
+                    _sig_mod.signal(_sig_mod.SIGALRM, lambda *_: os._exit(0))
+                    _sig_mod.alarm(5)
+            except Exception:
+                pass
+            # os._exit(0) skips atexit AND SessionDB's token-drain hook, so
+            # flush + finalize the session store here or the worker's turn
+            # (and its usage deltas) never become durable (#88583 / #50881
+            # class). Best-effort under the SIGALRM deadman above.
+            try:
+                _flush_one_shot_session_store(cli)
+            except Exception:
+                pass
+            try:
+                import logging as _lg
+                _lg.shutdown()
+            except Exception:
+                pass
+            for _stream in (sys.stdout, sys.stderr):
+                try:
+                    _stream.flush()
+                except Exception:
+                    pass
+            os._exit(0)
+        raise KeyboardInterrupt()
+    try:
+        import signal as _signal
+        _signal.signal(_signal.SIGINT, _signal_handler_q)
+        _signal.signal(_signal.SIGTERM, _signal_handler_q)
+        if hasattr(_signal, "SIGHUP"):
+            _signal.signal(_signal.SIGHUP, _signal_handler_q)
+    except Exception:
+        pass  # signal handler may fail in restricted environments
 
 
 def main(
@@ -8818,89 +9116,7 @@ def main(
     # Register cleanup for single-query mode (interactive mode registers in run())
     atexit.register(_run_cleanup)
 
-    # Also install signal handlers in single-query / `-q` mode.  Interactive
-    # mode registers its own inside HermesCLI.run(), but `-q` runs
-    # cli.agent.run_conversation() below and AIAgent spawns worker threads
-    # for tools — so when SIGTERM arrives on the main thread, raising
-    # KeyboardInterrupt only unwinds the main thread, not the worker
-    # running _wait_for_process.  Python then exits, the child subprocess
-    # (spawned with os.setsid, its own process group) is reparented to
-    # init and keeps running as an orphan.
-    #
-    # Fix: route SIGTERM/SIGHUP through agent.interrupt() which sets the
-    # per-thread interrupt flag the worker's poll loop checks every 200 ms.
-    # Give the worker a grace window to call _kill_process (SIGTERM to the
-    # process group, then SIGKILL after 1 s), then raise KeyboardInterrupt
-    # so main unwinds normally.  HERMES_SIGTERM_GRACE overrides the 1.5 s
-    # default for debugging.
-    def _signal_handler_q(signum, frame):
-        logger.debug("Received signal %s in single-query mode", signum)
-        # Arm the exit backstop now that shutdown intent is unambiguous —
-        # covers wedges in the unwind below that would otherwise leave the
-        # process alive with no watchdog (#65998 class). Never raises.
-        _arm_exit_watchdog_on_shutdown_signal()
-        try:
-            _agent = getattr(cli, "agent", None)
-            if _agent is not None:
-                request_hard_interrupt(_agent, f"received signal {signum}")
-                try:
-                    _grace = float(os.getenv("HERMES_SIGTERM_GRACE", "1.5"))
-                except (TypeError, ValueError):
-                    _grace = 1.5
-                if _grace > 0:
-                    time.sleep(_grace)
-        except Exception:
-            pass  # never block signal handling
-        # Kanban worker exit path (#28181): SIGTERM hits a dispatcher-spawned
-        # worker that's likely in a non-daemon thread waiting on a child
-        # subprocess in _wait_for_process. Raising KeyboardInterrupt only
-        # unwinds the main thread; the worker thread keeps running, the
-        # process gets reparented to init, and the dispatcher's _pid_alive
-        # check returns True forever — task stuck in 'running' indefinitely.
-        # Skip the controlled-unwind dance and call os._exit(0) so the kernel
-        # reclaims the PID immediately and detect_crashed_workers can reclaim
-        # the stale claim on the next tick. Flush logging + stdout/stderr
-        # first so the final debug trace isn't lost; SIGALRM deadman guards
-        # the flush against any rare blocking-I/O case (the reporter measured
-        # flush in <1ms; the alarm is a failsafe, not the common path).
-        if os.environ.get("HERMES_KANBAN_TASK"):
-            try:
-                import signal as _sig_mod
-                if hasattr(_sig_mod, "SIGALRM"):
-                    # Cancel any pre-existing alarm to avoid colliding with
-                    # caller-installed timers.
-                    _sig_mod.signal(_sig_mod.SIGALRM, lambda *_: os._exit(0))
-                    _sig_mod.alarm(5)
-            except Exception:
-                pass
-            # os._exit(0) skips atexit AND SessionDB's token-drain hook, so
-            # flush + finalize the session store here or the worker's turn
-            # (and its usage deltas) never become durable (#88583 / #50881
-            # class). Best-effort under the SIGALRM deadman above.
-            try:
-                _flush_one_shot_session_store(cli)
-            except Exception:
-                pass
-            try:
-                import logging as _lg
-                _lg.shutdown()
-            except Exception:
-                pass
-            for _stream in (sys.stdout, sys.stderr):
-                try:
-                    _stream.flush()
-                except Exception:
-                    pass
-            os._exit(0)
-        raise KeyboardInterrupt()
-    try:
-        import signal as _signal
-        _signal.signal(_signal.SIGINT, _signal_handler_q)
-        _signal.signal(_signal.SIGTERM, _signal_handler_q)
-        if hasattr(_signal, "SIGHUP"):
-            _signal.signal(_signal.SIGHUP, _signal_handler_q)
-    except Exception:
-        pass  # signal handler may fail in restricted environments
+    _install_single_query_signal_handlers(cli)
     
     # Handle single query mode
     if query or image:
@@ -8935,106 +9151,14 @@ def main(
             sys.exit(1)
         try:
             query, single_query_images = _collect_query_images(query, image)
-            # Kanban workers spawn with ``hermes chat -q "work kanban task <id>"``;
-            # the actual task description lives in the task body. Mirror the
-            # gateway/CLI behaviour for inbound images by scanning the body for
-            # local image paths and http(s) image URLs and attaching them to the
-            # worker's first turn. Without this, users who paste a screenshot
-            # path or URL into a kanban task body never get it routed to the
-            # model's vision input.
-            single_query_image_urls: list[str] = []
-            _kanban_task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
-            if _kanban_task_id:
-                try:
-                    from hermes_cli import kanban_db as _kb
-                    from agent.image_routing import extract_image_refs as _extract_refs
-
-                    _conn = _kb.connect()
-                    try:
-                        _task = _kb.get_task(_conn, _kanban_task_id)
-                    finally:
-                        try:
-                            _conn.close()
-                        except Exception:
-                            pass
-                    _body = getattr(_task, "body", "") if _task is not None else ""
-                    if _body:
-                        _kb_paths, _kb_urls = _extract_refs(_body)
-                        if _kb_paths:
-                            # Dedupe against any --image the user already passed.
-                            _seen = {str(p) for p in single_query_images}
-                            for _p in _kb_paths:
-                                if _p not in _seen:
-                                    _seen.add(_p)
-                                    single_query_images.append(Path(_p))
-                        if _kb_urls:
-                            single_query_image_urls.extend(_kb_urls)
-                except Exception as _exc:
-                    # Best-effort enrichment; never block worker startup on it.
-                    logger.debug("kanban image-ref extraction failed: %s", _exc)
+            single_query_image_urls = _collect_kanban_task_images(single_query_images)
             if quiet:
                 # Quiet mode: suppress banner, spinner, tool previews.
                 # Only print the final response and parseable session info.
                 cli.tool_progress_mode = "off"
                 if cli._ensure_runtime_credentials():
                     effective_query: Any = query
-                    if single_query_images or single_query_image_urls:
-                        # Honour the same image-routing decision used by the
-                        # interactive path. With a vision-capable model (incl.
-                        # custom-provider models declared via
-                        # `model.supports_vision: true`), attach images natively
-                        # as image_url content parts. Otherwise fall back to the
-                        # text-pipeline (vision_analyze pre-description).
-                        _img_mode = "text"
-                        _build_parts = None
-                        try:
-                            from agent.image_routing import (
-                                build_native_content_parts as _build_parts,  # noqa: F811
-                            )
-                            from agent.image_routing import decide_image_input_mode
-                            from hermes_cli.config import load_config
-
-                            _img_mode = decide_image_input_mode(
-                                (cli.provider or "").strip(),
-                                (cli.model or "").strip(),
-                                load_config(),
-                                requested_provider=(
-                                    cli.requested_provider or ""
-                                ).strip(),
-                            )
-                        except Exception:
-                            _img_mode = "text"
-
-                        if _img_mode == "native" and _build_parts is not None:
-                            try:
-                                _parts, _skipped = _build_parts(
-                                    query if isinstance(query, str) else "",
-                                    [str(p) for p in single_query_images],
-                                    image_urls=list(single_query_image_urls) or None,
-                                )
-                                if any(p.get("type") == "image_url" for p in _parts):
-                                    effective_query = _parts
-                                else:
-                                    # All images unreadable — text fallback.
-                                    # ``_preprocess_images_with_vision`` only knows
-                                    # about local files; URLs would be lost there,
-                                    # so keep the original query text intact when
-                                    # only URLs were supplied.
-                                    if single_query_images:
-                                        effective_query = cli._preprocess_images_with_vision(
-                                            query, single_query_images, announce=False,
-                                        )
-                            except Exception:
-                                if single_query_images:
-                                    effective_query = cli._preprocess_images_with_vision(
-                                        query, single_query_images, announce=False,
-                                    )
-                        elif single_query_images:
-                            effective_query = cli._preprocess_images_with_vision(
-                                query,
-                                single_query_images,
-                                announce=False,
-                            )
+                    effective_query = _route_single_query_images(cli, query, effective_query, single_query_images, single_query_image_urls)
                     turn_route = cli._resolve_turn_agent_config(effective_query)
                     if turn_route["signature"] != cli._active_agent_route_signature:
                         cli.agent = None
@@ -9066,81 +9190,7 @@ def main(
                         # (they check agent.tool_progress_mode, initialized
                         # from display.tool_progress at construction).
                         cli.agent.tool_progress_mode = "off"
-                        try:
-                            result = cli.agent.run_conversation(
-                                user_message=effective_query,
-                                conversation_history=cli.conversation_history,
-                            )
-                        except KeyboardInterrupt:
-                            _emit_interrupted_session_end(cli, reason="keyboard_interrupt")
-                            print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
-                            sys.exit(130)
-                        # Sync session_id if mid-run compression created a
-                        # continuation session. The exit line below reports
-                        # session_id to stderr for automation wrappers; without
-                        # this sync it would point at the ended parent.
-                        if (
-                            getattr(cli.agent, "session_id", None)
-                            and cli.agent.session_id != cli.session_id
-                        ):
-                            cli.session_id = cli.agent.session_id
-                        response = result.get("final_response", "") if isinstance(result, dict) else str(result)
-                        # Surface backend errors that produced no visible output
-                        # (e.g. invalid model slug → provider 4xx). Mirrors the
-                        # interactive CLI path. Write to stderr so piped stdout
-                        # stays clean for automation wrappers.
-                        if (
-                            not response
-                            and isinstance(result, dict)
-                            and result.get("error")
-                            and (result.get("failed") or result.get("partial"))
-                        ):
-                            print(f"Error: {result['error']}", file=sys.stderr)
-                        elif response:
-                            print(response)
-
-                        # Kanban goal-loop mode: a worker spawned for a
-                        # goal_mode card keeps working in THIS session until an
-                        # auxiliary judge agrees the card is done, the worker
-                        # terminates the task itself, or the turn budget runs
-                        # out (→ sticky block). Gated on the env vars the
-                        # dispatcher sets in `_default_spawn`; a no-op for every
-                        # normal worker and every non-kanban `-q` run.
-                        if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1":
-                            try:
-                                _run_kanban_goal_loop_q(cli, response)
-                            except Exception as _goal_exc:
-                                logger.debug("kanban goal loop failed: %s", _goal_exc)
-
-                        # Session ID goes to stderr so piped stdout is clean.
-                        print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
-
-                        # Ensure proper exit code for automation wrappers.
-                        #
-                        # Kanban workers get a special case: when the run failed
-                        # purely because the provider rate-limited / exhausted
-                        # quota (not because the task itself is broken), exit with
-                        # the EX_TEMPFAIL sentinel instead of the generic 1. The
-                        # dispatcher's reap classifier maps that code to a
-                        # ``rate_limited`` exit and releases the task back to
-                        # ``ready`` WITHOUT incrementing the failure counter, so a
-                        # 5-hour quota window can't trip the circuit breaker and
-                        # permanently block the card. Non-kanban runs keep the
-                        # plain 0/1 contract automation wrappers expect.
-                        _exit_code = 0
-                        if isinstance(result, dict) and result.get("failed"):
-                            _exit_code = 1
-                            if os.environ.get("HERMES_KANBAN_TASK") and result.get(
-                                "failure_reason"
-                            ) in ("rate_limit", "billing"):
-                                try:
-                                    from hermes_cli.kanban_db import (
-                                        KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,
-                                    )
-                                    _exit_code = _RL_CODE
-                                except Exception:
-                                    _exit_code = 1
-                        sys.exit(_exit_code)
+                        _run_quiet_single_query(cli, effective_query)
 
                 # Exit with error code if credentials or agent init fails
                 sys.exit(1)

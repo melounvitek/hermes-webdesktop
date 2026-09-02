@@ -93,7 +93,12 @@ def test_suppress_status_output_gates_quiet_tool_messages():
 
 def test_quiet_branch_neutralizations_precede_run_conversation():
     branch = _quiet_branch()
-    run_idx = branch.index("run_conversation(")
+    # The turn itself runs inside ``_run_quiet_single_query``; the quiet branch
+    # must finish neutralizing the callbacks before it hands off to that helper.
+    import inspect
+
+    assert "run_conversation(" in inspect.getsource(cli_mod._run_quiet_single_query)
+    run_idx = branch.index("_run_quiet_single_query(cli,")
     for attr in (
         "cli.agent.reasoning_callback = None",
         "cli.agent.tool_progress_callback = None",
@@ -101,5 +106,5 @@ def test_quiet_branch_neutralizations_precede_run_conversation():
         "cli.agent.tool_complete_callback = None",
     ):
         assert branch.index(attr) < run_idx, (
-            f"`{attr}` must run before run_conversation in the quiet branch"
+            f"`{attr}` must run before the run_conversation hand-off in the quiet branch"
         )
