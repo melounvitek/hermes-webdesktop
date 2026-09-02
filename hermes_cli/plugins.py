@@ -1202,24 +1202,6 @@ class PluginContext:
             self.manifest.name, getattr(provider, "name", "?"),
         )
 
-    # -- image gen provider registration ------------------------------------
-
-    @_serialized_replacement
-    def register_image_gen_provider(self, provider) -> Optional[PluginRegistration]:
-        """Register an :class:`agent.image_gen_provider.ImageGenProvider`; ``provider.name`` is
-        matched by ``image_gen.provider``."""
-        from agent import image_gen_registry
-        from agent.image_gen_provider import ImageGenProvider
-
-        return self._register_scoped_provider(
-            provider,
-            kind="image_gen_provider",
-            base_class=ImageGenProvider,
-            registry=image_gen_registry,
-            label="image_gen provider",
-            article="an",
-        )
-
     # -- dashboard auth provider registration --------------------------------
 
     @_serialized_replacement
@@ -1264,137 +1246,6 @@ class PluginContext:
             self.manifest.name, registry_name, provider.display_name,
         )
         return handle
-
-    # -- video gen provider registration -------------------------------------
-
-    @_serialized_replacement
-    def register_video_gen_provider(self, provider) -> Optional[PluginRegistration]:
-        """Register an :class:`agent.video_gen_provider.VideoGenProvider`; ``provider.name`` is
-        matched by ``video_gen.provider``."""
-        from agent import video_gen_registry
-        from agent.video_gen_provider import VideoGenProvider
-
-        return self._register_scoped_provider(
-            provider,
-            kind="video_gen_provider",
-            base_class=VideoGenProvider,
-            registry=video_gen_registry,
-            label="video_gen provider",
-        )
-
-    # -- web search/extract provider registration ----------------------------
-
-    @_serialized_replacement
-    def register_web_search_provider(self, provider) -> Optional[PluginRegistration]:
-        """Register an :class:`agent.web_search_provider.WebSearchProvider`; ``provider.name`` is
-        matched by ``web.search_backend`` / ``web.extract_backend`` / ``web.backend``."""
-        from agent import web_search_registry
-        from agent.web_search_provider import WebSearchProvider
-
-        return self._register_scoped_provider(
-            provider,
-            kind="web_search_provider",
-            base_class=WebSearchProvider,
-            registry=web_search_registry,
-            label="web provider",
-        )
-
-    # -- browser provider registration ---------------------------------------
-
-    @_serialized_replacement
-    def register_browser_provider(self, provider) -> Optional[PluginRegistration]:
-        """Register an :class:`agent.browser_provider.BrowserProvider`; ``provider.name`` is matched
-        by ``browser.cloud_provider`` (consulted by ``tools.browser_tool._get_cloud_provider``)."""
-        from agent import browser_registry
-        from agent.browser_provider import BrowserProvider
-
-        return self._register_scoped_provider(
-            provider,
-            kind="browser_provider",
-            base_class=BrowserProvider,
-            registry=browser_registry,
-            label="browser provider",
-        )
-
-    # -- terminal environment provider registration ----------------------------
-
-    @_serialized_replacement
-    def register_terminal_environment_provider(self, provider) -> Optional[PluginRegistration]:
-        """Register a :class:`agent.terminal_env_provider.TerminalEnvironmentProvider`;
-        ``provider.name`` is matched by ``terminal.backend`` when no built-in backend has that name.
-        Built-in names (local, docker, singularity, modal, daytona, vercel_sandbox, ssh) are
-        rejected — plugins never shadow in-tree backends."""
-        from agent import terminal_env_registry
-        from agent.terminal_env_provider import TerminalEnvironmentProvider
-
-        return self._register_scoped_provider(
-            provider,
-            kind="terminal_environment_provider",
-            base_class=TerminalEnvironmentProvider,
-            registry=terminal_env_registry,
-            label="terminal environment provider",
-            normalize=lambda n: n.strip().lower(),
-            reject_message="Plugin '%s' terminal environment provider rejected: %s",
-        )
-
-    # -- secret source registration -------------------------------------------
-
-    @_serialized_replacement
-    def register_secret_source(self, source) -> Optional[PluginRegistration]:
-        """Register a :class:`agent.secret_sources.base.SecretSource`, run by ``load_hermes_dotenv()``
-        (after ``~/.hermes/.env``, before credentials are read) when ``secrets.<name>`` is enabled.
-        The orchestrator owns ordering/precedence/provenance; the source only fetches. Since dotenv
-        usually loads before discovery, the manager re-pulls enabled plugin sources afterwards."""
-        import agent.secret_sources.registry as secret_registry
-        from agent.secret_sources.base import SecretSource
-
-        return self._register_scoped_provider(
-            source,
-            kind="secret_source",
-            base_class=SecretSource,
-            registry=secret_registry,
-            label="secret source",
-            normalize=None,
-            register=secret_registry.register_source,
-        )
-
-    # -- TTS provider registration -------------------------------------------
-
-    @_serialized_replacement
-    def register_tts_provider(self, provider) -> Optional[PluginRegistration]:
-        """Register an :class:`agent.tts_provider.TTSProvider`; ``provider.name`` is matched by
-        ``tts.provider`` unless it is a built-in name (rejected with a warning) or a
-        ``tts.providers.<name>: type: command`` entry shares it (command-providers win)."""
-        from agent import tts_registry
-        from agent.tts_provider import TTSProvider
-
-        return self._register_scoped_provider(
-            provider,
-            kind="tts_provider",
-            base_class=TTSProvider,
-            registry=tts_registry,
-            label="TTS provider",
-            normalize=lambda n: n.strip().lower(),
-        )
-
-    # -- transcription (STT) provider registration ---------------------------
-
-    @_serialized_replacement
-    def register_transcription_provider(self, provider) -> Optional[PluginRegistration]:
-        """Register an :class:`agent.transcription_provider.TranscriptionProvider`; ``provider.name``
-        is matched by ``stt.provider`` unless it is a built-in name (rejected) or a
-        ``stt.providers.<name>: type: command`` entry shares it (command-providers win)."""
-        from agent import transcription_registry
-        from agent.transcription_provider import TranscriptionProvider
-
-        return self._register_scoped_provider(
-            provider,
-            kind="transcription_provider",
-            base_class=TranscriptionProvider,
-            registry=transcription_registry,
-            label="transcription provider",
-            normalize=lambda n: n.strip().lower(),
-        )
 
     # -- platform adapter registration ---------------------------------------
 
@@ -1795,6 +1646,100 @@ class PluginContext:
         logger.debug("Plugin %s registered skill: %s", self.manifest.name, qualified)
         return handle
 
+
+# -- scoped provider registrars ------------------------------------------------------------------
+# Every ``register_<category>_provider`` shares one body (:meth:`PluginContext._register_scoped_provider`):
+# type-check, register in the scope-keyed process-global registry, lease the slot so unload restores
+# the displaced entry. Rows: (method, kind, registry module, base-class module:attr, label, options).
+# ``normalize`` defaults to ``str.strip``; ``None`` keeps the raw name; ``lower`` also lowercases.
+_SCOPED_PROVIDER_REGISTRARS: Tuple[Tuple[str, str, str, str, str, Dict[str, Any]], ...] = (
+    ("register_image_gen_provider", "image_gen_provider", "agent.image_gen_registry",
+     "agent.image_gen_provider:ImageGenProvider", "image_gen provider", {"article": "an"}),
+    ("register_video_gen_provider", "video_gen_provider", "agent.video_gen_registry",
+     "agent.video_gen_provider:VideoGenProvider", "video_gen provider", {}),
+    ("register_web_search_provider", "web_search_provider", "agent.web_search_registry",
+     "agent.web_search_provider:WebSearchProvider", "web provider", {}),
+    ("register_browser_provider", "browser_provider", "agent.browser_registry",
+     "agent.browser_provider:BrowserProvider", "browser provider", {}),
+    ("register_terminal_environment_provider", "terminal_environment_provider",
+     "agent.terminal_env_registry", "agent.terminal_env_provider:TerminalEnvironmentProvider",
+     "terminal environment provider",
+     {"normalize": "lower", "reject_message": "Plugin '%s' terminal environment provider rejected: %s"}),
+    ("register_secret_source", "secret_source", "agent.secret_sources.registry",
+     "agent.secret_sources.base:SecretSource", "secret source",
+     {"normalize": None, "register": "register_source"}),
+    ("register_tts_provider", "tts_provider", "agent.tts_registry",
+     "agent.tts_provider:TTSProvider", "TTS provider", {"normalize": "lower"}),
+    ("register_transcription_provider", "transcription_provider", "agent.transcription_registry",
+     "agent.transcription_provider:TranscriptionProvider", "transcription provider",
+     {"normalize": "lower"}),
+)
+
+_SCOPED_PROVIDER_DOCS: Dict[str, str] = {
+    "register_image_gen_provider": "Register an :class:`agent.image_gen_provider.ImageGenProvider`; "
+        "``provider.name`` is matched by ``image_gen.provider``.",
+    "register_video_gen_provider": "Register an :class:`agent.video_gen_provider.VideoGenProvider`; "
+        "``provider.name`` is matched by ``video_gen.provider``.",
+    "register_web_search_provider": "Register an :class:`agent.web_search_provider.WebSearchProvider`; "
+        "``provider.name`` is matched by ``web.search_backend`` / ``web.extract_backend`` / ``web.backend``.",
+    "register_browser_provider": "Register an :class:`agent.browser_provider.BrowserProvider`; "
+        "``provider.name`` is matched by ``browser.cloud_provider`` (consulted by "
+        "``tools.browser_tool._get_cloud_provider``).",
+    "register_terminal_environment_provider": "Register a "
+        ":class:`agent.terminal_env_provider.TerminalEnvironmentProvider`; ``provider.name`` is matched "
+        "by ``terminal.backend`` when no built-in backend has that name. Built-in names (local, docker, "
+        "singularity, modal, daytona, vercel_sandbox, ssh) are rejected — plugins never shadow in-tree "
+        "backends.",
+    "register_secret_source": "Register a :class:`agent.secret_sources.base.SecretSource`, run by "
+        "``load_hermes_dotenv()`` (after ``~/.hermes/.env``, before credentials are read) when "
+        "``secrets.<name>`` is enabled. The orchestrator owns ordering/precedence/provenance; the source "
+        "only fetches. Since dotenv usually loads before discovery, the manager re-pulls enabled plugin "
+        "sources afterwards.",
+    "register_tts_provider": "Register an :class:`agent.tts_provider.TTSProvider`; ``provider.name`` is "
+        "matched by ``tts.provider`` unless it is a built-in name (rejected with a warning) or a "
+        "``tts.providers.<name>: type: command`` entry shares it (command-providers win).",
+    "register_transcription_provider": "Register an "
+        ":class:`agent.transcription_provider.TranscriptionProvider`; ``provider.name`` is matched by "
+        "``stt.provider`` unless it is a built-in name (rejected) or a ``stt.providers.<name>: type: "
+        "command`` entry shares it (command-providers win).",
+}
+
+
+def _make_scoped_provider_registrar(method_name, kind, registry_mod, base_ref, label, options):
+    """Build one ``register_<category>_provider`` method from a ``_SCOPED_PROVIDER_REGISTRARS`` row."""
+    base_mod, base_attr = base_ref.split(":")
+    normalize = options.get("normalize", "strip")
+    normalize_fn = (
+        None if normalize is None
+        else (lambda n: n.strip().lower()) if normalize == "lower"
+        else (lambda n: n.strip())
+    )
+
+    def register(self, provider) -> Optional[PluginRegistration]:
+        registry = importlib.import_module(registry_mod)
+        base_class = getattr(importlib.import_module(base_mod), base_attr)
+        register_fn = options.get("register")
+        return self._register_scoped_provider(
+            provider,
+            kind=kind,
+            base_class=base_class,
+            registry=registry,
+            label=label,
+            article=options.get("article", "a"),
+            normalize=normalize_fn,
+            register=getattr(registry, register_fn) if register_fn else None,
+            reject_message=options.get("reject_message"),
+        )
+
+    register.__name__ = method_name
+    register.__qualname__ = f"PluginContext.{method_name}"
+    register.__doc__ = _SCOPED_PROVIDER_DOCS[method_name]
+    return _serialized_replacement(register)
+
+
+for _row in _SCOPED_PROVIDER_REGISTRARS:
+    setattr(PluginContext, _row[0], _make_scoped_provider_registrar(*_row))
+del _row
 
 # Hook callback timeout (non-blocking abandon). Default cap per Python hook callback; overridden by
 # ``plugins.hook_callback_timeout``. Shell hooks enforce their own subprocess timeout.
