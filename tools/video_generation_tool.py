@@ -1,28 +1,11 @@
 #!/usr/bin/env python3
-"""
-Video Generation Tool
-=====================
+"""``video_generate``: one tool dispatching to a plugin-registered :class:`VideoGenProvider`
+(``agent/video_gen_provider.py`` ABC, ``agent/video_gen_registry.py``, ``plugins/video_gen/<name>/``).
 
-Single ``video_generate`` tool that dispatches to a plugin-registered
-video generation provider. Mirrors the ``image_generate`` design:
-
-- ``agent/video_gen_provider.py`` defines the :class:`VideoGenProvider` ABC.
-- ``agent/video_gen_registry.py`` holds the active providers (populated by
-  plugins at import time).
-- Each provider lives under ``plugins/video_gen/<name>/``.
-
-The tool is backend-agnostic and ships **no in-tree provider** — enable a
-plugin (``hermes plugins enable video_gen/<name>``) and select it in
-``hermes tools`` → Video Generation.
-
-One tool covers text-to-video, image-to-video and reference-to-video with a
-compact schema (prompt, image_url, reference_image_urls, duration,
-aspect_ratio, resolution, negative_prompt, audio, seed, model). Providers
-ignore parameters they do not support: the tool layer does only lightweight
-validation (type/required-prompt) and each provider clamps inside
-:meth:`VideoGenProvider.generate`, so the surface stays stable as providers
-with different capabilities ship. Video edit/extend are intentionally not
-exposed here; providers with those workflows expose separate tools.
+Ships **no in-tree provider**: enable a plugin and select it in ``hermes tools`` → Video
+Generation. Covers text-, image- and reference-to-video; the tool layer only does lightweight
+validation and each provider clamps/ignores unsupported params inside ``generate``, so the
+surface stays stable as providers ship. Video edit/extend are deliberately not exposed here.
 """
 
 from __future__ import annotations
@@ -45,13 +28,9 @@ logger = logging.getLogger(__name__)
 
 VIDEO_GENERATE_SCHEMA: Dict[str, Any] = {
     "name": "video_generate",
-    # Placeholder — description AND params are rebuilt dynamically at
-    # get_tool_definitions() time from the active provider's declared
-    # capabilities() and the active model's catalog entry. Optional args
-    # (image_url, reference_image_urls, negative_prompt, audio, seed,
-    # upscale) are advertised ONLY when the active backend/model honors
-    # them; the handler accepts them regardless (replay compat — providers
-    # clamp/ignore). See _build_dynamic_video_schema().
+    # Placeholder: description AND params are rebuilt at get_tool_definitions() time by
+    # _build_dynamic_video_schema() from capabilities() + the model's catalog entry. Optional
+    # args are advertised ONLY when honored; the handler accepts them regardless (replay compat).
     "description": "(rebuilt at get_definitions() time — see _build_dynamic_video_schema)",
     "parameters": {
         "type": "object",
@@ -89,9 +68,7 @@ VIDEO_GENERATE_SCHEMA: Dict[str, Any] = {
                     "``video_gen.model``. Unknown models are rejected."
                 ),
             },
-            # image_url / reference_image_urls / negative_prompt / audio / seed /
-            # upscale are added per-capability by _build_dynamic_video_schema.
-            # Do not re-add them statically.
+            # Capability-gated args are added by _build_dynamic_video_schema; never statically.
         },
         "required": ["prompt"],
     },
@@ -101,8 +78,6 @@ VIDEO_GENERATE_SCHEMA: Dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Config readers (mirror image_generation_tool.py)
 # ---------------------------------------------------------------------------
-
-
 def _read_video_gen_key(key: str) -> Optional[str]:
     """Return the stripped ``video_gen.<key>`` string from config.yaml, or None."""
     try:
@@ -127,23 +102,23 @@ def _read_configured_video_model() -> Optional[str]:
     return _read_video_gen_key("model")
 
 
+def _discovered_registry():
+    """Import the provider registry after (idempotent) plugin discovery so user-installed plugins are visible."""
+    from agent import video_gen_registry
+    from hermes_cli.plugins import _ensure_plugins_discovered
+
+    _ensure_plugins_discovered()
+    return video_gen_registry, _ensure_plugins_discovered
+
+
 # ---------------------------------------------------------------------------
 # Availability check + provider resolution
 # ---------------------------------------------------------------------------
-
-
 def check_video_generation_requirements() -> bool:
-    """True when at least one registered provider reports available.
-
-    Triggers plugin discovery (idempotent) so user-installed plugins are
-    visible to the toolset gate.
-    """
+    """True when at least one registered provider reports available."""
     try:
-        from agent.video_gen_registry import list_providers
-        from hermes_cli.plugins import _ensure_plugins_discovered
-
-        _ensure_plugins_discovered()
-        for provider in list_providers():
+        registry_mod, _ = _discovered_registry()
+        for provider in registry_mod.list_providers():
             try:
                 if provider.is_available():
                     return True
@@ -155,20 +130,14 @@ def check_video_generation_requirements() -> bool:
 
 
 def _resolve_active_provider():
-    """Return the active provider object or None.
-
-    Forces a discovery refresh on a miss — handles long-lived sessions that
-    started before a plugin was installed.
-    """
+    """Active provider or None; forces a discovery refresh on a miss (long-lived sessions
+    that started before a plugin was installed)."""
     try:
-        from agent.video_gen_registry import get_active_provider
-        from hermes_cli.plugins import _ensure_plugins_discovered
-
-        _ensure_plugins_discovered()
-        provider = get_active_provider()
+        registry_mod, ensure_discovered = _discovered_registry()
+        provider = registry_mod.get_active_provider()
         if provider is None:
-            _ensure_plugins_discovered(force=True)
-            provider = get_active_provider()
+            ensure_discovered(force=True)
+            provider = registry_mod.get_active_provider()
         return provider
     except Exception as exc:
         logger.debug("video_gen provider resolution failed: %s", exc)
@@ -177,30 +146,28 @@ def _resolve_active_provider():
 
 def _missing_provider_error(configured: Optional[str]) -> str:
     if configured:
-        msg = (
-            f"video_gen.provider='{configured}' is set but no plugin "
-            f"registered that name. Run `hermes plugins list` to see "
-            f"installed video gen backends, or `hermes tools` → Video "
-            f"Generation to pick one."
-        )
         return json.dumps(error_response(
-            error=msg, error_type="provider_not_registered",
+            error=(
+                f"video_gen.provider='{configured}' is set but no plugin "
+                f"registered that name. Run `hermes plugins list` to see "
+                f"installed video gen backends, or `hermes tools` → Video "
+                f"Generation to pick one."
+            ),
+            error_type="provider_not_registered",
             provider=configured,
         ))
-    msg = (
-        "No video generation backend is configured. Run `hermes tools` → "
-        "Video Generation to enable one (xAI, FAL, or Google Veo)."
-    )
     return json.dumps(error_response(
-        error=msg, error_type="no_provider_configured",
+        error=(
+            "No video generation backend is configured. Run `hermes tools` → "
+            "Video Generation to enable one (xAI, FAL, or Google Veo)."
+        ),
+        error_type="no_provider_configured",
     ))
 
 
 # ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
-
-
 def _coerce_int(value: Any) -> Optional[int]:
     if value is None or value == "":
         return None
@@ -211,16 +178,11 @@ def _coerce_int(value: Any) -> Optional[int]:
 
 
 def _coerce_bool(value: Any) -> Optional[bool]:
-    if value is None:
-        return None
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        v = value.strip().lower()
-        if v in {"true", "1", "yes", "on"}:
-            return True
-        if v in {"false", "0", "no", "off"}:
-            return False
+        return {"true": True, "1": True, "yes": True, "on": True,
+                "false": False, "0": False, "no": False, "off": False}.get(value.strip().lower())
     return None
 
 
@@ -241,8 +203,7 @@ def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
     reference_image_urls = _normalize_reference_images(args.get("reference_image_urls"))
     task_id = _kw.get("task_id")
 
-    # Confinement chokepoint (mirrors image_generate): under a non-local
-    # backend, path-like source images reach providers as data: URLs.
+    # Confinement chokepoint (mirrors image_generate): non-local backends hand providers data: URLs.
     from tools.image_generation_tool import _confine_source_images
 
     image_url, reference_image_urls, confine_error = _confine_source_images(
@@ -258,8 +219,7 @@ def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
     upscale = _coerce_bool(args.get("upscale"))
     model_override = (args.get("model") or "").strip() or None
 
-    # Soft validation — providers do their own. The backend may accept
-    # image-only on its image-to-video endpoint, but our surface always needs a prompt.
+    # Soft validation — providers do their own; a backend may accept image-only, our surface never does.
     if not prompt:
         return tool_error("prompt is required for video generation")
     if "operation" in args or "video_url" in args:
@@ -291,7 +251,6 @@ def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
     }
     # Drop None entries so providers see clean defaults.
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
-
     pname = getattr(provider, "name", "?")
 
     def _err(error: str, error_type: str) -> str:
@@ -303,8 +262,7 @@ def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
     try:
         result = provider.generate(prompt=prompt, **kwargs)
     except TypeError as exc:
-        # A provider that hasn't widened its signature is a plugin bug, not a
-        # caller error — surface a clear contract message.
+        # An un-widened provider signature is a plugin bug, not a caller error.
         logger.warning(
             "video_gen provider '%s' rejected kwargs (signature too narrow): %s",
             pname, exc,
@@ -328,12 +286,33 @@ def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
 # ---------------------------------------------------------------------------
 # Dynamic schema — reflect the active backend's actual capabilities
 # ---------------------------------------------------------------------------
-# The configured backend determines which modalities, aspect ratios,
-# resolutions, durations and audio/negative-prompt flags are real; surfacing
-# the per-model surface in the description means the model usually gets the
-# call right first try. model_tools.get_tool_definitions() keys its cache on
-# config.yaml mtime, so the schema rebuilds when provider/model changes.
+# Surfacing the per-model surface (modalities, enums, durations, audio/negative-prompt)
+# means the model usually gets the call right first try. model_tools.get_tool_definitions()
+# keys its cache on config.yaml mtime, so the schema rebuilds on provider/model change.
 
+# Optional params advertised only when the provider's capabilities() sets the flag
+# (order = schema property order).
+_CAPABILITY_PARAMS = (
+    ("supports_negative_prompt", "negative_prompt", {
+        "type": "string",
+        "description": "Content to avoid in the output.",
+    }),
+    ("supports_audio", "audio", {
+        "type": "boolean",
+        "description": "Enable native audio generation (affects pricing tier).",
+    }),
+    ("supports_seed", "seed", {
+        "type": "integer",
+        "description": "Seed for reproducible outputs.",
+    }),
+    ("supports_upscale", "upscale", {
+        "type": "boolean",
+        "description": (
+            "High-resolution pass via the backend's video upscaler "
+            "(~2x, extra cost/latency). Omit for native resolution."
+        ),
+    }),
+)
 
 _GENERIC_DESCRIPTION = (
     "Generate a video from a text prompt (text-to-video), animate a "
@@ -352,14 +331,16 @@ _GENERIC_DESCRIPTION = (
 )
 
 
-def _build_dynamic_video_schema() -> Dict[str, Any]:
-    """Render description AND params from the active backend's declared surface.
+def _schema(description: str, properties: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "description": description,
+        "parameters": {"type": "object", "properties": properties, "required": ["prompt"]},
+    }
 
-    Optional args are advertised only when the resolved provider/model honors
-    them (capabilities() + the model's catalog entry); enums and duration
-    bounds tighten to the active model's sets. The handler still accepts
-    unadvertised args (replay compat): providers clamp or ignore.
-    """
+
+def _build_dynamic_video_schema() -> Dict[str, Any]:
+    """Render description AND params from capabilities() + the model's catalog entry; enums and
+    duration bounds tighten to the active model. Unadvertised args are still accepted (replay compat)."""
     static_props = VIDEO_GENERATE_SCHEMA["parameters"]["properties"]
     parts: List[str] = [_GENERIC_DESCRIPTION]
 
@@ -371,14 +352,7 @@ def _build_dynamic_video_schema() -> Dict[str, Any]:
             "\nNo video backend is available. Calls will return an error "
             "until the user picks one via `hermes tools` → Video Generation."
         )
-        return {
-            "description": "\n".join(parts),
-            "parameters": {
-                "type": "object",
-                "properties": {"prompt": static_props["prompt"]},
-                "required": ["prompt"],
-            },
-        }
+        return _schema("\n".join(parts), {"prompt": static_props["prompt"]})
 
     try:
         caps = provider.capabilities() or {}
@@ -388,17 +362,11 @@ def _build_dynamic_video_schema() -> Dict[str, Any]:
         models = provider.list_models() or []
     except Exception:
         models = []
-
     active_model = configured_model or provider.default_model()
-    model_meta = next(
-        (m for m in models if isinstance(m, dict) and m.get("id") == active_model),
-        {},
-    )
+    model_meta = next((m for m in models if isinstance(m, dict) and m.get("id") == active_model), {})
 
-    # ---- description -------------------------------------------------
-    # Model caveats surface only what differs from the backend's overall
-    # capabilities. FAL's plugin uses the singular ``modality`` key for
-    # single-modality entries.
+    # Model caveats surface only what differs from the backend's overall capabilities.
+    # FAL's plugin uses the singular ``modality`` key for single-modality entries.
     model_modalities = set(model_meta.get("modalities") or [])
     modality = model_meta.get("modality")
     if modality:
@@ -435,7 +403,6 @@ def _build_dynamic_video_schema() -> Dict[str, Any]:
         if notice:
             parts.append(f"- storage: {notice}")
 
-    # ---- params ------------------------------------------------------
     properties: Dict[str, Any] = {"prompt": static_props["prompt"]}
 
     if can_i2v:
@@ -477,48 +444,17 @@ def _build_dynamic_video_schema() -> Dict[str, Any]:
             param["enum"] = list(caps[caps_key])
         properties[key] = param
 
-    if caps.get("supports_negative_prompt"):
-        properties["negative_prompt"] = {
-            "type": "string",
-            "description": "Content to avoid in the output.",
-        }
-    if caps.get("supports_audio"):
-        properties["audio"] = {
-            "type": "boolean",
-            "description": (
-                "Enable native audio generation (affects pricing tier)."
-            ),
-        }
-    elif caps.get("audio_always_on"):
+    for flag, key, param in _CAPABILITY_PARAMS:
+        if caps.get(flag):
+            properties[key] = param
+    if caps.get("audio_always_on") and not caps.get("supports_audio"):
         parts.append(
             "- audio: native stereo audio is generated with every video "
             "(always on; no toggle) — describe the desired sound in the "
             "prompt"
         )
-    if caps.get("supports_seed"):
-        properties["seed"] = {
-            "type": "integer",
-            "description": "Seed for reproducible outputs.",
-        }
-    if caps.get("supports_upscale"):
-        properties["upscale"] = {
-            "type": "boolean",
-            "description": (
-                "High-resolution pass via the backend's video upscaler "
-                "(~2x, extra cost/latency). Omit for native resolution."
-            ),
-        }
-
     properties["model"] = static_props["model"]
-
-    return {
-        "description": "\n".join(parts),
-        "parameters": {
-            "type": "object",
-            "properties": properties,
-            "required": ["prompt"],
-        },
-    }
+    return _schema("\n".join(parts), properties)
 
 
 registry.register(
