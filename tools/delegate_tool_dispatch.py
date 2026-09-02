@@ -13,6 +13,7 @@ from concurrent.futures import FIRST_COMPLETED, wait as _cf_wait
 from typing import Any, Dict, List, Optional
 
 from agent.interrupt_compat import request_hard_interrupt
+from tools.delegate_tool_child_run import _fabricated_entry
 from tools.delegate_tool_progress import (
     SUBAGENT_FAILURE_STATUSES,
     _clean_error_text,
@@ -22,19 +23,6 @@ from tools.delegate_tool_progress import (
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.delegate_tool")
-
-
-def _fabricated_entry(idx: int, status: str, error: str, child: Any) -> Dict[str, Any]:
-    """Result entry for a child whose Future raised or never finished."""
-    return {
-        "task_index": idx,
-        "status": status,
-        "summary": None,
-        "error": error,
-        "api_calls": 0,
-        "duration_seconds": 0,
-        "_child_role": getattr(child, "_delegate_role", None),
-    }
 
 
 def _future_entry(future: Any, idx: int, child: Any) -> Dict[str, Any]:

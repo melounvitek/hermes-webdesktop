@@ -32,17 +32,15 @@ def _num(value: Any, default: int = 0) -> int:
     return int(value) if isinstance(value, (int, float)) else default
 
 
-def _fabricated_entry(
-    idx: int, status: str, error: str, child: Any, duration: float = 0
-) -> Dict[str, Any]:
-    """Result entry for a child that raised / never finished / was abandoned."""
+def _fabricated_entry(idx: int, status: str, error: str, child: Any) -> Dict[str, Any]:
+    """Result entry for a child whose Future raised or never finished."""
     return {
         "task_index": idx,
         "status": status,
         "summary": None,
         "error": error,
         "api_calls": 0,
-        "duration_seconds": duration,
+        "duration_seconds": 0,
         "_child_role": getattr(child, "_delegate_role", None),
     }
 
@@ -650,19 +648,24 @@ def _handle_child_wait_failure(
     if is_timeout and diagnostic_path:
         _err += f" Diagnostic: {diagnostic_path}"
 
-    _error_entry = _fabricated_entry(task_index, status, _err, child, duration)
-    _error_entry.update(
-        exit_reason=status,
-        api_calls=child_api_calls,
-        timeout_seconds=child_timeout if is_timeout else None,
-        timed_out_after_seconds=duration if is_timeout else None,
-        timeout_phase=(
+    _error_entry = {
+        "task_index": task_index,
+        "status": status,
+        "summary": None,
+        "error": _err,
+        "exit_reason": status,
+        "api_calls": child_api_calls,
+        "duration_seconds": duration,
+        "timeout_seconds": child_timeout if is_timeout else None,
+        "timed_out_after_seconds": duration if is_timeout else None,
+        "timeout_phase": (
             "before_first_llm_call" if is_timeout and child_api_calls == 0
             else "after_llm_calls" if is_timeout
             else None
         ),
-        diagnostic_path=diagnostic_path,
-    )
+        "_child_role": getattr(child, "_delegate_role", None),
+        "diagnostic_path": diagnostic_path,
+    }
     _append_missed_steer(_error_entry, _late_pending_steer)
     worktree.attach(_error_entry)
     close_deferred = is_timeout and not child_future.done()
