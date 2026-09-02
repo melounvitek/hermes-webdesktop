@@ -1,10 +1,7 @@
-"""
-Home Assistant platform adapter.
+"""Home Assistant platform adapter.
 
-Connects to the HA WebSocket API for real-time event monitoring.
-State-change events are converted to MessageEvent objects and forwarded
-to the agent for processing.  Outbound messages are delivered as HA
-persistent notifications.
+Listens on the HA WebSocket API; ``state_changed`` events become MessageEvents.
+Outbound messages are delivered as HA persistent notifications.
 
 Requires:
 - aiohttp (already in messaging extras)
@@ -37,28 +34,7 @@ from gateway.platforms.base import (
     SendResult,
 )
 
-from agent.secret_scope import UnscopedSecretError as _UnscopedSecretError
-from agent.secret_scope import get_secret as _scoped_get_secret
-
-
-def _get_scoped_secret(name, default=None):
-    """Scope-aware credential read with the default-profile startup fallback.
-
-    Secondary profiles construct their adapters under a profile secret
-    scope -- the scope is authoritative and a scoped miss returns ``default``
-    (no cross-profile borrow from ``os.environ``, which may hold another
-    profile's value). The DEFAULT profile's adapter constructs and sends
-    *unscoped* under multiplexing, where a bare ``get_secret`` would raise
-    ``UnscopedSecretError`` and crash this path; there ``os.environ`` is that
-    profile's own value, so fall back to it. Same pattern as the Slack
-    ``SLACK_APP_TOKEN`` read (#59739) and
-    ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
-    """
-    try:
-        val = _scoped_get_secret(name, default)
-    except _UnscopedSecretError:
-        val = os.getenv(name)
-    return val if val is not None else default
+from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 
 
 logger = logging.getLogger(__name__)
@@ -70,83 +46,71 @@ def check_ha_requirements() -> bool:
 
 
 def validate_ha_config(config: PlatformConfig) -> bool:
-    """Return True when Home Assistant has enough credential config to connect."""
-    token = (getattr(config, "token", None) or _get_scoped_secret("HASS_TOKEN", "")).strip()
-    return bool(token)
+    """True when Home Assistant has enough credential config to connect."""
+    return bool((getattr(config, "token", None) or _get_scoped_secret("HASS_TOKEN", "")).strip())
+
+
+def _domain_of(entity_id: str) -> str:
+    return entity_id.split(".")[0] if "." in entity_id else ""
+
+
+def _on_off(val: str) -> str:
+    return "on" if val == "on" else "off"
+
+
+def _triggered(val: str) -> str:
+    return "triggered" if val == "on" else "cleared"
 
 
 class HomeAssistantAdapter(BasePlatformAdapter):
-    """
-    Home Assistant WebSocket adapter.
-
-    Subscribes to ``state_changed`` events and forwards them as
-    MessageEvent objects.  Supports domain/entity filtering and
-    per-entity cooldowns to avoid event floods.
-    """
+    """HA WebSocket adapter: ``state_changed`` events → MessageEvents, with
+    domain/entity filtering and per-entity cooldowns against event floods."""
 
     MAX_MESSAGE_LENGTH = 4096
-
-    # Reconnection backoff schedule (seconds)
-    _BACKOFF_STEPS = [5, 10, 30, 60]
+    _BACKOFF_STEPS = [5, 10, 30, 60]  # reconnect backoff (seconds)
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.HOMEASSISTANT)
-
-        # Connection state
         self._session: Optional["aiohttp.ClientSession"] = None
         self._ws: Optional["aiohttp.ClientWebSocketResponse"] = None
         self._rest_session: Optional["aiohttp.ClientSession"] = None
         self._listen_task: Optional[asyncio.Task] = None
         self._msg_id: int = 0
 
-        # Configuration from extra
         extra = config.extra or {}
-        token = config.token or _get_scoped_secret("HASS_TOKEN", "")
         url = extra.get("url") or os.getenv("HASS_URL", "http://homeassistant.local:8123")
         self._hass_url: str = url.rstrip("/")
-        self._hass_token: str = token
+        self._hass_token: str = config.token or _get_scoped_secret("HASS_TOKEN", "")
 
-        # Event filtering
         self._watch_domains: Set[str] = set(extra.get("watch_domains", []))
         self._watch_entities: Set[str] = set(extra.get("watch_entities", []))
         self._ignore_entities: Set[str] = set(extra.get("ignore_entities", []))
         self._watch_all: bool = bool(extra.get("watch_all", False))
         self._cooldown_seconds: int = int(extra.get("cooldown_seconds", 30))
-
-        # Cooldown tracking: entity_id -> last_event_timestamp
-        self._last_event_time: Dict[str, float] = {}
+        self._last_event_time: Dict[str, float] = {}  # entity_id -> last event ts
 
     def _next_id(self) -> int:
-        """Return the next WebSocket message ID."""
         self._msg_id += 1
         return self._msg_id
 
-    # ------------------------------------------------------------------
-    # Connection lifecycle
-    # ------------------------------------------------------------------
+    # -- Connection lifecycle -----------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to HA WebSocket API and subscribe to events."""
         if not AIOHTTP_AVAILABLE:
             logger.warning("[%s] aiohttp not installed. Run: pip install aiohttp", self.name)
             return False
-
         if not self._hass_token:
             logger.warning("[%s] No HASS_TOKEN configured", self.name)
             return False
 
         try:
-            success = await self._ws_connect()
-            if not success:
+            if not await self._ws_connect():
                 return False
-
             # Dedicated REST session for send() calls
             self._rest_session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30),
-                trust_env=gateway_trust_env(),
+                timeout=aiohttp.ClientTimeout(total=30), trust_env=gateway_trust_env(),
             )
-
-            # Warn if no event filters are configured
             if not self._watch_domains and not self._watch_entities and not self._watch_all:
                 logger.warning(
                     "[%s] No watch_domains, watch_entities, or watch_all configured. "
@@ -154,69 +118,49 @@ class HomeAssistantAdapter(BasePlatformAdapter):
                     "your HA platform config to receive events.",
                     self.name,
                 )
-
-            # Start background listener
             self._listen_task = asyncio.create_task(self._listen_loop())
             self._running = True
             logger.info("[%s] Connected to %s", self.name, self._hass_url)
-            # Plugin-registered native handlers (ctx.register_platform_handler).
             self._wire_plugin_handlers(None)
             return True
-
         except Exception as e:
             logger.error("[%s] Failed to connect: %s", self.name, e)
             return False
 
     async def _ws_connect(self) -> bool:
-        """Establish WebSocket connection and authenticate."""
+        """Open the WebSocket, authenticate, and subscribe to ``state_changed``."""
         ws_url = self._hass_url.replace("https://", "wss://").replace("http://", "ws://")
-        ws_url = f"{ws_url}/api/websocket"
-
         self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            trust_env=gateway_trust_env(),
+            timeout=aiohttp.ClientTimeout(total=30), trust_env=gateway_trust_env(),
         )
-        self._ws = await self._session.ws_connect(ws_url, heartbeat=30, timeout=30)
+        self._ws = await self._session.ws_connect(f"{ws_url}/api/websocket", heartbeat=30, timeout=30)
 
-        # Step 1: Receive auth_required
         msg = await self._ws.receive_json()
         if msg.get("type") != "auth_required":
             logger.error("Expected auth_required, got: %s", msg.get("type"))
             await self._cleanup_ws()
             return False
 
-        # Step 2: Send auth
-        await self._ws.send_json({
-            "type": "auth",
-            "access_token": self._hass_token,
-        })
-
-        # Step 3: Wait for auth_ok
+        await self._ws.send_json({"type": "auth", "access_token": self._hass_token})
         msg = await self._ws.receive_json()
         if msg.get("type") != "auth_ok":
             logger.error("Auth failed: %s", msg)
             await self._cleanup_ws()
             return False
 
-        # Step 4: Subscribe to state_changed events
-        sub_id = self._next_id()
         await self._ws.send_json({
-            "id": sub_id,
+            "id": self._next_id(),
             "type": "subscribe_events",
             "event_type": "state_changed",
         })
-
-        # Verify subscription acknowledgement
         msg = await self._ws.receive_json()
         if not msg.get("success"):
             logger.error("Failed to subscribe to events: %s", msg)
             await self._cleanup_ws()
             return False
-
         return True
 
     async def _cleanup_ws(self) -> None:
-        """Close WebSocket and session."""
         if self._ws and not self._ws.closed:
             await self._ws.close()
         self._ws = None
@@ -225,7 +169,6 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         self._session = None
 
     async def disconnect(self) -> None:
-        """Disconnect from Home Assistant."""
         self._running = False
         if self._listen_task:
             self._listen_task.cancel()
@@ -241,14 +184,11 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         self._rest_session = None
         logger.info("[%s] Disconnected", self.name)
 
-    # ------------------------------------------------------------------
-    # Event listener
-    # ------------------------------------------------------------------
+    # -- Event listener -----------------------------------------------------
 
     async def _listen_loop(self) -> None:
         """Main event loop with automatic reconnection."""
         backoff_idx = 0
-
         while self._running:
             try:
                 await self._read_events()
@@ -259,8 +199,6 @@ class HomeAssistantAdapter(BasePlatformAdapter):
 
             if not self._running:
                 return
-
-            # Reconnect with backoff
             delay = self._BACKOFF_STEPS[min(backoff_idx, len(self._BACKOFF_STEPS) - 1)]
             logger.info("[%s] Reconnecting in %ds...", self.name, delay)
             await asyncio.sleep(delay)
@@ -268,9 +206,8 @@ class HomeAssistantAdapter(BasePlatformAdapter):
 
             try:
                 await self._cleanup_ws()
-                success = await self._ws_connect()
-                if success:
-                    backoff_idx = 0  # Reset on successful reconnect
+                if await self._ws_connect():
+                    backoff_idx = 0
                     logger.info("[%s] Reconnected", self.name)
             except Exception as e:
                 logger.warning("[%s] Reconnection failed: %s", self.name, e)
@@ -290,46 +227,32 @@ class HomeAssistantAdapter(BasePlatformAdapter):
             elif ws_msg.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
                 break
 
+    def _passes_filters(self, entity_id: str) -> bool:
+        """Closed by default: requires watch_domains, watch_entities, or watch_all."""
+        if entity_id in self._ignore_entities:
+            return False
+        if self._watch_domains or self._watch_entities:
+            return _domain_of(entity_id) in self._watch_domains or entity_id in self._watch_entities
+        return self._watch_all
+
     async def _handle_ha_event(self, event: Dict[str, Any]) -> None:
         """Process a state_changed event from Home Assistant."""
         event_data = event.get("data", {})
         entity_id: str = event_data.get("entity_id", "")
-
-        if not entity_id:
+        if not entity_id or not self._passes_filters(entity_id):
             return
 
-        # Apply ignore filter
-        if entity_id in self._ignore_entities:
-            return
-
-        # Apply domain/entity watch filters (closed by default — require
-        # explicit watch_domains, watch_entities, or watch_all to forward)
-        domain = entity_id.split(".")[0] if "." in entity_id else ""
-        if self._watch_domains or self._watch_entities:
-            domain_match = domain in self._watch_domains if self._watch_domains else False
-            entity_match = entity_id in self._watch_entities if self._watch_entities else False
-            if not domain_match and not entity_match:
-                return
-        elif not self._watch_all:
-            # No filters configured and watch_all is off — drop the event
-            return
-
-        # Apply cooldown
         now = time.time()
-        last = self._last_event_time.get(entity_id, 0)
-        if (now - last) < self._cooldown_seconds:
+        if (now - self._last_event_time.get(entity_id, 0)) < self._cooldown_seconds:
             return
         self._last_event_time[entity_id] = now
 
-        # Build human-readable message
-        old_state = event_data.get("old_state", {})
-        new_state = event_data.get("new_state", {})
-        message = self._format_state_change(entity_id, old_state, new_state)
-
+        message = self._format_state_change(
+            entity_id, event_data.get("old_state", {}), event_data.get("new_state", {}),
+        )
         if not message:
             return
 
-        # Build MessageEvent and forward to handler
         source = self.build_source(
             chat_id="ha_events",
             chat_name="Home Assistant Events",
@@ -337,16 +260,13 @@ class HomeAssistantAdapter(BasePlatformAdapter):
             user_id="homeassistant",
             user_name="Home Assistant",
         )
-
-        msg_event = MessageEvent(
+        await self.handle_message(MessageEvent(
             text=message,
             message_type=MessageType.TEXT,
             source=source,
             message_id=f"ha_{entity_id}_{int(now)}",
             timestamp=datetime.now(),
-        )
-
-        await self.handle_message(msg_event)
+        ))
 
     @staticmethod
     def _format_state_change(
@@ -357,62 +277,34 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         """Convert a state_changed event into a human-readable description."""
         if not new_state:
             return None
-
         old_val = old_state.get("state", "unknown") if old_state else "unknown"
         new_val = new_state.get("state", "unknown")
-
-        # Skip if state didn't actually change
         if old_val == new_val:
             return None
 
-        friendly_name = new_state.get("attributes", {}).get("friendly_name", entity_id)
-        domain = entity_id.split(".")[0] if "." in entity_id else ""
+        attrs = new_state.get("attributes", {})
+        name = attrs.get("friendly_name", entity_id)
+        domain = _domain_of(entity_id)
 
-        # Domain-specific formatting
         if domain == "climate":
-            attrs = new_state.get("attributes", {})
             temp = attrs.get("current_temperature", "?")
             target = attrs.get("temperature", "?")
             return (
-                f"[Home Assistant] {friendly_name}: HVAC mode changed from "
+                f"[Home Assistant] {name}: HVAC mode changed from "
                 f"'{old_val}' to '{new_val}' (current: {temp}, target: {target})"
             )
-
         if domain == "sensor":
-            unit = new_state.get("attributes", {}).get("unit_of_measurement", "")
-            return (
-                f"[Home Assistant] {friendly_name}: changed from "
-                f"{old_val}{unit} to {new_val}{unit}"
-            )
-
+            unit = attrs.get("unit_of_measurement", "")
+            return f"[Home Assistant] {name}: changed from {old_val}{unit} to {new_val}{unit}"
         if domain == "binary_sensor":
-            return (
-                f"[Home Assistant] {friendly_name}: "
-                f"{'triggered' if new_val == 'on' else 'cleared'} "
-                f"(was {'triggered' if old_val == 'on' else 'cleared'})"
-            )
-
+            return f"[Home Assistant] {name}: {_triggered(new_val)} (was {_triggered(old_val)})"
         if domain in {"light", "switch", "fan"}:
-            return (
-                f"[Home Assistant] {friendly_name}: turned "
-                f"{'on' if new_val == 'on' else 'off'}"
-            )
-
+            return f"[Home Assistant] {name}: turned {_on_off(new_val)}"
         if domain == "alarm_control_panel":
-            return (
-                f"[Home Assistant] {friendly_name}: alarm state changed from "
-                f"'{old_val}' to '{new_val}'"
-            )
+            return f"[Home Assistant] {name}: alarm state changed from '{old_val}' to '{new_val}'"
+        return f"[Home Assistant] {name} ({entity_id}): changed from '{old_val}' to '{new_val}'"
 
-        # Generic fallback
-        return (
-            f"[Home Assistant] {friendly_name} ({entity_id}): "
-            f"changed from '{old_val}' to '{new_val}'"
-        )
-
-    # ------------------------------------------------------------------
-    # Outbound messaging
-    # ------------------------------------------------------------------
+    # -- Outbound messaging -------------------------------------------------
 
     async def send(
         self,
@@ -423,66 +315,37 @@ class HomeAssistantAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send a notification via HA REST API (persistent_notification.create).
 
-        Uses the REST API instead of WebSocket to avoid a race condition
-        with the event listener loop that reads from the same WS connection.
+        REST rather than the WebSocket, to avoid racing the listener loop that
+        reads from the same WS connection.
         """
         url = f"{self._hass_url}/api/services/persistent_notification/create"
-        headers = {
-            "Authorization": f"Bearer {self._hass_token}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "title": "Hermes Agent",
-            "message": content[:self.MAX_MESSAGE_LENGTH],
-        }
+        headers = {"Authorization": f"Bearer {self._hass_token}", "Content-Type": "application/json"}
+        payload = {"title": "Hermes Agent", "message": content[:self.MAX_MESSAGE_LENGTH]}
+
+        async def _post(session) -> SendResult:
+            async with session.post(
+                url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status < 300:
+                    return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
+                body = await resp.text()
+                return SendResult(success=False, error=f"HTTP {resp.status}: {body}")
 
         try:
             if self._rest_session:
-                async with self._rest_session.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status < 300:
-                        return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
-                    else:
-                        body = await resp.text()
-                        return SendResult(success=False, error=f"HTTP {resp.status}: {body}")
-            else:
-                async with aiohttp.ClientSession(trust_env=gateway_trust_env()) as session:
-                    async with session.post(
-                        url,
-                        headers=headers,
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        if resp.status < 300:
-                            return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
-                        else:
-                            body = await resp.text()
-                            return SendResult(success=False, error=f"HTTP {resp.status}: {body}")
-
+                return await _post(self._rest_session)
+            async with aiohttp.ClientSession(trust_env=gateway_trust_env()) as session:
+                return await _post(session)
         except asyncio.TimeoutError:
             return SendResult(success=False, error="Timeout sending notification to HA")
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
-    async def send_typing(self, chat_id: str, metadata=None) -> None:
-        """No typing indicator for Home Assistant."""
-
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        """Return basic info about the HA event channel."""
-        return {
-            "name": "Home Assistant Events",
-            "type": "channel",
-            "url": self._hass_url,
-        }
+        return {"name": "Home Assistant Events", "type": "channel", "url": self._hass_url}
 
 
-# ---------------------------------------------------------------------------
-# Standalone (out-of-process) sender — used by cron deliver=homeassistant
-# ---------------------------------------------------------------------------
+# -- Standalone (out-of-process) sender — cron deliver=homeassistant ---------
 
 
 async def _standalone_send(
@@ -494,23 +357,11 @@ async def _standalone_send(
     media_files: Optional[list] = None,
     force_document: bool = False,
 ) -> Dict[str, Any]:
-    """Send a notification via the HA ``notify.notify`` service without a
-    live gateway adapter.
+    """Send via the HA ``notify.notify`` service without a live gateway adapter.
 
-    Used by ``tools/send_message_tool._send_via_adapter`` when the gateway
-    runner is not in this process (typical for cron jobs running
-    out-of-process).  The HTTP path is the same one the legacy
-    ``_send_homeassistant`` helper used in ``tools/send_message_tool.py``
-    before this migration.
-
-    Reads ``HASS_TOKEN`` from ``pconfig.token`` (set by the gateway config
-    loader from env) and falls back to the ``HASS_TOKEN`` env var.  Server
-    URL comes from ``pconfig.extra["url"]`` (seeded by the env loader in
-    ``gateway/config.py``) or the ``HASS_URL`` env var.
-
-    ``thread_id``, ``media_files`` and ``force_document`` are accepted for
-    signature parity with other standalone senders.  HA notifications have
-    no native threading or attachment model — these arguments are ignored.
+    Token: ``pconfig.token`` then ``HASS_TOKEN``; URL: ``pconfig.extra["url"]``
+    then ``HASS_URL``. ``thread_id``/``media_files``/``force_document`` are
+    signature parity only — HA notifications have no threads or attachments.
     """
     if not AIOHTTP_AVAILABLE:
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
@@ -519,69 +370,37 @@ async def _standalone_send(
     hass_url = (extra.get("url") or os.getenv("HASS_URL", "")).rstrip("/")
     token = (getattr(pconfig, "token", None) or _get_scoped_secret("HASS_TOKEN", "")).strip()
     if not hass_url or not token:
-        return {
-            "error": (
-                "Home Assistant standalone send: HASS_URL and HASS_TOKEN "
-                "must both be set"
-            )
-        }
+        return {"error": "Home Assistant standalone send: HASS_URL and HASS_TOKEN must both be set"}
 
     url = f"{hass_url}/api/services/notify/notify"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"message": message, "target": chat_id}
-
     try:
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            trust_env=gateway_trust_env(),
+            timeout=aiohttp.ClientTimeout(total=30), trust_env=gateway_trust_env(),
         ) as session:
             async with session.post(url, headers=headers, json=payload) as resp:
                 if resp.status not in {200, 201}:
                     body = await resp.text()
-                    return {
-                        "error": (
-                            f"Home Assistant API error ({resp.status}): {body}"
-                        )
-                    }
-        return {
-            "success": True,
-            "platform": "homeassistant",
-            "chat_id": chat_id,
-        }
+                    return {"error": f"Home Assistant API error ({resp.status}): {body}"}
+        return {"success": True, "platform": "homeassistant", "chat_id": chat_id}
     except asyncio.TimeoutError:
         return {"error": "Timeout sending notification to Home Assistant"}
     except Exception as e:
         return {"error": f"Home Assistant send failed: {e}"}
 
 
-# ---------------------------------------------------------------------------
-# is_connected probe
-# ---------------------------------------------------------------------------
-
-
 def _is_connected(config) -> bool:
-    """Home Assistant is considered connected when ``HASS_TOKEN`` is set.
+    """Connected when ``HASS_TOKEN`` is set.
 
-    Looks up via ``hermes_cli.gateway.get_env_value`` at call time (not via
-    the plugin's own bound import) so tests that patch
-    ``gateway_mod.get_env_value`` can suppress ambient ``HASS_TOKEN`` env
-    vars.  Matches what the legacy connected-platforms check did before
-    this migration.
+    Looked up via ``hermes_cli.gateway.get_env_value`` at call time so tests
+    patching ``gateway_mod.get_env_value`` can suppress ambient env vars.
     """
     import hermes_cli.gateway as gateway_mod
     return bool((gateway_mod.get_env_value("HASS_TOKEN") or "").strip())
 
 
-# ---------------------------------------------------------------------------
-# Plugin registration entry point
-# ---------------------------------------------------------------------------
-
-
 def _build_adapter(config):
-    """Factory wrapper that constructs HomeAssistantAdapter from a PlatformConfig."""
     return HomeAssistantAdapter(config)
 
 
@@ -596,15 +415,8 @@ def register(ctx) -> None:
         is_connected=_is_connected,
         required_env=["HASS_TOKEN"],
         install_hint="pip install aiohttp",
-        # Out-of-process cron delivery via the HA ``notify.notify`` service.
-        # Without this hook, ``deliver=homeassistant`` cron jobs would fail
-        # with "No live adapter" when cron runs separately from the gateway.
-        # Mirrors the Discord / Teams / Mattermost pattern.
-        standalone_sender_fn=_standalone_send,
-        # HA notification message cap — matches MAX_MESSAGE_LENGTH on the
-        # adapter class above.
+        standalone_sender_fn=_standalone_send,  # out-of-process cron delivery via notify.notify
         max_message_length=HomeAssistantAdapter.MAX_MESSAGE_LENGTH,
-        # Display
         emoji="🏠",
         allow_update_command=True,
     )
