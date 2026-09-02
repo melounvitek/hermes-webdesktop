@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess  # noqa: F401  (type annotation only)
 from typing import Any, Dict
 
 # Log-record parity with the origin module.
@@ -64,6 +65,11 @@ def _get_stt_section(stt_config: Dict[str, Any], name: str) -> Dict[str, Any]:
         return {}
     section = stt_config.get(name)
     return section if isinstance(section, dict) else {}
+
+
+def _process_error_detail(exc: "subprocess.CalledProcessError") -> str:
+    """stderr > stdout > str(exc) for a failed helper binary."""
+    return exc.stderr.strip() or exc.stdout.strip() or str(exc)
 
 
 def _log_prompt_unsupported(label: str) -> None:

@@ -27,6 +27,7 @@ from tools.transcription_common import (
     _error_result,
     _log_prompt_unsupported,
     _ok_result,
+    _process_error_detail,
 )
 
 # Log-record parity with the origin module.
@@ -137,18 +138,12 @@ def _should_force_faster_whisper_cpu() -> bool:
         return True
     # Under Rosetta platform.machine() reports x86_64; sysctl.proc_translated
     # flags translation and hw.optional.arm64 distinguishes Apple Silicon hosts.
-    if _sysctl_value("sysctl.proc_translated") == "1":
-        return True
-    return _sysctl_value("hw.optional.arm64") == "1"
+    return _sysctl_value("sysctl.proc_translated") == "1" or _sysctl_value("hw.optional.arm64") == "1"
 
 
 def _get_idle_unload_seconds(local_cfg: Dict[str, Any]) -> int:
     """Resolve the idle unload timeout from config; 0 = never (default), negatives clamp to 0."""
-    try:
-        val = int(local_cfg.get("unload_after_idle_seconds", 0))
-    except (TypeError, ValueError):
-        return 0
-    return max(val, 0)
+    return max(_config_number(local_cfg, "unload_after_idle_seconds", 0, int), 0)
 
 
 def _load_local_whisper_model(model_name: str, device: str = "auto", compute_type: str = "auto"):
@@ -351,7 +346,7 @@ def _transcribe_local_command(
     except KeyError as e:
         return _error_result(f"Invalid {LOCAL_STT_COMMAND_ENV} template, missing placeholder: {e}")
     except subprocess.CalledProcessError as e:
-        details = e.stderr.strip() or e.stdout.strip() or str(e)
+        details = _process_error_detail(e)
         logger.error("Local STT command failed for %s: %s", file_path, details)
         return _error_result(f"Local STT failed: {details}")
     except Exception as e:

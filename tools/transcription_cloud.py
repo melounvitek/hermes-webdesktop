@@ -327,9 +327,7 @@ def _transcribe_xai(
         creds = {
             "provider": "xai",
             "api_key": direct_api_key,
-            "base_url": str(
-                get_env_value("XAI_BASE_URL") or "https://api.x.ai/v1"
-            ).strip().rstrip("/"),
+            "base_url": str(get_env_value("XAI_BASE_URL") or "https://api.x.ai/v1").strip().rstrip("/"),
         }
     else:
         creds = resolve_xai_http_credentials()
@@ -346,15 +344,10 @@ def _transcribe_xai(
         # OAuth bearers are pinned to the resolver-validated xAI origin;
         # config/env base URL overrides only apply to API-key credentials.
         if resolved_creds.get("provider") == "xai-oauth":
-            return str(
-                resolved_creds.get("base_url") or XAI_STT_BASE_URL
-            ).strip().rstrip("/")
-        return str(
-            xai_config.get("base_url")
-            or get_env_value("XAI_STT_BASE_URL")
-            or resolved_creds.get("base_url")
-            or XAI_STT_BASE_URL
-        ).strip().rstrip("/")
+            url = resolved_creds.get("base_url")
+        else:
+            url = xai_config.get("base_url") or get_env_value("XAI_STT_BASE_URL") or resolved_creds.get("base_url")
+        return str(url or XAI_STT_BASE_URL).strip().rstrip("/")
 
     base_url = _resolve_base_url(creds)
     # Language: hook override > stt.xai.language > stt.language > env.
@@ -368,10 +361,9 @@ def _transcribe_xai(
         data: Dict[str, str] = {}
         if language:
             data["language"] = language
-        if use_format:
-            data["format"] = "true"
-        if use_diarize:
-            data["diarize"] = "true"
+        for flag, enabled in (("format", use_format), ("diarize", use_diarize)):
+            if enabled:
+                data[flag] = "true"
 
         def _post_transcription(bearer: str, endpoint_base_url: str):
             return _post_audio_multipart(
@@ -602,18 +594,22 @@ def _resolve_openai_audio_client_config() -> tuple[str, str]:
 
     selected = read_selection("stt")
 
+    def _managed() -> Optional[tuple[str, str]]:
+        gateway = resolve_managed_tool_gateway("openai-audio")
+        if gateway is None:
+            return None
+        return gateway.nous_user_token, urljoin(f"{gateway.gateway_origin.rstrip('/')}/", "v1")
+
     if selected == NOUS_MANAGED_PROVIDER:
-        managed_gateway = resolve_managed_tool_gateway("openai-audio")
-        if managed_gateway is None:
+        managed = _managed()
+        if managed is None:
             raise ValueError(selection_error(
                 "stt",
                 NOUS_MANAGED_PROVIDER,
                 "the Nous Tool Gateway is not available (not entitled or "
                 "unreachable)",
             ))
-        return managed_gateway.nous_user_token, urljoin(
-            f"{managed_gateway.gateway_origin.rstrip('/')}/", "v1"
-        )
+        return managed
 
     direct = _direct_openai_credentials(cfg_api_key, cfg_base_url)
     if direct is not None:
@@ -627,21 +623,13 @@ def _resolve_openai_audio_client_config() -> tuple[str, str]:
             "VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set",
         ))
 
-    managed_gateway = resolve_managed_tool_gateway("openai-audio")
-    if managed_gateway is None:
+    managed = _managed()
+    if managed is None:
         message = "Neither stt.openai.api_key in config nor VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set"
         if managed_nous_tools_enabled():
-            message += (
-                ". "
-                + nous_tool_gateway_unavailable_message(
-                    "managed OpenAI audio for transcription",
-                )
-            )
+            message += ". " + nous_tool_gateway_unavailable_message("managed OpenAI audio for transcription")
         raise ValueError(message)
-
-    return managed_gateway.nous_user_token, urljoin(
-        f"{managed_gateway.gateway_origin.rstrip('/')}/", "v1"
-    )
+    return managed
 
 
 def _extract_transcript_text(transcription: Any) -> str:

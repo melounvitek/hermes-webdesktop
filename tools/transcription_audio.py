@@ -23,6 +23,7 @@ from tools.transcription_common import (
     SUPPORTED_FORMATS,
     _config_number,
     _error_result,
+    _process_error_detail,
 )
 
 # Log-record parity with the origin module.
@@ -97,7 +98,7 @@ def _transcode_audio_for_stt(file_path: str, work_dir: str) -> tuple[Optional[st
         _run_ffmpeg_stt_encode(ffmpeg, file_path, converted_path)
         return converted_path, None
     except subprocess.CalledProcessError as exc:
-        details = exc.stderr.strip() or exc.stdout.strip() or str(exc)
+        details = _process_error_detail(exc)
         logger.error("ffmpeg STT transcode failed for %s: %s", file_path, details)
         return None, f"failed to transcode audio for the STT API: {details}"
     except Exception as exc:  # noqa: BLE001 - transcode is best-effort
@@ -105,13 +106,13 @@ def _transcode_audio_for_stt(file_path: str, work_dir: str) -> tuple[Optional[st
         return None, f"failed to transcode audio for the STT API: {exc}"
 
 
-def _validate_audio_file_size(audio_path: Path) -> Optional[Dict[str, Any]]:
-    """Return an error when *audio_path* exceeds the remote upload cap."""
+def _validate_audio_file_size(audio_path: Path, *, enforce_size_limit: bool = True) -> Optional[Dict[str, Any]]:
+    """Return an error when *audio_path* is inaccessible or (if enforced) exceeds the remote upload cap."""
     try:
         file_size = audio_path.stat().st_size
     except OSError as e:
         return _error_result(f"Failed to access file: {e}")
-    if file_size > MAX_FILE_SIZE:
+    if enforce_size_limit and file_size > MAX_FILE_SIZE:
         return _error_result(
             f"File too large: {file_size / (1024*1024):.1f}MB (max {MAX_FILE_SIZE / (1024*1024):.0f}MB)"
         )
@@ -132,13 +133,7 @@ def _validate_audio_source_file(
         return _error_result(f"Audio file not found: {file_path}")
     if not audio_path.is_file():
         return _error_result(f"Path is not a file: {file_path}")
-    if enforce_size_limit:
-        return _validate_audio_file_size(audio_path)
-    try:
-        audio_path.stat()
-    except OSError as e:
-        return _error_result(f"Failed to access file: {e}")
-    return None
+    return _validate_audio_file_size(audio_path, enforce_size_limit=enforce_size_limit)
 
 
 def _validate_audio_file(
@@ -216,7 +211,7 @@ def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], 
         logger.error("ffmpeg conversion timed out for %s", file_path)
         return None, "Audio conversion for local STT timed out"
     except subprocess.CalledProcessError as e:
-        details = e.stderr.strip() or e.stdout.strip() or str(e)
+        details = _process_error_detail(e)
         logger.error("ffmpeg conversion failed for %s: %s", file_path, details)
         return None, f"Failed to convert audio for local STT: {details}"
 
@@ -227,24 +222,19 @@ def _convert_caf_to_wav(file_path: str) -> Optional[str]:
     audio_path = Path(file_path)
     wav_path = os.path.join(audio_path.parent, f"{audio_path.stem}.wav")
     ffmpeg = _find_ffmpeg_binary()
-    if ffmpeg:
-        try:
-            subprocess.run([ffmpeg, "-y", "-i", file_path, wav_path],
-                check=True, capture_output=True, text=True,
-                timeout=300, stdin=subprocess.DEVNULL,
-                creationflags=windows_hide_flags())
-            return wav_path
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            logger.warning("ffmpeg CAF to WAV failed for %s: %s", file_path, e)
     afconvert = shutil.which("afconvert")
-    if afconvert:
+    candidates = (
+        ("ffmpeg", [ffmpeg, "-y", "-i", file_path, wav_path] if ffmpeg else None),
+        ("afconvert", [afconvert, file_path, wav_path, "-d", "LEI16", "-f", "WAVE"] if afconvert else None),
+    )
+    for label, command in candidates:
+        if not command:
+            continue
         try:
-            subprocess.run([afconvert, file_path, wav_path, "-d", "LEI16", "-f", "WAVE"],
-                check=True, capture_output=True, text=True,
-                timeout=300, stdin=subprocess.DEVNULL)
+            _run_quiet(command, timeout=300)
             return wav_path
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            logger.warning("afconvert CAF to WAV failed for %s: %s", file_path, e)
+            logger.warning("%s CAF to WAV failed for %s: %s", label, file_path, e)
     return None
 
 

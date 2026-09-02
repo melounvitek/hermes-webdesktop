@@ -522,7 +522,8 @@ def _transcribe_local(
         return _error_result("faster-whisper not installed")
 
     try:
-        local_cfg = _load_stt_config().get("local") or {}
+        stt_config = _load_stt_config()
+        local_cfg = stt_config.get("local") or {}
         # Reset the idle timer BEFORE loading/transcribing so the watcher can't
         # count a long in-flight transcription as idle time and unload mid-use.
         _touch_transcription_time()
@@ -530,8 +531,6 @@ def _transcribe_local(
         if model is None:  # defensive: load failed without raising
             return _error_result("Local whisper model failed to load")
 
-        stt_config = _load_stt_config()
-        local_config = stt_config.get("local") or {}
         transcribe_kwargs = build_local_transcribe_kwargs(stt_config)
         # pre_transcription hook overrides win over config-resolved values.
         if language:
@@ -541,7 +540,7 @@ def _transcribe_local(
 
         try:
             segments, info = model.transcribe(file_path, **transcribe_kwargs)
-            transcript = _join_confident_segments(segments, local_config)
+            transcript = _join_confident_segments(segments, local_cfg)
         except Exception as exc:
             # CUDA libs sometimes only fail at dlopen-on-first-use, AFTER the
             # model loaded. Evict the poisoned cached model, reload on CPU and
@@ -559,7 +558,7 @@ def _transcribe_local(
                 _local_model = model
                 _local_model_name = model_name
             segments, info = model.transcribe(file_path, **transcribe_kwargs)
-            transcript = _join_confident_segments(segments, local_config)
+            transcript = _join_confident_segments(segments, local_cfg)
 
         logger.info(
             "Transcribed %s via local whisper (%s, lang=%s, %.1fs audio)",
@@ -583,6 +582,15 @@ def _transcribe_local(
 # ---------------------------------------------------------------------------
 
 
+def _read_block_error(file_path: str) -> Optional[Dict[str, Any]]:
+    """Refuse to feed a credential / secret store (auth.json, .env, OAuth tokens, ...)
+    to an STT provider, which would ship its plaintext to a third-party API.
+    Mirrors the image-gen / video-gen read guards."""
+    from agent.file_safety import get_read_block_error
+    blocked = get_read_block_error(file_path)
+    return _error_result(blocked) if blocked else None
+
+
 def _transcribe_prepared_audio(
     file_path: str,
     model: Optional[str] = None,
@@ -594,13 +602,9 @@ def _transcribe_prepared_audio(
     label (``"gateway"``, ``"voice_mode"``) forwarded to the ``pre_transcription``
     hook for observability only. Returns the standard result envelope.
     """
-    # Refuse to feed a credential / secret store (auth.json, .env, OAuth
-    # tokens, ...) to an STT provider, which would ship its plaintext to a
-    # third-party API. Mirrors the image-gen / video-gen read guards.
-    from agent.file_safety import get_read_block_error
-    blocked = get_read_block_error(file_path)
+    blocked = _read_block_error(file_path)
     if blocked:
-        return _error_result(blocked)
+        return blocked
 
     # Validate before provider resolution so invalid files cannot trigger
     # provider setup or lazy installation. The remote-upload size cap is
@@ -777,10 +781,9 @@ def transcribe_audio(
     """
     # Secret-store refusal runs before ANY validation so the error names the
     # real reason rather than a format error.
-    from agent.file_safety import get_read_block_error
-    blocked = get_read_block_error(file_path)
+    blocked = _read_block_error(file_path)
     if blocked:
-        return _error_result(blocked)
+        return blocked
 
     # Cap .silk sources before the decoder runs (decoder safety); for all other
     # inputs the upload cap is provider-scoped in _transcribe_prepared_audio,

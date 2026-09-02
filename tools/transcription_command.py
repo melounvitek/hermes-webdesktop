@@ -98,12 +98,12 @@ def _resolve_command_stt_provider_config(
 
 
 def _get_command_stt_timeout(config: Dict[str, Any]) -> float:
-    """Return timeout in seconds, falling back when invalid."""
+    """Return timeout in seconds (``timeout`` > ``timeout_seconds``), falling back when invalid or <= 0."""
     raw = config.get("timeout", config.get("timeout_seconds", DEFAULT_COMMAND_STT_TIMEOUT_SECONDS))
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return float(DEFAULT_COMMAND_STT_TIMEOUT_SECONDS)
+        value = 0.0
     return value if value > 0 else float(DEFAULT_COMMAND_STT_TIMEOUT_SECONDS)
 
 
@@ -200,11 +200,11 @@ def _transcribe_command_stt(
             except subprocess.TimeoutExpired:
                 return fail(f"STT command provider '{provider_name}' timed out after {timeout:g}s")
             except subprocess.CalledProcessError as exc:
-                detail_parts = []
-                if exc.stderr:
-                    detail_parts.append(f"stderr: {exc.stderr.strip()}")
-                if exc.stdout:
-                    detail_parts.append(f"stdout: {exc.stdout.strip()}")
+                detail_parts = [
+                    f"{stream}: {text.strip()}"
+                    for stream, text in (("stderr", exc.stderr), ("stdout", exc.stdout))
+                    if text
+                ]
                 detail = "; ".join(detail_parts) or "no command output"
                 return fail(
                     f"STT command provider '{provider_name}' exited with code "
