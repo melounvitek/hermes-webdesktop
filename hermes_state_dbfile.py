@@ -31,30 +31,26 @@ from hermes_state_common import (
 # Log-record parity with the origin module (caplog tests pin "hermes_state").
 logger = logging.getLogger("hermes_state")
 
-
 # _read_sqlite_application_id runs on EVERY write via _raise_if_db_replaced,
 # against the LIVE state.db.  A bare open()/read()/close() there is the
 # howtocorrupt §2.2 bug: close() cancels every POSIX advisory lock this
-# process holds on the file — measured on Linux/SQLite 3.53.1, one probe call
-# drops the WAL-mode DMS shared lock the writer connection holds on state.db
-# (see hermes_cli/sqlite_safe_read.py for the module built around this rule).
-# With the DMS lock gone, a fresh opener in another process can treat this
-# writer as dead and rerun WAL-index recovery underneath it.
+# process holds on the file — one probe call drops the WAL-mode DMS shared
+# lock the writer connection holds (see hermes_cli/sqlite_safe_read.py).  With
+# the DMS lock gone, a fresh opener in another process can treat this writer
+# as dead and rerun WAL-index recovery underneath it.
 #
 # The probe therefore reads through a per-path fd cached for the life of the
 # process: opening an fd never cancels locks (only close() does), and
 # os.pread takes no shared file position.  When the path is re-pointed at a
 # new inode (the very replacement this probe exists to detect), the stale fd
 # is RETIRED, never closed — closing it would cancel the live connection's
-# locks on the old file, the exact bug being avoided.  Replacement events are
-# rare and halt writes anyway, so the leak is bounded.
+# locks on the old file.  Replacement events are rare and halt writes anyway,
+# so the leak is bounded.
 _HEADER_PROBE_LOCK = threading.Lock()
-
-
 _HEADER_PROBE_FDS: "dict[str, tuple[int, int, int]]" = {}  # key -> (fd, dev, ino)
-
-
 _RETIRED_HEADER_PROBE_FDS: "list[int]" = []  # intentionally never closed
+
+_FTS_TABLE_NAMES = ("messages_fts", "messages_fts_trigram", "messages_fts_cjk")
 
 
 def _pread_db_header(db_path: Path, length: int) -> "Optional[bytes]":
@@ -93,8 +89,7 @@ def _pread_db_header(db_path: Path, length: int) -> "Optional[bytes]":
             except OSError:
                 _RETIRED_HEADER_PROBE_FDS.append(fd)
                 return None
-            cached = (fd, fst.st_dev, fst.st_ino)
-            _HEADER_PROBE_FDS[key] = cached
+            cached = _HEADER_PROBE_FDS[key] = (fd, fst.st_dev, fst.st_ino)
         try:
             return os.pread(cached[0], length, 0)
         except OSError:
@@ -104,24 +99,15 @@ def _pread_db_header(db_path: Path, length: int) -> "Optional[bytes]":
 def _read_sqlite_application_id(db_path: Path) -> "Optional[int]":
     """Read application_id from the SQLite header without opening a connection.
 
-    Safe against live databases: routed through :func:`_pread_db_header`,
-    which never issues a ``close()`` that would cancel this process's POSIX
-    locks on the file (howtocorrupt §2.2).
+    Routed through :func:`_pread_db_header`, which never issues a ``close()``
+    that would cancel this process's POSIX locks on the file.
     """
     from hermes_state import _STATE_DB_APPLICATION_ID_OFFSET
-    header = _pread_db_header(db_path, _STATE_DB_APPLICATION_ID_OFFSET + 4)
-    if header is None:
+    end = _STATE_DB_APPLICATION_ID_OFFSET + 4
+    header = _pread_db_header(db_path, end)
+    if header is None or len(header) < end or header[:16] != b"SQLite format 3\x00":
         return None
-    if len(header) < _STATE_DB_APPLICATION_ID_OFFSET + 4:
-        return None
-    if header[:16] != b"SQLite format 3\x00":
-        return None
-    return int(
-        struct.unpack(
-            ">I",
-            header[_STATE_DB_APPLICATION_ID_OFFSET:_STATE_DB_APPLICATION_ID_OFFSET + 4],
-        )[0]
-    )
+    return int(struct.unpack(">I", header[_STATE_DB_APPLICATION_ID_OFFSET:end])[0])
 
 
 def _stat_sqlite_sidecar_identity(db_path: Path) -> Dict[str, tuple]:
@@ -142,10 +128,24 @@ def _canonical_sqlite_path(path: str) -> str:
 
 def _watched_sqlite_sidecar_paths(db_path) -> Set[str]:
     base = os.path.abspath(os.fspath(db_path))
-    return {
-        _canonical_sqlite_path(base + "-wal"),
-        _canonical_sqlite_path(base + "-shm"),
-    }
+    return {_canonical_sqlite_path(base + "-wal"), _canonical_sqlite_path(base + "-shm")}
+
+
+def _iter_proc_fd_targets():
+    """Yield ``(pid, readlink target)`` for every readable ``/proc/<pid>/fd`` entry."""
+    for pid_str in os.listdir("/proc"):
+        if not pid_str.isdigit():
+            continue
+        fd_dir = f"/proc/{pid_str}/fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue  # process gone or not ours
+        for fd in fds:
+            try:
+                yield int(pid_str), os.readlink(f"{fd_dir}/{fd}")
+            except OSError:
+                continue
 
 
 def iter_deleted_sqlite_sidecar_holders(db_path) -> List[Tuple[int, str]]:
@@ -163,31 +163,14 @@ def iter_deleted_sqlite_sidecar_holders(db_path) -> List[Tuple[int, str]]:
     """
     if not sys.platform.startswith("linux"):
         return []
-
     holders: List[Tuple[int, str]] = []
     watched = _watched_sqlite_sidecar_paths(db_path)
     try:
-        for pid_str in os.listdir("/proc"):
-            if not pid_str.isdigit():
-                continue
-            pid = int(pid_str)
-            fd_dir = f"/proc/{pid}/fd"
-            try:
-                fds = os.listdir(fd_dir)
-            except OSError:
-                continue
-            for fd in fds:
-                try:
-                    target = os.readlink(f"{fd_dir}/{fd}")
-                except OSError:
-                    continue
-                if " (deleted)" not in target:
-                    continue
-                if _canonical_sqlite_path(target) in watched:
-                    holders.append((pid, target))
+        for pid, target in _iter_proc_fd_targets():
+            if " (deleted)" in target and _canonical_sqlite_path(target) in watched:
+                holders.append((pid, target))
     except Exception as exc:
         logger.debug("deleted-WAL holder scan failed for %s: %s", db_path, exc)
-        return holders
     return holders
 
 
@@ -198,8 +181,7 @@ def refuse_deleted_wal_generation(db_path) -> None:
     replacement WAL inode while a live writer still holds the orphan.
     """
     from hermes_state import DeletedWalGenerationError, _DELETED_WAL_GENERATION_MSG
-    holders = iter_deleted_sqlite_sidecar_holders(db_path)
-    if not holders:
+    if not iter_deleted_sqlite_sidecar_holders(db_path):
         return
     logger.error(_DELETED_WAL_GENERATION_MSG)
     raise DeletedWalGenerationError(_DELETED_WAL_GENERATION_MSG)
@@ -216,8 +198,7 @@ def _connect_tracked_db(path, tracking_path=None, **kwargs):
     The ONLY tolerated fallback is the helper being absent entirely
     (scaffold/embed installs that ship hermes_state without hermes_cli). A
     real connection failure must propagate: silently retrying an *untracked*
-    connect would disable the guard for the lifetime of that connection,
-    which is precisely the failure mode this module exists to prevent.
+    connect would disable the guard for the lifetime of that connection.
     """
     try:
         from hermes_cli.sqlite_safe_read import connect_tracked
@@ -228,22 +209,14 @@ def _connect_tracked_db(path, tracking_path=None, **kwargs):
             path,
         )
         return sqlite3.connect(str(path), **kwargs)
-
     # Open through THIS module's sqlite3.connect so callers (and tests) that
     # patch hermes_state.sqlite3.connect keep control of connection creation;
     # the helper still owns tracking.
-    return connect_tracked(
-        path,
-        tracking_path=tracking_path,
-        connect_fn=sqlite3.connect,
-        **kwargs,
-    )
+    return connect_tracked(path, tracking_path=tracking_path, connect_fn=sqlite3.connect, **kwargs)
 
 
-def is_zeroed_state_db(
-    path: Path, *, probe_bytes: int = 100, force: bool = False
-) -> bool:
-    """Detect the #68474/#97568 zeroed state.db signature (0-byte or NUL header).
+def is_zeroed_state_db(path: Path, *, probe_bytes: int = 100, force: bool = False) -> bool:
+    """Detect the zeroed state.db signature (0-byte or NUL header).
 
     Byte-level probe, so it is only safe BEFORE any connection to *path*
     exists in this process: ``close()`` cancels every POSIX advisory lock the
@@ -277,10 +250,7 @@ def is_zeroed_state_db(
 
     if not force and has_live_connection(path):
         return False
-
-    head = read_header_bytes_preopen(
-        path, length=max(16, probe_bytes), force=force
-    )
+    head = read_header_bytes_preopen(path, length=max(16, probe_bytes), force=force)
     if head is None:
         return False
     if len(head) == 0:
@@ -300,67 +270,56 @@ def quarantine_cross_process_lock(path: Path, timeout: float = 5.0):
     handle = lock_path.open("a+b")
     acquired = False
     try:
-        deadline = time.monotonic() + timeout
         if platform.system() == "Windows":
             import msvcrt
 
-            while True:
-                try:
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                    acquired = True
-                    break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(0.020)
+            def _try_lock():
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+            def _unlock():
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         else:
             import fcntl
 
-            while True:
-                try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    acquired = True
+            def _try_lock():
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def _unlock():
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                _try_lock()
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
                     break
-                except (BlockingIOError, OSError):
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(0.020)
+                time.sleep(0.020)
         yield acquired
     finally:
         try:
             if acquired:
-                if platform.system() == "Windows":
-                    import msvcrt
-
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _unlock()
         except (OSError, AttributeError):
             pass
         finally:
             handle.close()
 
 
-def quarantine_zeroed_state_db(
-    path: Path, *, already_locked: bool = False
-) -> Optional[Path]:
+def quarantine_zeroed_state_db(path: Path, *, already_locked: bool = False) -> Optional[Path]:
     """Move a zeroed state.db aside (preserve bytes) and return quarantine path.
 
-    Uses a cross-process lock (``#68805``) so two concurrent startups cannot
-    race: the first process moves the zeroed file and the second re-checks
-    under the lock, finding the file already gone (or a fresh DB in its place)
-    instead of clobbering the quarantine.
+    Uses a cross-process lock so two concurrent startups cannot race: the first
+    process moves the zeroed file and the second re-checks under the lock,
+    finding the file already gone (or a fresh DB in its place) instead of
+    clobbering the quarantine.
     """
     def _do_quarantine():
         if not path.exists():
-            logger.info(
-                "quarantine_zeroed_state_db: %s already moved by another process",
-                path,
-            )
+            logger.info("quarantine_zeroed_state_db: %s already moved by another process", path)
             return None
         if not is_zeroed_state_db(path):
             logger.info(
@@ -369,20 +328,16 @@ def quarantine_zeroed_state_db(
                 path,
             )
             return None
-
         try:
             ts = time.strftime("%Y%m%d-%H%M%S")
         except Exception:
             ts = "unknown"
-        dest = path.with_name(
-            f"{path.name}.zeroed-{ts}-{os.getpid()}.bak"
-        )
+        stem = f"{path.name}.zeroed-{ts}-{os.getpid()}"
+        dest = path.with_name(f"{stem}.bak")
         n = 0
         while dest.exists():
             n += 1
-            dest = path.with_name(
-                f"{path.name}.zeroed-{ts}-{os.getpid()}-{n}.bak"
-            )
+            dest = path.with_name(f"{stem}-{n}.bak")
         try:
             path.rename(dest)
         except OSError as exc:
@@ -399,7 +354,6 @@ def quarantine_zeroed_state_db(
 
     if already_locked:
         return _do_quarantine()
-
     with quarantine_cross_process_lock(path) as acquired:
         if not acquired:
             logger.error(
@@ -421,97 +375,69 @@ def collect_state_db_stats(db_path: Path) -> Dict[str, Any]:
     run against a *live* database held by a gateway without ever taking a
     write lock or mutating the file. Every field is collected independently:
     a failed pragma/SELECT yields ``None`` for that field, and the helper
-    itself never raises.
+    itself never raises. Deliberately does NOT instantiate :class:`SessionDB`
+    — its constructor runs schema DDL, which a diagnostics probe must never do.
 
-    Deliberately does NOT instantiate :class:`SessionDB` — its constructor
-    runs schema DDL (migrations, FTS table creation), which is exactly the
-    kind of write a diagnostics probe must never perform.
-
-    Returned keys (all present, any may be None on failure):
-
-    - ``page_count``, ``page_size``, ``freelist_count`` — PRAGMA values
-    - ``logical_size_bytes`` — page_count * page_size (post-checkpoint size)
-    - ``wal_size_bytes`` — stat() of ``<db>-wal`` (0 when absent)
-    - ``journal_mode`` — PRAGMA journal_mode string
-    - ``messages`` / ``sessions`` — row counts
-    - ``fts_tables`` — dict of {table_name: bool} presence for
-      messages_fts / messages_fts_trigram / messages_fts_cjk
-    - ``fts_storage_version`` — int from state_meta, None when the marker is
-      absent (legacy pre-v23 inline layout)
-    - ``fts_rebuild_pending`` — True when the deferred v23 backfill has not
-      finished (high_water present and progress < high_water)
-    - ``fts_rebuild_high_water`` / ``fts_rebuild_progress`` — raw ints
-    - ``fts_rebuild_deferral`` — durable blocked-repair diagnostic, when present
+    Returned keys (all present, any may be None on failure): ``page_count``,
+    ``page_size``, ``freelist_count``, ``logical_size_bytes`` (page_count *
+    page_size), ``wal_size_bytes`` (stat of ``<db>-wal``, 0 when absent),
+    ``journal_mode``, ``messages`` / ``sessions`` row counts, ``fts_tables``
+    ({name: present}), ``fts_storage_version`` (None = legacy inline layout),
+    ``fts_rebuild_pending`` (deferred backfill unfinished),
+    ``fts_rebuild_high_water`` / ``fts_rebuild_progress`` raw ints, and
+    ``fts_rebuild_deferral`` (durable blocked-repair diagnostic).
     """
     from hermes_state import _connect_tracked_db
-    stats: Dict[str, Any] = {
-        "page_count": None,
-        "page_size": None,
-        "freelist_count": None,
-        "logical_size_bytes": None,
-        "wal_size_bytes": None,
-        "journal_mode": None,
-        "messages": None,
-        "sessions": None,
-        "fts_tables": None,
-        "fts_storage_version": None,
-        "fts_rebuild_pending": None,
-        "fts_rebuild_high_water": None,
-        "fts_rebuild_progress": None,
-        "fts_rebuild_deferral": None,
-    }
-
+    stats: Dict[str, Any] = dict.fromkeys((
+        "page_count", "page_size", "freelist_count", "logical_size_bytes", "wal_size_bytes",
+        "journal_mode", "messages", "sessions", "fts_tables", "fts_storage_version",
+        "fts_rebuild_pending", "fts_rebuild_high_water", "fts_rebuild_progress",
+        "fts_rebuild_deferral",
+    ))
     # WAL sidecar size needs no connection at all.
     try:
         wal_path = Path(str(db_path) + "-wal")
         stats["wal_size_bytes"] = wal_path.stat().st_size if wal_path.exists() else 0
     except OSError:
         pass
-
-    conn = None
     try:
-        # mode=ro refuses to create the file and refuses every write; a
-        # short timeout keeps doctor snappy when a writer holds the lock.
-        # Route through the tracked connect so byte-probe helpers
-        # (read_header_bytes_preopen) see this connection and refuse raw
+        # mode=ro refuses to create the file and refuses every write; a short
+        # timeout keeps doctor snappy when a writer holds the lock. The tracked
+        # connect lets byte-probe helpers see this connection and refuse raw
         # opens that could cancel our POSIX locks mid-read.
         conn = _connect_tracked_db(
-            f"file:{Path(db_path)}?mode=ro",
-            tracking_path=Path(db_path),
-            uri=True,
-            timeout=2.0,
+            f"file:{Path(db_path)}?mode=ro", tracking_path=Path(db_path), uri=True, timeout=2.0
         )
     except Exception as exc:
-        logger.debug("collect_state_db_stats: cannot open %s read-only: %s",
-                     db_path, exc)
+        logger.debug("collect_state_db_stats: cannot open %s read-only: %s", db_path, exc)
         return stats
 
-    def _scalar(sql: str) -> Any:
+    def _scalar(sql: str, params=()) -> Any:
         try:
-            row = conn.execute(sql).fetchone()
+            row = conn.execute(sql, params).fetchone()
             return row[0] if row else None
         except Exception:
             return None
 
+    def _int(value) -> Optional[int]:
+        return int(value) if value is not None else None
+
+    def _meta_int(key: str) -> Optional[int]:
+        try:
+            return _int(_scalar("SELECT value FROM state_meta WHERE key = ?", (key,)))
+        except Exception:
+            return None
+
     try:
-        pc = _scalar("PRAGMA page_count")
-        ps = _scalar("PRAGMA page_size")
-        stats["page_count"] = int(pc) if pc is not None else None
-        stats["page_size"] = int(ps) if ps is not None else None
+        stats["page_count"] = _int(_scalar("PRAGMA page_count"))
+        stats["page_size"] = _int(_scalar("PRAGMA page_size"))
         if stats["page_count"] is not None and stats["page_size"] is not None:
             stats["logical_size_bytes"] = stats["page_count"] * stats["page_size"]
-
-        fl = _scalar("PRAGMA freelist_count")
-        stats["freelist_count"] = int(fl) if fl is not None else None
-
+        stats["freelist_count"] = _int(_scalar("PRAGMA freelist_count"))
         jm = _scalar("PRAGMA journal_mode")
         stats["journal_mode"] = str(jm) if jm is not None else None
-
-        msgs = _scalar("SELECT COUNT(*) FROM messages")
-        stats["messages"] = int(msgs) if msgs is not None else None
-        sess = _scalar("SELECT COUNT(*) FROM sessions")
-        stats["sessions"] = int(sess) if sess is not None else None
-
+        stats["messages"] = _int(_scalar("SELECT COUNT(*) FROM messages"))
+        stats["sessions"] = _int(_scalar("SELECT COUNT(*) FROM sessions"))
         # FTS table presence via sqlite_master (never SELECTs from the
         # virtual tables themselves — a corrupt index must not fail stats).
         try:
@@ -520,39 +446,22 @@ def collect_state_db_stats(db_path: Path) -> Dict[str, Any]:
                 for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' "
                     "AND name IN (?, ?, ?)",
-                    ("messages_fts", "messages_fts_trigram", "messages_fts_cjk"),
+                    _FTS_TABLE_NAMES,
                 ).fetchall()
             }
-            stats["fts_tables"] = {
-                t: (t in names)
-                for t in ("messages_fts", "messages_fts_trigram", "messages_fts_cjk")
-            }
+            stats["fts_tables"] = {t: (t in names) for t in _FTS_TABLE_NAMES}
         except Exception:
             pass
-
         # Raw state_meta reads — cheap, and independent of SessionDB.
-        def _meta_int(key: str) -> Optional[int]:
-            try:
-                row = conn.execute(
-                    "SELECT value FROM state_meta WHERE key = ?", (key,)
-                ).fetchone()
-                return int(row[0]) if row and row[0] is not None else None
-            except Exception:
-                return None
-
         stats["fts_storage_version"] = _meta_int("fts_storage_version")
         high_water = _meta_int("fts_rebuild_high_water")
         progress = _meta_int("fts_rebuild_progress")
         stats["fts_rebuild_high_water"] = high_water
         stats["fts_rebuild_progress"] = progress
-        if high_water is None:
-            stats["fts_rebuild_pending"] = False
-        else:
-            stats["fts_rebuild_pending"] = (progress or 0) < high_water
+        stats["fts_rebuild_pending"] = False if high_water is None else (progress or 0) < high_water
         try:
             row = conn.execute(
-                "SELECT value FROM state_meta WHERE key = ? LIMIT 1",
-                (FTS_REBUILD_DEFERRAL_KEY,),
+                "SELECT value FROM state_meta WHERE key = ? LIMIT 1", (FTS_REBUILD_DEFERRAL_KEY,)
             ).fetchone()
             if row:
                 parsed = json.loads(row[0])
@@ -565,7 +474,6 @@ def collect_state_db_stats(db_path: Path) -> Dict[str, Any]:
             conn.close()
         except Exception:
             pass
-
     return stats
 
 
@@ -582,33 +490,13 @@ def count_db_holders(db_path: Path) -> Optional[int]:
         if not sys.platform.startswith("linux"):
             return None
         target = os.path.realpath(str(db_path))
-        holders = 0
-        for pid in os.listdir("/proc"):
-            if not pid.isdigit():
-                continue
-            fd_dir = f"/proc/{pid}/fd"
-            try:
-                fds = os.listdir(fd_dir)
-            except OSError:
-                continue  # process gone or not ours
-            for fd in fds:
-                try:
-                    if os.readlink(f"{fd_dir}/{fd}") == target:
-                        holders += 1
-                        break  # one hit per PID
-                except OSError:
-                    continue
-        return holders
+        return len({pid for pid, link in _iter_proc_fd_targets() if link == target})
     except Exception:
         return None
 
 
 def _is_inactive_orphan_desktop_holder(
-    *,
-    ppid: int,
-    age_seconds: float,
-    min_age_seconds: float,
-    ephemeral_backend: bool,
+    *, ppid: int, age_seconds: float, min_age_seconds: float, ephemeral_backend: bool,
     connection_statuses: List[str],
 ) -> bool:
     """Pure safety predicate for the narrow Desktop holder reap."""
@@ -620,35 +508,21 @@ def _is_inactive_orphan_desktop_holder(
     )
 
 
-def _concrete_state_db_holder_pids(
-    db_path: Path, holders: List[Tuple[int, str]]
-) -> List[int]:
+def _concrete_state_db_holder_pids(db_path: Path, holders: List[Tuple[int, str]]) -> List[int]:
     """Return unique PIDs proven to hold this DB or one of its sidecars."""
     canonical_db = os.path.normcase(os.path.abspath(os.fspath(db_path)))
-    watched = {
-        canonical_db,
-        canonical_db + "-wal",
-        canonical_db + "-shm",
-    }
+    watched = {canonical_db, canonical_db + "-wal", canonical_db + "-shm"}
     pids: List[int] = []
-    seen = set()
     for pid, path in holders:
-        canonical_path = os.path.normcase(
-            os.path.abspath(path.removesuffix(" (deleted)"))
-        )
-        if pid <= 0 or pid in seen or canonical_path not in watched:
+        if pid <= 0 or pid in pids or _canonical_sqlite_path(path) not in watched:
             continue
-        seen.add(pid)
         pids.append(pid)
     return pids
 
 
 def _read_proc_cmdline(pid: int) -> Optional[str]:
-    """Read /proc/<pid>/cmdline, world-readable even when fd table is not.
-
-    Returns the cmdline as a space-joined string, or None when unreadable
-    (process exited, or hidepid mount).
-    """
+    """Read /proc/<pid>/cmdline (world-readable even when the fd table is not)
+    as a space-joined string; None when unreadable (exited, hidepid mount)."""
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             raw = f.read()
@@ -664,11 +538,8 @@ _HERMES_CMDLINE_MARKERS = ("hermes_cli.main", "hermes_cli/main", "hermes serve",
 
 
 def _looks_like_hermes(cmdline: str) -> bool:
-    """Heuristic: does this cmdline look like a Hermes process?
-
-    Used to decide whether an uninspectable process (fd table unreadable
-    due to different user) should be treated as a potential state.db holder.
-    We only flag processes that look like Hermes, not every system daemon.
-    """
+    """Heuristic: does this cmdline look like a Hermes process?  Decides whether
+    an uninspectable process (fd table unreadable, different user) is treated
+    as a potential state.db holder; system daemons are not flagged."""
     lower = cmdline.lower()
     return any(marker in lower for marker in _HERMES_CMDLINE_MARKERS)
