@@ -26,7 +26,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from utils import atomic_json_write
 
 logger = logging.getLogger("hermes_cli.models")
 
@@ -89,12 +88,9 @@ def _reasoning_caps_disk_path() -> Path:
 
 
 def _read_reasoning_caps_disk() -> dict[str, Any]:
-    try:
-        with _reasoning_caps_disk_path().open(encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+    from hermes_cli.models import _read_json_cache
+
+    return _read_json_cache(_reasoning_caps_disk_path()) or {}
 
 
 def _load_reasoning_caps_disk(url: str) -> tuple[Optional[Caps], float]:
@@ -114,12 +110,12 @@ def _load_reasoning_caps_disk(url: str) -> tuple[Optional[Caps], float]:
 
 def _save_reasoning_caps_disk(url: str, caps: Caps) -> None:
     """Merge *url*'s catalog into the shared disk mirror, atomically."""
+    from hermes_cli.models import _write_json_cache
+
     try:
         data = _origin()._read_reasoning_caps_disk()
         data[url] = {"ts": time.time(), "caps": caps}
-        path = _reasoning_caps_disk_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json_write(path, data, indent=0, separators=(",", ":"))
+        _write_json_cache(_reasoning_caps_disk_path(), data, indent=0, separators=(",", ":"))
     except Exception as exc:
         logger.debug("Failed to save reasoning-caps disk cache: %s", exc)
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import json
-import http.client
 import logging
 import os
 import re
@@ -14,13 +13,13 @@ import urllib.request
 import urllib.error
 import time
 from pathlib import Path
-from typing import Any, NamedTuple, Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import TypeGuard
 
 from hermes_cli import __version__ as _HERMES_VERSION
-from hermes_cli.urllib_security import open_credentialed_url, url_origin
+from hermes_cli.urllib_security import open_credentialed_url
 from hermes_cli.models_catalog_static import (  # noqa: F401  (re-exported; tests patch hermes_cli.models.<name>)
     CANONICAL_PROVIDERS,
     OPENROUTER_MODELS,
@@ -72,6 +71,67 @@ from hermes_cli.models_reasoning_caps import (  # noqa: F401  (re-exported; test
     warm_nous_reasoning_caps_async,
     warm_openrouter_reasoning_caps_async,
 )
+from hermes_cli.models_local import (  # noqa: F401  (re-exported; tests patch hermes_cli.models.<name>)
+    LMStudioLoadResult,
+    _OLLAMA_CLOUD_CACHE_TTL,
+    _OLLAMA_LOCAL_CACHE_MAX_ENTRIES,
+    _OLLAMA_LOCAL_MODELS_CACHE,
+    _OLLAMA_LOCAL_MODELS_CACHE_TTL,
+    _OLLAMA_LOCAL_PROBE_FAILURE_CACHE,
+    _OLLAMA_LOCAL_PROBE_FAILURE_TTL,
+    _OLLAMA_LOCAL_PROBE_REACHABLE,
+    _evict_related_ollama_cache_entries,
+    _get_ollama_base_url,
+    _get_ollama_native_headers,
+    _get_ollama_request_headers,
+    _lmstudio_fetch_raw_models,
+    _lmstudio_request_headers,
+    _lmstudio_server_root,
+    _load_ollama_cloud_cache,
+    _normalize_openai_base_url,
+    _ollama_cloud_cache_path,
+    _ollama_local_catalog,
+    _ollama_probe_cache_key,
+    _remember_ollama_cache,
+    _root_for_ollama_native_api,
+    _same_ollama_native_root,
+    _save_ollama_cloud_cache,
+    _strip_ollama_cloud_suffix,
+    ensure_lmstudio_model_loaded,
+    fetch_lmstudio_models,
+    fetch_ollama_cloud_models,
+    fetch_ollama_local_models,
+    lmstudio_model_reasoning_options,
+    ollama_model_supports_thinking,
+    probe_lmstudio_models,
+    probe_ollama_local_models,
+    should_use_ollama_native_catalog,
+)
+from hermes_cli.models_pricing import (  # noqa: F401  (re-exported; tests patch hermes_cli.models.<name>)
+    _DEFAULT_NOUS_INFERENCE_BASE,
+    _FAILED_CATALOG_TTL_SECONDS,
+    _NOUS_CATALOG_TTL_SECONDS,
+    _NOUS_POLICY_APPEND_MAX,
+    _PRICING_AUTH_KEY_PREFIX,
+    _cache_catalog,
+    _cached_catalog,
+    _fetch_deepinfra_pricing,
+    _fetch_novita_pricing,
+    _fireworks_pricing_from_models_dev,
+    _format_price_per_mtok,
+    _pricing_auth_fingerprint,
+    _pricing_cache,
+    _pricing_cache_retry_after,
+    _resolve_nous_pricing_credentials,
+    _resolve_openrouter_api_key,
+    compute_sale_discount,
+    fetch_ai_gateway_pricing,
+    fetch_models_with_pricing,
+    get_pricing_for_provider,
+    nous_policy_allowed_ids,
+    peek_cached_pricing,
+    restrict_to_nous_policy,
+)
 from hermes_cli.models_validate import validate_requested_model  # noqa: F401  (re-exported)
 
 logger = logging.getLogger(__name__)
@@ -89,6 +149,25 @@ COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 def _urlopen_model_catalog_request(req: urllib.request.Request, *, timeout: float, ssl_context=None):
     """Open catalog requests without forwarding headers across origins."""
     return open_credentialed_url(req, timeout=timeout, ssl_context=ssl_context)
+
+
+def _read_json_cache(path: Path, *, errors=Exception) -> Optional[dict]:
+    """Load a JSON-object cache file; None when missing, unreadable, or not a dict."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except errors:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_json_cache(path: Path, data: Any, **dump_kwargs: Any) -> None:
+    """Atomically persist a cache file (creating parents). Raises on failure — callers decide
+    whether a failed cache write is worth logging."""
+    from utils import atomic_json_write
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json_write(path, data, **dump_kwargs)
 
 
 def _custom_provider_ssl_context(base_url: str):
@@ -173,6 +252,43 @@ def partition_nous_models_by_tier(
     return (selectable, unavailable)
 
 
+def _union_with_portal_recommendations(
+    tier_key: str,
+    curated_ids: list[str],
+    pricing: dict[str, dict[str, str]],
+    portal_base_url: str,
+    *,
+    force_refresh: bool,
+    synthesize_free_pricing: bool,
+) -> tuple[list[str], dict[str, dict[str, str]]]:
+    """Append the Portal's ``<tier_key>`` recommendations missing from ``curated_ids``.
+
+    In-repo curated models show first and Portal-only picks follow. Failures (network, parse,
+    missing field) are silent and degrade to returning the inputs unchanged — never block the
+    picker on a Portal-side hiccup.
+    """
+    try:
+        payload = fetch_nous_recommended_models(portal_base_url, force_refresh=force_refresh)
+    except Exception:
+        return (list(curated_ids), dict(pricing))
+
+    block = payload.get(tier_key) if isinstance(payload, dict) else None
+    if not isinstance(block, list) or not block:
+        return (list(curated_ids), dict(pricing))
+    portal_ids = [name for entry in block if (name := _extract_model_name(entry))]
+    if not portal_ids:
+        return (list(curated_ids), dict(pricing))
+
+    augmented_pricing = dict(pricing)
+    if synthesize_free_pricing:
+        for mid in portal_ids:
+            if mid not in augmented_pricing:
+                augmented_pricing[mid] = {"prompt": "0", "completion": "0"}
+
+    seen = set(curated_ids)
+    return (list(curated_ids) + [mid for mid in portal_ids if mid not in seen], augmented_pricing)
+
+
 def union_with_portal_free_recommendations(
     curated_ids: list[str],
     pricing: dict[str, dict[str, str]],
@@ -180,45 +296,12 @@ def union_with_portal_free_recommendations(
     *,
     force_refresh: bool = False,
 ) -> tuple[list[str], dict[str, dict[str, str]]]:
-    """Augment curated list + pricing with the Portal's ``freeRecommendedModels``.
-
-    * Portal free recommendations missing from ``curated_ids`` are appended after the curated list
-    (so the in-repo curated models show first and Portal-only picks follow).
-    """
-    try:
-        payload = fetch_nous_recommended_models(
-            portal_base_url, force_refresh=force_refresh
-        )
-    except Exception:
-        return (list(curated_ids), dict(pricing))
-
-    free_block = payload.get("freeRecommendedModels") if isinstance(payload, dict) else None
-    if not isinstance(free_block, list) or not free_block:
-        return (list(curated_ids), dict(pricing))
-
-    portal_free_ids: list[str] = []
-    for entry in free_block:
-        name = _extract_model_name(entry)
-        if name:
-            portal_free_ids.append(name)
-    if not portal_free_ids:
-        return (list(curated_ids), dict(pricing))
-
-    augmented_pricing = dict(pricing)
-    free_synthetic = {"prompt": "0", "completion": "0"}
-    for mid in portal_free_ids:
-        if mid not in augmented_pricing:
-            augmented_pricing[mid] = dict(free_synthetic)
-
-    augmented_ids = list(curated_ids)
-    seen = set(augmented_ids)
-    # Append Portal free recommendations that aren't already curated, so the
-    # in-repo curated ("HA") models show first and Portal-only picks follow.
-    new_ones = [mid for mid in portal_free_ids if mid not in seen]
-    if new_ones:
-        augmented_ids = augmented_ids + new_ones
-
-    return (augmented_ids, augmented_pricing)
+    """Augment curated list + pricing with the Portal's ``freeRecommendedModels`` (Portal-only free
+    picks get a synthetic $0 pricing entry so tier partitioning sees them as free)."""
+    return _union_with_portal_recommendations(
+        "freeRecommendedModels", curated_ids, pricing, portal_base_url,
+        force_refresh=force_refresh, synthesize_free_pricing=True,
+    )
 
 
 def union_with_portal_paid_recommendations(
@@ -228,43 +311,12 @@ def union_with_portal_paid_recommendations(
     *,
     force_refresh: bool = False,
 ) -> tuple[list[str], dict[str, dict[str, str]]]:
-    """Augment curated list with the Portal's ``paidRecommendedModels``.
-
-    * Portal paid recommendations missing from ``curated_ids`` are appended after the curated list
-    (so the in-repo curated models show first and Portal-only picks follow). * ``pricing`` is left
-    untouched — we deliberately do NOT synthesize pricing entries for paid models.
-
-    Failures (network, parse, missing field) are silent and degrade to returning the inputs
-    unchanged — never block the picker on a Portal-side hiccup.
-    """
-    try:
-        payload = fetch_nous_recommended_models(
-            portal_base_url, force_refresh=force_refresh
-        )
-    except Exception:
-        return (list(curated_ids), dict(pricing))
-
-    paid_block = payload.get("paidRecommendedModels") if isinstance(payload, dict) else None
-    if not isinstance(paid_block, list) or not paid_block:
-        return (list(curated_ids), dict(pricing))
-
-    portal_paid_ids: list[str] = []
-    for entry in paid_block:
-        name = _extract_model_name(entry)
-        if name:
-            portal_paid_ids.append(name)
-    if not portal_paid_ids:
-        return (list(curated_ids), dict(pricing))
-
-    augmented_ids = list(curated_ids)
-    seen = set(augmented_ids)
-    # Append Portal paid recommendations that aren't already curated, so the
-    # in-repo curated ("HA") models show first and Portal-only picks follow.
-    new_ones = [mid for mid in portal_paid_ids if mid not in seen]
-    if new_ones:
-        augmented_ids = augmented_ids + new_ones
-
-    return (augmented_ids, dict(pricing))
+    """Augment curated list with the Portal's ``paidRecommendedModels``. ``pricing`` is left
+    untouched — we deliberately do NOT synthesize pricing entries for paid models."""
+    return _union_with_portal_recommendations(
+        "paidRecommendedModels", curated_ids, pricing, portal_base_url,
+        force_refresh=force_refresh, synthesize_free_pricing=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -341,14 +393,8 @@ def _read_nous_recommended_disk(base: str) -> dict[str, Any] | None:
     The disk file is a JSON object keyed by portal base URL so staging and prod don't collide:
     ``{"<base>": {"data": {...}, "ts": <epoch_seconds>}}``.
     """
-    try:
-        with open(_nous_recommended_disk_path(), encoding="utf-8") as fh:
-            blob = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(blob, dict):
-        return None
-    entry = blob.get(base)
+    blob = _read_json_cache(_nous_recommended_disk_path(), errors=(OSError, json.JSONDecodeError))
+    entry = (blob or {}).get(base)
     if not isinstance(entry, dict):
         return None
     data = entry.get("data")
@@ -365,25 +411,11 @@ def _write_nous_recommended_disk(base: str, data: dict[str, Any]) -> None:
         return
     path = _nous_recommended_disk_path()
     try:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                blob = json.load(fh)
-            if not isinstance(blob, dict):
-                blob = {}
-        except (OSError, json.JSONDecodeError):
-            blob = {}
+        blob = _read_json_cache(path, errors=(OSError, json.JSONDecodeError)) or {}
         blob[base] = {"data": data, "ts": time.time()}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(blob, fh, indent=2)
-            fh.write("\n")
-        os.replace(tmp, path)
+        _write_json_cache(path, blob, indent=2)
     except OSError as exc:
-        import logging
-        logging.getLogger(__name__).debug(
-            "nous recommended-models disk cache write failed: %s", exc
-        )
+        logger.debug("nous recommended-models disk cache write failed: %s", exc)
 
 
 def fetch_nous_recommended_models(
@@ -620,6 +652,29 @@ def clamp_reasoning_effort_to_supported(
     return _clamp_effort(effort, supported_efforts)
 
 
+def _fetch_live_catalog_index(url: str, timeout: float, opener) -> Optional[tuple[list, dict[str, dict[str, Any]]]]:
+    """GET an OpenAI-style ``/models`` listing → ``(raw data array, {id: item})``, or None when the
+    endpoint is unreachable or the payload has no ``data`` list."""
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with opener(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception:
+        return None
+    live_items = payload.get("data", [])
+    if not isinstance(live_items, list):
+        return None
+    live_by_id: dict[str, dict[str, Any]] = {}
+    for item in live_items:
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("id") or "").strip()
+        if not mid:
+            continue
+        live_by_id[mid] = item
+    return live_items, live_by_id
+
+
 def fetch_openrouter_models(
     timeout: float = 8.0,
     *,
@@ -631,45 +686,23 @@ def fetch_openrouter_models(
     if _openrouter_catalog_cache is not None and not force_refresh:
         return list(_openrouter_catalog_cache)
 
-    # Prefer the remotely-hosted catalog manifest; fall back to the in-repo
-    # snapshot when the manifest is unreachable. Both are curated lists that
-    # drive the picker; the OpenRouter live /v1/models filter (tool support,
-    # free pricing) is applied on top either way.
+    # Prefer the remotely-hosted catalog manifest; fall back to the in-repo snapshot when the
+    # manifest is unreachable. Both are curated lists that drive the picker; the OpenRouter live
+    # /v1/models filter (tool support, free pricing) is applied on top either way.
     try:
         from hermes_cli.model_catalog import get_curated_openrouter_models
         remote = get_curated_openrouter_models()
     except Exception:
         remote = None
     fallback = list(remote) if remote else list(OPENROUTER_MODELS)
-    preferred_ids = [mid for mid, _ in fallback]
 
-    try:
-        req = urllib.request.Request(
-            _OPENROUTER_CATALOG_URL,
-            headers={"Accept": "application/json"},
-        )
-        with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
-    except Exception:
+    live = _fetch_live_catalog_index(_OPENROUTER_CATALOG_URL, timeout, _urlopen_model_catalog_request)
+    if live is None:
         return list(_openrouter_catalog_cache or fallback)
+    live_items, live_by_id = live
 
-    live_items = payload.get("data", [])
-    if not isinstance(live_items, list):
-        return list(_openrouter_catalog_cache or fallback)
-
-    live_by_id: dict[str, dict[str, Any]] = {}
-    for item in live_items:
-        if not isinstance(item, dict):
-            continue
-        mid = str(item.get("id") or "").strip()
-        if not mid:
-            continue
-        live_by_id[mid] = item
-
-    # Free warm-up for the reasoning-capability cache: this is the same payload
-    # _fetch_openrouter_reasoning_caps would fetch, so parse it once here and
-    # hot-path callers (openrouter_model_reasoning_capabilities) never need
-    # their own HTTP round-trip.
+    # Free warm-up for the reasoning-capability cache: same payload the caps fetch would pull, so
+    # parse it once here and hot-path callers never need their own HTTP round-trip.
     global _openrouter_reasoning_caps_cache
     seeded = _seed_reasoning_caps(_OPENROUTER_CATALOG_URL, live_items)
     if _openrouter_reasoning_caps_cache is None and seeded is not None:
@@ -677,18 +710,17 @@ def fetch_openrouter_models(
 
     curated: list[tuple[str, str]] = []
     silent_default = get_preferred_silent_default_model("openrouter")
-    for preferred_id in preferred_ids:
+    for preferred_id, _ in fallback:
         live_item = live_by_id.get(preferred_id)
         if live_item is None:
             continue
-        # Hide models that don't advertise tool-calling support — hermes-agent
-        # requires it and surfacing them leads to immediate runtime failures
-        # when the user selects them. Ported from Kilo-Org/kilocode#9068.
+        # Hide models that don't advertise tool-calling support — hermes-agent requires it and
+        # selecting one fails at the first tool call.
         if not _openrouter_model_supports_tools(live_item):
             continue
         if preferred_id == silent_default:
-            # Keep the silent-default badge through the live refresh so the
-            # picker shows which model Hermes lands on when none is selected.
+            # Keep the silent-default badge through the live refresh so the picker shows which
+            # model Hermes lands on when none is selected.
             desc = "default"
         else:
             desc = "free" if _openrouter_model_is_free(live_item.get("pricing")) else ""
@@ -750,33 +782,13 @@ def fetch_ai_gateway_models(
     from hermes_constants import AI_GATEWAY_BASE_URL
 
     fallback = list(VERCEL_AI_GATEWAY_MODELS)
-    preferred_ids = [mid for mid, _ in fallback]
-
-    try:
-        req = urllib.request.Request(
-            f"{AI_GATEWAY_BASE_URL.rstrip('/')}/models",
-            headers={"Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
-    except Exception:
+    live = _fetch_live_catalog_index(f"{AI_GATEWAY_BASE_URL.rstrip('/')}/models", timeout, urllib.request.urlopen)
+    if live is None:
         return list(_ai_gateway_catalog_cache or fallback)
-
-    live_items = payload.get("data", [])
-    if not isinstance(live_items, list):
-        return list(_ai_gateway_catalog_cache or fallback)
-
-    live_by_id: dict[str, dict[str, Any]] = {}
-    for item in live_items:
-        if not isinstance(item, dict):
-            continue
-        mid = str(item.get("id") or "").strip()
-        if not mid:
-            continue
-        live_by_id[mid] = item
+    _, live_by_id = live
 
     curated: list[tuple[str, str]] = []
-    for preferred_id in preferred_ids:
+    for preferred_id, _ in fallback:
         live_item = live_by_id.get(preferred_id)
         if live_item is None:
             continue
@@ -786,8 +798,8 @@ def fetch_ai_gateway_models(
     if not curated:
         return list(_ai_gateway_catalog_cache or fallback)
 
-    # If the live catalog offers a free Moonshot model, auto-promote it to
-    # position #1 as "recommended" — dynamic discovery without a PR.
+    # If the live catalog offers a free Moonshot model, auto-promote it to position #1 as
+    # "recommended" — dynamic discovery without a PR.
     free_moonshot = next(
         (
             mid
@@ -816,583 +828,6 @@ def ai_gateway_model_ids(*, force_refresh: bool = False) -> list[str]:
 # ---------------------------------------------------------------------------
 # Pricing helpers — fetch live pricing from OpenRouter-compatible /v1/models
 # ---------------------------------------------------------------------------
-
-# Cache: maps model_id → {"prompt": str, "completion": str} per endpoint
-_pricing_cache: dict[str, dict[str, dict[str, str]]] = {}
-
-# A failed fetch caches its empty result too, so an unreachable endpoint isn't
-# re-dialed on every call — but only until this deadline. Cached forever, one
-# bad moment (a blip during startup, a key that hadn't been written yet) turns
-# into no live model discovery for the life of the process, and the processes
-# that read this most are the ones that run for weeks: the gateway, the desktop
-# backend. Every caller falls back to a curated list meanwhile, so the cost of
-# the stale entry is silent and invisible.
-_FAILED_CATALOG_TTL_SECONDS = 120.0
-_pricing_cache_retry_after: dict[str, float] = {}
-
-
-def _cached_catalog(cache_key: str) -> Optional[dict[str, dict[str, Any]]]:
-    """The cached catalog for *cache_key*, or None to go fetch it."""
-    cached = _pricing_cache.get(cache_key)
-    if cached is None:
-        return None
-    retry_after = _pricing_cache_retry_after.get(cache_key)
-    if retry_after is not None and time.monotonic() >= retry_after:
-        _pricing_cache.pop(cache_key, None)
-        _pricing_cache_retry_after.pop(cache_key, None)
-        return None
-    return cached
-
-
-def _cache_catalog(
-    cache_key: str,
-    result: dict[str, dict[str, Any]],
-    ttl_seconds: Optional[float] = None,
-) -> dict[str, dict[str, Any]]:
-    """Cache a catalog result, giving an empty one an expiry.
-
-    *ttl_seconds* expires a non-empty result too. Only a catalog whose contents depend on server-
-    side state the client cannot observe needs it — an org's model policy can change while a long-
-    lived process holds the entry.
-    """
-    _pricing_cache[cache_key] = result
-    if result:
-        if ttl_seconds:
-            _pricing_cache_retry_after[cache_key] = time.monotonic() + ttl_seconds
-        else:
-            _pricing_cache_retry_after.pop(cache_key, None)
-    else:
-        _pricing_cache_retry_after[cache_key] = (
-            time.monotonic() + _FAILED_CATALOG_TTL_SECONDS
-        )
-    return result
-
-
-# NUL cannot appear in a URL, so this cannot collide with a real base URL.
-_PRICING_AUTH_KEY_PREFIX = "\x00auth:"
-
-
-def _pricing_auth_fingerprint(api_key: str | None) -> str:
-    """Key suffix identifying the credential a catalog was read with.
-
-    A governed endpoint answers each token with the catalog its org may reach, so two credentials
-    cannot share an entry. blake2b for cache-key fingerprinting only, same rationale as
-    :func:`_custom_endpoint_fingerprint`.
-    """
-    if not api_key:
-        return ""
-    import hashlib
-
-    digest = hashlib.blake2b(api_key.encode("utf-8", errors="replace"), digest_size=8)
-    return _PRICING_AUTH_KEY_PREFIX + digest.hexdigest()
-
-
-def peek_cached_pricing(base_url: str) -> dict[str, dict[str, Any]]:
-    """Pricing already cached for *base_url*, or ``{}``. Never fetches.
-
-    Accepts a ``/v1``-suffixed URL as well as the pre-``/v1`` root the fetchers key on, and
-    prefers an authenticated catalog. Scans rather than rebuilding a key because callers hold no
-    credential — newest first, skipping expired entries, so a rotated credential does not keep
-    answering from the catalog its predecessor read.
-    """
-    root = (base_url or "").rstrip("/")
-    if root.endswith("/v1"):
-        root = root[:-3].rstrip("/")
-    authed_prefix = root + _PRICING_AUTH_KEY_PREFIX
-    for key in reversed(list(_pricing_cache)):
-        if key.startswith(authed_prefix):
-            cached = _cached_catalog(key)
-            if cached:
-                return cached
-    return _cached_catalog(root) or {}
-
-
-def _format_price_per_mtok(per_token_str: str) -> str:
-    """Convert a per-token price string to a human-friendly $/Mtok string.
-
-    Always uses 2 decimal places so that prices align vertically when right-justified in a column
-    (the decimal point stays in the same position).
-
-    Sub-cent prices (e.g. deep-discount cache-hit promos) extend precision instead of collapsing to
-    "$0.00": the smallest decimal place that makes the value non-zero is found, then one extra digit
-    is kept and trailing zeros trimmed.
-    """
-    try:
-        val = float(per_token_str)
-    except (TypeError, ValueError):
-        return "?"
-    if val == 0:
-        return "free"
-    per_m = val * 1_000_000
-    text = f"{per_m:.2f}"
-    if per_m < 0.01:
-        # Non-zero price below one cent per Mtok — widen precision until the
-        # value shows, keep one extra significant digit, trim trailing zeros.
-        prec = 3
-        while prec < 12 and round(per_m, prec) == 0:
-            prec += 1
-        text = f"{per_m:.{min(prec + 1, 12)}f}".rstrip("0").rstrip(".")
-    return f"${text}"
-
-
-def compute_sale_discount(
-    prompt: str,
-    completion: str,
-    original: Any,
-) -> tuple[int, str, str] | None:
-    """Derive sale chrome from gateway ``pricing.original`` when cheaper.
-
-    Nous Portal-only feature: callers gate on the provider; this helper only sees ``original``
-    because the Nous fetch path opted in via ``include_sale_original=True``.
-
-    Returns ``(discount_percent, was_prompt_raw, was_completion_raw)`` only when ``original`` is a
-    dict and the current prompt (fallback: completion) rate is strictly below the corresponding
-    original.
-    """
-    def _finite(raw: Any) -> float | None:
-        try:
-            n = float(raw)
-        except (TypeError, ValueError):
-            return None
-        return n if n > 0 and n == n else None  # n == n rejects NaN
-
-    def _nonneg(raw: Any) -> float | None:
-        try:
-            n = float(raw)
-        except (TypeError, ValueError):
-            return None
-        return n if n >= 0 and n == n else None
-
-    orig_dict = original if isinstance(original, dict) else {}
-    was_prompt = orig_dict.get("prompt")
-    was_completion = orig_dict.get("completion")
-
-    # Free / $0 models: flat 100% off, with "was" prices only when the
-    # gateway actually served an original (e.g. a :free sibling); a
-    # natively-free model (stealth/ox-alpha) gets bare "-100%" chrome.
-    cur_prompt_any = _nonneg(prompt) if prompt not in (None, "") else None
-    cur_comp_any = _nonneg(completion) if completion not in (None, "") else None
-    if cur_prompt_any == 0 and cur_comp_any in (0, None):
-        return (
-            100,
-            str(was_prompt) if was_prompt not in (None, "") else "",
-            str(was_completion) if was_completion not in (None, "") else "",
-        )
-
-    if not isinstance(original, dict):
-        return None
-
-    if was_prompt in (None, "") and was_completion in (None, ""):
-        return None
-
-    cur_prompt = _finite(prompt) if prompt not in (None, "") else None
-    orig_prompt = _finite(was_prompt) if was_prompt not in (None, "") else None
-    if cur_prompt is not None and orig_prompt is not None and cur_prompt < orig_prompt:
-        pct = int(round((1.0 - (cur_prompt / orig_prompt)) * 100))
-        if pct < 1:
-            return None
-        return (
-            pct,
-            str(was_prompt),
-            str(was_completion) if was_completion not in (None, "") else "",
-        )
-
-    cur_comp = _finite(completion) if completion not in (None, "") else None
-    orig_comp = _finite(was_completion) if was_completion not in (None, "") else None
-    if cur_comp is not None and orig_comp is not None and cur_comp < orig_comp:
-        pct = int(round((1.0 - (cur_comp / orig_comp)) * 100))
-        if pct < 1:
-            return None
-        return (
-            pct,
-            str(was_prompt) if was_prompt not in (None, "") else "",
-            str(was_completion),
-        )
-
-    return None
-
-
-def fetch_models_with_pricing(
-    api_key: str | None = None,
-    base_url: str = "https://openrouter.ai/api",
-    timeout: float = 8.0,
-    *,
-    force_refresh: bool = False,
-    include_sale_original: bool = False,
-    cache_ttl_seconds: Optional[float] = None,
-) -> dict[str, dict[str, Any]]:
-    """Fetch ``/v1/models`` and return ``{model_id: {prompt, completion, ...}}``.
-
-    Results are cached per *base_url* and per credential, so repeated calls are free and one
-    caller's catalog never answers another's read. Works with any OpenRouter-compatible endpoint
-    (OpenRouter, Nous Portal).
-
-    When *include_sale_original* is true (Nous Portal only) and the gateway advertises a global
-    discount under ``pricing.original``, those pre-discount rates are copied through as a nested
-    ``original`` dict so pickers can show sale chrome.
-    """
-    url_root = (base_url or "").rstrip("/")
-    cache_key = url_root + _pricing_auth_fingerprint(api_key)
-    if not force_refresh:
-        cached = _cached_catalog(cache_key)
-        if cached is not None:
-            return cached
-
-    url = url_root + "/v1/models"
-    headers: dict[str, str] = {
-        "Accept": "application/json",
-        "User-Agent": _HERMES_USER_AGENT,
-    }
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
-    except Exception:
-        return _cache_catalog(cache_key, {})
-
-    # Same document the reasoning-capability fetch would pull, and every
-    # picker/pricing surface goes through here — mirror it so a later hot-path
-    # lookup (and the next process) has an answer without its own round-trip.
-    _seed_reasoning_caps(url, payload.get("data"))
-
-    result: dict[str, dict[str, Any]] = {}
-    for item in payload.get("data", []):
-        mid = item.get("id")
-        pricing = item.get("pricing")
-        if mid and isinstance(pricing, dict):
-            entry: dict[str, Any] = {
-                "prompt": str(pricing.get("prompt", "")),
-                "completion": str(pricing.get("completion", "")),
-            }
-            if pricing.get("input_cache_read"):
-                entry["input_cache_read"] = str(pricing["input_cache_read"])
-            if pricing.get("input_cache_write"):
-                entry["input_cache_write"] = str(pricing["input_cache_write"])
-            # Sale chrome is Nous Portal-only. Never copy pricing.original for
-            # OpenRouter / other OpenAI-compatible catalogs.
-            if include_sale_original:
-                original = pricing.get("original")
-                if isinstance(original, dict):
-                    orig_entry: dict[str, str] = {}
-                    for key in (
-                        "prompt",
-                        "completion",
-                        "input_cache_read",
-                        "input_cache_write",
-                    ):
-                        if original.get(key) not in (None, ""):
-                            orig_entry[key] = str(original[key])
-                    if orig_entry.get("prompt") or orig_entry.get("completion"):
-                        entry["original"] = orig_entry
-            result[mid] = entry
-
-    return _cache_catalog(cache_key, result, cache_ttl_seconds)
-
-
-def fetch_ai_gateway_pricing(
-    timeout: float = 8.0,
-    *,
-    force_refresh: bool = False,
-) -> dict[str, dict[str, str]]:
-    """Fetch Vercel AI Gateway /v1/models and return hermes-shaped pricing.
-
-    Vercel uses ``input`` / ``output`` field names; hermes's picker expects ``prompt`` /
-    ``completion``. This translates. Cache read/write field names already match.
-    """
-    from hermes_constants import AI_GATEWAY_BASE_URL
-
-    cache_key = AI_GATEWAY_BASE_URL.rstrip("/")
-    if not force_refresh:
-        cached = _cached_catalog(cache_key)
-        if cached is not None:
-            return cached
-
-    try:
-        req = urllib.request.Request(
-            f"{cache_key}/models",
-            headers={"Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
-    except Exception:
-        return _cache_catalog(cache_key, {})
-
-    result: dict[str, dict[str, str]] = {}
-    for item in payload.get("data", []):
-        if not isinstance(item, dict):
-            continue
-        mid = item.get("id")
-        pricing = item.get("pricing")
-        if not (mid and isinstance(pricing, dict)):
-            continue
-        entry: dict[str, str] = {
-            "prompt": str(pricing.get("input", "")),
-            "completion": str(pricing.get("output", "")),
-        }
-        if pricing.get("input_cache_read"):
-            entry["input_cache_read"] = str(pricing["input_cache_read"])
-        if pricing.get("input_cache_write"):
-            entry["input_cache_write"] = str(pricing["input_cache_write"])
-        result[mid] = entry
-
-    return _cache_catalog(cache_key, result)
-
-
-def _resolve_openrouter_api_key() -> str:
-    """Best-effort OpenRouter API key for pricing fetch."""
-    return os.getenv("OPENROUTER_API_KEY", "").strip()
-
-
-_DEFAULT_NOUS_INFERENCE_BASE = "https://inference-api.nousresearch.com"
-
-
-def _resolve_nous_pricing_credentials() -> tuple[str, str]:
-    """Return ``(api_key, base_url)`` for Nous Portal pricing.
-
-    Base URL precedence (mirrors runtime credential resolution): 1. ``NOUS_INFERENCE_BASE_URL`` env
-    override (staging / preview) 2. Resolved runtime credential ``base_url`` 3. Production default
-
-    Without (1), a staging profile's sale ``pricing.original`` never reaches the pickers — the
-    anonymous fallback would hit prod, which has no ``original`` field.
-    """
-    env_base = None
-    try:
-        from hermes_cli.auth import _nous_inference_env_override
-
-        env_base = _nous_inference_env_override()
-    except Exception:
-        env_base = None
-
-    api_key = ""
-    creds_base = ""
-    try:
-        from hermes_cli.auth import resolve_nous_runtime_credentials
-
-        creds = resolve_nous_runtime_credentials()
-        if creds:
-            api_key = creds.get("api_key", "") or ""
-            creds_base = (creds.get("base_url", "") or "").strip()
-    except Exception:
-        pass
-
-    base_url = (env_base or creds_base or _DEFAULT_NOUS_INFERENCE_BASE).rstrip("/")
-    # Credential bases arrive with or without the ``/v1`` suffix. Callers
-    # append their own path, so hand back the bare origin.
-    if base_url.endswith("/v1"):
-        base_url = base_url[:-3]
-    return (api_key, base_url)
-
-
-def nous_policy_allowed_ids(*, force_refresh: bool = False) -> Optional[set[str]]:
-    """The Nous model ids the caller's org may reach, or ``None`` to not filter.
-
-    The gateway omits policy-blocked rows from an authenticated ``GET /v1/models``, so that
-    response's keys are the reachable set.
-
-    ``None`` means "leave the caller's list alone", for the three states that cannot support
-    narrowing one: no policy (or a token too old to say), an anonymous read whose catalog is
-    unfiltered, and an empty read, which is a fetch failure rather than an org that may reach
-    nothing.
-    """
-    try:
-        from hermes_cli.nous_account import nous_policy_present
-
-        if nous_policy_present() is not True:
-            return None
-    except Exception:
-        return None
-
-    api_key, base_url = _resolve_nous_pricing_credentials()
-    if not api_key or not base_url:
-        return None
-
-    # Same arguments as get_pricing_for_provider's nous branch, so a caller
-    # asking for pricing too shares this entry instead of paying for a second
-    # request.
-    pricing = fetch_models_with_pricing(
-        api_key=api_key,
-        base_url=base_url,
-        force_refresh=force_refresh,
-        include_sale_original=True,
-        cache_ttl_seconds=_NOUS_CATALOG_TTL_SECONDS,
-    )
-    return set(pricing) or None
-
-
-# Past this size an allowed set reads as a whole catalog rather than an
-# allowlist, and is not worth showing in place of an empty picker.
-_NOUS_POLICY_APPEND_MAX = 64
-
-# How long a Nous catalog stays trusted. Its contents depend on the org's
-# policy, which an admin can change at any time and the client cannot observe,
-# so a long-lived process must re-ask instead of holding the first answer for
-# its whole life. Other providers' catalogs carry no such state and keep the
-# default no-expiry caching.
-_NOUS_CATALOG_TTL_SECONDS = 300.0
-
-
-def restrict_to_nous_policy(
-    model_ids: list[str],
-    allowed: Optional[set[str]],
-    *,
-    rescue_empty: bool = False,
-) -> list[str]:
-    """*model_ids* narrowed to *allowed*, preserving the caller's order.
-
-    A ``:free`` sibling is kept when its base model is reachable, mirroring the gateway, which
-    admits a row when any of its requestable ids passes. Prefer over-listing: that costs a 403 from
-    the authoritative gate, while hiding a row the gate would serve is unrecoverable from the
-    client.
-    """
-    if not allowed:
-        return list(model_ids)
-    kept = [
-        mid
-        for mid in model_ids
-        if mid in allowed or mid.split(":", 1)[0] in allowed
-    ]
-
-    # An allowlist can name only models the curated manifest lacks, leaving an
-    # empty picker — worse than no filter, since the models the org may use are
-    # the ones dropped. Opt-in per list: an already-empty list (a paid tier's
-    # gated models) means "nothing to gate", not "nothing survived".
-    if rescue_empty and not kept and len(allowed) <= _NOUS_POLICY_APPEND_MAX:
-        return sorted(allowed)
-    return kept
-
-
-def get_pricing_for_provider(provider: str, *, force_refresh: bool = False) -> dict[str, dict[str, str]]:
-    """Return live pricing for providers that support it (openrouter, nous, ai-gateway, novita)."""
-    normalized = normalize_provider(provider)
-    if normalized == "openrouter":
-        return fetch_models_with_pricing(
-            api_key=_resolve_openrouter_api_key(),
-            base_url="https://openrouter.ai/api",
-            force_refresh=force_refresh,
-        )
-    if normalized == "ai-gateway":
-        return fetch_ai_gateway_pricing(force_refresh=force_refresh)
-    if normalized == "novita":
-        return _fetch_novita_pricing(force_refresh=force_refresh)
-    if normalized == "deepinfra":
-        return _fetch_deepinfra_pricing(force_refresh=force_refresh)
-    if normalized == "fireworks":
-        return _fireworks_pricing_from_models_dev(force_refresh=force_refresh)
-    if normalized == "nous":
-        api_key, base_url = _resolve_nous_pricing_credentials()
-        if base_url:
-            return fetch_models_with_pricing(
-                api_key=api_key,
-                base_url=base_url,
-                force_refresh=force_refresh,
-                # Sale chrome (pricing.original) is Nous Portal-only.
-                include_sale_original=True,
-                cache_ttl_seconds=_NOUS_CATALOG_TTL_SECONDS,
-            )
-    return {}
-
-
-def _fireworks_pricing_from_models_dev(
-    *,
-    force_refresh: bool = False,
-) -> dict[str, dict[str, str]]:
-    """Derive Fireworks picker pricing from the models.dev registry cache.
-
-    No dedicated network fetch: ``fetch_models_dev()`` already maintains an in-memory + disk cache
-    (1h TTL) that every picker surface shares, so this is a pure dict transform on the picker path —
-    no added latency and no per-render network call.
-    """
-    cache_key = "models.dev/fireworks"
-    if not force_refresh:
-        cached = _cached_catalog(cache_key)
-        if cached is not None:
-            return cached
-
-    result: dict[str, dict[str, str]] = {}
-    try:
-        from agent.models_dev import _get_provider_models
-
-        models = _get_provider_models("fireworks") or {}
-        for mid, entry in models.items():
-            if not isinstance(entry, dict):
-                continue
-            cost = entry.get("cost")
-            if not isinstance(cost, dict):
-                continue
-            inp = cost.get("input")
-            out = cost.get("output")
-            if inp is None and out is None:
-                continue
-            row: dict[str, str] = {
-                "prompt": str(float(inp or 0) / 1_000_000),
-                "completion": str(float(out or 0) / 1_000_000),
-            }
-            cache_read = cost.get("cache_read")
-            if cache_read:
-                row["input_cache_read"] = str(float(cache_read) / 1_000_000)
-            result[str(mid)] = row
-    except Exception:
-        result = {}
-
-    return _cache_catalog(cache_key, result)
-
-
-def _fetch_novita_pricing(
-    timeout: float = 8.0,
-    *,
-    force_refresh: bool = False,
-) -> dict[str, dict[str, str]]:
-    """Fetch pricing from NovitaAI /v1/models.
-
-    NovitaAI reports per-million-token prices in units of 0.0001 USD; they are converted to the
-    per-token strings the shared pricing formatter expects. Results are cached in
-    ``_pricing_cache`` keyed on the resolved base URL so menu renders don't re-hit the network.
-    """
-    api_key = os.getenv("NOVITA_API_KEY", "").strip()
-    if not api_key:
-        return {}
-
-    base_url = os.getenv("NOVITA_BASE_URL", "").strip() or "https://api.novita.ai/openai/v1"
-    cache_key = base_url.rstrip("/")
-    if not force_refresh:
-        cached = _cached_catalog(cache_key)
-        if cached is not None:
-            return cached
-
-    url = cache_key + "/models"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-        "User-Agent": _HERMES_USER_AGENT,
-    }
-
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
-    except Exception:
-        return _cache_catalog(cache_key, {})
-
-    result: dict[str, dict[str, str]] = {}
-    for item in payload.get("data", []):
-        if not isinstance(item, dict):
-            continue
-        mid = item.get("id")
-        if not mid:
-            continue
-        inp = item.get("input_token_price_per_m")
-        out = item.get("output_token_price_per_m")
-        if inp is None and out is None:
-            continue
-        result[str(mid)] = {
-            "prompt": str(float(inp or 0) / 10_000 / 1_000_000),
-            "completion": str(float(out or 0) / 10_000 / 1_000_000),
-        }
-
-    return _cache_catalog(cache_key, result)
 
 
 # All provider IDs and aliases that are valid for the provider:model syntax.
@@ -1528,390 +963,6 @@ def _get_provider_config_dict(provider: str) -> dict[str, Any]:
     except (ImportError, OSError, RuntimeError, TypeError, ValueError, AttributeError):
         pass
     return {}
-
-
-def _root_for_ollama_native_api(base_url: str) -> str:
-    """Convert an OpenAI-style Ollama base URL to the native API root."""
-    root = str(base_url or "").strip().rstrip("/")
-    if root.startswith(":"):
-        root = "http://127.0.0.1" + root
-    elif root and "://" not in root:
-        root = "http://" + root
-    for suffix in ("/api/tags", "/v1/models", "/api", "/v1"):
-        if root.endswith(suffix):
-            root = root[: -len(suffix)].rstrip("/")
-            break
-    return root
-
-
-def _normalize_openai_base_url(base_url: Optional[str]) -> str:
-    """Add a usable HTTP scheme without changing an OpenAI API path."""
-    value = str(base_url or "").strip()
-    if value.startswith(":"):
-        return "http://127.0.0.1" + value
-    if value and "://" not in value:
-        return "http://" + value
-    return value
-
-
-def _get_ollama_base_url() -> str:
-    """Resolve the local Ollama-compatible endpoint URL.
-
-    Prefer explicit config under ``providers.ollama.base_url`` because this is how local Ollama-
-    compatible endpoints can be wired without changing the active model provider. Fall back to
-    active ``model.base_url`` only when the active provider is ollama/custom, then to Ollama's local
-    default.
-    """
-    provider_cfg = _get_provider_config_dict("ollama")
-    configured = (
-        provider_cfg.get("base_url", "")
-        or provider_cfg.get("api", "")
-        or provider_cfg.get("url", "")
-        or ""
-    )
-    if configured:
-        return str(configured).strip()
-
-    model_cfg = _get_model_config_dict()
-    model_provider = str(model_cfg.get("provider", "") or "").strip().lower()
-    model_base = str(model_cfg.get("base_url", "") or "").strip()
-    if model_provider == "ollama" and model_base:
-        return model_base
-    if model_provider == "custom" and model_base:
-        # Only reuse the active bare custom endpoint when it is actually
-        # Ollama-compatible. Otherwise a user working against an unrelated
-        # OpenAI-compatible endpoint would make the Ollama picker probe that
-        # endpoint's /api/tags and hide their local Ollama catalog.
-        try:
-            if should_use_ollama_native_catalog("custom", model_base):
-                return model_base
-        except (OSError, RuntimeError, TypeError, ValueError):
-            pass
-
-    env_host = os.getenv("OLLAMA_HOST", "").strip()
-    if env_host:
-        if env_host.startswith(":") and not env_host.startswith("::"):
-            env_host = "127.0.0.1" + env_host
-        elif env_host.startswith("[") and env_host.endswith("]"):
-            env_host = f"{env_host}:11434"
-        elif "://" in env_host:
-            try:
-                parsed = urllib.parse.urlsplit(env_host)
-                if parsed.hostname and parsed.port is None:
-                    hostname = parsed.hostname
-                    if ":" in hostname and not hostname.startswith("["):
-                        hostname = f"[{hostname}]"
-                    userinfo = (
-                        parsed.netloc.rsplit("@", 1)[0] + "@"
-                        if "@" in parsed.netloc
-                        else ""
-                    )
-                    env_host = parsed._replace(
-                        netloc=f"{userinfo}{hostname}:11434"
-                    ).geturl()
-            except ValueError:
-                pass
-        elif env_host.count(":") > 1 and not env_host.startswith("["):
-            env_host = f"[{env_host}]:11434"
-        elif ":" not in env_host:
-            env_host = f"{env_host}:11434"
-        return env_host
-    return "http://localhost:11434"
-
-
-def _get_ollama_request_headers() -> dict[str, str]:
-    """Return configured headers and credentials for native Ollama requests."""
-    entry = _get_provider_config_dict("ollama")
-    raw = entry.get("extra_headers")
-    try:
-        from hermes_cli.config import normalize_extra_headers
-
-        result = normalize_extra_headers(raw)
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
-        result = {}
-
-    api_key = str(entry.get("api_key") or "").strip()
-    if not api_key:
-        key_env = str(
-            entry.get("key_env") or entry.get("api_key_env") or ""
-        ).strip()
-        api_key = os.getenv(key_env, "").strip() if key_env else ""
-    if api_key:
-        if not any(key.lower() == "authorization" for key in result):
-            result["Authorization"] = f"Bearer {api_key}"
-    return result
-
-
-def _get_ollama_native_headers(
-    base_url: Optional[str],
-    *,
-    api_key: Optional[str] = None,
-) -> dict[str, str]:
-    """Resolve Ollama credentials and headers for one endpoint origin."""
-    entry = _get_provider_config_dict("ollama")
-    configured_base = str(
-        entry.get("base_url") or entry.get("api") or entry.get("url") or ""
-    ).strip()
-    explicit_key = str(api_key or "").strip()
-    configured_matches = bool(
-        configured_base
-        and base_url
-        and _same_ollama_native_root(base_url, configured_base)
-    )
-    if not configured_matches and not explicit_key:
-        return {}
-    headers = _get_ollama_request_headers() if configured_matches else {}
-    if explicit_key:
-        # A provider-specific key must not inherit any configured Authorization
-        # variant from the Ollama origin when both share a native root.
-        for key in tuple(headers):
-            if key.lower() == "authorization":
-                del headers[key]
-        headers["Authorization"] = f"Bearer {explicit_key}"
-    return headers
-
-
-_OLLAMA_LOCAL_MODELS_CACHE_TTL: int = 300  # seconds (5 minutes)
-_OLLAMA_LOCAL_MODELS_CACHE: dict[str, tuple[tuple[str, ...], float]] = {}
-_OLLAMA_LOCAL_PROBE_FAILURE_CACHE: dict[str, float] = {}
-_OLLAMA_LOCAL_PROBE_REACHABLE: dict[str, bool] = {}
-_OLLAMA_LOCAL_PROBE_FAILURE_TTL: int = 30
-_OLLAMA_LOCAL_CACHE_MAX_ENTRIES: int = 256
-
-
-def _evict_related_ollama_cache_entries(key: str) -> None:
-    _OLLAMA_LOCAL_MODELS_CACHE.pop(key, None)
-    _OLLAMA_LOCAL_PROBE_REACHABLE.pop(key, None)
-    for failure_key in list(_OLLAMA_LOCAL_PROBE_FAILURE_CACHE):
-        if failure_key == key or failure_key.startswith(f"{key}|timeout:"):
-            _OLLAMA_LOCAL_PROBE_FAILURE_CACHE.pop(failure_key, None)
-
-
-def _remember_ollama_cache(cache: dict[str, Any], key: str, value: Any) -> None:
-    if key not in cache and len(cache) >= _OLLAMA_LOCAL_CACHE_MAX_ENTRIES:
-        oldest_key = next(iter(cache))
-        _evict_related_ollama_cache_entries(
-            oldest_key.split("|timeout:", 1)[0]
-        )
-    cache[key] = value
-
-
-def _ollama_probe_cache_key(root: str, headers: Optional[dict[str, str]]) -> str:
-    cache_key = root
-    if headers:
-        import hashlib
-
-        normalized_headers = sorted(
-            (str(key).lower(), str(value)) for key, value in headers.items()
-        )
-        header_blob = json.dumps(
-            normalized_headers, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8", errors="replace")
-        header_fingerprint = hashlib.blake2b(header_blob, digest_size=8).hexdigest()
-        cache_key = f"{root}|headers:{header_fingerprint}"
-    return cache_key
-
-
-def probe_ollama_local_models(
-    base_url: Optional[str] = None,
-    timeout: float = 2.0,
-    headers: Optional[dict[str, str]] = None,
-) -> Optional[list[str]]:
-    """Probe local Ollama-compatible models from native ``/api/tags``.
-
-    Returns ``None`` when the endpoint cannot be reached or returns malformed data, and a list
-    (possibly empty) when ``/api/tags`` was reachable. Stock Ollama exposes its authoritative local
-    model catalog at ``/api/tags``; OpenAI-compatible ``/v1/models`` is not required for local
-    Ollama servers.
-    """
-    root = _root_for_ollama_native_api(base_url or _get_ollama_base_url())
-    if not root:
-        return None
-    cache_key = _ollama_probe_cache_key(root, headers)
-    failure_key = f"{cache_key}|timeout:{float(timeout):.3f}"
-    cached = _OLLAMA_LOCAL_MODELS_CACHE.get(cache_key)
-    if cached is not None:
-        cached_models, cached_at = cached
-        if time.monotonic() - cached_at < _OLLAMA_LOCAL_MODELS_CACHE_TTL:
-            return list(cached_models)
-    failed_at = _OLLAMA_LOCAL_PROBE_FAILURE_CACHE.get(failure_key)
-    if failed_at is not None:
-        if time.monotonic() - failed_at < _OLLAMA_LOCAL_PROBE_FAILURE_TTL:
-            return None
-        _OLLAMA_LOCAL_PROBE_FAILURE_CACHE.pop(failure_key, None)
-
-    try:
-        url = root.rstrip("/") + "/api/tags"
-        request_headers = {"User-Agent": _HERMES_USER_AGENT}
-        request_headers.update(headers or {})
-        req = urllib.request.Request(url, headers=request_headers)
-        with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
-    except (
-        ValueError,
-        OSError,
-        TimeoutError,
-        http.client.HTTPException,
-        urllib.error.URLError,
-        json.JSONDecodeError,
-        UnicodeDecodeError,
-    ):
-        _remember_ollama_cache(
-            _OLLAMA_LOCAL_PROBE_REACHABLE, cache_key, False
-        )
-        _remember_ollama_cache(
-            _OLLAMA_LOCAL_PROBE_FAILURE_CACHE, failure_key, time.monotonic()
-        )
-        return None
-
-    raw_models = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(raw_models, list):
-        _remember_ollama_cache(
-            _OLLAMA_LOCAL_PROBE_REACHABLE, cache_key, False
-        )
-        _remember_ollama_cache(
-            _OLLAMA_LOCAL_PROBE_FAILURE_CACHE, failure_key, time.monotonic()
-        )
-        return None
-
-    models: list[str] = []
-    seen: set[str] = set()
-    for item in raw_models:
-        if isinstance(item, dict):
-            model_id = str(item.get("model") or item.get("name") or "").strip()
-        else:
-            _remember_ollama_cache(
-                _OLLAMA_LOCAL_PROBE_REACHABLE, cache_key, False
-            )
-            _remember_ollama_cache(
-                _OLLAMA_LOCAL_PROBE_FAILURE_CACHE, failure_key, time.monotonic()
-            )
-            return None
-        if not model_id or model_id in seen:
-            continue
-        seen.add(model_id)
-        models.append(model_id)
-    if raw_models and not models:
-        _remember_ollama_cache(
-            _OLLAMA_LOCAL_PROBE_REACHABLE, cache_key, False
-        )
-        _remember_ollama_cache(
-            _OLLAMA_LOCAL_PROBE_FAILURE_CACHE, failure_key, time.monotonic()
-        )
-        return None
-    _remember_ollama_cache(_OLLAMA_LOCAL_PROBE_REACHABLE, cache_key, True)
-    _OLLAMA_LOCAL_PROBE_FAILURE_CACHE.pop(failure_key, None)
-    _remember_ollama_cache(
-        _OLLAMA_LOCAL_MODELS_CACHE,
-        cache_key,
-        (tuple(models), time.monotonic()),
-    )
-    return models
-
-
-def fetch_ollama_local_models(
-    base_url: Optional[str] = None,
-    timeout: float = 2.0,
-    headers: Optional[dict[str, str]] = None,
-) -> Optional[list[str]]:
-    """Fetch local Ollama-compatible models, preserving probe failure as ``None``."""
-    return probe_ollama_local_models(base_url, timeout, headers=headers)
-
-
-def _same_ollama_native_root(left: str, right: str) -> bool:
-    """Return True when two Ollama/OpenAI-style base URLs share an API root."""
-    left_root = _root_for_ollama_native_api(left).rstrip("/")
-    right_root = _root_for_ollama_native_api(right).rstrip("/")
-    if not left_root or not right_root:
-        return False
-    try:
-        left_parts = urllib.parse.urlsplit(left_root)
-        right_parts = urllib.parse.urlsplit(right_root)
-        return (
-            url_origin(left_root) == url_origin(right_root)
-            and left_parts.path.rstrip("/") == right_parts.path.rstrip("/")
-        )
-    except (AttributeError, ValueError):
-        return False
-
-
-def should_use_ollama_native_catalog(
-    provider: Optional[str],
-    base_url: Optional[str],
-    headers: Optional[dict[str, str]] = None,
-) -> bool:
-    """Return True when model discovery should use local Ollama ``/api/tags``.
-
-    Bare ``ollama`` is normalized to ``custom`` elsewhere so runtime paths share the OpenAI-
-    compatible client, but local Ollama's authoritative model list is ``/api/tags``. Use it when
-    the caller asked for Ollama explicitly, the base URL matches ``providers.ollama.base_url``,
-    or an ambiguous custom URL on Ollama's default port actually serves ``/api/tags``; other
-    custom endpoints keep the ``/models`` probe.
-    """
-    requested = str(provider or "").strip().lower()
-    root = _root_for_ollama_native_api(base_url or "")
-    if root:
-        try:
-            host = (urllib.parse.urlparse(root).hostname or "").lower()
-            if host == "ollama.com" or host.endswith(".ollama.com"):
-                return False
-        except ValueError:
-            pass
-
-    known_non_local_providers = {
-        "openrouter",
-        "nous",
-        "anthropic",
-        "openai",
-        "openai-codex",
-        "gemini",
-        "ollama-cloud",
-    }
-    if requested in known_non_local_providers:
-        return False
-
-    if requested == "ollama":
-        if not root:
-            return False
-        configured = _get_provider_config_dict("ollama")
-        configured_base = str(
-            configured.get("base_url")
-            or configured.get("api")
-            or configured.get("url")
-            or ""
-        ).strip()
-        if configured_base and not _same_ollama_native_root(root, configured_base):
-            return probe_ollama_local_models(root, timeout=0.5, headers=headers) is not None
-        return True
-
-    provider_cfg = _get_provider_config_dict("ollama")
-    configured_ollama_base_url = str(
-        provider_cfg.get("base_url", "")
-        or provider_cfg.get("api", "")
-        or provider_cfg.get("url", "")
-        or ""
-    ).strip()
-    if configured_ollama_base_url and _same_ollama_native_root(root, configured_ollama_base_url):
-        return True
-
-    if not root:
-        return False
-
-    local_like_providers = {"", "custom", "local", "llamacpp", "llama.cpp", "llama-cpp", "vllm"}
-    if requested not in local_like_providers and not requested.startswith("custom:"):
-        return False
-
-    if requested == "custom:ollama" or requested.endswith("-ollama"):
-        return True
-
-    try:
-        parsed = urllib.parse.urlparse(root)
-        if parsed.port != 11434:
-            return False
-    except ValueError:
-        return False
-
-    return probe_ollama_local_models(root, timeout=0.5, headers=headers) is not None
 
 
 def _get_model_config_dict() -> dict[str, Any]:
@@ -2365,106 +1416,83 @@ def resolve_fast_mode_overrides(
     return {"service_tier": "priority"}
 
 
+def _first_exchangeable_copilot_token(raw_tokens) -> str:
+    """Exchange stored GitHub tokens in order; the first that validates AND exchanges wins.
+
+    Trying every entry (instead of stopping at the first malformed one) keeps a later valid entry
+    reachable when an earlier one is unsupported.
+    """
+    from hermes_cli.copilot_auth import exchange_copilot_token, validate_copilot_token
+
+    for raw in raw_tokens:
+        raw = str(raw or "").strip()
+        if not raw:
+            continue
+        valid, _ = validate_copilot_token(raw)
+        if not valid:
+            continue
+        try:
+            # exchange_copilot_token returns (api_token, expires_at, base_url).
+            api_token = exchange_copilot_token(raw)[0]
+        except Exception:
+            continue
+        if api_token:
+            return api_token
+    return ""
+
+
+def _copilot_cli_config_tokens() -> list[str]:
+    """``copilotTokens`` from the GitHub Copilot CLI's own plaintext store (JSONC — strip
+    ``//``-comment lines), written by ``copilot login`` on hosts without an OS keychain."""
+    cli_config = os.path.expanduser("~/.copilot/config.json")
+    if not os.path.isfile(cli_config):
+        return []
+    with open(cli_config, "r", encoding="utf-8", errors="ignore") as fh:
+        raw_text = "\n".join(
+            line for line in fh.read().splitlines()
+            if not line.lstrip().startswith("//")
+        )
+    data = json.loads(raw_text) if raw_text.strip() else {}
+    tokens = data.get("copilotTokens")
+    return list(tokens.values()) if isinstance(tokens, dict) else []
+
+
 def _resolve_copilot_catalog_api_key() -> str:
     """Best-effort GitHub token for fetching the Copilot model catalog.
 
     Resolution order:
-      1. ``resolve_api_key_provider_credentials("copilot")`` — env vars
-         (``COPILOT_GITHUB_TOKEN`` / ``GH_TOKEN`` / ``GITHUB_TOKEN``) plus
-         the ``gh auth token`` CLI fallback.
-      2. ``read_credential_pool("copilot")`` — a token (typically a
-         ``gho_*`` from device-code login, or a fine-grained PAT) stored in
-         ``auth.json`` under ``credential_pool.copilot[]``. The pool is
-         populated by ``hermes auth add copilot`` and by ``_seed_from_env``
-         when the env var is set in ``~/.hermes/.env``.
-      3. ``~/.copilot/config.json`` ``copilotTokens`` — the GitHub Copilot
-         CLI's own store, written by ``copilot login`` on hosts without an
-         OS keychain. Without it, a user whose ONLY credential is the ACP
-         CLI login sees the copilot-acp picker fall back to the stale
-         curated list instead of the models their subscription serves.
+      1. ``resolve_api_key_provider_credentials("copilot")`` — env vars (``COPILOT_GITHUB_TOKEN`` /
+         ``GH_TOKEN`` / ``GITHUB_TOKEN``) plus the ``gh auth token`` CLI fallback.
+      2. ``read_credential_pool("copilot")`` — a token (a ``gho_*`` from device-code login, or a
+         fine-grained PAT) stored in ``auth.json`` under ``credential_pool.copilot[]``.
+      3. ``~/.copilot/config.json`` ``copilotTokens`` — without it, a user whose ONLY credential is
+         the ACP CLI login sees the copilot-acp picker fall back to the stale curated list.
 
-    Without (2)/(3), users without env-var credentials see the ``/model``
-    picker fall back to a stale hardcoded list because the live catalog
-    fetch silently 401s. To avoid wedging on a malformed entry, each
-    candidate is exchanged via ``exchange_copilot_token`` — only entries
-    that actually exchange successfully are returned, so a later valid
-    entry is reachable when an earlier one is unsupported.
+    Without (2)/(3), users without env-var credentials see the ``/model`` picker fall back to a
+    stale hardcoded list because the live catalog fetch silently 401s.
     """
     try:
         from hermes_cli.auth import resolve_api_key_provider_credentials
 
-        creds = resolve_api_key_provider_credentials("copilot")
-        api_key = str(creds.get("api_key") or "").strip()
+        api_key = str(resolve_api_key_provider_credentials("copilot").get("api_key") or "").strip()
         if api_key:
             return api_key
     except Exception:
         pass
-
     try:
         from hermes_cli.auth import read_credential_pool
-        from hermes_cli.copilot_auth import (
-            exchange_copilot_token,
-            validate_copilot_token,
-        )
 
-        for entry in read_credential_pool("copilot"):
-            if not isinstance(entry, dict):
-                continue
-            raw = str(entry.get("access_token") or "").strip()
-            if not raw:
-                continue
-            valid, _ = validate_copilot_token(raw)
-            if not valid:
-                continue
-            try:
-                # exchange_copilot_token returns (api_token, expires_at,
-                # base_url) — a 2-name unpack raises ValueError, which the
-                # except below silently swallowed, disabling this entire
-                # resolution path.
-                api_token = exchange_copilot_token(raw)[0]
-            except Exception:
-                continue
-            if api_token:
-                return api_token
+        token = _first_exchangeable_copilot_token(
+            entry.get("access_token") for entry in read_credential_pool("copilot") if isinstance(entry, dict)
+        )
+        if token:
+            return token
     except Exception:
         pass
-
-    # 3. Copilot CLI plaintext token store (JSONC — strip //-comment lines).
     try:
-        import json as _json
-
-        from hermes_cli.copilot_auth import (
-            exchange_copilot_token,
-            validate_copilot_token,
-        )
-
-        cli_config = os.path.expanduser("~/.copilot/config.json")
-        if os.path.isfile(cli_config):
-            with open(cli_config, "r", encoding="utf-8", errors="ignore") as fh:
-                raw_text = "\n".join(
-                    line for line in fh.read().splitlines()
-                    if not line.lstrip().startswith("//")
-                )
-            data = _json.loads(raw_text) if raw_text.strip() else {}
-            tokens = data.get("copilotTokens")
-            if isinstance(tokens, dict):
-                for raw in tokens.values():
-                    raw = str(raw or "").strip()
-                    if not raw:
-                        continue
-                    valid, _ = validate_copilot_token(raw)
-                    if not valid:
-                        continue
-                    try:
-                        api_token = exchange_copilot_token(raw)[0]
-                    except Exception:
-                        continue
-                    if api_token:
-                        return api_token
+        return _first_exchangeable_copilot_token(_copilot_cli_config_tokens())
     except Exception:
-        pass
-
-    return ""
+        return ""
 
 
 def _model_dedup_key(model_id: str) -> str:
@@ -2540,35 +1568,6 @@ def _openai_discovery_base_url(provider: str) -> str:
     except Exception:
         pass
     return "https://api.openai.com/v1"
-
-
-def _ollama_local_catalog(force_refresh: bool) -> list[str]:
-    """Catalog for the raw ``ollama`` provider: native ``/api/tags`` when the endpoint is a real
-    Ollama server, else the OpenAI-style ``/v1/models`` of the configured gateway."""
-    if force_refresh:
-        _OLLAMA_LOCAL_MODELS_CACHE.clear()
-        _OLLAMA_LOCAL_PROBE_FAILURE_CACHE.clear()
-        _OLLAMA_LOCAL_PROBE_REACHABLE.clear()
-    base_url = _get_ollama_base_url()
-    headers = _get_ollama_native_headers(base_url)
-    if should_use_ollama_native_catalog("ollama", base_url, headers=headers):
-        if headers:
-            native_models = fetch_ollama_local_models(base_url, headers=headers)
-        else:
-            native_models = fetch_ollama_local_models(base_url)
-        native_key = _ollama_probe_cache_key(_root_for_ollama_native_api(base_url), headers or None)
-        if native_models or _OLLAMA_LOCAL_PROBE_REACHABLE.get(native_key) is True:
-            return native_models or []
-    # Non-native Ollama-compatible endpoints (incl. Ollama Cloud) and gateways exposing only
-    # OpenAI-style /v1/models.
-    config = _get_provider_config_dict("ollama")
-    fallback_key = str(config.get("api_key") or "").strip()
-    if not fallback_key:
-        key_env = str(config.get("key_env") or "").strip()
-        fallback_key = os.getenv(key_env, "").strip() if key_env else ""
-    fallback_base = _normalize_openai_base_url(config.get("base_url") or base_url)
-    fallback_headers = _get_ollama_native_headers(fallback_base, api_key=fallback_key)
-    return fetch_api_models(fallback_key, fallback_base, headers=fallback_headers or None) or []
 
 
 def _codex_catalog(normalized: str, force_refresh: bool) -> list[str]:
@@ -2861,6 +1860,20 @@ _swr_refresh_inflight: set = set()
 _swr_refresh_lock = threading.Lock()
 
 
+def _cache_entry(fp: str, models: list[str], at: Optional[float] = None) -> dict:
+    """One provider row of the disk cache: credential fingerprint, write time, model ids."""
+    return {"fp": fp, "at": time.time() if at is None else at, "models": list(models)}
+
+
+def _ollama_native_probe_reachable() -> bool:
+    """Whether the configured local Ollama root answered the native ``/api/tags`` probe (an empty
+    catalog from a reachable server is authoritative; a failed probe is not)."""
+    base_url = _get_ollama_base_url()
+    headers = _get_ollama_native_headers(base_url) or None
+    probe_key = _ollama_probe_cache_key(_root_for_ollama_native_api(base_url), headers)
+    return _OLLAMA_LOCAL_PROBE_REACHABLE.get(probe_key) is True
+
+
 def _spawn_swr_refresh(cache_key: str, refresh_fn=None) -> None:
     """Kick a background refresh of *cache_key*'s model-id cache entry.
 
@@ -2879,25 +1892,11 @@ def _spawn_swr_refresh(cache_key: str, refresh_fn=None) -> None:
 
     def _default_refresh():
         live = provider_model_ids(cache_key, force_refresh=True)
-        if not live and cache_key == "ollama":
-            base_url = _get_ollama_base_url()
-            headers = _get_ollama_native_headers(base_url) or None
-            probe_key = _ollama_probe_cache_key(
-                _root_for_ollama_native_api(base_url), headers
-            )
-            if _OLLAMA_LOCAL_PROBE_REACHABLE.get(probe_key) is True:
-                return {
-                    "fp": _credential_fingerprint(cache_key),
-                    "at": time.time(),
-                    "models": [],
-                }
+        if not live and cache_key == "ollama" and _ollama_native_probe_reachable():
+            return _cache_entry(_credential_fingerprint(cache_key), [])
         if not live:
             return None
-        return {
-            "fp": _credential_fingerprint(cache_key),
-            "at": time.time(),
-            "models": list(live),
-        }
+        return _cache_entry(_credential_fingerprint(cache_key), live)
 
     def _refresh() -> None:
         try:
@@ -3032,12 +2031,7 @@ def _credential_fingerprint(provider: str) -> str:
 def _load_provider_models_cache() -> dict:
     """Return the full cache dict, or {} on any error."""
     try:
-        path = _provider_models_cache_path()
-        if not path.exists():
-            return {}
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        return _read_json_cache(_provider_models_cache_path()) or {}
     except Exception:
         return {}
 
@@ -3048,10 +2042,7 @@ _cache_write_lock = threading.Lock()
 def _save_provider_models_cache(data: dict) -> None:
     """Persist the cache dict. Best-effort — silent on any error."""
     try:
-        from utils import atomic_json_write
-        path = _provider_models_cache_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json_write(path, data, indent=None)
+        _write_json_cache(_provider_models_cache_path(), data, indent=None)
     except Exception:
         pass
 
@@ -3070,11 +2061,7 @@ def update_provider_cache_entry(provider: str, models: list[str]) -> None:
         fp = _credential_fingerprint(normalized)
         with _cache_write_lock:
             cache = _load_provider_models_cache()
-            cache[normalized] = {
-                "fp": fp,
-                "at": time.time(),
-                "models": list(models),
-            }
+            cache[normalized] = _cache_entry(fp, models)
             _save_provider_models_cache(cache)
     except Exception:
         pass
@@ -3121,24 +2108,15 @@ def cached_provider_model_ids(
     # Cache miss / stale / forced refresh — call the live path.
     live = provider_model_ids(normalized, force_refresh=force_refresh)
     if live:
-        cache[normalized] = {
-            "fp": fp,
-            "at": now,
-            "models": list(live),
-        }
+        cache[normalized] = _cache_entry(fp, live, now)
         _save_provider_models_cache(cache)
         return list(live)
 
     if normalized == "ollama":
-        base_url = _get_ollama_base_url()
-        headers = _get_ollama_native_headers(base_url) or None
-        probe_key = _ollama_probe_cache_key(
-            _root_for_ollama_native_api(base_url), headers
-        )
-        if _OLLAMA_LOCAL_PROBE_REACHABLE.get(probe_key) is True:
+        if _ollama_native_probe_reachable():
             # A reachable empty native catalog is authoritative for the short
             # native TTL; do not resurrect a stale disk catalog.
-            cache[normalized] = {"fp": fp, "at": now, "models": []}
+            cache[normalized] = _cache_entry(fp, [], now)
             _save_provider_models_cache(cache)
             return []
 
@@ -3183,11 +2161,8 @@ def clear_provider_models_cache(provider: Optional[str] = None) -> None:
         cache = _load_provider_models_cache()
         requested = str(provider or "").strip().lower()
         normalized = requested if requested == "ollama" else (normalize_provider(provider) or provider or "")
-        changed = False
         if normalized in cache:
             del cache[normalized]
-            changed = True
-        if changed:
             _save_provider_models_cache(cache)
     except Exception:
         pass
@@ -3494,325 +2469,6 @@ def _is_github_models_base_url(base_url: Optional[str]) -> bool:
         or normalized.startswith("https://models.github.ai/inference")
         or normalized.startswith("https://models.inference.ai.azure.com")
     )
-
-
-def _lmstudio_server_root(base_url: Optional[str]) -> Optional[str]:
-    """Return the LM Studio server root for native ``/api/v1`` endpoints.
-
-    Users commonly copy either the OpenAI-compatible runtime URL (``.../v1``) or the native API
-    prefix (``.../api`` / ``.../api/v1``). Native probes append ``/api/v1/...`` themselves, so
-    normalize all accepted forms back to the bare server root to avoid ``/api/api/v1`` requests.
-    """
-    root = (base_url or "").strip().rstrip("/")
-    for suffix in ("/api/v1", "/api", "/v1"):
-        if root.endswith(suffix):
-            root = root[: -len(suffix)].rstrip("/")
-            break
-    return root or None
-
-
-def _lmstudio_request_headers(api_key: Optional[str] = None) -> dict:
-    """Build HTTP headers for LM Studio native API requests."""
-    headers = {"User-Agent": _HERMES_USER_AGENT}
-    token = str(api_key or "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-
-def _lmstudio_fetch_raw_models(
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
-    timeout: float = 5.0,
-) -> Optional[list[dict]]:
-    """Fetch the raw model list from LM Studio's ``/api/v1/models``."""
-    server_root = _lmstudio_server_root(base_url)
-    if not server_root:
-        return None
-
-    headers = _lmstudio_request_headers(api_key)
-    request = urllib.request.Request(server_root + "/api/v1/models", headers=headers)
-    try:
-        with _urlopen_model_catalog_request(request, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        if exc.code in {401, 403}:
-            from hermes_cli.auth import AuthError
-            raise AuthError(
-                f"LM Studio rejected the request with HTTP {exc.code}.",
-                provider="lmstudio",
-                code="auth_rejected",
-            ) from exc
-        import logging
-        logging.getLogger(__name__).debug(
-            "LM Studio probe at %s failed with HTTP %s", server_root, exc.code,
-        )
-        return None
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).debug(
-            "LM Studio probe at %s failed: %s", server_root, exc,
-        )
-        return None
-
-    raw_models = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(raw_models, list):
-        import logging
-        logging.getLogger(__name__).debug(
-            "LM Studio probe at %s returned malformed payload (no `models` list)",
-            server_root,
-        )
-        return None
-    return raw_models
-
-
-def probe_lmstudio_models(
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
-    timeout: float = 5.0,
-) -> Optional[list[str]]:
-    """Probe LM Studio's model listing.
-
-    Returns chat-capable model keys, including a valid empty list when the server is reachable
-    but has no non-embedding models; returns ``None`` on network errors, malformed responses, or
-    bad base URLs. Raises ``AuthError`` on HTTP 401/403 so token issues surface separately from
-    reachability.
-    """
-    raw_models = _lmstudio_fetch_raw_models(api_key=api_key, base_url=base_url, timeout=timeout)
-    if raw_models is None:
-        return None
-
-    keys: list[str] = []
-    for raw in raw_models:
-        if not isinstance(raw, dict):
-            continue
-        if str(raw.get("type") or "").strip().lower() == "embedding":
-            continue
-        key = str(raw.get("key") or raw.get("id") or "").strip()
-        if key and key not in keys:
-            keys.append(key)
-    return keys
-
-
-def fetch_lmstudio_models(
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
-    timeout: float = 5.0,
-) -> list[str]:
-    """Fetch LM Studio chat-capable model keys from native ``/api/v1/models``.
-
-    Embedding models are filtered out; network errors, malformed responses, and bad base URLs
-    yield an empty list. Raises ``AuthError`` on HTTP 401/403 so callers can distinguish a
-    missing or wrong ``LM_API_KEY`` from an unreachable server — the most common LM Studio
-    support case.
-    """
-    models = probe_lmstudio_models(api_key=api_key, base_url=base_url, timeout=timeout)
-    return models or []
-
-
-class LMStudioLoadResult(NamedTuple):
-    """Verified LM Studio runtime plus load-attempt provenance."""
-
-    context_length: Optional[int]
-    load_attempted: bool = False
-    rejected: bool = False
-
-
-def ensure_lmstudio_model_loaded(
-    model: str,
-    base_url: Optional[str],
-    api_key: Optional[str],
-    target_context_length: Optional[int],
-    timeout: float = 120.0,
-    *,
-    return_load_result: bool = False,
-) -> Optional[int] | LMStudioLoadResult:
-    """Ensure ``model`` is loaded and return verified runtime context.
-
-    Existing loaded-instance context is authoritative. Cold loads omit ``context_length`` unless the
-    caller supplied an explicit override; the returned context must come from LM Studio's echoed or
-    refreshed state.
-    """
-
-    def _result(
-        context_length: Optional[int],
-        *,
-        load_attempted: bool = False,
-        rejected: bool = False,
-    ) -> Optional[int] | LMStudioLoadResult:
-        value = LMStudioLoadResult(context_length, load_attempted, rejected)
-        return value if return_load_result else context_length
-
-    def _positive_int(value: Any) -> Optional[int]:
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            return value
-        return None
-
-    def _loaded_context(entry: dict) -> Optional[int]:
-        instances = entry.get("loaded_instances")
-        if not isinstance(instances, list):
-            return None
-        for instance in instances:
-            config = instance.get("config") if isinstance(instance, dict) else None
-            context = config.get("context_length") if isinstance(config, dict) else None
-            parsed = _positive_int(context)
-            if parsed is not None:
-                return parsed
-        return None
-
-    def _find_entry(raw_models: list[dict]) -> Optional[dict]:
-        for raw in raw_models:
-            if isinstance(raw, dict) and (raw.get("key") == model or raw.get("id") == model):
-                return raw
-        return None
-
-    server_root = _lmstudio_server_root(base_url)
-    if not server_root:
-        return _result(None)
-
-    explicit_context = _positive_int(target_context_length)
-    if target_context_length is not None and explicit_context is None:
-        return _result(None)
-
-    headers = _lmstudio_request_headers(api_key)
-
-    try:
-        raw_models = _lmstudio_fetch_raw_models(api_key=api_key, base_url=base_url, timeout=10)
-    except Exception:
-        raw_models = None
-    if raw_models is None:
-        return _result(None)
-
-    target_entry = _find_entry(raw_models)
-    if target_entry is None:
-        return _result(None)
-
-    max_ctx = _positive_int(target_entry.get("max_context_length"))
-    if explicit_context is not None and max_ctx is not None and explicit_context > max_ctx:
-        return _result(None, rejected=True)
-
-    current_context = _loaded_context(target_entry)
-    if current_context is not None:
-        return _result(current_context)
-
-    loaded_instances = target_entry.get("loaded_instances")
-    if not isinstance(loaded_instances, list) or loaded_instances:
-        return _result(None)
-
-    load_payload: dict[str, Any] = {"model": model, "echo_load_config": True}
-    if explicit_context is not None:
-        load_payload["context_length"] = explicit_context
-    body = json.dumps(load_payload).encode()
-    load_headers = dict(headers)
-    load_headers["Content-Type"] = "application/json"
-    try:
-        load_request = urllib.request.Request(
-            server_root + "/api/v1/models/load",
-            data=body,
-            headers=load_headers,
-            method="POST",
-        )
-        with _urlopen_model_catalog_request(load_request, timeout=timeout) as resp:
-            response_body = resp.read()
-    except Exception:
-        return _result(None, load_attempted=True)
-
-    try:
-        response_payload = json.loads(response_body.decode())
-    except Exception:
-        response_payload = None
-    load_config = response_payload.get("load_config") if isinstance(response_payload, dict) else None
-    applied_context = (
-        _positive_int(load_config.get("context_length"))
-        if isinstance(load_config, dict)
-        else None
-    )
-    if applied_context is not None:
-        return _result(applied_context, load_attempted=True)
-
-    try:
-        refreshed_models = _lmstudio_fetch_raw_models(api_key=api_key, base_url=base_url, timeout=10)
-    except Exception:
-        refreshed_models = None
-    if refreshed_models is None:
-        return _result(None, load_attempted=True)
-    refreshed_entry = _find_entry(refreshed_models)
-    refreshed_context = _loaded_context(refreshed_entry) if refreshed_entry is not None else None
-    return _result(refreshed_context, load_attempted=True)
-
-
-def lmstudio_model_reasoning_options(
-    model: str,
-    base_url: Optional[str],
-    api_key: Optional[str] = None,
-    timeout: float = 5.0,
-) -> list[str]:
-    """Return the reasoning ``allowed_options`` LM Studio publishes for ``model``.
-
-    Reads ``capabilities.reasoning.allowed_options`` from ``/api/v1/models``; returns ``[]``
-    when the model is unknown, the endpoint is unreachable, or no reasoning capability is
-    declared.
-    """
-    try:
-        raw_models = _lmstudio_fetch_raw_models(api_key=api_key, base_url=base_url, timeout=timeout)
-    except Exception:
-        raw_models = None
-    if not raw_models:
-        return []
-
-    for raw in raw_models:
-        if not isinstance(raw, dict):
-            continue
-        if raw.get("key") != model and raw.get("id") != model:
-            continue
-        caps = raw.get("capabilities")
-        reasoning = caps.get("reasoning") if isinstance(caps, dict) else None
-        opts = reasoning.get("allowed_options") if isinstance(reasoning, dict) else None
-        if isinstance(opts, list):
-            return [str(o).strip().lower() for o in opts if isinstance(o, str)]
-        return []
-    return []
-
-
-def ollama_model_supports_thinking(
-    model: str,
-    base_url: Optional[str],
-    api_key: Optional[str] = None,
-    timeout: float = 5.0,
-) -> Optional[bool]:
-    """Return True if an Ollama (Cloud or local) model advertises ``thinking``.
-
-    Probes native ``/api/show`` and checks ``capabilities`` — the authoritative source, since
-    the OpenAI-compat ``/v1/models`` endpoint omits it. Tri-state: True when ``thinking`` is
-    declared, False when the probe succeeded without it, None when the probe failed so the
-    caller picks the fallback (treated as "don't emit").
-    """
-    import httpx
-
-    server_url = (base_url or "").strip().rstrip("/")
-    if server_url.endswith("/v1"):
-        server_url = server_url[:-3]
-    if not server_url:
-        return None
-
-    bare_model = _strip_ollama_cloud_suffix((model or "").strip())
-    if not bare_model:
-        return None
-
-    token = str(api_key or "").strip()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-
-    try:
-        with httpx.Client(timeout=timeout, headers=headers) as client:
-            resp = client.post(f"{server_url}/api/show", json={"name": bare_model})
-            if resp.status_code != 200:
-                return None
-            caps = resp.json().get("capabilities")
-            if isinstance(caps, list):
-                return "thinking" in caps
-    except Exception:
-        return None
-    return None
 
 
 def _fetch_github_models(api_key: Optional[str] = None, timeout: float = 5.0) -> Optional[list[str]]:
@@ -4281,6 +2937,16 @@ def github_model_reasoning_efforts(
     return _github_reasoning_efforts_for_model_id(str(model_id or normalized))
 
 
+def _probe_result(models, probed_url, resolved_base_url, suggested_base_url=None, used_fallback=False) -> dict[str, Any]:
+    return {
+        "models": models,
+        "probed_url": probed_url,
+        "resolved_base_url": resolved_base_url,
+        "suggested_base_url": suggested_base_url,
+        "used_fallback": used_fallback,
+    }
+
+
 def probe_api_models(
     api_key: Optional[str],
     base_url: Optional[str],
@@ -4288,31 +2954,18 @@ def probe_api_models(
     api_mode: Optional[str] = None,
     request_headers: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
-    """Probe a ``/models`` endpoint with light URL heuristics.
+    """Probe a ``/models`` endpoint with light URL heuristics (``base`` then ``base±/v1``).
 
     For ``anthropic_messages`` mode, sends ``x-api-key`` and ``anthropic-version`` headers
     instead of ``Authorization: Bearer``; the response shape (``data[].id``) is identical so one
-    parser serves both.
+    parser serves both. ``models`` is None when no candidate answered.
     """
     normalized = (base_url or "").strip().rstrip("/")
     if not normalized:
-        return {
-            "models": None,
-            "probed_url": None,
-            "resolved_base_url": "",
-            "suggested_base_url": None,
-            "used_fallback": False,
-        }
+        return _probe_result(None, None, "")
 
     if _is_github_models_base_url(normalized):
-        models = _fetch_github_models(api_key=api_key, timeout=timeout)
-        return {
-            "models": models,
-            "probed_url": COPILOT_MODELS_URL,
-            "resolved_base_url": COPILOT_BASE_URL,
-            "suggested_base_url": None,
-            "used_fallback": False,
-        }
+        return _probe_result(_fetch_github_models(api_key=api_key, timeout=timeout), COPILOT_MODELS_URL, COPILOT_BASE_URL)
 
     if normalized.endswith("/v1"):
         alternate_base = normalized[:-3].rstrip("/")
@@ -4335,43 +2988,41 @@ def probe_api_models(
     if normalized.startswith(COPILOT_BASE_URL):
         headers.update(copilot_default_headers())
     if isinstance(request_headers, dict):
-        # Per-provider custom headers can contain auth/proxy secrets. Merge
-        # last so endpoint-specific config wins, and never log the values.
+        # Per-provider custom headers can contain auth/proxy secrets. Merge last so
+        # endpoint-specific config wins, and never log the values.
         from hermes_cli.config import normalize_extra_headers
 
         headers.update(normalize_extra_headers(request_headers))
 
+    # Only thread ssl_context when a per-provider TLS override applies; public/unconfigured
+    # endpoints keep the original 2-arg call so existing call-seam mocks stay valid.
+    _open_kwargs: dict[str, Any] = {"timeout": timeout}
     _ssl_context = _custom_provider_ssl_context(normalized)
+    if _ssl_context is not None:
+        _open_kwargs["ssl_context"] = _ssl_context
     for candidate_base, is_fallback in candidates:
         url = candidate_base.rstrip("/") + "/models"
         tried.append(url)
         req = urllib.request.Request(url, headers=headers)
-        # Only thread ssl_context when a per-provider TLS override actually
-        # applies. Public/unconfigured endpoints keep the original 2-arg call,
-        # so nothing changes for them (and existing call-seam mocks stay valid).
-        _open_kwargs: dict[str, Any] = {"timeout": timeout}
-        if _ssl_context is not None:
-            _open_kwargs["ssl_context"] = _ssl_context
         try:
             with _urlopen_model_catalog_request(req, **_open_kwargs) as resp:
                 data = json.loads(resp.read().decode())
-                return {
-                    "models": [m.get("id", "") for m in data.get("data", [])],
-                    "probed_url": url,
-                    "resolved_base_url": candidate_base.rstrip("/"),
-                    "suggested_base_url": alternate_base if alternate_base != candidate_base else normalized,
-                    "used_fallback": is_fallback,
-                }
+                return _probe_result(
+                    [m.get("id", "") for m in data.get("data", [])],
+                    url,
+                    candidate_base.rstrip("/"),
+                    alternate_base if alternate_base != candidate_base else normalized,
+                    is_fallback,
+                )
         except Exception:
             continue
 
-    return {
-        "models": None,
-        "probed_url": tried[0] if tried else normalized.rstrip("/") + "/models",
-        "resolved_base_url": normalized,
-        "suggested_base_url": alternate_base if alternate_base != normalized else None,
-        "used_fallback": False,
-    }
+    return _probe_result(
+        None,
+        tried[0] if tried else normalized.rstrip("/") + "/models",
+        normalized,
+        alternate_base if alternate_base != normalized else None,
+    )
 
 
 # Legacy filter — used when an item has no surface tag (rolling out
@@ -4539,44 +3190,6 @@ def deepinfra_base_url(section: Optional[dict] = None) -> str:
     candidate = section.get("base_url") if isinstance(section, dict) else None
     value = candidate or os.getenv("DEEPINFRA_BASE_URL") or _DEEPINFRA_DEFAULT_BASE_URL
     return str(value).strip().rstrip("/")
-
-
-def _fetch_deepinfra_pricing(
-    timeout: float = 5.0,
-    *,
-    force_refresh: bool = False,
-) -> dict[str, dict[str, str]]:
-    """Return picker-shape pricing for DeepInfra chat models.
-
-    DeepInfra publishes ``input_tokens``/``output_tokens``/``cache_read_tokens`` in $/MTok; the
-    picker expects per-token strings under ``prompt``/``completion``/``input_cache_read``
-    (OpenRouter shape). Cached via the catalog helper so repeated picker renders are free.
-    """
-    items = _fetch_deepinfra_models_by_tag(
-        "chat", timeout=timeout, force_refresh=force_refresh
-    )
-    if not items:
-        return {}
-
-    result: dict[str, dict[str, str]] = {}
-    for item in items:
-        metadata = item.get("metadata") or {}
-        pricing = metadata.get("pricing") if isinstance(metadata, dict) else None
-        if not isinstance(pricing, dict):
-            continue
-        entry: dict[str, str] = {}
-        inp = pricing.get("input_tokens")
-        out = pricing.get("output_tokens")
-        cache_read = pricing.get("cache_read_tokens")
-        if inp is not None:
-            entry["prompt"] = str(float(inp) / 1_000_000)
-        if out is not None:
-            entry["completion"] = str(float(out) / 1_000_000)
-        if cache_read is not None:
-            entry["input_cache_read"] = str(float(cache_read) / 1_000_000)
-        if entry:
-            result[item["id"]] = entry
-    return result
 
 
 def _fetch_ai_gateway_models(timeout: float = 5.0) -> Optional[list[str]]:
@@ -4757,122 +3370,3 @@ def cached_fetch_api_models(
 # ---------------------------------------------------------------------------
 
 
-_OLLAMA_CLOUD_CACHE_TTL = 3600  # 1 hour
-
-
-def _strip_ollama_cloud_suffix(model_id: str) -> str:
-    """Strip :cloud / -cloud suffixes that models.dev appends to Ollama Cloud IDs.
-
-    The live API uses clean IDs (e.g. 'kimi-k2.6') while models.dev sometimes returns them as
-    'kimi-k2.6:cloud'. Normalising before the dedup merge prevents duplicate entries in the merged
-    model list.
-    """
-    for suffix in (":cloud", "-cloud"):
-        if model_id.endswith(suffix):
-            return model_id[: -len(suffix)]
-    return model_id
-
-
-def _ollama_cloud_cache_path() -> Path:
-    """Return the path for the Ollama Cloud model cache."""
-    from hermes_constants import get_hermes_home
-    return get_hermes_home() / "ollama_cloud_models_cache.json"
-
-
-def _load_ollama_cloud_cache(*, ignore_ttl: bool = False) -> Optional[dict]:
-    """Load cached Ollama Cloud models from disk."""
-    try:
-        cache_path = _ollama_cloud_cache_path()
-        if not cache_path.exists():
-            return None
-        with open(cache_path, encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return None
-        models = data.get("models")
-        if not (isinstance(models, list) and models):
-            return None
-        if not ignore_ttl:
-            cached_at = data.get("cached_at", 0)
-            if (time.time() - cached_at) > _OLLAMA_CLOUD_CACHE_TTL:
-                return None  # stale
-        return data
-    except Exception:
-        pass
-    return None
-
-
-def _save_ollama_cloud_cache(models: list[str]) -> None:
-    """Persist the merged Ollama Cloud model list to disk."""
-    try:
-        from utils import atomic_json_write
-        cache_path = _ollama_cloud_cache_path()
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json_write(cache_path, {"models": models, "cached_at": time.time()}, indent=None)
-    except Exception:
-        pass
-
-
-def fetch_ollama_cloud_models(
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
-    *,
-    force_refresh: bool = False,
-) -> list[str]:
-    """Fetch Ollama Cloud models by merging live API + models.dev, with disk cache.
-
-    Resolution order: 1. Disk cache (if fresh, < 1 hour, and not force_refresh) 2. Live
-    ``/v1/models`` endpoint (primary — freshest source) 3. models.dev registry (secondary — fills
-    gaps for unlisted models) 4. Merge: live models first, then models.dev additions (deduped)
-
-    Returns a list of model IDs (never None — empty list on total failure).
-    """
-    # 1. Check disk cache
-    if not force_refresh:
-        cached = _load_ollama_cloud_cache()
-        if cached is not None:
-            return cached["models"]
-
-    # 2. Live API probe
-    if not api_key:
-        api_key = os.getenv("OLLAMA_API_KEY", "")
-    if not base_url:
-        base_url = os.getenv("OLLAMA_BASE_URL", "") or "https://ollama.com/v1"
-
-    live_models: list[str] = []
-    if api_key:
-        result = fetch_api_models(api_key, base_url, timeout=8.0)
-        if result:
-            live_models = result
-
-    # 3. models.dev registry
-    mdev_models: list[str] = []
-    try:
-        from agent.models_dev import list_agentic_models
-        mdev_models = list_agentic_models("ollama-cloud")
-    except Exception:
-        pass
-
-    # 4. Merge: live first, then models.dev additions (deduped, order-preserving)
-    if live_models or mdev_models:
-        seen: set[str] = set()
-        merged: list[str] = []
-        for m in live_models:
-            if m and m not in seen:
-                seen.add(m)
-                merged.append(m)
-        for m in mdev_models:
-            normalized = _strip_ollama_cloud_suffix(m)
-            if normalized and normalized not in seen:
-                seen.add(normalized)
-                merged.append(normalized)
-        if merged:
-            _save_ollama_cloud_cache(merged)
-            return merged
-
-    # Total failure — return stale cache if available (ignore TTL)
-    stale = _load_ollama_cloud_cache(ignore_ttl=True)
-    if stale is not None:
-        return stale["models"]
-
-    return []
