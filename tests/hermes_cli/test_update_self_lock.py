@@ -249,9 +249,12 @@ def test_pre_fetch_flow_has_no_self_lock_preflight():
     pre_fetch = src[:fetch_idx]
     assert "_detect_self_loaded_native_modules()" not in pre_fetch
     assert "_m()._abort_dependency_sync_if_self_locked" not in pre_fetch
-    # ... and it must still guard the dependency sync after the code swap.
+    # ... and it must still guard the dependency sync after the code swap
+    # (the sync itself lives in _sync_python_dependencies_after_pull).
     post_fetch = src[fetch_idx:]
-    assert "_m()._abort_dependency_sync_if_self_locked" in post_fetch
+    assert "_sync_python_dependencies_after_pull(" in post_fetch
+    sync_src = inspect.getsource(update_cmd._sync_python_dependencies_after_pull)
+    assert "_m()._abort_dependency_sync_if_self_locked" in sync_src
 
 
 def test_zip_update_guards_dependency_sync():
