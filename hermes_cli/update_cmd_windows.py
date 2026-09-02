@@ -912,18 +912,115 @@ def _restore_windows_gateway_service(name: str, *, timeout: float = 60.0) -> Non
     )
 
 
+def _windows_cold_start_plan() -> dict | None:
+    """Pause token for the no-running-gateway case: cold-start after update when an autostart entry exists.
+
+    Desktop-owned lifecycle -> ``None`` (spawning ``gateway run`` beside Desktop races ports/state).
+    """
+    from hermes_cli.update_cmd import _desktop_owns_gateway_lifecycle
+
+    # No gateway running, but an installed autostart entry is an explicit "I want a
+    # gateway" signal; a gateway that died between updates would otherwise stay down
+    # until next login (resume only relaunches what was running). Cold-start after update.
+    # Exception: Desktop owns the lifecycle — spawning ``gateway run`` beside it races
+    # ports/state. The skip is ownership, not liveness.
+    with _best_effort('Could not check Desktop gateway-lifecycle ownership before update: %s'):
+        if _desktop_owns_gateway_lifecycle():
+            logger.debug(
+                "Skipping Windows gateway cold-start plan: "
+                "Desktop owns gateway lifecycle"
+            )
+            return None
+    with _best_effort('Could not check Windows gateway autostart state before update: %s'):
+        from hermes_cli import gateway_windows
+
+        if gateway_windows.is_installed():
+            return {
+                "resume_needed": True,
+                "profiles": {},
+                "unmapped_pids": [],
+                "unmapped": [],
+                "cold_start_if_installed": True,
+            }
+    return None
+
+
+def _pause_windows_gateway_services(service_gateways, token: dict, profiles: dict, unmapped: list) -> dict:
+    """Stop each SCM gateway service, recording them on *token*; roll everything back on failure.
+
+    Runs after every fallible ordinary-gateway step so a failure here restores the attempted
+    services AND the already-paused ordinary gateways before re-raising.
+    """
+    from hermes_cli.update_cmd import _restore_windows_gateway_service, _stop_windows_gateway_service
+
+    # Stop SCM services only after every fallible ordinary-gateway step; from here any
+    # error restores attempted services and already-paused gateways before aborting.
+    paused_services = []
+    current_service_name = None
+    try:
+        for service in service_gateways:
+            current_service_name = str(service.name)
+            _stop_windows_gateway_service(
+                current_service_name,
+                expected_processes=tuple(
+                    getattr(service, "descendant_identities", ())
+                ),
+                expected_service_identity=(
+                    int(service.service_pid),
+                    float(service.service_create_time),
+                ),
+                expected_gateway_identity=(
+                    int(service.gateway_pid),
+                    float(service.gateway_create_time),
+                ),
+            )
+            paused_services.append(current_service_name)
+            current_service_name = None
+        if paused_services:
+            token["services"] = paused_services
+            token["expected_services"] = list(paused_services)
+            token["restarted_services"] = []
+            token["service_profiles"] = {
+                str(service.name): str(service.profile)
+                for service in service_gateways
+                if str(service.name) in paused_services
+            }
+            print(
+                "  ✓ Paused Windows gateway service(s): "
+                + ", ".join(paused_services)
+            )
+        return token
+    except Exception as exc:
+        restore_names = []
+        if current_service_name:
+            restore_names.append(current_service_name)
+        restore_names.extend(reversed(paused_services))
+        rollback_failures = []
+        for service_name in dict.fromkeys(restore_names):
+            try:
+                _restore_windows_gateway_service(service_name)
+            except Exception as restore_exc:
+                rollback_failures.append(f"{service_name}: {restore_exc}")
+        if profiles or unmapped:
+            try:
+                _resume_windows_gateways_after_update(token)
+            except Exception as restore_exc:
+                rollback_failures.append(f"ordinary gateways: {restore_exc}")
+        failed_service = current_service_name or "unknown"
+        detail = f"Could not stop Windows gateway service {failed_service}: {exc}"
+        if rollback_failures:
+            detail += "; rollback failures: " + "; ".join(rollback_failures)
+        raise RuntimeError(detail) from exc
+
+
 def _pause_windows_gateways_for_update() -> dict | None:
     """Stop running Windows gateways before mutating the checkout or venv.
 
     Scheduled/startup gateways run via pythonw.exe, invisible to the hermes.exe instance guard, yet keep files
     locked during ``git``/``uv``. Stop only PIDs the gateway discovery code identifies.
     """
-    from hermes_cli.update_cmd import (
-        _desktop_owns_gateway_lifecycle,
-        _m,
-        _restore_windows_gateway_service,
-        _stop_windows_gateway_service,
-    )
+    from hermes_cli.update_cmd import _m
+
     if not _m()._is_windows():
         return None
 
@@ -974,30 +1071,7 @@ def _pause_windows_gateways_for_update() -> dict | None:
             f"Could not discover Windows gateway PIDs before update: {exc}"
         ) from exc
     if not running_pids:
-        # No gateway running, but an installed autostart entry is an explicit "I want a
-        # gateway" signal; a gateway that died between updates would otherwise stay down
-        # until next login (resume only relaunches what was running). Cold-start after update.
-        # Exception: Desktop owns the lifecycle — spawning ``gateway run`` beside it races
-        # ports/state. The skip is ownership, not liveness.
-        with _best_effort('Could not check Desktop gateway-lifecycle ownership before update: %s'):
-            if _desktop_owns_gateway_lifecycle():
-                logger.debug(
-                    "Skipping Windows gateway cold-start plan: "
-                    "Desktop owns gateway lifecycle"
-                )
-                return None
-        with _best_effort('Could not check Windows gateway autostart state before update: %s'):
-            from hermes_cli import gateway_windows
-
-            if gateway_windows.is_installed():
-                return {
-                    "resume_needed": True,
-                    "profiles": {},
-                    "unmapped_pids": [],
-                    "unmapped": [],
-                    "cold_start_if_installed": True,
-                }
-        return None
+        return _windows_cold_start_plan()
 
     profiles: dict[str, int] = {}
     mapped_pids = []
@@ -1101,64 +1175,7 @@ def _pause_windows_gateways_for_update() -> dict | None:
         "unmapped": unmapped,
     }
 
-    # Stop SCM services only after every fallible ordinary-gateway step; from here any
-    # error restores attempted services and already-paused gateways before aborting.
-    paused_services = []
-    current_service_name = None
-    try:
-        for service in service_gateways:
-            current_service_name = str(service.name)
-            _stop_windows_gateway_service(
-                current_service_name,
-                expected_processes=tuple(
-                    getattr(service, "descendant_identities", ())
-                ),
-                expected_service_identity=(
-                    int(service.service_pid),
-                    float(service.service_create_time),
-                ),
-                expected_gateway_identity=(
-                    int(service.gateway_pid),
-                    float(service.gateway_create_time),
-                ),
-            )
-            paused_services.append(current_service_name)
-            current_service_name = None
-        if paused_services:
-            token["services"] = paused_services
-            token["expected_services"] = list(paused_services)
-            token["restarted_services"] = []
-            token["service_profiles"] = {
-                str(service.name): str(service.profile)
-                for service in service_gateways
-                if str(service.name) in paused_services
-            }
-            print(
-                "  ✓ Paused Windows gateway service(s): "
-                + ", ".join(paused_services)
-            )
-        return token
-    except Exception as exc:
-        restore_names = []
-        if current_service_name:
-            restore_names.append(current_service_name)
-        restore_names.extend(reversed(paused_services))
-        rollback_failures = []
-        for service_name in dict.fromkeys(restore_names):
-            try:
-                _restore_windows_gateway_service(service_name)
-            except Exception as restore_exc:
-                rollback_failures.append(f"{service_name}: {restore_exc}")
-        if profiles or unmapped:
-            try:
-                _resume_windows_gateways_after_update(token)
-            except Exception as restore_exc:
-                rollback_failures.append(f"ordinary gateways: {restore_exc}")
-        failed_service = current_service_name or "unknown"
-        detail = f"Could not stop Windows gateway service {failed_service}: {exc}"
-        if rollback_failures:
-            detail += "; rollback failures: " + "; ".join(rollback_failures)
-        raise RuntimeError(detail) from exc
+    return _pause_windows_gateway_services(service_gateways, token, profiles, unmapped)
 
 
 def _cold_start_windows_gateway_after_update() -> bool:
