@@ -365,11 +365,10 @@ def _msgraph_webhook(config: GatewayConfig) -> None:
     ):
         return
     msgraph_cfg = config.platforms.setdefault(Platform.MSGRAPH_WEBHOOK, PlatformConfig())
-    if enabled:
-        # Same explicit-disable guard as the webhook branch, but READ (don't pop) the marker:
-        # the relay-exclusive pass below still consults it; the end-of-function scrub removes it.
-        if not msgraph_cfg.extra.get("_enabled_explicit", False) or msgraph_cfg.enabled:
-            msgraph_cfg.enabled = True
+    # Same explicit-disable guard as the webhook branch, but READ (don't pop) the marker:
+    # the relay-exclusive pass below still consults it; the end-of-function scrub removes it.
+    if enabled and (not msgraph_cfg.extra.get("_enabled_explicit", False) or msgraph_cfg.enabled):
+        msgraph_cfg.enabled = True
     _env_extras(msgraph_cfg.extra, (("port", "MSGRAPH_WEBHOOK_PORT", _INT),))
     if client_state:
         msgraph_cfg.extra["client_state"] = client_state
