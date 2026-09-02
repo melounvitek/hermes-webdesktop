@@ -1,32 +1,12 @@
 """Monitor-mode cron support — hash-suppressed change detection.
 
-A monitor job attaches a cheap *monitor source* (``monitor_script`` or
-``monitor_url``) to an ordinary LLM cron job. Each tick the scheduler runs
-the source FIRST and compares a hash of its exact output bytes against the
-hash stored from the last agent-triggering tick:
-
-* unchanged → the agent run is suppressed entirely (no LLM, no delivery);
-  the tick is recorded as a silent ``no_change`` run.
-* changed (or first run) → a "MONITOR CHANGE DETECTED" context block —
-  unified diff of old vs new output (capped) plus the new output — is
-  injected into the prompt and the agent runs normally.
-* source failure → treated as an ERROR, never as a change. The stored hash
-  is left untouched so a source that recovers to its previous output still
-  suppresses.
-
-Output is compared as EXACT BYTES — no timestamp stripping or whitespace
-normalization. Monitor scripts should emit stable output (sort results,
-omit "generated at" lines) or every tick will look like a change.
-
-State lives in two places, both durable across scheduler restarts:
-
-* ``job["monitor_state"]`` in jobs.json — ``last_output_hash`` +
-  ``last_changed_at`` (additive JSON fields, no migration needed);
-* ``OUTPUT_DIR/<job_id>/monitor_last_output.txt`` — the previous output
-  text, kept only so the next change can render a diff.
-
-Inspired by: ChatGPT Work monitor tasks (idea-level, docs-only);
-enabler: #80774.
+A monitor job attaches a cheap source (``monitor_script`` / ``monitor_url``) to an LLM cron job. Each
+tick runs the source FIRST and hashes its EXACT output bytes (no timestamp/whitespace normalization —
+scripts must emit stable output) against the hash from the last agent-triggering tick: unchanged →
+agent run suppressed (silent ``no_change`` run); changed/first run → a "MONITOR CHANGE DETECTED"
+block (capped unified diff + new output) is injected into the prompt; source failure → an ERROR,
+never a change, and the stored hash is left untouched. State: ``job["monitor_state"]`` in jobs.json
+(hash + last_changed_at) and ``OUTPUT_DIR/<job_id>/monitor_last_output.txt`` (for the diff).
 """
 
 from __future__ import annotations
@@ -148,9 +128,8 @@ def job_has_monitor(job: dict) -> bool:
 def check_monitor(job: dict) -> MonitorOutcome:
     """Run the monitor source and decide whether the agent should run.
 
-    On change (or first run) the new hash + snapshot are persisted BEFORE
-    the agent runs — detection time is the state boundary, so a failed
-    agent run doesn't re-alert on the same content forever.
+    On change (or first run) the new hash + snapshot are persisted BEFORE the agent runs — detection
+    time is the state boundary, so a failed agent run doesn't re-alert on the same content forever.
     On failure nothing is persisted.
     """
     job_id = str(job.get("id") or "")

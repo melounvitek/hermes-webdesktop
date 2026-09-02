@@ -1,23 +1,18 @@
 """Durable cron failure incidents with signature dedup and ack.
 
-The executions ledger (``cron.executions``) records every attempt; this module
-groups the *failures* into durable incidents keyed by ``(job_id, error
-signature)`` so the same job failing with the same error does not re-ping the
-operator every run once they have acknowledged it.
+The executions ledger (``cron.executions``) records every attempt; this module groups the *failures*
+into durable incidents keyed by ``(job_id, error signature)`` so the same job failing with the same
+error does not re-ping the operator every run once they have acknowledged it.
 
-Lifecycle: ``detected`` → ``alerted`` → ``closed``. Closing
-(acking) an incident is per-signature: the same job + same normalized error
-keeps resolving to the SAME incident id, so a closed incident stays closed (no
-re-alert) until the error text changes, which mints a brand-new incident.
-``detected`` means the failure was recorded; ``alerted`` means at least one
-failure ping for the signature actually reached the operator. Richer states
-(e.g. a dv9.6 ``reviewed``) are deliberately NOT reserved here — state
-validity lives in ``INCIDENT_STATES`` (Python), not a SQLite CHECK, exactly
-so a future slice can add states without a table rebuild.
+Lifecycle: ``detected`` → ``alerted`` → ``closed``. Closing (acking) an incident is per-signature:
+the same job + same normalized error keeps resolving to the SAME incident id, so a closed incident
+stays closed (no re-alert) until the error text changes, which mints a brand-new incident.
+``detected`` means the failure was recorded; ``alerted`` means at least one failure ping for the
+signature actually reached the operator. Other lifecycle words (e.g. ``reviewed``) are deliberately
+NOT reserved here.
 
-Incidents live in the SAME ``cron/executions.db`` as ``cron.executions`` so
-there is one durable cron store per profile. The schema is lazily created on
-connect and a missing database never raises (directories are created).
+Incidents live in the SAME ``cron/executions.db`` as ``cron.executions`` (one ledger file, shared
+connection settings).
 """
 
 from __future__ import annotations
@@ -63,10 +58,9 @@ def _connect() -> sqlite3.Connection:
 def _db_path() -> Path:
     """Resolve the shared cron DB path.
 
-    Prefer the ``cron.executions`` override when one is installed so an
-    operator/test that redirects the executions ledger also redirects the
-    incident table — they must stay in the SAME database. Falls back to this
-    module's own override, then the canonical profile home.
+    Prefer the ``cron.executions`` override when one is installed so an operator/test that redirects
+    the executions ledger also redirects the incident table — they must stay in the SAME database.
+    Falls back to this module's own override, then the canonical profile home.
     """
     try:
         from cron.executions import EXECUTIONS_FILE as _EXEC_OVERRIDE
@@ -116,9 +110,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
 def _transaction() -> Iterator[sqlite3.Connection]:
     """Open a connection, commit/rollback on exit, always close.
 
-    Mirrors ``cron.executions._transaction``: schema init runs inside the
-    ``try`` so a PRAGMA/DDL failure after a successful ``connect()`` still
-    closes the connection instead of leaking it.
+    Mirrors ``cron.executions._transaction``: schema init runs inside the ``try`` so a PRAGMA/DDL
+    failure after a successful ``connect()`` still closes the connection instead of leaking it.
     """
     with _lock:
         conn = _connect()

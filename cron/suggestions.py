@@ -1,9 +1,8 @@
 """Suggested cron jobs — proposed automations the user accepts with one tap.
 
-A *suggestion* is a ready-to-run cron job spec that Hermes surfaces to the
-user, who accepts it (creates the real cron job) or dismisses it (latched so
-it is never re-offered). This is the single surface every automation proposal
-flows through, regardless of where it came from:
+A *suggestion* is a ready-to-run cron job spec that Hermes surfaces to the user, who accepts it
+(creates the real cron job) or dismisses it (latched so it is never re-offered). This is the single
+surface every automation proposal flows through, regardless of where it came from:
 
   * ``catalog``  — a curated starter automation (daily briefing, important-mail
                    monitor, weekly digest, ...).
@@ -15,14 +14,12 @@ flows through, regardless of where it came from:
   * ``integration`` — the user connected an account (Gmail, GitHub, ...) and
                    the obvious automations for that surface are offered.
 
-Accepting a suggestion just calls the existing ``cron.jobs.create_job`` with
-the stored ``job_spec`` — there is NO second job engine. Suggestions never
-auto-create jobs; acceptance is always explicit (consent-first). Dismissed
-suggestions latch by a stable ``dedup_key`` so the same proposal is not
+Accepting a suggestion just calls the existing ``cron.jobs.create_job`` with the stored ``job_spec``
+— there is NO second job engine. Suggestions never auto-create jobs; acceptance is always explicit
+(consent-first). Dismissed suggestions latch by a stable ``dedup_key`` so the same proposal is not
 re-offered after the user says no.
 
-Storage mirrors ``cron/jobs.py``: ``~/.hermes/cron/suggestions.json``, atomic
-writes, an in-process lock, and 0600 perms.
+Storage mirrors ``cron/jobs.py``: ``~/.hermes/cron/suggestions.json``, atomic replace, 0600.
 """
 
 from __future__ import annotations
@@ -42,14 +39,11 @@ from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
 
-# Per-profile by design (issue #4707): suggestions live alongside the active
-# profile's cron store. Anchor on get_hermes_home() (profile home), not the
-# shared default root. See cron/jobs.py for the full rationale.
-#
-# Optional test override. Production resolves the path at call time so
-# multiplexed profile ticks (set_hermes_home_override) cannot leak one
-# profile's suggestions into the import-time home (#86519). Same pattern as
-# cron/executions.py.
+# Per-profile by design: suggestions live alongside the active profile's cron store. Anchor on
+# get_hermes_home() (profile home), not the shared default root. See cron/jobs.py for the full
+# rationale. Optional test override; production resolves the path at CALL time so multiplexed
+# profile ticks (set_hermes_home_override) cannot leak one profile's suggestions into the
+# import-time home.
 SUGGESTIONS_FILE: Optional[Path] = None
 
 
@@ -144,13 +138,12 @@ def add_suggestion(
 ) -> Optional[Dict[str, Any]]:
     """Register a pending suggestion. Returns the record, or None if skipped.
 
-    Skipped when: the source is unknown, the same ``dedup_key`` was already
-    dismissed or accepted (never re-offer), an identical pending suggestion
-    exists, or the pending list is full (``MAX_PENDING``).
+    Skipped when: the source is unknown, the same ``dedup_key`` was already dismissed or accepted
+    (never re-offer), an identical pending suggestion exists, or the pending list is full
+    (``MAX_PENDING``).
 
-    ``job_spec`` is a dict of kwargs for ``cron.jobs.create_job`` — accepting
-    the suggestion passes it straight through, so there is no second schema to
-    keep in sync.
+    ``job_spec`` is a dict of kwargs for ``cron.jobs.create_job`` — accepting the suggestion passes
+    it straight through, so there is no second schema to keep in sync.
     """
     if source not in VALID_SOURCES:
         raise ValueError(f"unknown suggestion source: {source!r}")
@@ -235,10 +228,9 @@ def dismiss_suggestion(ref: str) -> bool:
 def accept_suggestion(ref: str, *, origin: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Accept a suggestion: create the real cron job from its ``job_spec``.
 
-    Returns the created cron job dict, or None if the suggestion isn't found /
-    not pending. The job_spec is passed straight to ``cron.jobs.create_job``;
-    an ``origin`` (platform/chat) is merged so "origin" delivery routes back to
-    the chat where the user accepted.
+    Returns the created cron job dict, or None if the suggestion isn't found / not pending. The
+    job_spec is passed straight to ``cron.jobs.create_job``; an ``origin`` (platform/chat) is merged
+    so "origin" delivery routes back to the chat where the user accepted.
     """
     s = get_suggestion(ref)
     if not s or s.get("status") != _STATUS_PENDING:
