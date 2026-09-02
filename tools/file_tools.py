@@ -660,6 +660,46 @@ def _dedup_stub_or_block(task_data: dict, dedup_key: tuple, path: str) -> str:
     }, ensure_ascii=False)
 
 
+def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_str: str,
+                            offset: int, limit: int, dedup_key: tuple, *, partial: bool) -> int:
+    """Bookkeeping after a real (non-stub) read; returns the consecutive-read count.
+
+    Per-task tracker (under the lock): clear this key's stub-loop counter, add to
+    history, bump the consecutive counter, and store the mtime — it feeds both
+    dedup and the write/patch staleness warning. Then, OUTSIDE our lock so the
+    registry's own locking isn't nested under it, the cross-agent registry
+    (lets write/patch detect sibling-subagent writes after our read) and the
+    background-review read-mark (a FULL read of a skill file counts like
+    skill_view so a follow-up skill_manage(patch) is accepted; no-op outside
+    review forks).
+    """
+    with _read_tracker_lock:
+        task_data["dedup_hits"].pop(dedup_key, None)
+        task_data["read_history"].add((path, offset, limit))
+        count = _bump_consecutive(task_data, ("read", path, offset, limit))
+        try:
+            _mtime_now = os.path.getmtime(resolved_str)
+            task_data["dedup"][dedup_key] = _mtime_now
+            task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
+        except OSError:
+            pass
+        _cap_read_tracker_data(task_data)
+
+    try:
+        file_state.record_read(task_id, resolved_str, partial=partial)
+    except Exception:
+        logger.debug("file_state.record_read failed", exc_info=True)
+
+    if not partial:
+        try:
+            from tools.skill_manager_tool import mark_background_review_skill_read
+
+            mark_background_review_skill_read(Path(resolved_str))
+        except Exception:
+            logger.debug("background-review read-mark failed", exc_info=True)
+    return count
+
+
 def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str = "default") -> str:
     """Read a file with pagination and line numbers.
 
@@ -706,9 +746,11 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 "Use vision_analyze for images, or terminal to inspect binary files."
             )
 
-        # Pass the already-resolved path: get_read_block_error's own resolve()
-        # runs against the process cwd, so a relative "auth.json" read with
-        # TERMINAL_CWD == HERMES_HOME would otherwise miss the denylist.
+        # Hermes internal denylist: blocks prompt injection via catalog/hub
+        # metadata and credential stores under HERMES_HOME. Pass the resolved
+        # path: get_read_block_error's own resolve() runs against the process
+        # cwd, so a relative "auth.json" read with TERMINAL_CWD == HERMES_HOME
+        # would otherwise miss the denylist.
         block_error = get_read_block_error(str(_resolved))
         if block_error:
             return tool_error(block_error)
@@ -737,14 +779,18 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
         result_dict = result.to_dict()
 
         # Cache a not-found result for retries. Deliberately NO early return:
-        # error results still flow through the tracking block below, exactly
-        # as before the cache existed.
+        # error results still flow through the tracking block below
+        # (consecutive-loop detection, dedup bookkeeping) exactly as before the
+        # cache existed — serving from the cache is the optimization, recording
+        # must stay side-effect-identical.
         _err = result_dict.get("error") or ""
         if isinstance(_err, str) and _err.startswith("File not found:"):
             _record_not_found("read", resolved_str, task_id, json.dumps(result_dict, ensure_ascii=False))
 
         # Char budget is checked on the FORMATTED content (that is what enters
         # context) and BEFORE redaction, to skip the regex pass on huge content.
+        # Graceful truncation instead of rejection: the model gets what fits plus
+        # a next_offset, rather than guessing a smaller limit and burning a turn.
         file_size = result_dict.get("file_size", 0)
         max_chars = _get_max_read_chars()
         if len(result.content or "") > max_chars:
@@ -766,43 +812,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 "to keep context usage efficient."
             ))
 
-        read_key = ("read", path, offset, limit)
-        with _read_tracker_lock:
-            # A real read succeeded, so this key is no longer in a stub-loop.
-            task_data["dedup_hits"].pop(dedup_key, None)
-            task_data["read_history"].add((path, offset, limit))
-            count = _bump_consecutive(task_data, read_key)
-            # mtime at read time feeds dedup AND the write/patch staleness warning.
-            try:
-                _mtime_now = os.path.getmtime(resolved_str)
-                task_data["dedup"][dedup_key] = _mtime_now
-                task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
-            except OSError:
-                pass
-            _cap_read_tracker_data(task_data)
-
-        # Cross-agent registry (separate from the per-task tracker): lets
-        # write/patch detect sibling-subagent writes after our read. Partial
-        # when offset>1 or truncated. Outside our lock so the registry's own
-        # locking isn't nested under it.
-        _partial = (offset > 1) or bool(result_dict.get("truncated"))
-        try:
-            file_state.record_read(task_id, resolved_str, partial=_partial)
-        except Exception:
-            logger.debug("file_state.record_read failed", exc_info=True)
-
-        # Background-review read-before-write guard: a FULL read of a skill
-        # file counts like skill_view so a follow-up skill_manage(patch) is
-        # accepted. No-op outside review forks.
-        if not _partial:
-            try:
-                from tools.skill_manager_tool import mark_background_review_skill_read
-
-                mark_background_review_skill_read(Path(resolved_str))
-            except Exception:
-                logger.debug(
-                    "background-review read-mark failed", exc_info=True
-                )
+        count = _record_successful_read(task_data, task_id, path, resolved_str, offset, limit,
+                                        dedup_key, partial=(offset > 1) or bool(result_dict.get("truncated")))
 
         if count >= 4:
             return tool_error(
@@ -822,6 +833,14 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         return tool_error(str(e))
+
+
+def _resolve_or_none(filepath: str, task_id: str) -> str | None:
+    """Task-resolved path string, or None when resolution fails for any reason."""
+    try:
+        return str(_resolve_path_for_task(filepath, task_id))
+    except Exception:
+        return None
 
 
 def _write_precheck_error(paths: list[str], content_paths: list[str], task_id: str,
@@ -883,10 +902,7 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     try:
         # Resolution failure falls back to the legacy unlocked path (the write
         # still proceeds; the per-task staleness check still runs).
-        try:
-            _resolved = str(_resolve_path_for_task(path, task_id))
-        except Exception:
-            _resolved = None
+        _resolved = _resolve_or_none(path, task_id)
 
         if _resolved is None:
             stale_warning = _check_file_staleness(path, task_id)
@@ -900,10 +916,12 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             _update_read_timestamp(path, task_id)
             return json.dumps(result_dict, ensure_ascii=False)
 
-        # Per-path lock serializes read→modify→write across concurrent subagents.
+        # Per-path lock serializes read→modify→write across concurrent
+        # subagents; different paths stay fully parallel.
         with file_state.lock_path(_resolved):
             # Warning priority: cross-agent (names the sibling subagent) >
-            # per-task staleness > workspace divergence.
+            # per-task staleness > workspace divergence (relative path resolving
+            # outside the terminal's cwd — the worktree-cwd bug).
             cross_warning = file_state.check_stale(task_id, _resolved)
             stale_warning = _check_file_staleness(path, task_id)
             cwd_warning = _path_resolution_warning(path, Path(_resolved), task_id)
@@ -913,11 +931,14 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             effective_warning = cross_warning or stale_warning or cwd_warning
             if effective_warning:
                 result_dict["_warning"] = effective_warning
-            # Always report the ABSOLUTE path written so a wrong-cwd mismatch is visible.
+            # Always report the ABSOLUTE path written so a wrong-cwd mismatch is
+            # visible in the response instead of silently landing elsewhere.
             result_dict["resolved_path"] = _resolved
             if not result_dict.get("error"):
                 result_dict["files_modified"] = [_resolved]
                 _mark_verification_stale(task_id, [_resolved], session_id=session_id)
+            # Refresh stamps after the write so consecutive edits by the same
+            # task don't trigger false staleness warnings.
             _update_read_timestamp(path, task_id)
             if not result_dict.get("error"):
                 file_state.note_write(task_id, _resolved)
@@ -972,13 +993,6 @@ def _collect_v4a_header_paths(patch: str) -> tuple[list[str], list[str]] | str:
     return paths, content_paths
 
 
-def _resolve_or_none(filepath: str, task_id: str) -> str | None:
-    try:
-        return str(_resolve_path_for_task(filepath, task_id))
-    except Exception:
-        return None
-
-
 def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                new_string: str = None, replace_all: bool = False, patch: str = None,
                task_id: str = "default", cross_profile: bool = False,
@@ -1001,13 +1015,15 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
         return tool_error(precheck_err)
     try:
         # Lock paths in sorted, deduplicated order so concurrent callers with
-        # overlapping multi-file patches can't deadlock. An unresolvable path
-        # is simply not locked.
+        # overlapping multi-file patches can't deadlock (every caller locks in
+        # the same order). An unresolvable path is simply not locked.
         _path_to_resolved: dict[str, str] = {
             _p: _resolve_or_none(_p, task_id) for _p in _paths_to_check
         }
         _resolved_paths = sorted({_r for _r in _path_to_resolved.values() if _r})
 
+        # ExitStack: one lock per path; degenerates to a single lock (or none
+        # for an unresolvable path) without special-casing.
         from contextlib import ExitStack
         with ExitStack() as _locks:
             for _r in _resolved_paths:
@@ -1049,6 +1065,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             result_dict = result.to_dict()
             if stale_warnings:
                 result_dict["_warning"] = stale_warnings[0] if len(stale_warnings) == 1 else " | ".join(stale_warnings)
+            # Report the ABSOLUTE path(s) actually patched so a wrong-cwd
+            # mismatch is visible instead of silently landing elsewhere.
             _resolved_modified = [
                 _path_to_resolved.get(_p) or _p for _p in _paths_to_check
             ]
@@ -1057,6 +1075,9 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 if len(_resolved_modified) == 1:
                     result_dict["resolved_path"] = _resolved_modified[0]
                 _mark_verification_stale(task_id, _resolved_modified, session_id=session_id)
+                # Refresh stamps for every patched path (no false staleness on
+                # the next edit) and clear failure counters so a future miss
+                # starts a fresh count.
                 for _p in _paths_to_check:
                     _update_read_timestamp(_p, task_id)
                     _r = _path_to_resolved.get(_p)
@@ -1068,7 +1089,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
         # old_string-not-found hint. Per-file failure escalation is tracked for
         # replace mode only (V4A failures are rare; the generic hint suffices).
         # The generic hint is suppressed when patch_replace already attached a
-        # richer "Did you mean?" snippet.
+        # richer "Did you mean?" snippet. The escalating hint after 3 failures
+        # exists so the model recognises the loop and changes approach.
         if result_dict.get("error") and "Could not find" in str(result_dict["error"]):
             failure_count = 0
             if mode == "replace" and path:
@@ -1137,8 +1159,8 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         if block_error:
             return tool_error(block_error)
 
-        # A missing search root costs two shells (search + parent listing);
-        # cache the miss.
+        # A missing search root costs two shells (search + parent listing for
+        # "Similar paths"); cache the miss so a retry skips both.
         try:
             resolved_search_path = str(_resolve_path_for_task(path, task_id))
         except (OSError, ValueError):

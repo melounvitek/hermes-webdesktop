@@ -16,7 +16,6 @@ from tools.file_operations import (
     SearchMatch,
     LintResult,
     ShellFileOperations,
-    MAX_LINE_LENGTH,
     normalize_read_pagination,
     normalize_search_pagination,
 )
