@@ -224,8 +224,8 @@ class _CuaDriverSession:
         self._capability_version = ""
 
     async def _lifecycle_coro(self) -> None:
-        """Long-lived owner of the stdio MCP contexts: open, signal ready,
-        block on shutdown, clean up — all in one task (see class docstring)."""
+        """Owns the stdio MCP contexts: open, signal ready, block on shutdown, clean up —
+        all in one task (see class docstring)."""
         import time as _time
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -343,10 +343,9 @@ class _CuaDriverSession:
 
     def _notify_transport_reset(self) -> None:
         callback = getattr(self, "_transport_reset_callback", None)
-        if callback is None:
-            return
         try:
-            callback()
+            if callback is not None:
+                callback()
         except Exception as exc:
             logger.debug("cua-driver transport reset callback failed: %s", exc)
 
@@ -363,15 +362,13 @@ class _CuaDriverSession:
 
     def _signal_shutdown_locked(self) -> None:
         """Set the asyncio shutdown event from the caller's thread."""
-        loop = self._bridge._loop
-        event = self._shutdown_event
+        loop, event = self._bridge._loop, self._shutdown_event
         if loop is not None and event is not None and loop.is_running():
             with contextlib.suppress(RuntimeError):  # loop closed — nothing to signal
                 loop.call_soon_threadsafe(event.set)
 
     async def _call_tool_async(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        result = await self._session.call_tool(name, args)
-        return _extract_tool_result(result)
+        return _extract_tool_result(await self._session.call_tool(name, args))
 
     def _run_call(self, name: str, args: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
@@ -388,8 +385,7 @@ class _CuaDriverSession:
         return name in self._capabilities
 
     def supports_input_property(self, tool: str, property_name: str) -> bool:
-        """Whether the live action schema accepts *property_name* (fails closed).
-        Inspects tools/list rather than guessing from the package version."""
+        """Live tools/list schema accepts *property_name* (fails closed; no version guessing)."""
         schema = getattr(self, "_tool_schemas", {}).get(tool, {})
         properties = schema.get("properties") if isinstance(schema, dict) else None
         return isinstance(properties, dict) and property_name in properties
@@ -457,8 +453,7 @@ class _CuaDriverSession:
     # ── Recovery ─────────────────────────────────────────────────────
     def _revive_declared_session_once(self, name: str, args: Dict[str, Any],
                                       first_result: Dict[str, Any], timeout: float) -> Dict[str, Any]:
-        """Revive the stable session and replay the rejected call once; a second
-        rejection is surfaced as-is (no loop)."""
+        """Revive the stable session, replay the rejected call once; a 2nd rejection surfaces as-is."""
         session_id = self._declared_session_id
         if not session_id or name in self._LIFECYCLE_CALLS:
             return first_result
@@ -494,11 +489,18 @@ class _CuaDriverSession:
         self._start_lifecycle_locked()
         self._started = True
 
+    def _recreate_session(self, timeout: float, *, clear_timeout_suspect: bool = False) -> None:
+        """Restart the private lifecycle, then re-attach the declared public label."""
+        with self._lock:
+            self._restart_session_locked()
+        if clear_timeout_suspect:
+            self._timeout_suspect = False
+        self._restore_declared_session_after_transport_reset(timeout)
+
     def _cli_command(self, name: str, args: Dict[str, Any]) -> Tuple[List[str], Dict[str, str], Optional[str]]:
-        """Build ``(cmd, child_env, shot_file)`` for the CLI fallback. ``get_window_state``
-        routes its screenshot to a temp file (``screenshot_out_file``) so the daemon returns
-        a tiny JSON body instead of the multi-megabyte base64 blob that congests the socket;
-        ``_cli_result`` reads the PNG back."""
+        """Build ``(cmd, child_env, shot_file)`` for the CLI fallback. ``get_window_state`` routes
+        its screenshot to a temp file (``screenshot_out_file``) so the daemon returns a tiny JSON
+        body, not the multi-megabyte base64 blob that congests the socket; ``_cli_result`` reads it."""
         import tempfile as _tempfile
         from tools.computer_use import cua_backend as _cb
 
@@ -519,10 +521,9 @@ class _CuaDriverSession:
         return [driver_command, "call", name, json.dumps(call_args), *socket_args], child_env, shot_file
 
     def _call_tool_via_cli(self, name: str, args: Dict[str, Any], timeout: float) -> Dict[str, Any]:
-        """Fallback transport: ``cua-driver call <tool> <json>`` as a subprocess. The MCP
-        stdio bridge can persistently fail heavy calls (``get_window_state``) with EAGAIN
-        while the plain CLI, on its own daemon socket, keeps working. Retried with backoff;
-        output remapped to the ``_extract_tool_result`` shape so callers stay transport-agnostic."""
+        """Fallback transport: ``cua-driver call <tool> <json>`` subprocess. The MCP stdio bridge
+        can persistently fail heavy calls (``get_window_state``) with EAGAIN while the plain CLI,
+        on its own daemon socket, keeps working. Output is remapped to the ``_extract_tool_result`` shape."""
         from tools.environments.local import _sanitize_subprocess_env
 
         cmd, child_env, shot_file = self._cli_command(name, args)
@@ -540,18 +541,13 @@ class _CuaDriverSession:
         if self._timeout_suspect and name not in self._LIFECYCLE_CALLS:
             logger.warning("cua-driver session suspect after earlier MCP timeout; "
                            "recreating before %s", name)
-            with self._lock:
-                self._restart_session_locked()
-            self._timeout_suspect = False
-            self._restore_declared_session_after_transport_reset(timeout)
-
+            self._recreate_session(timeout, clear_timeout_suspect=True)
         # A prior session may have died (MCP drop / driver crash) and reset _started.
         if not self._started and name not in self._LIFECYCLE_CALLS:
             logger.warning("cua-driver session not active on %s; (re)starting before call", name)
             self.start()
             self._restore_declared_session_after_transport_reset(timeout)
         self._require_started()
-
         try:
             result = self._run_call(name, args, timeout)
         except Exception as e:
@@ -571,22 +567,18 @@ class _CuaDriverSession:
             if not self._is_closed_session_error(e):
                 raise
             logger.warning("cua-driver MCP session closed during %s; reconnecting once", name)
-            with self._lock:
-                self._restart_session_locked()
-            self._restore_declared_session_after_transport_reset(timeout)
+            self._recreate_session(timeout)
             if name not in self._TRANSPORT_REPLAY_SAFE_TOOLS:
                 return self._unknown_transport_outcome(name, e)
             result = self._run_call(name, args, timeout)
 
         # Remember only a SUCCESSFULLY declared identity: no stale recovery state.
-        if name == "start_session" and result.get("isError") is not True:
-            declared_id = args.get("session")
-            if isinstance(declared_id, str) and declared_id:
-                self._declared_session_id = declared_id
-
+        declared_id = args.get("session")
+        if (name == "start_session" and result.get("isError") is not True
+                and isinstance(declared_id, str) and declared_id):
+            self._declared_session_id = declared_id
         if self._is_ended_session_result(result):
             result = self._revive_declared_session_once(name, args, result, timeout)
-
         if (name == "end_session" and result.get("isError") is not True
                 and args.get("session") == self._declared_session_id):
             self._declared_session_id = None
