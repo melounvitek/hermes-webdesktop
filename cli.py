@@ -18090,11 +18090,2206 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             ] if item is not None
         ]
 
-    def run(self):
-        """Run the interactive CLI loop with persistent input at bottom."""
-        if not self._claim_active_session("cli"):
+    def _tui_process_loop(self):
+        while not self._should_exit:
+            try:
+                # Check for pending input with timeout
+                try:
+                    user_input = self._pending_input.get(timeout=0.1)
+                except queue.Empty:
+                    # Periodic config watcher — auto-reload MCP on mcp_servers change
+                    if not self._agent_running:
+                        self._check_config_mcp_changes()
+                        # Heal cooked-mode termios drift (lost
+                        # run_in_terminal restore) before draining
+                        # notifications — a drifted tty makes the CLI
+                        # look dead even though the loop is healthy.
+                        try:
+                            self._check_termios_drift()
+                        except Exception:
+                            pass
+                        # Check for background process notifications (completions
+                        # and watch pattern matches) while agent is idle.
+                        try:
+                            self._drain_process_notifications("cli-idle")
+                        except Exception:
+                            pass
+                        # Fire a due /loop wakeup while idle (defers to
+                        # queued user input and active /goal loops).
+                        try:
+                            self._maybe_fire_loop_tick()
+                        except Exception:
+                            pass
+                    continue
+
+                # Voice-transcribed messages arrive wrapped in a sentinel
+                # so only genuine STT output gets the voice prefix (#65827).
+                is_voice_input = isinstance(user_input, _VoiceInputMessage)
+                if is_voice_input:
+                    user_input = user_input.text
+
+                # Seeded -q prompts arrive wrapped in _SeededQueryMessage:
+                # arbitrary launcher/script text that must be submitted
+                # LITERALLY — skip slash routing, ! shell dispatch, and
+                # file-drop detection for this one message.
+                is_seeded_query = isinstance(user_input, _SeededQueryMessage)
+                if is_seeded_query:
+                    seeded = user_input
+                    user_input = (
+                        (seeded.text, seeded.images)
+                        if seeded.images
+                        else seeded.text
+                    )
+
+                if not user_input:
+                    continue
+
+                # The user has typed and submitted something, so any
+                # post-resize transient suppression should end here.
+                self._status_bar_suppressed_after_resize = False
+
+                # Unpack image payload: (text, [Path, ...]) or plain str
+                submit_images = []
+                if isinstance(user_input, tuple):
+                    user_input, submit_images = user_input
+
+                if isinstance(user_input, str):
+                    user_input = _strip_leaked_bracketed_paste_wrappers(user_input)
+                    user_input, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(user_input)
+                    if _had_mouse_reports:
+                        self._recover_terminal_input_modes(reason="mouse reports leaked into submitted input")
+
+                # Typed bare stop phrase while a voice chat is active ends
+                # the voice chat (same semantics as SAYING "stop") instead
+                # of sending the word to the agent. Voice transcripts are
+                # already stop-checked at the transcription points, so this
+                # only intercepts typed input.
+                if not is_voice_input and self._typed_voice_stop(user_input):
+                    continue
+
+                # Check for commands — but detect dragged/pasted file paths first.
+                # See _detect_file_drop() for details. Seeded -q prompts are
+                # literal text: no file-drop detection, no !/slash dispatch.
+                _file_drop = (
+                    _detect_file_drop(user_input)
+                    if isinstance(user_input, str) and not is_seeded_query
+                    else None
+                )
+                if _file_drop:
+                    _drop_path = _file_drop["path"]
+                    _remainder = _file_drop["remainder"]
+                    if _file_drop["is_image"]:
+                        submit_images.append(_drop_path)
+                        user_input = _remainder or f"[User attached image: {_drop_path.name}]"
+                        _cprint(f"  📎 Auto-attached image: {_drop_path.name}")
+                    else:
+                        _cprint(f"  📄 Detected file: {_drop_path.name}")
+                        user_input = (
+                            f"[User attached file: {_drop_path}]"
+                            + (f"\n{_remainder}" if _remainder else "")
+                        )
+
+                # A bare number right after a bare `/resume` prompt selects
+                # that session (see #34584). Checked before chat routing so
+                # the digit isn't sent to the agent as a message.
+                if (
+                    not _file_drop
+                    and self._pending_resume_sessions
+                    and isinstance(user_input, str)
+                    and self._consume_pending_resume_selection(user_input)
+                ):
+                    continue
+
+                # `!<command>` shell mode — run it here and loop back to
+                # idle. Checked BEFORE slash routing and before the chat
+                # path so nothing enters conversation history and no model
+                # turn is spent. See handle_bang_shell().
+                if (
+                    not _file_drop
+                    and not is_seeded_query
+                    and isinstance(user_input, str)
+                    and self.handle_bang_shell(user_input)
+                ):
+                    continue
+
+                if (
+                    not _file_drop
+                    and not is_seeded_query
+                    and isinstance(user_input, str)
+                    and _looks_like_slash_command(user_input)
+                ):
+                    _cprint(f"\n⚙️  {user_input}")
+                    try:
+                        if not self.process_command(user_input):
+                            self._should_exit = True
+                            # Schedule app exit
+                            if self._app.is_running:
+                                self._app.exit()
+                    except KeyboardInterrupt:
+                        # Ctrl+C during a slow slash command (e.g. /skills browse,
+                        # /sessions list with a large DB) should interrupt the
+                        # command and return to the prompt, NOT exit the entire
+                        # session. Without this guard a KeyboardInterrupt unwinds
+                        # to the outer prompt_toolkit loop and the session dies.
+                        _cprint("\n[dim]Command interrupted.[/dim]")
+                        continue
+                    # A slash handler may set a one-shot pending seed (e.g.
+                    # /blueprint <name>) to be run as the next agent turn.
+                    # If present, fall through to the chat path with the seed
+                    # as the user message instead of looping back to idle.
+                    _seed = getattr(self, "_pending_agent_seed", None)
+                    if _seed:
+                        self._pending_agent_seed = None
+                        user_input = _seed
+                    else:
+                        continue
+
+                # Expand paste references back to full content
+                _paste_ref_re = re.compile(r'\[Pasted text #\d+: \d+ lines \u2192 (.+?)\]')
+                paste_refs = list(_paste_ref_re.finditer(user_input)) if isinstance(user_input, str) else []
+                if paste_refs:
+                    user_input = self._expand_paste_references(user_input)
+                print()
+                self._print_user_message_preview(user_input)
+
+                # Show image attachment count
+                if submit_images:
+                    n = len(submit_images)
+                    _cprint(f"  {_DIM}📎 {n} image{'s' if n > 1 else ''} attached{_RST}")
+
+                # Regular chat - run agent
+                self._agent_running = True
+                self._interactive_turn = True
+                self._pet_turn_error = False
+                self._pet_reasoning = False
+                self._turn_summary_begin()
+                self._app.invalidate()  # Refresh status line
+
+                try:
+                    self.chat(user_input, images=submit_images or None, voice_input=is_voice_input)
+                finally:
+                    self._agent_running = False
+                    self._spinner_text = ""
+                    self._tool_start_time = 0.0
+                    self._pending_tool_info.clear()
+                    self._last_scrollback_tool = ""
+                    self._pet_reasoning = False
+                    self._pet_react_turn_end()
+                    # Post-turn accounting line (display.turn_summary).
+                    # Emitted after the response box, before the prompt
+                    # returns, so it reads as a footer for the turn.
+                    self._turn_summary_emit()
+                    self._interactive_turn = False
+
+                    self._app.invalidate()  # Refresh status line
+
+                    # Post-turn terminal recovery (#33271): after an
+                    # interrupt the prompt_toolkit renderer may have
+                    # drifted from the physical terminal state — CSI 6n
+                    # cursor position reports can leak as literal text
+                    # (^[[19;1R), and the VT100 input parser can stall in
+                    # a partial-escape state, accepting no further
+                    # keystrokes.  Drain stray escape bytes from the OS
+                    # input buffer and force a clean renderer redraw.
+                    if self._last_turn_interrupted:
+                        self._recover_terminal_after_interrupt()
+
+                    # Re-queue any messages that arrived in _interrupt_queue
+                    # while the agent was running and were never claimed by
+                    # the explicit interrupt path. See
+                    # _drain_interrupt_queue_to_pending_input for the full
+                    # rationale. Regression of #17666 / #18760 — the drain
+                    # block from the original PR #17939 was deferred as
+                    # "worth its own review" and never re-landed (#20271).
+                    self._drain_interrupt_queue_to_pending_input()
+
+                    # Goal continuation: if a standing goal is active, ask
+                    # the judge whether the turn satisfied it. If not, and
+                    # there's no real user message already queued, push the
+                    # continuation prompt back into _pending_input so the
+                    # next loop iteration picks it up naturally (and any
+                    # user input that arrives in between still preempts).
+                    try:
+                        self._maybe_continue_goal_after_turn()
+                    except Exception as _goal_exc:
+                        logging.debug("goal continuation hook failed: %s", _goal_exc)
+
+                    # /loop tick completion: if the turn that just ended
+                    # was a loop wakeup, evaluate it (LOOP_COMPLETE marker,
+                    # --until judge, caps) and schedule the next tick.
+                    try:
+                        self._maybe_complete_loop_tick_after_turn()
+                    except Exception as _loop_exc:
+                        logging.debug("loop completion hook failed: %s", _loop_exc)
+
+                    # Continuous voice: auto-restart recording after agent responds.
+                    # Dispatch to a daemon thread so play_beep (sd.wait) and
+                    # AudioRecorder.start (lock acquire) never block process_loop —
+                    # otherwise queued user input would stall silently.
+                    if self._voice_mode and self._voice_continuous and not self._voice_recording:
+                        def _restart_recording():
+                            try:
+                                if self._voice_tts:
+                                    self._voice_tts_done.wait(timeout=60)
+                                    time.sleep(0.3)
+                                # A barge-in capture already owns the mic and
+                                # will submit the interruption itself.
+                                if self._voice_barge_capture.is_set():
+                                    return
+                                self._voice_start_recording()
+                                self._app.invalidate()
+                            except Exception as e:
+                                _cprint(f"{_DIM}Voice auto-restart failed: {e}{_RST}")
+                        threading.Thread(target=_restart_recording, daemon=True).start()
+
+                    # Drain process notifications (completions + watch matches)
+                    # that arrived while the agent was running.
+                    try:
+                        self._drain_process_notifications("cli-post-turn")
+                    except Exception:
+                        pass  # Non-fatal — don't break the main loop
+
+            except OSError as e:
+                if getattr(e, "errno", None) == errno.EIO:
+                    self._mark_terminal_io_broken("process_loop")
+                    logger.warning(
+                        "process_loop EIO — freezing UI paints (#81521): %s",
+                        e,
+                    )
+                    continue
+                logger.warning("process_loop unhandled error (msg may be lost): %s", e)
+            except Exception as e:
+                if isinstance(e, OSError) and getattr(e, "errno", None) == errno.EIO:
+                    self._mark_terminal_io_broken("process_loop")
+                    logger.warning(
+                        "process_loop EIO — freezing UI paints (#81521): %s",
+                        e,
+                    )
+                    continue
+                logger.warning("process_loop unhandled error (msg may be lost): %s", e)
+
+    def _tui_signal_handler(self, signum, frame):
+        """Handle SIGHUP/SIGTERM by triggering graceful cleanup.
+
+        Calls ``self.agent.interrupt()`` first so the agent daemon
+        thread's poll loop sees the per-thread interrupt and kills the
+        tool's subprocess group via ``_kill_process`` (os.killpg).
+        Without this, the main thread dies from KeyboardInterrupt and
+        the daemon thread is killed with it — before it can run one
+        more poll iteration to clean up the subprocess, which was
+        spawned with ``os.setsid`` and therefore survives as an orphan
+        with PPID=1.
+
+        Grace window (``HERMES_SIGTERM_GRACE``, default 1.5 s) gives
+        the daemon time to: detect the interrupt (next 200 ms poll) →
+        call _kill_process (SIGTERM + 1 s wait + SIGKILL if needed) →
+        return from _wait_for_process.  ``time.sleep`` releases the
+        GIL so the daemon actually runs during the window.
+
+        Guarded ``logger.debug``: CPython's ``logging`` module is not
+        reentrant-safe.  ``Logger.isEnabledFor`` caches level results
+        in ``Logger._cache``; under shutdown races the cache can be
+        cleared (``_clear_cache``) or mid-mutation when the signal
+        fires, raising ``KeyError: <level_int>`` (e.g. ``KeyError: 10``
+        for DEBUG) inside the handler.  That KeyError then escapes
+        before ``raise KeyboardInterrupt()`` can fire, which bypasses
+        prompt_toolkit's normal interrupt unwind and surfaces as the
+        EIO cascade from issue #13710.  Wrap the log in a bare
+        ``try/except`` so the handler can never raise through it.
+        """
+        try:
+            logger.debug("Received signal %s, triggering graceful shutdown", signum)
+        except Exception:
+            pass  # never let logging raise from a signal handler (#13710 regression)
+        # Shutdown intent is now unambiguous — arm the exit backstop
+        # IMMEDIATELY, before the graceful unwind below.  If any step of
+        # that unwind wedges (main thread parked in a syscall, prompt_toolkit
+        # teardown never returning), _run_cleanup never runs and would
+        # never arm its own watchdog — leaving a "dead" CLI alive for
+        # minutes (#65998 class).  Never raises.
+        _arm_exit_watchdog_on_shutdown_signal()
+        try:
+            _signal_agent = getattr(self, "agent", None)
+            if _signal_agent is not None and getattr(self, "_agent_running", False):
+                request_hard_interrupt(
+                    _signal_agent, f"received signal {signum}"
+                )
+                try:
+                    _grace = float(os.getenv("HERMES_SIGTERM_GRACE", "1.5"))
+                except (TypeError, ValueError):
+                    _grace = 1.5
+                if _grace > 0:
+                    time.sleep(_grace)
+        except Exception:
+            pass  # never block signal handling
+        # Prefer a clean prompt_toolkit exit over `raise KeyboardInterrupt()`.
+        # Raising KBI from a signal handler unwinds into whatever Python
+        # frame the interpreter happens to be running — typically an
+        # `await asyncio.sleep()` inside prompt_toolkit's
+        # `_poll_output_size` coroutine.  The KBI becomes a Task
+        # exception, prompt_toolkit's `_handle_exception` prints
+        # "Unhandled exception in event loop" + the full traceback, and
+        # parks the terminal on "Press ENTER to continue..." (#13710
+        # variant — same root cause, different surface).
+        #
+        # `app.exit()` scheduled via `call_soon_threadsafe` lets the
+        # event loop unwind normally; `app.run()` returns and our
+        # existing `except (EOFError, KeyboardInterrupt, BrokenPipeError)`
+        # block at the bottom of the input loop handles the rest.
+        try:
+            from prompt_toolkit.application.current import get_app_or_none
+            _app = get_app_or_none()
+            if _app is not None:
+                _loop = getattr(_app, "loop", None)
+                if _loop is not None:
+                    _loop.call_soon_threadsafe(_app.exit)
+                    return  # clean unwind — no traceback, no ENTER pause
+        except Exception:
+            pass
+        raise KeyboardInterrupt()  # fallback for non-prompt_toolkit contexts
+
+    def _tui_spinner_loop(self):
+        while not self._should_exit:
+            if not self._app:
+                time.sleep(0.1)
+                continue
+            if self._command_running:
+                self._invalidate(min_interval=0.1)
+                time.sleep(0.1)
+            else:
+                # Do not repaint the idle prompt every second. In non-full-screen
+                # prompt_toolkit mode, background redraws can fight tmux/Ghostty/cmux
+                # viewport restoration after focus changes and visually move the
+                # command input area. Keep idle stable; input/agent events still
+                # invalidate explicitly when the UI actually changes.
+                time.sleep(0.2)
+
+    def _get_clarify_batch_display_fragments(self, state):
+        """Build styled text for the batch (multi-question) clarify panel.
+
+        A-compact layout mirroring the TUI: a "N questions" header, one
+        status line per question (✓ answered → answer / ▸ active /
+        · pending), and the active question's numbered choices (+ Other)
+        expanded directly beneath its status line.
+        """
+        questions_list = state.get("questions") or []
+        answers = state.get("answers") or {}
+        active = state.get("active", 0)
+        choices = state.get("choices") or []
+        selected = state.get("selected", 0)
+        multi_select = state.get("multi_select", False)
+        selected_indices = state.get("selected_indices", set()) if multi_select else set()
+
+        title = "Hermes needs your input"
+        header = f"{len(questions_list)} questions"
+
+        def _status_rows(width):
+            """(style, text) rows for the status list + expanded active question."""
+            rows = []
+            answer_meta = state.get("answer_meta") or {}
+            for idx, entry in enumerate(questions_list):
+                answered = entry["qid"] in answers
+                if answered:
+                    marker = "✓"
+                elif idx == active:
+                    marker = "▸"
+                else:
+                    marker = "·"
+                label = f"{marker} {entry['question']}"
+                row_style = 'class:clarify-selected' if idx == active else 'class:clarify-choice'
+                for wrapped in _wrap_panel_text(label, width, subsequent_indent="  "):
+                    rows.append((row_style, wrapped))
+                if answered:
+                    # The locked answer on its own line, in its own color,
+                    # so the current answer stays readable while walking
+                    # the list with Tab/Shift-Tab.
+                    for wrapped in _wrap_panel_text(
+                        f"    {answers[entry['qid']]}", width, subsequent_indent="    "
+                    ):
+                        rows.append(('class:clarify-answer', wrapped))
+                if idx != active:
+                    continue
+                # Expanded active question: numbered choices + Other.
+                for i, choice in enumerate(choices):
+                    num_prefix = str(i + 1) if i < 9 else ('0' if i == 9 else ' ')
+                    if multi_select:
+                        cb = "[x]" if i in selected_indices else "[ ]"
+                        cursor = "❯" if i == selected and not self._clarify_freetext else " "
+                        prefix = f"  {cursor} {cb} {num_prefix}. "
+                    else:
+                        cursor = "❯" if i == selected and not self._clarify_freetext else " "
+                        prefix = f"  {cursor} {num_prefix}. "
+                    style = 'class:clarify-selected' if i == selected and not self._clarify_freetext else 'class:clarify-choice'
+                    for wrapped in _wrap_panel_text(f"{prefix}{choice}", width, subsequent_indent="      "):
+                        rows.append((style, wrapped))
+                if choices:
+                    other_idx = len(choices)
+                    other_num = other_idx + 1
+                    other_num_prefix = str(other_num) if other_num < 10 else ('0' if other_num == 10 else ' ')
+                    if multi_select:
+                        cb = "[x]" if other_idx in selected_indices else "[ ]"
+                        mid = f"{cb} {other_num_prefix}"
+                    else:
+                        mid = other_num_prefix
+                    # An earlier typed answer stays visible next to Other;
+                    # Enter on it edits (the composer is prefilled).
+                    meta = answer_meta.get(entry["qid"]) or {}
+                    other_text = meta.get("other_text") or ""
+                    other_suffix = f"Other: {other_text}" if other_text else None
+                    if self._clarify_freetext:
+                        other_label = f"  ❯ {mid}. " + (other_suffix or "Other (type below)")
+                        other_style = 'class:clarify-active-other'
+                    elif selected == other_idx:
+                        other_label = f"  ❯ {mid}. " + (other_suffix or "Other (type your answer)")
+                        other_style = 'class:clarify-selected'
+                    else:
+                        other_label = f"    {mid}. " + (other_suffix or "Other (type your answer)")
+                        other_style = 'class:clarify-choice'
+                    for wrapped in _wrap_panel_text(other_label, width, subsequent_indent="      "):
+                        rows.append((other_style, wrapped))
+                elif self._clarify_freetext:
+                    for wrapped in _wrap_panel_text(
+                        "  Type your answer in the prompt below, then press Enter.", width
+                    ):
+                        rows.append(('class:clarify-active-other', wrapped))
+            return rows
+
+        preview_rows = _status_rows(60)
+        box_width = _panel_box_width(title, [header] + [text for _, text in preview_rows])
+        inner_text_width = max(8, box_width - 2)
+        rows = _status_rows(inner_text_width)
+
+        lines = []
+        lines.append(('class:clarify-border', '╭─ '))
+        lines.append(('class:clarify-title', title))
+        lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
+        _append_panel_line(lines, 'class:clarify-border', 'class:clarify-question', header, box_width)
+        for style, text in rows:
+            _append_panel_line(lines, 'class:clarify-border', style, text, box_width)
+        lines.append(('class:clarify-border', '╰' + ('─' * box_width) + '╯\n'))
+        return lines
+
+    def _get_clarify_display_fragments(self):
+        """Build styled text for the clarify question/choices panel.
+
+        Layout priority: choices + Other option must always render even if
+        the question is very long. The question is budgeted to leave enough
+        rows for the choices and trailing chrome; anything over the budget
+        is truncated with a marker.
+        """
+        state = self._clarify_state
+        if not state:
+            return []
+        if state.get("questions"):
+            return self._get_clarify_batch_display_fragments(state)
+
+        question = state["question"]
+        choices = state.get("choices") or []
+        selected = state.get("selected", 0)
+        # multi-select support
+        multi_select = state.get("multi_select", False)
+        selected_indices = state.get("selected_indices", set()) if multi_select else set()
+        preview_lines = _wrap_panel_text(question, 60)
+        for i, choice in enumerate(choices):
+            # Show number prefix for quick selection (1-9 for items 1-9, 0 for 10th item)
+            if i < 9:
+                num_prefix = str(i + 1)
+            elif i == 9:
+                num_prefix = '0'
+            else:
+                num_prefix = ' '
+            if multi_select:
+                cb = "[x]" if i in selected_indices else "[ ]"
+                if i == selected and not self._clarify_freetext:
+                    prefix = f"❯ {cb} {num_prefix}. "
+                else:
+                    prefix = f"  {cb} {num_prefix}. "
+            elif i == selected and not self._clarify_freetext:
+                prefix = f"❯ {num_prefix}. "
+            else:
+                prefix = f"  {num_prefix}. "
+            preview_lines.extend(_wrap_panel_text(f"{prefix}{choice}", 60, subsequent_indent="    "))
+        # "Other" option in preview
+        other_num = len(choices) + 1
+        if other_num < 10:
+            other_num_prefix = str(other_num)
+        elif other_num == 10:
+            other_num_prefix = '0'
+        else:
+            other_num_prefix = ' '
+        other_idx_val = len(choices)
+        if multi_select:
+            cb = "[x]" if other_idx_val in selected_indices else "[ ]"
+            other_label = (
+                f"❯ {cb} {other_num_prefix}. Other (type below)" if self._clarify_freetext
+                else f"❯ {cb} {other_num_prefix}. Other (type your answer)" if selected == other_idx_val
+                else f"  {cb} {other_num_prefix}. Other (type your answer)"
+            )
+        else:
+            other_label = (
+                f"❯ {other_num_prefix}. Other (type below)" if self._clarify_freetext
+                else f"❯ {other_num_prefix}. Other (type your answer)" if selected == len(choices)
+                else f"  {other_num_prefix}. Other (type your answer)"
+            )
+        preview_lines.extend(_wrap_panel_text(other_label, 60, subsequent_indent="    "))
+        box_width = _panel_box_width("Hermes needs your input", preview_lines)
+        inner_text_width = max(8, box_width - 2)
+
+        # Pre-wrap choices + Other option — these are mandatory.
+        choice_wrapped: list[tuple[int, str]] = []
+        if choices:
+            for i, choice in enumerate(choices):
+                # Show number prefix for quick selection (1-9 for items 1-9, 0 for 10th item)
+                if i < 9:
+                    num_prefix = str(i + 1)
+                elif i == 9:
+                    num_prefix = '0'
+                else:
+                    num_prefix = ' '
+                # multi-select support: add checkbox after cursor indicator
+                if multi_select:
+                    cb = "[x]" if i in selected_indices else "[ ]"
+                    if i == selected and not self._clarify_freetext:
+                        prefix = f'❯ {cb} {num_prefix}. '
+                    else:
+                        prefix = f'  {cb} {num_prefix}. '
+                elif i == selected and not self._clarify_freetext:
+                    prefix = f'❯ {num_prefix}. '
+                else:
+                    prefix = f'  {num_prefix}. '
+                for wrapped in _wrap_panel_text(f"{prefix}{choice}", inner_text_width, subsequent_indent="    "):
+                    choice_wrapped.append((i, wrapped))
+            # Trailing Other row(s)
+            other_idx = len(choices)
+            other_num = other_idx + 1
+            if other_num < 10:
+                other_num_prefix = str(other_num)
+            elif other_num == 10:
+                other_num_prefix = '0'
+            else:
+                other_num_prefix = ' '
+            # multi-select support: add checkbox to Other option
+            if multi_select:
+                cb = "[x]" if other_idx in selected_indices else "[ ]"
+                if selected == other_idx and not self._clarify_freetext:
+                    other_label_mand = f'❯ {cb} {other_num_prefix}. Other (type your answer)'
+                elif self._clarify_freetext:
+                    other_label_mand = f'❯ {cb} {other_num_prefix}. Other (type below)'
+                else:
+                    other_label_mand = f'  {cb} {other_num_prefix}. Other (type your answer)'
+            else:
+                if selected == other_idx and not self._clarify_freetext:
+                    other_label_mand = f'❯ {other_num_prefix}. Other (type your answer)'
+                elif self._clarify_freetext:
+                    other_label_mand = f'❯ {other_num_prefix}. Other (type below)'
+                else:
+                    other_label_mand = f'  {other_num_prefix}. Other (type your answer)'
+            other_wrapped = _wrap_panel_text(other_label_mand, inner_text_width, subsequent_indent="    ")
+        elif self._clarify_freetext:
+            # Freetext-only mode: the guidance line takes the place of choices.
+            other_wrapped = _wrap_panel_text(
+                "Type your answer in the prompt below, then press Enter.",
+                inner_text_width,
+            )
+        else:
+            other_wrapped = []
+
+        # Budget the question so mandatory rows always render.
+        # Chrome layouts:
+        #   full : top border + blank_after_title + blank_after_question
+        #          + blank_before_bottom + bottom border = 5 rows
+        #   tight: top border + bottom border = 2 rows (drop all blanks)
+        #
+        # reserved_below matches the approval-panel budget (~6 rows for
+        # spinner/tool-progress + status + input + separators + prompt).
+        term_rows = shutil.get_terminal_size((100, 24)).lines
+        chrome_full = 5
+        chrome_tight = 2
+        reserved_below = 6
+
+        available = max(0, term_rows - reserved_below)
+        # The compact decision must reserve room for at least one question
+        # row on top of the choices, otherwise full chrome (3 blank
+        # separators) gets kept when there is no room for it and the panel
+        # overflows the viewport — HSplit then clips the panel's tail,
+        # silently dropping the choices (the reported bug).
+        mandatory_full = chrome_full + 1 + len(choice_wrapped) + len(other_wrapped)
+
+        use_compact_chrome = mandatory_full > available
+        chrome_rows = chrome_tight if use_compact_chrome else chrome_full
+
+        max_question_rows = max(1, available - chrome_rows - len(choice_wrapped) - len(other_wrapped))
+        max_question_rows = min(max_question_rows, 12)  # soft cap on huge terminals
+
+        # When the choices alone (plus compact chrome) already exceed the
+        # viewport, drop the question entirely — the choices are the only
+        # thing the user must see to make a selection. Without this the
+        # question would still claim its 1-row floor above and push the
+        # tail of the choices off-screen (HSplit clips the overflow).
+        choices_overflow = chrome_rows + len(choice_wrapped) + len(other_wrapped) >= available
+        if choices_overflow:
+            max_question_rows = 0
+
+        question_wrapped = _wrap_panel_text(question, inner_text_width)
+        if max_question_rows <= 0:
+            question_wrapped = []
+        elif len(question_wrapped) > max_question_rows:
+            # The truncation marker is itself a row, so it must count
+            # against the budget. With a 1-row budget there is no room for
+            # both a question line and the marker — show the marker alone
+            # so the rendered question never exceeds max_question_rows.
+            keep = max(0, max_question_rows - 1)
+            question_wrapped = question_wrapped[:keep] + ["… (question truncated)"]
+
+        lines = []
+        # Box top border
+        lines.append(('class:clarify-border', '╭─ '))
+        lines.append(('class:clarify-title', 'Hermes needs your input'))
+        lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len("Hermes needs your input") - 3)) + '╮\n'))
+        if not use_compact_chrome:
+            _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+
+        # Question text (bounded)
+        for wrapped in question_wrapped:
+            _append_panel_line(lines, 'class:clarify-border', 'class:clarify-question', wrapped, box_width)
+        if not use_compact_chrome:
+            _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+
+        if self._clarify_freetext and not choices:
+            for wrapped in other_wrapped:
+                _append_panel_line(lines, 'class:clarify-border', 'class:clarify-choice', wrapped, box_width)
+            if not use_compact_chrome:
+                _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+
+        if choices:
+            # Multiple-choice mode: show selectable options
+            for i, wrapped in choice_wrapped:
+                style = 'class:clarify-selected' if i == selected and not self._clarify_freetext else 'class:clarify-choice'
+                _append_panel_line(lines, 'class:clarify-border', style, wrapped, box_width)
+
+            # "Other" option (trailing row(s), only shown when choices exist)
+            other_idx = len(choices)
+            # Calculate number prefix for "Other" option
+            other_num = other_idx + 1
+            if other_num < 10:
+                other_num_prefix = str(other_num)
+            elif other_num == 10:
+                other_num_prefix = '0'
+            else:
+                other_num_prefix = ' '
+
+            if selected == other_idx and not self._clarify_freetext:
+                other_style = 'class:clarify-selected'
+            elif self._clarify_freetext:
+                other_style = 'class:clarify-active-other'
+            else:
+                other_style = 'class:clarify-choice'
+            for wrapped in other_wrapped:
+                _append_panel_line(lines, 'class:clarify-border', other_style, wrapped, box_width)
+
+        if not use_compact_chrome:
+            _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+        lines.append(('class:clarify-border', '╰' + ('─' * box_width) + '╯\n'))
+        return lines
+
+    def _get_model_picker_display_fragments(self):
+        state = self._model_picker_state
+        if not state:
+            return []
+        stage = state.get("stage", "provider")
+        if stage == "provider":
+            title = "⚙ Model Picker — Select Provider"
+            choices = []
+            _providers = state.get("providers")
+            for p in _providers if isinstance(_providers, list) else []:
+                count = p.get("total_models", len(p.get("models", [])))
+                label = f"{p['name']} ({count} model{'s' if count != 1 else ''})"
+                if p.get("is_current"):
+                    label += "  ← current"
+                choices.append(label)
+            choices.append("Cancel")
+            hint = f"Current: {state.get('current_model', 'unknown')} on {state.get('current_provider', 'unknown')}"
+        else:
+            provider_data = state.get("provider_data") or {}
+            model_list = state.get("model_list") or []
+            title = f"⚙ Model Picker — {provider_data.get('name', provider_data.get('slug', 'Provider'))}"
+            # Fuzzy filter: narrow the concrete model list by the typed
+            # query. Selection still resolves to a real entry (see the
+            # filtered_pairs index mapping in the selection handler), so
+            # this never introduces an ambiguous model resolution.
+            _query = state.get("filter", "") or ""
+            filtered_pairs = self._filter_model_picker_entries(model_list, _query)
+            state["_filtered_pairs"] = filtered_pairs
+            model_labels = [e for (_i, e) in filtered_pairs]
+            choices = list(model_labels) + ["← Back", "Cancel"]
+            if _query:
+                hint = (
+                    f"Filter: {_query}▏  ({len(model_labels)}/{len(model_list)} match "
+                    "— type to narrow, Backspace to clear)"
+                )
+            elif model_list:
+                hint = f"Select a model ({len(model_list)} available) — type to filter"
+            else:
+                hint = "No models listed for this provider. Use Back or Cancel."
+
+        box_width = _panel_box_width(title, [hint] + choices, min_width=46, max_width=84)
+        inner_text_width = max(8, box_width - 6)
+        selected = state.get("selected", 0)
+
+        # Scrolling viewport: the panel renders into a Window with no max
+        # height, so without limiting visible items the bottom border and
+        # any items past the available terminal rows get clipped on long
+        # provider catalogs (e.g. Ollama Cloud's 36+ models).
+        try:
+            from prompt_toolkit.application import get_app
+            term_rows = get_app().output.get_size().rows
+        except Exception:
+            term_rows = shutil.get_terminal_size((100, 24)).lines
+        scroll_offset, visible = HermesCLI._compute_model_picker_viewport(
+            selected, state.get("_scroll_offset", 0), len(choices), term_rows,
+        )
+        state["_scroll_offset"] = scroll_offset
+
+        lines = []
+        lines.append(('class:clarify-border', '╭─ '))
+        lines.append(('class:clarify-title', title))
+        lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
+        _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+        _append_panel_line(lines, 'class:clarify-border', 'class:clarify-hint', hint, box_width)
+        _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+        for idx in range(scroll_offset, scroll_offset + visible):
+            choice = choices[idx]
+            style = 'class:clarify-selected' if idx == selected else 'class:clarify-choice'
+            prefix = '❯ ' if idx == selected else '  '
+            for wrapped in _wrap_panel_text(prefix + choice, inner_text_width, subsequent_indent='  '):
+                _append_panel_line(lines, 'class:clarify-border', style, wrapped, box_width)
+        _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+        lines.append(('class:clarify-border', '╰' + ('─' * box_width) + '╯\n'))
+        return lines
+
+    def _get_command_palette_display_fragments(self):
+        state = self._command_palette_state
+        if not state:
+            return []
+        rows = self._command_palette_visible_entries()
+        state["_visible_count"] = len(rows)
+        _query = state.get("filter", "") or ""
+        total = len(state.get("entries") or [])
+        title = "⚙ Command Palette"
+        if _query:
+            hint = f"Filter: {_query}▏  ({len(rows)}/{total} match — Enter inserts, Esc cancels)"
+        else:
+            hint = f"Type to filter {total} commands — ↑/↓ then Enter inserts, Esc cancels"
+
+        labels = [f"{c}  —  {d}" if d else c for (c, _cat, d) in rows]
+        if not labels:
+            labels = ["(no matching commands)"]
+        box_width = _panel_box_width(title, [hint] + labels, min_width=50, max_width=90)
+        inner_text_width = max(8, box_width - 6)
+        selected = state.get("selected", 0)
+        try:
+            from prompt_toolkit.application import get_app
+            term_rows = get_app().output.get_size().rows
+        except Exception:
+            term_rows = shutil.get_terminal_size((100, 24)).lines
+        scroll_offset, visible = HermesCLI._compute_model_picker_viewport(
+            selected, state.get("_scroll_offset", 0), len(labels), term_rows,
+        )
+        state["_scroll_offset"] = scroll_offset
+
+        lines = []
+        lines.append(('class:clarify-border', '╭─ '))
+        lines.append(('class:clarify-title', title))
+        lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
+        _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+        _append_panel_line(lines, 'class:clarify-border', 'class:clarify-hint', hint, box_width)
+        _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+        for idx in range(scroll_offset, min(scroll_offset + visible, len(labels))):
+            label = labels[idx]
+            style = 'class:clarify-selected' if idx == selected else 'class:clarify-choice'
+            prefix = '❯ ' if idx == selected else '  '
+            for wrapped in _wrap_panel_text(prefix + label, inner_text_width, subsequent_indent='    '):
+                _append_panel_line(lines, 'class:clarify-border', style, wrapped, box_width)
+        _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+        lines.append(('class:clarify-border', '╰' + ('─' * box_width) + '╯\n'))
+        return lines
+
+    def _get_sudo_display_fragments(self):
+        state = self._sudo_state
+        if not state:
+            return []
+        title = '🔐 Sudo Password Required'
+        body = 'Enter password below (hidden), or press Enter to skip'
+        box_width = _panel_box_width(title, [body])
+        lines = []
+        lines.append(('class:sudo-border', '╭─ '))
+        lines.append(('class:sudo-title', title))
+        lines.append(('class:sudo-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
+        _append_blank_panel_line(lines, 'class:sudo-border', box_width)
+        _append_panel_line(lines, 'class:sudo-border', 'class:sudo-text', body, box_width)
+        _append_blank_panel_line(lines, 'class:sudo-border', box_width)
+        lines.append(('class:sudo-border', '╰' + ('─' * box_width) + '╯\n'))
+        return lines
+
+    def _get_secret_display_fragments(self):
+        state = self._secret_state
+        if not state:
+            return []
+
+        title = '🔑 Skill Setup Required'
+        prompt = state.get("prompt") or f"Enter value for {state.get('var_name', 'secret')}"
+        metadata = state.get("metadata") or {}
+        help_text = metadata.get("help")
+        body = 'Enter secret below (hidden), ESC or Ctrl+C to skip'
+        content_lines = [prompt, body]
+        if help_text:
+            content_lines.insert(1, str(help_text))
+        box_width = _panel_box_width(title, content_lines)
+        lines = []
+        lines.append(('class:sudo-border', '╭─ '))
+        lines.append(('class:sudo-title', title))
+        lines.append(('class:sudo-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
+        _append_blank_panel_line(lines, 'class:sudo-border', box_width)
+        _append_panel_line(lines, 'class:sudo-border', 'class:sudo-text', prompt, box_width)
+        if help_text:
+            _append_panel_line(lines, 'class:sudo-border', 'class:sudo-text', str(help_text), box_width)
+        _append_blank_panel_line(lines, 'class:sudo-border', box_width)
+        _append_panel_line(lines, 'class:sudo-border', 'class:sudo-text', body, box_width)
+        _append_blank_panel_line(lines, 'class:sudo-border', box_width)
+        lines.append(('class:sudo-border', '╰' + ('─' * box_width) + '╯\n'))
+        return lines
+
+    def _tui_hint_text(self):
+        if self._sudo_state:
+            remaining = max(0, int(self._sudo_deadline - time.monotonic()))
+            return [
+                ('class:hint', '  password hidden · Enter to skip'),
+                ('class:clarify-countdown', f'  ({remaining}s)'),
+            ]
+
+        if self._secret_state:
+            remaining = max(0, int(self._secret_deadline - time.monotonic()))
+            return [
+                ('class:hint', '  secret hidden · Enter to skip'),
+                ('class:clarify-countdown', f'  ({remaining}s)'),
+            ]
+
+        if self._approval_state:
+            remaining = max(0, int(self._approval_deadline - time.monotonic()))
+            return [
+                ('class:hint', '  ↑/↓ to select, Enter to confirm'),
+                ('class:clarify-countdown', f'  ({remaining}s)'),
+            ]
+
+        if self._slash_confirm_state:
+            remaining = max(0, int(self._slash_confirm_deadline - time.monotonic()))
+            return [
+                ('class:hint', '  type 1/2/3, or ↑/↓ to select, Enter to confirm'),
+                ('class:clarify-countdown', f'  ({remaining}s)'),
+            ]
+
+        if self._clarify_state:
+            # None deadline = unlimited wait → hide the countdown entirely.
+            if self._clarify_deadline is None:
+                countdown = ''
+            else:
+                remaining = max(0, int(self._clarify_deadline - time.monotonic()))
+                countdown = f'  ({remaining}s)'
+            if self._clarify_freetext:
+                return [
+                    ('class:hint', '  type your answer and press Enter'),
+                    ('class:clarify-countdown', countdown),
+                ]
+            if self._clarify_state.get("questions"):
+                return [
+                    ('class:hint', '  ↑/↓ to select, Enter to lock, Tab next question'),
+                    ('class:clarify-countdown', countdown),
+                ]
+            return [
+                ('class:hint', '  ↑/↓ to select, Enter to confirm'),
+                ('class:clarify-countdown', countdown),
+            ]
+
+        if self._command_running:
+            frame = self._command_spinner_frame()
+            detail = "input temporarily disabled" if self._command_blocks_input else "input stays active; Enter queues"
+            return [
+                ('class:hint', f'  {frame} command in progress · {detail}'),
+            ]
+
+        return []
+
+    def _tui_placeholder_text(self):
+        if self._voice_recording:
+            _label = self._voice_record_key_label()
+            return f"recording... {_label} to stop, Ctrl+C to cancel"
+        if self._voice_processing:
+            return "transcribing..."
+        if self._sudo_state:
+            return "type password (hidden), Enter to submit · ESC to skip"
+        if self._secret_state:
+            return "type secret (hidden), Enter to submit · ESC to skip"
+        if self._approval_state:
+            return ""
+        if self._slash_confirm_state:
+            return "type 1/2/3, or use ↑/↓ then Enter"
+        if self._clarify_freetext:
+            return "type your answer here and press Enter"
+        if self._clarify_state:
+            return ""
+        if self._command_running:
+            frame = self._command_spinner_frame()
+            status = self._command_status or "Processing command..."
+            return f"{frame} {status}"
+        if self._agent_running:
+            return "msg=interrupt · /queue · /bg · /steer · Ctrl+C cancel"
+        if self._voice_mode:
+            _label = self._voice_record_key_label()
+            return f"type or {_label} to record"
+        # Advertise a parked draft so the stash can never be silently
+        # forgotten — the composer itself tells you how to get it back.
+        _stash_hint = ""
+        try:
+            _stash_hint = self._prompt_stash.placeholder_hint()
+        except Exception:
+            _stash_hint = ""
+        if _stash_hint:
+            return _stash_hint
+        # Idle + empty composer: show a rotating task-oriented example to
+        # nudge the user toward a high-value first action (C-09). Chosen
+        # once per session (self._composer_placeholder) so it stays stable
+        # while being read, not flickering every render.
+        return getattr(self, "_composer_placeholder", "") or ""
+
+    def _get_stash_panel_display_fragments(self):
+        try:
+            _stash = self._prompt_stash
+            return self._render_stash_panel(
+                _stash.panel_rows(),
+                _stash.panel_cursor,
+                self._get_tui_terminal_width(),
+            )
+        except Exception:
+            return []
+
+    def _tui_handle_voice_record(self, event):
+        """Toggle voice recording when voice mode is active.
+
+        IMPORTANT: This handler runs in prompt_toolkit's event-loop thread.
+        Any blocking call here (locks, sd.wait, disk I/O) freezes the
+        entire UI.  All heavy work is dispatched to daemon threads.
+        """
+        if not self._voice_mode:
+            return
+        # Always allow STOPPING a recording (even when agent is running)
+        if self._voice_recording:
+            # Manual stop via push-to-talk key: stop continuous mode
+            with self._voice_lock:
+                self._voice_continuous = False
+            # Flag clearing is handled atomically inside _voice_stop_and_transcribe
+            event.app.invalidate()
+            threading.Thread(
+                target=self._voice_stop_and_transcribe,
+                daemon=True,
+            ).start()
+        else:
+            # Allow disarming continuous mode even when the agent is
+            # running or transcribing — otherwise the user is stuck in
+            # an auto-restart loop until /voice off (#67545).
+            if self._agent_running or self._voice_processing:
+                with self._voice_lock:
+                    self._voice_continuous = False
+                event.app.invalidate()
+                return
+            # Guard: don't START recording during interactive prompts
+            if self._clarify_state or self._sudo_state or self._approval_state or self._slash_confirm_state:
+                return
+
+            # Interrupt TTS if playing, so user can start talking.
+            # stop_playback() is fast (just terminates a subprocess);
+            # the stop event drains the streaming pipeline if one is live.
+            if not self._voice_tts_done.is_set():
+                try:
+                    logger.info("TTS CUT: record key handler cutting TTS")
+                    from tools.tts_streaming import mark_speech_interrupted
+                    mark_speech_interrupted()
+                    if self._voice_tts_stop is not None:
+                        self._voice_tts_stop.set()
+                    from tools.voice_mode import stop_playback
+                    stop_playback()
+                    self._voice_tts_done.set()
+                except Exception:
+                    pass
+
+            with self._voice_lock:
+                self._voice_continuous = True
+
+            # Dispatch to a daemon thread so play_beep(sd.wait),
+            # AudioRecorder.start(lock acquire), and config I/O
+            # never block the prompt_toolkit event loop.
+            def _start_recording():
+                try:
+                    self._voice_start_recording()
+                    if hasattr(self, '_app') and self._app:
+                        self._app.invalidate()
+                except Exception as e:
+                    _cprint(f"\n{_DIM}Voice recording failed: {e}{_RST}")
+
+            threading.Thread(target=_start_recording, daemon=True).start()
+            event.app.invalidate()
+
+    def _tui_handle_ctrl_c(self, event):
+        """Handle Ctrl+C - cancel interactive prompts, interrupt agent, or exit.
+
+        Priority:
+        0. Cancel active voice recording
+        1. Cancel active sudo/approval/clarify prompt
+        2. Interrupt the running agent (first press)
+        3. Force exit (second press within 2s, or when idle)
+        """
+        now = time.time()
+
+        # Cancel active voice recording.
+        # Run cancel() in a background thread to prevent blocking the
+        # event loop if AudioRecorder._lock or CoreAudio takes time.
+        _should_cancel_voice = False
+        _recorder_ref = None
+        with self._voice_lock:
+            if self._voice_recording and self._voice_recorder:
+                _recorder_ref = self._voice_recorder
+                self._voice_recording = False
+                self._voice_continuous = False
+                _should_cancel_voice = True
+        if _should_cancel_voice:
+            _cprint(f"\n{_DIM}Recording cancelled.{_RST}")
+            threading.Thread(
+                target=_recorder_ref.cancel, daemon=True
+            ).start()
+            event.app.invalidate()
             return
 
+        # Cancel slash confirmation prompt (foreground UI, not an
+        # agent-blocking overlay — cancel and stop here).
+        if self._slash_confirm_state:
+            self._submit_slash_confirm_response("cancel")
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return
+
+        # Cancel /model picker (foreground UI — cancel and stop here).
+        if self._model_picker_state:
+            self._close_model_picker()
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return
+
+        # Cancel command palette (foreground UI — cancel and stop here).
+        if self._command_palette_state:
+            self._close_command_palette()
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return
+
+        # Clear all agent-blocking overlays (approval/clarify/sudo/secret)
+        # in one shot.  We do NOT return after clearing — we fall through so
+        # that if the agent is also running we fire the interrupt on the same
+        # Ctrl+C press.  This fixes the case where a stale/orphaned overlay
+        # (left behind by a previous interrupt) consumes the press without
+        # ever reaching the agent-interrupt branch, leaving the chat frozen
+        # (#14026).
+        _overlay_cleared = bool(
+            self._sudo_state
+            or self._secret_state
+            or self._approval_state
+            or self._clarify_state
+        )
+        if _overlay_cleared:
+            self._clear_active_overlays_for_interrupt()
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+
+        # If we only cleared overlays and the agent is NOT running, stop here
+        # (don't fall through to the interrupt/exit path).
+        if _overlay_cleared and not (self._agent_running and self.agent):
+            return
+
+        if self._agent_running and self.agent:
+            if now - self._last_ctrl_c_time < 2.0:
+                print("\n⚡ Force exiting...")
+                self._should_exit = True
+                event.app.exit()
+                return
+
+            self._last_ctrl_c_time = now
+            print("\n⚡ Interrupting agent... (press Ctrl+C again to force exit)")
+            request_hard_interrupt(self.agent)
+        # If there's text or images, clear them (like bash).
+        # If everything is already empty, exit.
+        elif event.app.current_buffer.text or self._attached_images:
+            event.app.current_buffer.reset()
+            self._attached_images.clear()
+            event.app.invalidate()
+        else:
+            self._should_exit = True
+            event.app.exit()
+
+    def _tui_handle_ctrl_q(self, event):
+        """Alternative interrupt/exit shortcut (Ctrl+Q).
+
+        Behaves like Ctrl+C: cancels active prompts, interrupts the
+        running agent, or clears the input buffer. Does not support
+        the double-press 'force exit' feature of Ctrl+C.
+        """
+        # Cancel active voice recording.
+        _should_cancel_voice = False
+        _recorder_ref = None
+        with self._voice_lock:
+            if self._voice_recording and self._voice_recorder:
+                _recorder_ref = self._voice_recorder
+                self._voice_recording = False
+                self._voice_continuous = False
+                _should_cancel_voice = True
+        if _should_cancel_voice:
+            _cprint(f"\n{_DIM}Recording cancelled.{_RST}")
+            threading.Thread(
+                target=_recorder_ref.cancel, daemon=True
+            ).start()
+            event.app.invalidate()
+            return
+
+        # Cancel slash confirmation prompt (foreground UI — cancel and stop).
+        if self._slash_confirm_state:
+            self._submit_slash_confirm_response("cancel")
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return
+
+        # Cancel /model picker (foreground UI — cancel and stop).
+        if self._model_picker_state:
+            self._close_model_picker()
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return
+
+        # Clear all agent-blocking overlays in one shot, then fall through to
+        # the agent-interrupt branch so a single Ctrl+Q both clears a stale
+        # overlay and interrupts a still-running agent (#14026).
+        _overlay_cleared = bool(
+            self._sudo_state
+            or self._secret_state
+            or self._approval_state
+            or self._clarify_state
+        )
+        if _overlay_cleared:
+            self._clear_active_overlays_for_interrupt()
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+
+        if _overlay_cleared and not (self._agent_running and self.agent):
+            return
+
+        if self._agent_running and self.agent:
+            print("\n⚡ Interrupting agent...")
+            request_hard_interrupt(self.agent)
+        elif event.app.current_buffer.text or self._attached_images:
+            event.app.current_buffer.reset()
+            self._attached_images.clear()
+            event.app.invalidate()
+        else:
+            self._should_exit = True
+            event.app.exit()
+
+    def _tui_make_clarify_number_handler(self, idx):
+        def handler(event):
+            if self._clarify_state and not self._clarify_freetext:
+                choices = self._clarify_state.get("choices") or []
+                # multi-select support: number keys toggle checkboxes instead of submitting
+                if self._clarify_state.get("multi_select"):
+                    if idx < len(choices):
+                        indices = self._clarify_state.get("selected_indices", set())
+                        if idx in indices:
+                            indices.discard(idx)
+                        else:
+                            indices.add(idx)
+                        event.app.invalidate()
+                    elif idx == len(choices):
+                        # Toggle "Other" in multi-select mode
+                        indices = self._clarify_state.get("selected_indices", set())
+                        if idx in indices:
+                            indices.discard(idx)
+                        else:
+                            indices.add(idx)
+                        event.app.invalidate()
+                    return
+                # Original single-select: number keys submit directly
+                # Map index to choice (treating "Other" as the last option)
+                if idx < len(choices):
+                    # Batch mode: lock the numbered choice for the active
+                    # question instead of resolving the whole prompt.
+                    if self._clarify_state.get("questions"):
+                        self._clarify_batch_lock(self._clarify_state, choices[idx])
+                        event.app.invalidate()
+                        return
+                    # Select a numbered choice
+                    self._clarify_state["response_queue"].put(choices[idx])
+                    self._clarify_state = None
+                    self._clarify_freetext = False
+                    event.app.invalidate()
+                elif idx == len(choices):
+                    # Select "Other" option
+                    self._clarify_freetext = True
+                    event.app.invalidate()
+        return handler
+
+    def _tui_restore_stash_payload(self, event, payload) -> None:
+        """Put a popped (text, images) payload back into the composer."""
+        if not payload:
+            return
+        text, images = payload
+        buf = event.app.current_buffer
+        buf.text = text
+        buf.cursor_position = len(text)
+        if images:
+            # Restore attachments the draft was carrying.  Extend rather
+            # than replace: the user may have attached something new since
+            # the stash was taken and silently dropping it would be data
+            # loss.
+            for img in images:
+                if img not in self._attached_images:
+                    self._attached_images.append(img)
+
+    def _tui_handle_stash_panel_up(self, event):
+        self._prompt_stash.move_cursor(-1)
+        event.app.invalidate()
+
+    def _tui_handle_stash_panel_down(self, event):
+        self._prompt_stash.move_cursor(1)
+        event.app.invalidate()
+
+    def _tui_handle_stash_panel_delete(self, event):
+        """D in the browse panel discards the highlighted draft."""
+        self._prompt_stash.delete_at_cursor()
+        event.app.invalidate()
+
+    def _tui_handle_stash_panel_close(self, event):
+        self._prompt_stash.close_panel()
+        event.app.invalidate()
+
+    def _tui_handle_tab(self, event):
+        """Tab: accept completion, auto-suggestion, or start completions.
+
+        Priority:
+        1. Completion menu open → accept selected completion
+        2. Ghost text suggestion available → accept auto-suggestion
+        3. Otherwise → start completion menu
+
+        After accepting a provider like 'anthropic:', the completion menu
+        closes and complete_while_typing doesn't fire (no keystroke).
+        This binding re-triggers completions so stage-2 models appear
+        immediately.
+        """
+        buf = event.current_buffer
+        if buf.complete_state:
+            # Completion menu is open — accept the selection
+            completion = buf.complete_state.current_completion
+            if completion is None:
+                # Menu open but nothing selected — select first then grab it
+                buf.go_to_completion(0)
+                completion = buf.complete_state and buf.complete_state.current_completion
+            if completion is None:
+                return
+            # Accept the selected completion
+            buf.apply_completion(completion)
+        elif buf.suggestion and buf.suggestion.text:
+            # No completion menu, but there's a ghost text auto-suggestion — accept it
+            buf.insert_text(buf.suggestion.text)
+        else:
+            # No menu and no suggestion — start completions from scratch
+            buf.start_completion()
+
+    def _tui_handle_double_escape(self, event):
+        """Double ESC: discard the current draft and any attached images.
+
+        Matches Claude Code / Gemini CLI, where double-Esc is the
+        clear-the-composer gesture. It works while the agent is
+        streaming, which is the gap Ctrl+C leaves: Ctrl+C interrupts a
+        running turn and only clears the draft when idle, so mid-stream
+        there was no way to discard a half-typed prompt.
+
+        The draft is appended to history first, so Up recalls it — the
+        same undo affordance Claude Code provides, and the reason this
+        is safe to bind to a key pressed by reflex.
+
+        Single ESC is the prefix for Alt sequences (escape+enter,
+        escape+g, escape+v), so prompt_toolkit's escape-timeout keeps
+        those distinct from the double press. Modal prompts bind ESC
+        eagerly and are excluded here so cancel still wins.
+        """
+        buf = event.app.current_buffer
+        if not (buf.text or self._attached_images):
+            return
+        buf.reset(append_to_history=bool(buf.text))
+        self._attached_images.clear()
+        event.app.invalidate()
+
+    def _tui_handle_ignored_terminal_sequence(self, event):
+        """Consume parser-level ignored terminal sequences before self-insert.
+
+        install_ignored_terminal_sequences() in hermes_cli.pt_input_extras
+        registers focus reports (CSI I / CSI O) as Keys.Ignore at the
+        VT100 parser level. Without this no-op binding the default
+        self-insert path would still fire and the bytes would land in
+        the buffer.
+
+        Focus-in (CSI I) additionally schedules a rate-limited full
+        repaint: while the tab/window was hidden the emulator may have
+        coalesced output or repainted the surface, so prompt_toolkit's
+        incremental diff would stack a fresh copy of the prompt chrome
+        on top of the stale one (#60920 focus-regain variant, #25337).
+        """
+        try:
+            for press in getattr(event, "key_sequence", None) or ():
+                if getattr(press, "data", None) == "\x1b[I":
+                    self._schedule_focus_regain_redraw()
+                    break
+        except Exception:
+            pass
+        return None
+
+    def _tui_handle_escape_modal(self, event):
+        """ESC cancels active secret/sudo prompts."""
+        if self._secret_state:
+            self._cancel_secret_capture()
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return
+        if self._sudo_state:
+            self._sudo_state["response_queue"].put("")
+            self._sudo_state = None
+            event.app.invalidate()
+            return
+        if self._slash_confirm_state:
+            self._submit_slash_confirm_response("cancel")
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return
+
+    def _tui_handle_ctrl_z(self, event):
+        """Handle Ctrl+Z - suspend process to background (Unix only)."""
+        if sys.platform == 'win32':
+            _cprint(f"\n{_DIM}Suspend (Ctrl+Z) is not supported on Windows.{_RST}")
+            event.app.invalidate()
+            return
+        import signal as _sig
+        from prompt_toolkit.application import run_in_terminal
+        from hermes_cli.skin_engine import get_active_skin
+        agent_name = get_active_skin().get_branding("agent_name", "Hermes Agent")
+        msg = f"\n{agent_name} has been suspended. Run `fg` to bring {agent_name} back."
+        def _suspend():
+            os.write(1, msg.encode())
+            os.kill(0, _sig.SIGTSTP)
+        run_in_terminal(_suspend)
+
+    def _tui_handle_ctrl_d(self, event):
+        """Ctrl+D: delete char under cursor (standard readline behaviour).
+        Only exit when the input is empty — same as bash/zsh. Pending
+        attached images count as input and block the EOF-exit so the
+        user doesn't lose them silently.
+        """
+        buf = event.app.current_buffer
+        if buf.text:
+            buf.delete()
+        elif self._attached_images:
+            # Empty text but pending attachments — no-op, don't exit.
+            return
+        else:
+            self._should_exit = True
+            event.app.exit()
+
+    def _tui_recall_without_recollapse(self, buf, move):
+        """Run a history-navigation move, suppressing paste-collapse.
+
+        Recalled history can hold the full text of a paste that was
+        collapsed to a placeholder at submit time. Loading it back into the
+        buffer looks exactly like a fresh large paste to ``_on_text_changed``
+        and would be re-collapsed. Set the skip flag around the move; if the
+        move didn't change the text (plain cursor movement), clear the flag
+        so a later real paste still collapses.
+        """
+        before = buf.text
+        self._skip_paste_collapse = True
+        move()
+        if buf.text == before:
+            self._skip_paste_collapse = False
+
+    def _tui_handle_alt_v(self, event):
+        """Alt+V — paste image from clipboard.
+
+        Alt key combos pass through all terminal emulators (sent as
+        ESC + key), unlike Ctrl+V which terminals intercept for text
+        paste.  This is the reliable way to attach clipboard images
+        on WSL2, VSCode, and any terminal over SSH where Ctrl+V
+        can't reach the application for image-only clipboard.
+        """
+        if self._try_attach_clipboard_image():
+            event.app.invalidate()
+        else:
+            # No image found — show a hint
+            pass  # silent when no image (avoid noise on accidental press)
+
+    def _tui_handle_ctrl_v(self, event):
+        """Fallback image paste for terminals without bracketed paste.
+
+        On Linux terminals (GNOME Terminal, Konsole, etc.), Ctrl+V
+        sends raw byte 0x16 instead of triggering a paste.  This
+        binding catches that and checks the clipboard for images.
+        On terminals that DO intercept Ctrl+V for paste (macOS
+        Terminal, iTerm2, VSCode, Windows Terminal), the bracketed
+        paste handler fires instead and this binding never triggers.
+        """
+        if self._try_attach_clipboard_image():
+            event.app.invalidate()
+
+    def _tui_handle_ctrl_l(self, event):
+        """Ctrl+L: force a clean full-screen repaint.
+
+        Recovers the UI after external terminal buffer drift — tmux /
+        cmux tab switches, ``clear`` from a subshell, SSH window
+        restores, etc. — that prompt_toolkit can't detect on its own.
+        Matches the universal bash/zsh/fish/vim/htop convention.
+        """
+        self._force_full_redraw()
+
+    def _tui_handle_alt_enter(self, event):
+        """Alt+Enter inserts a newline for multi-line input.
+
+        Works on mac/Linux/WSL. On Windows Terminal this keystroke is
+        intercepted at the terminal layer (toggles fullscreen) and never
+        reaches here — Windows users get newline via Ctrl+Enter instead
+        (bound below as c-j, since WT delivers Ctrl+Enter as LF).
+        """
+        event.current_buffer.insert_text('\n')
+
+    def _tui_handle_open_in_editor(self, event):
+        """Ctrl+G (or Alt+G in VSCode/Cursor) opens the current draft in an external editor."""
+        self._open_external_editor(event.current_buffer)
+
+    def _tui_model_picker_down(self, event):
+        state = self._model_picker_state
+        if not state:
+            return
+        if state.get("stage") == "provider":
+            max_idx = len(state.get("providers") or [])
+        else:
+            # +1 for "← Back" and Cancel over the filtered visible rows.
+            _fp = state.get("_filtered_pairs")
+            _visible = len(_fp) if _fp is not None else len(state.get("model_list") or [])
+            max_idx = _visible + 1
+        state["selected"] = min(max_idx, state.get("selected", 0) + 1)
+        event.app.invalidate()
+
+    def _tui_model_picker_up(self, event):
+        if self._model_picker_state:
+            self._model_picker_state["selected"] = max(0, self._model_picker_state.get("selected", 0) - 1)
+            event.app.invalidate()
+
+    def _tui_model_picker_escape(self, event):
+        """ESC clears an active filter first, else closes the picker."""
+        st = self._model_picker_state
+        if st and st.get("stage") == "model" and (st.get("filter") or ""):
+            st["filter"] = ""
+            st["selected"] = 0
+            st["_scroll_offset"] = 0
+            event.app.invalidate()
+            return
+        self._close_model_picker()
+        event.app.current_buffer.reset()
+        event.app.invalidate()
+
+    def _tui_model_picker_filter_backspace(self, event):
+        st = self._model_picker_state
+        if not st:
+            return
+        cur = st.get("filter", "") or ""
+        st["filter"] = cur[:-1]
+        st["selected"] = 0
+        st["_scroll_offset"] = 0
+        event.app.invalidate()
+
+    def _tui_make_model_filter_char_handler(self, ch: str):
+        def handler(event):
+            st = self._model_picker_state
+            if not st or st.get("stage") != "model":
+                return
+            st["filter"] = (st.get("filter", "") or "") + ch
+            st["selected"] = 0
+            st["_scroll_offset"] = 0
+            event.app.invalidate()
+        return handler
+
+    def _tui_make_palette_char_handler(self, ch: str):
+        def handler(event):
+            st = self._command_palette_state
+            if not st:
+                return
+            st["filter"] = (st.get("filter", "") or "") + ch
+            st["selected"] = 0
+            st["_scroll_offset"] = 0
+            event.app.invalidate()
+        return handler
+
+    def _tui_make_approval_number_handler(self, idx):
+        def handler(event):
+            if self._approval_state and idx < len(self._approval_state["choices"]):
+                self._approval_state["selected"] = idx
+                self._handle_approval_selection()
+                event.app.invalidate()
+        return handler
+
+    def _tui_make_slash_confirm_number_handler(self, idx):
+        def handler(event):
+            if self._slash_confirm_state and idx < len(self._slash_confirm_state.get("choices") or []):
+                choice = self._slash_confirm_state["choices"][idx][0]
+                self._submit_slash_confirm_response(choice)
+                event.app.current_buffer.reset()
+                event.app.invalidate()
+        return handler
+
+    def _tui_clarify_toggle(self, event):
+        if self._clarify_state:
+            selected = self._clarify_state["selected"]
+            indices = self._clarify_state.get("selected_indices", set())
+            if selected in indices:
+                indices.discard(selected)
+            else:
+                indices.add(selected)
+            event.app.invalidate()
+
+    def _tui_clarify_down(self, event):
+        """Move selection down in clarify choices."""
+        if self._clarify_state:
+            choices = self._clarify_state.get("choices") or []
+            max_idx = len(choices)  # last index is the "Other" option
+            self._clarify_state["selected"] = min(max_idx, self._clarify_state["selected"] + 1)
+            event.app.invalidate()
+
+    def _tui_clarify_up(self, event):
+        """Move selection up in clarify choices."""
+        if self._clarify_state:
+            self._clarify_state["selected"] = max(0, self._clarify_state["selected"] - 1)
+            event.app.invalidate()
+
+    def _tui_clarify_batch_tab(self, event):
+        state = self._clarify_state
+        if state and state.get("questions"):
+            self._clarify_batch_set_active(
+                state, (state["active"] + 1) % len(state["questions"])
+            )
+            event.app.invalidate()
+
+    def _tui_clarify_batch_backtab(self, event):
+        state = self._clarify_state
+        if state and state.get("questions"):
+            self._clarify_batch_set_active(
+                state, (state["active"] - 1) % len(state["questions"])
+            )
+            event.app.invalidate()
+
+    def _tui_command_palette_backspace(self, event):
+        st = self._command_palette_state
+        if st:
+            st["filter"] = (st.get("filter", "") or "")[:-1]
+            st["selected"] = 0
+            st["_scroll_offset"] = 0
+            event.app.invalidate()
+
+    def _tui_command_palette_down(self, event):
+        st = self._command_palette_state
+        if st:
+            n = st.get("_visible_count", len(self._command_palette_visible_entries()))
+            st["selected"] = min(max(0, n - 1), st.get("selected", 0) + 1)
+            event.app.invalidate()
+
+    def _tui_command_palette_up(self, event):
+        st = self._command_palette_state
+        if st:
+            st["selected"] = max(0, st.get("selected", 0) - 1)
+            event.app.invalidate()
+
+    def _tui_command_palette_enter(self, event):
+        self._handle_command_palette_selection()
+        event.app.invalidate()
+
+    def _tui_command_palette_escape(self, event):
+        self._close_command_palette()
+        event.app.invalidate()
+
+    def _tui_open_command_palette(self, event):
+        self._open_command_palette()
+        event.app.invalidate()
+
+    def _tui_slash_confirm_down(self, event):
+        if self._slash_confirm_state:
+            max_idx = len(self._slash_confirm_state.get("choices") or []) - 1
+            self._slash_confirm_state["selected"] = min(max_idx, self._slash_confirm_state.get("selected", 0) + 1)
+            event.app.invalidate()
+
+    def _tui_slash_confirm_up(self, event):
+        if self._slash_confirm_state:
+            self._slash_confirm_state["selected"] = max(0, self._slash_confirm_state.get("selected", 0) - 1)
+            event.app.invalidate()
+
+    def _tui_approval_down(self, event):
+        if self._approval_state:
+            max_idx = len(self._approval_state["choices"]) - 1
+            self._approval_state["selected"] = min(max_idx, self._approval_state["selected"] + 1)
+            event.app.invalidate()
+
+    def _tui_approval_up(self, event):
+        if self._approval_state:
+            self._approval_state["selected"] = max(0, self._approval_state["selected"] - 1)
+            event.app.invalidate()
+
+    def _tui_wake_startup(self):
+        try:
+            self._maybe_start_wake_word()
+        except Exception as e:
+            logger.debug("wake-word startup skipped: %s", e)
+
+    def _tui_suppress_closed_loop_errors(self, loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc):
+            return  # silently suppress
+        if isinstance(exc, KeyError) and "is not registered" in str(exc):
+            return  # suppress selector registration failures (#6393)
+        if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EIO:
+            return  # suppress I/O errors from broken stdout on interrupt (#13710)
+        # Fall back to default handler for everything else
+        loop.default_exception_handler(context)
+
+    def _tui_handle_enter(self, event):
+        """Handle Enter key - submit input.
+
+        Routes to the correct queue based on active UI state:
+        - Sudo password prompt: password goes to sudo response queue
+        - Approval selection: selected choice goes to approval response queue
+        - Clarify freetext mode: answer goes to the clarify response queue
+        - Clarify choice mode: selected choice goes to the clarify response queue
+        - Agent running: goes to _interrupt_queue (chat() monitors this)
+        - Agent idle: goes to _pending_input (process_loop monitors this)
+        Commands (starting with /) always go to _pending_input so they're
+        handled as commands, not sent as interrupt text to the agent.
+        """
+        # --- Sudo password prompt: submit the typed password ---
+        if self._sudo_state:
+            text = event.app.current_buffer.text
+            self._sudo_state["response_queue"].put(text)
+            self._sudo_state = None
+            event.app.invalidate()
+            return
+
+        # --- Secret prompt: submit the typed secret ---
+        if self._secret_state:
+            text = event.app.current_buffer.text
+            self._submit_secret_response(text)
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return
+
+        # --- Approval selection: confirm the highlighted choice ---
+        if self._approval_state:
+            self._handle_approval_selection()
+            event.app.invalidate()
+            return
+
+        # --- Slash-command confirmation: submit typed or highlighted choice ---
+        if self._slash_confirm_state:
+            text = event.app.current_buffer.text.strip()
+            choices = self._slash_confirm_state.get("choices") or []
+            choice = self._normalize_slash_confirm_choice(text, choices) if text else None
+            if choice is None:
+                selected = self._slash_confirm_state.get("selected", 0)
+                if 0 <= selected < len(choices):
+                    choice = choices[selected][0]
+            self._submit_slash_confirm_response(choice or "cancel")
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return
+
+        # --- /model picker modal ---
+        if self._model_picker_state:
+            try:
+                # Picker selections follow the same session-scoped default
+                # as /model <name>; honour model.persist_switch_by_default.
+                from hermes_cli.model_switch import resolve_persist_behavior
+
+                self._handle_model_picker_selection(
+                    persist_global=resolve_persist_behavior(False, False)
+                )
+            except Exception as _exc:
+                _cprint(f"  ✗ Model selection failed: {_exc}")
+                self._close_model_picker()
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+            return
+
+        # --- Clarify freetext mode: user typed their own answer ---
+        if self._clarify_freetext and self._clarify_state:
+            text = event.app.current_buffer.text.strip()
+            if text:
+                state = self._clarify_state
+                # Batch mode: lock the typed answer for the active question
+                if state.get("questions"):
+                    base = getattr(self, '_clarify_multi_base', None)
+                    if base is not None:
+                        # Multi-select "Other": append the typed answer to
+                        # the checked labels as a JSON array string.
+                        answer = json.dumps(base + [text], ensure_ascii=False)
+                        meta = {"kind": "multi", "choices": list(base), "other_text": text}
+                        self._clarify_multi_base = None
+                    else:
+                        answer = text
+                        meta = {"kind": "other", "other_text": text}
+                    self._clarify_freetext = False
+                    self._clarify_prefill = ""
+                    self._clarify_batch_lock(state, answer, meta=meta)
+                    event.app.current_buffer.reset()
+                    event.app.invalidate()
+                    return
+                # multi-select: prepend previously checked real choices
+                base = getattr(self, '_clarify_multi_base', None)
+                if base:
+                    text = ", ".join(base) + ", " + text
+                    self._clarify_multi_base = None
+                self._clarify_state["response_queue"].put(text)
+                self._clarify_state = None
+                self._clarify_freetext = False
+                event.app.current_buffer.reset()
+                event.app.invalidate()
+            return
+
+        # --- Clarify choice mode: confirm the highlighted selection ---
+        if self._clarify_state and not self._clarify_freetext:
+            state = self._clarify_state
+            # Batch mode: Enter locks the active question's answer and
+            # advances to the next unanswered question.
+            if state.get("questions"):
+                self._clarify_batch_enter(state)
+                # Editing an earlier "Other" answer: prefill the composer
+                # with the previously typed text.
+                if self._clarify_freetext and self._clarify_prefill:
+                    event.app.current_buffer.text = self._clarify_prefill
+                    event.app.current_buffer.cursor_position = len(self._clarify_prefill)
+                    self._clarify_prefill = ""
+                event.app.invalidate()
+                return
+            selected = state["selected"]
+            choices = state.get("choices") or []
+            # multi-select support: submit comma-joined list of checked choices
+            if state.get("multi_select"):
+                indices = state.get("selected_indices")
+                if not indices:
+                    # Nothing checked → submit empty string (parses to [])
+                    state["response_queue"].put("")
+                    self._clarify_state = None
+                    event.app.invalidate()
+                    return
+                sorted_idx = sorted(indices)
+                selected_choices = [choices[i] for i in sorted_idx if i < len(choices)]
+                other_checked = len(choices) in sorted_idx
+                if other_checked and selected_choices:
+                    # "Other" + real choices: store base choices, switch to freetext
+                    # so the user can type a custom answer that gets appended
+                    self._clarify_multi_base = selected_choices
+                    self._clarify_freetext = True
+                    event.app.invalidate()
+                    return
+                if selected_choices:
+                    state["response_queue"].put(", ".join(selected_choices))
+                    self._clarify_state = None
+                    event.app.invalidate()
+                    return
+                # Only "Other" was checked → switch to freetext
+                self._clarify_freetext = True
+                event.app.invalidate()
+                return
+            # Original single-select behavior: submit the highlighted choice
+            if selected < len(choices):
+                state["response_queue"].put(choices[selected])
+                self._clarify_state = None
+                event.app.invalidate()
+            else:
+                # "Other" selected → switch to freetext
+                self._clarify_freetext = True
+                event.app.invalidate()
+            return
+
+        # --- Normal input routing ---
+        raw_text = event.app.current_buffer.text
+        if (
+            self._tui_multiline_shortcuts
+            and event.app.current_buffer.cursor_position == len(raw_text)
+            and _is_backslash_line_continuation(raw_text)
+        ):
+            continued = _apply_backslash_line_continuation(raw_text)
+            event.app.current_buffer.text = continued
+            event.app.current_buffer.cursor_position = len(continued)
+            event.app.invalidate()
+            return
+        text = raw_text.strip()
+        has_images = bool(self._attached_images)
+        if text or has_images:
+            # Handle /model directly on the UI thread so interactive pickers
+            # can safely use prompt_toolkit terminal handoff helpers.
+            if self._should_handle_model_command_inline(text, has_images=has_images):
+                if not self.process_command(text):
+                    self._should_exit = True
+                    if event.app.is_running:
+                        event.app.exit()
+                event.app.current_buffer.reset(append_to_history=True)
+                # Force a repaint: process_command() prints through
+                # patch_stdout (scrolls output above the prompt) and never
+                # invalidates the app, so the just-cleared input area can
+                # keep showing the submitted text until some unrelated
+                # redraw fires. Every other early-return branch in this
+                # handler invalidates after reset — match them.
+                event.app.invalidate()
+                return
+
+            # Handle /steer while the agent is running immediately on the
+            # UI thread.  Queuing through _pending_input would deadlock the
+            # steer until after the agent loop finishes (process_loop is
+            # blocked inside self.chat()), which turns /steer into a
+            # post-run next-turn message — defeating mid-run injection.
+            # agent.steer() is thread-safe (holds _pending_steer_lock).
+            if self._should_handle_steer_command_inline(text, has_images=has_images):
+                self.process_command(text)
+                event.app.current_buffer.reset(append_to_history=True)
+                # Force a repaint after clearing the buffer.  /steer is
+                # dispatched mid-run while the agent streams output through
+                # patch_stdout; process_command() never invalidates the
+                # app, so without this the submitted "/steer <text>" can
+                # linger in the input area (looking unsent) and invite an
+                # accidental re-submit. See issue #34569.
+                event.app.invalidate()
+                return
+
+            # Same treatment for /bg and /btw while the agent is
+            # running.  Queuing them defeats the entire point of the
+            # commands: process_loop is blocked inside self.chat(), so the
+            # side task would only start once the foreground turn it was
+            # meant to run alongside has already finished (#75221).  The
+            # foreground turn is left alone: no interrupt, no steer.
+            if self._should_handle_background_command_inline(
+                text, has_images=has_images
+            ):
+                self.process_command(text)
+                event.app.current_buffer.reset(append_to_history=True)
+                # Repaint for the same reason as the /steer branch above:
+                # process_command() prints through patch_stdout and never
+                # invalidates the app, so the submitted text can linger in
+                # the input area looking unsent.
+                event.app.invalidate()
+                return
+
+            # Snapshot and clear attached images
+            images = list(self._attached_images)
+            self._attached_images.clear()
+            event.app.invalidate()
+            # Bundle text + images as a tuple when images are present
+            payload = (text, images) if images else text
+            # A bang command is treated like a slash command while the
+            # agent is busy: it must never be routed into steer/redirect
+            # (which would inject `!git status` into the model's context as
+            # a prompt). It queues and runs locally once the loop drains.
+            _is_local_dispatch = bool(text) and (
+                _looks_like_slash_command(text) or text.strip().startswith("!")
+            )
+            if self._agent_running and not _is_local_dispatch:
+                _effective_mode = self.busy_input_mode
+                redirected = False
+                if _effective_mode == "steer":
+                    # Route Enter through /steer — inject mid-run after the
+                    # next tool call.  Images can't ride along (steer only
+                    # appends text), so fall back to queue when images are
+                    # attached.  If the agent lacks steer() or rejects the
+                    # payload, also fall back to queue so nothing is lost.
+                    if images or not text:
+                        _effective_mode = "queue"
+                    else:
+                        accepted = False
+                        try:
+                            if self.agent is not None and hasattr(self.agent, "steer"):
+                                accepted = bool(self.agent.steer(text))
+                        except Exception as exc:
+                            _cprint(f"  {_DIM}Steer failed ({exc}) — queued for next turn.{_RST}")
+                            accepted = False
+                        if accepted:
+                            preview = text[:80] + ("..." if len(text) > 80 else "")
+                            _cprint(f"  {_ACCENT}⏩ Steered: '{preview}'{_RST}")
+                        else:
+                            _effective_mode = "queue"
+                if _effective_mode == "queue":
+                    # Queue for the next turn instead of interrupting
+                    self._pending_input.put(payload)
+                    preview = text if text else f"[{len(images)} image{'s' if len(images) != 1 else ''} attached]"
+                    _cprint(f"  Queued for the next turn: {preview[:80]}{'...' if len(preview) > 80 else ''}")
+                elif _effective_mode == "interrupt":
+                    if not images and text:
+                        try:
+                            if (
+                                self.agent is not None
+                                and getattr(
+                                    self.agent,
+                                    "_supports_active_turn_redirect",
+                                    False,
+                                )
+                                is True
+                                and hasattr(self.agent, "redirect")
+                            ):
+                                redirected = bool(self.agent.redirect(text))
+                        except Exception:
+                            redirected = False
+                    if redirected:
+                        preview = text[:80] + ("..." if len(text) > 80 else "")
+                        _cprint(f"  {_ACCENT}↪ Redirected current turn: '{preview}'{_RST}")
+                    else:
+                        # Compatibility path for older agents, multimodal
+                        # follow-ups, or a turn that finished in the race.
+                        self._interrupt_queue.put(payload)
+                        try:
+                            _dbg = _hermes_home / "interrupt_debug.log"
+                            with open(_dbg, "a", encoding="utf-8") as _f:
+                                _f.write(f"{time.strftime('%H:%M:%S')} ENTER: queued interrupt msg={str(payload)[:60]!r}, "
+                                         f"agent_running={self._agent_running}\n")
+                        except Exception:
+                            pass
+                # First-touch onboarding: on the very first busy-while-running
+                # event for this install, print a one-line tip explaining the
+                # /busy knob.  Flag persists to config.yaml and never fires
+                # again.  Guarded for exceptions so onboarding can't break
+                # the input loop.
+                try:
+                    from agent.onboarding import (
+                        BUSY_INPUT_FLAG,
+                        busy_input_hint_cli,
+                        is_seen,
+                        mark_seen,
+                    )
+                    if not is_seen(CLI_CONFIG, BUSY_INPUT_FLAG):
+                        _hint_mode = "redirect" if redirected else _effective_mode
+                        _cprint(f"  {_DIM}{busy_input_hint_cli(_hint_mode)}{_RST}")
+                        mark_seen(_hermes_home / "config.yaml", BUSY_INPUT_FLAG)
+                        CLI_CONFIG.setdefault("onboarding", {}).setdefault("seen", {})[BUSY_INPUT_FLAG] = True
+                except Exception:
+                    pass
+            else:
+                self._pending_input.put(payload)
+            # History stores real pasted content, not the placeholder, so
+            # up-arrow recall restores the actual text.
+            self._inline_pastes(event.app.current_buffer)
+            event.app.current_buffer.reset(append_to_history=True)
+
+    def _tui_handle_paste(self, event):
+        """Handle terminal paste — detect clipboard images.
+
+        When the terminal supports bracketed paste, Ctrl+V / Cmd+V
+        triggers this with the pasted text. We only auto-attach a
+        clipboard image for image-only/empty paste gestures so text
+        pastes and dictation do not accidentally attach stale images.
+
+        Large pastes (5+ lines) are collapsed to a file reference
+        placeholder while preserving any existing user text in the
+        buffer.
+        """
+        # Diagnostic canary: measure how long the paste handler blocks
+        # the prompt_toolkit event loop. If this exceeds ~500ms we log
+        # it so recurring "CLI freezes on paste" reports (issue #16263,
+        # macOS Tahoe 26 + iTerm2/Ghostty) arrive with data attached.
+        _paste_handler_start = time.perf_counter()
+        _paste_raw_size = len(event.data or "")
+        pasted_text = event.data or ""
+        # Normalise line endings — Windows \r\n and old Mac \r both become \n
+        # so the 5-line collapse threshold and display are consistent.
+        pasted_text = pasted_text.replace('\r\n', '\n').replace('\r', '\n')
+        pasted_text = _strip_leaked_bracketed_paste_wrappers(pasted_text)
+        pasted_text, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(pasted_text)
+        if _had_mouse_reports:
+            self._recover_terminal_input_modes(reason="mouse reports leaked into bracketed paste payload")
+        if _should_auto_attach_clipboard_image_on_paste(pasted_text) and self._try_attach_clipboard_image():
+            event.app.invalidate()
+        if pasted_text:
+            # Sanitize surrogate characters (e.g. from Word/Google Docs paste) before writing
+            from run_agent import _sanitize_surrogates
+            pasted_text = _sanitize_surrogates(pasted_text)
+            line_count = pasted_text.count('\n')
+            buf = event.current_buffer
+            threshold = self.config.get("paste_collapse_threshold", 5)
+            char_threshold = self.config.get("paste_collapse_char_threshold", 2000)
+            lines_hit = threshold > 0 and line_count >= threshold
+            chars_hit = char_threshold > 0 and len(pasted_text) >= char_threshold
+            if (lines_hit or chars_hit) and not buf.text.strip().startswith('/'):
+                self._tui_paste_counter[0] += 1
+                paste_dir = _hermes_home / "pastes"
+                paste_dir.mkdir(parents=True, exist_ok=True)
+                paste_file = paste_dir / f"paste_{self._tui_paste_counter[0]}_{datetime.now().strftime('%H%M%S')}.txt"
+                paste_file.write_text(pasted_text, encoding="utf-8")
+                logger.info("Collapsed paste #%d: %d lines, %d chars -> %s", self._tui_paste_counter[0], line_count + 1, len(pasted_text), paste_file)
+                placeholder = f"[Pasted text #{self._tui_paste_counter[0]}: {line_count + 1} lines \u2192 {paste_file}]"
+                prefix = ""
+                if buf.cursor_position > 0 and buf.text[buf.cursor_position - 1] != '\n':
+                    prefix = "\n"
+                self._tui_paste_just_collapsed[0] = True
+                buf.insert_text(prefix + placeholder)
+            else:
+                buf.insert_text(pasted_text)
+        _paste_handler_elapsed_ms = (time.perf_counter() - _paste_handler_start) * 1000.0
+        if _paste_handler_elapsed_ms > 500.0:
+            logger.warning(
+                "Slow bracketed-paste handler: %.1fms to process %d bytes "
+                "(%d lines) on %s. If the input becomes unresponsive after "
+                "this, attach this log line to the bug report.",
+                _paste_handler_elapsed_ms,
+                _paste_raw_size,
+                pasted_text.count('\n') + 1 if pasted_text else 0,
+                sys.platform,
+            )
+
+    def _tui_on_text_changed(self, buf):
+        """Detect large pastes and collapse them to a file reference.
+
+        When bracketed paste is available, handle_paste collapses
+        large pastes directly.  This handler is a fallback for
+        terminals without bracketed paste support.
+
+        Two heuristics (either triggers collapse):
+        1. Many characters added at once (chars_added > 1) — works
+           when the terminal delivers the paste in one event-loop tick.
+        2. Newline count jumped by 4+ in a single text-change event —
+           catches terminals that feed characters individually but
+           still batch newlines.  Alt+Enter only adds 1 newline per
+           event so it never triggers this.
+        """
+        text = _strip_leaked_bracketed_paste_wrappers(buf.text)
+        text, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(text)
+        if _had_mouse_reports:
+            self._recover_terminal_input_modes(reason="mouse reports leaked into prompt buffer")
+        if text != buf.text:
+            cursor = min(buf.cursor_position, len(text))
+            self._tui_paste_just_collapsed[0] = True
+            buf.text = text
+            buf.cursor_position = cursor
+            self._tui_prev_text_len[0] = len(text)
+            self._tui_prev_newline_count[0] = text.count('\n')
+            return
+        chars_added = len(text) - self._tui_prev_text_len[0]
+        self._tui_prev_text_len[0] = len(text)
+        if self._tui_paste_just_collapsed[0] or self._skip_paste_collapse:
+            self._tui_paste_just_collapsed[0] = False
+            self._skip_paste_collapse = False
+            self._tui_prev_newline_count[0] = text.count('\n')
+            return
+        line_count = text.count('\n')
+        newlines_added = line_count - self._tui_prev_newline_count[0]
+        self._tui_prev_newline_count[0] = line_count
+        is_paste = chars_added > 1 or newlines_added >= 4
+        threshold = self.config.get("paste_collapse_threshold_fallback", 5)
+        char_threshold = self.config.get("paste_collapse_char_threshold", 2000)
+        lines_hit = threshold > 0 and line_count >= threshold
+        chars_hit = char_threshold > 0 and len(text) >= char_threshold
+        if (lines_hit or chars_hit) and is_paste and not text.startswith('/'):
+            self._tui_paste_counter[0] += 1
+            paste_dir = _hermes_home / "pastes"
+            paste_dir.mkdir(parents=True, exist_ok=True)
+            paste_file = paste_dir / f"paste_{self._tui_paste_counter[0]}_{datetime.now().strftime('%H%M%S')}.txt"
+            paste_file.write_text(text, encoding="utf-8")
+            logger.info("Collapsed paste #%d: %d lines, %d chars -> %s (fallback)", self._tui_paste_counter[0], line_count + 1, len(text), paste_file)
+            self._tui_paste_just_collapsed[0] = True
+            buf.text = f"[Pasted text #{self._tui_paste_counter[0]}: {line_count + 1} lines \u2192 {paste_file}]"
+            buf.cursor_position = len(buf.text)
+
+    def _tui_handle_prompt_stash(self, event):
+        """Ctrl+S: stash the current draft, or restore/browse a stashed one.
+
+        - Composer has content → push it onto the stash and clear the input.
+        - Composer empty, one stashed draft → pop it straight back.
+        - Composer empty, several stashed → open the browse panel.
+        - Browse panel open → close it.
+
+        Pushing onto a stack (rather than a single slot) is what makes
+        repeated Ctrl+S safe: a second stash never silently overwrites the
+        first, both stay reachable in the panel.
+        """
+        from hermes_cli.prompt_stash import (
+            ACTION_OPEN_PANEL,
+            ACTION_RESTORED,
+            ACTION_STASHED,
+            resolve_ctrl_s,
+        )
+
+        buf = event.app.current_buffer
+        action, payload = resolve_ctrl_s(
+            self._prompt_stash, buf.text, self._attached_images
+        )
+
+        if action == ACTION_STASHED:
+            # reset() (not `text = ""`) so completion state, selection, and
+            # the undo stack are cleared along with the text.
+            buf.reset()
+            self._attached_images.clear()
+        elif action == ACTION_RESTORED:
+            self._tui_restore_stash_payload(event, payload)
+        elif action == ACTION_OPEN_PANEL:
+            pass  # resolve_ctrl_s already flipped panel_open
+
+        event.app.invalidate()
+
+    def _tui_handle_stash_panel_restore(self, event):
+        """Enter in the browse panel restores the highlighted draft."""
+        payload = self._prompt_stash.restore_at_cursor()
+        self._tui_restore_stash_payload(event, payload)
+        event.app.invalidate()
+
+    def _tui_history_up(self, event):
+        """Up arrow: browse history when on first line, else move cursor up."""
+        buf = event.app.current_buffer
+        self._tui_recall_without_recollapse(buf, lambda: buf.auto_up(count=event.arg))
+
+    def _tui_history_down(self, event):
+        """Down arrow: browse history when on last line, else move cursor down."""
+        buf = event.app.current_buffer
+        self._tui_recall_without_recollapse(buf, lambda: buf.auto_down(count=event.arg))
+
+    def _tui_image_bar_fragments(self):
+        if not self._attached_images:
+            return []
+        badges = _format_image_attachment_badges(
+            self._attached_images,
+            self._image_counter,
+        )
+        return [("class:image-badge", f" {badges} ")]
+
+    def _tui_voice_status_fragments(self):
+        return self._get_voice_status_fragments()
+
+    def _tui_spinner_text(self):
+        spinner_line = self._render_spinner_text()
+        if not spinner_line:
+            return []
+        return [('class:hint', spinner_line)]
+
+    def _tui_spinner_height(self):
+        return self._spinner_widget_height()
+
+    def _tui_hint_height(self):
+        if self._sudo_state or self._secret_state or self._approval_state or self._slash_confirm_state or self._clarify_state or self._command_running:
+            return 1
+        # Keep a spacer while the agent runs on roomy terminals, but reclaim
+        # the row on narrow/mobile screens where every line matters.
+        return self._agent_spacer_height()
+
+    def _tui_print_startup(self):
+        """Startup output: light-mode probe, banner, advisories, resume/welcome lines, tips."""
         # Detect light/dark terminal mode now (before pt grabs the tty).
         # Caches the result so subsequent _hex_to_ansi / style calls
         # don't risk re-querying mid-render.
@@ -18271,7 +20466,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             )
             self._startup_skills_line_shown = True
         self._console_print()
-        
+
+    def _tui_init_run_state(self):
+        """Reset the per-run REPL state (queues, modal states, voice state, config watcher)."""
         # State for async operation
         self._agent_running = False
         self._pending_input = queue.Queue()     # For normal input (commands + new queries)
@@ -18357,378 +20554,26 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         if os.environ.get("HERMES_DEFER_AGENT_STARTUP") != "1":
             self._ensure_tirith_security()
-        
+
+    def _tui_build_key_bindings(self):
+        """Build the prompt_toolkit KeyBindings for the REPL input area."""
         # Key bindings for the input area
         kb = KeyBindings()
 
         _multiline_shortcuts_enabled = _cli_multiline_shortcuts_enabled(self.config or CLI_CONFIG)
+        self._tui_multiline_shortcuts = _multiline_shortcuts_enabled
 
         from prompt_toolkit.keys import Keys as _IgnoreKeys
 
-        @kb.add(_IgnoreKeys.Ignore, eager=True)
-        def handle_ignored_terminal_sequence(event):
-            """Consume parser-level ignored terminal sequences before self-insert.
-
-            install_ignored_terminal_sequences() in hermes_cli.pt_input_extras
-            registers focus reports (CSI I / CSI O) as Keys.Ignore at the
-            VT100 parser level. Without this no-op binding the default
-            self-insert path would still fire and the bytes would land in
-            the buffer.
-
-            Focus-in (CSI I) additionally schedules a rate-limited full
-            repaint: while the tab/window was hidden the emulator may have
-            coalesced output or repainted the surface, so prompt_toolkit's
-            incremental diff would stack a fresh copy of the prompt chrome
-            on top of the stale one (#60920 focus-regain variant, #25337).
-            """
-            try:
-                for press in getattr(event, "key_sequence", None) or ():
-                    if getattr(press, "data", None) == "\x1b[I":
-                        self._schedule_focus_regain_redraw()
-                        break
-            except Exception:
-                pass
-            return None
-
-        def handle_enter(event):
-            """Handle Enter key - submit input.
-            
-            Routes to the correct queue based on active UI state:
-            - Sudo password prompt: password goes to sudo response queue
-            - Approval selection: selected choice goes to approval response queue
-            - Clarify freetext mode: answer goes to the clarify response queue
-            - Clarify choice mode: selected choice goes to the clarify response queue
-            - Agent running: goes to _interrupt_queue (chat() monitors this)
-            - Agent idle: goes to _pending_input (process_loop monitors this)
-            Commands (starting with /) always go to _pending_input so they're
-            handled as commands, not sent as interrupt text to the agent.
-            """
-            # --- Sudo password prompt: submit the typed password ---
-            if self._sudo_state:
-                text = event.app.current_buffer.text
-                self._sudo_state["response_queue"].put(text)
-                self._sudo_state = None
-                event.app.invalidate()
-                return
-
-            # --- Secret prompt: submit the typed secret ---
-            if self._secret_state:
-                text = event.app.current_buffer.text
-                self._submit_secret_response(text)
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-
-            # --- Approval selection: confirm the highlighted choice ---
-            if self._approval_state:
-                self._handle_approval_selection()
-                event.app.invalidate()
-                return
-
-            # --- Slash-command confirmation: submit typed or highlighted choice ---
-            if self._slash_confirm_state:
-                text = event.app.current_buffer.text.strip()
-                choices = self._slash_confirm_state.get("choices") or []
-                choice = self._normalize_slash_confirm_choice(text, choices) if text else None
-                if choice is None:
-                    selected = self._slash_confirm_state.get("selected", 0)
-                    if 0 <= selected < len(choices):
-                        choice = choices[selected][0]
-                self._submit_slash_confirm_response(choice or "cancel")
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-
-            # --- /model picker modal ---
-            if self._model_picker_state:
-                try:
-                    # Picker selections follow the same session-scoped default
-                    # as /model <name>; honour model.persist_switch_by_default.
-                    from hermes_cli.model_switch import resolve_persist_behavior
-
-                    self._handle_model_picker_selection(
-                        persist_global=resolve_persist_behavior(False, False)
-                    )
-                except Exception as _exc:
-                    _cprint(f"  ✗ Model selection failed: {_exc}")
-                    self._close_model_picker()
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-
-            # --- Clarify freetext mode: user typed their own answer ---
-            if self._clarify_freetext and self._clarify_state:
-                text = event.app.current_buffer.text.strip()
-                if text:
-                    state = self._clarify_state
-                    # Batch mode: lock the typed answer for the active question
-                    if state.get("questions"):
-                        base = getattr(self, '_clarify_multi_base', None)
-                        if base is not None:
-                            # Multi-select "Other": append the typed answer to
-                            # the checked labels as a JSON array string.
-                            answer = json.dumps(base + [text], ensure_ascii=False)
-                            meta = {"kind": "multi", "choices": list(base), "other_text": text}
-                            self._clarify_multi_base = None
-                        else:
-                            answer = text
-                            meta = {"kind": "other", "other_text": text}
-                        self._clarify_freetext = False
-                        self._clarify_prefill = ""
-                        self._clarify_batch_lock(state, answer, meta=meta)
-                        event.app.current_buffer.reset()
-                        event.app.invalidate()
-                        return
-                    # multi-select: prepend previously checked real choices
-                    base = getattr(self, '_clarify_multi_base', None)
-                    if base:
-                        text = ", ".join(base) + ", " + text
-                        self._clarify_multi_base = None
-                    self._clarify_state["response_queue"].put(text)
-                    self._clarify_state = None
-                    self._clarify_freetext = False
-                    event.app.current_buffer.reset()
-                    event.app.invalidate()
-                return
-
-            # --- Clarify choice mode: confirm the highlighted selection ---
-            if self._clarify_state and not self._clarify_freetext:
-                state = self._clarify_state
-                # Batch mode: Enter locks the active question's answer and
-                # advances to the next unanswered question.
-                if state.get("questions"):
-                    self._clarify_batch_enter(state)
-                    # Editing an earlier "Other" answer: prefill the composer
-                    # with the previously typed text.
-                    if self._clarify_freetext and self._clarify_prefill:
-                        event.app.current_buffer.text = self._clarify_prefill
-                        event.app.current_buffer.cursor_position = len(self._clarify_prefill)
-                        self._clarify_prefill = ""
-                    event.app.invalidate()
-                    return
-                selected = state["selected"]
-                choices = state.get("choices") or []
-                # multi-select support: submit comma-joined list of checked choices
-                if state.get("multi_select"):
-                    indices = state.get("selected_indices")
-                    if not indices:
-                        # Nothing checked → submit empty string (parses to [])
-                        state["response_queue"].put("")
-                        self._clarify_state = None
-                        event.app.invalidate()
-                        return
-                    sorted_idx = sorted(indices)
-                    selected_choices = [choices[i] for i in sorted_idx if i < len(choices)]
-                    other_checked = len(choices) in sorted_idx
-                    if other_checked and selected_choices:
-                        # "Other" + real choices: store base choices, switch to freetext
-                        # so the user can type a custom answer that gets appended
-                        self._clarify_multi_base = selected_choices
-                        self._clarify_freetext = True
-                        event.app.invalidate()
-                        return
-                    if selected_choices:
-                        state["response_queue"].put(", ".join(selected_choices))
-                        self._clarify_state = None
-                        event.app.invalidate()
-                        return
-                    # Only "Other" was checked → switch to freetext
-                    self._clarify_freetext = True
-                    event.app.invalidate()
-                    return
-                # Original single-select behavior: submit the highlighted choice
-                if selected < len(choices):
-                    state["response_queue"].put(choices[selected])
-                    self._clarify_state = None
-                    event.app.invalidate()
-                else:
-                    # "Other" selected → switch to freetext
-                    self._clarify_freetext = True
-                    event.app.invalidate()
-                return
-
-            # --- Normal input routing ---
-            raw_text = event.app.current_buffer.text
-            if (
-                _multiline_shortcuts_enabled
-                and event.app.current_buffer.cursor_position == len(raw_text)
-                and _is_backslash_line_continuation(raw_text)
-            ):
-                continued = _apply_backslash_line_continuation(raw_text)
-                event.app.current_buffer.text = continued
-                event.app.current_buffer.cursor_position = len(continued)
-                event.app.invalidate()
-                return
-            text = raw_text.strip()
-            has_images = bool(self._attached_images)
-            if text or has_images:
-                # Handle /model directly on the UI thread so interactive pickers
-                # can safely use prompt_toolkit terminal handoff helpers.
-                if self._should_handle_model_command_inline(text, has_images=has_images):
-                    if not self.process_command(text):
-                        self._should_exit = True
-                        if event.app.is_running:
-                            event.app.exit()
-                    event.app.current_buffer.reset(append_to_history=True)
-                    # Force a repaint: process_command() prints through
-                    # patch_stdout (scrolls output above the prompt) and never
-                    # invalidates the app, so the just-cleared input area can
-                    # keep showing the submitted text until some unrelated
-                    # redraw fires. Every other early-return branch in this
-                    # handler invalidates after reset — match them.
-                    event.app.invalidate()
-                    return
-
-                # Handle /steer while the agent is running immediately on the
-                # UI thread.  Queuing through _pending_input would deadlock the
-                # steer until after the agent loop finishes (process_loop is
-                # blocked inside self.chat()), which turns /steer into a
-                # post-run next-turn message — defeating mid-run injection.
-                # agent.steer() is thread-safe (holds _pending_steer_lock).
-                if self._should_handle_steer_command_inline(text, has_images=has_images):
-                    self.process_command(text)
-                    event.app.current_buffer.reset(append_to_history=True)
-                    # Force a repaint after clearing the buffer.  /steer is
-                    # dispatched mid-run while the agent streams output through
-                    # patch_stdout; process_command() never invalidates the
-                    # app, so without this the submitted "/steer <text>" can
-                    # linger in the input area (looking unsent) and invite an
-                    # accidental re-submit. See issue #34569.
-                    event.app.invalidate()
-                    return
-
-                # Same treatment for /bg and /btw while the agent is
-                # running.  Queuing them defeats the entire point of the
-                # commands: process_loop is blocked inside self.chat(), so the
-                # side task would only start once the foreground turn it was
-                # meant to run alongside has already finished (#75221).  The
-                # foreground turn is left alone: no interrupt, no steer.
-                if self._should_handle_background_command_inline(
-                    text, has_images=has_images
-                ):
-                    self.process_command(text)
-                    event.app.current_buffer.reset(append_to_history=True)
-                    # Repaint for the same reason as the /steer branch above:
-                    # process_command() prints through patch_stdout and never
-                    # invalidates the app, so the submitted text can linger in
-                    # the input area looking unsent.
-                    event.app.invalidate()
-                    return
-
-                # Snapshot and clear attached images
-                images = list(self._attached_images)
-                self._attached_images.clear()
-                event.app.invalidate()
-                # Bundle text + images as a tuple when images are present
-                payload = (text, images) if images else text
-                # A bang command is treated like a slash command while the
-                # agent is busy: it must never be routed into steer/redirect
-                # (which would inject `!git status` into the model's context as
-                # a prompt). It queues and runs locally once the loop drains.
-                _is_local_dispatch = bool(text) and (
-                    _looks_like_slash_command(text) or text.strip().startswith("!")
-                )
-                if self._agent_running and not _is_local_dispatch:
-                    _effective_mode = self.busy_input_mode
-                    redirected = False
-                    if _effective_mode == "steer":
-                        # Route Enter through /steer — inject mid-run after the
-                        # next tool call.  Images can't ride along (steer only
-                        # appends text), so fall back to queue when images are
-                        # attached.  If the agent lacks steer() or rejects the
-                        # payload, also fall back to queue so nothing is lost.
-                        if images or not text:
-                            _effective_mode = "queue"
-                        else:
-                            accepted = False
-                            try:
-                                if self.agent is not None and hasattr(self.agent, "steer"):
-                                    accepted = bool(self.agent.steer(text))
-                            except Exception as exc:
-                                _cprint(f"  {_DIM}Steer failed ({exc}) — queued for next turn.{_RST}")
-                                accepted = False
-                            if accepted:
-                                preview = text[:80] + ("..." if len(text) > 80 else "")
-                                _cprint(f"  {_ACCENT}⏩ Steered: '{preview}'{_RST}")
-                            else:
-                                _effective_mode = "queue"
-                    if _effective_mode == "queue":
-                        # Queue for the next turn instead of interrupting
-                        self._pending_input.put(payload)
-                        preview = text if text else f"[{len(images)} image{'s' if len(images) != 1 else ''} attached]"
-                        _cprint(f"  Queued for the next turn: {preview[:80]}{'...' if len(preview) > 80 else ''}")
-                    elif _effective_mode == "interrupt":
-                        if not images and text:
-                            try:
-                                if (
-                                    self.agent is not None
-                                    and getattr(
-                                        self.agent,
-                                        "_supports_active_turn_redirect",
-                                        False,
-                                    )
-                                    is True
-                                    and hasattr(self.agent, "redirect")
-                                ):
-                                    redirected = bool(self.agent.redirect(text))
-                            except Exception:
-                                redirected = False
-                        if redirected:
-                            preview = text[:80] + ("..." if len(text) > 80 else "")
-                            _cprint(f"  {_ACCENT}↪ Redirected current turn: '{preview}'{_RST}")
-                        else:
-                            # Compatibility path for older agents, multimodal
-                            # follow-ups, or a turn that finished in the race.
-                            self._interrupt_queue.put(payload)
-                            try:
-                                _dbg = _hermes_home / "interrupt_debug.log"
-                                with open(_dbg, "a", encoding="utf-8") as _f:
-                                    _f.write(f"{time.strftime('%H:%M:%S')} ENTER: queued interrupt msg={str(payload)[:60]!r}, "
-                                             f"agent_running={self._agent_running}\n")
-                            except Exception:
-                                pass
-                    # First-touch onboarding: on the very first busy-while-running
-                    # event for this install, print a one-line tip explaining the
-                    # /busy knob.  Flag persists to config.yaml and never fires
-                    # again.  Guarded for exceptions so onboarding can't break
-                    # the input loop.
-                    try:
-                        from agent.onboarding import (
-                            BUSY_INPUT_FLAG,
-                            busy_input_hint_cli,
-                            is_seen,
-                            mark_seen,
-                        )
-                        if not is_seen(CLI_CONFIG, BUSY_INPUT_FLAG):
-                            _hint_mode = "redirect" if redirected else _effective_mode
-                            _cprint(f"  {_DIM}{busy_input_hint_cli(_hint_mode)}{_RST}")
-                            mark_seen(_hermes_home / "config.yaml", BUSY_INPUT_FLAG)
-                            CLI_CONFIG.setdefault("onboarding", {}).setdefault("seen", {})[BUSY_INPUT_FLAG] = True
-                    except Exception:
-                        pass
-                else:
-                    self._pending_input.put(payload)
-                # History stores real pasted content, not the placeholder, so
-                # up-arrow recall restores the actual text.
-                self._inline_pastes(event.app.current_buffer)
-                event.app.current_buffer.reset(append_to_history=True)
+        kb.add(_IgnoreKeys.Ignore, eager=True)(self._tui_handle_ignored_terminal_sequence)
 
         _bind_prompt_submit_keys(
             kb,
-            handle_enter,
+            self._tui_handle_enter,
             multiline_shortcuts_enabled=_multiline_shortcuts_enabled,
         )
-        
-        @kb.add('escape', 'enter')
-        def handle_alt_enter(event):
-            """Alt+Enter inserts a newline for multi-line input.
 
-            Works on mac/Linux/WSL. On Windows Terminal this keystroke is
-            intercepted at the terminal layer (toggles fullscreen) and never
-            reaches here — Windows users get newline via Ctrl+Enter instead
-            (bound below as c-j, since WT delivers Ctrl+Enter as LF).
-            """
-            event.current_buffer.insert_text('\n')
+        kb.add('escape', 'enter')(self._tui_handle_alt_enter)
 
         if _multiline_shortcuts_enabled or _preserve_ctrl_enter_newline():
             @kb.add('c-j')
@@ -18752,434 +20597,127 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             lambda: not self._clarify_state and not self._approval_state and not self._sudo_state and not self._secret_state
         )
 
-        @kb.add('c-g', filter=_editor_filter)
-        @kb.add('escape', 'g', filter=_editor_filter)
-        def handle_open_in_editor(event):
-            """Ctrl+G (or Alt+G in VSCode/Cursor) opens the current draft in an external editor."""
-            cli_ref._open_external_editor(event.current_buffer)
+        kb.add('c-g', filter=_editor_filter)(kb.add('escape', 'g', filter=_editor_filter)(self._tui_handle_open_in_editor))
 
         # --- Ctrl+S prompt stash -------------------------------------------
         # Park a half-written draft, send something else, then bring the draft
         # back.  Suppressed while a modal prompt owns the composer (sudo /
         # secret / approval / clarify) so Ctrl+S can't stash a password.
         _stash_filter = Condition(
-            lambda: not cli_ref._clarify_state
-            and not cli_ref._approval_state
-            and not cli_ref._sudo_state
-            and not cli_ref._secret_state
-            and not cli_ref._slash_confirm_state
-            and not cli_ref._model_picker_state
+            lambda: not self._clarify_state
+            and not self._approval_state
+            and not self._sudo_state
+            and not self._secret_state
+            and not self._slash_confirm_state
+            and not self._model_picker_state
         )
         _stash_panel_filter = Condition(
-            lambda: cli_ref._prompt_stash.panel_open and bool(len(cli_ref._prompt_stash))
+            lambda: self._prompt_stash.panel_open and bool(len(self._prompt_stash))
         )
 
-        def _restore_stash_payload(event, payload) -> None:
-            """Put a popped (text, images) payload back into the composer."""
-            if not payload:
-                return
-            text, images = payload
-            buf = event.app.current_buffer
-            buf.text = text
-            buf.cursor_position = len(text)
-            if images:
-                # Restore attachments the draft was carrying.  Extend rather
-                # than replace: the user may have attached something new since
-                # the stash was taken and silently dropping it would be data
-                # loss.
-                for img in images:
-                    if img not in cli_ref._attached_images:
-                        cli_ref._attached_images.append(img)
+        kb.add('c-s', filter=_stash_filter)(self._tui_handle_prompt_stash)
 
-        @kb.add('c-s', filter=_stash_filter)
-        def handle_prompt_stash(event):
-            """Ctrl+S: stash the current draft, or restore/browse a stashed one.
+        kb.add('up', filter=_stash_panel_filter, eager=True)(self._tui_handle_stash_panel_up)
 
-            - Composer has content → push it onto the stash and clear the input.
-            - Composer empty, one stashed draft → pop it straight back.
-            - Composer empty, several stashed → open the browse panel.
-            - Browse panel open → close it.
+        kb.add('down', filter=_stash_panel_filter, eager=True)(self._tui_handle_stash_panel_down)
 
-            Pushing onto a stack (rather than a single slot) is what makes
-            repeated Ctrl+S safe: a second stash never silently overwrites the
-            first, both stay reachable in the panel.
-            """
-            from hermes_cli.prompt_stash import (
-                ACTION_OPEN_PANEL,
-                ACTION_RESTORED,
-                ACTION_STASHED,
-                resolve_ctrl_s,
-            )
+        kb.add('enter', filter=_stash_panel_filter, eager=True)(self._tui_handle_stash_panel_restore)
 
-            buf = event.app.current_buffer
-            action, payload = resolve_ctrl_s(
-                cli_ref._prompt_stash, buf.text, cli_ref._attached_images
-            )
+        kb.add('d', filter=_stash_panel_filter, eager=True)(kb.add('D', filter=_stash_panel_filter, eager=True)(self._tui_handle_stash_panel_delete))
 
-            if action == ACTION_STASHED:
-                # reset() (not `text = ""`) so completion state, selection, and
-                # the undo stack are cleared along with the text.
-                buf.reset()
-                cli_ref._attached_images.clear()
-            elif action == ACTION_RESTORED:
-                _restore_stash_payload(event, payload)
-            elif action == ACTION_OPEN_PANEL:
-                pass  # resolve_ctrl_s already flipped panel_open
+        kb.add('escape', filter=_stash_panel_filter, eager=True)(self._tui_handle_stash_panel_close)
 
-            event.app.invalidate()
-
-        @kb.add('up', filter=_stash_panel_filter, eager=True)
-        def handle_stash_panel_up(event):
-            cli_ref._prompt_stash.move_cursor(-1)
-            event.app.invalidate()
-
-        @kb.add('down', filter=_stash_panel_filter, eager=True)
-        def handle_stash_panel_down(event):
-            cli_ref._prompt_stash.move_cursor(1)
-            event.app.invalidate()
-
-        @kb.add('enter', filter=_stash_panel_filter, eager=True)
-        def handle_stash_panel_restore(event):
-            """Enter in the browse panel restores the highlighted draft."""
-            payload = cli_ref._prompt_stash.restore_at_cursor()
-            _restore_stash_payload(event, payload)
-            event.app.invalidate()
-
-        @kb.add('d', filter=_stash_panel_filter, eager=True)
-        @kb.add('D', filter=_stash_panel_filter, eager=True)
-        def handle_stash_panel_delete(event):
-            """D in the browse panel discards the highlighted draft."""
-            cli_ref._prompt_stash.delete_at_cursor()
-            event.app.invalidate()
-
-        @kb.add('escape', filter=_stash_panel_filter, eager=True)
-        def handle_stash_panel_close(event):
-            cli_ref._prompt_stash.close_panel()
-            event.app.invalidate()
-
-        @kb.add('tab', eager=True)
-        def handle_tab(event):
-            """Tab: accept completion, auto-suggestion, or start completions.
-
-            Priority:
-            1. Completion menu open → accept selected completion
-            2. Ghost text suggestion available → accept auto-suggestion
-            3. Otherwise → start completion menu
-
-            After accepting a provider like 'anthropic:', the completion menu
-            closes and complete_while_typing doesn't fire (no keystroke).
-            This binding re-triggers completions so stage-2 models appear
-            immediately.
-            """
-            buf = event.current_buffer
-            if buf.complete_state:
-                # Completion menu is open — accept the selection
-                completion = buf.complete_state.current_completion
-                if completion is None:
-                    # Menu open but nothing selected — select first then grab it
-                    buf.go_to_completion(0)
-                    completion = buf.complete_state and buf.complete_state.current_completion
-                if completion is None:
-                    return
-                # Accept the selected completion
-                buf.apply_completion(completion)
-            elif buf.suggestion and buf.suggestion.text:
-                # No completion menu, but there's a ghost text auto-suggestion — accept it
-                buf.insert_text(buf.suggestion.text)
-            else:
-                # No menu and no suggestion — start completions from scratch
-                buf.start_completion()
+        kb.add('tab', eager=True)(self._tui_handle_tab)
 
         # --- Clarify tool: arrow-key navigation for multiple-choice questions ---
 
-        @kb.add('up', filter=Condition(lambda: bool(self._clarify_state) and not self._clarify_freetext))
-        def clarify_up(event):
-            """Move selection up in clarify choices."""
-            if self._clarify_state:
-                self._clarify_state["selected"] = max(0, self._clarify_state["selected"] - 1)
-                event.app.invalidate()
+        kb.add('up', filter=Condition(lambda: bool(self._clarify_state) and not self._clarify_freetext))(self._tui_clarify_up)
 
-        @kb.add('down', filter=Condition(lambda: bool(self._clarify_state) and not self._clarify_freetext))
-        def clarify_down(event):
-            """Move selection down in clarify choices."""
-            if self._clarify_state:
-                choices = self._clarify_state.get("choices") or []
-                max_idx = len(choices)  # last index is the "Other" option
-                self._clarify_state["selected"] = min(max_idx, self._clarify_state["selected"] + 1)
-                event.app.invalidate()
+        kb.add('down', filter=Condition(lambda: bool(self._clarify_state) and not self._clarify_freetext))(self._tui_clarify_down)
 
         # multi-select support: Space toggles the checkbox at the current cursor position
-        @kb.add('space', filter=Condition(lambda: bool(self._clarify_state) and not self._clarify_freetext and self._clarify_state.get("multi_select")))
-        def clarify_toggle(event):
-            if self._clarify_state:
-                selected = self._clarify_state["selected"]
-                indices = self._clarify_state.get("selected_indices", set())
-                if selected in indices:
-                    indices.discard(selected)
-                else:
-                    indices.add(selected)
-                event.app.invalidate()
+        kb.add('space', filter=Condition(lambda: bool(self._clarify_state) and not self._clarify_freetext and self._clarify_state.get("multi_select")))(self._tui_clarify_toggle)
 
         # Batch clarify: Tab cycles the active question (any-order answering;
         # moving onto an answered question lets the user re-answer it before
         # the batch completes). Registered after the generic tab handler so
         # this filtered binding wins while the batch panel is open.
-        @kb.add('tab', filter=Condition(lambda: bool(self._clarify_state) and bool(self._clarify_state.get("questions")) and not self._clarify_freetext), eager=True)
-        def clarify_batch_tab(event):
-            state = self._clarify_state
-            if state and state.get("questions"):
-                self._clarify_batch_set_active(
-                    state, (state["active"] + 1) % len(state["questions"])
-                )
-                event.app.invalidate()
+        kb.add('tab', filter=Condition(lambda: bool(self._clarify_state) and bool(self._clarify_state.get("questions")) and not self._clarify_freetext), eager=True)(self._tui_clarify_batch_tab)
 
         # Shift-Tab walks backwards through the questions.
-        @kb.add('s-tab', filter=Condition(lambda: bool(self._clarify_state) and bool(self._clarify_state.get("questions")) and not self._clarify_freetext), eager=True)
-        def clarify_batch_backtab(event):
-            state = self._clarify_state
-            if state and state.get("questions"):
-                self._clarify_batch_set_active(
-                    state, (state["active"] - 1) % len(state["questions"])
-                )
-                event.app.invalidate()
+        kb.add('s-tab', filter=Condition(lambda: bool(self._clarify_state) and bool(self._clarify_state.get("questions")) and not self._clarify_freetext), eager=True)(self._tui_clarify_batch_backtab)
 
         # Number keys for quick clarify selection (1-9, 0 for 10th item)
-        def _make_clarify_number_handler(idx):
-            def handler(event):
-                if self._clarify_state and not self._clarify_freetext:
-                    choices = self._clarify_state.get("choices") or []
-                    # multi-select support: number keys toggle checkboxes instead of submitting
-                    if self._clarify_state.get("multi_select"):
-                        if idx < len(choices):
-                            indices = self._clarify_state.get("selected_indices", set())
-                            if idx in indices:
-                                indices.discard(idx)
-                            else:
-                                indices.add(idx)
-                            event.app.invalidate()
-                        elif idx == len(choices):
-                            # Toggle "Other" in multi-select mode
-                            indices = self._clarify_state.get("selected_indices", set())
-                            if idx in indices:
-                                indices.discard(idx)
-                            else:
-                                indices.add(idx)
-                            event.app.invalidate()
-                        return
-                    # Original single-select: number keys submit directly
-                    # Map index to choice (treating "Other" as the last option)
-                    if idx < len(choices):
-                        # Batch mode: lock the numbered choice for the active
-                        # question instead of resolving the whole prompt.
-                        if self._clarify_state.get("questions"):
-                            self._clarify_batch_lock(self._clarify_state, choices[idx])
-                            event.app.invalidate()
-                            return
-                        # Select a numbered choice
-                        self._clarify_state["response_queue"].put(choices[idx])
-                        self._clarify_state = None
-                        self._clarify_freetext = False
-                        event.app.invalidate()
-                    elif idx == len(choices):
-                        # Select "Other" option
-                        self._clarify_freetext = True
-                        event.app.invalidate()
-            return handler
 
         for _num in range(10):
             # 1-9 select items 0-8, 0 selects item 9 (10thitem)
             _idx = 9 if _num == 0 else _num - 1
-            kb.add(str(_num), filter=Condition(lambda: bool(self._clarify_state) and not self._clarify_freetext))(_make_clarify_number_handler(_idx))
+            kb.add(str(_num), filter=Condition(lambda: bool(self._clarify_state) and not self._clarify_freetext))(self._tui_make_clarify_number_handler(_idx))
 
         # --- Dangerous command approval: arrow-key navigation ---
 
-        @kb.add('up', filter=Condition(lambda: bool(self._approval_state)))
-        def approval_up(event):
-            if self._approval_state:
-                self._approval_state["selected"] = max(0, self._approval_state["selected"] - 1)
-                event.app.invalidate()
+        kb.add('up', filter=Condition(lambda: bool(self._approval_state)))(self._tui_approval_up)
 
-        @kb.add('down', filter=Condition(lambda: bool(self._approval_state)))
-        def approval_down(event):
-            if self._approval_state:
-                max_idx = len(self._approval_state["choices"]) - 1
-                self._approval_state["selected"] = min(max_idx, self._approval_state["selected"] + 1)
-                event.app.invalidate()
+        kb.add('down', filter=Condition(lambda: bool(self._approval_state)))(self._tui_approval_down)
 
         # --- Slash-command confirmation: arrow-key navigation ---
-        @kb.add('up', filter=Condition(lambda: bool(self._slash_confirm_state)))
-        def slash_confirm_up(event):
-            if self._slash_confirm_state:
-                self._slash_confirm_state["selected"] = max(0, self._slash_confirm_state.get("selected", 0) - 1)
-                event.app.invalidate()
+        kb.add('up', filter=Condition(lambda: bool(self._slash_confirm_state)))(self._tui_slash_confirm_up)
 
-        @kb.add('down', filter=Condition(lambda: bool(self._slash_confirm_state)))
-        def slash_confirm_down(event):
-            if self._slash_confirm_state:
-                max_idx = len(self._slash_confirm_state.get("choices") or []) - 1
-                self._slash_confirm_state["selected"] = min(max_idx, self._slash_confirm_state.get("selected", 0) + 1)
-                event.app.invalidate()
+        kb.add('down', filter=Condition(lambda: bool(self._slash_confirm_state)))(self._tui_slash_confirm_down)
 
         # --- /model picker: arrow-key navigation ---
-        @kb.add('up', filter=Condition(lambda: bool(self._model_picker_state)))
-        def model_picker_up(event):
-            if self._model_picker_state:
-                self._model_picker_state["selected"] = max(0, self._model_picker_state.get("selected", 0) - 1)
-                event.app.invalidate()
+        kb.add('up', filter=Condition(lambda: bool(self._model_picker_state)))(self._tui_model_picker_up)
 
-        @kb.add('down', filter=Condition(lambda: bool(self._model_picker_state)))
-        def model_picker_down(event):
-            state = self._model_picker_state
-            if not state:
-                return
-            if state.get("stage") == "provider":
-                max_idx = len(state.get("providers") or [])
-            else:
-                # +1 for "← Back" and Cancel over the filtered visible rows.
-                _fp = state.get("_filtered_pairs")
-                _visible = len(_fp) if _fp is not None else len(state.get("model_list") or [])
-                max_idx = _visible + 1
-            state["selected"] = min(max_idx, state.get("selected", 0) + 1)
-            event.app.invalidate()
+        kb.add('down', filter=Condition(lambda: bool(self._model_picker_state)))(self._tui_model_picker_down)
 
         def _model_picker_typing_active() -> bool:
             # Type-to-filter is only live on the model stage (concrete list).
             st = self._model_picker_state
             return bool(st) and st.get("stage") == "model"
 
-        def _make_model_filter_char_handler(ch: str):
-            def handler(event):
-                st = self._model_picker_state
-                if not st or st.get("stage") != "model":
-                    return
-                st["filter"] = (st.get("filter", "") or "") + ch
-                st["selected"] = 0
-                st["_scroll_offset"] = 0
-                event.app.invalidate()
-            return handler
-
         # Printable ASCII (space through ~) narrows the model list as you type.
         import string as _string
         for _ch in _string.digits + _string.ascii_letters + "-_.:/ ":
             kb.add(_ch, filter=Condition(_model_picker_typing_active))(
-                _make_model_filter_char_handler(_ch)
+                self._tui_make_model_filter_char_handler(_ch)
             )
 
-        @kb.add('backspace', filter=Condition(_model_picker_typing_active))
-        def model_picker_filter_backspace(event):
-            st = self._model_picker_state
-            if not st:
-                return
-            cur = st.get("filter", "") or ""
-            st["filter"] = cur[:-1]
-            st["selected"] = 0
-            st["_scroll_offset"] = 0
-            event.app.invalidate()
+        kb.add('backspace', filter=Condition(_model_picker_typing_active))(self._tui_model_picker_filter_backspace)
 
-        @kb.add('escape', filter=Condition(lambda: bool(self._model_picker_state)), eager=True)
-        def model_picker_escape(event):
-            """ESC clears an active filter first, else closes the picker."""
-            st = self._model_picker_state
-            if st and st.get("stage") == "model" and (st.get("filter") or ""):
-                st["filter"] = ""
-                st["selected"] = 0
-                st["_scroll_offset"] = 0
-                event.app.invalidate()
-                return
-            self._close_model_picker()
-            event.app.current_buffer.reset()
-            event.app.invalidate()
+        kb.add('escape', filter=Condition(lambda: bool(self._model_picker_state)), eager=True)(self._tui_model_picker_escape)
 
         # --- Ctrl+P command palette keybindings ---
         def _palette_active() -> bool:
             return bool(self._command_palette_state)
 
-        @kb.add('c-p', filter=Condition(
-            lambda: not self._command_palette_state
-            and not self._model_picker_state and not self._clarify_state
-            and not self._approval_state and not self._slash_confirm_state
-            and not self._sudo_state and not self._secret_state
-        ))
-        def open_command_palette(event):
-            self._open_command_palette()
-            event.app.invalidate()
+        kb.add('c-p', filter=Condition(lambda: not self._command_palette_state and not self._model_picker_state and not self._clarify_state and not self._approval_state and not self._slash_confirm_state and not self._sudo_state and not self._secret_state))(self._tui_open_command_palette)
 
-        @kb.add('up', filter=Condition(_palette_active))
-        def command_palette_up(event):
-            st = self._command_palette_state
-            if st:
-                st["selected"] = max(0, st.get("selected", 0) - 1)
-                event.app.invalidate()
+        kb.add('up', filter=Condition(_palette_active))(self._tui_command_palette_up)
 
-        @kb.add('down', filter=Condition(_palette_active))
-        def command_palette_down(event):
-            st = self._command_palette_state
-            if st:
-                n = st.get("_visible_count", len(self._command_palette_visible_entries()))
-                st["selected"] = min(max(0, n - 1), st.get("selected", 0) + 1)
-                event.app.invalidate()
+        kb.add('down', filter=Condition(_palette_active))(self._tui_command_palette_down)
 
-        @kb.add('enter', filter=Condition(_palette_active))
-        def command_palette_enter(event):
-            self._handle_command_palette_selection()
-            event.app.invalidate()
+        kb.add('enter', filter=Condition(_palette_active))(self._tui_command_palette_enter)
 
-        @kb.add('backspace', filter=Condition(_palette_active))
-        def command_palette_backspace(event):
-            st = self._command_palette_state
-            if st:
-                st["filter"] = (st.get("filter", "") or "")[:-1]
-                st["selected"] = 0
-                st["_scroll_offset"] = 0
-                event.app.invalidate()
+        kb.add('backspace', filter=Condition(_palette_active))(self._tui_command_palette_backspace)
 
-        @kb.add('escape', filter=Condition(_palette_active), eager=True)
-        def command_palette_escape(event):
-            self._close_command_palette()
-            event.app.invalidate()
-
-        def _make_palette_char_handler(ch: str):
-            def handler(event):
-                st = self._command_palette_state
-                if not st:
-                    return
-                st["filter"] = (st.get("filter", "") or "") + ch
-                st["selected"] = 0
-                st["_scroll_offset"] = 0
-                event.app.invalidate()
-            return handler
+        kb.add('escape', filter=Condition(_palette_active), eager=True)(self._tui_command_palette_escape)
 
         import string as _pstring
         for _pch in _pstring.digits + _pstring.ascii_letters + "-_.:/ ":
-            kb.add(_pch, filter=Condition(_palette_active))(_make_palette_char_handler(_pch))
+            kb.add(_pch, filter=Condition(_palette_active))(self._tui_make_palette_char_handler(_pch))
 
         # Number keys for quick approval selection (1-9, 0 for 10th item)
-        def _make_approval_number_handler(idx):
-            def handler(event):
-                if self._approval_state and idx < len(self._approval_state["choices"]):
-                    self._approval_state["selected"] = idx
-                    self._handle_approval_selection()
-                    event.app.invalidate()
-            return handler
 
         for _num in range(10):
             # 1-9 select items 0-8, 0 selects item 9 (10th item)
             _idx = 9 if _num == 0 else _num - 1
-            kb.add(str(_num), filter=Condition(lambda: bool(self._approval_state)))(_make_approval_number_handler(_idx))
+            kb.add(str(_num), filter=Condition(lambda: bool(self._approval_state)))(self._tui_make_approval_number_handler(_idx))
 
         # Number keys for quick slash-confirm selection (1-9, 0 for 10th item)
-        def _make_slash_confirm_number_handler(idx):
-            def handler(event):
-                if self._slash_confirm_state and idx < len(self._slash_confirm_state.get("choices") or []):
-                    choice = self._slash_confirm_state["choices"][idx][0]
-                    self._submit_slash_confirm_response(choice)
-                    event.app.current_buffer.reset()
-                    event.app.invalidate()
-            return handler
 
         for _num in range(10):
             _idx = 9 if _num == 0 else _num - 1
-            kb.add(str(_num), filter=Condition(lambda: bool(self._slash_confirm_state)))(_make_slash_confirm_number_handler(_idx))
+            kb.add(str(_num), filter=Condition(lambda: bool(self._slash_confirm_state)))(self._tui_make_slash_confirm_number_handler(_idx))
 
         # --- History navigation: up/down browse history in normal input mode ---
         # The TextArea is multiline, so by default up/down only move the cursor.
@@ -19189,140 +20727,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             lambda: not self._clarify_state and not self._approval_state and not self._slash_confirm_state and not self._sudo_state and not self._secret_state and not self._model_picker_state and not self._command_palette_state
         )
 
-        def _recall_without_recollapse(buf, move):
-            """Run a history-navigation move, suppressing paste-collapse.
+        kb.add('up', filter=_normal_input)(self._tui_history_up)
 
-            Recalled history can hold the full text of a paste that was
-            collapsed to a placeholder at submit time. Loading it back into the
-            buffer looks exactly like a fresh large paste to ``_on_text_changed``
-            and would be re-collapsed. Set the skip flag around the move; if the
-            move didn't change the text (plain cursor movement), clear the flag
-            so a later real paste still collapses.
-            """
-            before = buf.text
-            self._skip_paste_collapse = True
-            move()
-            if buf.text == before:
-                self._skip_paste_collapse = False
+        kb.add('down', filter=_normal_input)(self._tui_history_down)
 
-        @kb.add('up', filter=_normal_input)
-        def history_up(event):
-            """Up arrow: browse history when on first line, else move cursor up."""
-            buf = event.app.current_buffer
-            _recall_without_recollapse(buf, lambda: buf.auto_up(count=event.arg))
+        kb.add('c-l')(self._tui_handle_ctrl_l)
 
-        @kb.add('down', filter=_normal_input)
-        def history_down(event):
-            """Down arrow: browse history when on last line, else move cursor down."""
-            buf = event.app.current_buffer
-            _recall_without_recollapse(buf, lambda: buf.auto_down(count=event.arg))
-
-        @kb.add('c-l')
-        def handle_ctrl_l(event):
-            """Ctrl+L: force a clean full-screen repaint.
-
-            Recovers the UI after external terminal buffer drift — tmux /
-            cmux tab switches, ``clear`` from a subshell, SSH window
-            restores, etc. — that prompt_toolkit can't detect on its own.
-            Matches the universal bash/zsh/fish/vim/htop convention.
-            """
-            self._force_full_redraw()
-
-        @kb.add('c-c')
-        def handle_ctrl_c(event):
-            """Handle Ctrl+C - cancel interactive prompts, interrupt agent, or exit.
-            
-            Priority:
-            0. Cancel active voice recording
-            1. Cancel active sudo/approval/clarify prompt
-            2. Interrupt the running agent (first press)
-            3. Force exit (second press within 2s, or when idle)
-            """
-            now = time.time()
-
-            # Cancel active voice recording.
-            # Run cancel() in a background thread to prevent blocking the
-            # event loop if AudioRecorder._lock or CoreAudio takes time.
-            _should_cancel_voice = False
-            _recorder_ref = None
-            with cli_ref._voice_lock:
-                if cli_ref._voice_recording and cli_ref._voice_recorder:
-                    _recorder_ref = cli_ref._voice_recorder
-                    cli_ref._voice_recording = False
-                    cli_ref._voice_continuous = False
-                    _should_cancel_voice = True
-            if _should_cancel_voice:
-                _cprint(f"\n{_DIM}Recording cancelled.{_RST}")
-                threading.Thread(
-                    target=_recorder_ref.cancel, daemon=True
-                ).start()
-                event.app.invalidate()
-                return
-
-            # Cancel slash confirmation prompt (foreground UI, not an
-            # agent-blocking overlay — cancel and stop here).
-            if self._slash_confirm_state:
-                self._submit_slash_confirm_response("cancel")
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-
-            # Cancel /model picker (foreground UI — cancel and stop here).
-            if self._model_picker_state:
-                self._close_model_picker()
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-
-            # Cancel command palette (foreground UI — cancel and stop here).
-            if self._command_palette_state:
-                self._close_command_palette()
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-
-            # Clear all agent-blocking overlays (approval/clarify/sudo/secret)
-            # in one shot.  We do NOT return after clearing — we fall through so
-            # that if the agent is also running we fire the interrupt on the same
-            # Ctrl+C press.  This fixes the case where a stale/orphaned overlay
-            # (left behind by a previous interrupt) consumes the press without
-            # ever reaching the agent-interrupt branch, leaving the chat frozen
-            # (#14026).
-            _overlay_cleared = bool(
-                self._sudo_state
-                or self._secret_state
-                or self._approval_state
-                or self._clarify_state
-            )
-            if _overlay_cleared:
-                self._clear_active_overlays_for_interrupt()
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-
-            # If we only cleared overlays and the agent is NOT running, stop here
-            # (don't fall through to the interrupt/exit path).
-            if _overlay_cleared and not (self._agent_running and self.agent):
-                return
-
-            if self._agent_running and self.agent:
-                if now - self._last_ctrl_c_time < 2.0:
-                    print("\n⚡ Force exiting...")
-                    self._should_exit = True
-                    event.app.exit()
-                    return
-                
-                self._last_ctrl_c_time = now
-                print("\n⚡ Interrupting agent... (press Ctrl+C again to force exit)")
-                request_hard_interrupt(self.agent)
-            # If there's text or images, clear them (like bash).
-            # If everything is already empty, exit.
-            elif event.app.current_buffer.text or self._attached_images:
-                event.app.current_buffer.reset()
-                self._attached_images.clear()
-                event.app.invalidate()
-            else:
-                self._should_exit = True
-                event.app.exit()
+        kb.add('c-c')(self._tui_handle_ctrl_c)
 
         # Ctrl+Shift+C: no binding needed. Terminal emulators (GNOME Terminal,
         # iTerm2, kitty, Windows Terminal, etc.) intercept Ctrl+Shift+C before
@@ -19333,155 +20744,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # startup crash with try/except. Both were based on a misreading of how
         # terminal key events propagate. Deleting the dead handler outright.
 
-        @kb.add('c-q')  # Ctrl+Q
-        def handle_ctrl_q(event):
-            """Alternative interrupt/exit shortcut (Ctrl+Q).
+        kb.add('c-q')(self._tui_handle_ctrl_q)
 
-            Behaves like Ctrl+C: cancels active prompts, interrupts the
-            running agent, or clears the input buffer. Does not support
-            the double-press 'force exit' feature of Ctrl+C.
-            """
-            # Cancel active voice recording.
-            _should_cancel_voice = False
-            _recorder_ref = None
-            with cli_ref._voice_lock:
-                if cli_ref._voice_recording and cli_ref._voice_recorder:
-                    _recorder_ref = cli_ref._voice_recorder
-                    cli_ref._voice_recording = False
-                    cli_ref._voice_continuous = False
-                    _should_cancel_voice = True
-            if _should_cancel_voice:
-                _cprint(f"\n{_DIM}Recording cancelled.{_RST}")
-                threading.Thread(
-                    target=_recorder_ref.cancel, daemon=True
-                ).start()
-                event.app.invalidate()
-                return
-
-            # Cancel slash confirmation prompt (foreground UI — cancel and stop).
-            if self._slash_confirm_state:
-                self._submit_slash_confirm_response("cancel")
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-
-            # Cancel /model picker (foreground UI — cancel and stop).
-            if self._model_picker_state:
-                self._close_model_picker()
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-
-            # Clear all agent-blocking overlays in one shot, then fall through to
-            # the agent-interrupt branch so a single Ctrl+Q both clears a stale
-            # overlay and interrupts a still-running agent (#14026).
-            _overlay_cleared = bool(
-                self._sudo_state
-                or self._secret_state
-                or self._approval_state
-                or self._clarify_state
-            )
-            if _overlay_cleared:
-                self._clear_active_overlays_for_interrupt()
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-
-            if _overlay_cleared and not (self._agent_running and self.agent):
-                return
-
-            if self._agent_running and self.agent:
-                print("\n⚡ Interrupting agent...")
-                request_hard_interrupt(self.agent)
-            elif event.app.current_buffer.text or self._attached_images:
-                event.app.current_buffer.reset()
-                self._attached_images.clear()
-                event.app.invalidate()
-            else:
-                self._should_exit = True
-                event.app.exit()
-
-        @kb.add('c-d')
-        def handle_ctrl_d(event):
-            """Ctrl+D: delete char under cursor (standard readline behaviour).
-            Only exit when the input is empty — same as bash/zsh. Pending
-            attached images count as input and block the EOF-exit so the
-            user doesn't lose them silently.
-            """
-            buf = event.app.current_buffer
-            if buf.text:
-                buf.delete()
-            elif self._attached_images:
-                # Empty text but pending attachments — no-op, don't exit.
-                return
-            else:
-                self._should_exit = True
-                event.app.exit()
+        kb.add('c-d')(self._tui_handle_ctrl_d)
 
         _modal_prompt_active = Condition(
             lambda: bool(self._secret_state or self._sudo_state or self._slash_confirm_state)
         )
 
-        @kb.add('escape', filter=_modal_prompt_active, eager=True)
-        def handle_escape_modal(event):
-            """ESC cancels active secret/sudo prompts."""
-            if self._secret_state:
-                self._cancel_secret_capture()
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-            if self._sudo_state:
-                self._sudo_state["response_queue"].put("")
-                self._sudo_state = None
-                event.app.invalidate()
-                return
-            if self._slash_confirm_state:
-                self._submit_slash_confirm_response("cancel")
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
+        kb.add('escape', filter=_modal_prompt_active, eager=True)(self._tui_handle_escape_modal)
 
-        @kb.add('escape', 'escape', filter=~_modal_prompt_active)
-        def handle_double_escape(event):
-            """Double ESC: discard the current draft and any attached images.
+        kb.add('escape', 'escape', filter=~_modal_prompt_active)(self._tui_handle_double_escape)
 
-            Matches Claude Code / Gemini CLI, where double-Esc is the
-            clear-the-composer gesture. It works while the agent is
-            streaming, which is the gap Ctrl+C leaves: Ctrl+C interrupts a
-            running turn and only clears the draft when idle, so mid-stream
-            there was no way to discard a half-typed prompt.
-
-            The draft is appended to history first, so Up recalls it — the
-            same undo affordance Claude Code provides, and the reason this
-            is safe to bind to a key pressed by reflex.
-
-            Single ESC is the prefix for Alt sequences (escape+enter,
-            escape+g, escape+v), so prompt_toolkit's escape-timeout keeps
-            those distinct from the double press. Modal prompts bind ESC
-            eagerly and are excluded here so cancel still wins.
-            """
-            buf = event.app.current_buffer
-            if not (buf.text or cli_ref._attached_images):
-                return
-            buf.reset(append_to_history=bool(buf.text))
-            cli_ref._attached_images.clear()
-            event.app.invalidate()
-
-        @kb.add('c-z')
-        def handle_ctrl_z(event):
-            """Handle Ctrl+Z - suspend process to background (Unix only)."""
-            if sys.platform == 'win32':
-                _cprint(f"\n{_DIM}Suspend (Ctrl+Z) is not supported on Windows.{_RST}")
-                event.app.invalidate()
-                return
-            import signal as _sig
-            from prompt_toolkit.application import run_in_terminal
-            from hermes_cli.skin_engine import get_active_skin
-            agent_name = get_active_skin().get_branding("agent_name", "Hermes Agent")
-            msg = f"\n{agent_name} has been suspended. Run `fg` to bring {agent_name} back."
-            def _suspend():
-                os.write(1, msg.encode())
-                os.kill(0, _sig.SIGTSTP)
-            run_in_terminal(_suspend)
+        kb.add('c-z')(self._tui_handle_ctrl_z)
 
         # Voice push-to-talk key: configurable via config.yaml (voice.record_key)
         # Default: Ctrl+B (avoids conflict with Ctrl+R readline reverse-search).
@@ -19523,170 +20798,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # voice.record_key mid-session (Copilot round-13 on #19835).
         self.set_voice_record_key_cache(_raw_key)
 
-        @kb.add(*pt_key_to_sequence(_voice_key))
-        def handle_voice_record(event):
-            """Toggle voice recording when voice mode is active.
-
-            IMPORTANT: This handler runs in prompt_toolkit's event-loop thread.
-            Any blocking call here (locks, sd.wait, disk I/O) freezes the
-            entire UI.  All heavy work is dispatched to daemon threads.
-            """
-            if not cli_ref._voice_mode:
-                return
-            # Always allow STOPPING a recording (even when agent is running)
-            if cli_ref._voice_recording:
-                # Manual stop via push-to-talk key: stop continuous mode
-                with cli_ref._voice_lock:
-                    cli_ref._voice_continuous = False
-                # Flag clearing is handled atomically inside _voice_stop_and_transcribe
-                event.app.invalidate()
-                threading.Thread(
-                    target=cli_ref._voice_stop_and_transcribe,
-                    daemon=True,
-                ).start()
-            else:
-                # Allow disarming continuous mode even when the agent is
-                # running or transcribing — otherwise the user is stuck in
-                # an auto-restart loop until /voice off (#67545).
-                if cli_ref._agent_running or cli_ref._voice_processing:
-                    with cli_ref._voice_lock:
-                        cli_ref._voice_continuous = False
-                    event.app.invalidate()
-                    return
-                # Guard: don't START recording during interactive prompts
-                if cli_ref._clarify_state or cli_ref._sudo_state or cli_ref._approval_state or cli_ref._slash_confirm_state:
-                    return
-
-                # Interrupt TTS if playing, so user can start talking.
-                # stop_playback() is fast (just terminates a subprocess);
-                # the stop event drains the streaming pipeline if one is live.
-                if not cli_ref._voice_tts_done.is_set():
-                    try:
-                        logger.info("TTS CUT: record key handler cutting TTS")
-                        from tools.tts_streaming import mark_speech_interrupted
-                        mark_speech_interrupted()
-                        if cli_ref._voice_tts_stop is not None:
-                            cli_ref._voice_tts_stop.set()
-                        from tools.voice_mode import stop_playback
-                        stop_playback()
-                        cli_ref._voice_tts_done.set()
-                    except Exception:
-                        pass
-
-                with cli_ref._voice_lock:
-                    cli_ref._voice_continuous = True
-
-                # Dispatch to a daemon thread so play_beep(sd.wait),
-                # AudioRecorder.start(lock acquire), and config I/O
-                # never block the prompt_toolkit event loop.
-                def _start_recording():
-                    try:
-                        cli_ref._voice_start_recording()
-                        if hasattr(cli_ref, '_app') and cli_ref._app:
-                            cli_ref._app.invalidate()
-                    except Exception as e:
-                        _cprint(f"\n{_DIM}Voice recording failed: {e}{_RST}")
-
-                threading.Thread(target=_start_recording, daemon=True).start()
-                event.app.invalidate()
+        kb.add(*pt_key_to_sequence(_voice_key))(self._tui_handle_voice_record)
         from prompt_toolkit.keys import Keys
 
-        @kb.add(Keys.BracketedPaste, eager=True)
-        def handle_paste(event):
-            """Handle terminal paste — detect clipboard images.
+        kb.add(Keys.BracketedPaste, eager=True)(self._tui_handle_paste)
 
-            When the terminal supports bracketed paste, Ctrl+V / Cmd+V
-            triggers this with the pasted text. We only auto-attach a
-            clipboard image for image-only/empty paste gestures so text
-            pastes and dictation do not accidentally attach stale images.
+        kb.add('c-v')(self._tui_handle_ctrl_v)
 
-            Large pastes (5+ lines) are collapsed to a file reference
-            placeholder while preserving any existing user text in the
-            buffer.
-            """
-            # Diagnostic canary: measure how long the paste handler blocks
-            # the prompt_toolkit event loop. If this exceeds ~500ms we log
-            # it so recurring "CLI freezes on paste" reports (issue #16263,
-            # macOS Tahoe 26 + iTerm2/Ghostty) arrive with data attached.
-            _paste_handler_start = time.perf_counter()
-            _paste_raw_size = len(event.data or "")
-            pasted_text = event.data or ""
-            # Normalise line endings — Windows \r\n and old Mac \r both become \n
-            # so the 5-line collapse threshold and display are consistent.
-            pasted_text = pasted_text.replace('\r\n', '\n').replace('\r', '\n')
-            pasted_text = _strip_leaked_bracketed_paste_wrappers(pasted_text)
-            pasted_text, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(pasted_text)
-            if _had_mouse_reports:
-                self._recover_terminal_input_modes(reason="mouse reports leaked into bracketed paste payload")
-            if _should_auto_attach_clipboard_image_on_paste(pasted_text) and self._try_attach_clipboard_image():
-                event.app.invalidate()
-            if pasted_text:
-                # Sanitize surrogate characters (e.g. from Word/Google Docs paste) before writing
-                from run_agent import _sanitize_surrogates
-                pasted_text = _sanitize_surrogates(pasted_text)
-                line_count = pasted_text.count('\n')
-                buf = event.current_buffer
-                threshold = self.config.get("paste_collapse_threshold", 5)
-                char_threshold = self.config.get("paste_collapse_char_threshold", 2000)
-                lines_hit = threshold > 0 and line_count >= threshold
-                chars_hit = char_threshold > 0 and len(pasted_text) >= char_threshold
-                if (lines_hit or chars_hit) and not buf.text.strip().startswith('/'):
-                    _paste_counter[0] += 1
-                    paste_dir = _hermes_home / "pastes"
-                    paste_dir.mkdir(parents=True, exist_ok=True)
-                    paste_file = paste_dir / f"paste_{_paste_counter[0]}_{datetime.now().strftime('%H%M%S')}.txt"
-                    paste_file.write_text(pasted_text, encoding="utf-8")
-                    logger.info("Collapsed paste #%d: %d lines, %d chars -> %s", _paste_counter[0], line_count + 1, len(pasted_text), paste_file)
-                    placeholder = f"[Pasted text #{_paste_counter[0]}: {line_count + 1} lines \u2192 {paste_file}]"
-                    prefix = ""
-                    if buf.cursor_position > 0 and buf.text[buf.cursor_position - 1] != '\n':
-                        prefix = "\n"
-                    _paste_just_collapsed[0] = True
-                    buf.insert_text(prefix + placeholder)
-                else:
-                    buf.insert_text(pasted_text)
-            _paste_handler_elapsed_ms = (time.perf_counter() - _paste_handler_start) * 1000.0
-            if _paste_handler_elapsed_ms > 500.0:
-                logger.warning(
-                    "Slow bracketed-paste handler: %.1fms to process %d bytes "
-                    "(%d lines) on %s. If the input becomes unresponsive after "
-                    "this, attach this log line to the bug report.",
-                    _paste_handler_elapsed_ms,
-                    _paste_raw_size,
-                    pasted_text.count('\n') + 1 if pasted_text else 0,
-                    sys.platform,
-                )
+        kb.add('escape', 'v')(self._tui_handle_alt_v)
+        return kb
 
-        @kb.add('c-v')
-        def handle_ctrl_v(event):
-            """Fallback image paste for terminals without bracketed paste.
-
-            On Linux terminals (GNOME Terminal, Konsole, etc.), Ctrl+V
-            sends raw byte 0x16 instead of triggering a paste.  This
-            binding catches that and checks the clipboard for images.
-            On terminals that DO intercept Ctrl+V for paste (macOS
-            Terminal, iTerm2, VSCode, Windows Terminal), the bracketed
-            paste handler fires instead and this binding never triggers.
-            """
-            if self._try_attach_clipboard_image():
-                event.app.invalidate()
-
-        @kb.add('escape', 'v')
-        def handle_alt_v(event):
-            """Alt+V — paste image from clipboard.
-
-            Alt key combos pass through all terminal emulators (sent as
-            ESC + key), unlike Ctrl+V which terminals intercept for text
-            paste.  This is the reliable way to attach clipboard images
-            on WSL2, VSCode, and any terminal over SSH where Ctrl+V
-            can't reach the application for image-only clipboard.
-            """
-            if self._try_attach_clipboard_image():
-                event.app.invalidate()
-            else:
-                # No image found — show a hint
-                pass  # silent when no image (avoid noise on accidental press)
-
+    def _tui_build_layout(self, kb):
+        """Build the TUI widgets, Layout and Style; registers wrapper keybindings on ``kb``."""
         # Dynamic prompt: shows Hermes symbol when agent is working,
         # or answer prompt when clarify freetext mode is active.
         cli_ref = self
@@ -19753,66 +20876,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         input_area.window.height = _input_height
 
         # Paste collapsing: detect large pastes and save to temp file
-        _paste_counter = [0]
-        _prev_text_len = [0]
-        _prev_newline_count = [0]
-        _paste_just_collapsed = [False]
+        self._tui_paste_counter = [0]
+        self._tui_prev_text_len = [0]
+        self._tui_prev_newline_count = [0]
+        self._tui_paste_just_collapsed = [False]
         self._skip_paste_collapse = False
 
-        def _on_text_changed(buf):
-            """Detect large pastes and collapse them to a file reference.
-
-            When bracketed paste is available, handle_paste collapses
-            large pastes directly.  This handler is a fallback for
-            terminals without bracketed paste support.
-
-            Two heuristics (either triggers collapse):
-            1. Many characters added at once (chars_added > 1) — works
-               when the terminal delivers the paste in one event-loop tick.
-            2. Newline count jumped by 4+ in a single text-change event —
-               catches terminals that feed characters individually but
-               still batch newlines.  Alt+Enter only adds 1 newline per
-               event so it never triggers this.
-            """
-            text = _strip_leaked_bracketed_paste_wrappers(buf.text)
-            text, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(text)
-            if _had_mouse_reports:
-                self._recover_terminal_input_modes(reason="mouse reports leaked into prompt buffer")
-            if text != buf.text:
-                cursor = min(buf.cursor_position, len(text))
-                _paste_just_collapsed[0] = True
-                buf.text = text
-                buf.cursor_position = cursor
-                _prev_text_len[0] = len(text)
-                _prev_newline_count[0] = text.count('\n')
-                return
-            chars_added = len(text) - _prev_text_len[0]
-            _prev_text_len[0] = len(text)
-            if _paste_just_collapsed[0] or self._skip_paste_collapse:
-                _paste_just_collapsed[0] = False
-                self._skip_paste_collapse = False
-                _prev_newline_count[0] = text.count('\n')
-                return
-            line_count = text.count('\n')
-            newlines_added = line_count - _prev_newline_count[0]
-            _prev_newline_count[0] = line_count
-            is_paste = chars_added > 1 or newlines_added >= 4
-            threshold = self.config.get("paste_collapse_threshold_fallback", 5)
-            char_threshold = self.config.get("paste_collapse_char_threshold", 2000)
-            lines_hit = threshold > 0 and line_count >= threshold
-            chars_hit = char_threshold > 0 and len(text) >= char_threshold
-            if (lines_hit or chars_hit) and is_paste and not text.startswith('/'):
-                _paste_counter[0] += 1
-                paste_dir = _hermes_home / "pastes"
-                paste_dir.mkdir(parents=True, exist_ok=True)
-                paste_file = paste_dir / f"paste_{_paste_counter[0]}_{datetime.now().strftime('%H%M%S')}.txt"
-                paste_file.write_text(text, encoding="utf-8")
-                logger.info("Collapsed paste #%d: %d lines, %d chars -> %s (fallback)", _paste_counter[0], line_count + 1, len(text), paste_file)
-                _paste_just_collapsed[0] = True
-                buf.text = f"[Pasted text #{_paste_counter[0]}: {line_count + 1} lines \u2192 {paste_file}]"
-                buf.cursor_position = len(buf.text)
-
-        input_area.buffer.on_text_changed += _on_text_changed
+        input_area.buffer.on_text_changed += self._tui_on_text_changed
 
         # --- Input processors for password masking and inline placeholder ---
 
@@ -19839,132 +20909,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                         return Transformation(fragments=ti.fragments + [('class:placeholder', text)])
                 return Transformation(fragments=ti.fragments)
 
-        def _get_placeholder():
-            if cli_ref._voice_recording:
-                _label = cli_ref._voice_record_key_label()
-                return f"recording... {_label} to stop, Ctrl+C to cancel"
-            if cli_ref._voice_processing:
-                return "transcribing..."
-            if cli_ref._sudo_state:
-                return "type password (hidden), Enter to submit · ESC to skip"
-            if cli_ref._secret_state:
-                return "type secret (hidden), Enter to submit · ESC to skip"
-            if cli_ref._approval_state:
-                return ""
-            if cli_ref._slash_confirm_state:
-                return "type 1/2/3, or use ↑/↓ then Enter"
-            if cli_ref._clarify_freetext:
-                return "type your answer here and press Enter"
-            if cli_ref._clarify_state:
-                return ""
-            if cli_ref._command_running:
-                frame = cli_ref._command_spinner_frame()
-                status = cli_ref._command_status or "Processing command..."
-                return f"{frame} {status}"
-            if cli_ref._agent_running:
-                return "msg=interrupt · /queue · /bg · /steer · Ctrl+C cancel"
-            if cli_ref._voice_mode:
-                _label = cli_ref._voice_record_key_label()
-                return f"type or {_label} to record"
-            # Advertise a parked draft so the stash can never be silently
-            # forgotten — the composer itself tells you how to get it back.
-            _stash_hint = ""
-            try:
-                _stash_hint = cli_ref._prompt_stash.placeholder_hint()
-            except Exception:
-                _stash_hint = ""
-            if _stash_hint:
-                return _stash_hint
-            # Idle + empty composer: show a rotating task-oriented example to
-            # nudge the user toward a high-value first action (C-09). Chosen
-            # once per session (self._composer_placeholder) so it stays stable
-            # while being read, not flickering every render.
-            return getattr(cli_ref, "_composer_placeholder", "") or ""
-
-        input_area.control.input_processors.append(_PlaceholderProcessor(_get_placeholder))
+        input_area.control.input_processors.append(_PlaceholderProcessor(self._tui_placeholder_text))
 
         # Hint line above input: shown only for interactive prompts that need
         # extra instructions (sudo countdown, approval navigation, clarify).
         # The agent-running interrupt hint is now an inline placeholder above.
-        def get_hint_text():
-            if cli_ref._sudo_state:
-                remaining = max(0, int(cli_ref._sudo_deadline - time.monotonic()))
-                return [
-                    ('class:hint', '  password hidden · Enter to skip'),
-                    ('class:clarify-countdown', f'  ({remaining}s)'),
-                ]
-
-            if cli_ref._secret_state:
-                remaining = max(0, int(cli_ref._secret_deadline - time.monotonic()))
-                return [
-                    ('class:hint', '  secret hidden · Enter to skip'),
-                    ('class:clarify-countdown', f'  ({remaining}s)'),
-                ]
-
-            if cli_ref._approval_state:
-                remaining = max(0, int(cli_ref._approval_deadline - time.monotonic()))
-                return [
-                    ('class:hint', '  ↑/↓ to select, Enter to confirm'),
-                    ('class:clarify-countdown', f'  ({remaining}s)'),
-                ]
-
-            if cli_ref._slash_confirm_state:
-                remaining = max(0, int(cli_ref._slash_confirm_deadline - time.monotonic()))
-                return [
-                    ('class:hint', '  type 1/2/3, or ↑/↓ to select, Enter to confirm'),
-                    ('class:clarify-countdown', f'  ({remaining}s)'),
-                ]
-
-            if cli_ref._clarify_state:
-                # None deadline = unlimited wait → hide the countdown entirely.
-                if cli_ref._clarify_deadline is None:
-                    countdown = ''
-                else:
-                    remaining = max(0, int(cli_ref._clarify_deadline - time.monotonic()))
-                    countdown = f'  ({remaining}s)'
-                if cli_ref._clarify_freetext:
-                    return [
-                        ('class:hint', '  type your answer and press Enter'),
-                        ('class:clarify-countdown', countdown),
-                    ]
-                if cli_ref._clarify_state.get("questions"):
-                    return [
-                        ('class:hint', '  ↑/↓ to select, Enter to lock, Tab next question'),
-                        ('class:clarify-countdown', countdown),
-                    ]
-                return [
-                    ('class:hint', '  ↑/↓ to select, Enter to confirm'),
-                    ('class:clarify-countdown', countdown),
-                ]
-
-            if cli_ref._command_running:
-                frame = cli_ref._command_spinner_frame()
-                detail = "input temporarily disabled" if cli_ref._command_blocks_input else "input stays active; Enter queues"
-                return [
-                    ('class:hint', f'  {frame} command in progress · {detail}'),
-                ]
-
-            return []
-
-        def get_hint_height():
-            if cli_ref._sudo_state or cli_ref._secret_state or cli_ref._approval_state or cli_ref._slash_confirm_state or cli_ref._clarify_state or cli_ref._command_running:
-                return 1
-            # Keep a spacer while the agent runs on roomy terminals, but reclaim
-            # the row on narrow/mobile screens where every line matters.
-            return cli_ref._agent_spacer_height()
-
-        def get_spinner_text():
-            spinner_line = cli_ref._render_spinner_text()
-            if not spinner_line:
-                return []
-            return [('class:hint', spinner_line)]
-
-        def get_spinner_height():
-            return cli_ref._spinner_widget_height()
 
         spinner_widget = Window(
-            content=FormattedTextControl(get_spinner_text),
-            height=get_spinner_height,
+            content=FormattedTextControl(self._tui_spinner_text),
+            height=self._tui_spinner_height,
             wrap_lines=True,
         )
 
@@ -19979,343 +20932,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         )
 
         spacer = Window(
-            content=FormattedTextControl(get_hint_text),
-            height=get_hint_height,
+            content=FormattedTextControl(self._tui_hint_text),
+            height=self._tui_hint_height,
         )
 
         # --- Clarify tool: dynamic display widget for questions + choices ---
 
-        def _get_clarify_batch_display(state):
-            """Build styled text for the batch (multi-question) clarify panel.
-
-            A-compact layout mirroring the TUI: a "N questions" header, one
-            status line per question (✓ answered → answer / ▸ active /
-            · pending), and the active question's numbered choices (+ Other)
-            expanded directly beneath its status line.
-            """
-            questions_list = state.get("questions") or []
-            answers = state.get("answers") or {}
-            active = state.get("active", 0)
-            choices = state.get("choices") or []
-            selected = state.get("selected", 0)
-            multi_select = state.get("multi_select", False)
-            selected_indices = state.get("selected_indices", set()) if multi_select else set()
-
-            title = "Hermes needs your input"
-            header = f"{len(questions_list)} questions"
-
-            def _status_rows(width):
-                """(style, text) rows for the status list + expanded active question."""
-                rows = []
-                answer_meta = state.get("answer_meta") or {}
-                for idx, entry in enumerate(questions_list):
-                    answered = entry["qid"] in answers
-                    if answered:
-                        marker = "✓"
-                    elif idx == active:
-                        marker = "▸"
-                    else:
-                        marker = "·"
-                    label = f"{marker} {entry['question']}"
-                    row_style = 'class:clarify-selected' if idx == active else 'class:clarify-choice'
-                    for wrapped in _wrap_panel_text(label, width, subsequent_indent="  "):
-                        rows.append((row_style, wrapped))
-                    if answered:
-                        # The locked answer on its own line, in its own color,
-                        # so the current answer stays readable while walking
-                        # the list with Tab/Shift-Tab.
-                        for wrapped in _wrap_panel_text(
-                            f"    {answers[entry['qid']]}", width, subsequent_indent="    "
-                        ):
-                            rows.append(('class:clarify-answer', wrapped))
-                    if idx != active:
-                        continue
-                    # Expanded active question: numbered choices + Other.
-                    for i, choice in enumerate(choices):
-                        num_prefix = str(i + 1) if i < 9 else ('0' if i == 9 else ' ')
-                        if multi_select:
-                            cb = "[x]" if i in selected_indices else "[ ]"
-                            cursor = "❯" if i == selected and not cli_ref._clarify_freetext else " "
-                            prefix = f"  {cursor} {cb} {num_prefix}. "
-                        else:
-                            cursor = "❯" if i == selected and not cli_ref._clarify_freetext else " "
-                            prefix = f"  {cursor} {num_prefix}. "
-                        style = 'class:clarify-selected' if i == selected and not cli_ref._clarify_freetext else 'class:clarify-choice'
-                        for wrapped in _wrap_panel_text(f"{prefix}{choice}", width, subsequent_indent="      "):
-                            rows.append((style, wrapped))
-                    if choices:
-                        other_idx = len(choices)
-                        other_num = other_idx + 1
-                        other_num_prefix = str(other_num) if other_num < 10 else ('0' if other_num == 10 else ' ')
-                        if multi_select:
-                            cb = "[x]" if other_idx in selected_indices else "[ ]"
-                            mid = f"{cb} {other_num_prefix}"
-                        else:
-                            mid = other_num_prefix
-                        # An earlier typed answer stays visible next to Other;
-                        # Enter on it edits (the composer is prefilled).
-                        meta = answer_meta.get(entry["qid"]) or {}
-                        other_text = meta.get("other_text") or ""
-                        other_suffix = f"Other: {other_text}" if other_text else None
-                        if cli_ref._clarify_freetext:
-                            other_label = f"  ❯ {mid}. " + (other_suffix or "Other (type below)")
-                            other_style = 'class:clarify-active-other'
-                        elif selected == other_idx:
-                            other_label = f"  ❯ {mid}. " + (other_suffix or "Other (type your answer)")
-                            other_style = 'class:clarify-selected'
-                        else:
-                            other_label = f"    {mid}. " + (other_suffix or "Other (type your answer)")
-                            other_style = 'class:clarify-choice'
-                        for wrapped in _wrap_panel_text(other_label, width, subsequent_indent="      "):
-                            rows.append((other_style, wrapped))
-                    elif cli_ref._clarify_freetext:
-                        for wrapped in _wrap_panel_text(
-                            "  Type your answer in the prompt below, then press Enter.", width
-                        ):
-                            rows.append(('class:clarify-active-other', wrapped))
-                return rows
-
-            preview_rows = _status_rows(60)
-            box_width = _panel_box_width(title, [header] + [text for _, text in preview_rows])
-            inner_text_width = max(8, box_width - 2)
-            rows = _status_rows(inner_text_width)
-
-            lines = []
-            lines.append(('class:clarify-border', '╭─ '))
-            lines.append(('class:clarify-title', title))
-            lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
-            _append_panel_line(lines, 'class:clarify-border', 'class:clarify-question', header, box_width)
-            for style, text in rows:
-                _append_panel_line(lines, 'class:clarify-border', style, text, box_width)
-            lines.append(('class:clarify-border', '╰' + ('─' * box_width) + '╯\n'))
-            return lines
-
-        def _get_clarify_display():
-            """Build styled text for the clarify question/choices panel.
-
-            Layout priority: choices + Other option must always render even if
-            the question is very long. The question is budgeted to leave enough
-            rows for the choices and trailing chrome; anything over the budget
-            is truncated with a marker.
-            """
-            state = cli_ref._clarify_state
-            if not state:
-                return []
-            if state.get("questions"):
-                return _get_clarify_batch_display(state)
-
-            question = state["question"]
-            choices = state.get("choices") or []
-            selected = state.get("selected", 0)
-            # multi-select support
-            multi_select = state.get("multi_select", False)
-            selected_indices = state.get("selected_indices", set()) if multi_select else set()
-            preview_lines = _wrap_panel_text(question, 60)
-            for i, choice in enumerate(choices):
-                # Show number prefix for quick selection (1-9 for items 1-9, 0 for 10th item)
-                if i < 9:
-                    num_prefix = str(i + 1)
-                elif i == 9:
-                    num_prefix = '0'
-                else:
-                    num_prefix = ' '
-                if multi_select:
-                    cb = "[x]" if i in selected_indices else "[ ]"
-                    if i == selected and not cli_ref._clarify_freetext:
-                        prefix = f"❯ {cb} {num_prefix}. "
-                    else:
-                        prefix = f"  {cb} {num_prefix}. "
-                elif i == selected and not cli_ref._clarify_freetext:
-                    prefix = f"❯ {num_prefix}. "
-                else:
-                    prefix = f"  {num_prefix}. "
-                preview_lines.extend(_wrap_panel_text(f"{prefix}{choice}", 60, subsequent_indent="    "))
-            # "Other" option in preview
-            other_num = len(choices) + 1
-            if other_num < 10:
-                other_num_prefix = str(other_num)
-            elif other_num == 10:
-                other_num_prefix = '0'
-            else:
-                other_num_prefix = ' '
-            other_idx_val = len(choices)
-            if multi_select:
-                cb = "[x]" if other_idx_val in selected_indices else "[ ]"
-                other_label = (
-                    f"❯ {cb} {other_num_prefix}. Other (type below)" if cli_ref._clarify_freetext
-                    else f"❯ {cb} {other_num_prefix}. Other (type your answer)" if selected == other_idx_val
-                    else f"  {cb} {other_num_prefix}. Other (type your answer)"
-                )
-            else:
-                other_label = (
-                    f"❯ {other_num_prefix}. Other (type below)" if cli_ref._clarify_freetext
-                    else f"❯ {other_num_prefix}. Other (type your answer)" if selected == len(choices)
-                    else f"  {other_num_prefix}. Other (type your answer)"
-                )
-            preview_lines.extend(_wrap_panel_text(other_label, 60, subsequent_indent="    "))
-            box_width = _panel_box_width("Hermes needs your input", preview_lines)
-            inner_text_width = max(8, box_width - 2)
-
-            # Pre-wrap choices + Other option — these are mandatory.
-            choice_wrapped: list[tuple[int, str]] = []
-            if choices:
-                for i, choice in enumerate(choices):
-                    # Show number prefix for quick selection (1-9 for items 1-9, 0 for 10th item)
-                    if i < 9:
-                        num_prefix = str(i + 1)
-                    elif i == 9:
-                        num_prefix = '0'
-                    else:
-                        num_prefix = ' '
-                    # multi-select support: add checkbox after cursor indicator
-                    if multi_select:
-                        cb = "[x]" if i in selected_indices else "[ ]"
-                        if i == selected and not cli_ref._clarify_freetext:
-                            prefix = f'❯ {cb} {num_prefix}. '
-                        else:
-                            prefix = f'  {cb} {num_prefix}. '
-                    elif i == selected and not cli_ref._clarify_freetext:
-                        prefix = f'❯ {num_prefix}. '
-                    else:
-                        prefix = f'  {num_prefix}. '
-                    for wrapped in _wrap_panel_text(f"{prefix}{choice}", inner_text_width, subsequent_indent="    "):
-                        choice_wrapped.append((i, wrapped))
-                # Trailing Other row(s)
-                other_idx = len(choices)
-                other_num = other_idx + 1
-                if other_num < 10:
-                    other_num_prefix = str(other_num)
-                elif other_num == 10:
-                    other_num_prefix = '0'
-                else:
-                    other_num_prefix = ' '
-                # multi-select support: add checkbox to Other option
-                if multi_select:
-                    cb = "[x]" if other_idx in selected_indices else "[ ]"
-                    if selected == other_idx and not cli_ref._clarify_freetext:
-                        other_label_mand = f'❯ {cb} {other_num_prefix}. Other (type your answer)'
-                    elif cli_ref._clarify_freetext:
-                        other_label_mand = f'❯ {cb} {other_num_prefix}. Other (type below)'
-                    else:
-                        other_label_mand = f'  {cb} {other_num_prefix}. Other (type your answer)'
-                else:
-                    if selected == other_idx and not cli_ref._clarify_freetext:
-                        other_label_mand = f'❯ {other_num_prefix}. Other (type your answer)'
-                    elif cli_ref._clarify_freetext:
-                        other_label_mand = f'❯ {other_num_prefix}. Other (type below)'
-                    else:
-                        other_label_mand = f'  {other_num_prefix}. Other (type your answer)'
-                other_wrapped = _wrap_panel_text(other_label_mand, inner_text_width, subsequent_indent="    ")
-            elif cli_ref._clarify_freetext:
-                # Freetext-only mode: the guidance line takes the place of choices.
-                other_wrapped = _wrap_panel_text(
-                    "Type your answer in the prompt below, then press Enter.",
-                    inner_text_width,
-                )
-            else:
-                other_wrapped = []
-
-            # Budget the question so mandatory rows always render.
-            # Chrome layouts:
-            #   full : top border + blank_after_title + blank_after_question
-            #          + blank_before_bottom + bottom border = 5 rows
-            #   tight: top border + bottom border = 2 rows (drop all blanks)
-            #
-            # reserved_below matches the approval-panel budget (~6 rows for
-            # spinner/tool-progress + status + input + separators + prompt).
-            term_rows = shutil.get_terminal_size((100, 24)).lines
-            chrome_full = 5
-            chrome_tight = 2
-            reserved_below = 6
-
-            available = max(0, term_rows - reserved_below)
-            # The compact decision must reserve room for at least one question
-            # row on top of the choices, otherwise full chrome (3 blank
-            # separators) gets kept when there is no room for it and the panel
-            # overflows the viewport — HSplit then clips the panel's tail,
-            # silently dropping the choices (the reported bug).
-            mandatory_full = chrome_full + 1 + len(choice_wrapped) + len(other_wrapped)
-
-            use_compact_chrome = mandatory_full > available
-            chrome_rows = chrome_tight if use_compact_chrome else chrome_full
-
-            max_question_rows = max(1, available - chrome_rows - len(choice_wrapped) - len(other_wrapped))
-            max_question_rows = min(max_question_rows, 12)  # soft cap on huge terminals
-
-            # When the choices alone (plus compact chrome) already exceed the
-            # viewport, drop the question entirely — the choices are the only
-            # thing the user must see to make a selection. Without this the
-            # question would still claim its 1-row floor above and push the
-            # tail of the choices off-screen (HSplit clips the overflow).
-            choices_overflow = chrome_rows + len(choice_wrapped) + len(other_wrapped) >= available
-            if choices_overflow:
-                max_question_rows = 0
-
-            question_wrapped = _wrap_panel_text(question, inner_text_width)
-            if max_question_rows <= 0:
-                question_wrapped = []
-            elif len(question_wrapped) > max_question_rows:
-                # The truncation marker is itself a row, so it must count
-                # against the budget. With a 1-row budget there is no room for
-                # both a question line and the marker — show the marker alone
-                # so the rendered question never exceeds max_question_rows.
-                keep = max(0, max_question_rows - 1)
-                question_wrapped = question_wrapped[:keep] + ["… (question truncated)"]
-
-            lines = []
-            # Box top border
-            lines.append(('class:clarify-border', '╭─ '))
-            lines.append(('class:clarify-title', 'Hermes needs your input'))
-            lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len("Hermes needs your input") - 3)) + '╮\n'))
-            if not use_compact_chrome:
-                _append_blank_panel_line(lines, 'class:clarify-border', box_width)
-
-            # Question text (bounded)
-            for wrapped in question_wrapped:
-                _append_panel_line(lines, 'class:clarify-border', 'class:clarify-question', wrapped, box_width)
-            if not use_compact_chrome:
-                _append_blank_panel_line(lines, 'class:clarify-border', box_width)
-
-            if cli_ref._clarify_freetext and not choices:
-                for wrapped in other_wrapped:
-                    _append_panel_line(lines, 'class:clarify-border', 'class:clarify-choice', wrapped, box_width)
-                if not use_compact_chrome:
-                    _append_blank_panel_line(lines, 'class:clarify-border', box_width)
-
-            if choices:
-                # Multiple-choice mode: show selectable options
-                for i, wrapped in choice_wrapped:
-                    style = 'class:clarify-selected' if i == selected and not cli_ref._clarify_freetext else 'class:clarify-choice'
-                    _append_panel_line(lines, 'class:clarify-border', style, wrapped, box_width)
-
-                # "Other" option (trailing row(s), only shown when choices exist)
-                other_idx = len(choices)
-                # Calculate number prefix for "Other" option
-                other_num = other_idx + 1
-                if other_num < 10:
-                    other_num_prefix = str(other_num)
-                elif other_num == 10:
-                    other_num_prefix = '0'
-                else:
-                    other_num_prefix = ' '
-                
-                if selected == other_idx and not cli_ref._clarify_freetext:
-                    other_style = 'class:clarify-selected'
-                elif cli_ref._clarify_freetext:
-                    other_style = 'class:clarify-active-other'
-                else:
-                    other_style = 'class:clarify-choice'
-                for wrapped in other_wrapped:
-                    _append_panel_line(lines, 'class:clarify-border', other_style, wrapped, box_width)
-
-            if not use_compact_chrome:
-                _append_blank_panel_line(lines, 'class:clarify-border', box_width)
-            lines.append(('class:clarify-border', '╰' + ('─' * box_width) + '╯\n'))
-            return lines
-
         clarify_widget = ConditionalContainer(
             Window(
-                FormattedTextControl(_get_clarify_display),
+                FormattedTextControl(self._get_clarify_display_fragments),
                 wrap_lines=True,
             ),
             filter=Condition(lambda: cli_ref._clarify_state is not None),
@@ -20323,62 +20948,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         # --- Sudo password: display widget ---
 
-        def _get_sudo_display():
-            state = cli_ref._sudo_state
-            if not state:
-                return []
-            title = '🔐 Sudo Password Required'
-            body = 'Enter password below (hidden), or press Enter to skip'
-            box_width = _panel_box_width(title, [body])
-            lines = []
-            lines.append(('class:sudo-border', '╭─ '))
-            lines.append(('class:sudo-title', title))
-            lines.append(('class:sudo-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
-            _append_blank_panel_line(lines, 'class:sudo-border', box_width)
-            _append_panel_line(lines, 'class:sudo-border', 'class:sudo-text', body, box_width)
-            _append_blank_panel_line(lines, 'class:sudo-border', box_width)
-            lines.append(('class:sudo-border', '╰' + ('─' * box_width) + '╯\n'))
-            return lines
-
         sudo_widget = ConditionalContainer(
             Window(
-                FormattedTextControl(_get_sudo_display),
+                FormattedTextControl(self._get_sudo_display_fragments),
                 wrap_lines=True,
             ),
             filter=Condition(lambda: cli_ref._sudo_state is not None),
         )
 
-        def _get_secret_display():
-            state = cli_ref._secret_state
-            if not state:
-                return []
-
-            title = '🔑 Skill Setup Required'
-            prompt = state.get("prompt") or f"Enter value for {state.get('var_name', 'secret')}"
-            metadata = state.get("metadata") or {}
-            help_text = metadata.get("help")
-            body = 'Enter secret below (hidden), ESC or Ctrl+C to skip'
-            content_lines = [prompt, body]
-            if help_text:
-                content_lines.insert(1, str(help_text))
-            box_width = _panel_box_width(title, content_lines)
-            lines = []
-            lines.append(('class:sudo-border', '╭─ '))
-            lines.append(('class:sudo-title', title))
-            lines.append(('class:sudo-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
-            _append_blank_panel_line(lines, 'class:sudo-border', box_width)
-            _append_panel_line(lines, 'class:sudo-border', 'class:sudo-text', prompt, box_width)
-            if help_text:
-                _append_panel_line(lines, 'class:sudo-border', 'class:sudo-text', str(help_text), box_width)
-            _append_blank_panel_line(lines, 'class:sudo-border', box_width)
-            _append_panel_line(lines, 'class:sudo-border', 'class:sudo-text', body, box_width)
-            _append_blank_panel_line(lines, 'class:sudo-border', box_width)
-            lines.append(('class:sudo-border', '╰' + ('─' * box_width) + '╯\n'))
-            return lines
-
         secret_widget = ConditionalContainer(
             Window(
-                FormattedTextControl(_get_secret_display),
+                FormattedTextControl(self._get_secret_display_fragments),
                 wrap_lines=True,
             ),
             filter=Condition(lambda: cli_ref._secret_state is not None),
@@ -20386,163 +20966,37 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         # --- Dangerous command approval: display widget ---
 
-        def _get_approval_display():
-            return cli_ref._get_approval_display_fragments()
-
         approval_widget = ConditionalContainer(
             Window(
-                FormattedTextControl(_get_approval_display),
+                FormattedTextControl(self._get_approval_display_fragments),
                 wrap_lines=True,
             ),
             filter=Condition(lambda: cli_ref._approval_state is not None),
         )
 
-        def _get_slash_confirm_display():
-            return cli_ref._get_slash_confirm_display_fragments()
-
         slash_confirm_widget = ConditionalContainer(
             Window(
-                FormattedTextControl(_get_slash_confirm_display),
+                FormattedTextControl(self._get_slash_confirm_display_fragments),
                 wrap_lines=True,
             ),
             filter=Condition(lambda: cli_ref._slash_confirm_state is not None),
         )
 
         # --- /model picker: display widget ---
-        def _get_model_picker_display():
-            state = cli_ref._model_picker_state
-            if not state:
-                return []
-            stage = state.get("stage", "provider")
-            if stage == "provider":
-                title = "⚙ Model Picker — Select Provider"
-                choices = []
-                _providers = state.get("providers")
-                for p in _providers if isinstance(_providers, list) else []:
-                    count = p.get("total_models", len(p.get("models", [])))
-                    label = f"{p['name']} ({count} model{'s' if count != 1 else ''})"
-                    if p.get("is_current"):
-                        label += "  ← current"
-                    choices.append(label)
-                choices.append("Cancel")
-                hint = f"Current: {state.get('current_model', 'unknown')} on {state.get('current_provider', 'unknown')}"
-            else:
-                provider_data = state.get("provider_data") or {}
-                model_list = state.get("model_list") or []
-                title = f"⚙ Model Picker — {provider_data.get('name', provider_data.get('slug', 'Provider'))}"
-                # Fuzzy filter: narrow the concrete model list by the typed
-                # query. Selection still resolves to a real entry (see the
-                # filtered_pairs index mapping in the selection handler), so
-                # this never introduces an ambiguous model resolution.
-                _query = state.get("filter", "") or ""
-                filtered_pairs = cli_ref._filter_model_picker_entries(model_list, _query)
-                state["_filtered_pairs"] = filtered_pairs
-                model_labels = [e for (_i, e) in filtered_pairs]
-                choices = list(model_labels) + ["← Back", "Cancel"]
-                if _query:
-                    hint = (
-                        f"Filter: {_query}▏  ({len(model_labels)}/{len(model_list)} match "
-                        "— type to narrow, Backspace to clear)"
-                    )
-                elif model_list:
-                    hint = f"Select a model ({len(model_list)} available) — type to filter"
-                else:
-                    hint = "No models listed for this provider. Use Back or Cancel."
-
-            box_width = _panel_box_width(title, [hint] + choices, min_width=46, max_width=84)
-            inner_text_width = max(8, box_width - 6)
-            selected = state.get("selected", 0)
-
-            # Scrolling viewport: the panel renders into a Window with no max
-            # height, so without limiting visible items the bottom border and
-            # any items past the available terminal rows get clipped on long
-            # provider catalogs (e.g. Ollama Cloud's 36+ models).
-            try:
-                from prompt_toolkit.application import get_app
-                term_rows = get_app().output.get_size().rows
-            except Exception:
-                term_rows = shutil.get_terminal_size((100, 24)).lines
-            scroll_offset, visible = HermesCLI._compute_model_picker_viewport(
-                selected, state.get("_scroll_offset", 0), len(choices), term_rows,
-            )
-            state["_scroll_offset"] = scroll_offset
-
-            lines = []
-            lines.append(('class:clarify-border', '╭─ '))
-            lines.append(('class:clarify-title', title))
-            lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
-            _append_blank_panel_line(lines, 'class:clarify-border', box_width)
-            _append_panel_line(lines, 'class:clarify-border', 'class:clarify-hint', hint, box_width)
-            _append_blank_panel_line(lines, 'class:clarify-border', box_width)
-            for idx in range(scroll_offset, scroll_offset + visible):
-                choice = choices[idx]
-                style = 'class:clarify-selected' if idx == selected else 'class:clarify-choice'
-                prefix = '❯ ' if idx == selected else '  '
-                for wrapped in _wrap_panel_text(prefix + choice, inner_text_width, subsequent_indent='  '):
-                    _append_panel_line(lines, 'class:clarify-border', style, wrapped, box_width)
-            _append_blank_panel_line(lines, 'class:clarify-border', box_width)
-            lines.append(('class:clarify-border', '╰' + ('─' * box_width) + '╯\n'))
-            return lines
 
         model_picker_widget = ConditionalContainer(
             Window(
-                FormattedTextControl(_get_model_picker_display),
+                FormattedTextControl(self._get_model_picker_display_fragments),
                 wrap_lines=True,
             ),
             filter=Condition(lambda: cli_ref._model_picker_state is not None),
         )
 
         # --- Ctrl+P command palette: display widget ---
-        def _get_command_palette_display():
-            state = cli_ref._command_palette_state
-            if not state:
-                return []
-            rows = cli_ref._command_palette_visible_entries()
-            state["_visible_count"] = len(rows)
-            _query = state.get("filter", "") or ""
-            total = len(state.get("entries") or [])
-            title = "⚙ Command Palette"
-            if _query:
-                hint = f"Filter: {_query}▏  ({len(rows)}/{total} match — Enter inserts, Esc cancels)"
-            else:
-                hint = f"Type to filter {total} commands — ↑/↓ then Enter inserts, Esc cancels"
-
-            labels = [f"{c}  —  {d}" if d else c for (c, _cat, d) in rows]
-            if not labels:
-                labels = ["(no matching commands)"]
-            box_width = _panel_box_width(title, [hint] + labels, min_width=50, max_width=90)
-            inner_text_width = max(8, box_width - 6)
-            selected = state.get("selected", 0)
-            try:
-                from prompt_toolkit.application import get_app
-                term_rows = get_app().output.get_size().rows
-            except Exception:
-                term_rows = shutil.get_terminal_size((100, 24)).lines
-            scroll_offset, visible = HermesCLI._compute_model_picker_viewport(
-                selected, state.get("_scroll_offset", 0), len(labels), term_rows,
-            )
-            state["_scroll_offset"] = scroll_offset
-
-            lines = []
-            lines.append(('class:clarify-border', '╭─ '))
-            lines.append(('class:clarify-title', title))
-            lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
-            _append_blank_panel_line(lines, 'class:clarify-border', box_width)
-            _append_panel_line(lines, 'class:clarify-border', 'class:clarify-hint', hint, box_width)
-            _append_blank_panel_line(lines, 'class:clarify-border', box_width)
-            for idx in range(scroll_offset, min(scroll_offset + visible, len(labels))):
-                label = labels[idx]
-                style = 'class:clarify-selected' if idx == selected else 'class:clarify-choice'
-                prefix = '❯ ' if idx == selected else '  '
-                for wrapped in _wrap_panel_text(prefix + label, inner_text_width, subsequent_indent='    '):
-                    _append_panel_line(lines, 'class:clarify-border', style, wrapped, box_width)
-            _append_blank_panel_line(lines, 'class:clarify-border', box_width)
-            lines.append(('class:clarify-border', '╰' + ('─' * box_width) + '╯\n'))
-            return lines
 
         command_palette_widget = ConditionalContainer(
             Window(
-                FormattedTextControl(_get_command_palette_display),
+                FormattedTextControl(self._get_command_palette_display_fragments),
                 wrap_lines=True,
             ),
             filter=Condition(lambda: cli_ref._command_palette_state is not None),
@@ -20565,27 +21019,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # Image attachment indicator — shows badges like [📎 Image #1] above input
         cli_ref = self
 
-        def _get_image_bar():
-            if not cli_ref._attached_images:
-                return []
-            badges = _format_image_attachment_badges(
-                cli_ref._attached_images,
-                cli_ref._image_counter,
-            )
-            return [("class:image-badge", f" {badges} ")]
-
         image_bar = Window(
-            content=FormattedTextControl(_get_image_bar),
+            content=FormattedTextControl(self._tui_image_bar_fragments),
             height=Condition(lambda: bool(cli_ref._attached_images)),
         )
 
         # Persistent voice mode status bar (visible only when voice mode is on)
-        def _get_voice_status():
-            return cli_ref._get_voice_status_fragments()
 
         voice_status_bar = ConditionalContainer(
             Window(
-                FormattedTextControl(_get_voice_status),
+                FormattedTextControl(self._tui_voice_status_fragments),
                 height=1,
             ),
             filter=Condition(lambda: cli_ref._voice_mode),
@@ -20613,20 +21056,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         # Stash browse panel — appears just above the status bar when the user
         # presses Ctrl+S on an empty composer with 2+ stashed drafts.
-        def _get_stash_panel_display():
-            try:
-                _stash = cli_ref._prompt_stash
-                return cli_ref._render_stash_panel(
-                    _stash.panel_rows(),
-                    _stash.panel_cursor,
-                    cli_ref._get_tui_terminal_width(),
-                )
-            except Exception:
-                return []
 
         self._stash_panel_widget = ConditionalContainer(
             Window(
-                FormattedTextControl(_get_stash_panel_display),
+                FormattedTextControl(self._get_stash_panel_display_fragments),
                 wrap_lines=False,
             ),
             filter=Condition(
@@ -20665,7 +21098,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 )
             )
         )
-        
+
         # Style for the application
         self._tui_style_base = {
             # Input area / prompt: empty style strings inherit the
@@ -20725,6 +21158,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             'voice-status-recording': 'bg:#1a1a2e #FF4444 bold',
         }
         style = PTStyle.from_dict(self._build_tui_style_dict())
+        return (layout, style)
+
+    def run(self):
+        """Run the interactive CLI loop with persistent input at bottom."""
+        if not self._claim_active_session("cli"):
+            return
+
+        self._tui_print_startup()
+        self._tui_init_run_state()
+        kb = self._tui_build_key_bindings()
+        layout, style = self._tui_build_layout(kb)
 
         # Select CPR-disabled output when _terminal_may_leak_cpr() says so
         # (POSIX local + SSH; Windows keeps PT default — see helper docs).
@@ -20846,407 +21290,30 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         self._install_resize_recovery(app)
 
-        def spinner_loop():
-            while not self._should_exit:
-                if not self._app:
-                    time.sleep(0.1)
-                    continue
-                if self._command_running:
-                    self._invalidate(min_interval=0.1)
-                    time.sleep(0.1)
-                else:
-                    # Do not repaint the idle prompt every second. In non-full-screen
-                    # prompt_toolkit mode, background redraws can fight tmux/Ghostty/cmux
-                    # viewport restoration after focus changes and visually move the
-                    # command input area. Keep idle stable; input/agent events still
-                    # invalidate explicitly when the UI actually changes.
-                    time.sleep(0.2)
-
-        spinner_thread = threading.Thread(target=spinner_loop, daemon=True)
+        spinner_thread = threading.Thread(target=self._tui_spinner_loop, daemon=True)
         spinner_thread.start()
         
         # Background thread to process inputs and run agent
-        def process_loop():
-            while not self._should_exit:
-                try:
-                    # Check for pending input with timeout
-                    try:
-                        user_input = self._pending_input.get(timeout=0.1)
-                    except queue.Empty:
-                        # Periodic config watcher — auto-reload MCP on mcp_servers change
-                        if not self._agent_running:
-                            self._check_config_mcp_changes()
-                            # Heal cooked-mode termios drift (lost
-                            # run_in_terminal restore) before draining
-                            # notifications — a drifted tty makes the CLI
-                            # look dead even though the loop is healthy.
-                            try:
-                                self._check_termios_drift()
-                            except Exception:
-                                pass
-                            # Check for background process notifications (completions
-                            # and watch pattern matches) while agent is idle.
-                            try:
-                                self._drain_process_notifications("cli-idle")
-                            except Exception:
-                                pass
-                            # Fire a due /loop wakeup while idle (defers to
-                            # queued user input and active /goal loops).
-                            try:
-                                self._maybe_fire_loop_tick()
-                            except Exception:
-                                pass
-                        continue
-
-                    # Voice-transcribed messages arrive wrapped in a sentinel
-                    # so only genuine STT output gets the voice prefix (#65827).
-                    is_voice_input = isinstance(user_input, _VoiceInputMessage)
-                    if is_voice_input:
-                        user_input = user_input.text
-
-                    # Seeded -q prompts arrive wrapped in _SeededQueryMessage:
-                    # arbitrary launcher/script text that must be submitted
-                    # LITERALLY — skip slash routing, ! shell dispatch, and
-                    # file-drop detection for this one message.
-                    is_seeded_query = isinstance(user_input, _SeededQueryMessage)
-                    if is_seeded_query:
-                        seeded = user_input
-                        user_input = (
-                            (seeded.text, seeded.images)
-                            if seeded.images
-                            else seeded.text
-                        )
-
-                    if not user_input:
-                        continue
-
-                    # The user has typed and submitted something, so any
-                    # post-resize transient suppression should end here.
-                    self._status_bar_suppressed_after_resize = False
-
-                    # Unpack image payload: (text, [Path, ...]) or plain str
-                    submit_images = []
-                    if isinstance(user_input, tuple):
-                        user_input, submit_images = user_input
-
-                    if isinstance(user_input, str):
-                        user_input = _strip_leaked_bracketed_paste_wrappers(user_input)
-                        user_input, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(user_input)
-                        if _had_mouse_reports:
-                            self._recover_terminal_input_modes(reason="mouse reports leaked into submitted input")
-
-                    # Typed bare stop phrase while a voice chat is active ends
-                    # the voice chat (same semantics as SAYING "stop") instead
-                    # of sending the word to the agent. Voice transcripts are
-                    # already stop-checked at the transcription points, so this
-                    # only intercepts typed input.
-                    if not is_voice_input and self._typed_voice_stop(user_input):
-                        continue
-                    
-                    # Check for commands — but detect dragged/pasted file paths first.
-                    # See _detect_file_drop() for details. Seeded -q prompts are
-                    # literal text: no file-drop detection, no !/slash dispatch.
-                    _file_drop = (
-                        _detect_file_drop(user_input)
-                        if isinstance(user_input, str) and not is_seeded_query
-                        else None
-                    )
-                    if _file_drop:
-                        _drop_path = _file_drop["path"]
-                        _remainder = _file_drop["remainder"]
-                        if _file_drop["is_image"]:
-                            submit_images.append(_drop_path)
-                            user_input = _remainder or f"[User attached image: {_drop_path.name}]"
-                            _cprint(f"  📎 Auto-attached image: {_drop_path.name}")
-                        else:
-                            _cprint(f"  📄 Detected file: {_drop_path.name}")
-                            user_input = (
-                                f"[User attached file: {_drop_path}]"
-                                + (f"\n{_remainder}" if _remainder else "")
-                            )
-
-                    # A bare number right after a bare `/resume` prompt selects
-                    # that session (see #34584). Checked before chat routing so
-                    # the digit isn't sent to the agent as a message.
-                    if (
-                        not _file_drop
-                        and self._pending_resume_sessions
-                        and isinstance(user_input, str)
-                        and self._consume_pending_resume_selection(user_input)
-                    ):
-                        continue
-
-                    # `!<command>` shell mode — run it here and loop back to
-                    # idle. Checked BEFORE slash routing and before the chat
-                    # path so nothing enters conversation history and no model
-                    # turn is spent. See handle_bang_shell().
-                    if (
-                        not _file_drop
-                        and not is_seeded_query
-                        and isinstance(user_input, str)
-                        and self.handle_bang_shell(user_input)
-                    ):
-                        continue
-
-                    if (
-                        not _file_drop
-                        and not is_seeded_query
-                        and isinstance(user_input, str)
-                        and _looks_like_slash_command(user_input)
-                    ):
-                        _cprint(f"\n⚙️  {user_input}")
-                        try:
-                            if not self.process_command(user_input):
-                                self._should_exit = True
-                                # Schedule app exit
-                                if app.is_running:
-                                    app.exit()
-                        except KeyboardInterrupt:
-                            # Ctrl+C during a slow slash command (e.g. /skills browse,
-                            # /sessions list with a large DB) should interrupt the
-                            # command and return to the prompt, NOT exit the entire
-                            # session. Without this guard a KeyboardInterrupt unwinds
-                            # to the outer prompt_toolkit loop and the session dies.
-                            _cprint("\n[dim]Command interrupted.[/dim]")
-                            continue
-                        # A slash handler may set a one-shot pending seed (e.g.
-                        # /blueprint <name>) to be run as the next agent turn.
-                        # If present, fall through to the chat path with the seed
-                        # as the user message instead of looping back to idle.
-                        _seed = getattr(self, "_pending_agent_seed", None)
-                        if _seed:
-                            self._pending_agent_seed = None
-                            user_input = _seed
-                        else:
-                            continue
-                    
-                    # Expand paste references back to full content
-                    _paste_ref_re = re.compile(r'\[Pasted text #\d+: \d+ lines \u2192 (.+?)\]')
-                    paste_refs = list(_paste_ref_re.finditer(user_input)) if isinstance(user_input, str) else []
-                    if paste_refs:
-                        user_input = self._expand_paste_references(user_input)
-                    print()
-                    self._print_user_message_preview(user_input)
-                    
-                    # Show image attachment count
-                    if submit_images:
-                        n = len(submit_images)
-                        _cprint(f"  {_DIM}📎 {n} image{'s' if n > 1 else ''} attached{_RST}")
-
-                    # Regular chat - run agent
-                    self._agent_running = True
-                    self._interactive_turn = True
-                    self._pet_turn_error = False
-                    self._pet_reasoning = False
-                    self._turn_summary_begin()
-                    app.invalidate()  # Refresh status line
-
-                    try:
-                        self.chat(user_input, images=submit_images or None, voice_input=is_voice_input)
-                    finally:
-                        self._agent_running = False
-                        self._spinner_text = ""
-                        self._tool_start_time = 0.0
-                        self._pending_tool_info.clear()
-                        self._last_scrollback_tool = ""
-                        self._pet_reasoning = False
-                        self._pet_react_turn_end()
-                        # Post-turn accounting line (display.turn_summary).
-                        # Emitted after the response box, before the prompt
-                        # returns, so it reads as a footer for the turn.
-                        self._turn_summary_emit()
-                        self._interactive_turn = False
-
-                        app.invalidate()  # Refresh status line
-
-                        # Post-turn terminal recovery (#33271): after an
-                        # interrupt the prompt_toolkit renderer may have
-                        # drifted from the physical terminal state — CSI 6n
-                        # cursor position reports can leak as literal text
-                        # (^[[19;1R), and the VT100 input parser can stall in
-                        # a partial-escape state, accepting no further
-                        # keystrokes.  Drain stray escape bytes from the OS
-                        # input buffer and force a clean renderer redraw.
-                        if self._last_turn_interrupted:
-                            self._recover_terminal_after_interrupt()
-
-                        # Re-queue any messages that arrived in _interrupt_queue
-                        # while the agent was running and were never claimed by
-                        # the explicit interrupt path. See
-                        # _drain_interrupt_queue_to_pending_input for the full
-                        # rationale. Regression of #17666 / #18760 — the drain
-                        # block from the original PR #17939 was deferred as
-                        # "worth its own review" and never re-landed (#20271).
-                        self._drain_interrupt_queue_to_pending_input()
-
-                        # Goal continuation: if a standing goal is active, ask
-                        # the judge whether the turn satisfied it. If not, and
-                        # there's no real user message already queued, push the
-                        # continuation prompt back into _pending_input so the
-                        # next loop iteration picks it up naturally (and any
-                        # user input that arrives in between still preempts).
-                        try:
-                            self._maybe_continue_goal_after_turn()
-                        except Exception as _goal_exc:
-                            logging.debug("goal continuation hook failed: %s", _goal_exc)
-
-                        # /loop tick completion: if the turn that just ended
-                        # was a loop wakeup, evaluate it (LOOP_COMPLETE marker,
-                        # --until judge, caps) and schedule the next tick.
-                        try:
-                            self._maybe_complete_loop_tick_after_turn()
-                        except Exception as _loop_exc:
-                            logging.debug("loop completion hook failed: %s", _loop_exc)
-
-                        # Continuous voice: auto-restart recording after agent responds.
-                        # Dispatch to a daemon thread so play_beep (sd.wait) and
-                        # AudioRecorder.start (lock acquire) never block process_loop —
-                        # otherwise queued user input would stall silently.
-                        if self._voice_mode and self._voice_continuous and not self._voice_recording:
-                            def _restart_recording():
-                                try:
-                                    if self._voice_tts:
-                                        self._voice_tts_done.wait(timeout=60)
-                                        time.sleep(0.3)
-                                    # A barge-in capture already owns the mic and
-                                    # will submit the interruption itself.
-                                    if self._voice_barge_capture.is_set():
-                                        return
-                                    self._voice_start_recording()
-                                    app.invalidate()
-                                except Exception as e:
-                                    _cprint(f"{_DIM}Voice auto-restart failed: {e}{_RST}")
-                            threading.Thread(target=_restart_recording, daemon=True).start()
-
-                        # Drain process notifications (completions + watch matches)
-                        # that arrived while the agent was running.
-                        try:
-                            self._drain_process_notifications("cli-post-turn")
-                        except Exception:
-                            pass  # Non-fatal — don't break the main loop
-
-                except OSError as e:
-                    if getattr(e, "errno", None) == errno.EIO:
-                        self._mark_terminal_io_broken("process_loop")
-                        logger.warning(
-                            "process_loop EIO — freezing UI paints (#81521): %s",
-                            e,
-                        )
-                        continue
-                    logger.warning("process_loop unhandled error (msg may be lost): %s", e)
-                except Exception as e:
-                    if isinstance(e, OSError) and getattr(e, "errno", None) == errno.EIO:
-                        self._mark_terminal_io_broken("process_loop")
-                        logger.warning(
-                            "process_loop EIO — freezing UI paints (#81521): %s",
-                            e,
-                        )
-                        continue
-                    logger.warning("process_loop unhandled error (msg may be lost): %s", e)
         
         # Start processing thread
-        process_thread = threading.Thread(target=process_loop, daemon=True)
+        process_thread = threading.Thread(target=self._tui_process_loop, daemon=True)
         process_thread.start()
 
         # Wake word ("Hey Hermes") — start the always-on hotword listener if
         # enabled. Off-thread so a first-run engine install never blocks the
         # prompt; best-effort, so deps/mic/key gaps are surfaced, never fatal.
-        def _wake_startup():
-            try:
-                self._maybe_start_wake_word()
-            except Exception as e:
-                logger.debug("wake-word startup skipped: %s", e)
-        threading.Thread(target=_wake_startup, daemon=True, name="wake-startup").start()
+        threading.Thread(target=self._tui_wake_startup, daemon=True, name="wake-startup").start()
 
         # Register atexit cleanup so resources are freed even on unexpected exit
         atexit.register(_run_cleanup)
         
         # Register signal handlers for graceful shutdown on SSH disconnect / SIGTERM
-        def _signal_handler(signum, frame):
-            """Handle SIGHUP/SIGTERM by triggering graceful cleanup.
-
-            Calls ``self.agent.interrupt()`` first so the agent daemon
-            thread's poll loop sees the per-thread interrupt and kills the
-            tool's subprocess group via ``_kill_process`` (os.killpg).
-            Without this, the main thread dies from KeyboardInterrupt and
-            the daemon thread is killed with it — before it can run one
-            more poll iteration to clean up the subprocess, which was
-            spawned with ``os.setsid`` and therefore survives as an orphan
-            with PPID=1.
-
-            Grace window (``HERMES_SIGTERM_GRACE``, default 1.5 s) gives
-            the daemon time to: detect the interrupt (next 200 ms poll) →
-            call _kill_process (SIGTERM + 1 s wait + SIGKILL if needed) →
-            return from _wait_for_process.  ``time.sleep`` releases the
-            GIL so the daemon actually runs during the window.
-
-            Guarded ``logger.debug``: CPython's ``logging`` module is not
-            reentrant-safe.  ``Logger.isEnabledFor`` caches level results
-            in ``Logger._cache``; under shutdown races the cache can be
-            cleared (``_clear_cache``) or mid-mutation when the signal
-            fires, raising ``KeyError: <level_int>`` (e.g. ``KeyError: 10``
-            for DEBUG) inside the handler.  That KeyError then escapes
-            before ``raise KeyboardInterrupt()`` can fire, which bypasses
-            prompt_toolkit's normal interrupt unwind and surfaces as the
-            EIO cascade from issue #13710.  Wrap the log in a bare
-            ``try/except`` so the handler can never raise through it.
-            """
-            try:
-                logger.debug("Received signal %s, triggering graceful shutdown", signum)
-            except Exception:
-                pass  # never let logging raise from a signal handler (#13710 regression)
-            # Shutdown intent is now unambiguous — arm the exit backstop
-            # IMMEDIATELY, before the graceful unwind below.  If any step of
-            # that unwind wedges (main thread parked in a syscall, prompt_toolkit
-            # teardown never returning), _run_cleanup never runs and would
-            # never arm its own watchdog — leaving a "dead" CLI alive for
-            # minutes (#65998 class).  Never raises.
-            _arm_exit_watchdog_on_shutdown_signal()
-            try:
-                _signal_agent = getattr(self, "agent", None)
-                if _signal_agent is not None and getattr(self, "_agent_running", False):
-                    request_hard_interrupt(
-                        _signal_agent, f"received signal {signum}"
-                    )
-                    try:
-                        _grace = float(os.getenv("HERMES_SIGTERM_GRACE", "1.5"))
-                    except (TypeError, ValueError):
-                        _grace = 1.5
-                    if _grace > 0:
-                        time.sleep(_grace)
-            except Exception:
-                pass  # never block signal handling
-            # Prefer a clean prompt_toolkit exit over `raise KeyboardInterrupt()`.
-            # Raising KBI from a signal handler unwinds into whatever Python
-            # frame the interpreter happens to be running — typically an
-            # `await asyncio.sleep()` inside prompt_toolkit's
-            # `_poll_output_size` coroutine.  The KBI becomes a Task
-            # exception, prompt_toolkit's `_handle_exception` prints
-            # "Unhandled exception in event loop" + the full traceback, and
-            # parks the terminal on "Press ENTER to continue..." (#13710
-            # variant — same root cause, different surface).
-            #
-            # `app.exit()` scheduled via `call_soon_threadsafe` lets the
-            # event loop unwind normally; `app.run()` returns and our
-            # existing `except (EOFError, KeyboardInterrupt, BrokenPipeError)`
-            # block at the bottom of the input loop handles the rest.
-            try:
-                from prompt_toolkit.application.current import get_app_or_none
-                _app = get_app_or_none()
-                if _app is not None:
-                    _loop = getattr(_app, "loop", None)
-                    if _loop is not None:
-                        _loop.call_soon_threadsafe(_app.exit)
-                        return  # clean unwind — no traceback, no ENTER pause
-            except Exception:
-                pass
-            raise KeyboardInterrupt()  # fallback for non-prompt_toolkit contexts
         
         try:
             import signal as _signal
-            _signal.signal(_signal.SIGTERM, _signal_handler)
+            _signal.signal(_signal.SIGTERM, self._tui_signal_handler)
             if hasattr(_signal, 'SIGHUP'):
-                _signal.signal(_signal.SIGHUP, _signal_handler)
+                _signal.signal(_signal.SIGHUP, self._tui_signal_handler)
 
             # Windows: install a SIGINT handler that absorbs the signal
             # instead of letting Python's default handler raise
@@ -21287,16 +21354,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # neuter_async_httpx_del which disables __del__ entirely.  The
         # KeyError fix handles macOS + uv-managed Python environments where
         # fd 0 is not reliably available to the asyncio selector.
-        def _suppress_closed_loop_errors(loop, context):
-            exc = context.get("exception")
-            if isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc):
-                return  # silently suppress
-            if isinstance(exc, KeyError) and "is not registered" in str(exc):
-                return  # suppress selector registration failures (#6393)
-            if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EIO:
-                return  # suppress I/O errors from broken stdout on interrupt (#13710)
-            # Fall back to default handler for everything else
-            loop.default_exception_handler(context)
 
         # Validate stdin before launching prompt_toolkit — on macOS with
         # uv-managed Python, fd 0 can be invalid or unregisterable with the
@@ -21346,7 +21403,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     # Use get_running_loop() to avoid DeprecationWarning on
                     # Python 3.10+ when called outside an async context.
                     _loop = _aio.get_running_loop()
-                    _loop.set_exception_handler(_suppress_closed_loop_errors)
+                    _loop.set_exception_handler(self._tui_suppress_closed_loop_errors)
                 except RuntimeError:
                     pass  # No running loop -- nothing to patch
                 except Exception:
@@ -21357,7 +21414,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 # to report modified keys distinctly (kitty protocol +
                 # modifyOtherKeys); the cleanup reset pops both modes.
                 _mark_tui_input_modes_active()
-                if _multiline_shortcuts_enabled:
+                if self._tui_multiline_shortcuts:
                     _enable_extended_enter_keys(app.output)
                 # Drive the petdex mascot animation (no-op when no pet enabled).
                 self._pet_start_anim()
