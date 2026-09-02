@@ -886,13 +886,14 @@ def test_vision_picker_custom_endpoint(tmp_path, monkeypatch):
     """Custom endpoint writes base_url+model to config and the key to env."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     import hermes_cli.tools_config as tc
+    import hermes_cli.tools_config_providers as tcp
     from hermes_cli.config import load_config
 
     seq = iter([2])  # Custom OpenAI-compatible endpoint
     prompts = iter(["https://my.endpoint/v1", "sk-secret", "my-vision-model"])
     with patch.object(tc, "_prompt_choice", side_effect=lambda *a, **k: next(seq)), \
-         patch.object(tc, "_prompt", side_effect=lambda *a, **k: next(prompts)), \
-         patch.object(tc, "save_env_value") as save_env, \
+         patch.object(tcp, "_prompt", side_effect=lambda *a, **k: next(prompts)), \
+         patch.object(tcp, "save_env_value") as save_env, \
          patch.object(tc, "_toolset_has_keys", return_value=False):
         tc._configure_vision_backend()
 
