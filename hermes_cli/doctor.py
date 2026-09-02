@@ -1,7 +1,9 @@
-"""
-Doctor command for hermes CLI.
+"""``hermes doctor`` — diagnose (and with --fix, repair) a Hermes install.
 
-Diagnoses issues with Hermes Agent setup.
+``run_doctor`` walks ``DOCTOR_CHECKS`` in order; each check prints its own
+rows and returns a ``Finding``. Check bodies live in the ``doctor_*`` sibling
+modules and are re-exported here so ``hermes_cli.doctor.<name>`` stays the
+stable import/monkeypatch surface.
 """
 
 # stdlib modules stay bound here: tests patch doctor.shutil.which / doctor.subprocess.run /
@@ -153,10 +155,6 @@ _PROVIDER_ENV_HINTS = (
 
 
 from hermes_constants import is_termux as _is_termux  # noqa: F401  (tests call doctor._is_termux)
-
-
-# Shared byte formatter, aliased to the name this module's three rendering
-# call sites already use.
 from hermes_cli.sizefmt import format_bytes as _human_bytes  # noqa: F401  (tests import doctor._human_bytes)
 
 
@@ -325,7 +323,7 @@ def _print_summary(should_fix: bool, total: Finding) -> None:
     else:
         print(color("─" * 60, Colors.GREEN))
         print(color("  All checks passed! 🎉", Colors.GREEN, Colors.BOLD))
-    
+
     print()
 
 

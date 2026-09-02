@@ -169,7 +169,7 @@ def _check_directory_structure(should_fix: bool) -> Finding:
         f.fixed += 1
     else:
         check_warn(f"{_DHH} not found", "(will be created on first use)")
-    
+
     _memory_enabled, _user_profile_enabled = _memory_store_flags(hermes_home)
 
     # Check expected subdirectories. The built-in file store does not create or
@@ -188,7 +188,7 @@ def _check_directory_structure(should_fix: bool) -> Finding:
             f.fixed += 1
         else:
             check_warn(f"{_DHH}/{subdir_name}/ not found", "(will be created on first use)")
-    
+
     # Check for SOUL.md persona file
     soul_path = hermes_home / "SOUL.md"
     if soul_path.exists():
@@ -211,7 +211,7 @@ def _check_directory_structure(should_fix: bool) -> Finding:
             )
             check_ok(f"Created {_DHH}/SOUL.md with basic template")
             f.fixed += 1
-    
+
     # Check only enabled built-in stores. External providers are additive, but
     # users can explicitly disable either legacy file target; stale files left
     # by a migration must not be presented as active memory usage.
@@ -220,20 +220,14 @@ def _check_directory_structure(should_fix: bool) -> Finding:
         check_info("Built-in memory files disabled by config")
     elif memories_dir.exists():
         check_ok(f"{_DHH}/memories/ directory exists")
-        memory_file = memories_dir / "MEMORY.md"
-        user_file = memories_dir / "USER.md"
-        if _memory_enabled:
-            if memory_file.exists():
-                size = len(memory_file.read_text(encoding="utf-8").strip())
-                check_ok(f"MEMORY.md exists ({size} chars)")
+        for enabled, fname in ((_memory_enabled, "MEMORY.md"), (_user_profile_enabled, "USER.md")):
+            if not enabled:
+                continue
+            mem_file = memories_dir / fname
+            if mem_file.exists():
+                check_ok(f"{fname} exists ({len(mem_file.read_text(encoding='utf-8').strip())} chars)")
             else:
-                check_info("MEMORY.md not created yet (will be created when the agent first writes a memory)")
-        if _user_profile_enabled:
-            if user_file.exists():
-                size = len(user_file.read_text(encoding="utf-8").strip())
-                check_ok(f"USER.md exists ({size} chars)")
-            else:
-                check_info("USER.md not created yet (will be created when the agent first writes a memory)")
+                check_info(f"{fname} not created yet (will be created when the agent first writes a memory)")
     else:
         check_warn(f"{_DHH}/memories/ not found", "(will be created on first use)")
         if should_fix:
@@ -243,29 +237,55 @@ def _check_directory_structure(should_fix: bool) -> Finding:
     return f
 
 
+def _session_count(state_db_path: Path):
+    import sqlite3
+    conn = sqlite3.connect(str(state_db_path))
+    try:
+        return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _repair_state_db(f: Finding, should_fix: bool, state_db_path: Path, *,
+                     ok_label, not_fixed_label: str, failed_issue: str, fix_hint: str) -> None:
+    """Shared --fix path for both state.db corruption classes (FTS write health, malformed schema).
+
+    ``ok_label`` is a str, or a callable given the recovered session count.
+    """
+    if not should_fix:
+        f.issues.append(fix_hint)
+        return
+    from hermes_state import repair_state_db_schema
+    report = repair_state_db_schema(state_db_path)
+    if not report.get("repaired"):
+        check_warn(not_fixed_label, f"({report.get('error')}; backup: {report.get('backup_path')})")
+        f.issues.append(failed_issue)
+        return
+    if callable(ok_label):
+        try:
+            count = _session_count(state_db_path)
+        except Exception:
+            count = "?"
+        ok_label = ok_label(count)
+    backup_name = Path(report["backup_path"]).name if report.get("backup_path") else "n/a"
+    check_ok(ok_label, f"(strategy: {report.get('strategy')}; backup: {backup_name})")
+    f.fixed += 1
+
+
 def _check_state_db(should_fix: bool) -> Finding:
     """state.db session count, FTS write health, schema repair, stats snapshot, WAL size."""
     from hermes_cli.doctor import HERMES_HOME, _DHH
     f = Finding()
     issues = f.issues
     hermes_home = HERMES_HOME
-    # Check SQLite session store
     state_db_path = hermes_home / "state.db"
     if state_db_path.exists():
         try:
-            import sqlite3
-            conn = sqlite3.connect(str(state_db_path))
-            cursor = conn.execute("SELECT COUNT(*) FROM sessions")
-            count = cursor.fetchone()[0]
-            conn.close()
-            check_ok(f"{_DHH}/state.db exists ({count} sessions)")
-
-            # FTS write-health probe (#50502): `SELECT COUNT(*)` above succeeds
-            # even when the FTS index is corrupt and every message write fails
-            # through the triggers. `_db_opens_cleanly` now drives a rolled-back
-            # write so this otherwise-silent corruption class is surfaced (and
-            # repaired in place with --fix).
-            from hermes_state import _db_opens_cleanly, repair_state_db_schema
+            check_ok(f"{_DHH}/state.db exists ({_session_count(state_db_path)} sessions)")
+            # `SELECT COUNT(*)` succeeds even when the FTS index is corrupt and
+            # every message write fails through the triggers; _db_opens_cleanly
+            # drives a rolled-back write to surface that silent class.
+            from hermes_state import _db_opens_cleanly
 
             _write_reason = _db_opens_cleanly(state_db_path)
             if _write_reason is not None:
@@ -273,78 +293,32 @@ def _check_state_db(should_fix: bool) -> Finding:
                     f"{_DHH}/state.db fails a write-health probe (FTS index may be corrupt)",
                     f"({_write_reason})",
                 )
-                if should_fix:
-                    report = repair_state_db_schema(state_db_path)
-                    if report.get("repaired"):
-                        backup_name = (
-                            Path(report["backup_path"]).name
-                            if report.get("backup_path") else "n/a"
-                        )
-                        check_ok(
-                            "Repaired state.db FTS write health",
-                            f"(strategy: {report.get('strategy')}; backup: {backup_name})",
-                        )
-                        f.fixed += 1
-                    else:
-                        check_warn(
-                            "state.db FTS write-health repair did not recover automatically",
-                            f"({report.get('error')}; backup: {report.get('backup_path')})",
-                        )
-                        issues.append(
-                            "state.db FTS write corruption and auto-repair failed — "
-                            "restore from the backup copy beside state.db"
-                        )
-                else:
-                    issues.append(
-                        "state.db FTS write corruption — run 'hermes doctor --fix' "
-                        "(or 'hermes sessions repair') to rebuild the FTS index"
-                    )
+                _repair_state_db(
+                    f, should_fix, state_db_path,
+                    ok_label="Repaired state.db FTS write health",
+                    not_fixed_label="state.db FTS write-health repair did not recover automatically",
+                    failed_issue="state.db FTS write corruption and auto-repair failed — "
+                                 "restore from the backup copy beside state.db",
+                    fix_hint="state.db FTS write corruption — run 'hermes doctor --fix' "
+                             "(or 'hermes sessions repair') to rebuild the FTS index",
+                )
         except Exception as e:
-            from hermes_state import is_malformed_db_error, repair_state_db_schema
+            from hermes_state import is_malformed_db_error
 
             if is_malformed_db_error(e):
-                # sqlite_master itself is malformed (e.g. duplicate
-                # messages_fts) — every statement fails before it runs, so
-                # this is NOT a plain FTS-index rebuild. Repair sqlite_master
-                # in place (backup first; sessions/messages preserved).
-                check_warn(
-                    f"{_DHH}/state.db schema is malformed (sessions hidden until repaired)",
-                    f"({e})",
+                # sqlite_master itself is malformed (e.g. duplicate messages_fts):
+                # every statement fails before it runs, so this is NOT a plain FTS
+                # rebuild — repair sqlite_master in place (backup first).
+                check_warn(f"{_DHH}/state.db schema is malformed (sessions hidden until repaired)", f"({e})")
+                _repair_state_db(
+                    f, should_fix, state_db_path,
+                    ok_label=lambda count: f"Repaired state.db schema ({count} sessions recovered)",
+                    not_fixed_label="state.db schema repair did not recover automatically",
+                    failed_issue="state.db schema malformed and auto-repair failed — "
+                                 "restore from the backup copy beside state.db",
+                    fix_hint="state.db schema malformed — run 'hermes doctor --fix' "
+                             "(or 'hermes sessions repair') to recover hidden sessions",
                 )
-                if should_fix:
-                    report = repair_state_db_schema(state_db_path)
-                    if report.get("repaired"):
-                        try:
-                            conn = sqlite3.connect(str(state_db_path))
-                            count = conn.execute(
-                                "SELECT COUNT(*) FROM sessions"
-                            ).fetchone()[0]
-                            conn.close()
-                        except Exception:
-                            count = "?"
-                        backup_name = (
-                            Path(report["backup_path"]).name
-                            if report.get("backup_path") else "n/a"
-                        )
-                        check_ok(
-                            f"Repaired state.db schema ({count} sessions recovered)",
-                            f"(strategy: {report.get('strategy')}; backup: {backup_name})",
-                        )
-                        f.fixed += 1
-                    else:
-                        check_warn(
-                            "state.db schema repair did not recover automatically",
-                            f"({report.get('error')}; backup: {report.get('backup_path')})",
-                        )
-                        issues.append(
-                            "state.db schema malformed and auto-repair failed — "
-                            "restore from the backup copy beside state.db"
-                        )
-                else:
-                    issues.append(
-                        "state.db schema malformed — run 'hermes doctor --fix' "
-                        "(or 'hermes sessions repair') to recover hidden sessions"
-                    )
             else:
                 check_warn(f"{_DHH}/state.db exists but has issues: {e}")
 
@@ -407,6 +381,15 @@ def _check_state_db(should_fix: bool) -> Finding:
     return f
 
 
+def _gh_authenticated() -> bool:
+    """Check if gh CLI is authenticated via token file or device flow."""
+    try:
+        result = subprocess.run(["gh", "auth", "status", "--json", "authenticated"], capture_output=True, timeout=10)
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def _check_skills_hub(should_fix: bool) -> Finding:
     from hermes_cli.doctor import HERMES_HOME, _DHH
     f = Finding()
@@ -431,19 +414,7 @@ def _check_skills_hub(should_fix: bool) -> Finding:
 
     from hermes_cli.config import get_env_value
 
-    def _gh_authenticated() -> bool:
-        """Check if gh CLI is authenticated via token file or device flow."""
-        try:
-            result = subprocess.run(
-                ["gh", "auth", "status", "--json", "authenticated"],
-                capture_output=True, timeout=10,
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
-
-    github_token = get_env_value("GITHUB_TOKEN") or get_env_value("GH_TOKEN")
-    if github_token:
+    if get_env_value("GITHUB_TOKEN") or get_env_value("GH_TOKEN"):
         check_ok("GitHub token configured (authenticated API access)")
     elif _gh_authenticated():
         check_ok("GitHub authenticated via gh CLI", "(full API access — no GITHUB_TOKEN needed)")
@@ -452,96 +423,81 @@ def _check_skills_hub(should_fix: bool) -> Finding:
     return f
 
 
+def _memory_provider_honcho(issues: list) -> None:
+    from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
+    hcfg = HonchoClientConfig.from_global_config()
+    cfg_path = resolve_config_path()
+    if not cfg_path.exists():
+        # Config file missing — env-var fallback may still have resolved it.
+        if hcfg.api_key or hcfg.base_url:
+            check_ok("Honcho configured via environment variables",
+                     f"config file {cfg_path} not found, using HONCHO_API_KEY env var")
+        else:
+            check_warn("Honcho config not found", "run: hermes memory setup")
+    elif not hcfg.enabled:
+        check_info(f"Honcho disabled (set enabled: true in {cfg_path} to activate)")
+    elif not (hcfg.api_key or hcfg.base_url):
+        _fail_and_issue("Honcho API key or base URL not set", "run: hermes memory setup",
+                        "No Honcho API key — run 'hermes memory setup'", issues)
+    else:
+        from plugins.memory.honcho.client import get_honcho_client, reset_honcho_client
+        reset_honcho_client()
+        try:
+            get_honcho_client(hcfg)
+            check_ok("Honcho connected",
+                     f"workspace={hcfg.workspace_id} mode={hcfg.recall_mode} freq={hcfg.write_frequency}")
+        except Exception as _e:
+            _fail_and_issue("Honcho connection failed", str(_e), f"Honcho unreachable: {_e}", issues)
+
+
+def _memory_provider_mem0(issues: list) -> None:
+    from plugins.memory.mem0 import _load_config as _load_mem0_config
+    mem0_cfg = _load_mem0_config()
+    if mem0_cfg.get("api_key", ""):
+        check_ok("Mem0 API key configured")
+        check_info(f"user_id={mem0_cfg.get('user_id', '?')}  agent_id={mem0_cfg.get('agent_id', '?')}")
+    else:
+        _fail_and_issue("Mem0 API key not set", "(set MEM0_API_KEY in .env or run hermes memory setup)",
+                        "Mem0 is set as memory provider but API key is missing", issues)
+
+
+# provider -> (checker, ImportError row, ImportError issue, label for "check failed")
+_MEMORY_PROVIDER_CHECKS = {
+    "honcho": (_memory_provider_honcho, ("honcho-ai not installed", "pip install honcho-ai"),
+               "Honcho is set as memory provider but honcho-ai is not installed", "Honcho"),
+    "mem0": (_memory_provider_mem0, ("Mem0 plugin not loadable", "pip install mem0ai"),
+             "Mem0 is set as memory provider but mem0ai is not installed", "Mem0"),
+}
+
+
 def _check_memory_provider(should_fix: bool) -> Finding:
     from hermes_cli.doctor import HERMES_HOME
     f = Finding()
-    issues = f.issues
-    _active_memory_provider = _doctor_memory_config(HERMES_HOME).get("provider", "")
-
-    if not _active_memory_provider:
+    name = _doctor_memory_config(HERMES_HOME).get("provider", "")
+    if not name:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")
-    elif _active_memory_provider == "honcho":
+        return f
+    if name in _MEMORY_PROVIDER_CHECKS:
+        checker, missing_row, missing_issue, label = _MEMORY_PROVIDER_CHECKS[name]
         try:
-            from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
-            hcfg = HonchoClientConfig.from_global_config()
-            _honcho_cfg_path = resolve_config_path()
-
-            if not _honcho_cfg_path.exists():
-                # Config file missing — but env var fallback may have resolved it.
-                # Only warn if the config didn't actually resolve from env vars.
-                if hcfg.api_key or hcfg.base_url:
-                    check_ok(
-                        "Honcho configured via environment variables",
-                        f"config file {_honcho_cfg_path} not found, using HONCHO_API_KEY env var",
-                    )
-                else:
-                    check_warn("Honcho config not found", "run: hermes memory setup")
-            elif not hcfg.enabled:
-                check_info(f"Honcho disabled (set enabled: true in {_honcho_cfg_path} to activate)")
-            elif not (hcfg.api_key or hcfg.base_url):
-                _fail_and_issue(
-                    "Honcho API key or base URL not set",
-                    "run: hermes memory setup",
-                    "No Honcho API key — run 'hermes memory setup'",
-                    issues,
-                )
-            else:
-                from plugins.memory.honcho.client import get_honcho_client, reset_honcho_client
-                reset_honcho_client()
-                try:
-                    get_honcho_client(hcfg)
-                    check_ok(
-                        "Honcho connected",
-                        f"workspace={hcfg.workspace_id} mode={hcfg.recall_mode} freq={hcfg.write_frequency}",
-                    )
-                except Exception as _e:
-                    _fail_and_issue("Honcho connection failed", str(_e), f"Honcho unreachable: {_e}", issues)
+            checker(f.issues)
         except ImportError:
-            _fail_and_issue(
-                "honcho-ai not installed",
-                "pip install honcho-ai",
-                "Honcho is set as memory provider but honcho-ai is not installed",
-                issues,
-            )
+            _fail_and_issue(*missing_row, missing_issue, f.issues)
         except Exception as _e:
-            check_warn("Honcho check failed", str(_e))
-    elif _active_memory_provider == "mem0":
-        try:
-            from plugins.memory.mem0 import _load_config as _load_mem0_config
-            mem0_cfg = _load_mem0_config()
-            mem0_key = mem0_cfg.get("api_key", "")
-            if mem0_key:
-                check_ok("Mem0 API key configured")
-                check_info(f"user_id={mem0_cfg.get('user_id', '?')}  agent_id={mem0_cfg.get('agent_id', '?')}")
-            else:
-                _fail_and_issue(
-                    "Mem0 API key not set",
-                    "(set MEM0_API_KEY in .env or run hermes memory setup)",
-                    "Mem0 is set as memory provider but API key is missing",
-                    issues,
-                )
-        except ImportError:
-            _fail_and_issue(
-                "Mem0 plugin not loadable",
-                "pip install mem0ai",
-                "Mem0 is set as memory provider but mem0ai is not installed",
-                issues,
-            )
-        except Exception as _e:
-            check_warn("Mem0 check failed", str(_e))
-    else:
-        # Generic check for other memory providers (openviking, hindsight, etc.)
-        try:
-            from plugins.memory import load_memory_provider
-            _provider = load_memory_provider(_active_memory_provider)
-            if _provider and _provider.is_available():
-                check_ok(f"{_active_memory_provider} provider active")
-            elif _provider:
-                check_warn(f"{_active_memory_provider} configured but not available", "run: hermes memory status")
-            else:
-                check_warn(f"{_active_memory_provider} plugin not found", "run: hermes memory setup")
-        except Exception as _e:
-            check_warn(f"{_active_memory_provider} check failed", str(_e))
+            check_warn(f"{label} check failed", str(_e))
+        return f
+    # Generic check for other memory providers (openviking, hindsight, etc.)
+    try:
+        from plugins.memory import load_memory_provider
+        _provider = load_memory_provider(name)
+        if _provider and _provider.is_available():
+            check_ok(f"{name} provider active")
+        elif _provider:
+            check_warn(f"{name} configured but not available", "run: hermes memory status")
+        else:
+            check_warn(f"{name} plugin not found", "run: hermes memory setup")
+    except Exception as _e:
+        check_warn(f"{name} check failed", str(_e))
     return f
 
 
@@ -585,8 +541,6 @@ def _check_profiles(should_fix: bool) -> Finding:
                                 check_warn(f"Orphan alias: {wrapper.name} → profile '{_m.group(1)}' no longer exists")
                     except Exception:
                         pass
-    except ImportError:
-        pass
     except Exception:
         pass
     return f
