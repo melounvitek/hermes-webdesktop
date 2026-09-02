@@ -261,32 +261,23 @@ INLINE_TOOL_EXECUTORS: Dict[str, InlineToolExecutor] = {
     "delegate_task": _delegate_task,
 }
 
-# ``invoke_tool`` (concurrent path) historically consulted the memory manager right
-# after these three names and before the remaining inline tools; it never handled
-# ``message_agent`` inline (that name falls through to the registry there).
+# ``invoke_tool`` (concurrent path) consults the memory manager right after these three
+# names and before the remaining inline tools; ``message_agent`` falls through to the
+# registry there (Bot Mode DM is only injected into the sequential path's schema).
 INVOKE_TOOL_PRE_MEMORY_MANAGER_NAMES = frozenset({"todo_list", "session_search", "memory"})
-
-
-def memory_manager_executor(function_name: str) -> InlineToolExecutor:
-    """Executor routing ``function_name`` through ``agent._memory_manager``."""
-
-    def _run(agent, args: dict, ctx: InlineToolContext) -> Any:
-        return agent._memory_manager.handle_tool_call(function_name, args)
-
-    return _run
 
 
 def resolve_invoke_tool_executor(agent, function_name: str) -> Optional[InlineToolExecutor]:
     """Inline executor for ``invoke_tool`` (concurrent path), or None for registry dispatch.
 
-    Preserves the historical precedence: todo_list/session_search/memory, then memory
-    manager tools, then the remaining inline tools (``message_agent`` excluded).
+    Precedence: todo_list/session_search/memory, then memory-manager tools, then the
+    remaining inline tools (``message_agent`` excluded).
     """
     if function_name in INVOKE_TOOL_PRE_MEMORY_MANAGER_NAMES:
         return INLINE_TOOL_EXECUTORS[function_name]
     memory_manager = agent._memory_manager
     if memory_manager and memory_manager.has_tool(function_name):
-        return memory_manager_executor(function_name)
+        return lambda agent, args, ctx: agent._memory_manager.handle_tool_call(function_name, args)
     if function_name == "message_agent":
         return None
     return INLINE_TOOL_EXECUTORS.get(function_name)
