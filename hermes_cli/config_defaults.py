@@ -4,6 +4,20 @@ Pure-data leaf module: DEFAULT_CONFIG and OPTIONAL_ENV_VARS, extracted verbatim 
 hermes_cli/config.py. Must not import from hermes_cli.config.
 """
 
+
+def _aux(timeout, *, reasoning_effort=True, **extra):
+    """Standard auxiliary-task model block (see DEFAULT_CONFIG["auxiliary"]).
+
+    reasoning_effort=False omits that key (MoA blocks configure depth per slot);
+    ``extra`` keys are appended after the standard ones.
+    """
+    d = {"provider": "auto", "model": "", "base_url": "", "api_key": "", "timeout": timeout, "extra_body": {}}
+    if reasoning_effort:
+        d["reasoning_effort"] = ""
+    d.update(extra)
+    return d
+
+
 DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
@@ -1167,244 +1181,86 @@ DEFAULT_CONFIG = {
         # case-insensitive substrings matched against the endpoint URL;
         # copilot.tencent.com is always treated as stream-only.
         "stream_only_base_urls": [],
-        "vision": {
-            "provider": "auto",    # auto | openrouter | nous | codex | custom
-            "model": "",           # e.g. "google/gemini-2.5-flash", "gpt-4o"
-            "base_url": "",        # direct OpenAI-compatible endpoint (takes precedence over provider)
-            "api_key": "",         # API key for base_url (falls back to OPENAI_API_KEY)
-            "timeout": 120,        # seconds — LLM API call timeout; vision payloads need generous timeout
-            "extra_body": {},      # OpenAI-compatible provider-specific request fields
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-            "download_timeout": 30,  # seconds — image HTTP download timeout; increase for slow connections
-        },
-        # Note: web_extract no longer uses an auxiliary LLM — pages are
-        # truncate-and-stored with a read_file pointer (no summarization),
-        # and browser snapshots follow the same pattern. The old
-        # ``auxiliary.web_extract.*`` block was removed here. Existing
-        # values in user config.yaml files are harmless leftovers and ignored.
-        "compression": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 120,        # seconds — compression summarises large contexts; increase for local models
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-            # Guarded fast lane: only honored with a concrete provider/model
-            # and an explicit ``reasoning_effort: none`` certification.
-            # Zero preserves the historic uncapped compression request.
-            "max_output_tokens": 0,
-        },
-        # Note: session_search no longer uses an auxiliary LLM (PR #27590 —
-        # single-shape tool returns DB content directly). The old
-        # ``auxiliary.session_search.*`` block was removed here. Existing
-        # values in user config.yaml files are harmless leftovers and ignored.
-        "skills_hub": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 30,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-        },
-        "approval": {
-            "provider": "auto",
-            "model": "",           # fast/cheap model recommended (e.g. gemini-flash, haiku)
-            "base_url": "",
-            "api_key": "",
-            "timeout": 30,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-        },
-        # /review — the independent reviewer subagent's model. Unlike other
-        # aux tasks this is not a single LLM call: the reviewer is a full
-        # subagent (all normal subagent tools) spawned on the async
-        # delegation rail. provider/model/base_url/api_key/api_mode are
-        # resolved through the same credential system as delegation.provider
-        # pins. Leave provider "auto" + model empty to run the reviewer on
-        # the main agent's model.
-        "review": {
-            "provider": "auto",    # auto (= inherit main model) | openrouter | nous | anthropic | ...
-            "model": "",           # e.g. "anthropic/claude-opus-4.6" — a strong reviewer model
-            "base_url": "",        # direct OpenAI-compatible endpoint (takes precedence over provider)
-            "api_key": "",         # API key for base_url / provider override
-            "api_mode": "",        # force transport: chat_completions | anthropic_messages | codex_responses
-        },
-        "mcp": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 30,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-        },
+        # Per-task blocks share one shape (see _aux): provider "auto" = inherit the main
+        # model; base_url takes precedence over provider; api_key falls back to
+        # OPENAI_API_KEY; reasoning_effort: none|minimal|low|medium|high|xhigh|max|ultra
+        # (empty = provider default); extra_body = OpenAI-compatible request fields.
+        # Vision payloads need a generous timeout; download_timeout is the image HTTP
+        # download (seconds) — raise on slow connections.
+        "vision": _aux(120, download_timeout=30),
+        # web_extract and session_search no longer use an auxiliary LLM (pages are
+        # truncate-and-stored with a read_file pointer; session_search returns DB
+        # content directly). Leftover auxiliary.web_extract/session_search blocks in
+        # user config.yaml are ignored.
+        # Compression summarises large contexts — raise timeout for local models.
+        # max_output_tokens is a guarded fast lane: only honored with a concrete
+        # provider/model AND an explicit ``reasoning_effort: none``; 0 = uncapped.
+        "compression": _aux(120, max_output_tokens=0),
+        "skills_hub": _aux(30),
+        # Approval classifier: a fast/cheap model is recommended (gemini-flash, haiku).
+        "approval": _aux(30),
+        # /review — the independent reviewer subagent's model. Not a single LLM call:
+        # a full subagent (all normal subagent tools) spawned on the async delegation
+        # rail; provider/model/base_url/api_key/api_mode resolve through the same
+        # credential system as delegation.provider pins. provider "auto" + empty
+        # model = run on the main agent's model. api_mode forces the transport:
+        # chat_completions | anthropic_messages | codex_responses.
+        "review": {"provider": "auto", "model": "", "base_url": "", "api_key": "", "api_mode": ""},
+        "mcp": _aux(30),
+        # prefer_fast_model opts in to the provider fast tier; auto otherwise uses the main model.
         "title_generation": {
             "enabled": True,
             "provider": "auto",
             "model": "",
-            "prefer_fast_model": False,  # opt in to provider fast tier; auto otherwise uses the main model
+            "prefer_fast_model": False,
             "base_url": "",
             "api_key": "",
             "timeout": 30,
             "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
+            "reasoning_effort": "",
             "language": "",
         },
-        "memory_query_rewrite": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 8,
-            "extra_body": {},
-        },
-        "tts_audio_tags": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 30,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-        },
-        # Triage specifier — flesh out a rough one-liner in the Kanban
-        # Triage column into a concrete spec, then promote it to ``todo``.
-        # Invoked by ``hermes kanban specify`` (single id or --all). Set a
-        # cheap, capable model here (gemini-flash works well); the main
-        # model is overkill for short spec expansion.
-        "triage_specifier": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 120,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-        },
-        # Kanban decomposer — decomposes a triage task into a graph of
-        # child tasks routed to specialist profiles by description.
-        # Invoked by ``hermes kanban decompose`` and the kanban
-        # auto-decompose dispatcher tick. Returns a JSON task graph;
-        # uses more tokens than the specifier so allow more headroom.
-        "kanban_decomposer": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 180,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-        },
-        # Profile describer — auto-generates a 1-2 sentence description
-        # of what a profile is good at. Invoked by
-        # ``hermes profile describe <name> --auto`` and the dashboard's
-        # auto-generate button. Short, cheap call.
-        "profile_describer": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 60,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-        },
-        # Goal judge — evaluates whether a /goal run's latest response
-        # satisfies the goal/contract, and drafts goal contracts. Short
-        # structured-JSON calls; a fast cheap model is fine.
-        "goal_judge": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 60,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-        },
-        # Curator — skill-usage review fork. Timeout is generous because the
-        # review pass can take several minutes on reasoning models (umbrella
-        # building over hundreds of candidate skills). "auto" = use main chat
-        # model; override via `hermes model` → auxiliary → Curator to route
-        # to a cheaper aux model (e.g. openrouter google/gemini-3-flash-preview).
-        "curator": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 600,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-        },
-        # Monitor — urgency/importance classifier used by the important-mail
-        # monitor catalog automation (cron/scripts/classify_items.py). Scores
-        # candidate items 0-10 against the user's criteria so only above-
-        # threshold items get delivered. "auto" = main chat model; override to
-        # a cheap fast model (e.g. openrouter google/gemini-3-flash-preview,
-        # haiku) since per-item scoring is high-volume and a small model is fine.
-        "monitor": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 60,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-        },
-        # Background review — the post-turn self-improvement fork that decides
-        # whether to save a memory / patch a skill. "auto" (default) = run on
-        # the main chat model, replaying the full conversation, which is already
-        # warm in the prompt cache (cheap cache reads) — unchanged, optimal.
-        # Set provider/model to a cheaper model (e.g. openrouter
-        # google/gemini-3-flash-preview) to run the review there for ~3-5x lower
-        # cost. A different model can't reuse the main prompt cache anyway, so
-        # the fork automatically replays a compact digest instead of the full
-        # transcript when routed (minimises the cold-write). Same model = full
-        # replay; different model = digest. Quality holds (memory capture
-        # identical, skill near-identical in benchmarks).
-        "background_review": {
-            # Master switch for automatic post-turn memory/skill review forks.
-            # false = skip automatic spawns (manual /refine still works).
-            "enabled": True,
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 120,
-            "extra_body": {},
-            "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
-            # Aggregate INPUT-token budget for one review fork (issue #93057).
-            # The fork's FIRST request replays the full snapshot as a warm
-            # prompt-cache read (compaction is deferred until the first
-            # provider response arrives); after that it compacts an oversized
-            # snapshot in memory before further provider calls. This caps the
-            # SUM of input tokens replayed across the whole review tool loop
-            # (iterations are separately capped at 16). The loop stops before
-            # the provider call that would cross the budget. 0 or a negative
-            # value = unlimited.
-            "max_input_tokens": 600000,
-        },
-        "moa_reference": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 900,
-            "extra_body": {},
-            # NOTE: no reasoning_effort here by design — MoA reasoning depth is
-            # configured PER SLOT in the MoA preset (moa.presets.<name>.
-            # reference_models[].reasoning_effort / aggregator.reasoning_effort),
-            # not at the auxiliary-task level.
-        },
-        "moa_aggregator": {
-            "provider": "auto",
-            "model": "",
-            "base_url": "",
-            "api_key": "",
-            "timeout": 900,
-            "extra_body": {},
-            # NOTE: no reasoning_effort here by design — see moa_reference above.
-        },
+        "memory_query_rewrite": _aux(8, reasoning_effort=False),
+        "tts_audio_tags": _aux(30),
+        # Triage specifier — expands a rough Kanban Triage one-liner into a concrete
+        # spec, then promotes it to ``todo`` (``hermes kanban specify``). A cheap,
+        # capable model suffices.
+        "triage_specifier": _aux(120),
+        # Kanban decomposer — turns a triage task into a JSON graph of child tasks
+        # routed to specialist profiles (``hermes kanban decompose`` and the
+        # auto-decompose dispatcher tick). Uses more tokens than the specifier.
+        "kanban_decomposer": _aux(180),
+        # Profile describer — 1-2 sentence "what this profile is good at"
+        # (``hermes profile describe <name> --auto``, dashboard button). Short, cheap.
+        "profile_describer": _aux(60),
+        # Goal judge — decides whether a /goal run's latest response satisfies the
+        # goal/contract and drafts contracts. Short structured-JSON calls.
+        "goal_judge": _aux(60),
+        # Curator — skill-usage review fork. Generous timeout: the review pass can
+        # take minutes on reasoning models (umbrella building over hundreds of
+        # skills). Route to a cheaper aux model via `hermes model` → auxiliary → Curator.
+        "curator": _aux(600),
+        # Monitor — urgency/importance classifier for the important-mail monitor
+        # (cron/scripts/classify_items.py); scores items 0-10 against the user's
+        # criteria. High-volume per-item scoring — a small fast model is fine.
+        "monitor": _aux(60),
+        # Background review — post-turn self-improvement fork deciding whether to
+        # save a memory / patch a skill. "auto" = main chat model replaying the full
+        # conversation (warm prompt cache, cheap). A different model cannot reuse
+        # that cache, so when routed elsewhere the fork replays a compact digest
+        # instead (~3-5x cheaper; memory capture identical, skill near-identical).
+        # enabled=false skips automatic spawns (manual /refine still works).
+        # max_input_tokens caps the SUM of input tokens replayed across the whole
+        # review tool loop (iterations separately capped at 16): the FIRST request
+        # replays the full snapshot as a warm cache read, then an oversized snapshot
+        # is compacted in memory before further calls; the loop stops before the
+        # provider call that would cross the budget. <= 0 = unlimited.
+        "background_review": {"enabled": True, **_aux(120), "max_input_tokens": 600000},
+        # No reasoning_effort on the MoA blocks by design — MoA reasoning depth is
+        # configured PER SLOT in the preset (moa.presets.<name>.reference_models[]
+        # .reasoning_effort / aggregator.reasoning_effort), not per aux task.
+        "moa_reference": _aux(900, reasoning_effort=False),
+        "moa_aggregator": _aux(900, reasoning_effort=False),
     },
     
     "display": {
