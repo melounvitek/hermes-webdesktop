@@ -2,6 +2,7 @@
 gateway`` flow. setup.py re-exports the public names, and tests monkeypatch prompt/print/env
 helpers on hermes_cli.setup, so those are imported lazily per function."""
 
+import contextlib
 import logging
 import re
 from pathlib import Path
@@ -29,10 +30,8 @@ def _setup_telegram_auto_result():
     except ImportError:
         return None
     profile_name: str | None = None
-    try:
+    with contextlib.suppress(Exception):
         profile_name = _profile_name_from_hermes_home(Path(get_hermes_home()))
-    except Exception:
-        pass
     return auto_setup_telegram_bot_result(profile_name=profile_name)
 
 
@@ -260,7 +259,7 @@ _HOME_CHANNEL_CHECKS = (
 def _is_progress(status: str) -> bool:
     """A platform counts as configured unless its status says otherwise."""
     s = status.lower()
-    return not (s == "not configured" or s.startswith("partially") or s.startswith("plugin disabled"))
+    return not (s == "not configured" or s.startswith(("partially", "plugin disabled")))
 
 
 def _warn_missing_home_channels() -> None:

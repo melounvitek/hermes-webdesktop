@@ -2,6 +2,7 @@
 Blank Slate setup and the `--quick` missing-items pass. Names from setup.py are imported lazily
 per function so test patches on ``hermes_cli.setup`` take effect."""
 
+import contextlib
 import logging
 import os
 import sys
@@ -73,10 +74,8 @@ def _run_portal_one_shot(config: dict) -> None:
         return
 
     # Re-sync from disk so a caller's later save_config(config) can't clobber the login save.
-    try:
+    with contextlib.suppress(Exception):
         _reload_config_into(config, dict_only=True)
-    except Exception:
-        pass
     print()
     print_success("Portal setup complete.")
     _info("  Run `hermes portal info` to inspect routing.", "  Run `hermes` to start chatting.")
