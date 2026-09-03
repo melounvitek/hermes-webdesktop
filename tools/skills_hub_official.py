@@ -290,7 +290,8 @@ class HermesIndexSource(SkillSource):
 
     def _ensure_loaded(self) -> dict:
         if not self._loaded:
-            self._index, self._loaded = hub()._load_hermes_index(), True
+            from tools.skills_hub_search import _load_hermes_index
+            self._index, self._loaded = _load_hermes_index(), True
         return self._index or {}
 
     def _skills(self) -> list:

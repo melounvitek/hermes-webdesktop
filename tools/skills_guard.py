@@ -457,7 +457,7 @@ def _content_digest(skill_path: Path) -> str:
 
 def content_hash(skill_path: Path) -> str:
     """Short integrity hash (paths mixed in, so swapping two files' contents changes it). MUST stay symmetric
-    with ``tools.skills_hub.bundle_content_hash`` — change both at once."""
+    with ``tools.skills_hub_install.bundle_content_hash`` — change both at once."""
     return f"sha256:{_content_digest(skill_path)[:16]}"
 
 

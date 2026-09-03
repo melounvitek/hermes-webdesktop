@@ -2,8 +2,8 @@
 target safety (symlink/junction, category-bucket and nested-skill checks),
 lock-file-backed uninstall, bundle hashing and upstream update checks.
 
-Split out of ``tools/skills_hub.py``; every public/patched name is re-imported there,
-so ``tools.skills_hub.<name>`` keeps resolving (and monkeypatching) as before.
+Split out of ``tools/skills_hub.py``; hub state (paths, ``HubLockFile``, audit log)
+is still read from there at call time.
 """
 
 from __future__ import annotations
@@ -259,7 +259,8 @@ def check_for_skill_updates(
     satisfy the fetch and silently reassign provenance (names are not
     namespaced across registries), so a missing adapter reports "unavailable".
     """
-    from tools.skills_hub import HubLockFile, create_source_router
+    from tools.skills_hub import HubLockFile
+    from tools.skills_hub_search import create_source_router
     lock = lock or HubLockFile()
     installed = lock.list_installed()
     if name:

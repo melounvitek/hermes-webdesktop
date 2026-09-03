@@ -6,8 +6,7 @@ Library module (not an agent tool). Owns the hub paths, guarded HTTP, index
 cache, lock file, taps and audit log. Install/uninstall/update live in
 ``skills_hub_install``, the index fetch/source router/search in
 ``skills_hub_search``, and the adapters in the other ``tools.skills_hub_*``
-siblings; all are re-exported here so ``from tools.skills_hub import X`` keeps
-working (and stays the test patch target).
+siblings; import each name from its defining module.
 
 Used by hermes_cli/skills_hub.py for CLI commands and the /skills slash command.
 """
@@ -25,32 +24,7 @@ import httpx
 from hermes_constants import get_hermes_home
 from tools.url_safety import is_safe_url
 from tools.website_policy import check_website_access
-from tools.skills_hub_models import (  # noqa: F401  (re-exported public API)
-    SkillMeta, SkillBundle, SkillSource, source_url_for_bundle, _referenced_support_paths,
-    _normalize_bundle_path, _validate_skill_name, _validate_install_parent_path,
-    _normalize_lock_install_path, _validate_bundle_rel_path, _skill_meta_to_dict,
-    _parse_frontmatter, _dedupe_by_trust, TRUST_RANK,
-)
-from tools.skills_hub_github import (  # noqa: F401
-    GITHUB_TAP_PROVIDERS, github_provider_for, _PROVIDER_FILTER_VALUES,
-    _filter_results_by_provider, GitHubAuth, GitHubSource,
-)
-from tools.skills_hub_skillssh import SkillsShSource  # noqa: F401
-from tools.skills_hub_clawhub import ClawHubSource  # noqa: F401
-from tools.skills_hub_sources import (  # noqa: F401
-    WellKnownSkillSource, UrlSource, LobeHubSource, BrowseShSource,
-)
-from tools.skills_hub_official import OptionalSkillSource, HermesIndexSource  # noqa: F401
-from tools.skills_hub_search import (  # noqa: F401  (re-exported; tests patch tools.skills_hub.<name>)
-    HERMES_INDEX_TTL, HERMES_INDEX_URL, _API_SOURCE_IDS, _hermes_index_cache_file,
-    _load_hermes_index, _load_stale_index_cache, _search_one_source, _select_active_sources,
-    create_source_router, parallel_search_sources, unified_search,
-)
-from tools.skills_hub_install import (  # noqa: F401  (re-exported; tests patch tools.skills_hub.<name>)
-    _SOURCE_ID_ALIASES, _category_skill_dirs, _check_install_target, _is_path_redirect,
-    _resolve_lock_install_path, _source_matches, bundle_content_hash, check_for_skill_updates,
-    install_from_quarantine, quarantine_bundle, uninstall_skill,
-)
+from tools.skills_hub_models import _normalize_lock_install_path, _validate_skill_name
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +34,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Resolved per-call (not frozen at import) so the profile override is honored;
 # import-time constants leaked across profiles in single-process multi-profile
-# runtimes. Legacy names (SKILLS_DIR, ...) are re-exposed via __getattr__ below
-# so external `from tools.skills_hub import SKILLS_DIR` callers still work.
+# runtimes. The path names (SKILLS_DIR, ...) resolve live via __getattr__ below.
 
 INDEX_CACHE_TTL = 3600  # 1 hour
 

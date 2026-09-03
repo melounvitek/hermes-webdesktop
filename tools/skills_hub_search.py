@@ -2,8 +2,8 @@
 fallback), the source router, and parallel/unified search across source
 adapters.
 
-Split out of ``tools/skills_hub.py``; every public/patched name is re-imported there,
-so ``tools.skills_hub.<name>`` keeps resolving (and monkeypatching) as before.
+Split out of ``tools/skills_hub.py``; hub state (cache dir, ``TapsManager``, JSON
+cache reads) is still read from there at call time.
 """
 
 from __future__ import annotations
@@ -12,14 +12,13 @@ import logging
 import httpx
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
-from tools.skills_hub_github import _PROVIDER_FILTER_VALUES
+from typing import Any, Dict, List, Optional, Tuple
+from tools.skills_hub_clawhub import ClawHubSource
+from tools.skills_hub_github import GitHubAuth, GitHubSource, _PROVIDER_FILTER_VALUES, _filter_results_by_provider
 from tools.skills_hub_models import SkillMeta, SkillSource, TRUST_RANK, _dedupe_by_trust
+from tools.skills_hub_official import HermesIndexSource, OptionalSkillSource
 from tools.skills_hub_skillssh import SkillsShSource
-from tools.skills_hub_sources import LobeHubSource, WellKnownSkillSource
-
-if TYPE_CHECKING:  # runtime use resolves through the origin (test patch target)
-    from tools.skills_hub_github import GitHubAuth
+from tools.skills_hub_sources import BrowseShSource, LobeHubSource, UrlSource, WellKnownSkillSource
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.skills_hub")
@@ -43,7 +42,7 @@ def _load_hermes_index() -> Optional[dict]:
     Skills Hub. gzip/deflate first; the identity retry covers proxies that
     ignore the header and return Brotli anyway.
     """
-    from tools.skills_hub import _hermes_index_cache_file, _read_json_if_fresh
+    from tools.skills_hub import _read_json_if_fresh
     cache_file = _hermes_index_cache_file()
     cached = _read_json_if_fresh(cache_file, HERMES_INDEX_TTL)
     if cached is not None:
@@ -75,7 +74,7 @@ def _load_hermes_index() -> Optional[dict]:
 
 def _load_stale_index_cache() -> Optional[dict]:
     """Fall back to the cache regardless of age when the network fetch fails."""
-    from tools.skills_hub import _hermes_index_cache_file, _read_json_if_fresh
+    from tools.skills_hub import _read_json_if_fresh
     return _read_json_if_fresh(_hermes_index_cache_file(), float("inf"))
 
 
@@ -87,10 +86,7 @@ _API_SOURCE_IDS = frozenset({"github", "skills-sh", "clawhub", "lobehub", "well-
 
 def create_source_router(auth: Optional[GitHubAuth] = None) -> List[SkillSource]:
     """All configured source adapters, in priority order."""
-    from tools.skills_hub import (  # adapters resolve via origin: tests patch them there
-        BrowseShSource, ClawHubSource, GitHubAuth, GitHubSource, HermesIndexSource,
-        OptionalSkillSource, TapsManager, UrlSource,
-    )
+    from tools.skills_hub import TapsManager
     if auth is None:
         auth = GitHubAuth()
     return [
@@ -188,7 +184,6 @@ def parallel_search_sources(
 def unified_search(query: str, sources: List[SkillSource],
                    source_filter: str = "all", limit: int = 10) -> List[SkillMeta]:
     """Search all sources (in parallel) and merge results."""
-    from tools.skills_hub import _filter_results_by_provider, parallel_search_sources
     all_results, _, _ = parallel_search_sources(sources, query=query, source_filter=source_filter, overall_timeout=30)
     # Provider filters target ``extra.provider`` on the merged set, not a source id.
     if source_filter.strip().lower() in _PROVIDER_FILTER_VALUES:

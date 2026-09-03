@@ -278,7 +278,8 @@ def _(rid, params: dict) -> dict:
         except Exception as exc:
             return _err(rid, 5019, f"compute-host reload_mcp failed: {exc}")
         return _ok(rid, {"status": "reloaded", "turn_isolation": True, "host_ack": ack})
-    mcp_tool = _tools_mod("tools.mcp_tool")
+    _mcp_agent, _mcp_lifecycle, _mcp_discovery = (
+        _tools_mod("tools.mcp_tool_agent"), _tools_mod("tools.mcp_tool_lifecycle"), _tools_mod("tools.mcp_tool_discovery"))
     global _mcp_reload_gen, _mcp_reload_loaded_rev
     # Revision the CALLER wants loaded; empty on legacy clients / manual /reload-mcp
     # (generation-only coalescing).
@@ -292,7 +293,7 @@ def _(rid, params: dict) -> dict:
             return
         agent = session["agent"]
         try:  # enabled_override re-resolves toolsets so a server enabled in config this session is picked up
-            mcp_tool.refresh_agent_mcp_tools(agent, enabled_override=_load_enabled_toolsets(), quiet_mode=True)
+            _mcp_agent.refresh_agent_mcp_tools(agent, enabled_override=_load_enabled_toolsets(), quiet_mode=True)
         except Exception as _exc:
             logger.warning("Failed to refresh cached agent tools after /reload-mcp: %s", _exc)
         _emit("session.info", params.get("session_id", ""), _session_info(agent, session))
@@ -304,9 +305,9 @@ def _(rid, params: dict) -> dict:
         global _mcp_reload_gen, _mcp_reload_loaded_rev
         loaded = _compute_mcp_rev()
         for _ in range(_MCP_RELOAD_MAX_PASSES):
-            mcp_tool.shutdown_mcp_servers()
-            mcp_tool.reprobe_tool_availability()
-            mcp_tool.discover_mcp_tools()
+            _mcp_lifecycle.shutdown_mcp_servers()
+            _mcp_agent.reprobe_tool_availability()
+            _mcp_discovery.discover_mcp_tools()
             after = _compute_mcp_rev()
             if after == loaded:
                 break
@@ -1083,8 +1084,8 @@ del _name, _fn, _keys
 
 
 def _skills_search(rid, params, query):
-    hub = _tools_mod("tools.skills_hub")
-    raw = hub.unified_search(query, hub.create_source_router(hub.GitHubAuth()), source_filter="all", limit=20) or []
+    search, gh = _tools_mod("tools.skills_hub_search"), _tools_mod("tools.skills_hub_github")
+    raw = search.unified_search(query, search.create_source_router(gh.GitHubAuth()), source_filter="all", limit=20) or []
     return _ok(rid, {"results": [{"name": r.name, "description": r.description} for r in raw]})
 
 
@@ -1364,7 +1365,7 @@ def _(rid, params: dict) -> dict:
     if not cmd:
         return _err(rid, 4004, "empty command")
     try:
-        approval = _tools_mod("tools.approval")
+        approval = _tools_mod("tools.approval_detection")
         is_hardline, hardline_desc = approval.detect_hardline_command(cmd)
         if is_hardline:
             return _err(rid, 4005, f"blocked (hardline): {hardline_desc}. Use the agent for dangerous commands.")

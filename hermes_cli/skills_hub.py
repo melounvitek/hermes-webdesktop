@@ -87,7 +87,8 @@ def _try(fn, *args):
 
 def _sources():
     """Source router over all registries (authenticated GitHub when available)."""
-    from tools.skills_hub import GitHubAuth, create_source_router
+    from tools.skills_hub_github import GitHubAuth
+    from tools.skills_hub_search import create_source_router
     return create_source_router(GitHubAuth())
 
 
@@ -188,7 +189,7 @@ def _format_extra_metadata_lines(extra: Dict[str, Any]) -> list[str]:
 def _resolve_short_name(name: str, sources, console: Console) -> str:
     """Short name -> full identifier via search; "" when ambiguous/missing (one exact match wins,
     several -> the single official one, else they are listed)."""
-    from tools.skills_hub import unified_search
+    from tools.skills_hub_search import unified_search
     c = console or _console
     c.print(f"[dim]Resolving '{name}'...[/]")
     results = unified_search(name, sources, source_filter="all", limit=20)
@@ -259,7 +260,8 @@ def _is_valid_installed_skill_name(name: str) -> bool:
 
 def _existing_categories() -> List[str]:
     """Sorted category buckets under ``~/.hermes/skills/`` (children without their own SKILL.md)."""
-    from tools.skills_hub import SKILLS_DIR, _category_skill_dirs
+    from tools.skills_hub import SKILLS_DIR
+    from tools.skills_hub_install import _category_skill_dirs
     try:
         return sorted(name for name in set(_category_skill_dirs(SKILLS_DIR))
                       if not (SKILLS_DIR / name / "SKILL.md").exists())
@@ -315,7 +317,7 @@ def _prompt_for_category(c: Console, existing: List[str]) -> str:
 def do_search(query: str, source: str = "all", limit: int = 10, console: Optional[Console] = None,
               as_json: bool = False) -> None:
     """Search registries -> Rich table, or a clean JSON array (``as_json``) for scripting."""
-    from tools.skills_hub import unified_search
+    from tools.skills_hub_search import unified_search
     c = console or _console
     sources = _sources()
     if as_json:
@@ -360,7 +362,7 @@ def _rank_and_page(all_results, page: int, page_size: int):
 
 def _fetch_browse_results(c: Console, source: str):
     """Parallel fetch from all (or filtered) sources with a live per-source progress spinner."""
-    from tools.skills_hub import parallel_search_sources
+    from tools.skills_hub_search import parallel_search_sources
     with c.status("[bold]Fetching skills from registries...") as status:
         # parallel_search_sources invokes the callback from the collecting thread as each
         # source completes; the page itself is rendered once over the final, fully sorted set.
@@ -422,7 +424,7 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
         return
     # Provider filter (nvidia/openai/...) narrows GitHub-tap skills by their per-tap
     # ``extra.provider`` label (the runtime index stores them all under source="github").
-    from tools.skills_hub import _PROVIDER_FILTER_VALUES, _filter_results_by_provider
+    from tools.skills_hub_github import _PROVIDER_FILTER_VALUES, _filter_results_by_provider
     if source.strip().lower() in _PROVIDER_FILTER_VALUES:
         all_results = _filter_results_by_provider(all_results, source)
         if not all_results:
@@ -435,7 +437,7 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
 
 def browse_skills(page: int = 1, page_size: int = 20, source: str = "all") -> dict:
     """Paginated hub browse for programmatic callers (e.g. TUI gateway)."""
-    from tools.skills_hub import parallel_search_sources
+    from tools.skills_hub_search import parallel_search_sources
     page_size = max(1, min(page_size, 100))
     # The shared parallel walker carries the index-aware source-skip logic — querying
     # hermes-index AND the external APIs at once would double-count every skill.
@@ -573,7 +575,7 @@ def _announce_blueprint(c: Console, skill_name: str) -> None:
 
 def _pinned_sources(c: Console, sources, source_id: Optional[str], identifier: str):
     """Restrict `sources` to the adapter matching `source_id`; None when it is unknown."""
-    from tools.skills_hub import _source_matches
+    from tools.skills_hub_install import _source_matches
     pinned = [src for src in sources if _source_matches(src, source_id)] if source_id else sources
     if pinned:
         return pinned
@@ -599,7 +601,8 @@ def _print_fetch_failure(c: Console, sources, identifier: str) -> None:
 
 def _scan_quarantined(c: Console, q_path: Path, bundle, meta, identifier: str):
     """Run the cached security scan on the quarantined bundle and print the report."""
-    from tools.skills_hub import HUB_DIR, source_url_for_bundle
+    from tools.skills_hub import HUB_DIR
+    from tools.skills_hub_models import source_url_for_bundle
     from tools.skills_guard import scan_skill_cached, format_scan_report
     c.print("[bold]Running security scan...[/]")
     scan_source = ("official" if bundle.source == "official"
@@ -646,8 +649,8 @@ def do_install(identifier: str, category: str = "", force: bool = False,
     """Fetch, quarantine, scan, confirm, and install a skill. ``source_id`` pins resolution to one
     adapter; callers that know the provenance (``do_update``) must pass it so a bare identifier
     cannot resolve to a same-named skill elsewhere."""
-    from tools.skills_hub import (ensure_hub_dirs, quarantine_bundle, install_from_quarantine,
-                                  HubLockFile)
+    from tools.skills_hub import HubLockFile, ensure_hub_dirs
+    from tools.skills_hub_install import install_from_quarantine, quarantine_bundle
     from tools.skills_guard import should_allow_install
     c = console or _console
     ensure_hub_dirs()
@@ -793,7 +796,7 @@ def do_list(source_filter: str = "all", enabled_only: bool = False,
 
 def do_check(name: Optional[str] = None, console: Optional[Console] = None) -> None:
     """Check hub-installed skills for upstream updates."""
-    from tools.skills_hub import check_for_skill_updates
+    from tools.skills_hub_install import check_for_skill_updates
     c = console or _console
     results = check_for_skill_updates(name=name)
     if not results:
@@ -832,7 +835,8 @@ def do_update(name: Optional[str] = None, console: Optional[Console] = None,
     paperclipai/paperclip#10978's explicit-merge-mode rule: destructive replacement must be an explicit
     caller choice, never a rerun default).
     """
-    from tools.skills_hub import HubLockFile, check_for_skill_updates
+    from tools.skills_hub import HubLockFile
+    from tools.skills_hub_install import check_for_skill_updates
     c = console or _console
     lock = HubLockFile()
     updates = [entry for entry in check_for_skill_updates(name=name) if entry.get("status") == "update_available"]
@@ -900,7 +904,7 @@ def do_audit(name: Optional[str] = None, console: Optional[Console] = None,
 def do_uninstall(name: str, console: Optional[Console] = None, skip_confirm: bool = False,
                  invalidate_cache: bool = True) -> None:
     """Remove a hub-installed skill with confirmation."""
-    from tools.skills_hub import uninstall_skill
+    from tools.skills_hub_install import uninstall_skill
     c = console or _console
     # skip_confirm bypasses the prompt (TUI mode, where input() hangs)
     if not skip_confirm and not _confirm_or_cancel(c, f"\n[bold]Uninstall '{name}'?[/]"):
@@ -912,7 +916,7 @@ def do_uninstall(name: str, console: Optional[Console] = None, skip_confirm: boo
 def do_reset(name: str, restore: bool = False, console: Optional[Console] = None,
              skip_confirm: bool = False, invalidate_cache: bool = True) -> None:
     """Reset a bundled skill's manifest tracking (+ optionally restore from bundled)."""
-    from tools.skills_sync import reset_bundled_skill
+    from tools.skills_sync_bundled_ops import reset_bundled_skill
     c = console or _console
     if not skip_confirm and restore and not _confirm_or_cancel(
         c, f"\n[bold]Restore '{name}' from bundled source?[/]",
@@ -930,7 +934,7 @@ def do_reset(name: str, restore: bool = False, console: Optional[Console] = None
 
 def do_list_modified(console: Optional[Console] = None, as_json: bool = False) -> None:
     """List bundled skills the user has edited (which `hermes update` keeps)."""
-    from tools.skills_sync import list_user_modified_bundled_skills
+    from tools.skills_sync_bundled_ops import list_user_modified_bundled_skills
     c = console or _console
     modified = list_user_modified_bundled_skills()
     if as_json:
@@ -965,7 +969,7 @@ _DIFF_STATUS_LINE = {
 
 def do_diff(name: str, console: Optional[Console] = None) -> None:
     """Show how the user's copy of a bundled skill differs from the stock version."""
-    from tools.skills_sync import diff_bundled_skill
+    from tools.skills_sync_bundled_ops import diff_bundled_skill
     c = console or _console
     result = diff_bundled_skill(name)
     if not result["ok"]:
@@ -990,7 +994,7 @@ def do_opt_out(remove: bool = False, console: Optional[Console] = None, skip_con
                invalidate_cache: bool = True) -> None:
     """Write the .no-bundled-skills marker; with ``remove`` also delete pristine (tracked AND
     unmodified) bundled skills. User-edited and non-bundled skills are never touched."""
-    from tools.skills_sync import set_bundled_skills_opt_out, remove_pristine_bundled_skills
+    from tools.skills_sync_bundled_ops import set_bundled_skills_opt_out, remove_pristine_bundled_skills
     c = console or _console
     res = set_bundled_skills_opt_out(True)  # the marker first: always-safe
     if not _report_ok(c, res):
@@ -1026,7 +1030,8 @@ def do_opt_out(remove: bool = False, console: Optional[Console] = None, skip_con
 def do_opt_in(sync: bool = False, console: Optional[Console] = None,
               invalidate_cache: bool = True) -> None:
     """Remove the opt-out marker so bundled-skill seeding resumes."""
-    from tools.skills_sync import set_bundled_skills_opt_out, sync_skills
+    from tools.skills_sync import sync_skills
+    from tools.skills_sync_bundled_ops import set_bundled_skills_opt_out
     c = console or _console
     if not _report_ok(c, set_bundled_skills_opt_out(False)):
         return
@@ -1040,7 +1045,7 @@ def do_opt_in(sync: bool = False, console: Optional[Console] = None,
 def do_repair_official(name: str, restore: bool = False, console: Optional[Console] = None,
                        skip_confirm: bool = False, invalidate_cache: bool = True) -> None:
     """Backfill or restore official optional skills from repo source."""
-    from tools.skills_sync import restore_official_optional_skill
+    from tools.skills_sync_optional import restore_official_optional_skill
     c = console or _console
     if restore and not skip_confirm and not _confirm_or_cancel(
         c, f"\n[bold]Restore official optional skill '{name}' from repo source?[/]",
@@ -1107,7 +1112,8 @@ def _read_frontmatter(skill_md: str) -> dict:
 def do_publish(skill_path: str, target: str = "github", repo: str = "",
                console: Optional[Console] = None) -> None:
     """Publish a local skill to a registry (GitHub PR or ClawHub submission)."""
-    from tools.skills_hub import GitHubAuth, SKILLS_DIR
+    from tools.skills_hub import SKILLS_DIR
+    from tools.skills_hub_github import GitHubAuth
     from tools.skills_guard import scan_skill, format_scan_report
     c = console or _console
     path = Path(skill_path)

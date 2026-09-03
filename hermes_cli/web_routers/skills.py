@@ -13,6 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 
 from hermes_cli.web_deps import late
+from hermes_cli.web_server_profiles import _hub_action_name, _installed_hub_identifiers
 from hermes_cli.web_models import (
     SkillContentUpdate, SkillCreate, SkillInstallRequest, SkillToggle, SkillUninstallRequest,
     SkillsUpdateRequest)
@@ -23,12 +24,8 @@ from hermes_cli.web_routers._common import (
 hub_router = APIRouter()
 router = APIRouter()
 
-_config_profile_scope = late("_config_profile_scope")
-_hub_action_name = late("_hub_action_name")
-_installed_hub_identifiers = late("_installed_hub_identifiers")
-load_config = late("load_config")
-
-
+_config_profile_scope = late("_config_profile_scope", "hermes_cli.web_server_profiles")
+load_config = late("load_config", "hermes_cli.config")
 # Labels per hub source id (matches `hermes skills search` provenance); keep in
 # sync with create_source_router()'s source list.
 _SKILL_HUB_SOURCE_LABELS = {
@@ -46,7 +43,7 @@ _SKILL_HUB_SOURCE_LABELS = {
 
 def _hub_sources(profile: Optional[str]):
     """Source router built under ``profile``'s config scope."""
-    from tools.skills_hub import create_source_router
+    from tools.skills_hub_search import create_source_router
 
     with _config_profile_scope(profile):
         return create_source_router()
@@ -55,7 +52,7 @@ def _hub_sources(profile: Optional[str]):
 def _resolve_hub_skill(ident: str, profile: Optional[str]):
     """``(meta, bundle)`` for a hub identifier, resolved under ``profile``'s scope."""
     from hermes_cli.skills_hub import _resolve_source_meta_and_bundle
-    from tools.skills_hub import create_source_router
+    from tools.skills_hub_search import create_source_router
 
     with _config_profile_scope(profile):
         sources = create_source_router()
@@ -128,7 +125,7 @@ async def list_official_skills(profile: Optional[str] = None):
     """The ENTIRE optional-skills catalog (local scan), marked installed for ``profile``."""
 
     def _run():
-        from tools.skills_hub import OptionalSkillSource
+        from tools.skills_hub_official import OptionalSkillSource
 
         installed = _installed_hub_identifiers(profile)
         out = []
@@ -194,7 +191,7 @@ async def search_skills_hub(
         return {"results": [], "source_counts": {}, "timed_out": [], "installed": {}}
 
     def _run():
-        from tools.skills_hub import parallel_search_sources
+        from tools.skills_hub_search import parallel_search_sources
 
         sources = _hub_sources(profile)
         capped = min(max(limit, 1), 50)
@@ -275,7 +272,7 @@ async def scan_skill_hub(identifier: str = "", profile: Optional[str] = None):
     def _run():
         import shutil as _shutil
 
-        from tools.skills_hub import quarantine_bundle
+        from tools.skills_hub_install import quarantine_bundle
         from tools.skills_guard import scan_skill, should_allow_install
 
         meta, bundle = _resolve_hub_skill(ident, profile)
