@@ -26,10 +26,14 @@ def _notif_session_matches(s: dict, keys) -> bool:
     return str(s.get("session_key") or "") in keys or _session_lookup_key(s, fallback="") in keys
 
 
-def _notif_live_session_matches(keys) -> bool:
-    """Any non-finalized live session matches ``keys`` (False if the registry can't be read)."""
+def _notif_live_session_matches(keys, exclude: dict | None = None) -> bool:
+    """Any non-finalized live session (other than ``exclude``) matches ``keys``; False if the registry
+    can't be read (fail open rather than drop the event)."""
     return _notif_locked_sessions(
-        lambda ss: any(not s.get("_finalized") and _notif_session_matches(s, keys) for s in ss.values()), False
+        lambda ss: any(
+            s is not exclude and not s.get("_finalized") and _notif_session_matches(s, keys) for s in ss.values()
+        ),
+        False,
     )
 
 
@@ -70,11 +74,7 @@ def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) ->
             return True
     if evt_key in current_keys:
         return False
-    snapshot = _notif_locked_sessions(lambda ss: list(ss.values()), None)
-    if snapshot is None:
-        return False  # can't enumerate: fail open rather than drop the event
-    keys = {evt_key, resolved_key}
-    return any(s is not session and not s.get("_finalized") and _notif_session_matches(s, keys) for s in snapshot)
+    return _notif_live_session_matches({evt_key, resolved_key}, exclude=session)
 
 
 def _session_owns_notification_event(sid: str, session: dict, evt: dict) -> bool:
@@ -86,10 +86,8 @@ def _session_owns_notification_event(sid: str, session: dict, evt: dict) -> bool
     if str(evt.get("origin_ui_session_id") or "") == str(sid or ""):
         return True
     evt_key = str(evt.get("session_key") or "")
-    if not evt_key:
-        return False
     current_keys = _notif_current_keys(sid, session)
-    return evt_key in current_keys or _notif_resolve_event_key(evt_key) in current_keys
+    return bool(evt_key) and (evt_key in current_keys or _notif_resolve_event_key(evt_key) in current_keys)
 
 
 def _notification_event_requires_owner(evt: dict) -> bool:
