@@ -1698,100 +1698,79 @@ class GatewayInboundMixin:
         return message_text
 
     @staticmethod
-    def _prepend_inbound_media_file_notes(message_text: str, audio_file_paths: list[str], video_paths: list[str]) -> str:
-        if audio_file_paths:
-            from tools.credential_files import to_agent_visible_cache_path as _to_agent_path
-            for _apath in audio_file_paths:
-                _basename = os.path.basename(_apath)
-                _parts = _basename.split("_", 2)
-                _display = _parts[2] if len(_parts) >= 3 else _basename
-                _display = re.sub(r'[^\w.\- ]', '_', _display)
-                _agent_path = _to_agent_path(_apath)
-                _note = (
-                    f"[The user sent an audio file attachment: '{_display}'. "
-                    f"It is saved at: {_agent_path}. "
-                    f"Its content is not inlined here. If the user's request involves "
-                    f"what the audio contains, transcribe or process it yourself — for "
-                    f"example by passing the path to a transcription or media tool — "
-                    f"instead of asking the user to describe it. Only ask what to do "
-                    f"with it if their intent is genuinely unclear.]"
-                )
-                message_text = f"{_note}\n\n{message_text}"
+    def _inbound_attachment_display_name(path: str) -> Tuple[str, str]:
+        """``(display_name, agent_visible_path)`` for a downloaded attachment.
 
-        if video_paths:
-            from tools.credential_files import to_agent_visible_cache_path as _to_agent_path
-            for _vpath in video_paths:
-                _basename = os.path.basename(_vpath)
-                _parts = _basename.split("_", 2)
-                _display = _parts[2] if len(_parts) >= 3 else _basename
-                _display = re.sub(r'[^\w.\- ]', '_', _display)
-                _agent_path = _to_agent_path(_vpath)
+        The cache filename is ``<id>_<id>_<original>``; the agent path is translated to the
+        in-container path under a Docker backend (cache dirs are auto-mounted there).
+        """
+        from tools.credential_files import to_agent_visible_cache_path
+        basename = os.path.basename(path)
+        parts = basename.split("_", 2)
+        display_name = parts[2] if len(parts) >= 3 else basename
+        return re.sub(r'[^\w.\- ]', '_', display_name), to_agent_visible_cache_path(path)
+
+    @classmethod
+    def _prepend_inbound_media_file_notes(cls, message_text: str, audio_file_paths: list[str], video_paths: list[str]) -> str:
+        """Prepend a path-pointing note per audio-file / video attachment (content is not inlined)."""
+        for kind, noun, verb, tool, paths in (
+            ("an audio file attachment", "audio", "transcribe or process", "a transcription or media tool", audio_file_paths),
+            ("a video attachment", "video", "inspect or process", "a video analysis or media tool", video_paths),
+        ):
+            for _path in paths:
+                _display, _agent_path = cls._inbound_attachment_display_name(_path)
                 _note = (
-                    f"[The user sent a video attachment: '{_display}'. "
+                    f"[The user sent {kind}: '{_display}'. "
                     f"It is saved at: {_agent_path}. "
                     f"Its content is not inlined here. If the user's request involves "
-                    f"what the video contains, inspect or process it yourself — for "
-                    f"example by passing the path to a video analysis or media tool — "
+                    f"what the {noun} contains, {verb} it yourself — for "
+                    f"example by passing the path to {tool} — "
                     f"instead of asking the user to describe it. Only ask what to do "
                     f"with it if their intent is genuinely unclear.]"
                 )
                 message_text = f"{_note}\n\n{message_text}"
         return message_text
 
-    @staticmethod
-    def _prepend_inbound_document_notes(event: MessageEvent, message_text: str) -> str:
+    @classmethod
+    def _prepend_inbound_document_notes(cls, event: MessageEvent, message_text: str) -> str:
+        """Prepend a context note per non-media attachment (anything not routed as image/audio/video)."""
         from gateway.run import (
             _build_document_context_note,
             _event_media_is_audio,
             _event_media_is_image,
             _event_media_is_video,
         )
-        if event.media_urls:
-            import mimetypes as _mimetypes
-            from tools.credential_files import to_agent_visible_cache_path
+        if not event.media_urls:
+            return message_text
+        import mimetypes as _mimetypes
 
-            _TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
-            for i, path in enumerate(event.media_urls):
-                # Per-attachment document handling: skip anything already routed as image/audio/video
-                # above; only genuine non-media files get a context note. A document mixed into a
-                # PHOTO/VOICE message (message-level type != DOCUMENT) thus still reaches the agent.
-                if (
-                    _event_media_is_image(event, i)
-                    or _event_media_is_audio(event, i)
-                    or _event_media_is_video(event, i)
-                ):
-                    continue
-                mtype = event.media_types[i] if i < len(event.media_types) else ""
-                if mtype in {"", "application/octet-stream"}:
-                    _ext = os.path.splitext(path)[1].lower()
-                    if _ext in _TEXT_EXTENSIONS:
-                        mtype = "text/plain"
-                    else:
-                        guessed, _ = _mimetypes.guess_type(path)
-                        mtype = guessed or "application/octet-stream"
-                # Any accepted file gets a path-pointing context note — we accept
-                # all file types now, so a non-text/non-application MIME (font/*,
-                # model/*, etc.) must still tell the agent the file exists.
-
-                basename = os.path.basename(path)
-                parts = basename.split("_", 2)
-                display_name = parts[2] if len(parts) >= 3 else basename
-                display_name = re.sub(r'[^\w.\- ]', '_', display_name)
-
-                # Translate host cache path to in-container path if running under Docker backend.
-                # This ensures the agent receives a path it can open inside its sandbox, as the
-                # cache directories are auto-mounted at /root/.hermes/cache/* by get_cache_directory_mounts().
-                agent_path = to_agent_visible_cache_path(path)
-
-                inline_flags = getattr(event, "media_text_inlined", None) or []
-                inline_flag = inline_flags[i] if i < len(inline_flags) else None
-                context_note = _build_document_context_note(
-                    display_name,
-                    agent_path,
-                    mtype,
-                    content_inlined=inline_flag is not False,
-                )
-                message_text = f"{context_note}\n\n{message_text}"
+        _TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
+        for i, path in enumerate(event.media_urls):
+            # A document mixed into a PHOTO/VOICE message (message-level type != DOCUMENT) still
+            # reaches the agent; only genuine non-media files get a note.
+            if (
+                _event_media_is_image(event, i)
+                or _event_media_is_audio(event, i)
+                or _event_media_is_video(event, i)
+            ):
+                continue
+            mtype = event.media_types[i] if i < len(event.media_types) else ""
+            if mtype in {"", "application/octet-stream"}:
+                _ext = os.path.splitext(path)[1].lower()
+                if _ext in _TEXT_EXTENSIONS:
+                    mtype = "text/plain"
+                else:
+                    guessed, _ = _mimetypes.guess_type(path)
+                    mtype = guessed or "application/octet-stream"
+            # Every accepted file gets a note — a non-text/non-application MIME (font/*, model/*)
+            # must still tell the agent the file exists.
+            display_name, agent_path = cls._inbound_attachment_display_name(path)
+            inline_flags = getattr(event, "media_text_inlined", None) or []
+            inline_flag = inline_flags[i] if i < len(inline_flags) else None
+            context_note = _build_document_context_note(
+                display_name, agent_path, mtype, content_inlined=inline_flag is not False,
+            )
+            message_text = f"{context_note}\n\n{message_text}"
         return message_text
 
     @staticmethod
@@ -1827,14 +1806,87 @@ class GatewayInboundMixin:
                 message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
         return message_text
 
+    async def _inbound_model_context_length(self, source: SessionSource, session_key: str) -> int:
+        """Context length of the model this session's turn will run on (for @-reference budgeting).
+
+        A global ``model.context_length`` pin belongs to the configured model, not a session /model
+        or channel override; a matching per-custom-provider limit wins when available.
+        """
+        from gateway.run import _load_gateway_config
+        from agent.model_metadata import get_model_context_length_async
+
+        _msg_config_ctx = None
+        _msg_cfg = None
+        _msg_model_cfg = {}
+        _msg_custom_providers = []
+        try:
+            _msg_cfg = _load_gateway_config()
+            _msg_model_cfg = _msg_cfg.get("model", {})
+            if isinstance(_msg_model_cfg, dict):
+                _msg_raw_ctx = _msg_model_cfg.get("context_length")
+                if _msg_raw_ctx is not None:
+                    _msg_config_ctx = int(_msg_raw_ctx)
+            try:
+                from hermes_cli.config import get_compatible_custom_providers
+
+                _msg_custom_providers = get_compatible_custom_providers(_msg_cfg)
+            except Exception:
+                _msg_custom_providers = _msg_cfg.get("custom_providers") or []
+        except Exception:
+            pass
+        # GatewayRunner has no self._model/self._base_url; resolve the session's actual runtime.
+        _msg_model, _msg_runtime = self._resolve_session_agent_runtime(
+            source=source, session_key=session_key, user_config=_msg_cfg,
+        )
+        _msg_base_url = _msg_runtime.get("base_url") or ""
+        _msg_configured_model = (
+            _msg_model_cfg.get("default") or _msg_model_cfg.get("model")
+            if isinstance(_msg_model_cfg, dict)
+            else _msg_model_cfg
+        )
+        if _msg_model != _msg_configured_model:
+            _msg_config_ctx = None
+        if _msg_config_ctx is not None and isinstance(_msg_model_cfg, dict):
+            try:
+                from hermes_cli.route_identity import should_clear_context_pin_async
+
+                if await should_clear_context_pin_async(
+                    None,  # model match already checked above
+                    None,
+                    _msg_model_cfg.get("base_url"),
+                    _msg_base_url,
+                    _msg_model_cfg.get("provider"),
+                    _msg_runtime.get("provider"),
+                ):
+                    _msg_config_ctx = None
+            except Exception:
+                _msg_config_ctx = None
+        if _msg_custom_providers and _msg_base_url:
+            try:
+                from hermes_cli.config import get_custom_provider_context_length
+
+                _msg_custom_ctx = get_custom_provider_context_length(
+                    model=_msg_model, base_url=_msg_base_url, custom_providers=_msg_custom_providers,
+                )
+                if _msg_custom_ctx:
+                    _msg_config_ctx = _msg_custom_ctx
+            except Exception:
+                pass
+        return await get_model_context_length_async(
+            _msg_model,
+            base_url=_msg_base_url,
+            api_key=_msg_runtime.get("api_key") or "",
+            config_context_length=_msg_config_ctx,
+            provider=_msg_runtime.get("provider") or "",
+            custom_providers=_msg_custom_providers,
+        )
+
     async def _expand_inbound_context_references(
         self, source: SessionSource, session_key: str, message_text: str
     ) -> Optional[str]:
         """Expand ``@`` context references; returns None when the injection was refused (user notified)."""
-        from gateway.run import _load_gateway_config
         try:
             from agent.context_references import preprocess_context_references_async
-            from agent.model_metadata import get_model_context_length_async
 
             try:
                 from tools.terminal_scope import terminal_env as _ts_env
@@ -1842,80 +1894,7 @@ class GatewayInboundMixin:
                 _msg_cwd = os.environ.get("TERMINAL_CWD", os.path.expanduser("~"))
             else:
                 _msg_cwd = _ts_env("TERMINAL_CWD", os.path.expanduser("~"))
-            _msg_config_ctx = None
-            _msg_cfg = None
-            _msg_model_cfg = {}
-            _msg_custom_providers = []
-            try:
-                _msg_cfg = _load_gateway_config()
-                _msg_model_cfg = _msg_cfg.get("model", {})
-                if isinstance(_msg_model_cfg, dict):
-                    _msg_raw_ctx = _msg_model_cfg.get("context_length")
-                    if _msg_raw_ctx is not None:
-                        _msg_config_ctx = int(_msg_raw_ctx)
-                try:
-                    from hermes_cli.config import get_compatible_custom_providers
-
-                    _msg_custom_providers = get_compatible_custom_providers(_msg_cfg)
-                except Exception:
-                    _msg_custom_providers = _msg_cfg.get("custom_providers") or []
-            except Exception:
-                pass
-            # Resolve the session's actual model/provider/base_url as the hygiene compression
-            # block does; GatewayRunner has no self._model/self._base_url (AttributeError,
-            # silently caught below).
-            _msg_model, _msg_runtime = self._resolve_session_agent_runtime(
-                source=source,
-                session_key=session_key,
-                user_config=_msg_cfg,
-            )
-            _msg_base_url = _msg_runtime.get("base_url") or ""
-            # A global model.context_length belongs to the configured
-            # model, not a session /model or channel override. Prefer a
-            # matching per-custom-provider model limit when available.
-            _msg_configured_model = (
-                _msg_model_cfg.get("default") or _msg_model_cfg.get("model")
-                if isinstance(_msg_model_cfg, dict)
-                else _msg_model_cfg
-            )
-            if _msg_model != _msg_configured_model:
-                _msg_config_ctx = None
-            if _msg_config_ctx is not None and isinstance(_msg_model_cfg, dict):
-                try:
-                    from hermes_cli.route_identity import should_clear_context_pin_async
-
-                    if await should_clear_context_pin_async(
-                        None,  # model match already checked above
-                        None,
-                        _msg_model_cfg.get("base_url"),
-                        _msg_base_url,
-                        _msg_model_cfg.get("provider"),
-                        _msg_runtime.get("provider"),
-                    ):
-                        _msg_config_ctx = None
-                except Exception:
-                    _msg_config_ctx = None
-            if _msg_custom_providers and _msg_base_url:
-                try:
-                    from hermes_cli.config import get_custom_provider_context_length
-
-                    _msg_custom_ctx = get_custom_provider_context_length(
-                        model=_msg_model,
-                        base_url=_msg_base_url,
-                        custom_providers=_msg_custom_providers,
-                    )
-                    if _msg_custom_ctx:
-                        _msg_config_ctx = _msg_custom_ctx
-                except Exception:
-                    pass
-            _msg_ctx_len = await get_model_context_length_async(
-                _msg_model,
-                base_url=_msg_base_url,
-                api_key=_msg_runtime.get("api_key") or "",
-                config_context_length=_msg_config_ctx,
-                provider=_msg_runtime.get("provider") or "",
-                custom_providers=_msg_custom_providers,
-            )
+            _msg_ctx_len = await self._inbound_model_context_length(source, session_key)
             _ctx_result = await preprocess_context_references_async(
                 message_text,
                 cwd=_msg_cwd,
@@ -2377,18 +2356,65 @@ class GatewayInboundMixin:
             return prefix
         return user_text
 
+    _EMPTY_TEXT_PLACEHOLDER = "(The user sent a message with no text content)"
+
+    @classmethod
+    def _prepend_media_prefix(cls, prefix: str, user_text: str) -> str:
+        """``prefix`` + the user's text; the Discord empty-content placeholder is dropped as redundant."""
+        if user_text and user_text.strip() != cls._EMPTY_TEXT_PLACEHOLDER:
+            return f"{prefix}\n\n{user_text}"
+        return prefix
+
+    @staticmethod
+    def _untranscribed_audio_note(path: str) -> str:
+        """One minimal neutral marker for every STT failure.
+
+        Never mention "no STT provider", setup steps, or a DM sent — persisted in history they
+        poison later turns (the model keeps volunteering STT-setup advice).
+        """
+        from tools.credential_files import to_agent_visible_cache_path
+
+        agent_path = to_agent_visible_cache_path(os.path.abspath(path))
+        return (
+            "[voice message could not be transcribed automatically; "
+            f"the audio is available at: {agent_path}]"
+        )
+
+    async def _transcribe_one_clip(self, path: str, transcribe_audio, transcribe_audio_local_fallback) -> Tuple[Optional[str], str]:
+        """``(transcript_or_None, note)`` for one clip via configured STT with local fallback."""
+        result = await asyncio.to_thread(transcribe_audio, path, None, "gateway")
+        if not result.get("success"):
+            fallback = await asyncio.to_thread(transcribe_audio_local_fallback, path)
+            if fallback.get("success"):
+                logger.info("Configured STT failed for %s; recovered with local STT", path)
+                result = fallback
+        if not result["success"]:
+            logger.info("Voice transcription failed for %s: %s", path, result.get("error", "unknown error"))
+            return None, self._untranscribed_audio_note(path)
+        transcript = result["transcript"]
+        # STT may return success=True with an empty/whitespace transcript (silence, cut-off);
+        # empty quotes make the agent reply to nothing and can loop, so emit a sentinel note.
+        if not (transcript or "").strip():
+            return None, (
+                "[The user sent a voice message but it came through "
+                "empty or inaudible — speech-to-text returned no "
+                "words. Do not guess at the content; ask the user "
+                "to resend or type it out.]"
+            )
+        # Plain quoted line: a "The user sent a voice message..." wrapper read as a meta-instruction
+        # and made the LLM comment on voice mode instead.
+        return transcript, f'"{transcript}"'
+
     async def _enrich_message_with_transcription(
         self,
         user_text: str,
         audio_paths: List[str],
     ) -> tuple[str, List[str]]:
-        """Auto-transcribe user voice/audio messages using the configured STT provider and prepend
-        the transcript to the message text.
+        """Transcribe voice clips with the configured STT provider and prepend the transcripts.
 
-        Returns ``(enriched_text, successful_transcripts)``: the message with transcription
-        wrappers prepended, and the raw transcripts of successfully transcribed clips in input
-        order (empty if every clip failed or STT is disabled) so callers can echo them back to
-        the user before the agent loop.
+        Returns ``(enriched_text, successful_transcripts)``: transcripts of successfully
+        transcribed clips in input order (empty if every clip failed or STT is disabled) so callers
+        can echo them back before the agent loop.
         """
         from gateway.run import _probe_audio_duration
         seen = set()
@@ -2398,21 +2424,11 @@ class GatewayInboundMixin:
             for path in audio_paths:
                 abs_path = os.path.abspath(path)
                 duration_str = await _probe_audio_duration(abs_path)
-                if duration_str:
-                    notes.append(
-                        f"[The user sent a voice message: {abs_path} (duration: {duration_str})]"
-                    )
-                else:
-                    notes.append(f"[The user sent a voice message: {abs_path}]")
+                suffix = f" (duration: {duration_str})" if duration_str else ""
+                notes.append(f"[The user sent a voice message: {abs_path}{suffix}]")
             if not notes:
                 return user_text, []
-            prefix = "\n\n".join(notes)
-            _placeholder = "(The user sent a message with no text content)"
-            if user_text and user_text.strip() == _placeholder:
-                return prefix, []
-            if user_text:
-                return f"{prefix}\n\n{user_text}", []
-            return prefix, []
+            return self._prepend_media_prefix("\n\n".join(notes), user_text), []
 
         try:
             from tools.transcription_tools import (
@@ -2421,82 +2437,25 @@ class GatewayInboundMixin:
             )
         except ModuleNotFoundError as e:
             logger.error("Transcription module unavailable: %s", e)
-            unavailable_note = "[voice message could not be transcribed]"
-            _placeholder = "(The user sent a message with no text content)"
-            if user_text and user_text.strip() == _placeholder:
-                return unavailable_note, []
-            if user_text:
-                return f"{unavailable_note}\n\n{user_text}", []
-            return unavailable_note, []
+            return self._prepend_media_prefix("[voice message could not be transcribed]", user_text), []
 
         enriched_parts = []
         successful_transcripts: List[str] = []
         for path in audio_paths:
             try:
                 logger.debug("Transcribing user voice: %s", path)
-                result = await asyncio.to_thread(
-                    transcribe_audio, path, None, "gateway",
+                transcript, note = await self._transcribe_one_clip(
+                    path, transcribe_audio, transcribe_audio_local_fallback,
                 )
-                if not result.get("success"):
-                    fallback = await asyncio.to_thread(
-                        transcribe_audio_local_fallback,
-                        path,
-                    )
-                    if fallback.get("success"):
-                        logger.info(
-                            "Configured STT failed for %s; recovered with local STT",
-                            path,
-                        )
-                        result = fallback
-                if result["success"]:
-                    transcript = result["transcript"]
-                    # STT may return success=True with an empty/whitespace transcript (silence, cut-off);
-                    # empty quotes make the agent reply to nothing and can loop, so emit a sentinel note.
-                    if not (transcript or "").strip():
-                        enriched_parts.append(
-                            "[The user sent a voice message but it came through "
-                            "empty or inaudible — speech-to-text returned no "
-                            "words. Do not guess at the content; ask the user "
-                            "to resend or type it out.]"
-                        )
-                        continue
+                if transcript is not None:
                     successful_transcripts.append(transcript)
-                    # Pass the transcript as a plain quoted line: a "The user sent a voice message..."
-                    # wrapper read as a meta-instruction and made the LLM comment on voice mode instead.
-                    enriched_parts.append(f'"{transcript}"')
-                else:
-                    error = result.get("error", "unknown error")
-                    # All failure branches: one minimal neutral marker. Never mention "no STT provider",
-                    # setup steps, or a DM sent — persisted in history they poison later turns (the model
-                    # keeps volunteering STT-setup advice). Cause is logged for operators, not the prompt.
-                    logger.info("Voice transcription failed for %s: %s", path, error)
-                    from tools.credential_files import to_agent_visible_cache_path
-
-                    agent_path = to_agent_visible_cache_path(os.path.abspath(path))
-                    enriched_parts.append(
-                        "[voice message could not be transcribed automatically; "
-                        f"the audio is available at: {agent_path}]"
-                    )
+                enriched_parts.append(note)
             except Exception as e:
                 logger.error("Transcription error: %s", e)
-                from tools.credential_files import to_agent_visible_cache_path
-
-                agent_path = to_agent_visible_cache_path(os.path.abspath(path))
-                enriched_parts.append(
-                    "[voice message could not be transcribed automatically; "
-                    f"the audio is available at: {agent_path}]"
-                )
+                enriched_parts.append(self._untranscribed_audio_note(path))
 
         if enriched_parts:
-            prefix = "\n\n".join(enriched_parts)
-            # Strip the empty-content placeholder from the Discord adapter
-            # when we successfully transcribed the audio — it's redundant.
-            _placeholder = "(The user sent a message with no text content)"
-            if user_text and user_text.strip() == _placeholder:
-                return prefix, successful_transcripts
-            if user_text:
-                return f"{prefix}\n\n{user_text}", successful_transcripts
-            return prefix, successful_transcripts
+            return self._prepend_media_prefix("\n\n".join(enriched_parts), user_text), successful_transcripts
         return user_text, successful_transcripts
 
     def _pending_event_audio_paths(self, event) -> List[str]:
