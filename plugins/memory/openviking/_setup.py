@@ -321,7 +321,10 @@ def _mirror_manual_config_to_openviking_store(*, prompt, select, cancelled, valu
             return _SETUP_CANCELLED
         if replace is False:
             continue
-        ov._write_ovcli_config(path, values)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # atomic_json_write creates the temp file 0600 and os.replace()s it: no
+        # half-written config on crash, no chmod-after-write window for the keys.
+        ov.atomic_json_write(path, ov._ovcli_data_from_connection_values(values), mode=0o600)
         return path
 
 

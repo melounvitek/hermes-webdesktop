@@ -830,13 +830,6 @@ def _ovcli_data_from_connection_values(values: dict) -> dict:
     return data
 
 
-def _write_ovcli_config(path: Path, values: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # atomic_json_write creates the temp file 0600 and os.replace()s it: no
-    # half-written config on crash, no chmod-after-write window for the keys.
-    atomic_json_write(path, _ovcli_data_from_connection_values(values), mode=0o600)
-
-
 def _identity_failure(identity: str, subject: str, *, unhealthy_status: str = "status", legacy_subject: Optional[str] = None) -> str:
     """Human message for a non-identified probe result, or "" when identified."""
     if identity in _OPENVIKING_IDENTIFIED_STATES:
@@ -1157,22 +1150,21 @@ class _TurnUpload:
             logger.info("OpenViking sync_turn trace: " + fmt, *args)
 
     def post(self, client: _VikingClient) -> None:
-        if self.batch_messages:
-            while self.next_index < len(self.batch_messages):
-                batch_end = min(self.next_index + _SESSION_MESSAGE_BATCH_LIMIT, len(self.batch_messages))
-                payload = {"messages": self.batch_messages[self.next_index:batch_end]}
-                self._trace("POST /api/v1/sessions/%s/messages/batch range=%d:%d payload=%s",
-                            self.sid, self.next_index, batch_end, json.dumps(payload, ensure_ascii=False))
-                try:
-                    client.post(f"/api/v1/sessions/{self.sid}/messages/batch", payload)
-                except Exception as batch_error:
-                    if self.next_index:
-                        raise
-                    logger.warning("OpenViking structured sync failed; falling back to text sync: %s", batch_error)
-                    break
-                self.next_index = batch_end
-            if self.next_index == len(self.batch_messages):
-                return
+        while self.next_index < len(self.batch_messages):
+            batch_end = min(self.next_index + _SESSION_MESSAGE_BATCH_LIMIT, len(self.batch_messages))
+            payload = {"messages": self.batch_messages[self.next_index:batch_end]}
+            self._trace("POST /api/v1/sessions/%s/messages/batch range=%d:%d payload=%s",
+                        self.sid, self.next_index, batch_end, json.dumps(payload, ensure_ascii=False))
+            try:
+                client.post(f"/api/v1/sessions/{self.sid}/messages/batch", payload)
+            except Exception as batch_error:
+                if self.next_index:
+                    raise
+                logger.warning("OpenViking structured sync failed; falling back to text sync: %s", batch_error)
+                break
+            self.next_index = batch_end
+        if self.batch_messages and self.next_index == len(self.batch_messages):
+            return
         # Plain-text fallback: one user + one assistant message.
         assistant_message: Dict[str, Any] = {"role": "assistant", "parts": [{"type": "text", "text": _message_text(self.assistant_content)[:4000]}]}
         if self.provider._agent:
