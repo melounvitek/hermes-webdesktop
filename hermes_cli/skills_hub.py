@@ -101,13 +101,14 @@ def _clear_skills_cache() -> None:
         pass
 
 
-def _finish_change(c: Console, invalidate_cache: bool) -> None:
+def _finish_change(c: Console, invalidate_cache: bool, what: str = "Change will take effect",
+                   verb: str = "apply") -> None:
     """Apply-now (cache clear) or tell the user the change lands next session."""
     if invalidate_cache:
         _clear_skills_cache()
         return
-    c.print("[dim]Change will take effect in your next session.[/]")
-    c.print("[dim]Use /reset to start a new session now, or --now to apply immediately (invalidates prompt cache).[/]\n")
+    c.print(f"[dim]{what} in your next session.[/]")
+    c.print(f"[dim]Use /reset to start a new session now, or --now to {verb} immediately (invalidates prompt cache).[/]\n")
 
 
 def _print_error(c: Console, message: str) -> None:
@@ -166,15 +167,14 @@ def _resolve_short_name(name: str, sources, console: Console) -> str:
         c.print(f"[dim]Resolved to: {exact[0].identifier}[/]")
         return exact[0].identifier
     if len(exact) > 1:
-        # Official catalog entries outrank community mirrors of the same skill.
-        official = [r for r in exact if r.source == "official"]
+        official = [r for r in exact if r.source == "official"]  # outranks community mirrors
         if len(official) == 1:
             c.print(f"[dim]Resolved to: {official[0].identifier} (official catalog)[/]")
             return official[0].identifier
         c.print(f"\n[yellow]Multiple skills named '{name}' found:[/]")
         table = Table()
-        table.add_column("Source", style="dim")
-        table.add_column("Trust", style="dim")
+        for col in ("Source", "Trust"):
+            table.add_column(col, style="dim")
         _identifier_column(table, "bold cyan")
         for r in exact:
             table.add_row(r.source, _trust_cell(r.trust_level, r.source), r.identifier)
@@ -327,8 +327,8 @@ def do_search(query: str, source: str = "all", limit: int = 10, console: Optiona
     table = Table(title=f"Skills Hub — {len(results)} result(s)")
     table.add_column("Name", style="bold cyan")
     table.add_column("Description", max_width=60)
-    table.add_column("Source", style="dim")
-    table.add_column("Trust", style="dim")
+    for col in ("Source", "Trust"):
+        table.add_column(col, style="dim")
     _identifier_column(table, "dim")
     for r in results:
         table.add_row(r.name, _truncate(r.description, 60), _display_source(r),
@@ -362,6 +362,7 @@ def _fetch_browse_results(c: Console, source: str):
         # parallel_search_sources invokes the callback from the collecting thread as each
         # source completes; the page itself is rendered once over the final, fully sorted set.
         _done: List[str] = []
+
         def _on_source_done(sid: str, count: int) -> None:
             _done.append(f"{sid} ({count})")
             status.update(
@@ -373,10 +374,9 @@ def _fetch_browse_results(c: Console, source: str):
 
 def _render_browse_page(c: Console, deduped, page_items, page: int, total_pages: int,
                         start: int, source: str, source_counts, timed_out) -> None:
-    total = len(deduped)
     official_count = sum(1 for r in deduped if r.source == "official")
     source_label = f"— {source}" if source != "all" else "— all sources"
-    loaded_label = f"{total} skills loaded"
+    loaded_label = f"{len(deduped)} skills loaded"
     if timed_out:
         loaded_label += f", {len(timed_out)} source(s) still loading"
     c.print(f"\n[bold]Skills Hub — Browse {source_label}[/]"
@@ -398,16 +398,12 @@ def _render_browse_page(c: Console, deduped, page_items, page: int, total_pages:
                       r.identifier)
     c.print(table)
 
-    nav_parts = []
-    if page > 1:
-        nav_parts.append(f"[cyan]--page {page - 1}[/] ← prev")
-    if page < total_pages:
-        nav_parts.append(f"[cyan]--page {page + 1}[/] → next")
+    nav_parts = ([f"[cyan]--page {page - 1}[/] ← prev"] if page > 1 else []) + (
+        [f"[cyan]--page {page + 1}[/] → next"] if page < total_pages else [])
     if nav_parts:
         c.print(f"  {' | '.join(nav_parts)}")
     if source == "all" and source_counts:
-        parts = [f"{sid}: {ct}" for sid, ct in sorted(source_counts.items())]
-        c.print(f"  [dim]Sources: {', '.join(parts)}[/]")
+        c.print(f"  [dim]Sources: {', '.join(f'{sid}: {ct}' for sid, ct in sorted(source_counts.items()))}[/]")
     if timed_out:
         c.print(f"  [yellow]⚡ Slow sources skipped: {', '.join(timed_out)} "
                 f"— run again for cached results[/]")
@@ -484,6 +480,7 @@ def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
 
 def inspect_skill(identifier: str) -> Optional[dict]:
     """Skill metadata (+ SKILL.md preview) for programmatic callers."""
+
     class _Q:
         def print(self, *a, **k):
             pass
@@ -671,7 +668,8 @@ def do_install(identifier: str, category: str = "", force: bool = False,
     ``source_id`` pins resolution to one adapter; callers that know the provenance (``do_update``)
     must pass it so a bare identifier cannot resolve to a same-named skill elsewhere.
     """
-    from tools.skills_hub import ensure_hub_dirs, quarantine_bundle, install_from_quarantine, HubLockFile
+    from tools.skills_hub import (ensure_hub_dirs, quarantine_bundle, install_from_quarantine,
+                                  HubLockFile)
     from tools.skills_guard import should_allow_install
     c = console or _console
     ensure_hub_dirs()
@@ -745,18 +743,15 @@ def do_install(identifier: str, category: str = "", force: bool = False,
     c.print(f"[bold green]Installed:[/] {install_dir.resolve().relative_to(Path(SKILLS_DIR).resolve()).as_posix()}")
     c.print(f"[dim]Files: {', '.join(bundle.files.keys())}[/]\n")
     _announce_blueprint(c, bundle.name)
-    if invalidate_cache:
-        _clear_skills_cache()
-    else:
-        c.print("[dim]Skill will be available in your next session.[/]")
-        c.print("[dim]Use /reset to start a new session now, or --now to activate immediately (invalidates prompt cache).[/]\n")
+    _finish_change(c, invalidate_cache, "Skill will be available", "activate")
 
 
 def _print_tier1_advisory(skill_dir, console) -> None:
     """Advisory SkillEvaluator Tier 1 report. Never raises/blocks: scanner missing, disabled via
     ``skills.tier1_advisory: false``, or erroring all degrade to silence. Secrets render red."""
     try:
-        from tools.skillevaluator_scan import format_tier1_report, run_tier1_scan, tier1_advisory_enabled
+        from tools.skillevaluator_scan import (format_tier1_report, run_tier1_scan,
+                                               tier1_advisory_enabled)
         if not tier1_advisory_enabled():
             return
         report = run_tier1_scan(Path(skill_dir))
@@ -842,9 +837,8 @@ def do_check(name: Optional[str] = None, console: Optional[Console] = None) -> N
         c.print("[dim]No hub-installed skills to check.[/]\n")
         return
     table = Table(title="Skill Updates")
-    table.add_column("Name", style="bold cyan")
-    table.add_column("Source", style="dim")
-    table.add_column("Status", style="dim")
+    for col in ("Name", "Source", "Status"):
+        table.add_column(col, style="bold cyan" if col == "Name" else "dim")
     for entry in results:
         table.add_row(entry.get("name", ""), entry.get("source", ""), entry.get("status", ""))
     c.print(table)
@@ -1178,7 +1172,6 @@ def do_publish(skill_path: str, target: str = "github", repo: str = "",
     if not path.exists() or not (path / "SKILL.md").exists():
         _print_error(c, f"No SKILL.md found at {path}")
         return
-
     skill_md = (path / "SKILL.md").read_text(encoding="utf-8").lstrip("\ufeff")  # tolerate BOM
     fm = _read_frontmatter(skill_md)
     name = fm.get("name", path.name)
@@ -1329,9 +1322,8 @@ def do_snapshot_import(input_path: str, force: bool = False,
     if taps:
         mgr = TapsManager()
         for tap in taps:
-            repo = tap.get("repo", "")
-            if repo:
-                mgr.add(repo, tap.get("path", "skills/"))
+            if tap.get("repo", ""):
+                mgr.add(tap["repo"], tap.get("path", "skills/"))
         c.print(f"[dim]Restored {len(taps)} tap(s)[/]")
 
     skills = snapshot.get("skills", [])
@@ -1488,7 +1480,8 @@ _SLASH_ACTIONS = {
     "update": lambda args, c: do_update(
         name=next((a for a in args if not a.startswith("--")), None), console=c,
         force="--force" in args),
-    "audit": lambda args, c: do_audit(name=_first_positional(args), console=c, deep="--deep" in args),
+    "audit": lambda args, c: do_audit(name=_first_positional(args), console=c,
+                                      deep="--deep" in args),
     "uninstall": lambda args, c: do_uninstall(
         args[0], console=c, skip_confirm=True, invalidate_cache="--now" in args),
     "reset": lambda args, c: do_reset(
@@ -1501,8 +1494,8 @@ _SLASH_ACTIONS = {
         args[0], target=_opt_value(args, "--to", "github", last=True),
         repo=_opt_value(args, "--repo", "", last=True), console=c),
     "snapshot": _slash_snapshot,
-    "tap": lambda args, c: (do_tap(args[0], repo=args[1] if len(args) > 1 else "", console=c) if args
-                            else do_tap("list", console=c)),
+    "tap": lambda args, c: (do_tap(args[0], repo=args[1] if len(args) > 1 else "", console=c)
+                            if args else do_tap("list", console=c)),
     "help": lambda args, c: _print_skills_help(c),
     "--help": lambda args, c: _print_skills_help(c),
     "-h": lambda args, c: _print_skills_help(c)}
