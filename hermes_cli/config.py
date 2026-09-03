@@ -24,11 +24,12 @@ import yaml
 
 from hermes_cli.cli_output import line_input
 from hermes_cli.colors import Colors, color
+from hermes_cli import managed_scope
 from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 from hermes_cli.secret_prompt import masked_secret_prompt
 # Re-export from hermes_constants — canonical definition lives there.
 from hermes_constants import get_hermes_home, get_process_hermes_home  # noqa: F401
-from utils import atomic_replace, fast_safe_load
+from utils import atomic_replace, atomic_yaml_write, fast_safe_load
 
 logger = logging.getLogger(__name__)
 
@@ -2160,7 +2161,6 @@ def require_readable_config_before_write(
 
 def atomic_config_write(config_path: Path, data: Any, **kwargs: Any) -> None:
     """Fail-closed atomic write for ``config.yaml`` (``require_readable_config_before_write`` first)."""
-    from utils import atomic_yaml_write
 
     require_readable_config_before_write(config_path)
     atomic_yaml_write(config_path, data, **kwargs)
@@ -2313,7 +2313,7 @@ def apply_terminal_config_to_env(
     return target
 
 
-def _load_config_cache_sig(config_path: Path, managed_scope) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int, int, int]]]:
+def _load_config_cache_sig(config_path: Path) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int, int, int]]]:
     """Return ``(user_sig, cache_sig)`` for ``_LOAD_CONFIG_CACHE``.
 
     The managed config file's (mtime, size) is folded in ((0, 0) = none) so editing it invalidates
@@ -2363,7 +2363,7 @@ def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: 
     return lkg_copy
 
 
-def _merge_managed_overlay(expanded: Dict[str, Any], managed_scope) -> Tuple[Dict[str, Any], Any]:
+def _merge_managed_overlay(expanded: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
     """Apply the managed-scope overlay; returns ``(merged, managed_config_or_falsy)``.
 
     Managed wins at the leaf and is applied AFTER user expansion so a user ``${VAR}`` cannot shadow
@@ -2389,9 +2389,8 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         config_path = get_config_path()
         path_key = str(config_path)
 
-        from hermes_cli import managed_scope
-
-        user_sig, cache_sig = _load_config_cache_sig(config_path, managed_scope)
+    
+        user_sig, cache_sig = _load_config_cache_sig(config_path)
 
         cached = _LOAD_CONFIG_CACHE.get(path_key)
         if cached is not None and cache_sig is not None and cached[:4] == cache_sig:
@@ -2423,7 +2422,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                     return copy.deepcopy(lkg_copy) if want_deepcopy else lkg_copy
 
         normalized = _canonicalize_config(config)
-        expanded, managed_config = _merge_managed_overlay(_expand_env_vars(normalized), managed_scope)
+        expanded, managed_config = _merge_managed_overlay(_expand_env_vars(normalized))
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_sig is not None:
             # The cache stores its own deepcopy so load_config() callers can mutate freely while
@@ -2486,7 +2485,7 @@ _FALLBACK_COMMENT = """
 """
 
 
-def _strip_managed_keys_for_save(config: Dict[str, Any], managed_scope) -> Dict[str, Any]:
+def _strip_managed_keys_for_save(config: Dict[str, Any]) -> Dict[str, Any]:
     """Drop every leaf the managed layer pins (bulk safety net; single-key ``config set``
     hard-rejects) and tell the user what was not saved."""
     managed_keys = managed_scope.managed_config_keys()
@@ -2529,11 +2528,9 @@ def save_config(
         if is_managed():
             managed_error("save configuration")
             return
-        from hermes_cli import managed_scope
-
-        config = _strip_managed_keys_for_save(config, managed_scope)
-        from utils import atomic_yaml_write
-
+    
+        config = _strip_managed_keys_for_save(config)
+    
         ensure_hermes_home()
         config_path = get_config_path()
         require_readable_config_before_write(config_path)
@@ -2805,7 +2802,6 @@ def _env_write_blocked(key: str, action: str) -> bool:
     if is_managed():
         managed_error(f"{action} {key}")
         return True
-    from hermes_cli import managed_scope
 
     if managed_scope.is_env_managed(key):
         managed_dir = managed_scope.get_managed_dir()
@@ -3015,7 +3011,6 @@ def _section(title: str) -> None:
 def _show_managed_banner() -> None:
     """Surface administrator-pinned settings so the user knows why a config.yaml value may not
     be the effective one."""
-    from hermes_cli import managed_scope
 
     managed_keys = managed_scope.managed_config_keys()
     managed_env = managed_scope.load_managed_env()
@@ -3688,7 +3683,6 @@ def _exit_if_key_managed(key: str, action: str) -> None:
     """A key pinned by the managed layer cannot be set/unset (the next load would reinstate it):
     hard-reject and name the source. Distinct from ``is_managed()``; env-shaped keys route to the
     .env writers, which carry their own guard."""
-    from hermes_cli import managed_scope
 
     if managed_scope.is_key_managed(key):
         managed_dir = managed_scope.get_managed_dir()
@@ -3764,7 +3758,6 @@ def _exit_invalid(msg: str) -> None:
 def _write_user_config(config_path: Path, user_config: Dict[str, Any]) -> None:
     """Write only the user's raw config back (never the merged defaults)."""
     ensure_hermes_home()
-    from utils import atomic_yaml_write
     atomic_yaml_write(config_path, user_config, sort_keys=False)
 
 
