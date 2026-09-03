@@ -6283,182 +6283,151 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         expansion -> unknown-command message. Always returns True unless
         it re-dispatches through process_command.
         """
-        # Check for user-defined quick commands (bypass agent loop, no LLM call)
         base_cmd = cmd_lower.split()[0]
         skill_commands = _ensure_skill_commands()
         skill_bundles = get_skill_bundles()
         quick_commands = self.config.get("quick_commands", {})
+        user_args = cmd_original[len(base_cmd):].strip()
         if base_cmd.lstrip("/") in quick_commands:
-            qcmd = quick_commands[base_cmd.lstrip("/")]
-            if qcmd.get("type") == "exec":
-                import subprocess
-                exec_cmd = qcmd.get("command", "")
-                if exec_cmd:
-                    try:
-                        # shell=True is intentional: quick_commands are user-defined
-                        # shell snippets from config.yaml — not agent/LLM controlled.
-                        # Sanitize env to prevent credential leakage —
-                        # quick commands run in the CLI process which
-                        # has all API keys in os.environ.
-                        from tools.environments.local import build_subprocess_env
-                        sanitized_env = build_subprocess_env()
-                        from hermes_cli._subprocess_compat import windows_hide_flags
-                        result = subprocess.run(
-                            exec_cmd, shell=True, capture_output=True,
-                            text=True, encoding="utf-8", errors="replace", timeout=30, env=sanitized_env,
-                            # No console flash on Windows (#56747).
-                            creationflags=windows_hide_flags(),
-                        )
-                        output = result.stdout.strip() or result.stderr.strip()
-                        if output:
-                            from agent.redact import redact_sensitive_text
-                            output = redact_sensitive_text(output)
-                            self._console_print(_rich_text_from_ansi(output))
-                        else:
-                            self._console_print("[dim]Command returned no output[/]")
-                    except subprocess.TimeoutExpired:
-                        self._console_print("[bold red]Quick command timed out (30s)[/]")
-                    except Exception as e:
-                        self._console_print(f"[bold red]Quick command error: {e}[/]")
-                else:
-                    self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
-            elif qcmd.get("type") == "alias":
-                target = qcmd.get("target", "").strip()
-                if target:
-                    target = target if target.startswith("/") else f"/{target}"
-                    user_args = cmd_original[len(base_cmd):].strip()
-                    aliased_command = f"{target} {user_args}".strip()
-                    return self.process_command(aliased_command)
-                else:
-                    self._console_print(f"[bold red]Quick command '{base_cmd}' has no target defined[/]")
-            else:
-                self._console_print(f"[bold red]Quick command '{base_cmd}' has unsupported type (supported: 'exec', 'alias')[/]")
-        # Check for plugin-registered slash commands
-        elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
-            from hermes_cli.plugins import (
-                get_plugin_command_handler,
-                resolve_plugin_command_result,
-            )
-            plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
-            if plugin_handler:
-                user_args = cmd_original[len(base_cmd):].strip()
-                try:
-                    result = resolve_plugin_command_result(
-                        plugin_handler(user_args)
-                    )
-                    if result:
-                        _cprint(str(result))
-                except Exception as e:
-                    _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
-        # Skill bundles take precedence over individual skills — /<bundle>
-        # loads multiple skills at once. Rescans cheaply when files change.
+            return self._run_quick_command(base_cmd, quick_commands[base_cmd.lstrip("/")], user_args)
+        if base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
+            self._run_plugin_slash_command(base_cmd, user_args)
         elif base_cmd in skill_bundles:
-            user_instruction = cmd_original[len(base_cmd):].strip()
-            bundle_result = build_bundle_invocation_message(
-                base_cmd, user_instruction, task_id=self.session_id
-            )
-            if bundle_result:
-                msg, loaded_names, missing = bundle_result
-                bundle_info = skill_bundles[base_cmd]
-                print(
-                    f"\n⚡ Loading bundle: {bundle_info['name']} "
-                    f"({len(loaded_names)} skills)"
-                )
-                if missing:
-                    ChatConsole().print(
-                        f"[yellow]Skipped missing skills: {', '.join(missing)}[/]"
-                    )
-                if hasattr(self, '_pending_input'):
-                    self._pending_input.put(msg)
-            else:
-                ChatConsole().print(
-                    f"[bold red]Failed to load bundle for {base_cmd}[/]"
-                )
-        # Check for skill slash commands (/gif-search, /axolotl, etc.)
+            self._run_skill_bundle_command(base_cmd, skill_bundles[base_cmd], user_args)
         elif base_cmd in skill_commands:
-            rest = cmd_original[len(base_cmd):].strip()
-            # Stacked slash-skill invocations: `/skill-a /skill-b do XYZ`
-            # loads every leading skill (up to 5), not just the first.
-            # Inspired by Claude Code v2.1.199.
-            from agent.skill_commands import (
-                build_stacked_skill_invocation_message,
-                split_stacked_skill_commands,
-            )
-            extra_keys, user_instruction = split_stacked_skill_commands(rest)
-            if extra_keys:
-                stacked_result = build_stacked_skill_invocation_message(
-                    [base_cmd, *extra_keys],
-                    user_instruction,
-                    task_id=self.session_id,
-                )
-                if stacked_result:
-                    msg, loaded_names, missing = stacked_result
-                    print(
-                        f"\n⚡ Loading {len(loaded_names)} stacked skills: "
-                        f"{', '.join(loaded_names)}"
-                    )
-                    if missing:
-                        ChatConsole().print(
-                            f"[yellow]Skipped missing skills: {', '.join(missing)}[/]"
-                        )
-                    if hasattr(self, '_pending_input'):
-                        self._pending_input.put(msg)
-                else:
-                    ChatConsole().print(
-                        f"[bold red]Failed to load stacked skills for {base_cmd}[/]"
-                    )
-                return True
-            user_instruction = rest
-            msg = build_skill_invocation_message(
-                base_cmd, user_instruction, task_id=self.session_id
-            )
-            if msg:
-                skill_name = skill_commands[base_cmd]["name"]
-                print(f"\n⚡ Loading skill: {skill_name}")
-                if hasattr(self, '_pending_input'):
-                    self._pending_input.put(msg)
-            else:
-                ChatConsole().print(f"[bold red]Failed to load skill for {base_cmd}[/]")
+            self._run_skill_slash_command(base_cmd, skill_commands[base_cmd], user_args)
         else:
-            # Prefix matching: if input uniquely identifies one command, execute it.
-            # Matches against both built-in COMMANDS and installed skill commands so
-            # that execution-time resolution agrees with tab-completion.
-            from hermes_cli.commands import COMMANDS
-            typed_base = cmd_lower.split()[0]
-            all_known = set(COMMANDS) | set(skill_commands) | set(skill_bundles)
-            matches = [c for c in all_known if c.startswith(typed_base)]
-            if len(matches) > 1:
-                # Prefer an exact match (typed the full command name)
-                exact = [c for c in matches if c == typed_base]
-                if len(exact) == 1:
-                    matches = exact
+            return self._expand_slash_prefix(cmd_original, cmd_lower, skill_commands, skill_bundles)
+        return True
+
+    def _run_quick_command(self, base_cmd: str, qcmd: dict, user_args: str) -> bool:
+        """User-defined quick command (config.yaml): ``exec`` runs a shell snippet, ``alias`` re-dispatches."""
+        qtype = qcmd.get("type")
+        if qtype == "exec":
+            import subprocess
+            exec_cmd = qcmd.get("command", "")
+            if not exec_cmd:
+                self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
+                return True
+            try:
+                # shell=True is intentional: user-defined shell snippets from config.yaml,
+                # never agent/LLM controlled. The env is sanitized because the CLI process
+                # holds every API key in os.environ.
+                from tools.environments.local import build_subprocess_env
+                from hermes_cli._subprocess_compat import windows_hide_flags
+                result = subprocess.run(
+                    exec_cmd, shell=True, capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", timeout=30, env=build_subprocess_env(),
+                    # No console flash on Windows (#56747).
+                    creationflags=windows_hide_flags(),
+                )
+                output = result.stdout.strip() or result.stderr.strip()
+                if output:
+                    from agent.redact import redact_sensitive_text
+                    self._console_print(_rich_text_from_ansi(redact_sensitive_text(output)))
                 else:
-                    # Prefer the unique shortest match:
-                    # /qui → /quit (5) wins over /quint-pipeline (15)
-                    min_len = min(len(c) for c in matches)
-                    shortest = [c for c in matches if len(c) == min_len]
-                    if len(shortest) == 1:
-                        matches = shortest
-            if len(matches) == 1:
-                # Expand the prefix to the full command name, preserving arguments.
-                # Guard against redispatching the same token to avoid infinite
-                # recursion when the expanded name still doesn't hit an exact branch
-                # (e.g. /config with extra args that are not yet handled above).
-                full_name = matches[0]
-                if full_name == typed_base:
-                    # Already an exact token — no expansion possible; fall through
-                    _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
-                    _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
-                else:
-                    remainder = cmd_original.strip()[len(typed_base):]
-                    full_cmd = full_name + remainder
-                    return self.process_command(full_cmd)
-            elif len(matches) > 1:
-                _cprint(f"{_ACCENT}Ambiguous command: {cmd_lower}{_RST}")
-                _cprint(f"{_DIM}Did you mean: {', '.join(sorted(matches))}?{_RST}")
+                    self._console_print("[dim]Command returned no output[/]")
+            except subprocess.TimeoutExpired:
+                self._console_print("[bold red]Quick command timed out (30s)[/]")
+            except Exception as e:
+                self._console_print(f"[bold red]Quick command error: {e}[/]")
+        elif qtype == "alias":
+            target = qcmd.get("target", "").strip()
+            if target:
+                target = target if target.startswith("/") else f"/{target}"
+                return self.process_command(f"{target} {user_args}".strip())
+            self._console_print(f"[bold red]Quick command '{base_cmd}' has no target defined[/]")
+        else:
+            self._console_print(f"[bold red]Quick command '{base_cmd}' has unsupported type (supported: 'exec', 'alias')[/]")
+        return True
+
+    def _run_plugin_slash_command(self, base_cmd: str, user_args: str) -> None:
+        from hermes_cli.plugins import (
+            get_plugin_command_handler,
+            resolve_plugin_command_result,
+        )
+        plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
+        if plugin_handler:
+            try:
+                result = resolve_plugin_command_result(plugin_handler(user_args))
+                if result:
+                    _cprint(str(result))
+            except Exception as e:
+                _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
+
+    def _queue_skill_message(self, msg) -> None:
+        if hasattr(self, '_pending_input'):
+            self._pending_input.put(msg)
+
+    def _run_skill_bundle_command(self, base_cmd: str, bundle_info: dict, user_instruction: str) -> None:
+        """``/<bundle>`` loads several skills at once (bundles win over same-named skills)."""
+        bundle_result = build_bundle_invocation_message(
+            base_cmd, user_instruction, task_id=self.session_id
+        )
+        if not bundle_result:
+            ChatConsole().print(f"[bold red]Failed to load bundle for {base_cmd}[/]")
+            return
+        msg, loaded_names, missing = bundle_result
+        print(f"\n⚡ Loading bundle: {bundle_info['name']} ({len(loaded_names)} skills)")
+        if missing:
+            ChatConsole().print(f"[yellow]Skipped missing skills: {', '.join(missing)}[/]")
+        self._queue_skill_message(msg)
+
+    def _run_skill_slash_command(self, base_cmd: str, skill_info: dict, rest: str) -> None:
+        """``/<skill> ...``; stacked ``/skill-a /skill-b do XYZ`` loads every leading skill (up to 5)."""
+        from agent.skill_commands import (
+            build_stacked_skill_invocation_message,
+            split_stacked_skill_commands,
+        )
+        extra_keys, user_instruction = split_stacked_skill_commands(rest)
+        if extra_keys:
+            stacked_result = build_stacked_skill_invocation_message(
+                [base_cmd, *extra_keys],
+                user_instruction,
+                task_id=self.session_id,
+            )
+            if not stacked_result:
+                ChatConsole().print(f"[bold red]Failed to load stacked skills for {base_cmd}[/]")
+                return
+            msg, loaded_names, missing = stacked_result
+            print(f"\n⚡ Loading {len(loaded_names)} stacked skills: {', '.join(loaded_names)}")
+            if missing:
+                ChatConsole().print(f"[yellow]Skipped missing skills: {', '.join(missing)}[/]")
+            self._queue_skill_message(msg)
+            return
+        msg = build_skill_invocation_message(base_cmd, rest, task_id=self.session_id)
+        if msg:
+            print(f"\n⚡ Loading skill: {skill_info['name']}")
+            self._queue_skill_message(msg)
+        else:
+            ChatConsole().print(f"[bold red]Failed to load skill for {base_cmd}[/]")
+
+    def _expand_slash_prefix(self, cmd_original: str, cmd_lower: str, skill_commands, skill_bundles) -> bool:
+        """Unique-prefix expansion against built-in COMMANDS + skill commands/bundles (agrees with tab-completion)."""
+        from hermes_cli.commands import COMMANDS
+        typed_base = cmd_lower.split()[0]
+        all_known = set(COMMANDS) | set(skill_commands) | set(skill_bundles)
+        matches = [c for c in all_known if c.startswith(typed_base)]
+        if len(matches) > 1:
+            exact = [c for c in matches if c == typed_base]
+            if len(exact) == 1:
+                matches = exact
             else:
-                _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
-                _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
+                # Unique shortest match wins: /qui → /quit (5) over /quint-pipeline (15)
+                min_len = min(len(c) for c in matches)
+                shortest = [c for c in matches if len(c) == min_len]
+                if len(shortest) == 1:
+                    matches = shortest
+        if len(matches) == 1 and matches[0] != typed_base:
+            # Expand to the full name, preserving arguments.
+            return self.process_command(matches[0] + cmd_original.strip()[len(typed_base):])
+        if len(matches) > 1:
+            _cprint(f"{_ACCENT}Ambiguous command: {cmd_lower}{_RST}")
+            _cprint(f"{_DIM}Did you mean: {', '.join(sorted(matches))}?{_RST}")
+        else:
+            # Exact token with no handler (never re-dispatch the same token: recursion), or no match.
+            _cprint(f"\033[1;31mUnknown command: {cmd_lower}{_RST}")
+            _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
         return True
 
     def _owns_process_notification(self, event: dict) -> bool:
@@ -7158,150 +7127,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 self._voice_continuous = False
                 _cprint(f"\n{_DIM}Continuous voice mode stopped due to error.{_RST}")
 
-        # Handle interrupt - check if we were interrupted
-        pending_message = None
-        _show_interrupt_marker = False
-        _interrupted_this_turn = bool(turn.result and turn.result.get("interrupted"))
-        # Expose the flag for post-turn hooks (e.g. goal continuation)
-        # so they can skip themselves when the turn was user-cancelled.
-        self._last_turn_interrupted = _interrupted_this_turn
-        if _interrupted_this_turn:
-            pending_message = turn.result.get("interrupt_message") or interrupt_msg
-            # #60920: Don't append the interruption marker to response so it
-            # is never recorded in _OUTPUT_HISTORY by the Panel rendering
-            # below. The marker is printed separately with _suspend_output_history
-            # after the response Panel to preserve the visual while avoiding
-            # duplicates on terminal redraw (_recover_terminal_after_interrupt).
-            _show_interrupt_marker = bool(response and pending_message)
-        elif interrupt_msg:
-            # We fired agent.interrupt(interrupt_msg) but the turn result
-            # doesn't acknowledge it. Two ways this happens, both racy:
-            #   1. The agent thread had already passed its last interrupt
-            #      check (or finished) when the interrupt landed — the turn
-            #      completed normally and finalize_turn() never saw the flag.
-            #   2. The 10s post-interrupt wait above expired and we
-            #      abandoned the daemon thread; `result` is still None.
-            # In both cases the user's message must NOT be dropped —
-            # re-queue it as the next turn (#interrupt-vacuumed-into-void).
-            pending_message = interrupt_msg
-            # If the interrupt landed after finalize_turn()'s
-            # clear_interrupt(), the stale flag would instantly abort the
-            # NEXT turn at its first loop check. Clear it now that we've
-            # claimed the message — but ONLY if the agent thread actually
-            # exited. If it's still alive (abandoned after the 10s wait),
-            # the flag is what makes the wedged tool eventually unwind;
-            # clearing it would un-signal that thread.
-            try:
-                if (
-                    not agent_thread.is_alive()
-                    and self.agent
-                    and getattr(self.agent, "_interrupt_requested", False)
-                ):
-                    self.agent.clear_interrupt()
-            except Exception:
-                pass
+        pending_message, _show_interrupt_marker = self._chat_resolve_interrupt(turn, agent_thread, interrupt_msg, response)
 
         response_previewed = turn.result.get("response_previewed", False) if turn.result else False
 
-        # Display reasoning (thinking) box if enabled and available.
-        # Skip when streaming already showed reasoning live.  Use the
-        # turn-persistent flag (_reasoning_shown_this_turn) instead of
-        # _reasoning_stream_started — the latter gets reset during
-        # intermediate turn boundaries (tool-calling loops), which caused
-        # the reasoning box to re-render after the final response.
-        _reasoning_already_shown = getattr(self, '_reasoning_shown_this_turn', False)
-        if self.show_reasoning and turn.result and not _reasoning_already_shown:
-            reasoning = turn.result.get("last_reasoning")
-            if reasoning:
-                w = self._scrollback_box_width()
-                r_label = " Reasoning "
-                r_fill = w - 2 - len(r_label)
-                r_top = f"{_DIM}┌─{r_label}{'─' * max(r_fill - 1, 0)}┐{_RST}"
-                r_bot = f"{_DIM}└{'─' * (w - 2)}┘{_RST}"
-                # Collapse long reasoning to the first 10 lines unless the
-                # user opted into full display via /reasoning full.
-                lines = reasoning.strip().splitlines()
-                if len(lines) > 10 and not getattr(self, "reasoning_full", False):
-                    display_reasoning = "\n".join(lines[:10])
-                    display_reasoning += f"\n{_DIM}  ... ({len(lines) - 10} more lines — /reasoning full to show){_RST}"
-                else:
-                    display_reasoning = reasoning.strip()
-                _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
+        self._chat_print_reasoning_box(turn)
 
-        if response and not response_previewed:
-            # Use skin engine for label/color with fallback
-            try:
-                from hermes_cli.skin_engine import get_active_skin
-                _skin = get_active_skin()
-                label = _skin.get_branding("response_label", "⚕ Hermes")
-                _resp_color = _maybe_remap_for_light_mode(_skin.get_color("response_border", "#CD7F32"))
-                _resp_text = _maybe_remap_for_light_mode(_skin.get_color("banner_text", "#FFF8DC"))
-            except Exception:
-                label = "⚕ Hermes"
-                _resp_color = _maybe_remap_for_light_mode("#CD7F32")
-                _resp_text = _maybe_remap_for_light_mode("#FFF8DC")
-
-            is_error_response = turn.result and (turn.result.get("failed") or turn.result.get("partial"))
-            already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
-            if turn.use_streaming_tts and turn.box_opened and not is_error_response:
-                # Text was already printed sentence-by-sentence; just close the box
-                w = self._scrollback_box_width()
-                _cprint(f"\n{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
-            elif already_streamed:
-                # Response was already streamed token-by-token with box framing;
-                # _flush_stream() already closed the box. Skip Rich Panel.
-                # A transform hook runs after streaming. Show a suffix for
-                # append-only changes, or the complete replacement otherwise.
-                _post_stream_text = _post_stream_transform_output(response, turn.result)
-                if _post_stream_text.strip():
-                    _cprint(_post_stream_text)
-            else:
-                _chat_console = ChatConsole()
-                _chat_console.print(Panel(
-                    _render_final_assistant_content(response, mode=self.final_response_markdown),
-                    title=f"[{_resp_color} bold]{label}[/]",
-                    title_align="left",
-                    border_style=_resp_color,
-                    style=_resp_text,
-                    box=rich_box.HORIZONTALS,
-                    padding=(1, 0),
-                    width=self._scrollback_box_width(),
-                ))
-
-            # Durable, provider-agnostic billing CTA below the response. The
-            # response panel carries the full guidance; this pins the single
-            # action to take (Nous → /topup, other providers → their billing
-            # page) so it stays visible instead of scrolling away as prose.
-            if turn.result and turn.result.get("failure_reason") == "billing":
-                _bb = turn.result.get("billing_block") or {}
-                _prov_label = _bb.get("provider_label") or "your provider"
-                if _bb.get("is_nous"):
-                    _cta_lines = [
-                        "Run [bold]/topup[/] to add credits, or "
-                        "[bold]/subscription[/] to change plan.",
-                    ]
-                else:
-                    _url = _bb.get("billing_url")
-                    _cta_lines = [
-                        f"Add credits with {_prov_label}"
-                        + (f": [bold]{_url}[/]" if _url else ".")
-                    ]
-                _cta_lines.append(
-                    "Or switch providers with "
-                    "[bold]/model <model> --provider <provider>[/]."
-                )
-                try:
-                    ChatConsole().print(Panel(
-                        "\n".join(_cta_lines),
-                        title="[#CD7F32 bold]⚡ Out of credits[/]",
-                        title_align="left",
-                        border_style="#CD7F32",
-                        box=rich_box.HORIZONTALS,
-                        padding=(1, 4),
-                        width=self._scrollback_box_width(),
-                    ))
-                except Exception:
-                    pass
+        self._chat_print_response_panel(turn, response, response_previewed)
 
         # #60920: Print interruption marker with history suppressed so it
         # is never recorded in _OUTPUT_HISTORY. The marker was previously
@@ -7376,6 +7208,156 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             self._pending_input.put(_leftover_steer)
 
         return response
+
+    def _chat_resolve_interrupt(self, turn, agent_thread, interrupt_msg, response):
+        """Decide the re-queued interrupt message and whether to print the interrupt marker; clears a stale agent interrupt flag."""
+        # Handle interrupt - check if we were interrupted
+        pending_message = None
+        _show_interrupt_marker = False
+        _interrupted_this_turn = bool(turn.result and turn.result.get("interrupted"))
+        # Expose the flag for post-turn hooks (e.g. goal continuation)
+        # so they can skip themselves when the turn was user-cancelled.
+        self._last_turn_interrupted = _interrupted_this_turn
+        if _interrupted_this_turn:
+            pending_message = turn.result.get("interrupt_message") or interrupt_msg
+            # #60920: Don't append the interruption marker to response so it
+            # is never recorded in _OUTPUT_HISTORY by the Panel rendering
+            # below. The marker is printed separately with _suspend_output_history
+            # after the response Panel to preserve the visual while avoiding
+            # duplicates on terminal redraw (_recover_terminal_after_interrupt).
+            _show_interrupt_marker = bool(response and pending_message)
+        elif interrupt_msg:
+            # We fired agent.interrupt(interrupt_msg) but the turn result
+            # doesn't acknowledge it. Two ways this happens, both racy:
+            #   1. The agent thread had already passed its last interrupt
+            #      check (or finished) when the interrupt landed — the turn
+            #      completed normally and finalize_turn() never saw the flag.
+            #   2. The 10s post-interrupt wait above expired and we
+            #      abandoned the daemon thread; `result` is still None.
+            # In both cases the user's message must NOT be dropped —
+            # re-queue it as the next turn (#interrupt-vacuumed-into-void).
+            pending_message = interrupt_msg
+            # If the interrupt landed after finalize_turn()'s
+            # clear_interrupt(), the stale flag would instantly abort the
+            # NEXT turn at its first loop check. Clear it now that we've
+            # claimed the message — but ONLY if the agent thread actually
+            # exited. If it's still alive (abandoned after the 10s wait),
+            # the flag is what makes the wedged tool eventually unwind;
+            # clearing it would un-signal that thread.
+            try:
+                if (
+                    not agent_thread.is_alive()
+                    and self.agent
+                    and getattr(self.agent, "_interrupt_requested", False)
+                ):
+                    self.agent.clear_interrupt()
+            except Exception:
+                pass
+        return pending_message, _show_interrupt_marker
+
+    def _chat_print_reasoning_box(self, turn):
+        """Collapsed reasoning box when show_reasoning is on and streaming did not already show it this turn."""
+        # Display reasoning (thinking) box if enabled and available.
+        # Skip when streaming already showed reasoning live.  Use the
+        # turn-persistent flag (_reasoning_shown_this_turn) instead of
+        # _reasoning_stream_started — the latter gets reset during
+        # intermediate turn boundaries (tool-calling loops), which caused
+        # the reasoning box to re-render after the final response.
+        _reasoning_already_shown = getattr(self, '_reasoning_shown_this_turn', False)
+        if self.show_reasoning and turn.result and not _reasoning_already_shown:
+            reasoning = turn.result.get("last_reasoning")
+            if reasoning:
+                w = self._scrollback_box_width()
+                r_label = " Reasoning "
+                r_fill = w - 2 - len(r_label)
+                r_top = f"{_DIM}┌─{r_label}{'─' * max(r_fill - 1, 0)}┐{_RST}"
+                r_bot = f"{_DIM}└{'─' * (w - 2)}┘{_RST}"
+                # Collapse long reasoning to the first 10 lines unless the
+                # user opted into full display via /reasoning full.
+                lines = reasoning.strip().splitlines()
+                if len(lines) > 10 and not getattr(self, "reasoning_full", False):
+                    display_reasoning = "\n".join(lines[:10])
+                    display_reasoning += f"\n{_DIM}  ... ({len(lines) - 10} more lines — /reasoning full to show){_RST}"
+                else:
+                    display_reasoning = reasoning.strip()
+                _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
+
+    def _chat_print_response_panel(self, turn, response, response_previewed):
+        """Response box: close the TTS-drawn box, print the post-stream transform, or render the Rich Panel; then the billing CTA."""
+        if response and not response_previewed:
+            # Use skin engine for label/color with fallback
+            try:
+                from hermes_cli.skin_engine import get_active_skin
+                _skin = get_active_skin()
+                label = _skin.get_branding("response_label", "⚕ Hermes")
+                _resp_color = _maybe_remap_for_light_mode(_skin.get_color("response_border", "#CD7F32"))
+                _resp_text = _maybe_remap_for_light_mode(_skin.get_color("banner_text", "#FFF8DC"))
+            except Exception:
+                label = "⚕ Hermes"
+                _resp_color = _maybe_remap_for_light_mode("#CD7F32")
+                _resp_text = _maybe_remap_for_light_mode("#FFF8DC")
+
+            is_error_response = turn.result and (turn.result.get("failed") or turn.result.get("partial"))
+            already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
+            if turn.use_streaming_tts and turn.box_opened and not is_error_response:
+                # Text was already printed sentence-by-sentence; just close the box
+                w = self._scrollback_box_width()
+                _cprint(f"\n{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
+            elif already_streamed:
+                # Response was already streamed token-by-token with box framing;
+                # _flush_stream() already closed the box. Skip Rich Panel.
+                # A transform hook runs after streaming. Show a suffix for
+                # append-only changes, or the complete replacement otherwise.
+                _post_stream_text = _post_stream_transform_output(response, turn.result)
+                if _post_stream_text.strip():
+                    _cprint(_post_stream_text)
+            else:
+                _chat_console = ChatConsole()
+                _chat_console.print(Panel(
+                    _render_final_assistant_content(response, mode=self.final_response_markdown),
+                    title=f"[{_resp_color} bold]{label}[/]",
+                    title_align="left",
+                    border_style=_resp_color,
+                    style=_resp_text,
+                    box=rich_box.HORIZONTALS,
+                    padding=(1, 0),
+                    width=self._scrollback_box_width(),
+                ))
+
+            # Durable, provider-agnostic billing CTA below the response. The
+            # response panel carries the full guidance; this pins the single
+            # action to take (Nous → /topup, other providers → their billing
+            # page) so it stays visible instead of scrolling away as prose.
+            if turn.result and turn.result.get("failure_reason") == "billing":
+                _bb = turn.result.get("billing_block") or {}
+                _prov_label = _bb.get("provider_label") or "your provider"
+                if _bb.get("is_nous"):
+                    _cta_lines = [
+                        "Run [bold]/topup[/] to add credits, or "
+                        "[bold]/subscription[/] to change plan.",
+                    ]
+                else:
+                    _url = _bb.get("billing_url")
+                    _cta_lines = [
+                        f"Add credits with {_prov_label}"
+                        + (f": [bold]{_url}[/]" if _url else ".")
+                    ]
+                _cta_lines.append(
+                    "Or switch providers with "
+                    "[bold]/model <model> --provider <provider>[/]."
+                )
+                try:
+                    ChatConsole().print(Panel(
+                        "\n".join(_cta_lines),
+                        title="[#CD7F32 bold]⚡ Out of credits[/]",
+                        title_align="left",
+                        border_style="#CD7F32",
+                        box=rich_box.HORIZONTALS,
+                        padding=(1, 4),
+                        width=self._scrollback_box_width(),
+                    ))
+                except Exception:
+                    pass
 
     def _tui_process_loop(self):
         while not self._should_exit:
